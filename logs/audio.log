@@ -1,0 +1,126 @@
+2025-07-03 18:36:31,335 - __main__ - INFO - Audio Agent starting...
+2025-07-03 18:36:31,337 - __main__ - INFO - Child processor started
+2025-07-03 18:36:31,338 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:36:31,339 - __main__ - INFO - ChildProcessor started
+2025-07-03 18:36:31,443 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:36:31,507 - __main__ - INFO - Using audio device: pulse
+2025-07-03 18:36:31,507 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:36:31,560 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:36:31,561 - __main__ - INFO - MainProcessor started
+2025-07-03 18:36:56,145 - __main__ - INFO - [2025-07-03 18:36:56] SPEECH: hello hello hello hello
+2025-07-03 18:37:11,488 - __main__ - INFO - [2025-07-03 18:37:11] SPEECH: hello hello
+2025-07-03 18:37:17,538 - __main__ - INFO - [2025-07-03 18:37:17] SPEECH: mellow
+2025-07-03 18:37:22,431 - __main__ - INFO - [2025-07-03 18:37:22] SPEECH: play Mell
+2025-07-03 18:37:25,589 - __main__ - INFO - [2025-07-03 18:37:25] SPEECH: can you hear me
+2025-07-03 18:37:31,353 - __main__ - INFO - [2025-07-03 18:37:31] SPEECH: can you hear me
+2025-07-03 18:38:27,084 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:38:27,088 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:38:27,089 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:38:27,184 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:38:27,264 - __main__ - INFO - Using audio device: default
+2025-07-03 18:38:27,264 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:38:27,307 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:38:27,308 - __main__ - INFO - MainProcessor started
+2025-07-03 18:38:29,304 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:38:29,307 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:38:29,307 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:38:29,389 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:38:29,466 - __main__ - INFO - Using audio device: default
+2025-07-03 18:38:29,467 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:38:29,505 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:38:29,506 - __main__ - INFO - MainProcessor started
+2025-07-03 18:38:29,826 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:38:29,829 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:38:29,830 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:38:29,902 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:38:29,973 - __main__ - INFO - Using audio device: default
+2025-07-03 18:38:29,973 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:38:30,019 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:38:30,020 - __main__ - INFO - MainProcessor started
+2025-07-03 18:38:30,041 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:38:30,049 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:38:30,051 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:38:30,130 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:38:30,200 - __main__ - INFO - Using audio device: default
+2025-07-03 18:38:30,201 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:38:30,238 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:38:30,243 - __main__ - INFO - Audio Agent stopped
+2025-07-03 18:47:25,508 - __main__ - INFO - Audio Agent starting...
+2025-07-03 18:47:25,510 - __main__ - INFO - Child processor started
+2025-07-03 18:47:25,511 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:47:25,511 - __main__ - INFO - ChildProcessor started
+2025-07-03 18:47:25,594 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:47:25,658 - __main__ - INFO - Using audio device: pulse
+2025-07-03 18:47:25,659 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:47:25,707 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:47:25,708 - __main__ - INFO - MainProcessor started
+2025-07-03 18:47:39,592 - __main__ - INFO - [2025-07-03 18:47:39] SPEECH: dining room I wonder if
+2025-07-03 18:47:52,308 - __main__ - INFO - [2025-07-03 18:47:52] SPEECH: 8:00
+2025-07-03 18:48:01,097 - __main__ - INFO - [2025-07-03 18:48:01] SPEECH: okay bye-bye
+2025-07-03 18:48:34,462 - __main__ - INFO - [2025-07-03 18:48:34] SPEECH: hello hello hello hello
+2025-07-03 18:48:39,598 - __main__ - INFO - [2025-07-03 18:48:39] SPEECH: Can't Stop
+2025-07-03 18:49:18,901 - __main__ - INFO - [2025-07-03 18:49:18] SPEECH: what are the main principles of a neural net
+2025-07-03 18:49:25,892 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:25,896 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:25,896 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:25,993 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:26,071 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:26,071 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:26,114 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:26,114 - __main__ - INFO - MainProcessor started
+2025-07-03 18:49:26,852 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:26,855 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:26,856 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:26,933 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:27,012 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:27,012 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:27,050 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:27,050 - __main__ - INFO - MainProcessor started
+2025-07-03 18:49:27,151 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:27,154 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:27,155 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:27,230 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:27,309 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:27,310 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:27,350 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:27,350 - __main__ - INFO - MainProcessor started
+2025-07-03 18:49:27,727 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:27,730 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:27,730 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:27,803 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:27,870 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:27,870 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:27,913 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:27,913 - __main__ - INFO - MainProcessor started
+2025-07-03 18:49:28,335 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:28,338 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:28,338 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:28,417 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:28,489 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:28,489 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:28,531 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:28,531 - __main__ - INFO - MainProcessor started
+2025-07-03 18:49:28,591 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:28,594 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:28,595 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:28,664 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:28,740 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:28,740 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:28,782 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:28,782 - __main__ - INFO - MainProcessor started
+2025-07-03 18:49:30,555 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:30,558 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:30,558 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:30,638 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:30,708 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:30,709 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:30,749 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:30,749 - __main__ - INFO - MainProcessor started
+2025-07-03 18:49:30,790 - __main__ - INFO - Received interrupt signal
+2025-07-03 18:49:30,794 - __main__ - INFO - MainProcessor stopped
+2025-07-03 18:49:30,795 - __main__ - INFO - Waiting for input device to become available...
+2025-07-03 18:49:30,877 - __main__ - INFO - Using configured device index: 2
+2025-07-03 18:49:30,951 - __main__ - INFO - Using audio device: default
+2025-07-03 18:49:30,951 - __main__ - INFO - Using hardware rate: 44100 Hz, VAD rate: 32000 Hz
+2025-07-03 18:49:30,992 - __main__ - INFO - Audio stream initialized successfully
+2025-07-03 18:49:30,993 - __main__ - INFO - MainProcessor started

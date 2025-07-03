@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(sudo tail:*)",
+      "Bash(python3:*)",
+      "Bash(sudo apt-get:*)",
+      "Bash(sudo apt-get install:*)"
+    ],
+    "deny": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+    "sample_rate": 16000,
+    "chunk_duration_ms": 20,
+    "channels": 1,
+    "format": "pcm_16",
+    "vad_aggressiveness": 2,
+    "speech_timeout_ms": 1000,
+    "silence_timeout_ms": 500,
+    "device_index": 2,
+    "device_name": null
+}
