@@ -1,0 +1,75 @@
+{
+  "llm_handler": {
+    "model": "qwen2.5-7b-instruct",
+    "api_base": "http://localhost:8000",
+    "api_key": "",
+    "temperature": 0.7,
+    "max_tokens": 2048,
+    "top_p": 0.9,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+    "timeout": 30,
+    "max_retries": 3,
+    "retry_delay": 1,
+    "system_prompt": "You are a helpful AI assistant. Provide clear, concise, and accurate responses."
+  },
+  "intent_classification": {
+    "min_confidence": 0.4,
+    "high_confidence": 0.8,
+    "intent_patterns": {
+      "question": [
+        "\\b(what|how|why|when|where|who|which|can you|could you|would you|do you know)\\b",
+        "\\?",
+        "\\b(explain|tell me|help me understand)\\b"
+      ],
+      "command": [
+        "\\b(please|can you|could you|would you|help me|assist me)\\b.*\\b(do|perform|execute|run|start|stop|create|make|generate)\\b",
+        "\\b(turn on|turn off|enable|disable|activate|deactivate)\\b",
+        "\\b(play|pause|stop|resume|skip|next|previous)\\b"
+      ],
+      "task": [
+        "\\b(I need to|I want to|I have to|let me|help me)\\b.*\\b(complete|finish|solve|fix|work on)\\b",
+        "\\b(schedule|plan|organize|manage|track)\\b",
+        "\\b(remind me|set reminder|create task|add to list)\\b"
+      ],
+      "ignore": [
+        "\\b(um|uh|ah|hmm|er|well)\\b$",
+        "^[.,!?;:]*$",
+        "\\b(test|testing|hello|hi)\\b$"
+      ]
+    }
+  },
+  "response_templates": {
+    "system_prompts": {
+      "question": "You are a helpful assistant. Answer the user's question clearly and concisely. Be accurate and informative. Question: {transcript}",
+      "command": "You are a helpful assistant. The user has given you a command. Acknowledge the command and provide appropriate guidance or execute if possible. Command: {transcript}",
+      "conversation": "You are a friendly conversational assistant. Respond naturally and engage in meaningful dialogue. User said: {transcript}",
+      "task": "You are a task-oriented assistant. Help the user accomplish their task efficiently. Provide step-by-step guidance where appropriate. Task: {transcript}",
+      "unclear": "The user's intent is unclear. Ask for clarification politely and offer to help. What they said: {transcript}"
+    },
+    "fallback_responses": {
+      "error": "I apologize, but I encountered an error processing your request. Please try again or rephrase your question.",
+      "unclear": "I'm not sure I understand what you're asking. Could you please clarify or rephrase your request?",
+      "timeout": "I'm sorry, but I'm taking longer than expected to respond. Please try again.",
+      "no_response": "I don't have a response for that right now. Is there something else I can help you with?"
+    }
+  },
+  "processing": {
+    "max_context_length": 10,
+    "processing_timeout": 30,
+    "stream_responses": true,
+    "enable_conversation_history": true,
+    "log_interactions": true
+  },
+  "voice_output": {
+    "engine": "pyttsx3",
+    "voice_id": null,
+    "rate": 180,
+    "volume": 0.8,
+    "pitch": 0,
+    "output_device": null,
+    "streaming_enabled": true,
+    "sentence_delay": 0.2,
+    "word_delay": 0.05
+  }
+}

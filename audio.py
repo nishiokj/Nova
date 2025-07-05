@@ -101,18 +101,39 @@ class AudioDeviceManager:
         self.logger = logging.getLogger(__name__)
         
     def list_devices(self) -> List[Dict[str, Any]]:
-        """List all available audio devices"""
+        """List all available audio devices with supported sample rates"""
         try:
             p = pyaudio.PyAudio()
             devices = []
+            vad_rates = [8000, 16000, 32000, 48000]
             
             for i in range(p.get_device_count()):
                 info = p.get_device_info_by_index(i)
+                
+                # Test supported VAD sample rates for input devices
+                supported_vad_rates = []
+                if info['maxInputChannels'] > 0:
+                    for rate in vad_rates:
+                        try:
+                            test_stream = p.open(
+                                format=pyaudio.paInt16,
+                                channels=1,
+                                rate=rate,
+                                input=True,
+                                input_device_index=i,
+                                frames_per_buffer=1024
+                            )
+                            test_stream.close()
+                            supported_vad_rates.append(rate)
+                        except Exception:
+                            continue
+                
                 devices.append({
                     'index': i,
                     'name': info['name'],
                     'channels': info['maxInputChannels'],
                     'sample_rate': info['defaultSampleRate'],
+                    'supported_vad_rates': supported_vad_rates,
                     'is_input': info['maxInputChannels'] > 0
                 })
             
@@ -181,7 +202,7 @@ class ChildProcessor:
             audio_segment = AudioSegment(
                 data=audio_data,
                 sample_width=2,  # 16-bit audio
-                frame_rate=32000,
+                frame_rate=self.config.sample_rate,
                 channels=self.config.channels
             )
             
@@ -189,7 +210,7 @@ class ChildProcessor:
             wav_data = audio_segment.export(format="wav").read()
             
             # Create AudioData object
-            audio_data_obj = sr.AudioData(wav_data, 32000, 2)
+            audio_data_obj = sr.AudioData(wav_data, self.config.sample_rate, 2)
             
             # Perform speech recognition
             text = self.recognizer.recognize_google(audio_data_obj)
@@ -256,8 +277,44 @@ class MainProcessor:
         self.speech_start_time = None
         self.last_speech_time = None
     
+    def get_supported_sample_rate(self, device_index: int) -> int:
+        """Get the best supported sample rate for the device that's compatible with VAD"""
+        vad_supported_rates = [8000, 16000, 32000, 48000]
+        
+        try:
+            device_info = self.pyaudio_instance.get_device_info_by_index(device_index)
+            default_rate = int(device_info['defaultSampleRate'])
+            
+            # Try VAD-compatible rates in order of preference
+            preferred_rates = [32000, 16000, 48000, 8000]
+            
+            for rate in preferred_rates:
+                try:
+                    # Test if this rate is supported by the device
+                    test_stream = self.pyaudio_instance.open(
+                        format=pyaudio.paInt16,
+                        channels=self.config.channels,
+                        rate=rate,
+                        input=True,
+                        input_device_index=device_index,
+                        frames_per_buffer=1024
+                    )
+                    test_stream.close()
+                    self.logger.info(f"Device supports sample rate: {rate} Hz")
+                    return rate
+                except Exception:
+                    continue
+            
+            # If no VAD rate works, use default and warn
+            self.logger.warning(f"Device only supports {default_rate} Hz, VAD may not work properly")
+            return default_rate
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting supported sample rates: {e}")
+            return 16000  # Safe fallback
+    
     def initialize_audio_stream(self, device_index: int):
-        """Initialize PyAudio stream"""
+        """Initialize PyAudio stream with dynamic sample rate detection"""
         try:
             self.pyaudio_instance = pyaudio.PyAudio()
             
@@ -265,24 +322,22 @@ class MainProcessor:
             device_info = self.pyaudio_instance.get_device_info_by_index(device_index)
             self.logger.info(f"Using audio device: {device_info['name']}")
             
-            # Force 16000 Hz for VAD compatibility, we'll resample if needed
-            hardware_rate = 44100  # Common hardware rate
-            vad_rate = 32000      # VAD compatible rate
+            # Dynamically detect best supported sample rate
+            optimal_rate = self.get_supported_sample_rate(device_index)
             
-            # Store both rates
-            self.hardware_rate = hardware_rate
-            self.vad_rate = vad_rate
+            # Update config to use the optimal rate
+            self.config.config["sample_rate"] = optimal_rate
             
-            # Update config to use VAD rate for processing
-            self.config.config["sample_rate"] = vad_rate
+            # Recalculate chunk size based on new sample rate
+            self.config.config["chunk_size"] = int(optimal_rate * self.config.chunk_duration_ms / 1000)
             
-            self.logger.info(f"Using hardware rate: {hardware_rate} Hz, VAD rate: {vad_rate} Hz")
+            self.logger.info(f"Using sample rate: {optimal_rate} Hz, chunk size: {self.config.chunk_size} samples")
             
             # Create audio stream
             self.audio_stream = self.pyaudio_instance.open(
                 format=pyaudio.paInt16,
                 channels=self.config.channels,
-                rate=vad_rate,
+                rate=optimal_rate,
                 input=True,
                 input_device_index=device_index,
                 frames_per_buffer=self.config.chunk_size
@@ -513,8 +568,10 @@ def main():
         
         print("Available audio devices:")
         for device in devices:
+            vad_rates_str = ', '.join(map(str, device['supported_vad_rates'])) if device['supported_vad_rates'] else 'None'
             print(f"  Index: {device['index']}, Name: {device['name']}, "
-                  f"Channels: {device['channels']}, Input: {device['is_input']}")
+                  f"Channels: {device['channels']}, Input: {device['is_input']}, "
+                  f"VAD Rates: {vad_rates_str}")
         return
     
     # Start the audio agent

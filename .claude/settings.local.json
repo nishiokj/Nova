@@ -6,7 +6,8 @@
       "Bash(sudo tail:*)",
       "Bash(python3:*)",
       "Bash(sudo apt-get:*)",
-      "Bash(sudo apt-get install:*)"
+      "Bash(sudo apt-get install:*)",
+      "Bash(python:*)"
     ],
     "deny": []
   }
