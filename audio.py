@@ -100,48 +100,322 @@ class AudioDeviceManager:
         self.config = config
         self.logger = logging.getLogger(__name__)
         
+    def _suppress_alsa_errors(self):
+        """Suppress ALSA error messages during device detection"""
+        try:
+            # Try to redirect ALSA errors to null
+            import ctypes
+            import os
+            
+            # Redirect stderr to null temporarily
+            self._original_stderr = os.dup(2)
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+            
+        except Exception:
+            # If suppression fails, continue without it
+            pass
+    
+    def _restore_stderr(self):
+        """Restore stderr after ALSA error suppression"""
+        try:
+            if hasattr(self, '_original_stderr'):
+                os.dup2(self._original_stderr, 2)
+                os.close(self._original_stderr)
+        except Exception:
+            pass
+        
     def list_devices(self) -> List[Dict[str, Any]]:
         """List all available audio devices with supported sample rates"""
+        p = None
+        
+        # First try to suppress ALSA error messages
+        self._suppress_alsa_errors()
+        
         try:
             p = pyaudio.PyAudio()
             devices = []
             vad_rates = [8000, 16000, 32000, 48000]
             
-            for i in range(p.get_device_count()):
-                info = p.get_device_info_by_index(i)
+            # Get device count with error handling
+            try:
+                device_count = p.get_device_count()
+                self.logger.info(f"PyAudio found {device_count} audio devices")
                 
-                # Test supported VAD sample rates for input devices
-                supported_vad_rates = []
-                if info['maxInputChannels'] > 0:
-                    for rate in vad_rates:
+                # If no devices found, try fallback immediately
+                if device_count == 0:
+                    self.logger.warning("PyAudio found 0 devices, trying fallback detection")
+                    if p:
                         try:
-                            test_stream = p.open(
-                                format=pyaudio.paInt16,
-                                channels=1,
-                                rate=rate,
-                                input=True,
-                                input_device_index=i,
-                                frames_per_buffer=1024
-                            )
-                            test_stream.close()
-                            supported_vad_rates.append(rate)
-                        except Exception:
-                            continue
-                
-                devices.append({
-                    'index': i,
-                    'name': info['name'],
-                    'channels': info['maxInputChannels'],
-                    'sample_rate': info['defaultSampleRate'],
-                    'supported_vad_rates': supported_vad_rates,
-                    'is_input': info['maxInputChannels'] > 0
-                })
+                            p.terminate()
+                        except:
+                            pass
+                    return self._try_platform_specific_detection()
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to get device count: {e}")
+                if p:
+                    try:
+                        p.terminate()
+                    except:
+                        pass
+                return self._try_platform_specific_detection()
             
-            p.terminate()
+            for i in range(device_count):
+                try:
+                    info = p.get_device_info_by_index(i)
+                    self.logger.debug(f"Device {i}: {info['name']} - Input channels: {info['maxInputChannels']}")
+                    
+                    # Test supported VAD sample rates for input devices
+                    supported_vad_rates = []
+                    if info['maxInputChannels'] > 0:
+                        for rate in vad_rates:
+                            try:
+                                # More robust stream testing with timeout
+                                test_stream = p.open(
+                                    format=pyaudio.paInt16,
+                                    channels=min(1, info['maxInputChannels']),
+                                    rate=rate,
+                                    input=True,
+                                    input_device_index=i,
+                                    frames_per_buffer=512,
+                                    start=False  # Don't start immediately
+                                )
+                                test_stream.close()
+                                supported_vad_rates.append(rate)
+                                self.logger.debug(f"Device {i} supports {rate} Hz")
+                            except Exception as e:
+                                self.logger.debug(f"Device {i} does not support {rate} Hz: {e}")
+                                continue
+                    
+                    devices.append({
+                        'index': i,
+                        'name': info['name'],
+                        'channels': info['maxInputChannels'],
+                        'sample_rate': info['defaultSampleRate'],
+                        'supported_vad_rates': supported_vad_rates,
+                        'is_input': info['maxInputChannels'] > 0,
+                        'host_api': info.get('hostApi', 'unknown')
+                    })
+                
+                except Exception as e:
+                    self.logger.warning(f"Error querying device {i}: {e}")
+                    continue
+            
             return devices
+            
         except Exception as e:
-            self.logger.error(f"Error listing audio devices: {e}")
+            self.logger.error(f"Error initializing PyAudio: {e}")
+            # Try alternative methods for different platforms
+            return self._try_platform_specific_detection()
+        finally:
+            # Restore stderr
+            self._restore_stderr()
+            if p:
+                try:
+                    p.terminate()
+                except:
+                    pass
+    
+    def _try_platform_specific_detection(self) -> List[Dict[str, Any]]:
+        """Try platform-specific audio device detection when PyAudio fails"""
+        import platform
+        import subprocess
+        
+        system = platform.system().lower()
+        self.logger.info(f"Trying platform-specific detection for {system}")
+        
+        if system == "darwin":  # macOS
+            return self._detect_macos_devices()
+        elif system == "linux":
+            return self._detect_linux_devices()
+        elif system == "windows":
+            return self._detect_windows_devices()
+        else:
+            self.logger.warning(f"Unsupported platform: {system}")
             return []
+    
+    def _detect_macos_devices(self) -> List[Dict[str, Any]]:
+        """Detect audio devices on macOS"""
+        try:
+            import subprocess
+            
+            # Use system_profiler to get audio devices
+            result = subprocess.run(
+                ["system_profiler", "SPAudioDataType", "-json"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                import json
+                data = json.loads(result.stdout)
+                devices = []
+                
+                for audio_data in data.get("SPAudioDataType", []):
+                    for device_name, device_info in audio_data.items():
+                        if isinstance(device_info, dict) and "coreaudio_input_source" in device_info:
+                            devices.append({
+                                'index': len(devices),
+                                'name': device_name,
+                                'channels': 1,  # Assume mono for safety
+                                'sample_rate': 44100,  # Default sample rate
+                                'supported_vad_rates': [16000, 32000],  # Conservative estimate
+                                'is_input': True,
+                                'host_api': 'coreaudio'
+                            })
+                
+                self.logger.info(f"macOS detection found {len(devices)} input devices")
+                return devices
+        except Exception as e:
+            self.logger.error(f"macOS device detection failed: {e}")
+        
+        return []
+    
+    def _detect_linux_devices(self) -> List[Dict[str, Any]]:
+        """Detect audio devices on Linux"""
+        try:
+            import subprocess
+            import os
+            
+            # Try ALSA first
+            devices = []
+            
+            # Check /proc/asound/cards
+            try:
+                with open('/proc/asound/cards', 'r') as f:
+                    for line in f:
+                        if ':' in line and '[' in line:
+                            card_info = line.strip()
+                            devices.append({
+                                'index': len(devices),
+                                'name': card_info,
+                                'channels': 1,
+                                'sample_rate': 44100,
+                                'supported_vad_rates': [16000, 32000],
+                                'is_input': True,
+                                'host_api': 'alsa'
+                            })
+            except Exception as e:
+                self.logger.debug(f"Could not read /proc/asound/cards: {e}")
+            
+            # Try arecord -l as fallback
+            if not devices:
+                try:
+                    result = subprocess.run(
+                        ["arecord", "-l"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    
+                    if result.returncode == 0:
+                        for line in result.stdout.split('\n'):
+                            if 'card' in line.lower() and 'device' in line.lower():
+                                devices.append({
+                                    'index': len(devices),
+                                    'name': line.strip(),
+                                    'channels': 1,
+                                    'sample_rate': 44100,
+                                    'supported_vad_rates': [16000, 32000],
+                                    'is_input': True,
+                                    'host_api': 'alsa'
+                                })
+                except Exception as e:
+                    self.logger.debug(f"arecord -l failed: {e}")
+            
+            # Docker environment fallback - check for mounted devices from host
+            if not devices and os.path.exists('/.dockerenv'):
+                self.logger.info("Docker environment detected, checking for host audio devices...")
+                
+                # Try to detect if we're in a Docker container with macOS host
+                try:
+                    # Check if we have macOS-style audio device info available
+                    host_info = os.environ.get('HOST_AUDIO_DEVICES', '')
+                    if host_info:
+                        self.logger.info(f"Found host audio device info: {host_info}")
+                        devices.append({
+                            'index': 0,
+                            'name': 'Host Audio Device (Docker)',
+                            'channels': 1,
+                            'sample_rate': 44100,
+                            'supported_vad_rates': [16000, 32000],
+                            'is_input': True,
+                            'host_api': 'docker_host'
+                        })
+                    else:
+                        # Create a dummy device for Docker testing
+                        self.logger.warning("No host audio devices detected, creating dummy device for testing")
+                        devices.append({
+                            'index': 0,
+                            'name': 'Docker Dummy Audio Device',
+                            'channels': 1,
+                            'sample_rate': 44100,
+                            'supported_vad_rates': [16000, 32000],
+                            'is_input': True,
+                            'host_api': 'dummy'
+                        })
+                except Exception as e:
+                    self.logger.error(f"Docker audio detection failed: {e}")
+            
+            self.logger.info(f"Linux detection found {len(devices)} input devices")
+            return devices
+            
+        except Exception as e:
+            self.logger.error(f"Linux device detection failed: {e}")
+        
+        return []
+    
+    def _detect_windows_devices(self) -> List[Dict[str, Any]]:
+        """Detect audio devices on Windows"""
+        try:
+            import subprocess
+            
+            # Use PowerShell to get audio devices
+            ps_command = '''
+            Get-WmiObject -Class Win32_SoundDevice | 
+            Where-Object { $_.Status -eq "OK" } | 
+            Select-Object Name, DeviceID | 
+            ConvertTo-Json
+            '''
+            
+            result = subprocess.run(
+                ["powershell", "-Command", ps_command],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                import json
+                data = json.loads(result.stdout)
+                devices = []
+                
+                # Handle both single device and array of devices
+                if isinstance(data, dict):
+                    data = [data]
+                
+                for device in data:
+                    if device.get('Name'):
+                        devices.append({
+                            'index': len(devices),
+                            'name': device['Name'],
+                            'channels': 1,
+                            'sample_rate': 44100,
+                            'supported_vad_rates': [16000, 32000],
+                            'is_input': True,
+                            'host_api': 'wasapi'
+                        })
+                
+                self.logger.info(f"Windows detection found {len(devices)} input devices")
+                return devices
+                
+        except Exception as e:
+            self.logger.error(f"Windows device detection failed: {e}")
+        
+        return []
     
     def find_input_device(self) -> Optional[int]:
         """Find suitable input device based on configuration"""
@@ -152,7 +426,14 @@ class AudioDeviceManager:
         
         if not input_devices:
             self.logger.warning("No input devices found")
+            self.logger.info("Available devices (debug info):")
+            for device in devices:
+                self.logger.info(f"  Device {device['index']}: {device['name']} (input: {device['is_input']}, channels: {device['channels']})")
             return None
+        
+        self.logger.info(f"Found {len(input_devices)} input devices:")
+        for device in input_devices:
+            self.logger.info(f"  Device {device['index']}: {device['name']} (channels: {device['channels']}, VAD rates: {device['supported_vad_rates']})")
         
         # If specific device configured, try to find it
         if self.config.device_index is not None:
@@ -167,7 +448,14 @@ class AudioDeviceManager:
                     self.logger.info(f"Using configured device name: {device['name']}")
                     return device['index']
         
-        # Use first available input device
+        # Prefer devices with VAD-compatible rates
+        vad_compatible_devices = [d for d in input_devices if d['supported_vad_rates']]
+        if vad_compatible_devices:
+            default_device = vad_compatible_devices[0]
+            self.logger.info(f"Using VAD-compatible device: {default_device['name']}")
+            return default_device['index']
+        
+        # Use first available input device as fallback
         default_device = input_devices[0]
         self.logger.info(f"Using default input device: {default_device['name']}")
         return default_device['index']
@@ -214,6 +502,7 @@ class ChildProcessor:
             
             # Perform speech recognition
             text = self.recognizer.recognize_google(audio_data_obj)
+            print(text)
             return text
             
         except sr.UnknownValueError:
@@ -238,7 +527,7 @@ class ChildProcessor:
                     
                     # Process the audio chunk
                     transcript = self.process_audio_chunk(audio_data)
-                    
+                    self.logger.info(transcript)
                     if transcript:
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         speech_log = f"[{timestamp}] SPEECH: {transcript}"
@@ -249,6 +538,7 @@ class ChildProcessor:
                             f.write(speech_log + "\n")
                 
                 else:
+                    self.logger.info("empty")
                     # Sleep when queue is empty
                     time.sleep(0.1)
                     
@@ -383,7 +673,6 @@ class MainProcessor:
     def process_speech_detection(self, audio_chunk: bytes, is_speech: bool):
         """Process speech detection logic and manage speech segments"""
         current_time = time.time()
-        
         if is_speech:
             self.last_speech_time = current_time
             
@@ -415,6 +704,7 @@ class MainProcessor:
             # Send to child processor
             try:
                 self.audio_queue.put(combined_audio, timeout=1.0)
+                print(combined_audio)
                 self.logger.debug(f"Speech segment sent to processor ({len(combined_audio)} bytes)")
             except Exception as e:
                 self.logger.error(f"Error sending audio to queue: {e}")
@@ -441,7 +731,8 @@ class MainProcessor:
                 
                 # Check for speech
                 is_speech = self.is_speech(audio_chunk)
-                
+                if is_speech:
+                    self.logger.info("detected speech")
                 # Process speech detection
                 self.process_speech_detection(audio_chunk, is_speech)
                 
@@ -495,13 +786,42 @@ class AudioAgent:
                 logging.StreamHandler(sys.stdout)
             ]
         )
+        
+        # Log system information for debugging
+        import platform
+        logger = logging.getLogger(__name__)
+        logger.info(f"System: {platform.system()} {platform.release()}")
+        logger.info(f"Python: {platform.python_version()}")
+        logger.info(f"Platform: {platform.platform()}")
+        logger.info(f"Machine: {platform.machine()}")
+        logger.info(f"Processor: {platform.processor()}")
+        
+        # Log audio library availability
+        try:
+            import pyaudio
+            logger.info(f"PyAudio version: {pyaudio.__version__}")
+        except ImportError:
+            logger.error("PyAudio not available")
+        except Exception as e:
+            logger.error(f"PyAudio error: {e}")
+        
+        try:
+            import webrtcvad
+            logger.info("WebRTC VAD available")
+        except ImportError:
+            logger.error("WebRTC VAD not available")
+        except Exception as e:
+            logger.error(f"WebRTC VAD error: {e}")
     
     def start_child_process(self):
         """Start the child processor"""
-        child_processor = ChildProcessor(self.audio_queue, self.config)
-        self.child_process = Process(target=child_processor.run)
-        self.child_process.start()
-        self.logger.info("Child processor started")
+        try:
+            child_processor = ChildProcessor(self.audio_queue, self.config)
+            self.child_process = Process(target=child_processor.run)
+            self.child_process.start()
+            self.logger.info("Child processor started")
+        except Exception: 
+            self.logger.error("FAILED TO START CHILD PROCESSOR")
     
     def stop_child_process(self):
         """Stop the child processor"""

@@ -1,12 +1,10 @@
-version: '3.8'
-
 services:
   audio-processor:
     build: .
     container_name: audio-vad-processor
     restart: unless-stopped
     
-    # Audio device access
+    # Audio device access - conditional mounting based on host OS
     devices:
       - "/dev/snd:/dev/snd"
     
@@ -16,13 +14,20 @@ services:
     # Environment variables
     environment:
       - PYTHONUNBUFFERED=1
-      - AUDIO_LOG_LEVEL=INFO
+      - AUDIO_LOG_LEVEL=DEBUG
+      - PULSE_RUNTIME_PATH=/run/user/1000/pulse
+      - ALSA_PCM_CARD=0
+      - ALSA_PCM_DEVICE=0
     
     # Volume mounts
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs
       - /tmp/.X11-unix:/tmp/.X11-unix:rw  # For potential GUI debugging
+      # Mount PulseAudio socket if available
+      - /run/user/1000/pulse:/run/user/1000/pulse:rw
+      # Mount ALSA configuration
+      - /etc/asound.conf:/etc/asound.conf:ro
     
     # Network mode host for better audio device access
     network_mode: host
