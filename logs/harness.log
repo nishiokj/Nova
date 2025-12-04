@@ -1,0 +1,12 @@
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_call] Calling tool: calculator | {"tool": "calculator", "params": {"expression": "2 + 2 * 3"}}
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_result] Tool calculator completed | {"tool": "calculator", "result_preview": "8"}
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human"}}
+2025-12-04 00:01:24,640 - harness - ERROR - [tools] [tool_error] Tool get_current_time failed: Tool 'get_current_time' is disabled | {"tool": "get_current_time"}
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_call] Calling tool: file_read | {"tool": "file_read", "params": {"path": "/etc/hostname"}}
+2025-12-04 00:01:24,640 - harness - ERROR - [tools] [tool_error] Tool file_read failed: File not found: /etc/hostname | {"tool": "file_read"}
+2025-12-04 00:01:37,892 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human"}}
+2025-12-04 00:01:37,892 - harness - INFO - [tools] [tool_result] Tool get_current_time completed | {"tool": "get_current_time", "result_preview": "Thursday, December 04, 2025 at 12:01 AM"}
+2025-12-04 00:01:37,892 - harness - INFO - [tools] [tool_call] Calling tool: bash_execute | {"tool": "bash_execute", "params": {"command": "echo hello world"}}
+2025-12-04 00:01:37,895 - harness - INFO - [tools] [tool_result] Tool bash_execute completed | {"tool": "bash_execute", "result_preview": "hello world\n"}
+2025-12-04 00:01:37,895 - harness - INFO - [tools] [tool_call] Calling tool: python_execute | {"tool": "python_execute", "params": {"code": "print(\"Python works!\")"}}
+2025-12-04 00:01:37,895 - harness - INFO - [tools] [tool_result] Tool python_execute completed | {"tool": "python_execute", "result_preview": "Python works!\n"}

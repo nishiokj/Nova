@@ -106,7 +106,7 @@ class ToolConfig:
     """Configuration for the Tool Registry"""
     enabled_tools: List[str] = field(default_factory=lambda: [
         "web_search", "web_fetch", "bash_execute", "python_execute",
-        "file_read", "file_write", "calculator"
+        "file_read", "file_write", "calculator", "get_current_time"
     ])
     sandbox_bash: bool = True
     sandbox_python: bool = True

@@ -549,9 +549,233 @@ class ChildProcessor:
         self.logger.info("ChildProcessor stopped")
 
 
+class NoiseFilter:
+    """
+    Advanced noise filtering and voice signal enhancement.
+    Uses energy-based detection, spectral analysis, and adaptive thresholding.
+    """
+
+    def __init__(self, sample_rate: int = 16000, frame_duration_ms: int = 30):
+        self.sample_rate = sample_rate
+        self.frame_duration_ms = frame_duration_ms
+        self.frame_size = int(sample_rate * frame_duration_ms / 1000)
+
+        # Noise floor estimation (adaptive)
+        self.noise_floor = 0.0
+        self.noise_floor_samples = []
+        self.noise_floor_window = 50  # Number of frames for noise estimation
+        self.noise_floor_percentile = 10  # Use 10th percentile as noise floor
+
+        # Energy thresholds
+        self.min_speech_energy = 100  # Minimum energy to consider as potential speech
+        self.speech_energy_ratio = 3.0  # Speech must be X times above noise floor
+
+        # Frequency analysis for voice detection
+        self.voice_freq_low = 85  # Hz - lowest voice frequency
+        self.voice_freq_high = 3500  # Hz - highest voice frequency (narrower for clarity)
+
+        # Smoothing for stable detection
+        self.energy_history = []
+        self.energy_history_size = 5
+
+        # Calibration state
+        self.is_calibrated = False
+        self.calibration_frames = 0
+        self.calibration_target = 30  # Frames needed for calibration
+
+    def calibrate(self, audio_chunk: bytes) -> bool:
+        """
+        Calibrate noise floor from ambient audio.
+        Returns True when calibration is complete.
+        """
+        energy = self._calculate_energy(audio_chunk)
+        self.noise_floor_samples.append(energy)
+        self.calibration_frames += 1
+
+        if self.calibration_frames >= self.calibration_target:
+            # Calculate noise floor as percentile of collected samples
+            sorted_samples = sorted(self.noise_floor_samples)
+            percentile_idx = int(len(sorted_samples) * self.noise_floor_percentile / 100)
+            self.noise_floor = sorted_samples[percentile_idx] if sorted_samples else 100
+
+            # Set minimum threshold
+            self.noise_floor = max(self.noise_floor, self.min_speech_energy)
+
+            self.is_calibrated = True
+            return True
+
+        return False
+
+    def _calculate_energy(self, audio_chunk: bytes) -> float:
+        """Calculate RMS energy of audio chunk"""
+        samples = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
+        if len(samples) == 0:
+            return 0.0
+
+        # RMS energy
+        rms = np.sqrt(np.mean(samples ** 2))
+        return rms
+
+    def _calculate_zero_crossing_rate(self, audio_chunk: bytes) -> float:
+        """
+        Calculate zero crossing rate - helps distinguish voice from noise.
+        Voice typically has moderate ZCR, while noise has high ZCR.
+        """
+        samples = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
+        if len(samples) < 2:
+            return 0.0
+
+        signs = np.sign(samples)
+        signs[signs == 0] = 1  # Treat zeros as positive
+        crossings = np.sum(np.abs(np.diff(signs)) > 0)
+
+        return crossings / len(samples)
+
+    def _calculate_spectral_centroid(self, audio_chunk: bytes) -> float:
+        """
+        Calculate spectral centroid - indicates "brightness" of sound.
+        Voice typically has centroid in 500-2000 Hz range.
+        """
+        samples = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
+        if len(samples) < 256:
+            return 0.0
+
+        # Apply window function
+        windowed = samples * np.hanning(len(samples))
+
+        # FFT
+        fft = np.abs(np.fft.rfft(windowed))
+        freqs = np.fft.rfftfreq(len(windowed), 1.0 / self.sample_rate)
+
+        # Spectral centroid
+        if np.sum(fft) == 0:
+            return 0.0
+
+        centroid = np.sum(freqs * fft) / np.sum(fft)
+        return centroid
+
+    def _calculate_voice_band_energy_ratio(self, audio_chunk: bytes) -> float:
+        """
+        Calculate ratio of energy in voice frequency band vs total.
+        Voice should have high energy in 85-3500 Hz range.
+        """
+        samples = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
+        if len(samples) < 256:
+            return 0.0
+
+        # Apply window
+        windowed = samples * np.hanning(len(samples))
+
+        # FFT
+        fft = np.abs(np.fft.rfft(windowed))
+        freqs = np.fft.rfftfreq(len(windowed), 1.0 / self.sample_rate)
+
+        # Total energy
+        total_energy = np.sum(fft ** 2)
+        if total_energy == 0:
+            return 0.0
+
+        # Voice band energy
+        voice_mask = (freqs >= self.voice_freq_low) & (freqs <= self.voice_freq_high)
+        voice_energy = np.sum(fft[voice_mask] ** 2)
+
+        return voice_energy / total_energy
+
+    def update_noise_floor(self, energy: float, is_speech: bool):
+        """Adaptively update noise floor during non-speech"""
+        if not is_speech and self.is_calibrated:
+            self.noise_floor_samples.append(energy)
+            if len(self.noise_floor_samples) > self.noise_floor_window:
+                self.noise_floor_samples.pop(0)
+
+            # Update noise floor
+            if len(self.noise_floor_samples) >= 10:
+                sorted_samples = sorted(self.noise_floor_samples)
+                percentile_idx = int(len(sorted_samples) * self.noise_floor_percentile / 100)
+                new_floor = sorted_samples[percentile_idx]
+
+                # Smooth update
+                self.noise_floor = 0.9 * self.noise_floor + 0.1 * new_floor
+
+    def is_voice(self, audio_chunk: bytes) -> tuple:
+        """
+        Comprehensive voice detection using multiple features.
+        Returns (is_voice, confidence, features)
+        """
+        # Calculate features
+        energy = self._calculate_energy(audio_chunk)
+        zcr = self._calculate_zero_crossing_rate(audio_chunk)
+        spectral_centroid = self._calculate_spectral_centroid(audio_chunk)
+        voice_band_ratio = self._calculate_voice_band_energy_ratio(audio_chunk)
+
+        # Add to energy history for smoothing
+        self.energy_history.append(energy)
+        if len(self.energy_history) > self.energy_history_size:
+            self.energy_history.pop(0)
+
+        smoothed_energy = np.mean(self.energy_history)
+
+        features = {
+            'energy': energy,
+            'smoothed_energy': smoothed_energy,
+            'zcr': zcr,
+            'spectral_centroid': spectral_centroid,
+            'voice_band_ratio': voice_band_ratio,
+            'noise_floor': self.noise_floor
+        }
+
+        # Decision logic
+        confidence = 0.0
+
+        # Energy check
+        energy_threshold = self.noise_floor * self.speech_energy_ratio
+        if smoothed_energy > energy_threshold:
+            confidence += 0.4
+        elif smoothed_energy > self.noise_floor * 1.5:
+            confidence += 0.2
+
+        # Voice band energy ratio check (should be > 0.3 for voice)
+        if voice_band_ratio > 0.4:
+            confidence += 0.3
+        elif voice_band_ratio > 0.25:
+            confidence += 0.15
+
+        # ZCR check (voice typically 0.01-0.1, noise higher)
+        if 0.01 < zcr < 0.15:
+            confidence += 0.2
+        elif zcr < 0.2:
+            confidence += 0.1
+
+        # Spectral centroid check (voice typically 300-2000 Hz)
+        if 300 < spectral_centroid < 2000:
+            confidence += 0.1
+
+        is_voice = confidence >= 0.5
+
+        return is_voice, confidence, features
+
+    def apply_noise_gate(self, audio_chunk: bytes, threshold_db: float = -40) -> bytes:
+        """Apply simple noise gate to reduce background noise"""
+        samples = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
+
+        # Calculate dB level
+        rms = np.sqrt(np.mean(samples ** 2))
+        if rms == 0:
+            return audio_chunk
+
+        db = 20 * np.log10(rms / 32768)  # Relative to max int16
+
+        if db < threshold_db:
+            # Below threshold, attenuate
+            attenuation = 0.1
+            samples = samples * attenuation
+
+        return samples.astype(np.int16).tobytes()
+
+
 class MainProcessor:
     """Main audio processor with VAD and speech detection"""
-    
+
     def __init__(self, config: AudioConfig, audio_queue: Queue):
         self.config = config
         self.audio_queue = audio_queue
@@ -560,12 +784,32 @@ class MainProcessor:
         self.audio_stream = None
         self.pyaudio_instance = None
         self.running = False
-        
+
+        # Advanced noise filter
+        self.noise_filter = NoiseFilter(
+            sample_rate=self.config.sample_rate,
+            frame_duration_ms=self.config.chunk_duration_ms
+        )
+
         # Speech detection state
         self.speech_frames = []
         self.is_speech_active = False
         self.speech_start_time = None
         self.last_speech_time = None
+
+        # Ring buffer for pre-roll (capture audio before speech detected)
+        self.pre_roll_buffer = []
+        self.pre_roll_frames = 5  # Keep last 5 frames before speech
+
+        # Consecutive frame tracking for robust detection
+        self.consecutive_speech_frames = 0
+        self.consecutive_silence_frames = 0
+        self.min_speech_frames_start = 3  # Need 3 consecutive speech frames to start
+        self.min_silence_frames_end = 15  # Need 15 consecutive silence frames to end
+
+        # Statistics
+        self.total_frames_processed = 0
+        self.speech_frames_count = 0
     
     def get_supported_sample_rate(self, device_index: int) -> int:
         """Get the best supported sample rate for the device that's compatible with VAD"""
@@ -651,95 +895,187 @@ class MainProcessor:
             self.pyaudio_instance.terminate()
             self.pyaudio_instance = None
     
-    def is_speech(self, audio_chunk: bytes) -> bool:
-        """Check if audio chunk contains speech using VAD"""
+    def is_speech(self, audio_chunk: bytes) -> tuple:
+        """
+        Check if audio chunk contains speech using multi-layer detection.
+        Returns (is_speech, confidence, details)
+        """
         try:
             # VAD requires specific sample rates
             if self.config.sample_rate not in [8000, 16000, 32000, 48000]:
                 self.logger.warning(f"Sample rate {self.config.sample_rate} not supported by VAD")
-                return False
-            
+                return False, 0.0, {}
+
             # VAD requires specific chunk durations
             if self.config.chunk_duration_ms not in [10, 20, 30]:
                 self.logger.warning(f"Chunk duration {self.config.chunk_duration_ms}ms not supported by VAD")
-                return False
-            
-            return self.vad.is_speech(audio_chunk, self.config.sample_rate)
-            
+                return False, 0.0, {}
+
+            # Layer 1: WebRTC VAD
+            vad_result = self.vad.is_speech(audio_chunk, self.config.sample_rate)
+
+            # Layer 2: Advanced noise filter analysis
+            voice_result, voice_confidence, features = self.noise_filter.is_voice(audio_chunk)
+
+            # Combine results - both must agree for high confidence
+            if vad_result and voice_result:
+                # Both agree it's speech
+                combined_confidence = 0.5 + (voice_confidence * 0.5)
+                is_speech = True
+            elif vad_result or voice_result:
+                # One thinks it's speech - use voice confidence to decide
+                combined_confidence = voice_confidence
+                is_speech = voice_confidence > 0.6  # Require higher confidence if disagreement
+            else:
+                # Neither thinks it's speech
+                combined_confidence = voice_confidence
+                is_speech = False
+
+            details = {
+                'vad_result': vad_result,
+                'voice_result': voice_result,
+                'voice_confidence': voice_confidence,
+                'combined_confidence': combined_confidence,
+                **features
+            }
+
+            return is_speech, combined_confidence, details
+
         except Exception as e:
             self.logger.error(f"Error in VAD processing: {e}")
-            return False
-    
-    def process_speech_detection(self, audio_chunk: bytes, is_speech: bool):
-        """Process speech detection logic and manage speech segments"""
+            return False, 0.0, {'error': str(e)}
+
+    def process_speech_detection(self, audio_chunk: bytes, is_speech: bool, confidence: float = 0.0):
+        """Process speech detection logic and manage speech segments with hysteresis"""
         current_time = time.time()
+        self.total_frames_processed += 1
+
+        # Update pre-roll buffer
+        self.pre_roll_buffer.append(audio_chunk)
+        if len(self.pre_roll_buffer) > self.pre_roll_frames:
+            self.pre_roll_buffer.pop(0)
+
         if is_speech:
+            self.consecutive_speech_frames += 1
+            self.consecutive_silence_frames = 0
+            self.speech_frames_count += 1
             self.last_speech_time = current_time
-            
+
             if not self.is_speech_active:
-                # Start of speech detected
-                self.is_speech_active = True
-                self.speech_start_time = current_time
-                self.speech_frames = []
-                self.logger.debug("Speech started")
-            
-            # Accumulate speech frames
-            self.speech_frames.append(audio_chunk)
-            
-        else:
-            # No speech detected
+                # Only start speech segment after minimum consecutive frames
+                if self.consecutive_speech_frames >= self.min_speech_frames_start:
+                    self.is_speech_active = True
+                    self.speech_start_time = current_time
+                    # Include pre-roll buffer
+                    self.speech_frames = list(self.pre_roll_buffer)
+                    self.logger.info(f"Speech started (confidence: {confidence:.2f})")
+
             if self.is_speech_active:
-                silence_duration = current_time - self.last_speech_time
-                
-                if silence_duration > (self.config.silence_timeout_ms / 1000.0):
-                    # End of speech detected
-                    self.end_speech_segment()
+                # Accumulate speech frames
+                self.speech_frames.append(audio_chunk)
+
+        else:
+            self.consecutive_silence_frames += 1
+            self.consecutive_speech_frames = 0
+
+            # Update noise floor during silence
+            energy = self.noise_filter._calculate_energy(audio_chunk)
+            self.noise_filter.update_noise_floor(energy, is_speech=False)
+
+            if self.is_speech_active:
+                # Also add silence frames to capture trailing audio
+                self.speech_frames.append(audio_chunk)
+
+                # Only end speech segment after minimum consecutive silence frames
+                if self.consecutive_silence_frames >= self.min_silence_frames_end:
+                    # Also check if silence timeout exceeded
+                    silence_duration = current_time - self.last_speech_time if self.last_speech_time else 0
+
+                    if silence_duration > (self.config.silence_timeout_ms / 1000.0):
+                        self.end_speech_segment()
     
     def end_speech_segment(self):
         """End current speech segment and send to processing queue"""
         if self.speech_frames:
             # Combine all speech frames
             combined_audio = b''.join(self.speech_frames)
-            
-            # Send to child processor
-            try:
-                self.audio_queue.put(combined_audio, timeout=1.0)
-                print(combined_audio)
-                self.logger.debug(f"Speech segment sent to processor ({len(combined_audio)} bytes)")
-            except Exception as e:
-                self.logger.error(f"Error sending audio to queue: {e}")
-        
+
+            # Calculate speech duration
+            speech_duration = time.time() - self.speech_start_time if self.speech_start_time else 0
+
+            # Filter out very short segments (likely noise)
+            min_speech_duration = 0.3  # Minimum 300ms
+            if speech_duration >= min_speech_duration:
+                # Send to child processor
+                try:
+                    self.audio_queue.put(combined_audio, timeout=1.0)
+                    self.logger.info(f"Speech segment sent: {len(combined_audio)} bytes, {speech_duration:.2f}s")
+                except Exception as e:
+                    self.logger.error(f"Error sending audio to queue: {e}")
+            else:
+                self.logger.debug(f"Discarded short segment: {speech_duration:.2f}s")
+
         # Reset speech detection state
         self.is_speech_active = False
         self.speech_frames = []
         self.speech_start_time = None
         self.last_speech_time = None
+        self.consecutive_speech_frames = 0
+        self.consecutive_silence_frames = 0
+        self.pre_roll_buffer = []
     
     def run(self, device_index: int):
-        """Main processing loop"""
+        """Main processing loop with noise calibration"""
         if not self.initialize_audio_stream(device_index):
             self.logger.error("Failed to initialize audio stream")
             return
-        
+
+        # Update noise filter with actual sample rate
+        self.noise_filter.sample_rate = self.config.sample_rate
+        self.noise_filter.frame_size = self.config.chunk_size
+
         self.running = True
         self.logger.info("MainProcessor started")
-        
+
+        # Calibration phase
+        self.logger.info("Calibrating noise floor... Please remain silent for a moment.")
+        calibration_complete = False
+
         try:
             while self.running:
                 # Read audio chunk
-                audio_chunk = self.audio_stream.read(self.config.chunk_size)
-                
-                # Check for speech
-                is_speech = self.is_speech(audio_chunk)
-                if is_speech:
-                    self.logger.info("detected speech")
-                # Process speech detection
-                self.process_speech_detection(audio_chunk, is_speech)
-                
+                try:
+                    audio_chunk = self.audio_stream.read(self.config.chunk_size, exception_on_overflow=False)
+                except Exception as read_error:
+                    self.logger.warning(f"Audio read error: {read_error}")
+                    continue
+
+                # Calibration phase
+                if not calibration_complete:
+                    if self.noise_filter.calibrate(audio_chunk):
+                        calibration_complete = True
+                        self.logger.info(f"Noise floor calibrated: {self.noise_filter.noise_floor:.2f}")
+                        self.logger.info("Listening for speech...")
+                    continue
+
+                # Check for speech using enhanced detection
+                is_speech, confidence, details = self.is_speech(audio_chunk)
+
+                # Debug logging for high-confidence events
+                if is_speech and confidence > 0.7:
+                    self.logger.debug(f"Speech detected: confidence={confidence:.2f}, "
+                                     f"energy={details.get('energy', 0):.0f}, "
+                                     f"voice_band_ratio={details.get('voice_band_ratio', 0):.2f}")
+
+                # Process speech detection with confidence
+                self.process_speech_detection(audio_chunk, is_speech, confidence)
+
         except KeyboardInterrupt:
             self.logger.info("Received interrupt signal")
         except Exception as e:
-            self.logger.info(f"Error in MainProcessor: {e}")
+            self.logger.error(f"Error in MainProcessor: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.stop()
     
