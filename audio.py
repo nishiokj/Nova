@@ -805,7 +805,7 @@ class MainProcessor:
         self.consecutive_speech_frames = 0
         self.consecutive_silence_frames = 0
         self.min_speech_frames_start = 2  # Need 2 consecutive speech frames to start (was 3)
-        self.min_silence_frames_end = 8   # Need 8 consecutive silence frames to end (was 15 = 450ms, now 240ms)
+        self.min_silence_frames_end = 15   # Need 15 consecutive silence frames to end (was 15 = 450ms, now 240ms)
 
         # Statistics
         self.total_frames_processed = 0

@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-Main Entry Point - Voice-Activated AI Agent System (OPTIMIZED)
+Main Entry Point - Voice-Activated AI Agent System (OPTIMIZED v2)
+
+Architecture v2 - Multiprocess:
+- Main Process: Audio capture, Whisper STT, request routing
+- Agent Process: LLM reasoning, tool execution (no GIL contention)
+- TTS Process: Speech synthesis (no GIL contention)
+
+Communication via EventBus with multiprocessing.Queue
 
 Performance optimizations:
 - Local Whisper STT (faster-whisper) instead of Google API
-- Threading instead of multiprocessing for lower IPC overhead
+- Multiprocessing for Agent and TTS (bypass GIL)
 - Direct PCM-to-Whisper without WAV conversion
 - Blocking queue.get() instead of poll+sleep
 - Cached linting results
-- Non-blocking TTS
+- Backpressure handling (latest request wins)
 
-Target: 300ms from end-of-speech to inference start
+Target: 4s round-trip for tool-using queries
 """
 
 import os
@@ -23,6 +30,7 @@ import atexit
 import logging
 import argparse
 import threading
+import uuid
 import numpy as np
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +42,7 @@ from dataclasses import dataclass
 # Local imports
 from audio import AudioConfig, AudioDeviceManager, MainProcessor
 
-# Harness imports
+# Harness imports (v1 - single process, kept for compatibility)
 from harness import (
     AgentHarness,
     HarnessConfig,
@@ -46,6 +54,17 @@ from harness import (
     StructuredLogger,
     get_logger,
     set_logger
+)
+
+# Harness imports (v2 - multiprocess)
+from harness import (
+    EventBus,
+    ProcessManager,
+    AgentRequest,
+    AgentResult,
+    TTSRequest,
+    create_tts_worker,
+    create_agent_worker
 )
 
 
@@ -1105,6 +1124,364 @@ class VoiceAgentSystem:
 
 
 # =============================================================================
+# VOICE AGENT SYSTEM V2 - MULTIPROCESS ARCHITECTURE
+# =============================================================================
+
+class VoiceAgentSystemV2:
+    """
+    Voice agent system with multiprocess architecture.
+
+    Architecture:
+    - Main Process: Audio capture, Whisper STT, request routing
+    - Agent Process: LLM reasoning, tool execution
+    - TTS Process: Speech synthesis
+
+    Benefits:
+    - No GIL contention between STT, Agent, and TTS
+    - True parallelism for I/O-bound operations
+    - Backpressure handling (latest request wins)
+    - Health monitoring with auto-restart
+    """
+
+    def __init__(
+        self,
+        harness_config_path: str = None,
+        audio_config_path: str = "config/audio_config.json",
+        whisper_model: str = "base.en",
+        use_whisper: bool = True,
+        default_tier: str = "standard"
+    ):
+        self.logger = self._setup_logging()
+        self.profiler = PROFILER
+
+        # Load configurations
+        self.audio_config = AudioConfig(audio_config_path)
+        self.harness_config_path = harness_config_path
+        self.harness_config = load_or_create_config(harness_config_path) if harness_config_path else None
+        self.default_tier = default_tier
+        self.whisper_model = whisper_model
+        self.use_whisper = use_whisper
+
+        # EventBus for inter-process communication
+        self.event_bus = EventBus(max_agent_pending=1)
+
+        # Process manager
+        self.process_manager = ProcessManager(self.event_bus)
+
+        # Audio components (run in main process)
+        self.audio_queue = Queue()
+        self.device_manager = AudioDeviceManager(self.audio_config)
+        self.audio_processor = None
+        self.main_processor = None
+
+        # Threads for main process
+        self.processor_thread = None
+        self.main_processor_thread = None
+        self.response_thread = None
+
+        # Text processing
+        self.linter = TextLinter()
+
+        # State
+        self.running = False
+        self._request_count = 0
+
+        self.logger.info("VoiceAgentSystemV2 initialized (MULTIPROCESS)")
+
+    def _setup_logging(self) -> logging.Logger:
+        """Setup logging for the system"""
+        os.makedirs("logs", exist_ok=True)
+
+        logging.basicConfig(
+            level=logging.WARNING,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler("logs/voice_agent_v2.log"),
+            ]
+        )
+
+        # Suppress noisy libraries
+        for noisy in ['httpx', 'httpcore', 'openai', 'faster_whisper', 'urllib3', 'asyncio']:
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(logging.INFO)
+        console.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+        logger.addHandler(console)
+        logger.propagate = False
+
+        return logger
+
+    def _process_transcription(self, text: str, receive_time: float):
+        """Process a transcription by submitting to the Agent process via EventBus"""
+        # Lint and validate
+        with self.profiler.measure("bridge.lint_validate_ms"):
+            lint_result = self.linter.lint_and_validate(text)
+
+        if not lint_result.is_valid:
+            self.logger.debug(f"Invalid input rejected: {text[:50]}")
+            return
+
+        self._request_count += 1
+        request_id = f"req_{self._request_count}_{uuid.uuid4().hex[:8]}"
+
+        self.logger.info(f"[{request_id}] Processing: {lint_result.cleaned}")
+
+        # Submit to Agent via EventBus (non-blocking)
+        request = AgentRequest(
+            request_id=request_id,
+            speech_text=lint_result.cleaned,
+            tier=self.default_tier,
+            context=None,
+            conversation_history=[]
+        )
+
+        with self.profiler.measure("eventbus.submit_ms"):
+            self.event_bus.submit_agent_request(request)
+
+        self.logger.debug(f"[{request_id}] Submitted to Agent process")
+
+    def _response_monitor_loop(self):
+        """Monitor for Agent responses and log them"""
+        self.logger.info("Response monitor started")
+
+        while self.running:
+            try:
+                result = self.event_bus.get_agent_response(timeout=0.5)
+                if result:
+                    self.logger.info(
+                        f"[{result.request_id}] Response received in {result.duration_ms:.0f}ms: "
+                        f"{result.spoken_response[:100]}..."
+                    )
+                    self.profiler.record("pipeline.agent_response_ms", result.duration_ms)
+
+                    if result.tools_used:
+                        self.logger.info(f"[{result.request_id}] Tools used: {', '.join(result.tools_used)}")
+
+            except Exception as e:
+                self.logger.error(f"Response monitor error: {e}")
+
+        self.logger.info("Response monitor stopped")
+
+    def start(self):
+        """Start the voice agent system with multiprocess architecture"""
+        self.logger.info("Starting VoiceAgentSystemV2 (MULTIPROCESS)...")
+        self.running = True
+
+        # Find audio device
+        device_index = self.device_manager.wait_for_input_device()
+        if device_index is None:
+            self.logger.error("No audio input device found")
+            return False
+
+        self.logger.info(f"Using audio device index: {device_index}")
+
+        # Setup worker factories
+        voice_config = {
+            "engine": "pyttsx3",
+            "rate": 180,
+            "volume": 0.8
+        }
+
+        self.process_manager.set_tts_factory(
+            create_tts_worker(self.event_bus, voice_config)
+        )
+
+        self.process_manager.set_agent_factory(
+            create_agent_worker(
+                self.event_bus,
+                config=self.harness_config,
+                config_path=self.harness_config_path
+            )
+        )
+
+        # Start worker processes
+        self.logger.info("Starting worker processes...")
+        self.process_manager.start()
+
+        # Give workers time to initialize
+        time.sleep(1.0)
+
+        # Create audio processor (runs in main process with STT)
+        self.audio_processor = OptimizedAudioProcessorV2(
+            audio_queue=self.audio_queue,
+            audio_config=self.audio_config,
+            on_transcription=self._process_transcription,
+            whisper_model=self.whisper_model,
+            use_whisper=self.use_whisper,
+            profiler=self.profiler
+        )
+
+        # Pre-initialize STT model
+        self.logger.info("Pre-loading STT model...")
+        self.audio_processor.initialize()
+
+        # Start audio processor thread
+        self.processor_thread = threading.Thread(
+            target=self.audio_processor.run,
+            daemon=True,
+            name="AudioProcessor"
+        )
+        self.processor_thread.start()
+
+        # Start main audio capture
+        self.main_processor = MainProcessor(self.audio_config, self.audio_queue)
+        self.main_processor_thread = threading.Thread(
+            target=self.main_processor.run,
+            args=(device_index,),
+            daemon=True,
+            name="AudioCapture"
+        )
+        self.main_processor_thread.start()
+
+        # Start response monitor thread
+        self.response_thread = threading.Thread(
+            target=self._response_monitor_loop,
+            daemon=True,
+            name="ResponseMonitor"
+        )
+        self.response_thread.start()
+
+        self.logger.info("VoiceAgentSystemV2 started successfully")
+        self.logger.info("Speak to interact with the AI agent...")
+
+        return True
+
+    def run_blocking(self):
+        """Run the system and block until stopped"""
+        if not self.start():
+            return
+
+        try:
+            while self.running:
+                # Check process health
+                if not self.process_manager.agent_alive:
+                    self.logger.warning("Agent process not alive!")
+                if not self.process_manager.tts_alive:
+                    self.logger.warning("TTS process not alive!")
+
+                time.sleep(0.5)
+
+        except KeyboardInterrupt:
+            self.logger.info("Received interrupt signal")
+        finally:
+            self.stop()
+
+    def stop(self):
+        """Stop the voice agent system"""
+        self.logger.info("Stopping VoiceAgentSystemV2...")
+        self.running = False
+
+        # Stop audio components
+        if self.main_processor:
+            self.main_processor.stop()
+
+        if self.audio_processor:
+            self.audio_processor.stop()
+            self.audio_queue.put(None)
+
+        # Stop worker processes
+        self.process_manager.stop()
+
+        # Wait for threads
+        if self.processor_thread and self.processor_thread.is_alive():
+            self.processor_thread.join(timeout=5.0)
+
+        if self.main_processor_thread and self.main_processor_thread.is_alive():
+            self.main_processor_thread.join(timeout=5.0)
+
+        if self.response_thread and self.response_thread.is_alive():
+            self.response_thread.join(timeout=2.0)
+
+        self.logger.info("VoiceAgentSystemV2 stopped")
+        self.profiler.report_summary(logger=self.logger)
+
+
+class OptimizedAudioProcessorV2:
+    """
+    Audio processor for V2 multiprocess architecture.
+    Only handles STT - Agent/TTS are in separate processes.
+    """
+
+    def __init__(
+        self,
+        audio_queue: Queue,
+        audio_config: AudioConfig,
+        on_transcription: Callable[[str, float], None],
+        whisper_model: str = "base.en",
+        use_whisper: bool = True,
+        profiler: RuntimeProfiler = None
+    ):
+        self.audio_queue = audio_queue
+        self.config = audio_config
+        self.on_transcription = on_transcription
+        self.logger = logging.getLogger(__name__)
+        self.running = False
+        self.profiler = profiler or PROFILER
+
+        # Choose STT engine
+        if use_whisper:
+            self.stt = LocalWhisperSTT(model_size=whisper_model)
+        else:
+            self.stt = GoogleSTT()
+
+    def initialize(self) -> bool:
+        """Pre-initialize STT model"""
+        return self.stt.initialize()
+
+    def run(self):
+        """Main processing loop"""
+        self.running = True
+        self.logger.info("OptimizedAudioProcessorV2 started")
+
+        while self.running:
+            try:
+                # Blocking get with short timeout
+                try:
+                    audio_data = self.audio_queue.get(timeout=0.05)
+                except Empty:
+                    continue
+
+                if audio_data is None:
+                    break
+
+                if not audio_data or len(audio_data) < 100:
+                    continue
+
+                receive_time = time.time()
+
+                # Transcribe
+                with self.profiler.measure("stt.transcription_ms"):
+                    transcript = self.stt.transcribe_pcm(
+                        audio_data,
+                        sample_rate=self.config.sample_rate
+                    )
+
+                if transcript:
+                    transcribe_time = time.time()
+                    self.logger.info(
+                        f"Transcribed in {(transcribe_time - receive_time)*1000:.0f}ms: {transcript}"
+                    )
+
+                    # Call the transcription handler (submits to EventBus)
+                    self.on_transcription(transcript, receive_time)
+
+            except Exception as e:
+                self.logger.error(f"Error in OptimizedAudioProcessorV2: {e}")
+                import traceback
+                traceback.print_exc()
+
+        self.logger.info("OptimizedAudioProcessorV2 stopped")
+
+    def stop(self):
+        """Stop the processor"""
+        self.running = False
+
+
+# =============================================================================
 # INTERACTIVE MODE
 # =============================================================================
 
@@ -1214,17 +1591,22 @@ def interactive_mode(harness: AgentHarness):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="Voice-Activated AI Agent System (OPTIMIZED)",
+        description="Voice-Activated AI Agent System (OPTIMIZED v2)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                    # Start with voice input
+  python main.py                    # Start with voice input (v1 single-process)
+  python main.py --v2               # Start with voice input (v2 multiprocess - RECOMMENDED)
   python main.py --interactive      # Text-only interactive mode
   python main.py --list-devices     # List audio devices
   python main.py --no-router        # Disable task routing (faster)
   python main.py --tier advanced    # Use advanced tier by default
   python main.py --whisper tiny.en  # Use tiny Whisper model (fastest)
   python main.py --google-stt       # Use Google STT instead of Whisper
+
+Architecture:
+  v1 (default): Single process with threading - simpler but GIL-limited
+  v2 (--v2):    Multiprocess - Agent and TTS in separate processes, no GIL contention
         """
     )
 
@@ -1280,6 +1662,11 @@ Examples:
         action="store_true",
         help="Enable debug logging"
     )
+    parser.add_argument(
+        "--v2",
+        action="store_true",
+        help="Use v2 multiprocess architecture (Agent and TTS in separate processes)"
+    )
 
     args = parser.parse_args()
 
@@ -1321,15 +1708,33 @@ Examples:
         return
 
     # Full voice mode
-    system = VoiceAgentSystem(
-        harness_config_path=args.config if os.path.exists(args.config) else None,
-        audio_config_path=args.audio_config,
-        router_enabled=not args.no_router,
-        tts_enabled=not args.no_tts,
-        default_tier=args.tier,
-        whisper_model=args.whisper,
-        use_whisper=not args.google_stt
-    )
+    if args.v2:
+        # V2: Multiprocess architecture (Agent and TTS in separate processes)
+        print("=" * 60)
+        print("Starting Voice Agent System V2 (MULTIPROCESS)")
+        print("  - Main Process: Audio capture, Whisper STT")
+        print("  - Agent Process: LLM reasoning, tool execution")
+        print("  - TTS Process: Speech synthesis")
+        print("=" * 60)
+
+        system = VoiceAgentSystemV2(
+            harness_config_path=args.config if os.path.exists(args.config) else None,
+            audio_config_path=args.audio_config,
+            whisper_model=args.whisper,
+            use_whisper=not args.google_stt,
+            default_tier=args.tier
+        )
+    else:
+        # V1: Single process with threading (original)
+        system = VoiceAgentSystem(
+            harness_config_path=args.config if os.path.exists(args.config) else None,
+            audio_config_path=args.audio_config,
+            router_enabled=not args.no_router,
+            tts_enabled=not args.no_tts,
+            default_tier=args.tier,
+            whisper_model=args.whisper,
+            use_whisper=not args.google_stt
+        )
 
     # Handle signals
     def signal_handler(signum, frame):

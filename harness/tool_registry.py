@@ -17,7 +17,7 @@ from enum import Enum
 import traceback
 import signal
 import io
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stdout, redirect_stderr, contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from .config import ToolConfig
@@ -117,14 +117,49 @@ class ToolRegistry:
     Manages tool registration, execution, and lifecycle.
     """
 
-    def __init__(self, config: Optional[ToolConfig] = None):
+    def __init__(self, config: Optional[ToolConfig] = None, default_working_dir: Optional[str] = None):
         self.config = config or ToolConfig()
         self.logger = get_logger()
         self._tools: Dict[str, Tool] = {}
         self._lock = threading.Lock()
+        self._default_working_dir = os.path.abspath(default_working_dir) if default_working_dir else os.getcwd()
+        self._thread_local = threading.local()
 
         # Register built-in tools
         self._register_builtin_tools()
+
+    def _get_current_working_dir(self) -> str:
+        """Return the active working directory for this thread/tool call"""
+        return getattr(self._thread_local, "workdir", self._default_working_dir)
+
+    def set_default_working_dir(self, workdir: Optional[str]):
+        """Override the default working directory used when no context is set"""
+        if workdir:
+            self._default_working_dir = os.path.abspath(workdir)
+
+    @contextmanager
+    def with_working_dir(self, workdir: Optional[str]):
+        """Context manager that temporarily uses a specific working directory"""
+        previous = getattr(self._thread_local, "workdir", None)
+        changed = bool(workdir)
+        if changed:
+            self._thread_local.workdir = os.path.abspath(workdir)
+        try:
+            yield
+        finally:
+            if changed:
+                if previous is None:
+                    self._thread_local.__dict__.pop("workdir", None)
+                else:
+                    self._thread_local.workdir = previous
+
+    def _resolve_path(self, path: str) -> str:
+        """Resolve a user-provided path against the active working directory"""
+        path = os.path.expanduser(path)
+        if os.path.isabs(path):
+            return os.path.abspath(path)
+        base = self._get_current_working_dir()
+        return os.path.abspath(os.path.join(base, path))
 
     def register(self, tool: Tool):
         """Register a tool"""
@@ -680,22 +715,21 @@ class ToolRegistry:
     def _file_write(self, path: str, content: str, append: bool = False) -> ToolResult:
         """Write content to file"""
         try:
-            # Expand user path
-            path = os.path.expanduser(path)
+            resolved_path = self._resolve_path(path)
 
             # Create directory if needed
-            dir_path = os.path.dirname(path)
+            dir_path = os.path.dirname(resolved_path)
             if dir_path and not os.path.exists(dir_path):
                 os.makedirs(dir_path)
 
             mode = "a" if append else "w"
-            with open(path, mode, encoding="utf-8") as f:
+            with open(resolved_path, mode, encoding="utf-8") as f:
                 f.write(content)
 
             return ToolResult(
                 status=ToolStatus.SUCCESS,
-                output=f"Successfully {'appended to' if append else 'wrote'} {path}",
-                metadata={"path": path, "bytes_written": len(content), "append": append}
+                output=f"Successfully {'appended to' if append else 'wrote'} {resolved_path}",
+                metadata={"path": resolved_path, "bytes_written": len(content), "append": append}
             )
 
         except Exception as e:
@@ -819,7 +853,7 @@ class ToolRegistry:
             with ThreadPoolExecutor(max_workers=min(num_sources, 5)) as executor:
                 futures = {executor.submit(fetch_url, r): r for r in search_results[:num_sources]}
 
-                for future in as_completed(futures, timeout=8):
+                for future in as_completed(futures, timeout=5):
                     try:
                         result = future.result()
                         if result["content"]:  # Only add if we got content
