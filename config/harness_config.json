@@ -1,0 +1,78 @@
+{
+  "router": {
+    "enabled": true,
+    "default_tier": "standard",
+    "difficulty_tiers": ["simple", "standard", "advanced"]
+  },
+  "service_rep": {
+    "enabled": true,
+    "voice_engine": "pyttsx3",
+    "voice_rate": 180,
+    "voice_volume": 0.8
+  },
+  "agent": {
+    "tier": "standard",
+    "max_tool_calls": 10,
+    "tool_timeout": 30,
+    "allow_code_execution": true,
+    "allow_internet": true,
+    "allow_bash": true
+  },
+  "tools": {
+    "enabled_tools": [
+      "fast_answer",
+      "web_search",
+      "web_fetch",
+      "bash_execute",
+      "python_execute",
+      "file_read",
+      "file_write",
+      "calculator",
+      "get_current_time"
+    ],
+    "sandbox_bash": true,
+    "sandbox_python": true,
+    "max_output_length": 10000,
+    "bash_timeout": 30,
+    "python_timeout": 60
+  },
+  "logging": {
+    "log_dir": "logs",
+    "log_level": "INFO",
+    "log_to_file": true,
+    "log_to_console": true,
+    "structured_format": true
+  },
+  "llm_configs": {
+    "router": {
+      "provider": "openai",
+      "model": "gpt-5-nano",
+      "max_tokens": 100,
+      "temperature": 0.1
+    },
+    "service_rep": {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "max_tokens": 2048,
+      "temperature": 0.7
+    },
+    "simple": {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "max_tokens": 8192,
+      "temperature": 0.7
+    },
+    "standard": {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "max_tokens": 8192,
+      "temperature": 0.7
+    },
+    "advanced": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4.5",
+      "max_tokens": 16000,
+      "temperature": 0.7
+    }
+  }
+}

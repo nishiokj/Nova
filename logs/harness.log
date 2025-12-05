@@ -1,0 +1,601 @@
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_call] Calling tool: calculator | {"tool": "calculator", "params": {"expression": "2 + 2 * 3"}}
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_result] Tool calculator completed | {"tool": "calculator", "result_preview": "8"}
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human"}}
+2025-12-04 00:01:24,640 - harness - ERROR - [tools] [tool_error] Tool get_current_time failed: Tool 'get_current_time' is disabled | {"tool": "get_current_time"}
+2025-12-04 00:01:24,640 - harness - INFO - [tools] [tool_call] Calling tool: file_read | {"tool": "file_read", "params": {"path": "/etc/hostname"}}
+2025-12-04 00:01:24,640 - harness - ERROR - [tools] [tool_error] Tool file_read failed: File not found: /etc/hostname | {"tool": "file_read"}
+2025-12-04 00:01:37,892 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human"}}
+2025-12-04 00:01:37,892 - harness - INFO - [tools] [tool_result] Tool get_current_time completed | {"tool": "get_current_time", "result_preview": "Thursday, December 04, 2025 at 12:01 AM"}
+2025-12-04 00:01:37,892 - harness - INFO - [tools] [tool_call] Calling tool: bash_execute | {"tool": "bash_execute", "params": {"command": "echo hello world"}}
+2025-12-04 00:01:37,895 - harness - INFO - [tools] [tool_result] Tool bash_execute completed | {"tool": "bash_execute", "result_preview": "hello world\n"}
+2025-12-04 00:01:37,895 - harness - INFO - [tools] [tool_call] Calling tool: python_execute | {"tool": "python_execute", "params": {"code": "print(\"Python works!\")"}}
+2025-12-04 00:01:37,895 - harness - INFO - [tools] [tool_result] Tool python_execute completed | {"tool": "python_execute", "result_preview": "Python works!\n"}
+2025-12-04 07:40:25,289 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 07:40:25,290 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 07:40:25,533 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 07:54:42,212 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 07:54:42,214 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 07:54:42,636 - harness - INFO - [harness] [system] AgentHarness cleaned up
+2025-12-04 07:55:17,724 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 07:55:17,725 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 07:55:17,941 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 07:56:24,377 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 07:56:24,380 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 07:56:24,690 - harness - INFO - [harness] [system] AgentHarness cleaned up
+2025-12-04 07:56:29,698 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 07:56:29,699 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 07:56:29,700 - harness - INFO - [harness] [system] AgentHarness cleaned up
+2025-12-04 07:57:12,371 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 07:57:12,371 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 07:57:12,588 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 07:57:30,277 - harness - INFO - [bridge] [system] Processing: what's the weather today.
+2025-12-04 07:57:30,279 - harness - INFO - [input] [speech_received] Speech received: what's the weather today. | {"text": "what's the weather today.", "length": 25}
+2025-12-04 07:57:30,282 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.80) | {"input_preview": "what's the weather today.", "tier": "simple", "confidence": 0.8}
+2025-12-04 07:57:30,283 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.8}
+2025-12-04 07:57:31,797 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:33,517 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:35,633 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:39,448 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:39,448 - harness - ERROR - [service_rep] [error] LLM acknowledgment failed: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}}
+2025-12-04 07:57:39,448 - harness - INFO - [tts] [tts_output] TTS output: Let me think about that. | {"text": "Let me think about that.", "length": 24}
+2025-12-04 07:57:39,657 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:41,451 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:43,593 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:48,971 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 07:57:48,975 - harness - ERROR - [agent] [error] Agent execution failed: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}}
+2025-12-04 07:57:48,976 - harness - INFO - [tts] [tts_output] TTS output: I ran into an issue: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is... | {"text": "I ran into an issue: Error code: 400 - {'error': {'message': \"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.\", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}}", "length": 260}
+2025-12-04 07:57:48,976 - harness - INFO - [output] [response_generated] Response: I ran into an issue: Error code: 400 - {'error': {'message': "Unsupported parameter: 'max_tokens' is... | {"response": "I ran into an issue: Error code: 400 - {'error': {'message': \"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.\", 'type': 'invalid_request_error', 'param': 'max_tokens', 'code': 'unsupported_parameter'}}", "length": 260, "duration_ms": 18697.57604598999, "tier": "simple", "tools_used": []}
+2025-12-04 07:57:48,977 - harness - INFO - [bridge] [system] Response generated in 18698ms
+2025-12-04 08:01:31,319 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 08:01:31,319 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 08:01:31,542 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 08:02:32,561 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 08:02:32,562 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 08:02:32,781 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 08:02:48,600 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 08:02:48,600 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 08:02:48,819 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 08:02:55,658 - harness - INFO - [bridge] [system] Processing: what's the weather today.
+2025-12-04 08:02:55,659 - harness - INFO - [input] [speech_received] Speech received: what's the weather today. | {"text": "what's the weather today.", "length": 25}
+2025-12-04 08:02:55,662 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.80) | {"input_preview": "what's the weather today.", "tier": "simple", "confidence": 0.8}
+2025-12-04 08:02:55,663 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.8}
+2025-12-04 08:02:56,084 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:02:57,217 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:02:59,340 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:03:03,037 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:03:03,037 - harness - ERROR - [service_rep] [error] LLM acknowledgment failed: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}}
+2025-12-04 08:03:03,037 - harness - INFO - [tts] [tts_output] TTS output: Let me think about that. | {"text": "Let me think about that.", "length": 24}
+2025-12-04 08:03:03,861 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:03:05,008 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:03:07,143 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:03:10,313 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:03:10,314 - harness - ERROR - [agent] [error] Agent execution failed: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}}
+2025-12-04 08:03:10,316 - harness - INFO - [tts] [tts_output] TTS output: I ran into an issue: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does ... | {"text": "I ran into an issue: Error code: 400 - {'error': {'message': \"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.\", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}}", "length": 262}
+2025-12-04 08:03:10,318 - harness - INFO - [output] [response_generated] Response: I ran into an issue: Error code: 400 - {'error': {'message': "Unsupported value: 'temperature' does ... | {"response": "I ran into an issue: Error code: 400 - {'error': {'message': \"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.\", 'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}}", "length": 262, "duration_ms": 14658.334016799927, "tier": "simple", "tools_used": []}
+2025-12-04 08:03:10,318 - harness - INFO - [bridge] [system] Response generated in 14658ms
+2025-12-04 08:06:50,976 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 08:06:50,978 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 08:06:51,706 - harness - INFO - [harness] [system] AgentHarness cleaned up
+2025-12-04 08:06:53,189 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 08:06:53,189 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 08:06:53,419 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 08:06:58,292 - harness - INFO - [bridge] [system] Processing: what's the weather today.
+2025-12-04 08:06:58,292 - harness - INFO - [input] [speech_received] Speech received: what's the weather today. | {"text": "what's the weather today.", "length": 25}
+2025-12-04 08:06:58,292 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.80) | {"input_preview": "what's the weather today.", "tier": "simple", "confidence": 0.8}
+2025-12-04 08:06:58,293 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.8}
+2025-12-04 08:06:58,452 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:06:58,712 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:06:59,717 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:06:59,829 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:07:01,834 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:07:01,954 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:07:04,957 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:07:05,083 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:07:05,084 - harness - ERROR - [service_rep] [error] LLM acknowledgment failed: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}}
+2025-12-04 08:07:05,085 - harness - INFO - [tts] [tts_output] TTS output: Let me think about that. | {"text": "Let me think about that.", "length": 24}
+2025-12-04 08:07:05,111 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:07:05,276 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:07:06,283 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:07:06,441 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:07:08,448 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:07:08,604 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:07:11,612 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:07:11,735 - harness - ERROR - [llm] [llm_error] LLM error from openai/gpt-5-nano: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}} | {"provider": "openai", "model": "gpt-5-nano"}
+2025-12-04 08:07:11,736 - harness - ERROR - [agent] [error] Agent execution failed: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not supported with this model.", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}}
+2025-12-04 08:07:11,736 - harness - INFO - [tts] [tts_output] TTS output: I ran into an issue: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not ... | {"text": "I ran into an issue: Error code: 400 - {'error': {'message': \"Unsupported parameter: 'top_p' is not supported with this model.\", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}}", "length": 213}
+2025-12-04 08:07:11,736 - harness - INFO - [output] [response_generated] Response: I ran into an issue: Error code: 400 - {'error': {'message': "Unsupported parameter: 'top_p' is not ... | {"response": "I ran into an issue: Error code: 400 - {'error': {'message': \"Unsupported parameter: 'top_p' is not supported with this model.\", 'type': 'invalid_request_error', 'param': 'top_p', 'code': 'unsupported_parameter'}}", "length": 213, "duration_ms": 13444.586038589478, "tier": "simple", "tools_used": []}
+2025-12-04 08:07:11,737 - harness - INFO - [bridge] [system] Response generated in 13445ms
+2025-12-04 08:10:08,649 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 08:10:08,649 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 08:10:08,871 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 08:10:12,369 - harness - INFO - [bridge] [system] Processing: what's the weather today.
+2025-12-04 08:10:12,370 - harness - INFO - [input] [speech_received] Speech received: what's the weather today. | {"text": "what's the weather today.", "length": 25}
+2025-12-04 08:10:12,372 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.80) | {"input_preview": "what's the weather today.", "tier": "simple", "confidence": 0.8}
+2025-12-04 08:10:12,372 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.8}
+2025-12-04 08:10:12,540 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:10:12,540 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:10:13,681 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep:  | {"user_input_preview": "what's the weather today.", "acknowledgment": ""}
+2025-12-04 08:10:13,703 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:10:13,703 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:10:18,489 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls | {"decision": "Completed with 0 tool calls", "tools_to_use": []}
+2025-12-04 08:10:18,490 - harness - INFO - [tts] [tts_output] TTS output: I can fetch today's weather, but I need a location. Which city (and country) would you like me to ch... | {"text": "I can fetch today's weather, but I need a location. Which city (and country) would you like me to check? If you prefer, I can use your current location\u2014just tell me to proceed with your location.", "length": 195}
+2025-12-04 08:10:18,494 - harness - INFO - [output] [response_generated] Response: I can fetch today's weather, but I need a location. Which city (and country) would you like me to ch... | {"response": "I can fetch today's weather, but I need a location. Which city (and country) would you like me to check? If you prefer, I can use your current location\u2014just tell me to proceed with your location.", "length": 195, "duration_ms": 6123.496294021606, "tier": "simple", "tools_used": []}
+2025-12-04 08:10:18,495 - harness - INFO - [bridge] [system] Response generated in 6123ms
+2025-12-04 08:10:30,235 - harness - INFO - [bridge] [system] Processing: I'm in Chicago.
+2025-12-04 08:10:30,237 - harness - INFO - [input] [speech_received] Speech received: I'm in Chicago. | {"text": "I'm in Chicago.", "length": 15}
+2025-12-04 08:10:30,266 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.1
+2025-12-04 08:10:30,266 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:10:30,984 - harness - INFO - [router] [router_classification] Classified as 'standard' (confidence: 0.85) | {"input_preview": "I'm in Chicago.", "tier": "standard", "confidence": 0.85}
+2025-12-04 08:10:30,984 - harness - INFO - [harness] [system] Routed to tier: standard | {"confidence": 0.85}
+2025-12-04 08:10:30,985 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:10:30,985 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:10:31,901 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep:  | {"user_input_preview": "I'm in Chicago.", "acknowledgment": ""}
+2025-12-04 08:10:31,927 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 08:10:31,927 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 08:10:38,766 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human", "timezone": "America/Chicago"}}
+2025-12-04 08:10:38,766 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human", "timezone": "America/Chicago"}}
+2025-12-04 08:10:38,802 - harness - INFO - [tools] [tool_result] Tool get_current_time completed | {"tool": "get_current_time", "result_preview": "Thursday, December 04, 2025 at 08:10 AM"}
+2025-12-04 08:10:38,802 - harness - INFO - [tools] [tool_result] Tool get_current_time completed | {"tool": "get_current_time", "result_preview": "Thursday, December 04, 2025 at 08:10 AM"}
+2025-12-04 08:10:38,802 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 08:10:38,802 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 08:10:47,469 - harness - INFO - [agent] [agent_decision] Decision: Completed with 1 tool calls | {"decision": "Completed with 1 tool calls", "tools_to_use": ["get_current_time"]}
+2025-12-04 08:10:47,470 - harness - INFO - [tts] [tts_output] TTS output: It’s currently Thursday, December 04, 2025 at 08:10 AM (America/Chicago).... I've provided more deta... | {"text": "It\u2019s currently Thursday, December 04, 2025 at 08:10 AM (America/Chicago).... I've provided more details.", "length": 104}
+2025-12-04 08:10:47,471 - harness - INFO - [output] [response_generated] Response: It’s currently Thursday, December 04, 2025 at 08:10 AM (America/Chicago).... I've provided more deta... | {"response": "It\u2019s currently Thursday, December 04, 2025 at 08:10 AM (America/Chicago).... I've provided more details.", "length": 104, "duration_ms": 17233.733892440796, "tier": "standard", "tools_used": ["get_current_time"]}
+2025-12-04 08:10:47,471 - harness - INFO - [bridge] [system] Response generated in 17234ms
+2025-12-04 08:15:28,569 - harness - INFO - [bridge] [system] Processing: what is amd's stock price at.
+2025-12-04 08:15:28,569 - harness - INFO - [input] [speech_received] Speech received: what is amd's stock price at. | {"text": "what is amd's stock price at.", "length": 29}
+2025-12-04 08:15:28,569 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.80) | {"input_preview": "what is amd's stock price at.", "tier": "simple", "confidence": 0.8}
+2025-12-04 08:15:28,569 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.8}
+2025-12-04 08:15:28,570 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:15:28,570 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:15:29,757 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep:  | {"user_input_preview": "what is amd's stock price at.", "acknowledgment": ""}
+2025-12-04 08:15:29,760 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:15:29,760 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:15:33,649 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "AMD stock price today", "num_results": 5}}
+2025-12-04 08:15:33,649 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "AMD stock price today", "num_results": 5}}
+2025-12-04 08:15:34,287 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "[{'title': 'Advanced Micro Devices, Inc. (AMD) Stock Price, News, Quote & History ...', 'url': 'https://finance.yahoo.com/quote/AMD/', 'snippet': 'Find the latest Advanced Micro Devices, Inc. (AMD) stock quote, history, news and other vital information to help you with your stock trading and investing.'}, {'title': 'AMD Stock Price | Advanced Micro Devices Inc. Stock Quote (U.S.: Nasdaq ...', 'url': 'https://www.marketwatch.com/investing/stock/amd', 'snippet': '2 days ago \u00b7 View real-time stock "}
+2025-12-04 08:15:34,288 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "[{'title': 'Advanced Micro Devices, Inc. (AMD) Stock Price, News, Quote & History ...', 'url': 'https://finance.yahoo.com/quote/AMD/', 'snippet': 'Find the latest Advanced Micro Devices, Inc. (AMD) stock quote, history, news and other vital information to help you with your stock trading and investing.'}, {'title': 'AMD Stock Price | Advanced Micro Devices Inc. Stock Quote (U.S.: Nasdaq ...', 'url': 'https://www.marketwatch.com/investing/stock/amd', 'snippet': '2 days ago \u00b7 View real-time stock "}
+2025-12-04 08:15:34,289 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:15:34,289 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:15:45,090 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://finance.yahoo.com/quote/AMD/", "extract_type": "text"}}
+2025-12-04 08:15:45,090 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://finance.yahoo.com/quote/AMD/", "extract_type": "text"}}
+2025-12-04 08:15:45,823 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Advanced Micro Devices, Inc. (AMD) Stock Price, News, Quote & History - Yahoo Finance\nOops, something went wrong\nSkip to navigation\nSkip to main content\nSkip to right column\nNews\nToday's news\nUS\nPolitics\n2025 Election\nWorld\nWeather\nClimate change\nHealth\nWellness\nMental health\nSexual health\nDermatology\nOral health\nHair loss\nFoot health\nNutrition\nHealthy eating\nMeal delivery\nWeight loss\nVitamins and supplements\nFitness\nEquipment\nExercise\nWomen's health\nSleep\nHealthy aging\nHearing\nMobility\nScience\n"}
+2025-12-04 08:15:45,824 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Advanced Micro Devices, Inc. (AMD) Stock Price, News, Quote & History - Yahoo Finance\nOops, something went wrong\nSkip to navigation\nSkip to main content\nSkip to right column\nNews\nToday's news\nUS\nPolitics\n2025 Election\nWorld\nWeather\nClimate change\nHealth\nWellness\nMental health\nSexual health\nDermatology\nOral health\nHair loss\nFoot health\nNutrition\nHealthy eating\nMeal delivery\nWeight loss\nVitamins and supplements\nFitness\nEquipment\nExercise\nWomen's health\nSleep\nHealthy aging\nHearing\nMobility\nScience\n"}
+2025-12-04 08:15:45,824 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://www.nasdaq.com/market-activity/stocks/amd", "extract_type": "text"}}
+2025-12-04 08:15:45,824 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://www.nasdaq.com/market-activity/stocks/amd", "extract_type": "text"}}
+2025-12-04 08:15:46,028 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Advanced Micro Devices, Inc. Common Stock (AMD) Stock Price, Quote, News & History | Nasdaq\nSkip to main content\nData is currently not available\nSearch Nasdaq.com\nClear\nSearch\nWe couldn\u2019t find any results matching your search.\nPlease try using other words for your search or explore other sections of the website for relevant information.\nWe\u2019re sorry, we are currently experiencing some issues, please try again later.\nOur team is working diligently to resolve the issue. Thank you for your patience "}
+2025-12-04 08:15:46,028 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Advanced Micro Devices, Inc. Common Stock (AMD) Stock Price, Quote, News & History | Nasdaq\nSkip to main content\nData is currently not available\nSearch Nasdaq.com\nClear\nSearch\nWe couldn\u2019t find any results matching your search.\nPlease try using other words for your search or explore other sections of the website for relevant information.\nWe\u2019re sorry, we are currently experiencing some issues, please try again later.\nOur team is working diligently to resolve the issue. Thank you for your patience "}
+2025-12-04 08:15:46,028 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://www.cnbc.com/quotes/+amd"}}
+2025-12-04 08:15:46,028 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://www.cnbc.com/quotes/+amd"}}
+2025-12-04 08:15:46,848 - harness - ERROR - [tools] [tool_error] Tool web_fetch failed: Fetch failed: 404 Client Error: Not Found for url: https://www.cnbc.com/quotes/+amd | {"tool": "web_fetch"}
+2025-12-04 08:15:46,849 - harness - ERROR - [tools] [tool_error] Tool web_fetch failed: Fetch failed: 404 Client Error: Not Found for url: https://www.cnbc.com/quotes/+amd | {"tool": "web_fetch"}
+2025-12-04 08:15:46,850 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:15:46,850 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:16:00,404 - harness - INFO - [agent] [agent_decision] Decision: Completed with 4 tool calls | {"decision": "Completed with 4 tool calls", "tools_to_use": ["web_search", "web_fetch", "web_fetch", "web_fetch"]}
+2025-12-04 08:16:00,406 - harness - INFO - [tts] [tts_output] TTS output: I searched for AMD's latest price and pulled data from a couple of finance sites. The Yahoo Finance ... | {"text": "I searched for AMD's latest price and pulled data from a couple of finance sites. The Yahoo Finance page for AMD shows:\n- Price: 216.73 USD\n- Change: +1.49 (+0.69%)\n- Time: As of 2:34:17 PM EST\n- Note: Market data on that page is delayed\n\nOther sources (Nasdaq/CNBC) had fetch issues in this session, so I didn\u2019t get reliable cross-check data from them right now.\n\nIf you\u2019d like, I can refresh for real-time data or pull from additional sources (e.g., Google Finance, Nasdaq) to confirm.", "length": 487}
+2025-12-04 08:16:00,409 - harness - INFO - [output] [response_generated] Response: I searched for AMD's latest price and pulled data from a couple of finance sites. The Yahoo Finance ... | {"response": "I searched for AMD's latest price and pulled data from a couple of finance sites. The Yahoo Finance page for AMD shows:\n- Price: 216.73 USD\n- Change: +1.49 (+0.69%)\n- Time: As of 2:34:17 PM EST\n- Note: Market data on that page is delayed\n\nOther sources (Nasdaq/CNBC) had fetch issues in this session, so I didn\u2019t get reliable cross-check data from them right now.\n\nIf you\u2019d like, I can refresh for real-time data or pull from additional sources (e.g., Google Finance, Nasdaq) to confirm.", "length": 487, "duration_ms": 31839.468002319336, "tier": "simple", "tools_used": ["web_search", "web_fetch"]}
+2025-12-04 08:16:00,409 - harness - INFO - [bridge] [system] Response generated in 31839ms
+2025-12-04 08:23:44,419 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 08:23:44,419 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 08:23:44,559 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 08:23:44,560 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 08:23:44,778 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 08:24:25,393 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 08:24:25,393 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 08:24:25,393 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 08:24:25,393 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 08:24:25,393 - harness - INFO - [tts] [tts_output] TTS output: Let me think about that. | {"text": "Let me think about that.", "length": 24}
+2025-12-04 08:24:25,406 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:24:25,406 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:24:29,653 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "Chicago weather today current conditions", "num_results": 5}}
+2025-12-04 08:24:29,653 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "Chicago weather today current conditions", "num_results": 5}}
+2025-12-04 08:24:29,888 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 08:24:29,888 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 08:24:29,888 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:24:29,888 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:24:33,433 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "current weather Chicago today NOAA", "num_results": 5}}
+2025-12-04 08:24:33,434 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "current weather Chicago today NOAA", "num_results": 5}}
+2025-12-04 08:24:33,973 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 08:24:33,974 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 08:24:33,974 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:24:33,974 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:24:43,137 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://forecast.weather.gov/MapClick.php?lat=41.8781&lon=-87.6298", "extract_type": "text"}}
+2025-12-04 08:24:43,137 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://forecast.weather.gov/MapClick.php?lat=41.8781&lon=-87.6298", "extract_type": "text"}}
+2025-12-04 08:24:43,805 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "National Weather Service\nView Location Examples\nSorry, the location you searched for was not found. Please try another search.\nMultiple locations were found. Please select one of the following:\nYour local forecast office is\nChicago, IL\nNews Headlines\nNovember and Meteorological Fall 2025 Climate Summaries\nNovember 29-30, 2025: Post-Thanksgiving Winter Storm Delivers Up to a Foot of Snow to the Region\nHazardous Weather Conditions\nHazardous Weather Outlook\nCurrent conditions at\nChicago, Chicago Mi"}
+2025-12-04 08:24:43,806 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "National Weather Service\nView Location Examples\nSorry, the location you searched for was not found. Please try another search.\nMultiple locations were found. Please select one of the following:\nYour local forecast office is\nChicago, IL\nNews Headlines\nNovember and Meteorological Fall 2025 Climate Summaries\nNovember 29-30, 2025: Post-Thanksgiving Winter Storm Delivers Up to a Foot of Snow to the Region\nHazardous Weather Conditions\nHazardous Weather Outlook\nCurrent conditions at\nChicago, Chicago Mi"}
+2025-12-04 08:24:43,806 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:24:43,806 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:25:03,978 - harness - INFO - [agent] [agent_decision] Decision: Completed with 3 tool calls | {"decision": "Completed with 3 tool calls", "tools_to_use": ["web_search", "web_search", "web_fetch"]}
+2025-12-04 08:25:03,980 - harness - INFO - [tts] [tts_output] TTS output: I pulled the National Weather Service Chicago forecast for the area and extracted the latest observe... | {"text": "I pulled the National Weather Service Chicago forecast for the area and extracted the latest observed conditions and today\u2019s outlook.... I've provided more details.", "length": 164}
+2025-12-04 08:25:03,981 - harness - INFO - [output] [response_generated] Response: I pulled the National Weather Service Chicago forecast for the area and extracted the latest observe... | {"response": "I pulled the National Weather Service Chicago forecast for the area and extracted the latest observed conditions and today\u2019s outlook.... I've provided more details.", "length": 164, "duration_ms": 38588.294982910156, "tier": "simple", "tools_used": ["web_search", "web_fetch"]}
+2025-12-04 08:25:03,982 - harness - INFO - [bridge] [system] Response generated in 38588ms
+2025-12-04 08:25:06,203 - harness - INFO - [bridge] [system] Processing: I've provided more details.
+2025-12-04 08:25:06,203 - harness - INFO - [input] [speech_received] Speech received: I've provided more details. | {"text": "I've provided more details.", "length": 27}
+2025-12-04 08:25:06,204 - harness - INFO - [router] [router_classification] Classified as 'standard' (confidence: 0.60) | {"input_preview": "I've provided more details.", "tier": "standard", "confidence": 0.6}
+2025-12-04 08:25:06,204 - harness - INFO - [harness] [system] Routed to tier: standard | {"confidence": 0.6}
+2025-12-04 08:25:06,204 - harness - INFO - [tts] [tts_output] TTS output: Working on it. | {"text": "Working on it.", "length": 14}
+2025-12-04 08:25:06,205 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 08:25:06,205 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 08:25:11,616 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls | {"decision": "Completed with 0 tool calls", "tools_to_use": []}
+2025-12-04 08:25:11,616 - harness - INFO - [tts] [tts_output] TTS output: I don't see the additional details in this chat. Tell me where you added them (pasted here, uploaded... | {"text": "I don't see the additional details in this chat. Tell me where you added them (pasted here, uploaded a file, linked a URL) and exactly what outcome you want.... I've provided more details.", "length": 188}
+2025-12-04 08:25:11,617 - harness - INFO - [output] [response_generated] Response: I don't see the additional details in this chat. Tell me where you added them (pasted here, uploaded... | {"response": "I don't see the additional details in this chat. Tell me where you added them (pasted here, uploaded a file, linked a URL) and exactly what outcome you want.... I've provided more details.", "length": 188, "duration_ms": 5413.296937942505, "tier": "standard", "tools_used": []}
+2025-12-04 08:25:11,617 - harness - INFO - [bridge] [system] Response generated in 5413ms
+2025-12-04 08:26:25,145 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 08:26:25,145 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 08:26:25,290 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 08:26:25,290 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 08:26:25,516 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 08:26:35,288 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 08:26:35,288 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 08:26:35,289 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 08:26:35,289 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 08:26:35,289 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 08:26:35,289 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 08:26:35,289 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 08:26:35,302 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:26:35,302 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:26:42,968 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://wttr.in/Chicago?format=3", "extract_type": "text"}}
+2025-12-04 08:26:42,968 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://wttr.in/Chicago?format=3", "extract_type": "text"}}
+2025-12-04 08:26:50,992 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Chicago: \u2600\ufe0f   +9\u00b0F"}
+2025-12-04 08:26:50,992 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Chicago: \u2600\ufe0f   +9\u00b0F"}
+2025-12-04 08:26:50,992 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:26:50,992 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:26:55,335 - harness - INFO - [agent] [agent_decision] Decision: Completed with 1 tool calls | {"decision": "Completed with 1 tool calls", "tools_to_use": ["web_fetch"]}
+2025-12-04 08:26:55,336 - harness - INFO - [tts] [tts_output] TTS output: Chicago today: Sunny, 9°F. | {"text": "Chicago today: Sunny, 9\u00b0F.", "length": 26}
+2025-12-04 08:26:55,336 - harness - INFO - [output] [response_generated] Response: Chicago today: Sunny, 9°F. | {"response": "Chicago today: Sunny, 9\u00b0F.", "length": 26, "duration_ms": 20047.60694503784, "tier": "simple", "tools_used": ["web_fetch"]}
+2025-12-04 08:26:55,337 - harness - INFO - [bridge] [system] Response generated in 20048ms
+2025-12-04 08:26:59,137 - harness - INFO - [bridge] [system] Processing: Chicago today, sunny, nine degrees Fahrenheit.
+2025-12-04 08:26:59,137 - harness - INFO - [input] [speech_received] Speech received: Chicago today, sunny, nine degrees Fahrenheit. | {"text": "Chicago today, sunny, nine degrees Fahrenheit.", "length": 46}
+2025-12-04 08:26:59,138 - harness - INFO - [router] [router_classification] Classified as 'standard' (confidence: 0.60) | {"input_preview": "Chicago today, sunny, nine degrees Fahrenheit.", "tier": "standard", "confidence": 0.6}
+2025-12-04 08:26:59,138 - harness - INFO - [harness] [system] Routed to tier: standard | {"confidence": 0.6}
+2025-12-04 08:26:59,138 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me think about that. | {"user_input_preview": "Chicago today, sunny, nine degrees Fahrenheit.", "acknowledgment": "Let me think about that."}
+2025-12-04 08:26:59,138 - harness - INFO - [tts] [tts_output] TTS output: Let me think about that. | {"text": "Let me think about that.", "length": 24}
+2025-12-04 08:26:59,138 - harness - INFO - [agent] [system] Running agent at tier 'standard' (max 3 tool calls)
+2025-12-04 08:26:59,139 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 08:26:59,139 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 08:27:03,134 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls | {"decision": "Completed with 0 tool calls", "tools_to_use": []}
+2025-12-04 08:27:03,134 - harness - INFO - [tts] [tts_output] TTS output: Thanks — sounds chilly! 9°F is about −12.8°C. Sunny but very cold; dress in warm layers, insulated c... | {"text": "Thanks \u2014 sounds chilly! 9\u00b0F is about \u221212.8\u00b0C. Sunny but very cold; dress in warm layers, insulated coat, hat, gloves, and a scarf. Would you like a detailed forecast (hourly/temp/wind chill) or commute updates for Chicago today?", "length": 228}
+2025-12-04 08:27:03,135 - harness - INFO - [output] [response_generated] Response: Thanks — sounds chilly! 9°F is about −12.8°C. Sunny but very cold; dress in warm layers, insulated c... | {"response": "Thanks \u2014 sounds chilly! 9\u00b0F is about \u221212.8\u00b0C. Sunny but very cold; dress in warm layers, insulated coat, hat, gloves, and a scarf. Would you like a detailed forecast (hourly/temp/wind chill) or commute updates for Chicago today?", "length": 228, "duration_ms": 3997.128963470459, "tier": "standard", "tools_used": []}
+2025-12-04 08:27:03,135 - harness - INFO - [bridge] [system] Response generated in 3997ms
+2025-12-04 08:35:31,612 - harness - INFO - [bridge] [system] Processing: Yeah, hi Jim and good morning. Hey, probably good evening.
+2025-12-04 08:35:31,612 - harness - INFO - [input] [speech_received] Speech received: Yeah, hi Jim and good morning. Hey, probably good evening. | {"text": "Yeah, hi Jim and good morning. Hey, probably good evening.", "length": 58}
+2025-12-04 08:35:31,612 - harness - INFO - [router] [router_classification] Classified as 'standard' (confidence: 0.60) | {"input_preview": "Yeah, hi Jim and good morning. Hey, probably good ", "tier": "standard", "confidence": 0.6}
+2025-12-04 08:35:31,612 - harness - INFO - [harness] [system] Routed to tier: standard | {"confidence": 0.6}
+2025-12-04 08:35:31,613 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Working on it. | {"user_input_preview": "Yeah, hi Jim and good morning. Hey, probably good ", "acknowledgment": "Working on it."}
+2025-12-04 08:35:31,613 - harness - INFO - [tts] [tts_output] TTS output: Working on it. | {"text": "Working on it.", "length": 14}
+2025-12-04 08:35:31,613 - harness - INFO - [agent] [system] Running agent at tier 'standard' (max 3 tool calls)
+2025-12-04 08:35:31,614 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 08:35:31,614 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 08:35:35,649 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human", "timezone": "America/Chicago"}}
+2025-12-04 08:35:35,649 - harness - INFO - [tools] [tool_call] Calling tool: get_current_time | {"tool": "get_current_time", "params": {"format": "human", "timezone": "America/Chicago"}}
+2025-12-04 08:35:35,672 - harness - INFO - [tools] [tool_result] Tool get_current_time completed | {"tool": "get_current_time", "result_preview": "Thursday, December 04, 2025 at 08:35 AM"}
+2025-12-04 08:35:35,673 - harness - INFO - [tools] [tool_result] Tool get_current_time completed | {"tool": "get_current_time", "result_preview": "Thursday, December 04, 2025 at 08:35 AM"}
+2025-12-04 08:35:35,673 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 08:35:35,673 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 08:35:43,299 - harness - INFO - [agent] [agent_decision] Decision: Completed with 1 tool calls | {"decision": "Completed with 1 tool calls", "tools_to_use": ["get_current_time"]}
+2025-12-04 08:35:43,300 - harness - INFO - [tts] [tts_output] TTS output: Do you want me to draft a message to Jim, or just help you word a reply? If you want a ready-to-send... | {"text": "Do you want me to draft a message to Jim, or just help you word a reply? If you want a ready-to-send line, pick a tone \u2014 casual, professional, or playful \u2014 or tell me one detail to include (topic or ask).... I've provided more details.", "length": 235}
+2025-12-04 08:35:43,301 - harness - INFO - [output] [response_generated] Response: Do you want me to draft a message to Jim, or just help you word a reply? If you want a ready-to-send... | {"response": "Do you want me to draft a message to Jim, or just help you word a reply? If you want a ready-to-send line, pick a tone \u2014 casual, professional, or playful \u2014 or tell me one detail to include (topic or ask).... I've provided more details.", "length": 235, "duration_ms": 11689.061164855957, "tier": "standard", "tools_used": ["get_current_time"]}
+2025-12-04 08:35:43,302 - harness - INFO - [bridge] [system] Response generated in 11689ms
+2025-12-04 08:35:45,065 - harness - INFO - [bridge] [system] Processing: How are you? I'm good over here. Yeah, I'm good now. No, I require one information, okay. So, did you remember this plug dashboard which you have done for the recon one?
+2025-12-04 08:35:45,065 - harness - INFO - [input] [speech_received] Speech received: How are you? I'm good over here. Yeah, I'm good now. No, I require one information, okay. So, did yo... | {"text": "How are you? I'm good over here. Yeah, I'm good now. No, I require one information, okay. So, did you remember this plug dashboard which you have done for the recon one?", "length": 169}
+2025-12-04 08:35:45,066 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "How are you? I'm good over here. Yeah, I'm good no", "tier": "simple", "confidence": 0.85}
+2025-12-04 08:35:45,066 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 08:35:45,066 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: One moment please. | {"user_input_preview": "How are you? I'm good over here. Yeah, I'm good no", "acknowledgment": "One moment please."}
+2025-12-04 08:35:45,066 - harness - INFO - [tts] [tts_output] TTS output: One moment please. | {"text": "One moment please.", "length": 18}
+2025-12-04 08:35:45,066 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 08:35:45,067 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:35:45,067 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:35:55,514 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls | {"decision": "Completed with 0 tool calls", "tools_to_use": []}
+2025-12-04 08:35:55,515 - harness - INFO - [tts] [tts_output] TTS output: Great to hear you’re good. I don’t retain past sessions unless you share details here, so I don’t re... | {"text": "Great to hear you\u2019re good. I don\u2019t retain past sessions unless you share details here, so I don\u2019t recall a \u201cplug dashboard\u201d for Recon from earlier messages. If you share specs or code (or describe the features you want), I\u2019ll help reconstruct or review it. Do you want a React + Chart.js version or a Python Dash version? What data sources are involved?", "length": 353}
+2025-12-04 08:35:55,515 - harness - INFO - [output] [response_generated] Response: Great to hear you’re good. I don’t retain past sessions unless you share details here, so I don’t re... | {"response": "Great to hear you\u2019re good. I don\u2019t retain past sessions unless you share details here, so I don\u2019t recall a \u201cplug dashboard\u201d for Recon from earlier messages. If you share specs or code (or describe the features you want), I\u2019ll help reconstruct or review it. Do you want a React + Chart.js version or a Python Dash version? What data sources are involved?", "length": 353, "duration_ms": 10449.923038482666, "tier": "simple", "tools_used": []}
+2025-12-04 08:35:55,516 - harness - INFO - [bridge] [system] Response generated in 10450ms
+2025-12-04 08:35:57,550 - harness - INFO - [bridge] [system] Processing: Let me share my... That's what I'm saying. That's what I'm saying. Yeah, see, I'm some Splunk dashboard on here. I'm sharing my screen.
+2025-12-04 08:35:57,550 - harness - INFO - [input] [speech_received] Speech received: Let me share my... That's what I'm saying. That's what I'm saying. Yeah, see, I'm some Splunk dashbo... | {"text": "Let me share my... That's what I'm saying. That's what I'm saying. Yeah, see, I'm some Splunk dashboard on here. I'm sharing my screen.", "length": 135}
+2025-12-04 08:35:57,550 - harness - INFO - [router] [router_classification] Classified as 'standard' (confidence: 0.60) | {"input_preview": "Let me share my... That's what I'm saying. That's ", "tier": "standard", "confidence": 0.6}
+2025-12-04 08:35:57,550 - harness - INFO - [harness] [system] Routed to tier: standard | {"confidence": 0.6}
+2025-12-04 08:35:57,550 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: I'm on it. | {"user_input_preview": "Let me share my... That's what I'm saying. That's ", "acknowledgment": "I'm on it."}
+2025-12-04 08:35:57,550 - harness - INFO - [tts] [tts_output] TTS output: I'm on it. | {"text": "I'm on it.", "length": 10}
+2025-12-04 08:35:57,551 - harness - INFO - [agent] [system] Running agent at tier 'standard' (max 3 tool calls)
+2025-12-04 08:35:57,551 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 08:35:57,551 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 08:36:11,611 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls | {"decision": "Completed with 0 tool calls", "tools_to_use": []}
+2025-12-04 08:36:11,612 - harness - INFO - [tts] [tts_output] TTS output: Got it — you’re sharing a Splunk dashboard and want something to say while you present. Here are qui... | {"text": "Got it \u2014 you\u2019re sharing a Splunk dashboard and want something to say while you present. Here are quick lines and a short script you can use right now, plus a few tips if screen\u2011share gives you trouble.... I've provided more details.", "length": 232}
+2025-12-04 08:36:11,612 - harness - INFO - [output] [response_generated] Response: Got it — you’re sharing a Splunk dashboard and want something to say while you present. Here are qui... | {"response": "Got it \u2014 you\u2019re sharing a Splunk dashboard and want something to say while you present. Here are quick lines and a short script you can use right now, plus a few tips if screen\u2011share gives you trouble.... I've provided more details.", "length": 232, "duration_ms": 14062.055826187134, "tier": "standard", "tools_used": []}
+2025-12-04 08:36:11,613 - harness - INFO - [bridge] [system] Response generated in 14062ms
+2025-12-04 08:36:22,082 - harness - INFO - [bridge] [system] Processing: No, see if you remember last time when we do this we get this here and we get the report also, no here How many which are deleted and everything?
+2025-12-04 08:36:22,082 - harness - INFO - [input] [speech_received] Speech received: No, see if you remember last time when we do this we get this here and we get the report also, no he... | {"text": "No, see if you remember last time when we do this we get this here and we get the report also, no here How many which are deleted and everything?", "length": 145}
+2025-12-04 08:36:22,083 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "No, see if you remember last time when we do this ", "tier": "simple", "confidence": 0.85}
+2025-12-04 08:36:22,083 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 08:36:22,083 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: One moment. | {"user_input_preview": "No, see if you remember last time when we do this ", "acknowledgment": "One moment."}
+2025-12-04 08:36:22,083 - harness - INFO - [tts] [tts_output] TTS output: One moment. | {"text": "One moment.", "length": 11}
+2025-12-04 08:36:22,083 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 08:36:22,084 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 08:36:22,084 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 08:36:32,988 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls | {"decision": "Completed with 0 tool calls", "tools_to_use": []}
+2025-12-04 08:36:32,988 - harness - INFO - [tts] [tts_output] TTS output: I can’t recall past chats unless you share details here. If you want to know “how many are deleted” ... | {"text": "I can\u2019t recall past chats unless you share details here. If you want to know \u201chow many are deleted\u201d in the plug dashboard report, share your schema or a sample dataset. Here are quick patterns:... I've provided more details.", "length": 224}
+2025-12-04 08:36:32,989 - harness - INFO - [output] [response_generated] Response: I can’t recall past chats unless you share details here. If you want to know “how many are deleted” ... | {"response": "I can\u2019t recall past chats unless you share details here. If you want to know \u201chow many are deleted\u201d in the plug dashboard report, share your schema or a sample dataset. Here are quick patterns:... I've provided more details.", "length": 224, "duration_ms": 10906.277179718018, "tier": "simple", "tools_used": []}
+2025-12-04 08:36:32,989 - harness - INFO - [bridge] [system] Response generated in 10906ms
+2025-12-04 09:41:04,192 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:41:04,192 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:41:04,356 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 09:41:04,356 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:41:04,472 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 09:41:19,575 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 09:41:19,577 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 09:41:19,809 - harness - INFO - [harness] [system] AgentHarness cleaned up
+2025-12-04 09:41:20,666 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 09:41:20,667 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 09:41:20,668 - harness - INFO - [harness] [system] AgentHarness cleaned up
+2025-12-04 09:41:21,836 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:41:21,836 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:41:21,972 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 09:41:21,972 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:41:22,177 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 09:41:27,183 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:41:27,183 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:41:27,184 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:41:27,184 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:41:27,184 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:41:27,184 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:41:27,184 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 09:41:27,197 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:41:27,197 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:41:39,341 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "Chicago weather today", "num_results": 1}}
+2025-12-04 09:41:39,341 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "Chicago weather today", "num_results": 1}}
+2025-12-04 09:41:39,591 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 09:41:39,592 - harness - INFO - [tts] [tts_output] TTS output: Searching now. | {"text": "Searching now.", "length": 14}
+2025-12-04 09:41:39,593 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 09:41:39,595 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:41:39,595 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:41:52,147 - harness - INFO - [agent] [agent_decision] Decision: Completed with 1 tool calls (limit: 1) | {"decision": "Completed with 1 tool calls (limit: 1)", "tools_to_use": ["web_search"]}
+2025-12-04 09:41:52,148 - harness - INFO - [tts] [tts_output] TTS output: Sorry, I can’t access real-time weather data right now. Would you like me to try fetching Chicago’s ... | {"text": "Sorry, I can\u2019t access real-time weather data right now. Would you like me to try fetching Chicago\u2019s current conditions again?", "length": 125}
+2025-12-04 09:41:52,148 - harness - INFO - [output] [response_generated] Response: Sorry, I can’t access real-time weather data right now. Would you like me to try fetching Chicago’s ... | {"response": "Sorry, I can\u2019t access real-time weather data right now. Would you like me to try fetching Chicago\u2019s current conditions again?", "length": 125, "duration_ms": 24964.90430831909, "tier": "simple", "tools_used": ["web_search"]}
+2025-12-04 09:41:52,149 - harness - INFO - [bridge] [system] Response generated in 24965ms
+2025-12-04 09:46:50,071 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:46:50,072 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:46:50,209 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 09:46:50,209 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:46:50,422 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 09:47:00,120 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:47:00,120 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:47:00,121 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:47:00,121 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:47:00,121 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:47:00,121 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:47:00,121 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 09:47:00,134 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:47:00,134 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:47:16,629 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://wttr.in/Chicago?format=3", "extract_type": "text"}}
+2025-12-04 09:47:16,629 - harness - INFO - [tools] [tool_call] Calling tool: web_fetch | {"tool": "web_fetch", "params": {"url": "https://wttr.in/Chicago?format=3", "extract_type": "text"}}
+2025-12-04 09:47:25,684 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Chicago: \u2600\ufe0f   +10\u00b0F"}
+2025-12-04 09:47:25,684 - harness - INFO - [tts] [tts_output] TTS output: Searching now. | {"text": "Searching now.", "length": 14}
+2025-12-04 09:47:25,684 - harness - INFO - [tools] [tool_result] Tool web_fetch completed | {"tool": "web_fetch", "result_preview": "Chicago: \u2600\ufe0f   +10\u00b0F"}
+2025-12-04 09:47:25,685 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:47:25,685 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:47:31,387 - harness - INFO - [agent] [agent_decision] Decision: Completed with 1 tool calls (limit: 1) | {"decision": "Completed with 1 tool calls (limit: 1)", "tools_to_use": ["web_fetch"]}
+2025-12-04 09:47:31,388 - harness - INFO - [tts] [tts_output] TTS output: Today in Chicago: Sunny, +10°F. | {"text": "Today in Chicago: Sunny, +10\u00b0F.", "length": 31}
+2025-12-04 09:47:31,391 - harness - INFO - [output] [response_generated] Response: Today in Chicago: Sunny, +10°F. | {"response": "Today in Chicago: Sunny, +10\u00b0F.", "length": 31, "duration_ms": 31270.401000976562, "tier": "simple", "tools_used": ["web_fetch"]}
+2025-12-04 09:47:31,391 - harness - INFO - [bridge] [system] Response generated in 31270ms
+2025-12-04 09:47:35,694 - harness - INFO - [bridge] [system] Processing: Today in Chicago, sunny plus 10 degrees Fahrenheit.
+2025-12-04 09:47:35,695 - harness - INFO - [input] [speech_received] Speech received: Today in Chicago, sunny plus 10 degrees Fahrenheit. | {"text": "Today in Chicago, sunny plus 10 degrees Fahrenheit.", "length": 51}
+2025-12-04 09:47:35,695 - harness - INFO - [router] [router_classification] Classified as 'standard' (confidence: 0.60) | {"input_preview": "Today in Chicago, sunny plus 10 degrees Fahrenheit", "tier": "standard", "confidence": 0.6}
+2025-12-04 09:47:35,695 - harness - INFO - [harness] [system] Routed to tier: standard | {"confidence": 0.6}
+2025-12-04 09:47:35,695 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me think about that. | {"user_input_preview": "Today in Chicago, sunny plus 10 degrees Fahrenheit", "acknowledgment": "Let me think about that."}
+2025-12-04 09:47:35,695 - harness - INFO - [tts] [tts_output] TTS output: Let me think about that. | {"text": "Let me think about that.", "length": 24}
+2025-12-04 09:47:35,695 - harness - INFO - [agent] [system] Running agent at tier 'standard' (max 3 tool calls)
+2025-12-04 09:47:35,696 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 09:47:35,696 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 09:53:02,807 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:53:02,807 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:53:02,948 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 09:53:02,948 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:53:13,653 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:53:13,653 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:53:13,790 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 09:53:13,790 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:53:14,008 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 09:53:23,826 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:53:23,826 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:53:23,826 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:53:23,826 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:53:23,826 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:53:23,826 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:53:23,827 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 09:53:23,839 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:53:23,839 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:53:43,207 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "Chicago weather today"}}
+2025-12-04 09:53:43,207 - harness - INFO - [tts] [tts_output] TTS output: Searching now. | {"text": "Searching now.", "length": 14}
+2025-12-04 09:53:43,207 - harness - INFO - [tools] [tool_call] Calling tool: web_search | {"tool": "web_search", "params": {"query": "Chicago weather today"}}
+2025-12-04 09:53:43,413 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 09:53:43,413 - harness - INFO - [tools] [tool_result] Tool web_search completed | {"tool": "web_search", "result_preview": "None"}
+2025-12-04 09:53:43,414 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:53:43,414 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:53:58,381 - harness - INFO - [agent] [agent_decision] Decision: Completed with 1 tool calls (limit: 1) | {"decision": "Completed with 1 tool calls (limit: 1)", "tools_to_use": ["web_search"]}
+2025-12-04 09:53:58,383 - harness - INFO - [tts] [tts_output] TTS output: Sorry, I can’t access real-time weather data right now. If you’d like, I can try again—should I retr... | {"text": "Sorry, I can\u2019t access real-time weather data right now. If you\u2019d like, I can try again\u2014should I retry to fetch Chicago\u2019s weather?", "length": 129}
+2025-12-04 09:53:58,383 - harness - INFO - [output] [response_generated] Response: Sorry, I can’t access real-time weather data right now. If you’d like, I can try again—should I retr... | {"response": "Sorry, I can\u2019t access real-time weather data right now. If you\u2019d like, I can try again\u2014should I retry to fetch Chicago\u2019s weather?", "length": 129, "duration_ms": 34557.70301818848, "tier": "simple", "tools_used": ["web_search"]}
+2025-12-04 09:53:58,384 - harness - INFO - [bridge] [system] Response generated in 34558ms
+2025-12-04 09:54:47,799 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:54:47,799 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:54:47,799 - harness - ERROR - [harness] [error] Failed to pre-warm agent LLM: 'LLMConfig' object has no attribute 'base_url'
+2025-12-04 09:54:47,799 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:54:48,012 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 09:55:00,571 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:55:00,571 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:55:00,571 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:55:00,571 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:55:00,571 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:55:00,571 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:55:00,573 - harness - ERROR - [harness] [error] Harness processing failed: 'LLMConfig' object has no attribute 'base_url'
+2025-12-04 09:55:00,573 - harness - INFO - [tts] [tts_output] TTS output: I'm sorry, something went wrong. Please try again. | {"text": "I'm sorry, something went wrong. Please try again.", "length": 50}
+2025-12-04 09:55:09,630 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:55:09,631 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:55:09,631 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:55:09,631 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:55:09,631 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:55:09,631 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:55:09,632 - harness - ERROR - [harness] [error] Harness processing failed: 'LLMConfig' object has no attribute 'base_url'
+2025-12-04 09:55:09,632 - harness - INFO - [tts] [tts_output] TTS output: I'm sorry, something went wrong. Please try again. | {"text": "I'm sorry, something went wrong. Please try again.", "length": 50}
+2025-12-04 09:55:58,882 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:55:58,882 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:55:58,882 - harness - INFO - [agent] [system] Creating standard tier agent (max_tokens=500, max_tools=3)
+2025-12-04 09:55:59,021 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 09:55:59,021 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:55:59,232 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 09:56:04,091 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:56:04,092 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:56:04,092 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:56:04,092 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:56:04,092 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:56:04,092 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:56:04,093 - harness - INFO - [agent] [system] Creating simple tier agent (max_tokens=150, max_tools=1)
+2025-12-04 09:56:04,093 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 09:56:04,105 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:56:04,105 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:56:06,834 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 09:56:06,834 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 09:56:06,835 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 2743.0689334869385, "tier": "simple", "tools_used": []}
+2025-12-04 09:56:06,835 - harness - INFO - [bridge] [system] Response generated in 2743ms
+2025-12-04 09:56:38,409 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:56:38,410 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:56:38,410 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:56:38,410 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:56:38,410 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:56:38,410 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:56:38,411 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 09:56:38,411 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:56:38,411 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:56:40,869 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 09:56:40,870 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 09:56:40,871 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 2461.655616760254, "tier": "simple", "tools_used": []}
+2025-12-04 09:56:40,872 - harness - INFO - [bridge] [system] Response generated in 2462ms
+2025-12-04 09:57:16,162 - harness - INFO - [bridge] [system] Processing: What's the weather in Chicago?
+2025-12-04 09:57:16,162 - harness - INFO - [input] [speech_received] Speech received: What's the weather in Chicago? | {"text": "What's the weather in Chicago?", "length": 30}
+2025-12-04 09:57:16,163 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:57:16,163 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:57:16,163 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:57:16,163 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:57:16,163 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 09:57:16,163 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:57:16,164 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:57:18,683 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 09:57:18,683 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 09:57:18,684 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 2521.7490196228027, "tier": "simple", "tools_used": []}
+2025-12-04 09:57:18,685 - harness - INFO - [bridge] [system] Response generated in 2522ms
+2025-12-04 09:57:30,730 - harness - INFO - [bridge] [system] Processing: I apologize, I couldn't generate a response.
+2025-12-04 09:57:30,731 - harness - INFO - [input] [speech_received] Speech received: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 09:57:30,731 - harness - INFO - [router] [router_classification] Classified as 'standard' (confidence: 0.75) | {"input_preview": "I apologize, I couldn't generate a response.", "tier": "standard", "confidence": 0.75}
+2025-12-04 09:57:30,731 - harness - INFO - [harness] [system] Routed to tier: standard | {"confidence": 0.75}
+2025-12-04 09:57:30,731 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me think about that. | {"user_input_preview": "I apologize, I couldn't generate a response.", "acknowledgment": "Let me think about that."}
+2025-12-04 09:57:30,731 - harness - INFO - [tts] [tts_output] TTS output: Let me think about that. | {"text": "Let me think about that.", "length": 24}
+2025-12-04 09:57:30,732 - harness - INFO - [agent] [system] Running agent at tier 'standard' (max 3 tool calls)
+2025-12-04 09:57:30,732 - harness - INFO - Model gpt-5-mini requires default temperature; dropping override 0.7
+2025-12-04 09:57:30,732 - harness - INFO - Model gpt-5-mini does not support top_p; dropping override 0.9
+2025-12-04 09:57:39,650 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 3) | {"decision": "Completed with 0 tool calls (limit: 3)", "tools_to_use": []}
+2025-12-04 09:57:39,651 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 09:57:39,653 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 8921.9388961792, "tier": "standard", "tools_used": []}
+2025-12-04 09:57:39,653 - harness - INFO - [bridge] [system] Response generated in 8922ms
+2025-12-04 09:57:44,471 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 09:57:44,473 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 09:57:44,788 - harness - INFO - [harness] [system] AgentHarness cleaned up
+2025-12-04 09:58:33,887 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 09:58:33,887 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 09:58:33,887 - harness - INFO - [agent] [system] Creating standard tier agent (max_tokens=500, max_tools=3)
+2025-12-04 09:58:34,024 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 09:58:34,024 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 09:58:34,235 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 09:58:39,201 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 09:58:39,201 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 09:58:39,202 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 09:58:39,202 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 09:58:39,202 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 09:58:39,202 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 09:58:39,203 - harness - INFO - [agent] [system] Creating simple tier agent (max_tokens=150, max_tools=1)
+2025-12-04 09:58:39,203 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 09:58:39,215 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 09:58:39,215 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 09:58:41,816 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 09:58:41,816 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 09:58:41,817 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 2615.818977355957, "tier": "simple", "tools_used": []}
+2025-12-04 09:58:41,818 - harness - INFO - [bridge] [system] Response generated in 2616ms
+2025-12-04 10:02:02,119 - harness - INFO - [bridge] [system] Processing: What's the weather in Chicago?
+2025-12-04 10:02:02,119 - harness - INFO - [input] [speech_received] Speech received: What's the weather in Chicago? | {"text": "What's the weather in Chicago?", "length": 30}
+2025-12-04 10:02:02,119 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 10:02:02,120 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 10:02:02,120 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 10:02:02,120 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 10:02:02,120 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 10:02:02,121 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 10:02:02,121 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 10:02:04,360 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 10:02:04,361 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 10:02:04,361 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 2241.8620586395264, "tier": "simple", "tools_used": []}
+2025-12-04 10:02:04,362 - harness - INFO - [bridge] [system] Response generated in 2242ms
+2025-12-04 10:03:06,494 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 10:03:06,494 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 10:03:06,494 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 10:03:06,494 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 10:03:06,494 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 10:03:06,495 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 10:03:06,495 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 10:03:06,495 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 10:03:06,495 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 10:03:09,076 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 10:03:09,077 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 10:03:09,078 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 2583.843231201172, "tier": "simple", "tools_used": []}
+2025-12-04 10:03:09,079 - harness - INFO - [bridge] [system] Response generated in 2584ms
+2025-12-04 10:03:25,241 - harness - INFO - [bridge] [system] Processing: What's the weather today?
+2025-12-04 10:03:25,241 - harness - INFO - [input] [speech_received] Speech received: What's the weather today? | {"text": "What's the weather today?", "length": 25}
+2025-12-04 10:03:25,241 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today?", "tier": "simple", "confidence": 0.85}
+2025-12-04 10:03:25,241 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 10:03:25,242 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today?", "acknowledgment": "Let me check that for you."}
+2025-12-04 10:03:25,242 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 10:03:25,242 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 10:03:25,242 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 10:03:25,242 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 10:03:28,023 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 10:03:28,025 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 10:03:28,026 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 2784.9881649017334, "tier": "simple", "tools_used": []}
+2025-12-04 10:03:28,028 - harness - INFO - [bridge] [system] Response generated in 2785ms
+2025-12-04 10:05:38,214 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 10:05:38,214 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 10:05:38,214 - harness - INFO - [agent] [system] Creating standard tier agent (max_tokens=800, max_tools=3)
+2025-12-04 10:05:38,352 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 10:05:38,352 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 10:05:38,563 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 10:05:47,426 - harness - INFO - [bridge] [system] Processing: What's the weather today in Chicago?
+2025-12-04 10:05:47,426 - harness - INFO - [input] [speech_received] Speech received: What's the weather today in Chicago? | {"text": "What's the weather today in Chicago?", "length": 36}
+2025-12-04 10:05:47,426 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What's the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 10:05:47,426 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 10:05:47,427 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What's the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 10:05:47,427 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 10:05:47,427 - harness - INFO - [agent] [system] Creating simple tier agent (max_tokens=300, max_tools=1)
+2025-12-04 10:05:47,427 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 10:05:47,439 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 10:05:47,439 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 10:05:52,816 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 10:05:52,816 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 10:05:52,816 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 5390.308141708374, "tier": "simple", "tools_used": []}
+2025-12-04 10:05:52,817 - harness - INFO - [bridge] [system] Response generated in 5390ms
+2025-12-04 10:09:48,027 - harness - INFO - [tts] [system] Initialized voice streamer
+2025-12-04 10:09:48,027 - harness - INFO - [harness] [system] Pre-warming LLM clients...
+2025-12-04 10:09:48,027 - harness - INFO - [agent] [system] Creating standard tier agent (max_tokens=800, max_tools=3)
+2025-12-04 10:09:48,166 - harness - INFO - [llm] [system] OpenAI client pre-warmed for model gpt-5-mini
+2025-12-04 10:09:48,166 - harness - INFO - [harness] [system] AgentHarness initialized
+2025-12-04 10:09:48,382 - harness - INFO - [harness] [system] Async processing started
+2025-12-04 10:09:54,050 - harness - INFO - [bridge] [system] Processing: What is the weather today in Chicago?
+2025-12-04 10:09:54,050 - harness - INFO - [input] [speech_received] Speech received: What is the weather today in Chicago? | {"text": "What is the weather today in Chicago?", "length": 37}
+2025-12-04 10:09:54,051 - harness - INFO - [router] [router_classification] Classified as 'simple' (confidence: 0.85) | {"input_preview": "What is the weather today in Chicago?", "tier": "simple", "confidence": 0.85}
+2025-12-04 10:09:54,051 - harness - INFO - [harness] [system] Routed to tier: simple | {"confidence": 0.85}
+2025-12-04 10:09:54,051 - harness - INFO - [service_rep] [service_rep_acknowledgment] ServiceRep: Let me check that for you. | {"user_input_preview": "What is the weather today in Chicago?", "acknowledgment": "Let me check that for you."}
+2025-12-04 10:09:54,051 - harness - INFO - [tts] [tts_output] TTS output: Let me check that for you. | {"text": "Let me check that for you.", "length": 26}
+2025-12-04 10:09:54,051 - harness - INFO - [agent] [system] Creating simple tier agent (max_tokens=300, max_tools=1)
+2025-12-04 10:09:54,052 - harness - INFO - [agent] [system] Running agent at tier 'simple' (max 1 tool calls)
+2025-12-04 10:09:54,063 - harness - INFO - Model gpt-5-nano requires default temperature; dropping override 0.7
+2025-12-04 10:09:54,063 - harness - INFO - Model gpt-5-nano does not support top_p; dropping override 0.9
+2025-12-04 10:09:58,678 - harness - INFO - [agent] [agent_decision] Decision: Completed with 0 tool calls (limit: 1) | {"decision": "Completed with 0 tool calls (limit: 1)", "tools_to_use": []}
+2025-12-04 10:09:58,679 - harness - INFO - [tts] [tts_output] TTS output: I apologize, I couldn't generate a response. | {"text": "I apologize, I couldn't generate a response.", "length": 44}
+2025-12-04 10:09:58,680 - harness - INFO - [output] [response_generated] Response: I apologize, I couldn't generate a response. | {"response": "I apologize, I couldn't generate a response.", "length": 44, "duration_ms": 4629.119157791138, "tier": "simple", "tools_used": []}
+2025-12-04 10:09:58,680 - harness - INFO - [bridge] [system] Response generated in 4629ms
+2025-12-04 10:11:51,232 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 10:11:51,234 - harness - INFO - [harness] [system] Async processing stopped
+2025-12-04 10:11:51,519 - harness - INFO - [harness] [system] AgentHarness cleaned up
