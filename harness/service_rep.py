@@ -191,15 +191,10 @@ class TTSEngine:
 
     def _speak_text(self, text: str):
         """Actually speak the text"""
-        text_preview = text[:60].replace('\n', ' ') if text else "(empty)"
+        import subprocess
+        import platform
 
-        if not self._engine:
-            # LOUD FAILURE - Don't silently swallow this!
-            import sys
-            msg = f"❌ TTS SILENT FAIL: No engine! Text lost: '{text_preview}...'"
-            print(msg, file=sys.stderr)
-            self.logger.error(msg, component="tts")
-            return
+        text_preview = text[:60].replace('\n', ' ') if text else "(empty)"
 
         self._speaking = True
         try:
@@ -207,6 +202,37 @@ class TTSEngine:
                 f"🔊 TTS SPEAK [{self._engine_type}]: Starting... text='{text_preview}...' (len={len(text)})",
                 component="tts"
             )
+
+            # On macOS, prefer the 'say' command - it's much more reliable than pyttsx3
+            # pyttsx3's NSSpeechDriver has thread affinity issues that cause silent failures
+            if platform.system() == "Darwin":
+                try:
+                    self.logger.info(f"🔊 TTS SPEAK: Using macOS 'say' command", component="tts")
+                    rate = self.voice_config.get('rate', 180)
+                    result = subprocess.run(
+                        ["say", "-r", str(rate), text],
+                        capture_output=True,
+                        timeout=300  # 5 minute timeout for long text
+                    )
+                    if result.returncode == 0:
+                        self.logger.info(f"🔊 TTS SPEAK: Complete!", component="tts")
+                    else:
+                        self.logger.warning(f"🔊 TTS SPEAK: say command returned {result.returncode}", component="tts")
+                    return
+                except subprocess.TimeoutExpired:
+                    self.logger.warning("🔊 TTS SPEAK: say command timed out", component="tts")
+                    return
+                except Exception as e:
+                    self.logger.warning(f"🔊 TTS SPEAK: say command failed ({e}), falling back to engine", component="tts")
+                    # Fall through to other engines
+
+            if not self._engine:
+                # LOUD FAILURE - Don't silently swallow this!
+                import sys
+                msg = f"❌ TTS SILENT FAIL: No engine! Text lost: '{text_preview}...'"
+                print(msg, file=sys.stderr)
+                self.logger.error(msg, component="tts")
+                return
 
             if hasattr(self._engine, 'speak_blocking'):
                 # Prefer a single blocking speak to avoid streaming cut-offs
@@ -224,7 +250,7 @@ class TTSEngine:
                     wait_fn()
 
             else:
-                # pyttsx3
+                # pyttsx3 - WARNING: This has thread affinity issues on macOS
                 self.logger.info(f"🔊 TTS SPEAK: Using pyttsx3 say() + runAndWait()", component="tts")
                 self._engine.say(text)
                 self.logger.info(f"🔊 TTS SPEAK: pyttsx3.say() done, calling runAndWait()...", component="tts")
