@@ -21,6 +21,7 @@ class LLMConfig:
     api_base: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096
+    max_completion_tokens: Optional[int] = None  # For models that require max_completion_tokens
     top_p: float = 0.9
     timeout: int = 60
     max_retries: int = 3
@@ -105,6 +106,7 @@ When using tools, explain what you're doing briefly."""
 class ToolConfig:
     """Configuration for the Tool Registry"""
     enabled_tools: List[str] = field(default_factory=lambda: [
+        "fast_answer",  # PREFERRED - single-hop search with parallel fetch
         "web_search", "web_fetch", "bash_execute", "python_execute",
         "file_read", "file_write", "calculator", "get_current_time"
     ])

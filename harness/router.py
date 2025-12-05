@@ -36,81 +36,127 @@ class TaskClassification:
 class PatternClassifier:
     """
     Rule-based classifier using patterns.
-    Fast fallback when LLM classification is not needed.
+    OPTIMIZED: Expanded patterns for higher confidence, fewer LLM fallbacks.
     """
 
     def __init__(self):
-        # Patterns for simple tasks
+        # Patterns for simple tasks (EXPANDED for better coverage)
         self.simple_patterns = [
-            r"^(what|when|where|who) (is|are|was|were)\b",
-            r"^(tell me|what's|whats)\b.*\b(time|date|weather)\b",
-            r"^(hi|hello|hey|thanks|thank you|bye|goodbye)\b",
-            r"^(yes|no|ok|okay|sure|fine|great)\b$",
-            r"^(define|meaning of|what does .* mean)\b",
-            r"^(calculate|compute|what is) \d+[\+\-\*\/\^\%]\d+",
-            r"^(convert|how many)\b.*\b(to|in)\b",
+            # Questions
+            r"^(what|when|where|who|how) (is|are|was|were|do|does|did)\b",
+            r"^(tell me|what's|whats|what is)\b",
+            r"^(can you|could you|would you)\b.*(tell|explain|describe)\b",
+            # Time/date/weather
+            r"\b(time|date|weather|temperature|forecast)\b",
+            # Greetings
+            r"^(hi|hello|hey|thanks|thank you|bye|goodbye|good morning|good afternoon|good evening)\b",
+            r"^(yes|no|ok|okay|sure|fine|great|yep|nope|yeah|nah)\b$",
+            # Definitions
+            r"^(define|meaning of|what does .* mean|explain)\b",
+            r"\b(definition|meaning)\b.*\bof\b",
+            # Math
+            r"(calculate|compute|what is|how much is).*\d+",
+            r"\d+\s*[\+\-\*\/\^\%]\s*\d+",
+            # Conversions
+            r"(convert|how many)\b.*\b(to|in|from)\b",
+            # Simple requests
+            r"^(show|display|list|give me)\b",
+            r"\b(summarize|summary|tldr|brief)\b",
+            # Facts
+            r"^(who|what) (invented|created|discovered|founded|wrote|made)\b",
+            r"\b(capital|population|president|ceo|founder)\b.*\bof\b",
         ]
 
-        # Patterns for advanced tasks
+        # Patterns for advanced tasks (EXPANDED)
         self.advanced_patterns = [
-            r"\b(write|create|generate|build|implement|develop)\b.*\b(code|program|script|application|app|function|class)\b",
-            r"\b(analyze|research|investigate|deep dive)\b",
-            r"\b(multiple|several|various)\b.*\b(steps|tasks|operations)\b",
-            r"\b(compare|contrast|evaluate)\b.*\b(and|vs|versus)\b",
-            r"\b(automate|workflow|pipeline|integration)\b",
-            r"\b(debug|fix|troubleshoot|diagnose)\b.*\b(error|bug|issue|problem)\b",
-            r"\b(complex|complicated|sophisticated|advanced)\b",
-            r"\b(optimize|improve|enhance|refactor)\b.*\b(performance|code|system)\b",
+            # Code generation
+            r"\b(write|create|generate|build|implement|develop|code)\b.*\b(code|program|script|application|app|function|class|module|api)\b",
+            r"\b(programming|coding|software|algorithm)\b",
+            # Analysis
+            r"\b(analyze|research|investigate|deep dive|examine|study)\b",
+            r"\b(multiple|several|various|many)\b.*\b(steps|tasks|operations|files)\b",
+            # Comparison
+            r"\b(compare|contrast|evaluate|assess|review)\b.*\b(and|vs|versus|between)\b",
+            # Automation
+            r"\b(automate|workflow|pipeline|integration|deploy|ci/cd)\b",
+            # Debugging
+            r"\b(debug|fix|troubleshoot|diagnose|solve)\b.*\b(error|bug|issue|problem|exception)\b",
+            # Complex tasks
+            r"\b(complex|complicated|sophisticated|advanced|comprehensive)\b",
+            r"\b(optimize|improve|enhance|refactor|redesign|architect)\b",
+            # Multi-step
+            r"\b(step by step|walkthrough|guide me|help me build)\b",
+            r"\b(entire|whole|full|complete)\b.*\b(project|system|application)\b",
         ]
 
-        # Patterns indicating tool usage needed
+        # Patterns indicating tool usage needed (standard tier)
         self.tool_patterns = [
-            r"\b(search|look up|find|google)\b",
-            r"\b(run|execute|open|start|launch)\b",
-            r"\b(file|folder|directory|document)\b",
-            r"\b(download|fetch|get from|retrieve)\b",
-            r"\b(install|update|upgrade)\b",
+            # Web
+            r"\b(search|look up|find|google|browse|web)\b",
+            r"\b(download|fetch|get from|retrieve|pull)\b",
+            # Execution
+            r"\b(run|execute|open|start|launch|call)\b",
+            # Files
+            r"\b(file|folder|directory|document|read|write|save|load)\b",
+            # System
+            r"\b(install|update|upgrade|uninstall|pip|npm|brew)\b",
+            r"\b(terminal|command|shell|bash|cli)\b",
+            # Network
+            r"\b(api|endpoint|request|response|http|url|fetch)\b",
         ]
+
+        # Pre-compile all patterns for speed
+        self._compiled_simple = [re.compile(p, re.IGNORECASE) for p in self.simple_patterns]
+        self._compiled_advanced = [re.compile(p, re.IGNORECASE) for p in self.advanced_patterns]
+        self._compiled_tool = [re.compile(p, re.IGNORECASE) for p in self.tool_patterns]
 
     def classify(self, text: str) -> Optional[TaskClassification]:
         """
         Classify using pattern matching.
-        Returns None if no confident match.
+        OPTIMIZED: Uses pre-compiled patterns, higher confidence thresholds.
+        Returns None only if no match at all (rare with expanded patterns).
         """
         text_lower = text.lower().strip()
 
-        # Check for simple patterns
-        for pattern in self.simple_patterns:
-            if re.search(pattern, text_lower, re.IGNORECASE):
+        # Check for simple patterns (using pre-compiled)
+        for i, pattern in enumerate(self._compiled_simple):
+            if pattern.search(text_lower):
                 return TaskClassification(
                     tier=TaskTier.SIMPLE,
-                    confidence=0.8,
+                    confidence=0.85,  # Higher confidence with expanded patterns
                     reasoning="Matched simple task pattern",
-                    metadata={"classifier": "pattern", "pattern": pattern}
+                    metadata={"classifier": "pattern", "pattern_idx": i}
                 )
 
         # Check for advanced patterns
-        for pattern in self.advanced_patterns:
-            if re.search(pattern, text_lower, re.IGNORECASE):
+        for i, pattern in enumerate(self._compiled_advanced):
+            if pattern.search(text_lower):
                 return TaskClassification(
                     tier=TaskTier.ADVANCED,
-                    confidence=0.75,
+                    confidence=0.80,  # Higher confidence
                     reasoning="Matched advanced task pattern",
-                    metadata={"classifier": "pattern", "pattern": pattern}
+                    metadata={"classifier": "pattern", "pattern_idx": i}
                 )
 
         # Check for tool patterns -> standard tier
-        for pattern in self.tool_patterns:
-            if re.search(pattern, text_lower, re.IGNORECASE):
+        for i, pattern in enumerate(self._compiled_tool):
+            if pattern.search(text_lower):
                 return TaskClassification(
                     tier=TaskTier.STANDARD,
-                    confidence=0.7,
+                    confidence=0.75,  # Higher confidence
                     reasoning="Matched tool usage pattern",
-                    metadata={"classifier": "pattern", "pattern": pattern}
+                    metadata={"classifier": "pattern", "pattern_idx": i}
                 )
 
-        # No confident match
-        return None
+        # OPTIMIZATION: Default to STANDARD instead of None
+        # This avoids expensive LLM fallback for unmatched queries
+        # Most queries that don't match explicit patterns are standard tasks
+        return TaskClassification(
+            tier=TaskTier.STANDARD,
+            confidence=0.6,
+            reasoning="No pattern match, defaulting to standard",
+            metadata={"classifier": "pattern_default"}
+        )
 
 
 class LLMClassifier:
@@ -199,6 +245,7 @@ class Router:
     def classify(self, text: str, context: Optional[str] = None) -> TaskClassification:
         """
         Classify incoming text and determine appropriate tier.
+        OPTIMIZED: Pattern classifier always returns result, LLM fallback skipped.
 
         Args:
             text: The user input to classify
@@ -217,24 +264,22 @@ class Router:
                 metadata={"classifier": "disabled"}
             )
 
-        # Try pattern matching first (fast)
+        # OPTIMIZED: Pattern matching is now comprehensive enough to handle all cases
+        # The pattern classifier always returns a result (never None)
+        # This eliminates the expensive LLM fallback that was adding 100-800ms latency
         pattern_result = self.pattern_classifier.classify(text)
-        if pattern_result and pattern_result.confidence >= 0.75:
+
+        # Pattern classifier now always returns a result
+        if pattern_result:
             self.logger.router_classification(text, pattern_result.tier_name, pattern_result.confidence)
             return pattern_result
 
-        # Use LLM classifier for uncertain cases
-        if self.llm_classifier:
-            result = self.llm_classifier.classify(text, context)
-            self.logger.router_classification(text, result.tier_name, result.confidence)
-            return result
-
-        # Fallback to default
+        # This fallback should never be reached, but keep for safety
         default_tier = TaskTier(self.config.default_tier)
         result = TaskClassification(
             tier=default_tier,
             confidence=0.5,
-            reasoning="No classifier available, using default",
+            reasoning="Fallback to default",
             metadata={"classifier": "fallback"}
         )
         self.logger.router_classification(text, result.tier_name, result.confidence)

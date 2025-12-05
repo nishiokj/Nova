@@ -120,12 +120,23 @@ class LLMAdapter(ABC):
         self.config = config
         self.logger = get_logger()
         self._retry_count = 0
+        self._prewarmed = False
 
     @property
     @abstractmethod
     def provider(self) -> str:
         """Get provider name"""
         pass
+
+    def prewarm(self) -> bool:
+        """
+        Pre-warm the client to avoid cold start latency on first request.
+        OPTIMIZATION: Called at startup to initialize client and connection pool.
+        Returns True if successful.
+        """
+        # Default implementation does nothing, override in subclasses
+        self._prewarmed = True
+        return True
 
     @abstractmethod
     def complete(
@@ -188,13 +199,24 @@ class LLMAdapter(ABC):
         self.logger.llm_request(self.provider, self.config.model, prompt_preview)
 
     def _log_response(self, response: LLMResponse, duration_ms: float):
-        """Log LLM response"""
+        """Log LLM response with full details for debugging"""
+        # Format tool calls for logging
+        tool_calls_data = None
+        if response.tool_calls:
+            tool_calls_data = [
+                {"id": tc.id, "name": tc.name, "args": tc.arguments}
+                for tc in response.tool_calls
+            ]
+
         self.logger.llm_response(
-            self.provider,
-            self.config.model,
-            response.content,
-            response.usage,
-            duration_ms
+            provider=self.provider,
+            model=self.config.model,
+            response_content=response.content or "",
+            tokens=response.usage,
+            duration_ms=duration_ms,
+            tool_calls=tool_calls_data,
+            finish_reason=response.finish_reason,
+            raw_response=str(response.raw_response)[:500] if response.raw_response else None
         )
 
 
@@ -208,6 +230,20 @@ class OpenAIAdapter(LLMAdapter):
     @property
     def provider(self) -> str:
         return "openai"
+
+    def prewarm(self) -> bool:
+        """
+        Pre-warm the OpenAI client to avoid cold start latency.
+        Initializes the client and HTTP connection pool.
+        """
+        try:
+            self._get_client()
+            self._prewarmed = True
+            self.logger.info(f"OpenAI client pre-warmed for model {self.config.model}", component="llm")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to pre-warm OpenAI client: {e}", component="llm")
+            return False
 
     def _get_client(self):
         """Lazy initialize OpenAI client"""
@@ -235,6 +271,35 @@ class OpenAIAdapter(LLMAdapter):
         except ImportError:
             raise ImportError("openai package not installed. Run: pip install openai")
 
+    def _use_max_completion_tokens(self) -> bool:
+        """
+        Some newer OpenAI models (e.g., gpt-5-*) reject max_tokens in favor of max_completion_tokens.
+        """
+        model = (self.config.model or "").lower()
+        return model.startswith(("gpt-5", "o1", "o3"))
+
+    def _requires_default_temperature(self) -> bool:
+        """
+        Some models only support the default temperature (1.0) and will reject overrides.
+        """
+        model = (self.config.model or "").lower()
+        return model.startswith(("gpt-5", "o1", "o3"))
+
+    def _supports_sampling_params(self) -> bool:
+        """
+        Some newer models reject sampling controls like top_p/temperature overrides.
+        """
+        model = (self.config.model or "").lower()
+        return not model.startswith(("gpt-5", "o1", "o3"))
+
+    def _is_reasoning_model(self) -> bool:
+        """
+        Check if this is a reasoning model (o1, o3, gpt-5-*).
+        These models tend to ignore tool calls unless forced.
+        """
+        model = (self.config.model or "").lower()
+        return model.startswith(("gpt-5", "o1", "o3"))
+
     def _prepare_request(
         self,
         messages: List[Message],
@@ -242,39 +307,105 @@ class OpenAIAdapter(LLMAdapter):
         **kwargs
     ) -> Dict[str, Any]:
         """Prepare request parameters"""
+        max_tokens_value = kwargs.get("max_tokens", self.config.max_tokens)
+        max_completion_tokens_value = kwargs.get(
+            "max_completion_tokens",
+            getattr(self.config, "max_completion_tokens", None)
+        )
+        temperature_value = kwargs.get("temperature", self.config.temperature)
+
         params = {
             "model": self.config.model,
             "messages": [m.to_dict() for m in messages],
-            "temperature": kwargs.get("temperature", self.config.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
-            "top_p": kwargs.get("top_p", self.config.top_p),
         }
+
+        # Temperature handling: drop overrides for models that require the default
+        if self._supports_sampling_params():
+            if temperature_value is not None:
+                params["temperature"] = temperature_value
+            top_p_value = kwargs.get("top_p", self.config.top_p)
+            if top_p_value is not None:
+                params["top_p"] = top_p_value
+        else:
+            # Log and drop unsupported sampling params
+            if temperature_value not in (None, 1):
+                try:
+                    self.logger.logger.info(
+                        "Model %s requires default temperature; dropping override %s",
+                        self.config.model,
+                        temperature_value
+                    )
+                except Exception:
+                    pass
+            top_p_value = kwargs.get("top_p", self.config.top_p)
+            if top_p_value is not None:
+                try:
+                    self.logger.logger.info(
+                        "Model %s does not support top_p; dropping override %s",
+                        self.config.model,
+                        top_p_value
+                    )
+                except Exception:
+                    pass
+
+        # Choose the correct token limit parameter for the target model
+        if max_completion_tokens_value is not None:
+            params["max_completion_tokens"] = max_completion_tokens_value
+        elif self._use_max_completion_tokens():
+            if max_tokens_value is not None:
+                params["max_completion_tokens"] = max_tokens_value
+        else:
+            if max_tokens_value is not None:
+                params["max_tokens"] = max_tokens_value
 
         if tools:
             params["tools"] = [t.to_openai_format() for t in tools]
-            params["tool_choice"] = kwargs.get("tool_choice", "auto")
+            # For reasoning models that tend to ignore tools, force "required"
+            default_choice = "required" if self._is_reasoning_model() else "auto"
+            # Use explicitly passed tool_choice, or fall back to default
+            explicit_choice = kwargs.get("tool_choice")
+            params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
 
         return params
 
     def _parse_response(self, response) -> LLMResponse:
-        """Parse OpenAI response"""
+        """Parse OpenAI response with detailed debugging"""
         choice = response.choices[0]
         message = choice.message
 
+        # Debug: Log raw message details
+        raw_content = message.content
+        raw_tool_calls = message.tool_calls
+        finish = choice.finish_reason
+
         tool_calls = []
-        if message.tool_calls:
-            for tc in message.tool_calls:
-                tool_calls.append(ToolCall(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments=json.loads(tc.function.arguments)
-                ))
+        if raw_tool_calls:
+            for tc in raw_tool_calls:
+                try:
+                    tool_calls.append(ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=json.loads(tc.function.arguments)
+                    ))
+                except json.JSONDecodeError as e:
+                    self.logger.warning(
+                        f"Failed to parse tool call args: {tc.function.arguments[:100]}",
+                        component="llm"
+                    )
+
+        # Warn if we got no content and no tools (usually means token limit hit too early)
+        if not raw_content and not tool_calls and finish != "stop":
+            self.logger.warning(
+                f"Empty response: finish_reason={finish}, tokens used but no content produced. "
+                f"Model may need higher max_tokens for reasoning.",
+                component="llm"
+            )
 
         return LLMResponse(
-            content=message.content or "",
+            content=raw_content or "",
             role=MessageRole.ASSISTANT,
             tool_calls=tool_calls,
-            finish_reason=choice.finish_reason,
+            finish_reason=finish,
             usage={
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
@@ -297,8 +428,24 @@ class OpenAIAdapter(LLMAdapter):
         try:
             client = self._get_client()
             params = self._prepare_request(messages, tools, **kwargs)
+
+            # DIAGNOSTIC: Log exactly what we're sending
+            tool_names = [t.name for t in tools] if tools else []
+            self.logger.info(
+                f"API REQUEST: model={params.get('model')}, tools={tool_names}, "
+                f"tool_choice={params.get('tool_choice', 'none')}",
+                component="llm"
+            )
+
             response = client.chat.completions.create(**params)
             result = self._parse_response(response)
+
+            # DIAGNOSTIC: Log what we got back
+            self.logger.info(
+                f"API RESPONSE: content_len={len(result.content) if result.content else 0}, "
+                f"tool_calls={len(result.tool_calls)}, finish={result.finish_reason}",
+                component="llm"
+            )
 
             duration_ms = (time.time() - start_time) * 1000
             self._log_response(result, duration_ms)
@@ -449,6 +596,19 @@ class AnthropicAdapter(LLMAdapter):
     @property
     def provider(self) -> str:
         return "anthropic"
+
+    def prewarm(self) -> bool:
+        """
+        Pre-warm the Anthropic client to avoid cold start latency.
+        """
+        try:
+            self._get_client()
+            self._prewarmed = True
+            self.logger.info(f"Anthropic client pre-warmed for model {self.config.model}", component="llm")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to pre-warm Anthropic client: {e}", component="llm")
+            return False
 
     def _get_client(self):
         """Lazy initialize Anthropic client"""

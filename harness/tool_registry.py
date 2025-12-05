@@ -18,6 +18,7 @@ import traceback
 import signal
 import io
 from contextlib import redirect_stdout, redirect_stderr
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from .config import ToolConfig
 from .logger import get_logger
@@ -367,6 +368,27 @@ class ToolRegistry:
             timeout=5
         ))
 
+        # FAST ANSWER TOOL - Single-hop search with parallel fetch
+        # This is THE tool to use for simple questions - returns actual content, not just URLs
+        self.register(Tool(
+            name="fast_answer",
+            description="PREFERRED for simple questions. Searches the web AND fetches content from top results IN PARALLEL. Returns actual answer content, not just URLs. Use this for weather, stock prices, facts, current events.",
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "The search query (be specific for best results)"
+                },
+                "num_sources": {
+                    "type": "integer",
+                    "description": "Number of sources to fetch in parallel (default: 3)",
+                    "default": 3
+                }
+            },
+            required_params=["query"],
+            executor=self._fast_answer,
+            timeout=15  # Fast timeout - we fetch in parallel
+        ))
+
     # Tool Executors
 
     def _web_search(self, query: str, num_results: int = 5) -> ToolResult:
@@ -374,7 +396,7 @@ class ToolRegistry:
         try:
             # Try duckduckgo_search first
             try:
-                from duckduckgo_search import DDGS
+                from ddgs import DDGS
                 with DDGS() as ddgs:
                     results = list(ddgs.text(query, max_results=num_results))
                     formatted = []
@@ -717,6 +739,132 @@ class ToolRegistry:
                 status=ToolStatus.ERROR,
                 output=None,
                 error=f"Calculation failed: {str(e)}"
+            )
+
+    def _fast_answer(self, query: str, num_sources: int = 3) -> ToolResult:
+        """
+        FAST single-hop search: search + parallel fetch in one call.
+        Returns actual content, not just URLs.
+        """
+        try:
+            import requests
+            from urllib.parse import urlparse
+
+            # Step 1: Search
+            search_results = []
+            try:
+                from ddgs import DDGS
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, max_results=num_sources + 2))  # Get extra in case some fail
+                    for r in results[:num_sources + 2]:
+                        url = r.get("href", r.get("link", ""))
+                        if url:
+                            search_results.append({
+                                "title": r.get("title", ""),
+                                "url": url,
+                                "snippet": r.get("body", r.get("snippet", ""))
+                            })
+            except ImportError:
+                return ToolResult(
+                    status=ToolStatus.ERROR,
+                    output=None,
+                    error="Web search requires 'duckduckgo-search'. Install: pip install duckduckgo-search"
+                )
+
+            if not search_results:
+                return ToolResult(
+                    status=ToolStatus.ERROR,
+                    output=None,
+                    error=f"No search results found for: {query}"
+                )
+
+            # Step 2: Fetch URLs in PARALLEL
+            def fetch_url(result: dict) -> dict:
+                """Fetch a single URL and extract text content"""
+                url = result["url"]
+                try:
+                    headers = {"User-Agent": "Mozilla/5.0 (compatible; AgentHarness/1.0)"}
+                    response = requests.get(url, headers=headers, timeout=5)
+                    response.raise_for_status()
+
+                    # Extract text content
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(response.text, "html.parser")
+                        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                            tag.decompose()
+                        text = soup.get_text(separator=" ", strip=True)
+                        # Truncate to reasonable size
+                        text = text[:2000] if len(text) > 2000 else text
+                    except ImportError:
+                        text = response.text[:2000]
+
+                    return {
+                        "title": result["title"],
+                        "url": url,
+                        "content": text,
+                        "success": True
+                    }
+                except Exception as e:
+                    return {
+                        "title": result["title"],
+                        "url": url,
+                        "content": result.get("snippet", ""),  # Fall back to snippet
+                        "success": False,
+                        "error": str(e)
+                    }
+
+            # Execute parallel fetches with ThreadPoolExecutor
+            fetched_content = []
+            with ThreadPoolExecutor(max_workers=min(num_sources, 5)) as executor:
+                futures = {executor.submit(fetch_url, r): r for r in search_results[:num_sources]}
+
+                for future in as_completed(futures, timeout=8):
+                    try:
+                        result = future.result()
+                        if result["content"]:  # Only add if we got content
+                            fetched_content.append(result)
+                    except Exception:
+                        pass
+
+            # Step 3: Format combined results
+            if not fetched_content:
+                # Fall back to snippets if all fetches failed
+                output = f"Search results for '{query}':\n\n"
+                for r in search_results[:num_sources]:
+                    output += f"• {r['title']}: {r['snippet']}\n"
+                return ToolResult(
+                    status=ToolStatus.SUCCESS,
+                    output=output,
+                    metadata={"query": query, "sources": len(search_results), "fetched": 0}
+                )
+
+            # Build combined output
+            output = f"Information about '{query}' from {len(fetched_content)} sources:\n\n"
+            for i, item in enumerate(fetched_content, 1):
+                output += f"[Source {i}: {item['title']}]\n"
+                output += f"{item['content'][:1500]}\n\n"
+
+            # Truncate total if too long
+            if len(output) > 6000:
+                output = output[:6000] + "\n...[truncated]"
+
+            return ToolResult(
+                status=ToolStatus.SUCCESS,
+                output=output,
+                metadata={
+                    "query": query,
+                    "sources_searched": len(search_results),
+                    "sources_fetched": len(fetched_content),
+                    "urls": [r["url"] for r in fetched_content]
+                }
+            )
+
+        except Exception as e:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Fast answer failed: {str(e)}"
             )
 
     def _get_current_time(self, format: str = "human", timezone: str = "local") -> ToolResult:

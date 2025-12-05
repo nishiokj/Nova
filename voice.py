@@ -44,8 +44,8 @@ class VoiceConfig:
     chunk_size: int = 1024
     sample_rate: int = 22050
     streaming_enabled: bool = True
-    sentence_delay: float = 0.1  # Delay between sentences
-    word_delay: float = 0.05  # Delay between words for streaming
+    sentence_delay: float = 0.0  # No artificial delay
+    word_delay: float = 0.0  # No artificial delay
 
 
 class VoiceOutputEngine:
@@ -262,8 +262,18 @@ class VoiceStreamer:
         
         # Initialize engine
         if self.engine and not self.engine.initialize():
-            self.logger.error("Failed to initialize voice engine")
+            import sys
+            msg = "❌ VoiceStreamer: Engine initialization FAILED!"
+            print(msg, file=sys.stderr, flush=True)
+            self.logger.error(msg)
             self.engine = None
+        elif not self.engine:
+            import sys
+            msg = "❌ VoiceStreamer: No engine created!"
+            print(msg, file=sys.stderr, flush=True)
+            self.logger.error(msg)
+        else:
+            print(f"✅ VoiceStreamer: Engine ready ({self.config.engine})", flush=True)
     
     def _create_engine(self) -> Optional[VoiceOutputEngine]:
         """Create appropriate voice engine"""
@@ -329,8 +339,40 @@ class VoiceStreamer:
         if not self.is_streaming:
             return
         
+        self.logger.debug(f"VoiceStreamer enqueue full text: {text[:120]}")
         self.text_queue.put(text)
         self.text_queue.put(None)  # Signal end of stream
+
+    def speak_blocking(self, text: str):
+        """Speak full text without the streaming queue (for reliability)."""
+        import sys
+        if not self.engine:
+            msg = f"❌ VoiceStreamer.speak_blocking: NO ENGINE! Text lost: '{text[:60]}...'"
+            print(msg, file=sys.stderr, flush=True)
+            self.logger.error(msg)
+            return
+        try:
+            print(f"🔊 Speaking: {text[:50]}...", flush=True)
+            self.logger.debug(f"VoiceStreamer blocking speak start: {text[:120]}")
+            self.engine.speak(text)
+            self.logger.debug("VoiceStreamer blocking speak end")
+        except Exception as e:
+            msg = f"❌ VoiceStreamer.speak_blocking FAILED: {e}"
+            print(msg, file=sys.stderr, flush=True)
+            self.logger.error(msg)
+    
+    def wait_until_idle(self, timeout: Optional[float] = None):
+        """Block until queued speech has finished playing"""
+        start_time = time.time()
+        while True:
+            queue_empty = self.text_queue.empty()
+            engine_idle = not (self.engine and getattr(self.engine, "is_speaking", False))
+            buffer_empty = not self.buffer
+            if queue_empty and engine_idle and buffer_empty:
+                break
+            if timeout is not None and (time.time() - start_time) > timeout:
+                break
+            time.sleep(0.05)
     
     def _streaming_loop(self):
         """Main streaming loop"""
@@ -354,6 +396,7 @@ class VoiceStreamer:
     
     def _process_text_chunk(self, text_chunk: str):
         """Process incoming text chunk"""
+        self.logger.debug(f"VoiceStreamer process chunk: {text_chunk[:120]}")
         self.buffer += text_chunk
         
         # Check for complete sentences
@@ -395,17 +438,15 @@ class VoiceStreamer:
         return complete_sentences
     
     def _speak_sentence(self, sentence: str):
-        """Speak a single sentence"""
+        """Speak a single sentence in-order (pyttsx3 is not thread safe)."""
         if not self.engine:
             return
-        
+
         try:
-            # Speak asynchronously to avoid blocking
-            self.engine.speak_async(sentence)
-            
-            # Add slight delay for natural speech
-            time.sleep(self.config.sentence_delay)
-            
+            # Speak synchronously to avoid overlapping runAndWait calls
+            self.logger.debug(f"TTS start: {sentence[:80]}")
+            self.engine.speak(sentence)
+            self.logger.debug("TTS end")
         except Exception as e:
             self.logger.error(f"Error speaking sentence: {e}")
     

@@ -578,10 +578,10 @@ class NoiseFilter:
         self.energy_history = []
         self.energy_history_size = 5
 
-        # Calibration state
+        # Calibration state (OPTIMIZED - reduced from 30 to 15 frames = ~450ms startup)
         self.is_calibrated = False
         self.calibration_frames = 0
-        self.calibration_target = 30  # Frames needed for calibration
+        self.calibration_target = 15  # Frames needed for calibration (was 30 = 900ms)
 
     def calibrate(self, audio_chunk: bytes) -> bool:
         """
@@ -801,11 +801,11 @@ class MainProcessor:
         self.pre_roll_buffer = []
         self.pre_roll_frames = 5  # Keep last 5 frames before speech
 
-        # Consecutive frame tracking for robust detection
+        # Consecutive frame tracking for robust detection (OPTIMIZED for low latency)
         self.consecutive_speech_frames = 0
         self.consecutive_silence_frames = 0
-        self.min_speech_frames_start = 3  # Need 3 consecutive speech frames to start
-        self.min_silence_frames_end = 15  # Need 15 consecutive silence frames to end
+        self.min_speech_frames_start = 2  # Need 2 consecutive speech frames to start (was 3)
+        self.min_silence_frames_end = 8   # Need 8 consecutive silence frames to end (was 15 = 450ms, now 240ms)
 
         # Statistics
         self.total_frames_processed = 0

@@ -10,6 +10,7 @@ import queue
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Callable, Generator
 from enum import Enum
+from contextlib import nullcontext
 
 from .config import HarnessConfig, RuntimeConfig, load_or_create_config, LLMConfig
 from .logger import StructuredLogger, get_logger, set_logger
@@ -69,7 +70,12 @@ class AgentHarness:
     5. ServiceRep speaks final response
     """
 
-    def __init__(self, config: Optional[HarnessConfig] = None, config_path: str = None):
+    def __init__(
+        self,
+        config: Optional[HarnessConfig] = None,
+        config_path: str = None,
+        profiler: Optional[Any] = None
+    ):
         # Load configuration
         if config:
             self._base_config = config
@@ -79,6 +85,7 @@ class AgentHarness:
             self._base_config = load_or_create_config()
 
         self._runtime_config = RuntimeConfig(self._base_config)
+        self.profiler = profiler
 
         # Setup logging
         self._setup_logging()
@@ -129,6 +136,23 @@ class AgentHarness:
         self.service_rep = StreamingServiceRep(config.service_rep)
         self.service_rep.initialize()
 
+        # LOUD FAILURE: Check if TTS is enabled but has no engine
+        if config.service_rep.enabled and self.service_rep.tts._engine_type == "none":
+            import sys
+            msg = (
+                "\n" + "="*70 + "\n"
+                "🚨 FATAL: TTS IS ENABLED BUT NO ENGINE AVAILABLE!\n"
+                "   ServiceRep.enabled=True but no TTS engine loaded.\n"
+                "   Audio output will NOT work!\n\n"
+                "   Fix options:\n"
+                "   1. pip install pyttsx3\n"
+                "   2. Ensure voice.py VoiceStreamer is importable\n"
+                "   3. Run with --no-tts to disable TTS\n"
+                + "="*70 + "\n"
+            )
+            print(msg, file=sys.stderr)
+            self.logger.error(msg, component="harness")
+
         # Tiered Agent
         self.agent = TieredAgent(
             config=config.agent,
@@ -141,6 +165,31 @@ class AgentHarness:
             tier_llm = config.llm_configs.get(tier.value)
             if tier_llm:
                 self.router.set_tier_config(tier, tier_llm)
+
+        # OPTIMIZATION: Pre-warm LLM clients to avoid cold start latency
+        self._prewarm_llm_clients()
+
+        # Track tool usage for progress messages
+        self._last_progress_tool = None
+
+    def _profile(self, metric_name: str):
+        """Helper to get profiler context if available"""
+        if not self.profiler:
+            return nullcontext()
+        return self.profiler.measure(metric_name)
+
+    def _prewarm_llm_clients(self):
+        """Pre-warm LLM clients to avoid cold start penalty on first request"""
+        self.logger.info("Pre-warming LLM clients...", component="harness")
+
+        # Pre-warm the default tier's agent
+        try:
+            default_tier = self._base_config.agent.tier
+            agent = self.agent._get_agent(default_tier)
+            if agent._llm and hasattr(agent._llm, 'prewarm'):
+                agent._llm.prewarm()
+        except Exception as e:
+            self.logger.error(f"Failed to pre-warm agent LLM: {e}", component="harness")
 
     def _set_state(self, state: HarnessState):
         """Set harness state and notify callbacks"""
@@ -176,7 +225,8 @@ class AgentHarness:
         try:
             # Step 1: Route (if enabled)
             self._set_state(HarnessState.ROUTING)
-            classification, tier_config = self.router.route(speech_text, context)
+            with self._profile("harness.route_ms"):
+                classification, tier_config = self.router.route(speech_text, context)
 
             self.logger.info(
                 f"Routed to tier: {classification.tier_name}",
@@ -188,48 +238,104 @@ class AgentHarness:
             self._set_state(HarnessState.ACKNOWLEDGING)
 
             # Generate brief action description for acknowledgment
-            action_description = self._generate_action_preview(speech_text, classification)
-            self.service_rep.acknowledge_request(speech_text, action_description)
+            with self._profile("harness.action_preview_ms"):
+                action_description = self._generate_action_preview(speech_text, classification)
+            with self._profile("harness.service_rep_ack_ms"):
+                self.service_rep.acknowledge_request(speech_text, action_description)
 
-            # Step 3: Agent execution
+            # Step 3: Agent execution with progress updates
             self._set_state(HarnessState.AGENT_WORKING)
 
-            agent_response = self.agent.run(
-                user_input=speech_text,
-                tier=classification.tier_name,
-                context=context
-            )
+            # Reset progress tracking and wire up callback
+            self._last_progress_tool = None
+            progress_callback = self._create_progress_callback()
+
+            # Get the agent for this tier and add progress callback
+            tier_agent = self.agent._get_agent(classification.tier_name)
+            tier_agent.add_step_callback(progress_callback)
+
+            try:
+                with self._profile("harness.agent_run_ms"):
+                    agent_response = self.agent.run(
+                        user_input=speech_text,
+                        tier=classification.tier_name,
+                        context=context
+                    )
+            finally:
+                # Clean up callback to avoid accumulation
+                if progress_callback in tier_agent._step_callbacks:
+                    tier_agent._step_callbacks.remove(progress_callback)
 
             # Step 4: Generate and speak response
-            self._set_state(HarnessState.RESPONDING)
+    #        self._set_state(HarnessState.RESPONDING)
 
             if agent_response.success:
                 # Generate spoken response (may be abbreviated)
-                spoken_response = self._generate_spoken_response(agent_response)
+                with self._profile("harness.spoken_response_ms"):
+                    spoken_response = self._generate_spoken_response(agent_response)
                 full_response = agent_response.content
+                self.logger.debug(
+                    f"Spoken response ready (len={len(spoken_response)}): {spoken_response[:120]}",
+                    component="harness"
+                )
 
                 # Speak the response
-                self.service_rep.report_completion(spoken_response, full_response)
+                with self._profile("harness.service_rep_respond_ms"):
+                    # DIAGNOSTIC: Aggressive logging for TTS failure investigation
+                    import threading
+                    text_preview = spoken_response[:100].replace('\n', ' ') if spoken_response else "(empty)"
+                    self.logger.info(
+                        f"🚀 HARNESS->TTS: DISPATCHING COMPLETION | thread={threading.current_thread().name} | "
+                        f"text='{text_preview}...' (len={len(spoken_response) if spoken_response else 0})",
+                        component="harness"
+                    )
+
+                    # Check ServiceRep state before calling
+                    sr_enabled = self.service_rep.enabled
+                    tts_initialized = self.service_rep.tts._initialized
+                    tts_thread_alive = self.service_rep.tts._speak_thread.is_alive() if self.service_rep.tts._speak_thread else False
+                    tts_queue_before = self.service_rep.tts._speak_queue.qsize()
+
+                    self.logger.info(
+                        f"🚀 HARNESS->TTS: PRE-CALL STATE | sr_enabled={sr_enabled}, tts_init={tts_initialized}, "
+                        f"tts_thread={tts_thread_alive}, queue_size={tts_queue_before}",
+                        component="harness"
+                    )
+
+                    if not sr_enabled:
+                        self.logger.error("🚀 HARNESS->TTS: ServiceRep is DISABLED! Completion will NOT be spoken!", component="harness")
+                    if not tts_thread_alive:
+                        self.logger.error(f"🚀 HARNESS->TTS: TTS thread DEAD! last_error={self.service_rep.tts._last_error}", component="harness")
+
+                    self.service_rep.report_completion(spoken_response, full_response)
+
+                    tts_queue_after = self.service_rep.tts._speak_queue.qsize()
+                    self.logger.info(
+                        f"🚀 HARNESS->TTS: COMPLETION DISPATCHED | queue_after={tts_queue_after}",
+                        component="harness"
+                    )
             else:
                 # Handle error
                 error_msg = f"I ran into an issue: {agent_response.error or 'Unknown error'}"
                 spoken_response = error_msg
                 full_response = agent_response.content
 
-                self.service_rep.report_error(spoken_response, agent_response.error)
+                with self._profile("harness.service_rep_error_ms"):
+                    self.service_rep.report_error(spoken_response, agent_response.error)
 
             # Complete
             self._set_state(HarnessState.IDLE)
             duration_ms = (time.time() - start_time) * 1000
 
-            self.logger.response_generated(
-                spoken_response,
-                metadata={
-                    "duration_ms": duration_ms,
-                    "tier": classification.tier_name,
-                    "tools_used": agent_response.tools_used if agent_response else []
-                }
-            )
+            with self._profile("harness.output_serialization_ms"):
+                self.logger.response_generated(
+                    spoken_response,
+                    metadata={
+                        "duration_ms": duration_ms,
+                        "tier": classification.tier_name,
+                        "tools_used": agent_response.tools_used if agent_response else []
+                    }
+                )
 
             response = HarnessResponse(
                 spoken_response=spoken_response,
@@ -259,7 +365,8 @@ class AgentHarness:
 
             # Speak error to user
             error_spoken = "I'm sorry, something went wrong. Please try again."
-            self.service_rep.report_error(error_spoken, str(e))
+            with self._profile("harness.service_rep_error_ms"):
+                self.service_rep.report_error(error_spoken, str(e))
 
             return HarnessResponse(
                 spoken_response=error_spoken,
@@ -299,10 +406,15 @@ class AgentHarness:
             action_preview = self._generate_action_preview(speech_text, classification)
             self.service_rep.acknowledge_request(speech_text, action_preview)
 
-            # Stream agent response
+            # Stream agent response with progress updates
             self._set_state(HarnessState.AGENT_WORKING)
 
+            # Reset progress tracking and wire up callback
+            self._last_progress_tool = None
+            progress_callback = self._create_progress_callback()
+
             agent = self.agent._get_agent(classification.tier_name)
+            agent.add_step_callback(progress_callback)
             agent_response = None
 
             for chunk in agent.run_streaming(speech_text, context):
@@ -316,6 +428,10 @@ class AgentHarness:
             # Flush any remaining TTS buffer
             if hasattr(self.service_rep, 'flush_buffer'):
                 self.service_rep.flush_buffer()
+
+            # Clean up progress callback
+            if progress_callback in agent._step_callbacks:
+                agent._step_callbacks.remove(progress_callback)
 
             self._set_state(HarnessState.IDLE)
             duration_ms = (time.time() - start_time) * 1000
@@ -334,6 +450,13 @@ class AgentHarness:
             self._set_state(HarnessState.ERROR)
             self.logger.error(f"Streaming processing failed: {e}", component="harness")
             yield f"\nError: {str(e)}"
+
+            # Clean up progress callback on error (if it was created)
+            try:
+                if progress_callback and agent and progress_callback in agent._step_callbacks:
+                    agent._step_callbacks.remove(progress_callback)
+            except (NameError, AttributeError):
+                pass  # Callback wasn't created yet
 
             return HarnessResponse(
                 spoken_response="An error occurred",
@@ -366,22 +489,64 @@ class AgentHarness:
         else:
             return "I'm working on that"
 
+    def _get_tool_progress_message(self, tool_name: str, step_number: int) -> Optional[str]:
+        """
+        Get a progress message for tool execution.
+        Returns None if we shouldn't speak (to avoid over-chatting).
+        """
+        # Don't repeat progress for same tool
+        if self._last_progress_tool == tool_name:
+            return None
+
+        self._last_progress_tool = tool_name
+        tool_lower = tool_name.lower()
+
+        # Map tools to spoken progress messages
+        if "search" in tool_lower or "web" in tool_lower:
+            return "Searching now."
+        elif "fetch" in tool_lower or "get" in tool_lower:
+            return "Getting that information."
+        elif "read" in tool_lower or "file" in tool_lower:
+            return "Reading the file."
+        elif "write" in tool_lower or "save" in tool_lower:
+            return "Writing the file."
+        elif "bash" in tool_lower or "command" in tool_lower or "exec" in tool_lower:
+            return "Running the command."
+        elif "calculate" in tool_lower or "math" in tool_lower:
+            return "Calculating."
+        else:
+            # Only speak for first tool call to avoid over-chatting
+            if step_number == 0:
+                return "Working on it."
+            return None
+
+    def _create_progress_callback(self) -> Callable[[AgentStep], None]:
+        """Create a callback to report progress during agent execution"""
+        def on_step(step: AgentStep):
+            # Only report progress for tool executions
+            if step.tool_name:
+                progress_msg = self._get_tool_progress_message(step.tool_name, step.step_number)
+                if progress_msg:
+                    self.service_rep.report_progress(progress_msg)
+
+        return on_step
+
     def _generate_spoken_response(self, agent_response: AgentResponse) -> str:
         """Generate a spoken version of the response (may be abbreviated)"""
         content = agent_response.content
 
         # If response is too long, summarize
-        if len(content) > 500:
+        if len(content) > 5000:
             # Take first paragraph or sentence
             paragraphs = content.split('\n\n')
             if paragraphs:
                 first_para = paragraphs[0]
-                if len(first_para) > 300:
+                if len(first_para) > 3000:
                     # Take first sentence
                     sentences = first_para.split('. ')
                     if sentences:
                         return sentences[0] + ". I've provided the full details."
-                return first_para[:300] + "... I've provided more details."
+                return first_para[:3000] + "... I've provided more details."
 
         return content
 
@@ -519,7 +684,8 @@ def create_harness(
     config_path: str = None,
     router_enabled: bool = True,
     service_rep_enabled: bool = True,
-    default_tier: str = "standard"
+    default_tier: str = "standard",
+    profiler: Optional[Any] = None
 ) -> AgentHarness:
     """
     Create and configure an AgentHarness instance.
@@ -529,6 +695,7 @@ def create_harness(
         router_enabled: Whether to enable routing
         service_rep_enabled: Whether to enable TTS
         default_tier: Default agent tier
+        profiler: Optional profiler for runtime metrics
 
     Returns:
         Configured AgentHarness instance
@@ -539,4 +706,4 @@ def create_harness(
     config.service_rep.enabled = service_rep_enabled
     config.agent.tier = default_tier
 
-    return AgentHarness(config=config)
+    return AgentHarness(config=config, profiler=profiler)

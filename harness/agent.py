@@ -116,29 +116,30 @@ class Agent:
         self._thought_callbacks: List[Callable[[str], None]] = []
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with tool information"""
-        tools = self.tool_registry.list_tools(enabled_only=True)
-        tool_descriptions = []
-        for tool in tools:
-            desc = f"- {tool.name}: {tool.description}"
-            tool_descriptions.append(desc)
+        """Build system prompt - uses tier-specific prompt from config"""
+        # The system prompt should already be tier-specific from TieredAgent
+        # Just return it directly without adding extra verbose instructions
+        return self.config.system_prompt
 
-        tools_section = "\n".join(tool_descriptions) if tool_descriptions else "No tools available."
+    def _needs_realtime_data(self, user_input: str) -> bool:
+        """
+        Detect if the query requires real-time data (weather, stocks, news, etc.)
+        These queries MUST use tools - the model cannot answer from memory.
+        """
+        input_lower = user_input.lower()
 
-        return f"""{self.config.system_prompt}
+        # Keywords that indicate real-time data is needed
+        realtime_keywords = [
+            "weather", "temperature", "forecast", "rain", "sunny", "cloudy",
+            "stock", "price", "market", "trading", "shares",
+            "news", "today", "current", "right now", "latest",
+            "score", "game", "match", "playing",
+            "traffic", "flight", "status",
+            "bitcoin", "crypto", "btc", "eth",
+            "exchange rate", "currency"
+        ]
 
-Available tools:
-{tools_section}
-
-When responding:
-1. First, briefly explain what you're going to do (this will be spoken to the user)
-2. Then use tools if needed
-3. Provide a clear, helpful response
-
-Format your initial response as:
-ACTION: <brief description of what you will do>
----
-<your reasoning and tool usage>"""
+        return any(keyword in input_lower for keyword in realtime_keywords)
 
     def _get_tool_definitions(self) -> List[ToolDefinition]:
         """Get tool definitions for LLM"""
@@ -196,8 +197,6 @@ ACTION: <brief description of what you will do>
         self._current_state = AgentState.EXECUTING_TOOL
         start_time = time.time()
 
-        self.logger.tool_call(tool_call.name, tool_call.arguments)
-
         step = AgentStep(
             step_number=self._step_count,
             state=AgentState.EXECUTING_TOOL,
@@ -206,13 +205,16 @@ ACTION: <brief description of what you will do>
         )
         self._step_count += 1
 
+        # CRITICAL: Record step BEFORE execution so progress callbacks fire immediately
+        # This allows ServiceRep to speak "Searching now..." before the actual search
+        self._record_step(step)
+
         result = self.tool_registry.execute(tool_call.name, **tool_call.arguments)
 
+        # Update step with results after execution
         step.tool_output = result.output if result.is_success else result.error
         step.duration_ms = (time.time() - start_time) * 1000
         step.error = result.error if not result.is_success else None
-
-        self._record_step(step)
 
         if result.is_success:
             self.logger.tool_result(tool_call.name, result.output, step.duration_ms)
@@ -222,9 +224,21 @@ ACTION: <brief description of what you will do>
         return result
 
     def _process_tool_calls(self, tool_calls: List[ToolCall]) -> List[Dict[str, Any]]:
-        """Process multiple tool calls and return results"""
+        """Process multiple tool calls and return results (with de-duplication)"""
         results = []
+        seen_calls = set()  # Track (name, args_hash) to prevent duplicates
+
         for tool_call in tool_calls:
+            # De-duplicate: skip if we've already called this tool with same args
+            args_key = (tool_call.name, json.dumps(tool_call.arguments, sort_keys=True))
+            if args_key in seen_calls:
+                self.logger.warning(
+                    f"Skipping duplicate tool call: {tool_call.name}",
+                    component="agent"
+                )
+                continue
+            seen_calls.add(args_key)
+
             result = self._execute_tool(tool_call)
             results.append({
                 "tool_call_id": tool_call.id,
@@ -236,7 +250,7 @@ ACTION: <brief description of what you will do>
 
     def run(self, user_input: str, context: Optional[str] = None) -> AgentResponse:
         """
-        Run the agent on user input.
+        Run the agent on user input with tier-appropriate tool limits.
 
         Args:
             user_input: The user's request
@@ -257,6 +271,13 @@ ACTION: <brief description of what you will do>
         self._step_count = 0
         self._steps = []
         tools_used = []
+        total_tool_calls = 0
+        max_tool_calls = self.config.max_tool_calls
+        input_lower = user_input.lower()
+        wants_search = any(
+            phrase in input_lower
+            for phrase in ["search", "look up", "lookup", "google", "find", "check online", "look online"]
+        )
 
         # Build messages
         messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
@@ -268,103 +289,115 @@ ACTION: <brief description of what you will do>
 
         messages.append(Message(MessageRole.USER, user_input))
 
-        # Get tool definitions
-        tool_definitions = self._get_tool_definitions()
+        # Decide whether tools are allowed for this request
+        needs_realtime = self._needs_realtime_data(user_input)
+        # Only allow tools when we truly need external/fresh data or the user asked to search
+        allow_tools = max_tool_calls > 0 and (needs_realtime or wants_search)
+        if not allow_tools:
+            max_tool_calls = 0
+        tool_definitions = self._get_tool_definitions() if allow_tools else []
 
         try:
             # Initial LLM call
-            self._emit_thought("Processing user request...")
+            self._emit_thought("Processing request...")
 
-            response = self._llm.complete(messages, tools=tool_definitions)
+            # CRITICAL: If this looks like a query that NEEDS real-time data, force tool usage
+            tool_choice = None
+            if needs_realtime and tool_definitions:
+                # Force the model to use fast_answer for real-time queries
+                fast_answer = next((t for t in tool_definitions if t.name == "fast_answer"), None)
+                if fast_answer:
+                    tool_choice = {"type": "function", "function": {"name": "fast_answer"}}
+                    self.logger.info(f"Forcing fast_answer tool for real-time query", component="agent")
 
-            # Extract action description for ServiceRep
-            action_description, _ = self._extract_action_description(response.content)
+            response = self._llm.complete(
+                messages,
+                tools=tool_definitions if max_tool_calls > 0 else None,
+                tool_choice=tool_choice
+            )
 
             # Record thinking step
             thinking_step = AgentStep(
                 step_number=self._step_count,
                 state=AgentState.THINKING,
-                thought=response.content[:500]
+                thought=response.content[:200] if response.content else "Thinking..."
             )
             self._step_count += 1
             self._record_step(thinking_step)
 
-            # Process tool calls if any
-            iteration = 0
-            max_iterations = self.config.max_tool_calls
+            # If tools are disallowed, force the model to answer without them
+            if response.has_tool_calls and max_tool_calls == 0:
+                response = self._llm.complete(messages, tools=None)
 
-            while response.has_tool_calls and iteration < max_iterations:
-                iteration += 1
-                self._emit_thought(f"Using tools: {[tc.name for tc in response.tool_calls]}")
+            # Process tool calls with STRICT limit enforcement
+            while response.has_tool_calls and max_tool_calls > 0 and total_tool_calls < max_tool_calls:
+                # CRITICAL: Limit number of parallel tool calls per iteration
+                tool_calls_this_round = response.tool_calls[:max(1, max_tool_calls - total_tool_calls)]
 
-                # Execute tools
-                tool_results = self._process_tool_calls(response.tool_calls)
+                self._emit_thought(f"Using tool: {tool_calls_this_round[0].name}")
+
+                # Execute tools (limited)
+                tool_results = self._process_tool_calls(tool_calls_this_round)
                 tools_used.extend([tr["name"] for tr in tool_results])
+                total_tool_calls += len(tool_results)
 
                 # Add assistant message with tool calls
                 messages.append(Message(
                     role=MessageRole.ASSISTANT,
-                    content=response.content,
+                    content=response.content or "",
                     tool_calls=[{
                         "id": tc.id,
                         "type": "function",
                         "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}
-                    } for tc in response.tool_calls]
+                    } for tc in tool_calls_this_round]
                 ))
 
                 # Add tool results
                 for tr in tool_results:
                     messages.append(Message(
                         role=MessageRole.TOOL,
-                        content=str(tr["result"]),
+                        content=str(tr["result"])[:2000],  # Limit result size
                         tool_call_id=tr["tool_call_id"],
                         name=tr["name"]
                     ))
 
-                # Get next response
+                # Check if we've hit the limit - if so, force final answer
+                if total_tool_calls >= max_tool_calls:
+                    self._emit_thought(f"Tool limit reached ({max_tool_calls}), generating final answer")
+                    # Don't pass tools to force a text-only response
+                    response = self._llm.complete(messages, tools=None)
+                    break
+
+                # Get next response (may include more tool calls)
                 self._current_state = AgentState.GENERATING_RESPONSE
                 response = self._llm.complete(messages, tools=tool_definitions)
 
-                # Update action description if found
-                new_action, _ = self._extract_action_description(response.content)
-                if new_action:
-                    action_description = new_action
-
             # Final response
             self._current_state = AgentState.COMPLETE
-
-            # Clean up response content
-            final_content = response.content
-            if "---" in final_content:
-                parts = final_content.split("---")
-                final_content = parts[-1].strip() if len(parts) > 1 else parts[0]
-
-            # Remove ACTION prefix if present
-            if final_content.startswith("ACTION:"):
-                lines = final_content.split("\n")
-                final_content = "\n".join(lines[1:]).strip()
+            final_content = response.content or "I apologize, I couldn't generate a response."
 
             # Update conversation history
             self._add_message(Message(MessageRole.USER, user_input))
-            self._add_message(Message(MessageRole.ASSISTANT, response.content))
+            self._add_message(Message(MessageRole.ASSISTANT, final_content))
 
             total_duration = (time.time() - start_time) * 1000
 
             self.logger.agent_decision(
-                f"Completed with {len(tools_used)} tool calls",
+                f"Completed with {total_tool_calls} tool calls (limit: {max_tool_calls})",
                 tools=tools_used
             )
 
             return AgentResponse(
                 content=final_content,
-                structured_action=action_description,
+                structured_action=None,  # Removed ACTION: requirement
                 steps=self._steps,
                 total_duration_ms=total_duration,
                 tools_used=list(set(tools_used)),
                 success=True,
                 metadata={
                     "model": self._llm_config.model if self._llm_config else None,
-                    "iterations": iteration
+                    "tool_calls": total_tool_calls,
+                    "max_tool_calls": max_tool_calls
                 }
             )
 
@@ -373,7 +406,7 @@ ACTION: <brief description of what you will do>
             self.logger.error(f"Agent execution failed: {e}", component="agent")
 
             return AgentResponse(
-                content=f"I encountered an error processing your request: {str(e)}",
+                content=f"I encountered an error: {str(e)}",
                 success=False,
                 error=str(e),
                 steps=self._steps,
@@ -509,9 +542,59 @@ ACTION: <brief description of what you will do>
         return [{"role": m.role.value, "content": m.content} for m in self._conversation]
 
 
+# =============================================================================
+# TIER-SPECIFIC SYSTEM PROMPTS - Critical for appropriate response complexity
+# =============================================================================
+
+SIMPLE_TIER_PROMPT = """You are a fast assistant. Answer from your own knowledge unless the user explicitly asks for a lookup or the request is about fresh data (time/date/weather/stocks/news).
+
+Principles:
+- Be decisive and brief (under 40 words).
+- ZERO tools unless the user asks you to search OR it’s clearly fresh-data. If you must fetch, call fast_answer once, then answer.
+- No preambles; just give the answer.
+
+Available tools (use only if necessary):
+{tools}"""
+
+STANDARD_TIER_PROMPT = """You are a capable assistant. Optimize for fast, accurate answers with minimal tool use.
+
+Principles:
+- First, answer directly if you can. Only reach for tools when data is missing, stale, or explicitly requested.
+- If you need to search, prefer fast_answer and keep tool calls to the minimum required (max 3, but aim for 1).
+- Keep responses concise and clear; avoid boilerplate.
+
+Available tools:
+{tools}"""
+
+ADVANCED_TIER_PROMPT = """You are an expert assistant for complex tasks. Optimize for correctness and clarity.
+
+Principles:
+- Quickly outline the plan in your head, then execute. Use tools only where they add real evidence or fresh data.
+- Prefer fewer, high-impact tool calls (max 10). Avoid trivial tool calls (e.g., time) unless requested.
+- Double-check critical facts; provide a crisp, helpful final answer.
+
+Available tools:
+{tools}"""
+
+# Tool call limits by tier
+TIER_TOOL_LIMITS = {
+    "simple": 1,      # ONE tool call max - answer quickly
+    "standard": 3,    # Reasonable for most tasks
+    "advanced": 10    # Complex research/multi-step
+}
+
+# Max tokens by tier - keep latency low
+TIER_MAX_TOKENS = {
+    "simple": 1500,
+    "standard": 4000,
+    "advanced": 8000
+}
+
+
 class TieredAgent:
     """
-    Agent that can operate at different tiers with different LLM configs.
+    Agent that operates with tier-specific behavior.
+    Each tier has different prompts, tool limits, and response styles.
     """
 
     def __init__(
@@ -525,17 +608,73 @@ class TieredAgent:
         self.tier_configs = tier_configs
         self._agents: Dict[str, Agent] = {}
         self._current_tier = config.tier
+        self.logger = get_logger()
+
+    def _get_tier_prompt(self, tier: str) -> str:
+        """Get the appropriate system prompt for the tier"""
+        tools = self.tool_registry.list_tools(enabled_only=True)
+        tool_descriptions = "\n".join([f"- {t.name}: {t.description}" for t in tools])
+
+        if tier == "simple":
+            return SIMPLE_TIER_PROMPT.format(tools=tool_descriptions)
+        elif tier == "advanced":
+            return ADVANCED_TIER_PROMPT.format(tools=tool_descriptions)
+        else:
+            return STANDARD_TIER_PROMPT.format(tools=tool_descriptions)
 
     def _get_agent(self, tier: str) -> Agent:
-        """Get or create agent for tier"""
+        """Get or create agent for tier with tier-specific config"""
         if tier not in self._agents:
-            llm_config = self.tier_configs.get(tier, self.tier_configs.get("standard"))
-            self._agents[tier] = Agent(self.config, self.tool_registry, llm_config)
+            base_llm_config = self.tier_configs.get(tier, self.tier_configs.get("standard"))
+
+            # Clone LLM config with tier-specific max_tokens
+            # CRITICAL: This prevents simple queries from generating 1000+ tokens
+            from .config import LLMConfig
+            tier_max_tokens = TIER_MAX_TOKENS.get(tier, 500)
+            llm_config = LLMConfig(
+                provider=base_llm_config.provider,
+                model=base_llm_config.model,
+                api_key=base_llm_config.api_key,
+                api_base=base_llm_config.api_base,
+                max_tokens=tier_max_tokens,  # TIER-SPECIFIC LIMIT
+                max_completion_tokens=tier_max_tokens,  # Some models need this
+                temperature=base_llm_config.temperature,
+                top_p=base_llm_config.top_p,
+                timeout=base_llm_config.timeout,
+                max_retries=base_llm_config.max_retries,
+                retry_delay=base_llm_config.retry_delay,
+                streaming=base_llm_config.streaming
+            )
+
+            # Create modified config with tier-specific tool limits
+            tier_config = AgentConfig(
+                llm_config=llm_config,
+                tier=tier,
+                system_prompt=self._get_tier_prompt(tier),
+                max_tool_calls=TIER_TOOL_LIMITS.get(tier, 3),
+                tool_timeout=self.config.tool_timeout,
+                allow_code_execution=self.config.allow_code_execution,
+                allow_internet=self.config.allow_internet,
+                allow_bash=self.config.allow_bash
+            )
+
+            self.logger.info(
+                f"Creating {tier} tier agent (max_tokens={tier_max_tokens}, max_tools={TIER_TOOL_LIMITS.get(tier, 3)})",
+                component="agent"
+            )
+
+            self._agents[tier] = Agent(tier_config, self.tool_registry, llm_config)
         return self._agents[tier]
 
     def run(self, user_input: str, tier: str = None, context: Optional[str] = None) -> AgentResponse:
-        """Run with specified tier"""
+        """Run with specified tier and tier-appropriate behavior"""
         tier = tier or self._current_tier
+
+        self.logger.info(
+            f"Running agent at tier '{tier}' (max {TIER_TOOL_LIMITS.get(tier, 3)} tool calls)",
+            component="agent"
+        )
+
         agent = self._get_agent(tier)
         return agent.run(user_input, context)
 
