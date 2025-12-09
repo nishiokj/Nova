@@ -201,7 +201,14 @@ class TTSWorker:
         return self._speaking
 
 
-def run_tts_worker_process(tts_queue, shutdown_event, cancel_event, tts_heartbeat, voice_config):
+def run_tts_worker_process(
+    tts_queue,
+    shutdown_event,
+    cancel_event,
+    tts_heartbeat,
+    voice_config,
+    tts_speaking_event
+):
     """
     Top-level function to run TTS worker in a subprocess.
     Must be top-level (not a closure) for proper pickling with spawn.
@@ -264,31 +271,37 @@ def run_tts_worker_process(tts_queue, shutdown_event, cancel_event, tts_heartbea
     # Define speak function based on engine type
     def speak_text(text: str) -> bool:
         """Speak text using the available engine"""
-        if use_say_command:
-            # Use macOS 'say' command - runs in subprocess, very reliable
-            try:
-                rate = (voice_config or {}).get('rate', 180)
-                result = subprocess.run(
-                    ["say", "-r", str(rate), text],
-                    capture_output=True,
-                    timeout=300  # 5 minute timeout for long text
-                )
-                return result.returncode == 0
-            except subprocess.TimeoutExpired:
-                logger.warning("say command timed out")
-                return False
-            except Exception as e:
-                logger.error(f"say command failed: {e}")
-                return False
-        else:
-            # Use pyttsx3
-            try:
-                engine.say(text)
-                engine.runAndWait()
-                return True
-            except Exception as e:
-                logger.error(f"pyttsx3 failed: {e}")
-                return False
+        if tts_speaking_event:
+            tts_speaking_event.set()
+        try:
+            if use_say_command:
+                # Use macOS 'say' command - runs in subprocess, very reliable
+                try:
+                    rate = (voice_config or {}).get('rate', 180)
+                    result = subprocess.run(
+                        ["say", "-r", str(rate), text],
+                        capture_output=True,
+                        timeout=300  # 5 minute timeout for long text
+                    )
+                    return result.returncode == 0
+                except subprocess.TimeoutExpired:
+                    logger.warning("say command timed out")
+                    return False
+                except Exception as e:
+                    logger.error(f"say command failed: {e}")
+                    return False
+            else:
+                # Use pyttsx3
+                try:
+                    engine.say(text)
+                    engine.runAndWait()
+                    return True
+                except Exception as e:
+                    logger.error(f"pyttsx3 failed: {e}")
+                    return False
+        finally:
+            if tts_speaking_event:
+                tts_speaking_event.clear()
 
     # Main loop
     try:
@@ -330,6 +343,7 @@ def run_tts_worker_process(tts_queue, shutdown_event, cancel_event, tts_heartbea
 
                 # Speak the text
                 start_time = time.time()
+                logger.debug(f"SPEAKING THIS TEXT", text)
                 success = speak_text(text)
                 duration_ms = (time.time() - start_time) * 1000
 
@@ -361,6 +375,7 @@ def create_tts_worker(event_bus: EventBus, voice_config: Optional[Dict[str, Any]
             event_bus.shutdown_event,
             event_bus.cancel_event,
             event_bus._tts_last_heartbeat,
-            voice_config
+            voice_config,
+            event_bus.tts_speaking_event
         )
     )

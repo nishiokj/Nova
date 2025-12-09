@@ -13,7 +13,12 @@
       "Bash(docker logs:*)",
       "Bash(docker exec:*)",
       "Bash(chmod:*)",
-      "Bash(docker-compose up:*)"
+      "Bash(docker-compose up:*)",
+      "Bash(mkdir:*)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(pip3:*)",
+      "Bash(.venv/bin/python -m pytest:*)"
     ],
     "deny": []
   }
