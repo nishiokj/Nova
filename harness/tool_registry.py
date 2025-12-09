@@ -605,6 +605,26 @@ class ToolRegistry:
                 "print": print,
             }
 
+            original_open = open
+
+            def logging_open(file, mode='r', *args, **kwargs):
+                abs_path = os.path.abspath(file)
+                write_mode = any(ch in mode for ch in ("w", "a", "x", "+"))
+                if write_mode:
+                    self.logger.file_operation("python_open", abs_path, status="starting", detail=f"mode={mode}")
+                try:
+                    result = original_open(file, mode, *args, **kwargs)
+                except Exception as e:
+                    if write_mode:
+                        self.logger.file_operation("python_open", abs_path, status="failed", detail=str(e))
+                    raise
+                else:
+                    if write_mode:
+                        self.logger.file_operation("python_open", abs_path, status="success", detail=f"mode={mode}")
+                    return result
+
+            namespace["open"] = logging_open
+
             # Capture stdout/stderr
             stdout_capture = io.StringIO()
             stderr_capture = io.StringIO()
@@ -666,77 +686,114 @@ class ToolRegistry:
 
     def _file_read(self, path: str, encoding: str = "utf-8", max_bytes: int = 100000) -> ToolResult:
         """Read file contents"""
+        resolved_path = self._resolve_path(path)
         try:
-            # Expand user path
-            path = os.path.expanduser(path)
+            self.logger.file_operation("file_read", resolved_path, status="starting")
 
-            if not os.path.exists(path):
+            if not os.path.exists(resolved_path):
+                error_msg = f"File not found: {resolved_path}"
+                self.logger.file_operation("file_read", resolved_path, status="failed", detail=error_msg)
                 return ToolResult(
                     status=ToolStatus.ERROR,
                     output=None,
-                    error=f"File not found: {path}"
+                    error=error_msg
                 )
 
-            if not os.path.isfile(path):
+            if not os.path.isfile(resolved_path):
+                error_msg = f"Path is not a file: {resolved_path}"
+                self.logger.file_operation("file_read", resolved_path, status="failed", detail=error_msg)
                 return ToolResult(
                     status=ToolStatus.ERROR,
                     output=None,
-                    error=f"Path is not a file: {path}"
+                    error=error_msg
                 )
 
-            file_size = os.path.getsize(path)
+            file_size = os.path.getsize(resolved_path)
             if file_size > max_bytes:
-                with open(path, "r", encoding=encoding) as f:
+                with open(resolved_path, "r", encoding=encoding) as f:
                     content = f.read(max_bytes)
                 content += f"\n...[truncated, file size: {file_size} bytes]"
             else:
-                with open(path, "r", encoding=encoding) as f:
+                with open(resolved_path, "r", encoding=encoding) as f:
                     content = f.read()
+
+            self.logger.file_operation(
+                "file_read",
+                resolved_path,
+                status="success",
+                detail=f"bytes={len(content)} size={file_size}"
+            )
 
             return ToolResult(
                 status=ToolStatus.SUCCESS,
                 output=content,
-                metadata={"path": path, "size": file_size}
+                metadata={"path": resolved_path, "size": file_size, "action": "read"}
             )
 
         except UnicodeDecodeError as e:
+            detail = f"Failed to decode with encoding '{encoding}': {str(e)}"
+            self.logger.file_operation("file_read", resolved_path, status="failed", detail=detail)
             return ToolResult(
                 status=ToolStatus.ERROR,
                 output=None,
-                error=f"Failed to decode file with encoding '{encoding}': {str(e)}"
+                error=detail
             )
         except Exception as e:
+            detail = f"File read failed: {str(e)}"
+            self.logger.file_operation("file_read", resolved_path, status="failed", detail=detail)
             return ToolResult(
                 status=ToolStatus.ERROR,
                 output=None,
-                error=f"File read failed: {str(e)}"
+                error=detail
             )
 
     def _file_write(self, path: str, content: str, append: bool = False) -> ToolResult:
         """Write content to file"""
+        resolved_path = self._resolve_path(path)
         try:
-            resolved_path = self._resolve_path(path)
+            self.logger.file_operation(
+                "file_write",
+                resolved_path,
+                status="starting",
+                detail=f"append={append}"
+            )
 
             # Create directory if needed
             dir_path = os.path.dirname(resolved_path)
             if dir_path and not os.path.exists(dir_path):
-                os.makedirs(dir_path)
+                self.logger.file_operation("mkdir", dir_path, status="starting")
+                os.makedirs(dir_path, exist_ok=True)
+                self.logger.file_operation("mkdir", dir_path, status="success")
 
             mode = "a" if append else "w"
             with open(resolved_path, mode, encoding="utf-8") as f:
                 f.write(content)
 
+            self.logger.file_operation(
+                "file_write",
+                resolved_path,
+                status="success",
+                detail=f"bytes={len(content)} append={append}"
+            )
+
             return ToolResult(
                 status=ToolStatus.SUCCESS,
                 output=f"Successfully {'appended to' if append else 'wrote'} {resolved_path}",
-                metadata={"path": resolved_path, "bytes_written": len(content), "append": append}
+                metadata={
+                    "path": resolved_path,
+                    "bytes_written": len(content),
+                    "append": append,
+                    "action": "append" if append else "write"
+                }
             )
 
         except Exception as e:
+            detail = f"File write failed: {str(e)}"
+            self.logger.file_operation("file_write", resolved_path, status="failed", detail=detail)
             return ToolResult(
                 status=ToolStatus.ERROR,
                 output=None,
-                error=f"File write failed: {str(e)}"
+                error=detail
             )
 
     def _calculator(self, expression: str) -> ToolResult:

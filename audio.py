@@ -776,7 +776,12 @@ class NoiseFilter:
 class MainProcessor:
     """Main audio processor with VAD and speech detection"""
 
-    def __init__(self, config: AudioConfig, audio_queue: Queue):
+    def __init__(
+        self,
+        config: AudioConfig,
+        audio_queue: Queue,
+        tts_block_event: Optional[Any] = None
+    ):
         self.config = config
         self.audio_queue = audio_queue
         self.logger = logging.getLogger(__name__)
@@ -810,6 +815,7 @@ class MainProcessor:
         # Statistics
         self.total_frames_processed = 0
         self.speech_frames_count = 0
+        self._tts_block_event = tts_block_event
     
     def get_supported_sample_rate(self, device_index: int) -> int:
         """Get the best supported sample rate for the device that's compatible with VAD"""
@@ -1055,7 +1061,11 @@ class MainProcessor:
                     if self.noise_filter.calibrate(audio_chunk):
                         calibration_complete = True
                         self.logger.info(f"Noise floor calibrated: {self.noise_filter.noise_floor:.2f}")
-                        self.logger.info("Listening for speech...")
+                    self.logger.info("Listening for speech...")
+                    continue
+
+                if self._tts_block_event and self._tts_block_event.is_set():
+                    self._reset_detection_state()
                     continue
 
                 # Check for speech using enhanced detection
@@ -1091,6 +1101,16 @@ class MainProcessor:
         self.cleanup_audio_stream()
         
         self.logger.info("MainProcessor stopped")
+
+    def _reset_detection_state(self):
+        """Reset speech detection state (used when suppressing audio)"""
+        self.is_speech_active = False
+        self.speech_frames = []
+        self.speech_start_time = None
+        self.last_speech_time = None
+        self.consecutive_speech_frames = 0
+        self.consecutive_silence_frames = 0
+        self.pre_roll_buffer = []
 
 
 class AudioAgent:

@@ -110,6 +110,7 @@ class Agent:
         self._current_state = AgentState.IDLE
         self._step_count = 0
         self._steps: List[AgentStep] = []
+        self._file_operations: List[Dict[str, Any]] = []
 
         # Callbacks
         self._step_callbacks: List[Callable[[AgentStep], None]] = []
@@ -141,6 +142,31 @@ class Agent:
 
         return any(keyword in input_lower for keyword in realtime_keywords)
 
+    def _needs_file_tools(self, user_input: str) -> bool:
+        """
+        Detect if the query clearly requires file system operations.
+        """
+        input_lower = user_input.lower()
+
+        trigger_phrases = [
+            "create file", "write file", "append file", "new file",
+            "add file", "make file", "generate file", "remove file",
+            "delete file", "edit file", "save file", "open file",
+            "create folder", "create directory", "write script",
+            "save script", "create test", "generate script"
+        ]
+
+        if any(phrase in input_lower for phrase in trigger_phrases):
+            return True
+
+        verbs = ["create", "write", "append", "add", "save", "edit", "update", "delete", "remove", "generate"]
+        nouns = ["file", "folder", "directory", "script", "code", "config", "project"]
+
+        if any(verb in input_lower for verb in verbs) and any(noun in input_lower for noun in nouns):
+            return True
+
+        return False
+
     def _get_tool_definitions(self) -> List[ToolDefinition]:
         """Get tool definitions for LLM"""
         return self.tool_registry.get_definitions(enabled_only=True)
@@ -164,6 +190,25 @@ class Agent:
                 callback(step)
             except Exception as e:
                 self.logger.error(f"Step callback error: {e}", component="agent")
+
+    def _record_file_operation(self, path: str, tool_name: str, action: str):
+        """Track file operations requested by tools"""
+        if not path:
+            return
+        entry = {
+            "path": path,
+            "tool": tool_name,
+            "action": action,
+            "timestamp": time.time()
+        }
+        self._file_operations.append(entry)
+        self.logger.file_operation(
+            "agent_file",
+            path,
+            status="noted",
+            detail=f"tool={tool_name} action={action}",
+            component="agent"
+        )
 
     def _emit_thought(self, thought: str):
         """Emit a thought to callbacks"""
@@ -221,6 +266,20 @@ class Agent:
         else:
             self.logger.tool_error(tool_call.name, Exception(result.error or "Unknown"))
 
+        metadata = result.metadata or {}
+        paths = []
+        if metadata.get("path"):
+            paths.append(metadata["path"])
+        if metadata.get("paths"):
+            additional = metadata["paths"]
+            if isinstance(additional, list):
+                paths.extend(additional)
+            else:
+                paths.append(additional)
+        action = metadata.get("action", tool_call.name)
+        for path in paths:
+            self._record_file_operation(path, tool_call.name, action)
+
         return result
 
     def _process_tool_calls(self, tool_calls: List[ToolCall]) -> List[Dict[str, Any]]:
@@ -270,6 +329,7 @@ class Agent:
         self._current_state = AgentState.THINKING
         self._step_count = 0
         self._steps = []
+        self._file_operations = []
         tools_used = []
         total_tool_calls = 0
         max_tool_calls = self.config.max_tool_calls
@@ -291,8 +351,9 @@ class Agent:
 
         # Decide whether tools are allowed for this request
         needs_realtime = self._needs_realtime_data(user_input)
-        # Only allow tools when we truly need external/fresh data or the user asked to search
-        allow_tools = max_tool_calls > 0 and (needs_realtime or wants_search)
+        needs_file_tools = self._needs_file_tools(user_input)
+        # Only allow tools when we truly need external/fresh data, the user asked to search, or file ops are needed
+        allow_tools = max_tool_calls > 0 and (needs_realtime or wants_search or needs_file_tools)
         if not allow_tools:
             max_tool_calls = 0
         tool_definitions = self._get_tool_definitions() if allow_tools else []
@@ -397,7 +458,8 @@ class Agent:
                 metadata={
                     "model": self._llm_config.model if self._llm_config else None,
                     "tool_calls": total_tool_calls,
-                    "max_tool_calls": max_tool_calls
+                    "max_tool_calls": max_tool_calls,
+                    "file_operations": list(self._file_operations)
                 }
             )
 
@@ -436,6 +498,7 @@ class Agent:
         self._steps = []
         tools_used = []
         full_content = ""
+        self._file_operations = []
 
         # Build messages
         messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
@@ -505,7 +568,8 @@ class Agent:
                 steps=self._steps,
                 total_duration_ms=(time.time() - start_time) * 1000,
                 tools_used=list(set(tools_used)),
-                success=True
+                success=True,
+                metadata={"file_operations": list(self._file_operations)}
             )
 
         except Exception as e:

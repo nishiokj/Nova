@@ -1,0 +1,22 @@
+# Test dependencies for Agent Harness
+
+# Core testing framework
+pytest>=7.0.0
+pytest-cov>=4.0.0      # Coverage reporting
+pytest-timeout>=2.0.0  # Test timeouts
+pytest-xdist>=3.0.0    # Parallel test execution
+
+# Optional test utilities
+pytest-watch>=4.2.0    # Watch mode for development
+pytest-randomly>=3.0   # Randomize test order
+
+# Mocking and fixtures
+unittest-mock>=1.4.0   # For Python < 3.8 compatibility (included in 3.8+)
+
+# Code quality (optional)
+flake8>=6.0.0
+black>=23.0.0
+mypy>=1.0.0
+
+# Documentation
+# pytest-html>=3.0.0   # HTML test reports

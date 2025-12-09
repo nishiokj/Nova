@@ -94,6 +94,7 @@ class AgentHarness:
         # State management
         self._state = HarnessState.IDLE
         self._lock = threading.Lock()
+        self._tts_speaking_event = threading.Event()
 
         # Initialize components
         self._initialize_components()
@@ -133,7 +134,10 @@ class AgentHarness:
         self.router = Router(config.router)
 
         # ServiceRep
-        self.service_rep = StreamingServiceRep(config.service_rep)
+        self.service_rep = StreamingServiceRep(
+            config.service_rep,
+            speech_block_event=self._tts_speaking_event
+        )
         self.service_rep.initialize()
 
         # LOUD FAILURE: Check if TTS is enabled but has no engine
@@ -215,8 +219,11 @@ class AgentHarness:
         start_time = time.time()
 
         self.logger.speech_received(speech_text)
+        call_dir = os.getcwd()
+        self.logger.debug("CALLING DIR", call_dir)
         self._set_state(HarnessState.PROCESSING)
-
+        if call_dir == None:
+            self.logger.debug("DIR IS NONE")
         classification = None
         agent_response = None
         spoken_response = ""
@@ -255,12 +262,14 @@ class AgentHarness:
             tier_agent.add_step_callback(progress_callback)
 
             try:
-                with self._profile("harness.agent_run_ms"):
-                    agent_response = self.agent.run(
-                        user_input=speech_text,
-                        tier=classification.tier_name,
-                        context=context
-                    )
+                self.logger.debug("ATTEMPTING TO RUN IN DIRECTORY", call_dir)
+                with self.tool_registry.with_working_dir(call_dir):
+                    with self._profile("harness.agent_run_ms"):
+                        agent_response = self.agent.run(
+                            user_input=speech_text,
+                            tier=classification.tier_name,
+                            context=context
+                        )
             finally:
                 # Clean up callback to avoid accumulation
                 if progress_callback in tier_agent._step_callbacks:
@@ -274,6 +283,15 @@ class AgentHarness:
                 with self._profile("harness.spoken_response_ms"):
                     spoken_response = self._generate_spoken_response(agent_response)
                 full_response = agent_response.content
+                file_ops = agent_response.metadata.get("file_operations", []) if agent_response.metadata else []
+                for op in file_ops:
+                    self.logger.file_operation(
+                        "harness_file",
+                        op.get("path"),
+                        status="noted",
+                        detail=f"tool={op.get('tool')} action={op.get('action')}",
+                        component="harness"
+                    )
                 self.logger.debug(
                     f"Spoken response ready (len={len(spoken_response)}): {spoken_response[:120]}",
                     component="harness"
@@ -391,6 +409,7 @@ class AgentHarness:
         start_time = time.time()
 
         self.logger.speech_received(speech_text)
+        call_dir = os.getcwd()
         self._set_state(HarnessState.PROCESSING)
 
         classification = None
@@ -417,13 +436,14 @@ class AgentHarness:
             agent.add_step_callback(progress_callback)
             agent_response = None
 
-            for chunk in agent.run_streaming(speech_text, context):
-                full_content += chunk
-                yield chunk
+            with self.tool_registry.with_working_dir(call_dir):
+                for chunk in agent.run_streaming(speech_text, context):
+                    full_content += chunk
+                    yield chunk
 
-                # Stream to TTS
-                if hasattr(self.service_rep, 'stream_response_chunk'):
-                    self.service_rep.stream_response_chunk(chunk)
+                    # Stream to TTS
+                    if hasattr(self.service_rep, 'stream_response_chunk'):
+                        self.service_rep.stream_response_chunk(chunk)
 
             # Flush any remaining TTS buffer
             if hasattr(self.service_rep, 'flush_buffer'):
@@ -512,7 +532,7 @@ class AgentHarness:
             return "Writing the file."
         elif "bash" in tool_lower or "command" in tool_lower or "exec" in tool_lower:
             return "Running the command."
-        elif "calculate" in tool_lower or "math" in tool_lower:
+        elif "calc" in tool_lower or "math" in tool_lower:
             return "Calculating."
         else:
             # Only speak for first tool call to avoid over-chatting
@@ -677,6 +697,11 @@ class AgentHarness:
         self.stop_async_processing()
         self.service_rep.cleanup()
         self.logger.info("AgentHarness cleaned up", component="harness")
+
+    @property
+    def tts_speaking_event(self) -> threading.Event:
+        """Event that is set while ServiceRep/TTS is speaking"""
+        return self._tts_speaking_event
 
 
 # Factory function

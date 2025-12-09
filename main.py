@@ -1066,7 +1066,11 @@ class VoiceAgentSystem:
         self.processor_thread.start()
 
         # Create main audio processor (uses our threading queue)
-        self.main_processor = MainProcessor(self.audio_config, self.audio_queue)
+        self.main_processor = MainProcessor(
+            self.audio_config,
+            self.audio_queue,
+            tts_block_event=self.harness.tts_speaking_event
+        )
 
         # Start main processor in thread
         self.main_processor_thread = threading.Thread(
@@ -1328,7 +1332,11 @@ class VoiceAgentSystemV2:
         self.processor_thread.start()
 
         # Start main audio capture
-        self.main_processor = MainProcessor(self.audio_config, self.audio_queue)
+        self.main_processor = MainProcessor(
+            self.audio_config,
+            self.audio_queue,
+            tts_block_event=self.event_bus.tts_speaking_event
+        )
         self.main_processor_thread = threading.Thread(
             target=self.main_processor.run,
             args=(device_index,),

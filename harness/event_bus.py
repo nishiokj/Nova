@@ -125,6 +125,7 @@ class EventBus:
         self.shutdown_event: Event = Event()
         self.cancel_event: Event = Event()  # Signal to cancel current Agent work
         self.agent_busy_event: Event = Event()  # Set when Agent is processing
+        self.tts_speaking_event: Event = Event()  # Set while TTS is actively speaking
 
         # Health tracking
         self._agent_last_heartbeat = mp.Value('d', time.time())

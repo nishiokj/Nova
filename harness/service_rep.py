@@ -47,7 +47,7 @@ class TTSEngine:
     Integrates with the voice.py module.
     """
 
-    def __init__(self, voice_config: Dict[str, Any] = None):
+    def __init__(self, voice_config: Dict[str, Any] = None, speech_block_event: Optional[threading.Event] = None):
         self.logger = get_logger()
         self.voice_config = voice_config or {}
         self._engine = None
@@ -60,6 +60,7 @@ class TTSEngine:
         self._items_queued = 0  # DIAGNOSTIC: track queue activity
         self._items_spoken = 0  # DIAGNOSTIC: track successful speaks
         self._last_error = None  # DIAGNOSTIC: track last error
+        self._speech_block_event = speech_block_event
 
     def initialize(self) -> bool:
         """Initialize TTS engine"""
@@ -197,6 +198,8 @@ class TTSEngine:
         text_preview = text[:60].replace('\n', ' ') if text else "(empty)"
 
         self._speaking = True
+        if self._speech_block_event:
+            self._speech_block_event.set()
         try:
             self.logger.info(
                 f"🔊 TTS SPEAK [{self._engine_type}]: Starting... text='{text_preview}...' (len={len(text)})",
@@ -270,6 +273,8 @@ class TTSEngine:
 
         finally:
             self._speaking = False
+            if self._speech_block_event:
+                self._speech_block_event.clear()
 
     def speak(self, response: SpokenResponse):
         """Queue a response to be spoken"""
@@ -338,10 +343,11 @@ class ServiceRep:
     Generates natural acknowledgments and responses via TTS.
     """
 
-    def __init__(self, config: ServiceRepConfig):
+    def __init__(self, config: ServiceRepConfig, speech_block_event: Optional[threading.Event] = None):
         self.config = config
         self.logger = get_logger()
         self.enabled = config.enabled
+        self._speech_block_event = speech_block_event
 
         # LLM for generating acknowledgments
         self._llm: Optional[LLMAdapter] = None
@@ -353,7 +359,7 @@ class ServiceRep:
             "engine": config.voice_engine,
             "rate": config.voice_rate,
             "volume": config.voice_volume
-        })
+        }, speech_block_event=speech_block_event)
 
         # Response callbacks
         self._response_callbacks: List[Callable[[SpokenResponse], None]] = []
@@ -740,8 +746,8 @@ class StreamingServiceRep(ServiceRep):
     Speaks chunks as they arrive for lower latency.
     """
 
-    def __init__(self, config: ServiceRepConfig):
-        super().__init__(config)
+    def __init__(self, config: ServiceRepConfig, speech_block_event: Optional[threading.Event] = None):
+        super().__init__(config, speech_block_event=speech_block_event)
         self._buffer = ""
         self._buffer_threshold = 50  # Chars before speaking
 

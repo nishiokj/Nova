@@ -36,6 +36,7 @@ class EventType(Enum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     TOOL_ERROR = "tool_error"
+    FILE_OPERATION = "file_operation"
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
     LLM_ERROR = "llm_error"
@@ -255,6 +256,47 @@ class StructuredLogger:
             duration_ms=duration_ms
         )
         self._log_entry(entry, f"✅ TOOL RESULT ({duration_ms:.0f}ms): {result_str}")
+
+    def tool_error(self, tool_name: str, error: Exception, duration_ms: float = 0):
+        """Log tool error - GOLDEN PATH"""
+        entry = self._create_entry(
+            EventType.TOOL_ERROR, LogLevel.ERROR,
+            f"Tool {tool_name} failed: {error}", component="tools",
+            data={"tool": tool_name}, error=error,
+            duration_ms=duration_ms
+        )
+        self._log_entry(entry, f"❌ TOOL ERROR ({duration_ms:.0f}ms): {tool_name} - {error}")
+
+    def file_operation(
+        self,
+        operation: str,
+        path: Optional[str],
+        status: str,
+        detail: Optional[str] = None,
+        component: str = "tools"
+    ):
+        """Log file operations with clear path information"""
+        safe_path = path or "(unknown)"
+        message = f"{operation} {status}: {safe_path}"
+        level = LogLevel.INFO
+        if status.lower() in {"failed", "error", "denied"}:
+            level = LogLevel.ERROR
+        entry = self._create_entry(
+            EventType.FILE_OPERATION,
+            level,
+            message,
+            component=component,
+            data={
+                "operation": operation,
+                "path": safe_path,
+                "status": status,
+                **({"detail": detail} if detail else {})
+            }
+        )
+        log_msg = f"🗂️ FILE {operation} {status}: {safe_path}"
+        if detail:
+            log_msg += f" | {detail}"
+        self._log_entry(entry, log_msg)
 
     def response_generated(self, response: str, metadata: Optional[Dict] = None):
         """Log final response - GOLDEN PATH"""
