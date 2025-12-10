@@ -18,7 +18,8 @@
       "Bash(source .venv/bin/activate)",
       "Bash(pip install:*)",
       "Bash(pip3:*)",
-      "Bash(.venv/bin/python -m pytest:*)"
+      "Bash(.venv/bin/python -m pytest:*)",
+      "Bash(cat:*)"
     ],
     "deny": []
   }

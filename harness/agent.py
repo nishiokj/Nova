@@ -21,6 +21,7 @@ from .llm_adapter import (
 )
 from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 from .logger import get_logger
+from .agent_execution_logger import get_execution_logger
 from .planner import Planner, Executor, Reflector, Plan, ExecutionTrace, Reflection, PlanStatus
 
 
@@ -110,6 +111,7 @@ class Agent:
         self.config = config
         self.tool_registry = tool_registry
         self.logger = get_logger()
+        self.exec_logger = get_execution_logger()
 
         # Use provided LLM config or agent's config
         self._llm_config = llm_config or config.llm_config
@@ -365,7 +367,8 @@ class Agent:
         self._file_operations = []
 
         # Build messages
-        messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
+        system_prompt = self._build_system_prompt()
+        messages = [Message(MessageRole.SYSTEM, system_prompt)]
         messages.extend(self._conversation)
 
         # Add context if provided
@@ -377,6 +380,30 @@ class Agent:
         # Get tool definitions
         tool_definitions = self._get_tool_definitions()
 
+        # ========== LOG FULL AGENT CONTEXT ==========
+        req_id = self.logger.request_id or "no-req"
+        exec_id = self.exec_logger.new_execution_id(req_id)
+
+        self.exec_logger.log_agent_context(
+            req_id=req_id,
+            exec_id=exec_id,
+            user_input=full_input,
+            tier=self.config.tier,
+            system_prompt=system_prompt,
+            conversation_history=[
+                {"role": m.role.value, "content": m.content[:500] if m.content else ""}
+                for m in self._conversation
+            ],
+            tool_definitions=[
+                {
+                    "name": td.get("function", {}).get("name") if isinstance(td, dict) else getattr(td, "name", "unknown"),
+                    "description": td.get("function", {}).get("description", "")[:200] if isinstance(td, dict) else getattr(td, "description", "")[:200]
+                }
+                for td in tool_definitions
+            ],
+            additional_context={"context_provided": context} if context else None
+        )
+
         try:
             # ========== PHASE 1: PLANNING ==========
             self._current_state = AgentState.PLANNING
@@ -385,12 +412,38 @@ class Agent:
             plan = self._planner.create_plan(
                 user_input=user_input,
                 context=context,
-                tier=self.config.tier
+                tier=self.config.tier,
+                exec_id=exec_id  # Pass exec_id for logging
             )
 
             self.logger.plan_created(
                 f"Plan: {plan.goal_type} - {plan.goal[:60]}",
                 tools=[s.tool_hint for s in plan.steps if s.tool_hint]
+            )
+
+            # ========== LOG PLANNING RESULT ==========
+            self.exec_logger.log_planning_result(
+                req_id=req_id,
+                exec_id=exec_id,
+                goal=plan.goal,
+                goal_type=plan.goal_type,
+                requires_tools=plan.requires_tools,
+                steps=[
+                    {
+                        "step_num": s.step_num,
+                        "objective": s.objective,
+                        "tool_hint": s.tool_hint,
+                        "tool_args_hint": s.tool_args_hint,
+                        "success_criteria": s.success_criteria.description if s.success_criteria else None,
+                        "depends_on": s.depends_on,
+                        "status": s.status.value
+                    }
+                    for s in plan.steps
+                ],
+                success_criteria=plan.success_criteria.description,
+                estimated_complexity=plan.estimated_complexity,
+                reasoning=plan.reasoning,
+                plan_status=plan.status.value
             )
 
             # Record planning step
@@ -409,7 +462,9 @@ class Agent:
             trace = self._executor.execute(
                 plan=plan,
                 messages=messages,
-                tools=tool_definitions if plan.requires_tools else []
+                tools=tool_definitions if plan.requires_tools else [],
+                req_id=req_id,
+                exec_id=exec_id
             )
 
             final_content = trace.final_response or "I apologize, I couldn't generate a response."
@@ -626,38 +681,29 @@ class Agent:
 
 
 # =============================================================================
-# TIER-SPECIFIC SYSTEM PROMPTS - Critical for appropriate response complexity
+# TIER-SPECIFIC SYSTEM PROMPTS - Loaded from config
 # =============================================================================
 
-SIMPLE_TIER_PROMPT = """You are a fast assistant. Answer from your own knowledge unless the user explicitly asks for a lookup or the request is about fresh data (time/date/weather/stocks/news).
+def _load_tier_prompts():
+    """Load tier-specific prompts from config file"""
+    import json
+    from pathlib import Path
 
-Principles:
-- Be decisive and brief (under 40 words).
-- ZERO tools unless the user asks you to search OR it’s clearly fresh-data. If you must fetch, call fast_answer once, then answer.
-- No preambles; just give the answer.
+    config_path = Path(__file__).parent.parent / "config" / "prompts_config.json"
+    try:
+        with open(config_path, 'r') as f:
+            data = json.load(f)
+            return data.get("agent_tier_prompts", {})
+    except Exception:
+        # Fallback to hardcoded defaults if config fails to load
+        return {
+            "simple": "You are a fast assistant. Answer from your own knowledge unless the user explicitly asks for a lookup or the request is about fresh data (time/date/weather/stocks/news).\n\nPrinciples:\n- Be decisive and brief (under 40 words).\n- ZERO tools unless the user asks you to search OR it's clearly fresh-data. If you must fetch, call fast_answer once, then answer.\n- No preambles; just give the answer.\n\nAvailable tools (use only if necessary):\n{tools}",
+            "standard": "You are a capable assistant. Optimize for fast, accurate answers with minimal tool use.\n\nPrinciples:\n- First, answer directly if you can. Only reach for tools when data is missing, stale, or explicitly requested.\n- If you need to search, prefer fast_answer and keep tool calls to the minimum required (max 3, but aim for 1).\n- Keep responses concise and clear; avoid boilerplate.\n\nAvailable tools:\n{tools}",
+            "advanced": "You are an expert personal CLI assistant for complex tasks. Optimize for correctness and clarity.\n\nPrinciples:\n- Quickly outline the plan. This could be multiple steps and also could require discovery if called from an existing system. You are highly capable of multi-turn robust plans and should be very detail oriented for complex tasks. Use tools only where they add real evidence or fresh data.\n- Prefer fewer, high-impact tool calls (max 10). Avoid trivial tool calls (e.g., time) unless requested.\n- Double-check critical facts; provide a crisp, helpful final answer.\n\nAvailable tools:\n{tools}"
+        }
 
-Available tools (use only if necessary):
-{tools}"""
-
-STANDARD_TIER_PROMPT = """You are a capable assistant. Optimize for fast, accurate answers with minimal tool use.
-
-Principles:
-- First, answer directly if you can. Only reach for tools when data is missing, stale, or explicitly requested.
-- If you need to search, prefer fast_answer and keep tool calls to the minimum required (max 3, but aim for 1).
-- Keep responses concise and clear; avoid boilerplate.
-
-Available tools:
-{tools}"""
-
-ADVANCED_TIER_PROMPT = """You are an expert personal CLI assistant for complex tasks. Optimize for correctness and clarity.
-
-Principles:
-- Quickly outline the plan. This could be multiple steps and also could require discovery if called from an existing system. You are highly capable of multi-turn robust plans and should be very detail oriented for complex tasks. Use tools only where they add real evidence or fresh data.
-- Prefer fewer, high-impact tool calls (max 10). Avoid trivial tool calls (e.g., time) unless requested.
-- Double-check critical facts; provide a crisp, helpful final answer.
-
-Available tools:
-{tools}"""
+# Load tier prompts from config
+_TIER_PROMPTS = _load_tier_prompts()
 
 # Tool call limits and max tokens are driven by the JSON config defaults above
 TIER_TOOL_LIMITS = DEFAULT_TIER_TOOL_LIMITS
@@ -688,12 +734,9 @@ class TieredAgent:
         tools = self.tool_registry.list_tools(enabled_only=True)
         tool_descriptions = "\n".join([f"- {t.name}: {t.description}" for t in tools])
 
-        if tier == "simple":
-            return SIMPLE_TIER_PROMPT.format(tools=tool_descriptions)
-        elif tier == "advanced":
-            return ADVANCED_TIER_PROMPT.format(tools=tool_descriptions)
-        else:
-            return STANDARD_TIER_PROMPT.format(tools=tool_descriptions)
+        # Get prompt template from config
+        prompt_template = _TIER_PROMPTS.get(tier, _TIER_PROMPTS.get("standard"))
+        return prompt_template.format(tools=tool_descriptions)
 
     def _get_agent(self, tier: str) -> Agent:
         """Get or create agent for tier with tier-specific config"""

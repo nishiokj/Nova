@@ -449,6 +449,47 @@ class ToolRegistry:
             timeout=15  # Fast timeout - we fetch in parallel
         ))
 
+        # Get Working Directory Tool
+        self.register(Tool(
+            name="get_working_directory",
+            description="Get the current working directory path. Use this to understand where you are in the filesystem before performing file operations.",
+            parameters={},
+            required_params=[],
+            executor=self._get_working_directory,
+            timeout=5
+        ))
+
+        # List Files Tool
+        self.register(Tool(
+            name="list_files",
+            description="List files and directories in a given path. Returns file names, sizes, and types.",
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": "Path to list (defaults to current working directory)",
+                    "default": "."
+                },
+                "include_hidden": {
+                    "type": "boolean",
+                    "description": "Include hidden files (default: false)",
+                    "default": False
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "List recursively (default: false)",
+                    "default": False
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Maximum depth for recursive listing (default: 3)",
+                    "default": 3
+                }
+            },
+            required_params=[],
+            executor=self._list_files,
+            timeout=10
+        ))
+
     # Tool Executors
 
     def _web_search(self, query: str, num_results: int = 5) -> ToolResult:
@@ -575,13 +616,19 @@ class ToolRegistry:
             # Use timeout from config if not specified
             timeout = min(timeout, self.config.bash_timeout)
 
+            # Resolve working directory against calling context
+            if working_dir:
+                resolved_cwd = self._resolve_path(working_dir)
+            else:
+                resolved_cwd = self._get_current_working_dir()
+
             result = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=working_dir
+                cwd=resolved_cwd
             )
 
             output = result.stdout
@@ -1168,6 +1215,133 @@ class ToolRegistry:
             output=output,
             metadata=metadata
         )
+
+    def _get_working_directory(self) -> ToolResult:
+        """Get the current working directory"""
+        try:
+            cwd = self._get_current_working_dir()
+            return ToolResult(
+                status=ToolStatus.SUCCESS,
+                output=cwd,
+                metadata={"path": cwd}
+            )
+        except Exception as e:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Failed to get working directory: {str(e)}"
+            )
+
+    def _list_files(
+        self,
+        path: str = ".",
+        include_hidden: bool = False,
+        recursive: bool = False,
+        max_depth: int = 3
+    ) -> ToolResult:
+        """List files and directories"""
+        try:
+            resolved_path = self._resolve_path(path)
+
+            if not os.path.exists(resolved_path):
+                return ToolResult(
+                    status=ToolStatus.ERROR,
+                    output=None,
+                    error=f"Path does not exist: {resolved_path}"
+                )
+
+            if not os.path.isdir(resolved_path):
+                return ToolResult(
+                    status=ToolStatus.ERROR,
+                    output=None,
+                    error=f"Path is not a directory: {resolved_path}"
+                )
+
+            entries = []
+
+            if recursive:
+                for root, dirs, files in os.walk(resolved_path):
+                    # Calculate current depth
+                    depth = root[len(resolved_path):].count(os.sep)
+                    if depth >= max_depth:
+                        dirs[:] = []  # Don't recurse deeper
+                        continue
+
+                    # Filter hidden files/dirs if needed
+                    if not include_hidden:
+                        dirs[:] = [d for d in dirs if not d.startswith('.')]
+                        files = [f for f in files if not f.startswith('.')]
+
+                    for d in dirs:
+                        dir_path = os.path.join(root, d)
+                        rel_path = os.path.relpath(dir_path, resolved_path)
+                        entries.append(f"{rel_path}/ [DIR]")
+
+                    for f in files:
+                        file_path = os.path.join(root, f)
+                        rel_path = os.path.relpath(file_path, resolved_path)
+                        try:
+                            size = os.path.getsize(file_path)
+                            entries.append(f"{rel_path} ({self._format_size(size)})")
+                        except OSError:
+                            entries.append(f"{rel_path} [ERROR]")
+            else:
+                # Non-recursive listing
+                items = os.listdir(resolved_path)
+
+                if not include_hidden:
+                    items = [item for item in items if not item.startswith('.')]
+
+                # Sort: directories first, then files
+                dirs = []
+                files = []
+
+                for item in sorted(items):
+                    item_path = os.path.join(resolved_path, item)
+                    if os.path.isdir(item_path):
+                        dirs.append(f"{item}/ [DIR]")
+                    else:
+                        try:
+                            size = os.path.getsize(item_path)
+                            files.append(f"{item} ({self._format_size(size)})")
+                        except OSError:
+                            files.append(f"{item} [ERROR]")
+
+                entries = dirs + files
+
+            if not entries:
+                output = f"Directory is empty: {resolved_path}"
+            else:
+                output = f"Contents of {resolved_path}:\n" + "\n".join(entries)
+
+            # Truncate if too long
+            if len(output) > self.config.max_output_length:
+                output = output[:self.config.max_output_length] + "\n...[truncated]"
+
+            return ToolResult(
+                status=ToolStatus.SUCCESS,
+                output=output,
+                metadata={
+                    "path": resolved_path,
+                    "count": len(entries),
+                    "recursive": recursive
+                }
+            )
+
+        except Exception as e:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Failed to list files: {str(e)}"
+            )
+
+    def _format_size(self, bytes: int) -> str:
+        """Format file size in human-readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes < 1024.0:
+                return f"{bytes:.1f}{unit}"
+            bytes /= 1024.0
+        return f"{bytes:.1f}TB"
 
 
 # Decorator for easy tool registration

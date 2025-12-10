@@ -59,17 +59,7 @@ class RouterConfig:
     llm_config: Optional[LLMConfig] = None
     difficulty_tiers: List[str] = field(default_factory=lambda: ["simple", "standard", "advanced"])
     default_tier: str = "standard"
-    classification_prompt: str = """Classify the following user request into a difficulty tier.
-Consider complexity, required tools, and multi-step reasoning.
-
-Tiers:
-- simple: Direct questions, basic info retrieval, single-step tasks
-- standard: Multi-step tasks, tool usage required, moderate complexity
-- advanced: Complex reasoning, multiple tools, code execution, research
-
-User request: {input}
-
-Respond with ONLY the tier name (simple/standard/advanced):"""
+    # classification_prompt moved to config/prompts_config.json
 
 
 @dataclass
@@ -80,14 +70,8 @@ class ServiceRepConfig:
     voice_engine: str = "pyttsx3"
     voice_rate: int = 180
     voice_volume: float = 0.8
-    acknowledgment_prompt: str = """You are a friendly service representative.
-Given the user's request and the agent's planned action, generate a brief, natural acknowledgment
-to speak to the user. Keep it concise (1-2 sentences max).
-
-User request: {user_input}
-Agent's planned action: {agent_action}
-
-Generate a brief spoken acknowledgment:"""
+    # acknowledgment_prompt moved to config/prompts_config.json
+    # canned_responses moved to config/service_rep_config.json
 
 
 @dataclass
@@ -95,17 +79,8 @@ class AgentConfig:
     """Configuration for the Agent component"""
     llm_config: Optional[LLMConfig] = None
     tier: str = "standard"
-    system_prompt: str = """You are a highly capable AI assistant with access to various tools.
-Your goal is to help the user accomplish their tasks efficiently and accurately.
-
-For each request:
-1. Analyze what the user needs
-2. Decide which tools (if any) would help
-3. Execute tools and reason about results
-4. Provide a clear, helpful response
-
-Always be concise, accurate, and helpful. If you need clarification, ask.
-When using tools, explain what you're doing briefly."""
+    # system_prompt moved to config/prompts_config.json (tier-specific prompts)
+    system_prompt: str = ""  # Will be populated from tier-specific prompts
 
     max_tool_calls: int = 10
     tool_timeout: int = 30

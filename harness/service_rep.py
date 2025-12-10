@@ -285,42 +285,55 @@ class ServiceRep:
         # Response callbacks
         self._response_callbacks: List[Callable[[SpokenResponse], None]] = []
 
-        # Canned responses for common situations
-        self._canned_responses = {
-            "thinking": [
-                "Got it—one sec.",
-                "On it.",
-                "Let me think for a moment.",
-                "Working on that now.",
-            ],
-            "searching": [
-                "Let me look that up quickly.",
-                "Searching for the latest.",
-                "Checking that now.",
-            ],
-            "executing": [
-                "Running that now.",
-                "Executing—I'll update you in a moment.",
-                "Got it, running that.",
-            ],
-            "error": [
-                "I ran into an issue.",
-                "Something went wrong.",
-                "I'm having trouble with that.",
-            ],
-            "clarification": [
-                "Quick clarification—what exactly do you want?",
-                "I want to be sure—can you specify?",
-                "Could you be a bit more specific?",
-            ],
-            "done": [
-                "All set.",
-                "Here you go.",
-                "Done—here’s what I found.",
-            ]
-        }
-
+        # Load canned responses from config
+        self._canned_responses = self._load_canned_responses()
         self._response_index = {}  # Track which response to use next
+
+    def _load_canned_responses(self) -> Dict[str, List[str]]:
+        """Load canned responses from config file"""
+        import json
+        from pathlib import Path
+
+        config_path = Path(__file__).parent.parent / "config" / "service_rep_config.json"
+        try:
+            with open(config_path, 'r') as f:
+                data = json.load(f)
+                return data.get("canned_responses", {})
+        except Exception:
+            # Fallback to hardcoded defaults
+            return {
+                "thinking": [
+                    "Got it—one sec.",
+                    "On it.",
+                    "Let me think for a moment.",
+                    "Working on that now.",
+                ],
+                "searching": [
+                    "Let me look that up quickly.",
+                    "Searching for the latest.",
+                    "Checking that now.",
+                ],
+                "executing": [
+                    "Running that now.",
+                    "Executing—I'll update you in a moment.",
+                    "Got it, running that.",
+                ],
+                "error": [
+                    "I ran into an issue.",
+                    "Something went wrong.",
+                    "I'm having trouble with that.",
+                ],
+                "clarification": [
+                    "Quick clarification—what exactly do you want?",
+                    "I want to be sure—can you specify?",
+                    "Could you be a bit more specific?",
+                ],
+                "done": [
+                    "All set.",
+                    "Here you go.",
+                    "Done—here's what I found.",
+                ]
+            }
 
     def initialize(self) -> bool:
         """Initialize the ServiceRep"""

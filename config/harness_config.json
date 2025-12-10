@@ -7,7 +7,7 @@
   "service_rep": {
     "enabled": true,
     "voice_engine": "pyttsx3",
-    "voice_rate": 200,
+    "voice_rate": 190,
     "voice_volume": 0.65
   },
   "agent": {
@@ -19,13 +19,13 @@
     "allow_bash": true,
     "tier_tool_limits": {
       "simple": 1,
-      "standard": 3,
-      "advanced": 10
+      "standard": 5,
+      "advanced": 25
     },
     "tier_max_tokens": {
       "simple": 1500,
       "standard": 4000,
-      "advanced": 8000
+      "advanced": 32000
     }
   },
   "tools": {
@@ -39,7 +39,9 @@
         "file_write",
         "search_filesystem",
         "calculator",
-        "get_current_time"
+        "get_current_time",
+        "get_working_directory",
+        "list_files"
       ],
     "sandbox_bash": true,
     "sandbox_python": true,
@@ -69,8 +71,8 @@
     },
     "simple": {
       "provider": "openai",
-      "model": "gpt-5-mini",
-      "max_tokens": 8192,
+      "model": "gpt-5-nano",
+      "max_tokens": 4098,
       "temperature": 0.7
     },
     "standard": {
@@ -81,7 +83,7 @@
     },
     "advanced": {
       "provider": "openai",
-      "model": "gpt-5-mini",
+      "model": "gpt-5.1",
       "max_tokens": 32000,
       "temperature": 0.7
     }

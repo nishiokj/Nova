@@ -40,75 +40,69 @@ class PatternClassifier:
     """
 
     def __init__(self):
-        # Patterns for simple tasks (EXPANDED for better coverage)
-        self.simple_patterns = [
-            # Questions
-            r"^(what|when|where|who|how) (is|are|was|were|do|does|did)\b",
-            r"^(tell me|what's|whats|what is)\b",
-            r"^(can you|could you|would you)\b.*(tell|explain|describe)\b",
-            # Time/date/weather
-            r"\b(time|date|weather|temperature|forecast)\b",
-            # Greetings
-            r"^(hi|hello|hey|thanks|thank you|bye|goodbye|good morning|good afternoon|good evening)\b",
-            r"^(yes|no|ok|okay|sure|fine|great|yep|nope|yeah|nah)\b$",
-            # Definitions
-            r"^(define|meaning of|what does .* mean|explain)\b",
-            r"\b(definition|meaning)\b.*\bof\b",
-            # Math
-            r"(calculate|compute|what is|how much is).*\d+",
-            r"\d+\s*[\+\-\*\/\^\%]\s*\d+",
-            # Conversions
-            r"(convert|how many)\b.*\b(to|in|from)\b",
-            # Simple requests
-            r"^(show|display|list|give me)\b",
-            r"\b(summarize|summary|tldr|brief)\b",
-            # Facts
-            r"^(who|what) (invented|created|discovered|founded|wrote|made)\b",
-            r"\b(capital|population|president|ceo|founder)\b.*\bof\b",
-        ]
-
-        # Patterns for advanced tasks (EXPANDED)
-        self.advanced_patterns = [
-            # Code generation
-            r"\b(write|create|generate|build|implement|develop|code)\b.*\b(code|program|script|application|app|function|class|module|api)\b",
-            r"\b(programming|coding|software|algorithm)\b",
-            # Analysis
-            r"\b(analyze|research|investigate|deep dive|examine|study)\b",
-            r"\b(multiple|several|various|many)\b.*\b(steps|tasks|operations|files)\b",
-            # Comparison
-            r"\b(compare|contrast|evaluate|assess|review)\b.*\b(and|vs|versus|between)\b",
-            # Automation
-            r"\b(automate|workflow|pipeline|integration|deploy|ci/cd)\b",
-            # Debugging
-            r"\b(debug|fix|troubleshoot|diagnose|solve)\b.*\b(error|bug|issue|problem|exception)\b",
-            # Complex tasks
-            r"\b(complex|complicated|sophisticated|advanced|comprehensive)\b",
-            r"\b(optimize|improve|enhance|refactor|redesign|architect)\b",
-            # Multi-step
-            r"\b(step by step|walkthrough|guide me|help me build)\b",
-            r"\b(entire|whole|full|complete)\b.*\b(project|system|application)\b",
-        ]
-
-        # Patterns indicating tool usage needed (standard tier)
-        self.tool_patterns = [
-            # Web
-            r"\b(search|look up|find|google|browse|web)\b",
-            r"\b(download|fetch|get from|retrieve|pull)\b",
-            # Execution
-            r"\b(run|execute|open|start|launch|call)\b",
-            # Files
-            r"\b(file|folder|directory|document|read|write|save|load)\b",
-            # System
-            r"\b(install|update|upgrade|uninstall|pip|npm|brew)\b",
-            r"\b(terminal|command|shell|bash|cli)\b",
-            # Network
-            r"\b(api|endpoint|request|response|http|url|fetch)\b",
-        ]
+        # Load patterns from config
+        patterns = self._load_patterns()
+        self.simple_patterns = patterns.get("simple_patterns", [])
+        self.advanced_patterns = patterns.get("advanced_patterns", [])
+        self.tool_patterns = patterns.get("tool_patterns", [])
 
         # Pre-compile all patterns for speed
         self._compiled_simple = [re.compile(p, re.IGNORECASE) for p in self.simple_patterns]
         self._compiled_advanced = [re.compile(p, re.IGNORECASE) for p in self.advanced_patterns]
         self._compiled_tool = [re.compile(p, re.IGNORECASE) for p in self.tool_patterns]
+
+    def _load_patterns(self) -> Dict[str, List[str]]:
+        """Load pattern lists from config file"""
+        import json
+        from pathlib import Path
+
+        config_path = Path(__file__).parent.parent / "config" / "router_patterns_config.json"
+        try:
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        except Exception:
+            # Fallback to hardcoded defaults
+            return {
+                "simple_patterns": [
+                    r"^(what|when|where|who|how) (is|are|was|were|do|does|did)\b",
+                    r"^(tell me|what's|whats|what is)\b",
+                    r"^(can you|could you|would you)\b.*(tell|explain|describe)\b",
+                    r"\b(time|date|weather|temperature|forecast)\b",
+                    r"^(hi|hello|hey|thanks|thank you|bye|goodbye|good morning|good afternoon|good evening)\b",
+                    r"^(yes|no|ok|okay|sure|fine|great|yep|nope|yeah|nah)\b$",
+                    r"^(define|meaning of|what does .* mean|explain)\b",
+                    r"\b(definition|meaning)\b.*\bof\b",
+                    r"(calculate|compute|what is|how much is).*\d+",
+                    r"\d+\s*[\+\-\*\/\^\%]\s*\d+",
+                    r"(convert|how many)\b.*\b(to|in|from)\b",
+                    r"^(show|display|list|give me)\b",
+                    r"\b(summarize|summary|tldr|brief)\b",
+                    r"^(who|what) (invented|created|discovered|founded|wrote|made)\b",
+                    r"\b(capital|population|president|ceo|founder)\b.*\bof\b",
+                ],
+                "advanced_patterns": [
+                    r"\b(write|create|generate|build|implement|develop|code)\b.*\b(code|program|script|application|app|function|class|module|api)\b",
+                    r"\b(programming|coding|software|algorithm)\b",
+                    r"\b(analyze|research|investigate|deep dive|examine|study)\b",
+                    r"\b(multiple|several|various|many)\b.*\b(steps|tasks|operations|files)\b",
+                    r"\b(compare|contrast|evaluate|assess|review)\b.*\b(and|vs|versus|between)\b",
+                    r"\b(automate|workflow|pipeline|integration|deploy|ci/cd)\b",
+                    r"\b(debug|fix|troubleshoot|diagnose|solve)\b.*\b(error|bug|issue|problem|exception)\b",
+                    r"\b(complex|complicated|sophisticated|advanced|comprehensive)\b",
+                    r"\b(optimize|improve|enhance|refactor|redesign|architect)\b",
+                    r"\b(step by step|walkthrough|guide me|help me build)\b",
+                    r"\b(entire|whole|full|complete)\b.*\b(project|system|application)\b",
+                ],
+                "tool_patterns": [
+                    r"\b(search|look up|find|google|browse|web)\b",
+                    r"\b(download|fetch|get from|retrieve|pull)\b",
+                    r"\b(run|execute|open|start|launch|call)\b",
+                    r"\b(file|folder|directory|document|read|write|save|load)\b",
+                    r"\b(install|update|upgrade|uninstall|pip|npm|brew)\b",
+                    r"\b(terminal|command|shell|bash|cli)\b",
+                    r"\b(api|endpoint|request|response|http|url|fetch)\b",
+                ]
+            }
 
     def classify(self, text: str) -> Optional[TaskClassification]:
         """

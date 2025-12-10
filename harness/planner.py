@@ -19,6 +19,7 @@ from enum import Enum
 from .llm_adapter import LLMAdapter, Message, MessageRole, LLMResponse, ToolCall
 from .tool_registry import ToolRegistry, ToolResult
 from .logger import get_logger
+from .agent_execution_logger import get_execution_logger
 
 
 class PlanStatus(Enum):
@@ -130,7 +131,20 @@ class Reflection:
 # PLANNER: Creates execution plans with explicit success criteria
 # =============================================================================
 
-PLANNING_PROMPT = """You are a planning assistant. Given a user request, create an execution plan.
+def _load_planner_prompts():
+    """Load planner prompts from config file"""
+    import json
+    from pathlib import Path
+
+    config_path = Path(__file__).parent.parent / "config" / "prompts_config.json"
+    try:
+        with open(config_path, 'r') as f:
+            data = json.load(f)
+            return data.get("planner_prompts", {})
+    except Exception:
+        # Fallback to hardcoded defaults
+        return {
+            "planning": """You are a planning assistant. Given a user request, create an execution plan.
 
 IMPORTANT: Your job is to determine:
 1. What is the user's ACTUAL GOAL? (not just what they said, but what they want to achieve)
@@ -139,21 +153,21 @@ IMPORTANT: Your job is to determine:
 
 Respond with a JSON plan:
 ```json
-{
+{{
   "goal": "Clear statement of what user wants to achieve",
   "goal_type": "question|task|creation|search",
   "requires_tools": true/false,
   "steps": [
-    {
+    {{
       "step_num": 1,
       "objective": "What this step accomplishes",
       "tool_hint": "tool_name or null for reasoning",
-      "tool_args_hint": {"arg": "value"} or null
-    }
+      "tool_args_hint": {{"arg": "value"}} or null
+    }}
   ],
   "success_criteria": "How we know the goal was achieved",
   "reasoning": "Why this plan will work"
-}
+}}
 ```
 
 GUIDELINES:
@@ -165,7 +179,41 @@ GUIDELINES:
 Available tools: {tools}
 
 User request: {user_input}
-{context}"""
+{context}""",
+            "reflection": """Evaluate if the goal was achieved.
+
+GOAL: {goal}
+SUCCESS CRITERIA: {success_criteria}
+
+EXECUTION SUMMARY:
+- Tool calls: {tool_calls} ({tool_failures} failed)
+- Steps completed: {steps_completed}/{total_steps}
+
+FINAL RESPONSE:
+{response}
+
+Evaluate honestly:
+1. Was the GOAL actually achieved? (yes/no)
+2. Confidence (0-1): How sure are you?
+3. Evidence: What indicates success or failure?
+4. Gaps: What's missing or wrong?
+
+Respond with JSON:
+```json
+{{
+  "goal_achieved": true/false,
+  "confidence": 0.0-1.0,
+  "evidence": ["reason1", "reason2"],
+  "gaps": ["gap1", "gap2"],
+  "suggestions": ["suggestion1"]
+}}
+```"""
+        }
+
+# Load planner prompts from config
+_PLANNER_PROMPTS = _load_planner_prompts()
+PLANNING_PROMPT = _PLANNER_PROMPTS.get("planning", "")
+REFLECTION_PROMPT = _PLANNER_PROMPTS.get("reflection", "")
 
 
 class Planner:
@@ -179,12 +227,14 @@ class Planner:
         self.llm = llm
         self.tool_registry = tool_registry
         self.logger = get_logger()
+        self.exec_logger = get_execution_logger()
 
     def create_plan(
         self,
         user_input: str,
         context: Optional[str] = None,
-        tier: str = "standard"
+        tier: str = "standard",
+        exec_id: Optional[str] = None
     ) -> Plan:
         """
         Create an execution plan for the user's request.
@@ -210,7 +260,7 @@ class Planner:
 
         # Simple factual questions (no tools needed)
         question_starters = [
-            "what is", "what's", "who is", "who's", "when did", "when was",
+            "what is", "what's", "what does", "who is", "who's", "when did", "when was",
             "where is", "where's", "how many", "how much", "define", "explain",
             "what are", "why is", "why do", "can you tell me"
         ]
@@ -376,8 +426,12 @@ class Planner:
             else:
                 json_str = content
 
-            return json.loads(json_str.strip())
-        except (json.JSONDecodeError, IndexError):
+            self.logger.debug(f"Attempting to parse JSON (length {len(json_str)}): {json_str[:200]}", component="planner")
+            result = json.loads(json_str.strip())
+            self.logger.debug(f"Successfully parsed JSON, type: {type(result)}", component="planner")
+            return result
+        except (json.JSONDecodeError, IndexError) as e:
+            self.logger.debug(f"JSON parse failed ({type(e).__name__}): {e}. Returning fallback plan.", component="planner")
             # Return minimal plan structure
             return {
                 "goal": user_input,
@@ -387,6 +441,9 @@ class Planner:
                 "success_criteria": "Request handled",
                 "reasoning": "Could not parse plan"
             }
+        except Exception as e:
+            self.logger.error(f"Unexpected error in _parse_plan_response: {type(e).__name__}: {e}", component="planner")
+            raise
 
 
 # =============================================================================
@@ -411,12 +468,15 @@ class Executor:
         self.tool_registry = tool_registry
         self.max_tool_calls = max_tool_calls
         self.logger = get_logger()
+        self.exec_logger = get_execution_logger()
 
     def execute(
         self,
         plan: Plan,
         messages: List[Message],
-        tools: List[Any]
+        tools: List[Any],
+        req_id: Optional[str] = None,
+        exec_id: Optional[str] = None
     ) -> ExecutionTrace:
         """
         Execute a plan and return trace of what happened.
@@ -443,15 +503,22 @@ class Executor:
                     trace.steps_executed = plan.steps.copy()
             else:
                 # Tool-based execution
-                trace = self._execute_with_tools(plan, messages, tools, trace)
+                trace = self._execute_with_tools(
+                    plan,
+                    messages,
+                    tools,
+                    trace,
+                    req_id=req_id,
+                    exec_id=exec_id
+                )
 
-            # Determine overall plan status
-            if trace.all_steps_succeeded:
-                plan.status = PlanStatus.COMPLETED
-            elif trace.had_failures:
-                plan.status = PlanStatus.PARTIAL if trace.final_response else PlanStatus.FAILED
-            else:
-                plan.status = PlanStatus.COMPLETED
+                # Determine overall plan status
+                if trace.all_steps_succeeded:
+                    plan.status = PlanStatus.COMPLETED
+                elif trace.had_failures:
+                    plan.status = PlanStatus.PARTIAL if trace.final_response else PlanStatus.FAILED
+                else:
+                    plan.status = PlanStatus.COMPLETED
 
         except Exception as e:
             self.logger.error(f"Execution failed: {e}", component="executor")
@@ -466,7 +533,9 @@ class Executor:
         plan: Plan,
         messages: List[Message],
         tools: List[Any],
-        trace: ExecutionTrace
+        trace: ExecutionTrace,
+        req_id: Optional[str] = None,
+        exec_id: Optional[str] = None
     ) -> ExecutionTrace:
         """Execute plan that requires tools"""
 
@@ -511,6 +580,51 @@ class Executor:
                     step.error = result.error if not result.is_success else None
                     step.duration_ms = duration_ms
                     trace.steps_executed.append(step)
+
+                    # ========== LOG EXECUTION STEP ==========
+                    if req_id and exec_id:
+                        step_id = f"step-{step.step_num}"
+
+                        # Log execution context before execution
+                        self.exec_logger.log_execution_context(
+                            req_id=req_id,
+                            exec_id=exec_id,
+                            step_id=step_id,
+                            step_num=step.step_num,
+                            step_objective=step.objective,
+                            tool_hint=step.tool_hint,
+                            messages=[{"role": m.role.value, "content": m.content[:200] if m.content else ""} for m in messages[-3:]],  # Last 3 messages
+                            available_tools=[t.get("function", {}).get("name", "unknown") if isinstance(t, dict) else str(t) for t in tools[:5]],  # First 5 tools
+                            dependencies=step.depends_on
+                        )
+
+                        # Log step execution result
+                        status = "completed" if result.is_success else "failed"
+                        failure_mode = None
+                        if not result.is_success:
+                            if "timeout" in str(result.error).lower():
+                                failure_mode = "timeout"
+                            elif "permission" in str(result.error).lower():
+                                failure_mode = "permission_error"
+                            elif result.metadata and result.metadata.get("status") == ToolStatus.DISABLED:
+                                failure_mode = "tool_disabled"
+                            else:
+                                failure_mode = "tool_execution_failed"
+
+                        self.exec_logger.log_execution_step(
+                            req_id=req_id,
+                            exec_id=exec_id,
+                            step_id=step_id,
+                            step_num=step.step_num,
+                            status=status,
+                            step_objective=step.objective,
+                            tool_used=tool_call.name,
+                            tool_result=result.output if result.is_success else None,
+                            error=result.error if not result.is_success else None,
+                            failure_mode=failure_mode,
+                            duration_ms=duration_ms
+                        )
+
                     current_step_idx += 1
 
                 # Add to messages
@@ -546,36 +660,6 @@ class Executor:
 # =============================================================================
 # REFLECTOR: Evaluates execution against goals
 # =============================================================================
-
-REFLECTION_PROMPT = """Evaluate if the goal was achieved.
-
-GOAL: {goal}
-SUCCESS CRITERIA: {success_criteria}
-
-EXECUTION SUMMARY:
-- Tool calls: {tool_calls} ({tool_failures} failed)
-- Steps completed: {steps_completed}/{total_steps}
-
-FINAL RESPONSE:
-{response}
-
-Evaluate honestly:
-1. Was the GOAL actually achieved? (yes/no)
-2. Confidence (0-1): How sure are you?
-3. Evidence: What indicates success or failure?
-4. Gaps: What's missing or wrong?
-
-Respond with JSON:
-```json
-{{
-  "goal_achieved": true/false,
-  "confidence": 0.0-1.0,
-  "evidence": ["reason1", "reason2"],
-  "gaps": ["gap1", "gap2"],
-  "suggestions": ["suggestion1"]
-}}
-```"""
-
 
 class Reflector:
     """
