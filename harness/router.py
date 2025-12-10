@@ -22,21 +22,59 @@ class TaskTier(Enum):
 
 @dataclass
 class TaskClassification:
-    """Result of task classification"""
+    """Result of task classification with budget constraints"""
     tier: TaskTier
     confidence: float
     reasoning: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Budget constraints - set based on tier
+    max_tool_calls: Optional[int] = None
+    max_tokens: Optional[int] = None
+    max_steps: Optional[int] = None
+
+    def __post_init__(self):
+        """Set default budget constraints based on tier if not provided"""
+        # These are hard limits - the agent MUST stay within these
+        tier_budgets = {
+            TaskTier.SIMPLE: {"max_tool_calls": 0, "max_tokens": 500, "max_steps": 1},
+            TaskTier.STANDARD: {"max_tool_calls": 5, "max_tokens": 2000, "max_steps": 5},
+            TaskTier.ADVANCED: {"max_tool_calls": 15, "max_tokens": 8000, "max_steps": 10},
+        }
+        defaults = tier_budgets.get(self.tier, tier_budgets[TaskTier.STANDARD])
+
+        if self.max_tool_calls is None:
+            self.max_tool_calls = defaults["max_tool_calls"]
+        if self.max_tokens is None:
+            self.max_tokens = defaults["max_tokens"]
+        if self.max_steps is None:
+            self.max_steps = defaults["max_steps"]
+
     @property
     def tier_name(self) -> str:
         return self.tier.value
+
+    @property
+    def budget(self) -> Dict[str, int]:
+        """Return budget as dict for easy propagation"""
+        return {
+            "max_tool_calls": self.max_tool_calls,
+            "max_tokens": self.max_tokens,
+            "max_steps": self.max_steps
+        }
 
 
 class PatternClassifier:
     """
     Rule-based classifier using patterns.
-    OPTIMIZED: Expanded patterns for higher confidence, fewer LLM fallbacks.
+
+    SIMPLE tier criteria (must ALL be true):
+    - Instant factual lookup (no reasoning required)
+    - Single atomic answer (name, date, number, yes/no)
+    - No "show work", "explain reasoning", or multi-step anything
+    - No tool usage required
+
+    If ANY of these require reasoning or multiple steps -> NOT simple.
     """
 
     def __init__(self):
@@ -45,11 +83,14 @@ class PatternClassifier:
         self.simple_patterns = patterns.get("simple_patterns", [])
         self.advanced_patterns = patterns.get("advanced_patterns", [])
         self.tool_patterns = patterns.get("tool_patterns", [])
+        # NEW: Patterns that EXCLUDE from simple tier even if simple patterns match
+        self.not_simple_patterns = patterns.get("not_simple_patterns", [])
 
         # Pre-compile all patterns for speed
         self._compiled_simple = [re.compile(p, re.IGNORECASE) for p in self.simple_patterns]
         self._compiled_advanced = [re.compile(p, re.IGNORECASE) for p in self.advanced_patterns]
         self._compiled_tool = [re.compile(p, re.IGNORECASE) for p in self.tool_patterns]
+        self._compiled_not_simple = [re.compile(p, re.IGNORECASE) for p in self.not_simple_patterns]
 
     def _load_patterns(self) -> Dict[str, List[str]]:
         """Load pattern lists from config file"""
@@ -63,23 +104,53 @@ class PatternClassifier:
         except Exception:
             # Fallback to hardcoded defaults
             return {
+                # SIMPLE: Instant factual lookups, single atomic answers
+                # These are things that can be answered in ONE sentence with NO reasoning
                 "simple_patterns": [
-                    r"^(what|when|where|who|how) (is|are|was|were|do|does|did)\b",
-                    r"^(tell me|what's|whats|what is)\b",
-                    r"^(can you|could you|would you)\b.*(tell|explain|describe)\b",
-                    r"\b(time|date|weather|temperature|forecast)\b",
+                    # Greetings and acknowledgments (instant response)
                     r"^(hi|hello|hey|thanks|thank you|bye|goodbye|good morning|good afternoon|good evening)\b",
                     r"^(yes|no|ok|okay|sure|fine|great|yep|nope|yeah|nah)\b$",
-                    r"^(define|meaning of|what does .* mean|explain)\b",
-                    r"\b(definition|meaning)\b.*\bof\b",
-                    r"(calculate|compute|what is|how much is).*\d+",
-                    r"\d+\s*[\+\-\*\/\^\%]\s*\d+",
-                    r"(convert|how many)\b.*\b(to|in|from)\b",
-                    r"^(show|display|list|give me)\b",
-                    r"\b(summarize|summary|tldr|brief)\b",
-                    r"^(who|what) (invented|created|discovered|founded|wrote|made)\b",
-                    r"\b(capital|population|president|ceo|founder)\b.*\bof\b",
+                    # Single-fact questions (no reasoning, just lookup)
+                    r"^what is the (capital|population|name|date|year|time)\b",
+                    r"^who (is|was) the (president|ceo|founder|inventor|author)\b",
+                    r"^when (is|was|did)\b",
+                    r"^where (is|was|are)\b",
+                    # Simple definitions (one concept, no analysis)
+                    r"^(define|what does .* mean)\b",
+                    r"^what is a[n]?\s+\w+\??$",  # "What is a noun?" - single word definition
+                    # Basic arithmetic (single operation, no word problems)
+                    r"^\d+\s*[\+\-\*\/\^\%]\s*\d+\s*[=\?]?\s*$",  # "5 + 3 = ?" pure math
+                    r"^(what is|calculate)\s+\d+\s*[\+\-\*\/]\s*\d+",  # "what is 5+3"
+                    # Simple unit conversions (no multi-step)
+                    r"^(convert|how many) \d+\s*(cm|mm|m|km|inches|feet|miles|kg|g|lb|oz)\b.*\b(to|in)\b",
                 ],
+
+                # NOT_SIMPLE: Patterns that OVERRIDE simple classification
+                # If ANY of these match, task is NOT simple regardless of simple patterns
+                "not_simple_patterns": [
+                    # Multi-step or reasoning indicators
+                    r"\b(step by step|show.*(work|reasoning|steps)|explain.*(how|why|reasoning))\b",
+                    r"\b(and then|first.*then|after that|finally)\b",
+                    r"\b(multiple|several|all|each|every)\b.*(steps?|parts?|components?|factors?)\b",
+                    # Word problems (require parsing and multi-step math)
+                    r"\b(company|factory|factories|store|shop|business)\b.*\b(produce|produces|sell|sells|make|makes)\b",
+                    r"\b(per day|per hour|per week|in \d+ days|in \d+ hours)\b",
+                    r"\b(combined|total|altogether|in all|sum of)\b",
+                    r"\b(more than|less than|percent more|percent less|\d+%)\b.*\b(than|of)\b",
+                    r"\bhalf (of|as much)\b",
+                    # Analysis or comparison
+                    r"\b(compare|contrast|analyze|evaluate|assess)\b",
+                    r"\b(pros and cons|advantages|disadvantages|trade.?offs?)\b",
+                    r"\b(vs\.?|versus|between .* and)\b",
+                    # Long-form output requests
+                    r"\b(write|create|generate|draft|compose)\b.*(essay|article|report|document|story)\b",
+                    r"\b(comprehensive|detailed|thorough|in.?depth)\b",
+                    # Substring/algorithm problems
+                    r"\b(substring|longest|shortest|algorithm|iterate|traverse)\b",
+                    r"\b(array|list|string)\b.*\b(find|search|determine|compute)\b",
+                ],
+
+                # ADVANCED: Complex tasks requiring reasoning or tools
                 "advanced_patterns": [
                     r"\b(write|create|generate|build|implement|develop|code)\b.*\b(code|program|script|application|app|function|class|module|api)\b",
                     r"\b(programming|coding|software|algorithm)\b",
@@ -93,6 +164,8 @@ class PatternClassifier:
                     r"\b(step by step|walkthrough|guide me|help me build)\b",
                     r"\b(entire|whole|full|complete)\b.*\b(project|system|application)\b",
                 ],
+
+                # TOOL patterns -> standard tier
                 "tool_patterns": [
                     r"\b(search|look up|find|google|browse|web)\b",
                     r"\b(download|fetch|get from|retrieve|pull)\b",
@@ -107,44 +180,75 @@ class PatternClassifier:
     def classify(self, text: str) -> Optional[TaskClassification]:
         """
         Classify using pattern matching.
-        OPTIMIZED: Uses pre-compiled patterns, higher confidence thresholds.
-        Returns None only if no match at all (rare with expanded patterns).
+
+        Classification order:
+        1. Check NOT_SIMPLE patterns first - these override any simple match
+        2. Check ADVANCED patterns - complex tasks
+        3. Check SIMPLE patterns - only if not excluded by step 1
+        4. Check TOOL patterns -> standard
+        5. Default to STANDARD
+
+        This ensures multi-step word problems are NEVER classified as simple.
         """
         text_lower = text.lower().strip()
 
-        # Check for simple patterns (using pre-compiled)
-        for i, pattern in enumerate(self._compiled_simple):
+        # STEP 1: Check NOT_SIMPLE exclusions FIRST
+        # These override simple patterns - if matched, task cannot be simple
+        is_excluded_from_simple = False
+        exclusion_reason = None
+        for i, pattern in enumerate(self._compiled_not_simple):
             if pattern.search(text_lower):
-                return TaskClassification(
-                    tier=TaskTier.SIMPLE,
-                    confidence=0.85,  # Higher confidence with expanded patterns
-                    reasoning="Matched simple task pattern",
-                    metadata={"classifier": "pattern", "pattern_idx": i}
-                )
+                is_excluded_from_simple = True
+                exclusion_reason = f"Matched not_simple pattern #{i}"
+                break
 
-        # Check for advanced patterns
+        # STEP 2: Check for ADVANCED patterns (highest priority)
         for i, pattern in enumerate(self._compiled_advanced):
             if pattern.search(text_lower):
                 return TaskClassification(
                     tier=TaskTier.ADVANCED,
-                    confidence=0.80,  # Higher confidence
+                    confidence=0.85,
                     reasoning="Matched advanced task pattern",
-                    metadata={"classifier": "pattern", "pattern_idx": i}
+                    metadata={"classifier": "pattern", "pattern_idx": i, "pattern_type": "advanced"}
                 )
 
-        # Check for tool patterns -> standard tier
+        # STEP 3: Check for SIMPLE patterns (only if not excluded)
+        if not is_excluded_from_simple:
+            for i, pattern in enumerate(self._compiled_simple):
+                if pattern.search(text_lower):
+                    return TaskClassification(
+                        tier=TaskTier.SIMPLE,
+                        confidence=0.90,  # High confidence for true simple tasks
+                        reasoning="Matched simple task pattern (instant fact/greeting)",
+                        metadata={"classifier": "pattern", "pattern_idx": i, "pattern_type": "simple"}
+                    )
+        else:
+            # Log that we blocked a potential simple classification
+            # This helps debug routing decisions
+            pass  # Could add logging here if needed
+
+        # STEP 4: If excluded from simple but not advanced, route to STANDARD
+        # These are tasks that look simple but require reasoning
+        if is_excluded_from_simple:
+            return TaskClassification(
+                tier=TaskTier.STANDARD,
+                confidence=0.80,
+                reasoning=f"Excluded from simple tier: {exclusion_reason}",
+                metadata={"classifier": "pattern_exclusion", "exclusion_reason": exclusion_reason}
+            )
+
+        # STEP 5: Check for tool patterns -> standard tier
         for i, pattern in enumerate(self._compiled_tool):
             if pattern.search(text_lower):
                 return TaskClassification(
                     tier=TaskTier.STANDARD,
-                    confidence=0.75,  # Higher confidence
+                    confidence=0.75,
                     reasoning="Matched tool usage pattern",
-                    metadata={"classifier": "pattern", "pattern_idx": i}
+                    metadata={"classifier": "pattern", "pattern_idx": i, "pattern_type": "tool"}
                 )
 
-        # OPTIMIZATION: Default to STANDARD instead of None
-        # This avoids expensive LLM fallback for unmatched queries
-        # Most queries that don't match explicit patterns are standard tasks
+        # STEP 6: Default to STANDARD for anything unmatched
+        # Most queries that don't match explicit patterns need some reasoning
         return TaskClassification(
             tier=TaskTier.STANDARD,
             confidence=0.6,

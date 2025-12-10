@@ -106,6 +106,7 @@ class ExecutionStepLog:
     step_id: str
     step_num: int
     status: str                     # completed, failed, partial
+    action: Optional[Dict[str, Any]] = None  # What action was taken
     result: Optional[Dict[str, Any]] = None
     failure_mode: Optional[str] = None
     substeps_achieved: Optional[List[str]] = None
@@ -123,6 +124,8 @@ class ExecutionStepLog:
             "step_num": self.step_num,
             "status": self.status
         }
+        if self.action:
+            data["action"] = self.action
         if self.result:
             data["result"] = self.result
         if self.failure_mode:
@@ -134,6 +137,36 @@ class ExecutionStepLog:
         if self.error_details:
             data["error_details"] = self.error_details
         return data
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
+
+
+@dataclass
+class EpisodeSummaryLog:
+    """Episodic summary with RL labels - one per (req_id, exec_id)"""
+    ts: str
+    lvl: str
+    svc: str                        # episode_summary
+    req_id: str
+    exec_id: str
+    meta: Dict[str, Any]            # System metadata (prompt IDs, tool manifest)
+    task: Dict[str, Any]            # Task details
+    stats: Dict[str, Any]           # Deterministic statistics
+    labels: Dict[str, Any]          # RL labels from Reflector
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ts": self.ts,
+            "lvl": self.lvl,
+            "svc": self.svc,
+            "req_id": self.req_id,
+            "exec_id": self.exec_id,
+            "meta": self.meta,
+            "task": self.task,
+            "stats": self.stats,
+            "labels": self.labels
+        }
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2)
@@ -189,33 +222,34 @@ class AgentExecutionLogger:
         exec_id: str,
         user_input: str,
         tier: str,
-        system_prompt: str,
+        system_prompt_id: str,
+        tool_manifest_id: str,
         conversation_history: List[Dict[str, Any]],
-        tool_definitions: List[Dict[str, Any]],
+        tool_names: List[str],
         additional_context: Optional[Dict[str, Any]] = None
     ):
         """
         Log the full context presented to the agent when handling a request.
+        Now uses IDs instead of full schemas for system prompts and tools.
 
         Args:
             req_id: Request ID
             exec_id: Execution ID
             user_input: The user's input text
             tier: Agent tier (simple/standard/advanced)
-            system_prompt: The system prompt used
-            conversation_history: Previous conversation messages
-            tool_definitions: Available tool definitions
+            system_prompt_id: ID of the system prompt (e.g., "tier_advanced_v3")
+            tool_manifest_id: ID of the tool manifest (e.g., "default_tools_v2")
+            conversation_history: Previous conversation messages (truncated)
+            tool_names: List of available tool names only
             additional_context: Any other context information
         """
         context = {
             "tier": tier,
-            "system_prompt": system_prompt,
-            "conversation_history": conversation_history,
-            "tool_definitions": [
-                {"name": t.get("name"), "description": t.get("description")}
-                for t in tool_definitions
-            ],
-            "tool_count": len(tool_definitions)
+            "system_prompt_id": system_prompt_id,
+            "tool_manifest_id": tool_manifest_id,
+            "conversation_history": conversation_history[-5:] if len(conversation_history) > 5 else conversation_history,
+            "tool_names": tool_names,
+            "tool_count": len(tool_names)
         }
         if additional_context:
             context["additional"] = additional_context
@@ -253,6 +287,7 @@ class AgentExecutionLogger:
     ):
         """
         Log the complete planning result with all substeps.
+        Reasoning is truncated to 512 chars.
 
         Args:
             req_id: Request ID
@@ -266,13 +301,16 @@ class AgentExecutionLogger:
             reasoning: Why this plan was chosen
             plan_status: Status of the plan
         """
+        # Truncate reasoning to keep logs manageable
+        reasoning_truncated = reasoning[:512] if len(reasoning) > 512 else reasoning
+
         plan = {
             "goal": goal,
             "goal_type": goal_type,
             "requires_tools": requires_tools,
             "estimated_complexity": estimated_complexity,
             "success_criteria": success_criteria,
-            "reasoning": reasoning,
+            "reasoning": reasoning_truncated,
             "status": plan_status,
             "steps": steps,
             "step_count": len(steps)
@@ -299,10 +337,13 @@ class AgentExecutionLogger:
         tool_hint: Optional[str],
         messages: List[Dict[str, Any]],
         available_tools: List[str],
+        system_prompt_id: str,
+        tool_manifest_id: str,
         dependencies: Optional[List[int]] = None
     ):
         """
         Log the context provided to a subagent/substep during execution.
+        Now includes system_prompt_id and tool_manifest_id.
 
         Args:
             req_id: Request ID
@@ -311,8 +352,10 @@ class AgentExecutionLogger:
             step_num: Step number
             step_objective: What this step should accomplish
             tool_hint: Suggested tool for this step
-            messages: Message history for this step
-            available_tools: Tools available to this step
+            messages: Message history for this step (truncated)
+            available_tools: Tool names only (not full schemas)
+            system_prompt_id: ID of system prompt
+            tool_manifest_id: ID of tool manifest
             dependencies: Steps this depends on
         """
         context = {
@@ -320,8 +363,10 @@ class AgentExecutionLogger:
             "step_objective": step_objective,
             "tool_hint": tool_hint,
             "message_count": len(messages),
-            "messages": messages,
-            "available_tools": available_tools,
+            "messages": messages[-3:] if len(messages) > 3 else messages,  # Keep only recent messages
+            "available_tools": available_tools,  # Names only
+            "system_prompt_id": system_prompt_id,
+            "tool_manifest_id": tool_manifest_id,
             "dependencies": dependencies or []
         }
 
@@ -345,8 +390,11 @@ class AgentExecutionLogger:
         step_num: int,
         status: str,
         step_objective: str,
-        tool_used: Optional[str] = None,
-        tool_result: Optional[Any] = None,
+        tool_name: Optional[str] = None,
+        tool_args: Optional[Dict[str, Any]] = None,
+        tool_success: Optional[bool] = None,
+        tool_output: Optional[Any] = None,
+        tool_error: Optional[str] = None,
         error: Optional[str] = None,
         failure_mode: Optional[str] = None,
         substeps_achieved: Optional[List[str]] = None,
@@ -354,7 +402,7 @@ class AgentExecutionLogger:
         duration_ms: float = 0
     ):
         """
-        Log detailed execution step result with failure modes.
+        Log detailed execution step result with action and result details.
 
         Args:
             req_id: Request ID
@@ -363,33 +411,50 @@ class AgentExecutionLogger:
             step_num: Step number
             status: Step status (completed/failed/partial)
             step_objective: What this step was trying to accomplish
-            tool_used: Tool that was used
-            tool_result: Result from tool execution
-            error: Error message if failed
+            tool_name: Name of tool that was called
+            tool_args: Arguments passed to tool
+            tool_success: Whether tool call succeeded
+            tool_output: Output from tool
+            tool_error: Error from tool if failed
+            error: Error message if step failed
             failure_mode: Specific failure mode (tool_failed/llm_error/timeout/etc)
             substeps_achieved: Substeps that succeeded
             substeps_failed: Substeps that failed
             duration_ms: Execution duration
         """
-        result = {
-            "step_objective": step_objective,
+        # Build action object
+        action = None
+        if tool_name:
+            action = {
+                "type": "tool_call",
+                "tool_name": tool_name,
+                "tool_args": tool_args or {}
+            }
+
+        # Build result object
+        result_data = {
             "duration_ms": round(duration_ms)
         }
-        if tool_used:
-            result["tool_used"] = tool_used
-        if tool_result is not None:
-            # Truncate large results
-            result_str = str(tool_result)
-            result["tool_result"] = result_str[:2000] if len(result_str) > 2000 else result_str
-            result["result_truncated"] = len(result_str) > 2000
+
+        if tool_name:
+            result_data["tool_success"] = tool_success if tool_success is not None else False
+            if tool_output is not None:
+                # Truncate large outputs
+                output_str = str(tool_output)
+                result_data["tool_output"] = output_str[:2000] if len(output_str) > 2000 else output_str
+                result_data["result_truncated"] = len(output_str) > 2000
+            if tool_error:
+                result_data["error"] = tool_error
 
         error_details = None
-        if error or failure_mode:
+        if error or failure_mode or tool_error:
             error_details = {}
             if error:
                 error_details["error_message"] = error
             if failure_mode:
                 error_details["failure_mode"] = failure_mode
+            if tool_error:
+                error_details["tool_error"] = tool_error
 
         # Determine log level based on status
         lvl = "INFO" if status == "completed" else "WARNING"
@@ -403,11 +468,79 @@ class AgentExecutionLogger:
             step_id=step_id,
             step_num=step_num,
             status=status,
-            result=result,
+            action=action,
+            result=result_data,
             failure_mode=failure_mode,
             substeps_achieved=substeps_achieved,
             substeps_failed=substeps_failed,
             error_details=error_details
+        )
+
+        self.logger.info(entry.to_json())
+
+    def log_episode_summary(
+        self,
+        req_id: str,
+        exec_id: str,
+        tier: str,
+        system_prompt_id: str,
+        tool_manifest_id: str,
+        user_input: str,
+        goal: str,
+        goal_type: str,
+        total_duration_ms: float,
+        tool_calls: int,
+        tool_failures: int,
+        max_tool_calls_allowed: int,
+        rl_labels: Dict[str, Any]
+    ):
+        """
+        Log episodic summary with RL labels - one per (req_id, exec_id).
+
+        Args:
+            req_id: Request ID
+            exec_id: Execution ID
+            tier: Agent tier used
+            system_prompt_id: ID of system prompt
+            tool_manifest_id: ID of tool manifest
+            user_input: User's original input
+            goal: Extracted goal from planning
+            goal_type: Type of goal (question/task/creation/search)
+            total_duration_ms: Total execution time
+            tool_calls: Number of tool calls made
+            tool_failures: Number of tool failures
+            max_tool_calls_allowed: Max tool calls limit
+            rl_labels: RL labels from Reflector (goal_achieved, reward, etc.)
+        """
+        meta = {
+            "tier": tier,
+            "system_prompt_id": system_prompt_id,
+            "tool_manifest_id": tool_manifest_id
+        }
+
+        task = {
+            "user_input": user_input,
+            "goal": goal,
+            "goal_type": goal_type
+        }
+
+        stats = {
+            "total_duration_ms": round(total_duration_ms),
+            "tool_calls": tool_calls,
+            "tool_failures": tool_failures,
+            "max_tool_calls_allowed": max_tool_calls_allowed
+        }
+
+        entry = EpisodeSummaryLog(
+            ts=self._ts(),
+            lvl="INFO",
+            svc="episode_summary",
+            req_id=req_id,
+            exec_id=exec_id,
+            meta=meta,
+            task=task,
+            stats=stats,
+            labels=rl_labels
         )
 
         self.logger.info(entry.to_json())

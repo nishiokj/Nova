@@ -95,6 +95,7 @@ class AgentHarness:
         self._state = HarnessState.IDLE
         self._lock = threading.Lock()
         self._tts_speaking_event = threading.Event()
+        self._cancel_event = threading.Event()  # Signal to cancel current work (barge-in)
 
         # Initialize components
         self._initialize_components()
@@ -133,10 +134,11 @@ class AgentHarness:
         # Router
         self.router = Router(config.router)
 
-        # ServiceRep
+        # ServiceRep (with cancel_event for barge-in support)
         self.service_rep = StreamingServiceRep(
             config.service_rep,
-            speech_block_event=self._tts_speaking_event
+            speech_block_event=self._tts_speaking_event,
+            cancel_event=self._cancel_event
         )
         self.service_rep.initialize()
 
@@ -690,6 +692,17 @@ class AgentHarness:
     def tts_speaking_event(self) -> threading.Event:
         """Event that is set while ServiceRep/TTS is speaking"""
         return self._tts_speaking_event
+
+    @property
+    def cancel_event(self) -> threading.Event:
+        """Event to signal cancellation of current work (e.g., barge-in)"""
+        return self._cancel_event
+
+    def clear_tts_queue(self):
+        """Clear pending TTS queue (for barge-in support)"""
+        if self.service_rep and hasattr(self.service_rep, 'tts'):
+            self.service_rep.tts.clear_queue()
+            self.logger.info("TTS queue cleared (barge-in)", component="harness")
 
 
 # Factory function

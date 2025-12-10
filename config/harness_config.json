@@ -61,31 +61,101 @@
       "provider": "openai",
       "model": "gpt-5-nano",
       "max_tokens": 100,
-      "temperature": 0.1
+      "temperature": 0.1,
+      "failover_models": [
+        {
+          "provider": "gemini",
+          "model": "gemini-2.0-flash-lite",
+          "max_tokens": 100,
+          "temperature": 0.1
+        },
+        {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "max_tokens": 100,
+          "temperature": 0.1
+        }
+      ]
     },
     "service_rep": {
       "provider": "openai",
       "model": "gpt-5-mini",
       "max_tokens": 2048,
-      "temperature": 0.7
+      "temperature": 0.7,
+      "failover_models": [
+        {
+          "provider": "gemini",
+          "model": "gemini-2.0-flash",
+          "max_tokens": 2048,
+          "temperature": 0.7
+        },
+        {
+          "provider": "gemini",
+          "model": "gemini-2.5-pro",
+          "max_tokens": 2048,
+          "temperature": 0.7
+        }
+      ]
     },
     "simple": {
       "provider": "openai",
       "model": "gpt-5-nano",
       "max_tokens": 4098,
-      "temperature": 0.7
+      "temperature": 0.7,
+      "failover_models": [
+        {
+          "provider": "gemini",
+          "model": "gemini-2.0-flash-lite",
+          "max_tokens": 4098,
+          "temperature": 0.7
+        },
+        {
+          "provider": "gemini",
+          "model": "gemini-2.0-flash",
+          "max_tokens": 4098,
+          "temperature": 0.7
+        }
+      ]
     },
     "standard": {
       "provider": "openai",
       "model": "gpt-5-mini",
       "max_tokens": 16000,
-      "temperature": 0.7
+      "temperature": 0.7,
+      "failover_models": [
+        {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "max_tokens": 16000,
+          "temperature": 0.7
+        },
+        {
+          "provider": "gemini",
+          "model": "gemini-2.5-pro",
+          "max_tokens": 16000,
+          "temperature": 0.7
+        }
+      ]
     },
     "advanced": {
       "provider": "openai",
       "model": "gpt-5.1",
       "max_tokens": 32000,
-      "temperature": 0.7
+      "temperature": 0.7,
+      "failover_models": [
+        {
+          "provider": "gemini",
+          "model": "gemini-2.5-pro",
+          "max_tokens": 32000,
+          "temperature": 0.7
+        },
+        {
+          "provider": "gemini",
+          "model": "gemini-2.5-flash",
+          "max_tokens": 32000,
+          "temperature": 0.7
+        }
+      ]
     }
   }
 }

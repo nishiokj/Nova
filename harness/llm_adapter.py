@@ -15,6 +15,7 @@ import threading
 
 from .config import LLMConfig
 from .logger import get_logger
+from .resilience import ResilienceConfig, resilient_call
 
 
 class MessageRole(Enum):
@@ -110,6 +111,17 @@ class LLMResponse:
         return len(self.tool_calls) > 0
 
 
+def llm_resilience(func):
+    """Decorator for LLM calls that need retries + circuit breaking."""
+    return resilient_call(
+        state_attr="_llm_circuit_state",
+        config_getter=lambda self: self._llm_resilience_config(),
+        key_getter=lambda self, *_, **__: self._llm_resilience_key(),
+        component="llm",
+        logger_getter=lambda self: self.logger,
+    )(func)
+
+
 class LLMAdapter(ABC):
     """
     Abstract base class for LLM adapters.
@@ -119,14 +131,31 @@ class LLMAdapter(ABC):
     def __init__(self, config: LLMConfig):
         self.config = config
         self.logger = get_logger()
-        self._retry_count = 0
         self._prewarmed = False
+        self._llm_circuit_state: Dict[str, Any] = {}
 
     @property
     @abstractmethod
     def provider(self) -> str:
         """Get provider name"""
         pass
+
+    def _llm_resilience_config(self) -> ResilienceConfig:
+        """Build resilience config for this adapter."""
+        return ResilienceConfig(
+            max_retries=self.config.max_retries,
+            initial_backoff=self.config.retry_delay,
+            backoff_multiplier=self.config.retry_backoff_multiplier,
+            max_backoff=self.config.retry_backoff_max,
+            jitter=self.config.retry_jitter,
+            failure_threshold=self.config.circuit_breaker_threshold,
+            recovery_timeout=self.config.circuit_breaker_cooldown,
+            half_open_successes=self.config.circuit_breaker_half_open_successes,
+        )
+
+    def _llm_resilience_key(self) -> str:
+        """Unique key for the circuit breaker."""
+        return f"{self.provider}:{self.config.model}"
 
     def prewarm(self) -> bool:
         """
@@ -183,15 +212,6 @@ class LLMAdapter(ABC):
     ) -> AsyncGenerator[str, None]:
         """Async streaming completion"""
         pass
-
-    def _handle_retry(self, error: Exception) -> bool:
-        """Handle retry logic. Returns True if should retry."""
-        self._retry_count += 1
-        if self._retry_count <= self.config.max_retries:
-            time.sleep(self.config.retry_delay * self._retry_count)
-            return True
-        self._retry_count = 0
-        return False
 
     def _log_request(self, messages: List[Message]):
         """Log LLM request"""
@@ -415,6 +435,7 @@ class OpenAIAdapter(LLMAdapter):
             raw_response=response
         )
 
+    @llm_resilience
     def complete(
         self,
         messages: List[Message],
@@ -453,8 +474,6 @@ class OpenAIAdapter(LLMAdapter):
 
         except Exception as e:
             self.logger.llm_error(self.provider, self.config.model, e)
-            if self._handle_retry(e):
-                return self.complete(messages, tools, **kwargs)
             raise
 
     def stream(
@@ -529,10 +548,9 @@ class OpenAIAdapter(LLMAdapter):
 
         except Exception as e:
             self.logger.llm_error(self.provider, self.config.model, e)
-            if self._handle_retry(e):
-                return self.stream(messages, tools, **kwargs)
             raise
 
+    @llm_resilience
     async def acomplete(
         self,
         messages: List[Message],
@@ -555,8 +573,6 @@ class OpenAIAdapter(LLMAdapter):
 
         except Exception as e:
             self.logger.llm_error(self.provider, self.config.model, e)
-            if self._handle_retry(e):
-                return await self.acomplete(messages, tools, **kwargs)
             raise
 
     async def astream(
@@ -689,6 +705,7 @@ class AnthropicAdapter(LLMAdapter):
             raw_response=response
         )
 
+    @llm_resilience
     def complete(
         self,
         messages: List[Message],
@@ -725,8 +742,6 @@ class AnthropicAdapter(LLMAdapter):
 
         except Exception as e:
             self.logger.llm_error(self.provider, self.config.model, e)
-            if self._handle_retry(e):
-                return self.complete(messages, tools, **kwargs)
             raise
 
     def stream(
@@ -806,10 +821,9 @@ class AnthropicAdapter(LLMAdapter):
 
         except Exception as e:
             self.logger.llm_error(self.provider, self.config.model, e)
-            if self._handle_retry(e):
-                return self.stream(messages, tools, **kwargs)
             raise
 
+    @llm_resilience
     async def acomplete(
         self,
         messages: List[Message],
@@ -846,8 +860,6 @@ class AnthropicAdapter(LLMAdapter):
 
         except Exception as e:
             self.logger.llm_error(self.provider, self.config.model, e)
-            if self._handle_retry(e):
-                return await self.acomplete(messages, tools, **kwargs)
             raise
 
     async def astream(
@@ -947,8 +959,194 @@ class CustomAdapter(LLMAdapter):
             yield chunk
 
 
+class FailoverLLMAdapter(LLMAdapter):
+    """
+    Adapter that adds model-level failover on top of a primary adapter.
+
+    Behavior:
+    - Uses the primary adapter first (with its own retry + circuit breaker).
+    - If it raises an exception, iterates through configured failover models.
+    - If no failover models are configured, behaves like the primary adapter.
+
+    NOTE: Failover is only triggered on exceptions. If all adapters fail,
+    the last exception is propagated to the caller.
+    """
+
+    def __init__(self, primary: LLMAdapter, failover_models: List[LLMConfig]):
+        super().__init__(primary.config)
+        self._primary = primary
+        self._adapters: List[LLMAdapter] = [primary]
+
+        # Initialize adapters for each failover model (if any)
+        for cfg in failover_models or []:
+            try:
+                # Create a base adapter for the failover config using the same factory
+                adapter = create_adapter(cfg) if not isinstance(primary, FailoverLLMAdapter) else None
+                if adapter is not None:
+                    self._adapters.append(adapter)
+            except Exception as e:
+                # Log but continue so a bad failover config doesn't break startup
+                self.logger.error(f"Failed to initialize failover adapter for {cfg.provider}:{cfg.model} - {e}",
+                                  component="llm")
+
+    @property
+    def provider(self) -> str:
+        # Report the primary provider for logging/metrics
+        return self._primary.provider
+
+    def _iter_adapters(self) -> List[LLMAdapter]:
+        """Return the list of adapters to try, primary first."""
+        return self._adapters or [self._primary]
+
+    def complete(
+        self,
+        messages: List[Message],
+        tools: Optional[List[ToolDefinition]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        last_exc: Optional[Exception] = None
+
+        for idx, adapter in enumerate(self._iter_adapters()):
+            provider = adapter.provider
+            model = getattr(adapter, "config", self.config).model
+
+            if idx > 0:
+                # Log failover attempt
+                self.logger.warning(
+                    f"LLM failover: primary failed, trying {provider}:{model}",
+                    component="llm"
+                )
+
+            try:
+                return adapter.complete(messages, tools, **kwargs)
+            except Exception as e:
+                last_exc = e
+                # Underlying adapters should also log errors; this is a summary
+                self.logger.llm_error(provider, model, e)
+                continue
+
+        # All adapters failed; propagate the last exception
+        if last_exc:
+            raise last_exc
+        # Should not reach here, but guard just in case
+        raise RuntimeError("FailoverLLMAdapter: no adapters available for completion")
+
+    def stream(
+        self,
+        messages: List[Message],
+        tools: Optional[List[ToolDefinition]] = None,
+        **kwargs
+    ) -> Generator[str, None, LLMResponse]:
+        last_exc: Optional[Exception] = None
+
+        for idx, adapter in enumerate(self._iter_adapters()):
+            provider = adapter.provider
+            model = getattr(adapter, "config", self.config).model
+
+            had_output = False
+
+            if idx > 0:
+                self.logger.warning(
+                    f"LLM streaming failover: primary failed, trying {provider}:{model}",
+                    component="llm"
+                )
+
+            try:
+                stream = adapter.stream(messages, tools, **kwargs)
+                while True:
+                    try:
+                        chunk = next(stream)
+                    except StopIteration as stop:
+                        # Normal completion, propagate generator return value if present
+                        return stop.value if hasattr(stop, "value") else None  # type: ignore[return-value]
+                    had_output = True
+                    yield chunk
+            except Exception as e:
+                last_exc = e
+                self.logger.llm_error(provider, model, e)
+                # If we've already yielded output from this adapter, do not switch mid-stream
+                if had_output:
+                    raise
+                # Otherwise, try the next adapter
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("FailoverLLMAdapter: no adapters available for streaming")
+
+    async def acomplete(
+        self,
+        messages: List[Message],
+        tools: Optional[List[ToolDefinition]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        last_exc: Optional[Exception] = None
+
+        for idx, adapter in enumerate(self._iter_adapters()):
+            provider = adapter.provider
+            model = getattr(adapter, "config", self.config).model
+
+            if idx > 0:
+                self.logger.warning(
+                    f"LLM async failover: primary failed, trying {provider}:{model}",
+                    component="llm"
+                )
+
+            try:
+                return await adapter.acomplete(messages, tools, **kwargs)
+            except Exception as e:
+                last_exc = e
+                self.logger.llm_error(provider, model, e)
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("FailoverLLMAdapter: no adapters available for async completion")
+
+    async def astream(
+        self,
+        messages: List[Message],
+        tools: Optional[List[ToolDefinition]] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        last_exc: Optional[Exception] = None
+
+        for idx, adapter in enumerate(self._iter_adapters()):
+            provider = adapter.provider
+            model = getattr(adapter, "config", self.config).model
+
+            had_output = False
+
+            if idx > 0:
+                self.logger.warning(
+                    f"LLM async streaming failover: primary failed, trying {provider}:{model}",
+                    component="llm"
+                )
+
+            try:
+                async for chunk in adapter.astream(messages, tools, **kwargs):
+                    had_output = True
+                    yield chunk
+                return
+            except Exception as e:
+                last_exc = e
+                self.logger.llm_error(provider, model, e)
+                if had_output:
+                    raise
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("FailoverLLMAdapter: no adapters available for async streaming")
+
+
 def create_adapter(config: LLMConfig) -> LLMAdapter:
-    """Factory function to create appropriate adapter based on config"""
+    """Factory function to create appropriate adapter based on config.
+
+    If failover models are configured on the LLMConfig, this returns a
+    FailoverLLMAdapter that will try the primary model first and then
+    sequentially fall back to the configured backups on failure.
+    """
     adapters = {
         "openai": OpenAIAdapter,
         "anthropic": AnthropicAdapter,
@@ -958,9 +1156,18 @@ def create_adapter(config: LLMConfig) -> LLMAdapter:
     provider = config.provider.lower()
     if provider not in adapters:
         # Fallback to custom adapter for unknown providers
-        return CustomAdapter(config)
+        base_adapter: LLMAdapter = CustomAdapter(config)
+    else:
+        base_adapter = adapters[provider](config)
 
-    return adapters[provider](config)
+    # If no failover models are configured, return the base adapter directly
+    failover_models = getattr(config, "failover_models", None) or []
+    if not failover_models:
+        return base_adapter
+
+    # Wrap with failover adapter; if any failover config is itself configured
+    # with failover_models, those will be respected by the nested adapter.
+    return FailoverLLMAdapter(base_adapter, failover_models)
 
 
 # Convenience functions for simple usage

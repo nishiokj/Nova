@@ -6,6 +6,7 @@ Uses temperature=0 and binary yes/no questions to minimize scoring noise.
 
 import re
 import json
+import logging
 from typing import Tuple, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,21 @@ class LLMJudge:
             judge_llm: LLMAdapter configured with temperature=0
         """
         self.llm = judge_llm
+        self.logger = logging.getLogger(__name__)
+
+    def ensure_ready(self) -> None:
+        """
+        Pre-warm the judge LLM to catch configuration issues early.
+        """
+        self.logger.info("Initializing judge LLM for grading")
+        try:
+            ready = self.llm.prewarm()
+        except Exception as e:
+            self.logger.error("Judge LLM prewarm failed: %s", e)
+            raise RuntimeError("Judge LLM initialization failed") from e
+
+        if not ready:
+            raise RuntimeError("Judge LLM prewarm reported failure; please check credentials or network access")
 
     def grade_task(
         self,

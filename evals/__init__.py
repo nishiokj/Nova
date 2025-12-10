@@ -12,33 +12,41 @@ This package provides a comprehensive evaluation framework with:
 from .eval_task import EvalTask, GradingRubric, RubricCriterion, EvalResult, EvalRun
 from .grading import LLMJudge
 from .isolation import IsolatedEnvironment, TaskExecutor
+from .eval_runner import EvalRunner, AgentFactory
+from .agent_loader import create_agent_from_config, load_agent_config, list_available_agents, print_available_agents
+from .metrics import MetricsCalculator, RunComparator
+from .visualization import EvalVisualizer
+from .agent_interface import EvalAgentProtocol, EvalAgentResponse, validate_agent_response, wrap_response
 
 __all__ = [
+    # Core data structures
     'EvalTask',
     'GradingRubric',
     'RubricCriterion',
     'EvalResult',
     'EvalRun',
+
+    # Agent interface (for interoperability)
+    'EvalAgentProtocol',
+    'EvalAgentResponse',
+    'validate_agent_response',
+    'wrap_response',
+
+    # Evaluation components
     'LLMJudge',
     'IsolatedEnvironment',
     'TaskExecutor',
+    'EvalRunner',
+    'AgentFactory',
+
+    # Configuration loaders
+    'create_agent_from_config',
+    'load_agent_config',
+    'list_available_agents',
+    'print_available_agents',
+
+    # Analysis tools
+    'MetricsCalculator',
+    'RunComparator',
+    'EvalVisualizer',
 ]
-
-# Import additional modules when they're available
-try:
-    from .eval_runner import EvalRunner
-    __all__.append('EvalRunner')
-except ImportError:
-    pass
-
-try:
-    from .metrics import MetricsCalculator, RunComparator
-    __all__.extend(['MetricsCalculator', 'RunComparator'])
-except ImportError:
-    pass
-
-try:
-    from .visualization import EvalVisualizer
-    __all__.append('EvalVisualizer')
-except ImportError:
-    pass

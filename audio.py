@@ -780,7 +780,9 @@ class MainProcessor:
         self,
         config: AudioConfig,
         audio_queue: Queue,
-        tts_block_event: Optional[Any] = None
+        tts_block_event: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
+        clear_tts_queue: Optional[callable] = None
     ):
         self.config = config
         self.audio_queue = audio_queue
@@ -816,6 +818,11 @@ class MainProcessor:
         self.total_frames_processed = 0
         self.speech_frames_count = 0
         self._tts_block_event = tts_block_event
+
+        # Barge-in support: cancel TTS when user speaks during playback
+        self._cancel_event = cancel_event
+        self._clear_tts_queue = clear_tts_queue
+        self._barge_in_triggered = False  # Track if we already triggered barge-in for current TTS
     
     def get_supported_sample_rate(self, device_index: int) -> int:
         """Get the best supported sample rate for the device that's compatible with VAD"""
@@ -1064,12 +1071,24 @@ class MainProcessor:
                     self.logger.info("Listening for speech...")
                     continue
 
-                if self._tts_block_event and self._tts_block_event.is_set():
-                    self._reset_detection_state()
-                    continue
-
                 # Check for speech using enhanced detection
                 is_speech, confidence, details = self.is_speech(audio_chunk)
+
+                # Handle TTS speaking state with barge-in support
+                if self._tts_block_event and self._tts_block_event.is_set():
+                    # TTS is speaking - check for barge-in (user speech during TTS)
+                    if is_speech and confidence > 0.6 and not self._barge_in_triggered:
+                        # User is speaking over TTS - trigger barge-in
+                        self.logger.info(f"Barge-in detected! confidence={confidence:.2f}")
+                        self._trigger_barge_in()
+                    else:
+                        # No barge-in, just ignore this frame for transcription
+                        # (don't send to STT, but keep listening for barge-in)
+                        self._reset_detection_state()
+                        continue
+                else:
+                    # TTS not speaking - reset barge-in state for next TTS session
+                    self._barge_in_triggered = False
 
                 # Debug logging for high-confidence events
                 if is_speech and confidence > 0.7:
@@ -1111,6 +1130,26 @@ class MainProcessor:
         self.consecutive_speech_frames = 0
         self.consecutive_silence_frames = 0
         self.pre_roll_buffer = []
+
+    def _trigger_barge_in(self):
+        """
+        Trigger barge-in: cancel current TTS and clear queued TTS.
+        Called when user speaks while TTS is active.
+        """
+        self._barge_in_triggered = True
+
+        # Signal cancellation to the agent/TTS workers
+        if self._cancel_event:
+            self._cancel_event.set()
+            self.logger.debug("Cancel event set for barge-in")
+
+        # Clear pending TTS queue
+        if self._clear_tts_queue:
+            self._clear_tts_queue()
+            self.logger.debug("TTS queue cleared for barge-in")
+
+        # Reset detection state so we start fresh listening to this new utterance
+        self._reset_detection_state()
 
 
 class AudioAgent:

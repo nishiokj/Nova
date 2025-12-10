@@ -177,6 +177,12 @@ class TaskExecutor:
     - Timeout handling
     - Resource cleanup
     - Error capture
+
+    IMPORTANT: The executor calls the agent's run() method with:
+    - user_input: The task prompt (NEVER polluted with metadata)
+    - context: Optional context string (file info, env vars) passed SEPARATELY
+
+    This maintains a clean separation between the actual task and execution context.
     """
 
     def __init__(self, agent_factory: Callable):
@@ -194,6 +200,10 @@ class TaskExecutor:
 
         Creates temporary directory, runs agent, captures result,
         cleans up resources.
+
+        IMPORTANT: The task prompt is passed as-is to the agent.
+        Working directory and file context are passed separately via the
+        context parameter, NOT concatenated into the prompt.
 
         Args:
             task: The eval task to execute
@@ -217,16 +227,31 @@ class TaskExecutor:
                 elif hasattr(agent.tool_registry, '_working_dir'):
                     agent.tool_registry._working_dir = str(env.workdir)
 
-            # Build full prompt with context
-            full_prompt = task.prompt
-            context_str = env.get_context_string()
-            if context_str:
-                full_prompt = f"{context_str}\n\n{task.prompt}"
+            # For wrapped agents (like RoutedAgentWrapper), try to set on inner agent
+            if hasattr(agent, 'tiered_agent'):
+                for tier_agent in getattr(agent.tiered_agent, '_agents', {}).values():
+                    if hasattr(tier_agent, 'tool_registry'):
+                        if hasattr(tier_agent.tool_registry, 'set_default_working_dir'):
+                            tier_agent.tool_registry.set_default_working_dir(str(env.workdir))
+                        elif hasattr(tier_agent.tool_registry, '_working_dir'):
+                            tier_agent.tool_registry._working_dir = str(env.workdir)
 
-            # Run with timeout
+            # CRITICAL: Pass prompt and context SEPARATELY
+            # The prompt is the actual task - do NOT prepend working directory or metadata
+            # Context is passed as a separate parameter for tasks that need file/env info
+            user_input = task.prompt
+
+            # Build context string for tasks that need it (file ops, etc.)
+            # This is passed separately, not concatenated into the prompt
+            context_str = None
+            if task.context and ("files" in task.context or "env" in task.context):
+                context_str = env.get_context_string()
+
+            # Run with timeout using standardized interface
             try:
                 with timeout(task.timeout_seconds):
-                    response = agent.run(full_prompt)
+                    # Call agent with clean separation of prompt and context
+                    response = agent.run(user_input, context=context_str)
                 return response
 
             except TimeoutError:

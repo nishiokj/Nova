@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 from .config import ToolConfig
 from .logger import get_logger
 from .llm_adapter import ToolDefinition
+from .resilience import ResilienceConfig, resilient_call
 
 
 class ToolStatus(Enum):
@@ -126,6 +127,7 @@ class ToolRegistry:
         self._lock = threading.Lock()
         self._default_working_dir = os.path.abspath(default_working_dir) if default_working_dir else os.getcwd()
         self._thread_local = threading.local()
+        self._tool_circuit_state: Dict[str, Any] = {}
 
         # Register built-in tools
         self._register_builtin_tools()
@@ -196,6 +198,27 @@ class ToolRegistry:
         """Get tool definitions for LLM"""
         return [t.to_definition() for t in self.list_tools(enabled_only)]
 
+    def _tool_resilience_config(self) -> ResilienceConfig:
+        """Resilience settings for tool calls."""
+        return ResilienceConfig(
+            max_retries=self.config.max_retries,
+            initial_backoff=self.config.retry_delay,
+            backoff_multiplier=self.config.retry_backoff_multiplier,
+            max_backoff=self.config.retry_backoff_max,
+            jitter=self.config.retry_jitter,
+            failure_threshold=self.config.circuit_breaker_threshold,
+            recovery_timeout=self.config.circuit_breaker_cooldown,
+            half_open_successes=self.config.circuit_breaker_half_open_successes,
+        )
+
+    @resilient_call(
+        state_attr="_tool_circuit_state",
+        config_getter=lambda self: self._tool_resilience_config(),
+        key_getter=lambda self, name, *_, **__: name,
+        component="tools",
+        logger_getter=lambda self: self.logger,
+        result_validator=lambda result: getattr(result, "is_success", True),
+    )
     def execute(self, name: str, **kwargs) -> ToolResult:
         """Execute a tool by name"""
         tool = self.get(name)

@@ -17,9 +17,58 @@ from typing import Dict, Any, Optional, List
 from enum import Enum
 
 from .llm_adapter import LLMAdapter, Message, MessageRole, LLMResponse, ToolCall
-from .tool_registry import ToolRegistry, ToolResult
+from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 from .logger import get_logger
 from .agent_execution_logger import get_execution_logger
+
+
+@dataclass
+class ToolCallRecord:
+    """Record of a single tool call made during step execution"""
+    tool_name: str
+    arguments: Dict[str, Any]
+    result: ToolResult
+    duration_ms: float
+    timestamp: float
+
+
+@dataclass
+class StepContext:
+    """
+    Accumulated context during step execution.
+
+    A step may involve multiple tool calls and reasoning rounds.
+    This captures everything that happened within the step.
+    """
+    tool_calls_made: List[ToolCallRecord] = field(default_factory=list)
+    tool_results: Dict[str, Any] = field(default_factory=dict)  # tool_name -> last result
+    intermediate_reasoning: List[str] = field(default_factory=list)
+    validation_checks: Dict[str, bool] = field(default_factory=dict)
+    accumulated_data: Dict[str, Any] = field(default_factory=dict)  # Step's working memory
+
+    def add_tool_result(self, tool_name: str, result: ToolResult):
+        """Store tool result for this step"""
+        self.tool_results[tool_name] = result
+
+        # Could extract structured data based on tool type
+        if result.is_success and result.output:
+            # Store in accumulated_data with a key based on tool name
+            key = f"{tool_name}_output"
+            if key not in self.accumulated_data:
+                self.accumulated_data[key] = []
+            self.accumulated_data[key].append(result.output)
+
+    def has_required_data(self, required: List[str]) -> bool:
+        """Check if step has all required data in accumulated_data"""
+        return all(key in self.accumulated_data for key in required)
+
+
+@dataclass
+class ValidationResult:
+    """Result of validating a step's success criteria"""
+    passed: bool
+    details: str
+    confidence: float = 1.0
 
 
 class PlanStatus(Enum):
@@ -37,23 +86,45 @@ class SuccessCriteria:
     description: str                      # Human-readable success condition
     required_outputs: List[str] = field(default_factory=list)  # What must be produced
     validation_hints: List[str] = field(default_factory=list)  # How to validate
+    automated_checks: Optional[Dict[str, Any]] = None  # Automated validation config
 
 
 @dataclass
 class PlanStep:
-    """A single step in an execution plan"""
+    """
+    A single step in an execution plan.
+
+    A step is a unit of work (sub-goal), not a single tool call.
+    It may involve 0-N tool calls plus reasoning to achieve its objective.
+    """
     step_num: int
     objective: str                        # What this step should accomplish
-    tool_hint: Optional[str] = None       # Suggested tool (or None for reasoning)
+
+    # Guidance (not strict requirements)
+    tool_hint: Optional[str] = None       # Suggested primary tool
     tool_args_hint: Optional[Dict] = None # Suggested arguments
+
+    # Step boundaries and validation
     success_criteria: Optional[SuccessCriteria] = None
+    max_tool_calls: int = 3               # Safety limit per step (reduced from 10)
     depends_on: List[int] = field(default_factory=list)  # Step dependencies
 
-    # Filled during execution
+    # Execution state (filled during execution)
     status: PlanStatus = PlanStatus.PENDING
-    result: Optional[Any] = None
+    context: Optional[StepContext] = None  # Accumulated context during execution
     error: Optional[str] = None
     duration_ms: float = 0
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+
+    # Validation results
+    validation_passed: bool = False
+    validation_details: Optional[str] = None
+
+    @property
+    def result(self) -> Optional[Any]:
+        """Convenience property - step's accumulated data"""
+        return self.context.accumulated_data if self.context else None
 
 
 @dataclass
@@ -117,14 +188,35 @@ class ExecutionTrace:
 
 @dataclass
 class Reflection:
-    """Post-execution evaluation"""
+    """Post-execution evaluation with RL labels"""
     plan_goal: str
     goal_achieved: bool                   # Did we actually accomplish the goal?
-    confidence: float                     # 0-1 confidence in assessment
+    confidence: float                     # 0-1 confidence in assessment (now called reflection_confidence)
     evidence: List[str]                   # Why we think goal was/wasn't achieved
     gaps: List[str]                       # What's missing
     suggestions: List[str]                # What could be done differently
     should_retry: bool = False            # Should we try again with different approach?
+
+    # RL-specific labels
+    had_tool_failures: bool = False
+    reward: float = 0.0
+    plan_quality: float = 0.0
+    execution_quality: float = 0.0
+    response_quality: float = 0.0
+
+    def to_rl_labels(self) -> Dict[str, Any]:
+        """Convert to RL labels dict for logging"""
+        return {
+            "goal_achieved": self.goal_achieved,
+            "reflection_confidence": self.confidence,
+            "had_tool_failures": self.had_tool_failures,
+            "reward": self.reward,
+            "plan_quality": self.plan_quality,
+            "execution_quality": self.execution_quality,
+            "response_quality": self.response_quality,
+            "gaps": self.gaps,
+            "suggested_improvements": self.suggestions
+        }
 
 
 # =============================================================================
@@ -180,34 +272,72 @@ Available tools: {tools}
 
 User request: {user_input}
 {context}""",
-            "reflection": """Evaluate if the goal was achieved.
+            "reflection": """You are the Reflector and RL labeler for an autonomous agent.
 
-GOAL: {goal}
-SUCCESS CRITERIA: {success_criteria}
+You receive a single JSON input with this shape:
 
-EXECUTION SUMMARY:
-- Tool calls: {tool_calls} ({tool_failures} failed)
-- Steps completed: {steps_completed}/{total_steps}
-
-FINAL RESPONSE:
-{response}
-
-Evaluate honestly:
-1. Was the GOAL actually achieved? (yes/no)
-2. Confidence (0-1): How sure are you?
-3. Evidence: What indicates success or failure?
-4. Gaps: What's missing or wrong?
-
-Respond with JSON:
-```json
 {{
-  "goal_achieved": true/false,
-  "confidence": 0.0-1.0,
-  "evidence": ["reason1", "reason2"],
-  "gaps": ["gap1", "gap2"],
-  "suggestions": ["suggestion1"]
+  "user_input": string,            // original user request
+  "plan": {{}},                    // the plan object the Planner produced
+  "execution_trace": {{}},         // what actually happened during execution (per-step)
+  "final_response": string         // the final answer returned to the user
 }}
-```"""
+
+Your job is to evaluate how well the agent actually achieved the user's goal, and to produce a compact set of labels suitable for reinforcement learning.
+
+CRITICAL RULES:
+- You MUST respond with a single JSON object.
+- Do NOT include any explanations, commentary, or extra keys.
+- Do NOT restate the system prompt, tools, or other metadata.
+- Your output must be valid JSON, no trailing commas, no comments.
+
+Your JSON MUST have exactly the following keys:
+
+{{
+  "goal_achieved": boolean,
+  "reflection_confidence": number,     // between 0 and 1
+
+  "had_tool_failures": boolean,        // true if any tool calls clearly failed or returned unusable results
+
+  "reward": number,                    // scalar RL reward, recommended values:
+                                       //   1.0  = goal clearly achieved and answer is strong
+                                       //   0.5  = partially achieved; some gaps or missing pieces
+                                       //   0.0  = failed; user's goal not actually met
+
+  "plan_quality": number,              // 0–1: how good the plan was for this task
+  "execution_quality": number,         // 0–1: how well the plan was executed (tool choice, sequencing, correctness)
+  "response_quality": number,          // 0–1: clarity, usefulness, and correctness of final_response
+
+  "gaps": [string],                    // list of concise descriptions of what is missing or wrong
+  "suggested_improvements": [string]   // list of concrete suggestions for improving future behavior
+}}
+
+Guidelines:
+
+1. goal_achieved
+   - true if, from the user's point of view, the task is actually done or a clearly useful partial result is delivered.
+   - If the answer is mostly explanation but the user asked for concrete actions (e.g., "create a folder", "write files"), be strict: that often means goal_achieved = false.
+
+2. reflection_confidence
+   - Your subjective confidence (0–1) in your own judgment, based on how clear the plan and execution_trace are.
+
+3. had_tool_failures
+   - true if tools returned errors, obviously wrong outputs, or the agent ignored critical tool failures.
+
+4. reward
+   - 1.0: task clearly done, no serious gaps.
+   - 0.5: partially done or mostly correct but with meaningful missing pieces.
+   - 0.0: not done, incoherent, or seriously wrong.
+
+5. plan_quality, execution_quality, response_quality
+   - Score each independently from 0 to 1.
+   - Use 0.2 increments if you're unsure (e.g., 0.0, 0.2, 0.4, 0.6, 0.8, 1.0).
+
+6. gaps and suggested_improvements
+   - Keep items short and concrete.
+   - Focus on things that can actually be improved by an RL policy: better tool choices, ordering, thoroughness, checking for missing actions, etc.
+
+Again: Output ONLY the JSON object with these keys. No markdown, no natural language, no extra wrapping text."""
         }
 
 # Load planner prompts from config
@@ -234,22 +364,136 @@ class Planner:
         user_input: str,
         context: Optional[str] = None,
         tier: str = "standard",
-        exec_id: Optional[str] = None
+        exec_id: Optional[str] = None,
+        budget: Optional[Dict[str, int]] = None
     ) -> Plan:
         """
         Create an execution plan for the user's request.
 
         For simple requests, this is fast (pattern matching).
         For complex requests, uses LLM to decompose.
+
+        IMPORTANT: If budget constraints are provided, the plan MUST fit within them.
+        If the task cannot be completed within budget, we fail fast with a clear error.
+
+        Args:
+            user_input: The user's request
+            context: Optional additional context
+            tier: Execution tier (simple/standard/advanced)
+            exec_id: Execution ID for logging
+            budget: Budget constraints from router (max_tool_calls, max_tokens, max_steps)
         """
         # Fast path: detect simple patterns that don't need LLM planning
         simple_plan = self._try_simple_plan(user_input)
         if simple_plan:
+            # Validate plan fits within budget constraints
+            if budget:
+                validation = self._validate_plan_budget(simple_plan, budget, tier)
+                if not validation["fits"]:
+                    self.logger.warning(
+                        f"Plan exceeds {tier} budget: {validation['reason']}",
+                        component="planner"
+                    )
+                    # Return a budget-exceeded plan that will fail fast
+                    return self._create_budget_exceeded_plan(
+                        user_input, budget, tier, validation["reason"]
+                    )
             self.logger.debug(f"Using simple plan for: {user_input[:50]}", component="planner")
             return simple_plan
 
         # Complex path: use LLM to create plan
-        return self._create_llm_plan(user_input, context, tier)
+        plan = self._create_llm_plan(user_input, context, tier)
+
+        # Validate LLM-generated plan fits within budget
+        if budget:
+            validation = self._validate_plan_budget(plan, budget, tier)
+            if not validation["fits"]:
+                self.logger.warning(
+                    f"LLM plan exceeds {tier} budget: {validation['reason']}",
+                    component="planner"
+                )
+                # Return a budget-exceeded plan that will fail fast
+                return self._create_budget_exceeded_plan(
+                    user_input, budget, tier, validation["reason"]
+                )
+
+        return plan
+
+    def _validate_plan_budget(
+        self,
+        plan: Plan,
+        budget: Dict[str, int],
+        tier: str
+    ) -> Dict[str, Any]:
+        """
+        Validate that a plan fits within budget constraints.
+
+        Returns dict with:
+          - fits: bool
+          - reason: str (if doesn't fit)
+        """
+        max_tool_calls = budget.get("max_tool_calls", 999)
+        max_steps = budget.get("max_steps", 999)
+
+        # Count tools needed
+        tools_needed = sum(1 for s in plan.steps if s.tool_hint)
+        steps_needed = len(plan.steps)
+
+        if tools_needed > max_tool_calls:
+            return {
+                "fits": False,
+                "reason": f"Plan requires {tools_needed} tools but {tier} tier allows max {max_tool_calls}"
+            }
+
+        if steps_needed > max_steps:
+            return {
+                "fits": False,
+                "reason": f"Plan requires {steps_needed} steps but {tier} tier allows max {max_steps}"
+            }
+
+        # For simple tier, NO tools should be used
+        if tier == "simple" and plan.requires_tools:
+            return {
+                "fits": False,
+                "reason": f"Simple tier cannot use tools, but plan requires: {[s.tool_hint for s in plan.steps if s.tool_hint]}"
+            }
+
+        return {"fits": True, "reason": None}
+
+    def _create_budget_exceeded_plan(
+        self,
+        user_input: str,
+        budget: Dict[str, int],
+        tier: str,
+        reason: str
+    ) -> Plan:
+        """
+        Create a plan that immediately fails due to budget constraints.
+
+        This is better than attempting execution and failing mid-way.
+        The agent should recognize this and return a clear error.
+        """
+        return Plan(
+            goal=f"BUDGET_EXCEEDED: {user_input[:100]}",
+            goal_type="error",
+            steps=[
+                PlanStep(
+                    step_num=1,
+                    objective=f"Return error: Task cannot be completed within {tier} tier budget",
+                    tool_hint=None,
+                    success_criteria=SuccessCriteria(
+                        description="Inform user of budget constraints"
+                    )
+                )
+            ],
+            success_criteria=SuccessCriteria(
+                description="User informed of budget limitation"
+            ),
+            estimated_complexity=tier,
+            requires_tools=False,
+            reasoning=f"BUDGET_EXCEEDED: {reason}. Consider re-routing to a higher tier.",
+            status=PlanStatus.FAILED  # Mark as already failed
+        )
 
     def _try_simple_plan(self, user_input: str) -> Optional[Plan]:
         """
@@ -272,14 +516,19 @@ class Planner:
             "latest", "recent", "live"
         ])
         needs_search = any(kw in input_lower for kw in [
-            "search", "look up", "find", "google", "check online"
+            "search", "look up", "find information", "google", "check online"
+        ])
+        # File/folder creation/modification keywords
+        is_creation_task = any(kw in input_lower for kw in [
+            "create file", "write file", "create folder", "make folder", "mkdir",
+            "create directory", "build", "generate", "set up", "initialize",
+            "instantiate", "implement"
         ])
         needs_files = any(kw in input_lower for kw in [
-            "create file", "write file", "read file", "open file", "save",
-            "create folder", "delete file", "edit file"
+            "read file", "open file", "save", "delete file", "edit file", "modify"
         ])
 
-        if is_simple_question and not needs_realtime and not needs_search and not needs_files:
+        if is_simple_question and not needs_realtime and not needs_search and not needs_files and not is_creation_task:
             return Plan(
                 goal=f"Answer: {user_input}",
                 goal_type="question",
@@ -301,8 +550,8 @@ class Planner:
                 reasoning="Simple factual question - answer from knowledge"
             )
 
-        # Search/lookup requests
-        if needs_search or needs_realtime:
+        # Search/lookup requests (but NOT creation tasks)
+        if (needs_search or needs_realtime) and not is_creation_task and not needs_files:
             return Plan(
                 goal=f"Find information: {user_input}",
                 goal_type="search",
@@ -335,6 +584,7 @@ class Planner:
             )
 
         # Not a simple pattern - need LLM planning
+        # This includes creation tasks, file operations, and complex requests
         return None
 
     def _create_llm_plan(
@@ -499,11 +749,14 @@ class Executor:
                 # Mark plan step as completed
                 if plan.steps:
                     plan.steps[0].status = PlanStatus.COMPLETED
-                    plan.steps[0].result = response.content
+                    # Create StepContext to store result (result is a read-only property)
+                    plan.steps[0].context = StepContext(
+                        accumulated_data={"response": response.content}
+                    )
                     trace.steps_executed = plan.steps.copy()
             else:
-                # Tool-based execution
-                trace = self._execute_with_tools(
+                # Step-by-step execution
+                trace = self._execute_plan_stepwise(
                     plan,
                     messages,
                     tools,
@@ -528,7 +781,7 @@ class Executor:
         trace.total_duration_ms = (time.time() - start_time) * 1000
         return trace
 
-    def _execute_with_tools(
+    def _execute_plan_stepwise(
         self,
         plan: Plan,
         messages: List[Message],
@@ -537,18 +790,114 @@ class Executor:
         req_id: Optional[str] = None,
         exec_id: Optional[str] = None
     ) -> ExecutionTrace:
-        """Execute plan that requires tools"""
+        """
+        Execute plan step-by-step.
 
-        tool_calls_made = 0
-        current_step_idx = 0
+        Each step is a unit of work that may involve multiple tool calls.
+        We execute steps sequentially, respecting dependencies.
+        """
 
-        # Initial LLM call
-        response = self.llm.complete(messages, tools=tools)
-        trace.llm_calls += 1
+        for step in plan.steps:
+            # Check dependencies
+            if not self._dependencies_met(step, plan.steps):
+                step.status = PlanStatus.FAILED
+                step.error = f"Dependencies not satisfied: {step.depends_on}"
+                self.logger.error(f"Step {step.step_num} failed: dependencies not met", component="executor")
+                trace.steps_executed.append(step)
+                continue
 
-        while response.has_tool_calls and tool_calls_made < self.max_tool_calls:
+            # Execute the step
+            self._execute_step(step, messages, tools, trace, req_id, exec_id)
+            trace.steps_executed.append(step)
+
+            # Stop if critical step failed and no response yet
+            if step.status == PlanStatus.FAILED and not trace.final_response:
+                self.logger.error(f"Step {step.step_num} failed, stopping execution", component="executor")
+                break
+
+        # Get final response if we haven't already
+        if not trace.final_response:
+            response = self.llm.complete(messages, tools=None)
+            trace.llm_calls += 1
+            trace.final_response = response.content
+
+        return trace
+
+    def _execute_step(
+        self,
+        step: PlanStep,
+        messages: List[Message],
+        tools: List[Any],
+        trace: ExecutionTrace,
+        req_id: Optional[str] = None,
+        exec_id: Optional[str] = None
+    ):
+        """
+        Execute a single step (may involve multiple tool calls).
+
+        A step is complete when:
+        1. LLM stops requesting tools (has final answer), OR
+        2. max_tool_calls reached for this step, OR
+        3. Step validation passes
+        """
+
+        step.status = PlanStatus.IN_PROGRESS
+        step.started_at = time.time()
+        step.context = StepContext()
+
+        self.logger.info(f"Starting step {step.step_num}: {step.objective}", component="executor")
+
+        # Add step guidance to help LLM focus
+        step_guidance = self._create_step_guidance(step)
+        messages_with_guidance = messages.copy()
+        messages_with_guidance.append(Message(
+            role=MessageRole.SYSTEM,
+            content=step_guidance
+        ))
+
+        # Log execution context
+        if req_id and exec_id:
+            step_id = f"step-{step.step_num}"
+            # Extract tool names from tools list
+            tool_names = []
+            for t in tools[:5]:
+                if isinstance(t, dict):
+                    tool_names.append(t.get("function", {}).get("name", "unknown"))
+                else:
+                    tool_names.append(str(t))
+
+            self.exec_logger.log_execution_context(
+                req_id=req_id,
+                exec_id=exec_id,
+                step_id=step_id,
+                step_num=step.step_num,
+                step_objective=step.objective,
+                tool_hint=step.tool_hint,
+                messages=[{"role": m.role.value, "content": m.content[:200] if m.content else ""} for m in messages[-3:]],
+                available_tools=tool_names,
+                system_prompt_id="executor_step_guidance_v1",  # Fixed ID for step guidance
+                tool_manifest_id="runtime_tools_v1",  # ID for runtime tool set
+                dependencies=step.depends_on
+            )
+
+        tool_calls_in_step = 0
+        step_complete = False
+        tool_hint_executed = False  # Track if the suggested tool was called
+
+        # Execute until step completes or hits limit
+        while not step_complete and tool_calls_in_step < step.max_tool_calls:
+            response = self.llm.complete(messages_with_guidance, tools=tools)
+            trace.llm_calls += 1
+
+            if not response.has_tool_calls:
+                # LLM thinks step is done (no more tools needed)
+                step_complete = True
+                trace.final_response = response.content
+                break
+
+            # Process all tool calls in this LLM response
             for tool_call in response.tool_calls:
-                if tool_calls_made >= self.max_tool_calls:
+                if tool_calls_in_step >= step.max_tool_calls:
                     break
 
                 # Log tool start
@@ -558,12 +907,27 @@ class Executor:
                 }])
 
                 # Execute tool
-                start = time.time()
+                start_time = time.time()
                 result = self.tool_registry.execute(tool_call.name, **tool_call.arguments)
-                duration_ms = (time.time() - start) * 1000
+                duration_ms = (time.time() - start_time) * 1000
 
+                # Record in step context
+                record = ToolCallRecord(
+                    tool_name=tool_call.name,
+                    arguments=tool_call.arguments,
+                    result=result,
+                    duration_ms=duration_ms,
+                    timestamp=time.time()
+                )
+                step.context.tool_calls_made.append(record)
+                step.context.add_tool_result(tool_call.name, result)
+
+                tool_calls_in_step += 1
                 trace.tool_calls += 1
-                tool_calls_made += 1
+
+                # Check if this was the suggested tool and it succeeded
+                if step.tool_hint and tool_call.name == step.tool_hint and result.is_success:
+                    tool_hint_executed = True
 
                 # Log result
                 if result.is_success:
@@ -572,62 +936,24 @@ class Executor:
                     trace.tool_failures += 1
                     self.logger.tool_call_end(tool_call.name, False, duration_ms, result.error)
 
-                # Track in plan step if we can match it
-                if current_step_idx < len(plan.steps):
-                    step = plan.steps[current_step_idx]
-                    step.status = PlanStatus.COMPLETED if result.is_success else PlanStatus.FAILED
-                    step.result = result.output if result.is_success else None
-                    step.error = result.error if not result.is_success else None
-                    step.duration_ms = duration_ms
-                    trace.steps_executed.append(step)
+                # Add to conversation
+                messages_with_guidance.append(Message(
+                    role=MessageRole.ASSISTANT,
+                    content=response.content or "",
+                    tool_calls=[{
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {"name": tool_call.name, "arguments": json.dumps(tool_call.arguments)}
+                    }]
+                ))
+                messages_with_guidance.append(Message(
+                    role=MessageRole.TOOL,
+                    content=str(result.output if result.is_success else f"Error: {result.error}")[:2000],
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name
+                ))
 
-                    # ========== LOG EXECUTION STEP ==========
-                    if req_id and exec_id:
-                        step_id = f"step-{step.step_num}"
-
-                        # Log execution context before execution
-                        self.exec_logger.log_execution_context(
-                            req_id=req_id,
-                            exec_id=exec_id,
-                            step_id=step_id,
-                            step_num=step.step_num,
-                            step_objective=step.objective,
-                            tool_hint=step.tool_hint,
-                            messages=[{"role": m.role.value, "content": m.content[:200] if m.content else ""} for m in messages[-3:]],  # Last 3 messages
-                            available_tools=[t.get("function", {}).get("name", "unknown") if isinstance(t, dict) else str(t) for t in tools[:5]],  # First 5 tools
-                            dependencies=step.depends_on
-                        )
-
-                        # Log step execution result
-                        status = "completed" if result.is_success else "failed"
-                        failure_mode = None
-                        if not result.is_success:
-                            if "timeout" in str(result.error).lower():
-                                failure_mode = "timeout"
-                            elif "permission" in str(result.error).lower():
-                                failure_mode = "permission_error"
-                            elif result.metadata and result.metadata.get("status") == ToolStatus.DISABLED:
-                                failure_mode = "tool_disabled"
-                            else:
-                                failure_mode = "tool_execution_failed"
-
-                        self.exec_logger.log_execution_step(
-                            req_id=req_id,
-                            exec_id=exec_id,
-                            step_id=step_id,
-                            step_num=step.step_num,
-                            status=status,
-                            step_objective=step.objective,
-                            tool_used=tool_call.name,
-                            tool_result=result.output if result.is_success else None,
-                            error=result.error if not result.is_success else None,
-                            failure_mode=failure_mode,
-                            duration_ms=duration_ms
-                        )
-
-                    current_step_idx += 1
-
-                # Add to messages
+                # Update main messages too (for next step)
                 messages.append(Message(
                     role=MessageRole.ASSISTANT,
                     content=response.content or "",
@@ -644,17 +970,181 @@ class Executor:
                     name=tool_call.name
                 ))
 
-            # Get next response
-            if tool_calls_made < self.max_tool_calls:
-                response = self.llm.complete(messages, tools=tools)
+            # HEURISTIC: If the suggested tool was executed successfully, consider step complete
+            # This prevents the LLM from looping on the same tool repeatedly
+            if tool_hint_executed and tool_calls_in_step >= 1:
+                self.logger.debug(
+                    f"Step {step.step_num}: Suggested tool '{step.tool_hint}' executed successfully. Marking step complete.",
+                    component="executor"
+                )
+                step_complete = True
+                # Generate a final response summarizing the step
+                final_response = self.llm.complete(
+                    messages_with_guidance + [Message(
+                        MessageRole.SYSTEM,
+                        "The step objective has been achieved. Provide a brief 1-sentence summary of what was accomplished. Do NOT call more tools."
+                    )],
+                    tools=None  # No tools for final summary
+                )
                 trace.llm_calls += 1
-            else:
-                # Force final answer
-                response = self.llm.complete(messages, tools=None)
-                trace.llm_calls += 1
+                trace.final_response = final_response.content
+                break
 
-        trace.final_response = response.content
-        return trace
+        # Finalize step
+        step.completed_at = time.time()
+        step.duration_ms = (step.completed_at - step.started_at) * 1000
+
+        # Determine step status
+        if step_complete:
+            step.status = PlanStatus.COMPLETED
+        elif tool_calls_in_step >= step.max_tool_calls:
+            step.status = PlanStatus.PARTIAL
+            step.error = f"Max tool calls ({step.max_tool_calls}) reached before step completion"
+        else:
+            step.status = PlanStatus.FAILED
+            step.error = "Step did not complete"
+
+        # Validate step if criteria defined
+        if step.success_criteria:
+            validation = self._validate_step(step)
+            step.validation_passed = validation.passed
+            step.validation_details = validation.details
+
+            if not validation.passed:
+                step.status = PlanStatus.FAILED
+                step.error = f"Validation failed: {validation.details}"
+
+        # Log execution step result
+        if req_id and exec_id:
+            step_id = f"step-{step.step_num}"
+            status = "completed" if step.status == PlanStatus.COMPLETED else "failed"
+            failure_mode = None
+
+            if step.status != PlanStatus.COMPLETED:
+                if "dependencies" in str(step.error).lower():
+                    failure_mode = "dependency_failed"
+                elif "max tool calls" in str(step.error).lower():
+                    failure_mode = "max_tool_calls_exceeded"
+                elif "validation" in str(step.error).lower():
+                    failure_mode = "validation_failed"
+                else:
+                    failure_mode = "step_execution_failed"
+
+            # Log with detailed action and result
+            if step.context.tool_calls_made:
+                # Use the first tool call as representative
+                first_call = step.context.tool_calls_made[0]
+                self.exec_logger.log_execution_step(
+                    req_id=req_id,
+                    exec_id=exec_id,
+                    step_id=step_id,
+                    step_num=step.step_num,
+                    status=status,
+                    step_objective=step.objective,
+                    tool_name=first_call.tool_name,
+                    tool_args=first_call.arguments,
+                    tool_success=first_call.result.is_success,
+                    tool_output=first_call.result.output,
+                    tool_error=first_call.result.error,
+                    error=step.error,
+                    failure_mode=failure_mode,
+                    duration_ms=step.duration_ms
+                )
+            else:
+                # No tools used
+                self.exec_logger.log_execution_step(
+                    req_id=req_id,
+                    exec_id=exec_id,
+                    step_id=step_id,
+                    step_num=step.step_num,
+                    status=status,
+                    step_objective=step.objective,
+                    error=step.error,
+                    failure_mode=failure_mode,
+                    duration_ms=step.duration_ms
+                )
+
+        self.logger.info(
+            f"Step {step.step_num} {step.status.value}: {step.objective} "
+            f"({tool_calls_in_step} tool calls, {step.duration_ms:.0f}ms)",
+            component="executor"
+        )
+
+    def _create_step_guidance(self, step: PlanStep) -> str:
+        """Create system message to guide LLM for this specific step"""
+        guidance = f"""You are currently executing Step {step.step_num} of a multi-step plan.
+
+STEP OBJECTIVE: {step.objective}
+
+SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria else "Complete the objective"}
+
+CRITICAL: This is a SINGLE FOCUSED STEP. Once you have the information or have executed the necessary action, respond with a brief summary WITHOUT calling more tools. Do not repeat tool calls.
+
+"""
+
+        if step.tool_hint:
+            guidance += f"SUGGESTED ACTION: Call {step.tool_hint}"
+            if step.tool_args_hint:
+                guidance += f" with args: {json.dumps(step.tool_args_hint)}"
+            guidance += f"\nAfter calling {step.tool_hint} successfully, provide a brief summary of the result and move on. Do NOT call additional tools unless absolutely necessary.\n"
+        else:
+            guidance += "This step is reasoning/synthesis only - no tools needed. Provide your analysis and move on.\n"
+
+        return guidance
+
+    def _validate_step(self, step: PlanStep) -> ValidationResult:
+        """Validate if step achieved its success criteria"""
+        if not step.success_criteria:
+            return ValidationResult(passed=True, details="No criteria specified")
+
+        criteria = step.success_criteria
+
+        # Check required outputs exist
+        if criteria.required_outputs:
+            missing_outputs = []
+            for required in criteria.required_outputs:
+                if not step.context or required not in step.context.accumulated_data:
+                    missing_outputs.append(required)
+
+            if missing_outputs:
+                return ValidationResult(
+                    passed=False,
+                    details=f"Missing required outputs: {missing_outputs}",
+                    confidence=1.0
+                )
+
+        # Run automated checks if defined
+        if criteria.automated_checks:
+            for check_name, check_config in criteria.automated_checks.items():
+                if check_name == "min_items":
+                    # Check if any accumulated data has minimum number of items
+                    min_count = check_config
+                    total_items = sum(len(v) if isinstance(v, list) else 1 for v in step.context.accumulated_data.values())
+                    if total_items < min_count:
+                        return ValidationResult(
+                            passed=False,
+                            details=f"Expected at least {min_count} items, got {total_items}",
+                            confidence=1.0
+                        )
+
+        # Basic validation passed
+        return ValidationResult(
+            passed=True,
+            details="All required outputs present" if criteria.required_outputs else "Step completed",
+            confidence=0.8  # Could use LLM for higher confidence
+        )
+
+    def _dependencies_met(self, step: PlanStep, all_steps: List[PlanStep]) -> bool:
+        """Check if step's dependencies are completed"""
+        if not step.depends_on:
+            return True
+
+        for dep_num in step.depends_on:
+            dep_step = next((s for s in all_steps if s.step_num == dep_num), None)
+            if not dep_step or dep_step.status != PlanStatus.COMPLETED:
+                return False
+
+        return True
 
 
 # =============================================================================
@@ -715,20 +1205,37 @@ class Reflector:
         return self._llm_reflect(plan, trace)
 
     def _llm_reflect(self, plan: Plan, trace: ExecutionTrace) -> Reflection:
-        """Use LLM to evaluate complex task completion"""
-        prompt = REFLECTION_PROMPT.format(
-            goal=plan.goal,
-            success_criteria=plan.success_criteria.description,
-            tool_calls=trace.tool_calls,
-            tool_failures=trace.tool_failures,
-            steps_completed=len([s for s in trace.steps_executed if s.status == PlanStatus.COMPLETED]),
-            total_steps=len(plan.steps),
-            response=trace.final_response[:1500] if trace.final_response else "(no response)"
-        )
+        """Use LLM to evaluate complex task completion with RL labeling"""
+        # Build structured input for the Reflector
+        reflector_input = {
+            "user_input": plan.goal,  # Using plan.goal as user_input proxy
+            "plan": {
+                "goal": plan.goal,
+                "goal_type": plan.goal_type,
+                "requires_tools": plan.requires_tools,
+                "steps": [
+                    {
+                        "step_num": s.step_num,
+                        "objective": s.objective,
+                        "status": s.status.value
+                    }
+                    for s in plan.steps
+                ],
+                "success_criteria": plan.success_criteria.description
+            },
+            "execution_trace": {
+                "tool_calls": trace.tool_calls,
+                "tool_failures": trace.tool_failures,
+                "steps_completed": len([s for s in trace.steps_executed if s.status == PlanStatus.COMPLETED]),
+                "total_steps": len(plan.steps),
+                "all_steps_succeeded": trace.all_steps_succeeded
+            },
+            "final_response": trace.final_response[:1500] if trace.final_response else "(no response)"
+        }
 
         messages = [
-            Message(MessageRole.SYSTEM, "You evaluate task completion. Be honest and critical. Output JSON."),
-            Message(MessageRole.USER, prompt)
+            Message(MessageRole.SYSTEM, REFLECTION_PROMPT),
+            Message(MessageRole.USER, json.dumps(reflector_input))
         ]
 
         try:
@@ -738,11 +1245,16 @@ class Reflector:
             return Reflection(
                 plan_goal=plan.goal,
                 goal_achieved=eval_data.get("goal_achieved", False),
-                confidence=eval_data.get("confidence", 0.5),
-                evidence=eval_data.get("evidence", []),
+                confidence=eval_data.get("reflection_confidence", 0.5),
+                evidence=[],  # Not in new format
                 gaps=eval_data.get("gaps", []),
-                suggestions=eval_data.get("suggestions", []),
-                should_retry=not eval_data.get("goal_achieved", True) and trace.tool_failures > 0
+                suggestions=eval_data.get("suggested_improvements", []),
+                should_retry=not eval_data.get("goal_achieved", True) and trace.tool_failures > 0,
+                had_tool_failures=eval_data.get("had_tool_failures", trace.tool_failures > 0),
+                reward=eval_data.get("reward", 0.0),
+                plan_quality=eval_data.get("plan_quality", 0.0),
+                execution_quality=eval_data.get("execution_quality", 0.0),
+                response_quality=eval_data.get("response_quality", 0.0)
             )
         except Exception as e:
             self.logger.error(f"Reflection failed: {e}", component="reflector")
@@ -754,7 +1266,12 @@ class Reflector:
                 confidence=0.6,
                 evidence=["Heuristic evaluation"],
                 gaps=[] if success else ["Could not verify goal completion"],
-                suggestions=[]
+                suggestions=[],
+                had_tool_failures=trace.tool_failures > 0,
+                reward=1.0 if success else 0.0,
+                plan_quality=0.5,
+                execution_quality=0.5 if success else 0.2,
+                response_quality=0.5 if success else 0.2
             )
 
     def _parse_reflection(self, content: str) -> Dict[str, Any]:

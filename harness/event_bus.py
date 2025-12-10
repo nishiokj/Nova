@@ -39,6 +39,9 @@ class MessageType(Enum):
     AGENT_STATUS = "agent_status"
     TTS_STATUS = "tts_status"
 
+    # RL Training Events
+    EPISODE_COMPLETE = "episode_complete"  # Emitted when an episode finishes
+
 
 @dataclass
 class BusMessage:
@@ -106,11 +109,13 @@ class EventBus:
     - Main Process: Produces AgentRequests, consumes AgentResults
     - Agent Process: Consumes AgentRequests, produces AgentResults + TTSRequests
     - TTS Process: Consumes TTSRequests
+    - RL Process: Consumes EpisodeComplete events, produces RL training logs
 
     Features:
     - Backpressure: Latest request replaces pending (for Agent queue)
     - Cancellation: Shared event to signal cancel across processes
     - Health monitoring: Periodic health checks
+    - Episode completion events for RL training
     """
 
     def __init__(self, max_agent_pending: int = 1):
@@ -120,6 +125,9 @@ class EventBus:
 
         # Queue for TTS worker (unbounded - we want all speech queued)
         self.tts_queue: Queue = Queue()
+
+        # Queue for RL training events (unbounded - we want all episodes logged)
+        self.rl_events_queue: Queue = Queue()
 
         # Control events
         self.shutdown_event: Event = Event()
@@ -338,6 +346,41 @@ class EventBus:
                 q.get_nowait()
             except queue.Empty:
                 break
+
+    # =========================================================================
+    # RL TRAINING METHODS
+    # =========================================================================
+
+    def emit_episode_complete(self, episode_data: Dict[str, Any]):
+        """
+        Emit an episode completion event for RL training.
+        Called by Agent when an episode finishes.
+
+        Args:
+            episode_data: Complete episode data including req_id, exec_id, plan, trace, reflection
+        """
+        msg = BusMessage(
+            type=MessageType.EPISODE_COMPLETE,
+            payload=episode_data,
+            request_id=episode_data.get("req_id", "")
+        )
+        self.rl_events_queue.put(msg)
+        self.logger.debug(f"Emitted episode complete: {episode_data.get('req_id')}")
+
+    def get_episode_event(self, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+        """
+        Get next episode completion event.
+        Called by RL reward shaping process.
+        """
+        try:
+            msg = self.rl_events_queue.get(timeout=timeout)
+            if msg.type == MessageType.EPISODE_COMPLETE:
+                return msg.payload
+            elif msg.type == MessageType.SHUTDOWN:
+                return None
+        except queue.Empty:
+            return None
+        return None
 
 
 class ProcessManager:

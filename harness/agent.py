@@ -23,6 +23,7 @@ from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 from .logger import get_logger
 from .agent_execution_logger import get_execution_logger
 from .planner import Planner, Executor, Reflector, Plan, ExecutionTrace, Reflection, PlanStatus
+from .resilience import CircuitBreakerOpenError
 
 
 class AgentState(Enum):
@@ -106,12 +107,14 @@ class Agent:
         self,
         config: AgentConfig,
         tool_registry: ToolRegistry,
-        llm_config: Optional[LLMConfig] = None
+        llm_config: Optional[LLMConfig] = None,
+        event_bus: Optional[Any] = None  # EventBus for RL episode emission
     ):
         self.config = config
         self.tool_registry = tool_registry
         self.logger = get_logger()
         self.exec_logger = get_execution_logger()
+        self.event_bus = event_bus  # Optional EventBus for RL training
 
         # Use provided LLM config or agent's config
         self._llm_config = llm_config or config.llm_config
@@ -283,7 +286,26 @@ class Agent:
         # This allows ServiceRep to speak "Searching now..." before the actual search
         self._record_step(step)
 
-        result = self.tool_registry.execute(tool_call.name, **tool_call.arguments)
+        try:
+            result = self.tool_registry.execute(tool_call.name, **tool_call.arguments)
+        except CircuitBreakerOpenError as cb_error:
+            retry_after = cb_error.retry_after
+            if retry_after is not None:
+                retry_hint = f"{max(1, int(retry_after))}s"
+            else:
+                retry_hint = "a short while"
+
+            message = (
+                f"Tool '{tool_call.name}' temporarily disabled after repeated failures. "
+                f"Please wait {retry_hint} before retrying."
+            )
+            self.logger.warning(message, component="agent")
+            result = ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=message,
+                metadata={"circuit_breaker": True}
+            )
 
         # Update step with results after execution
         step.tool_output = result.output if result.is_success else result.error
@@ -339,7 +361,13 @@ class Agent:
             })
         return results, any_failed
 
-    def run(self, user_input: str, context: Optional[str] = None) -> AgentResponse:
+    def run(
+        self,
+        user_input: str,
+        context: Optional[str] = None,
+        budget: Optional[Dict[str, int]] = None,
+        classification: Optional[Any] = None
+    ) -> AgentResponse:
         """
         Run the agent using Plan → Execute → Reflect architecture.
 
@@ -350,6 +378,8 @@ class Agent:
         Args:
             user_input: The user's request
             context: Optional additional context
+            budget: Budget constraints from router - MUST be enforced
+            classification: Full TaskClassification for logging
 
         Returns:
             AgentResponse with content, plan, and reflection
@@ -360,6 +390,10 @@ class Agent:
                 success=False,
                 error="No LLM configured"
             )
+
+        # Store budget for enforcement during execution
+        self._budget = budget
+        self._classification = classification
 
         start_time = time.time()
         self._step_count = 0
@@ -381,26 +415,32 @@ class Agent:
         tool_definitions = self._get_tool_definitions()
 
         # ========== LOG FULL AGENT CONTEXT ==========
-        req_id = self.logger.request_id or "no-req"
+        # Generate unique req_id for this run (if logger doesn't have one)
+        if self.logger.request_id is None:
+            req_id = self.logger.new_request()
+        else:
+            req_id = self.logger.request_id
+
         exec_id = self.exec_logger.new_execution_id(req_id)
+
+        # Extract tool names only (not full schemas)
+        tool_names = [
+            td.get("function", {}).get("name") if isinstance(td, dict) else getattr(td, "name", "unknown")
+            for td in tool_definitions
+        ]
 
         self.exec_logger.log_agent_context(
             req_id=req_id,
             exec_id=exec_id,
             user_input=full_input,
             tier=self.config.tier,
-            system_prompt=system_prompt,
+            system_prompt_id=f"tier_{self.config.tier}_v1",
+            tool_manifest_id="default_tools_v1",
             conversation_history=[
                 {"role": m.role.value, "content": m.content[:500] if m.content else ""}
                 for m in self._conversation
             ],
-            tool_definitions=[
-                {
-                    "name": td.get("function", {}).get("name") if isinstance(td, dict) else getattr(td, "name", "unknown"),
-                    "description": td.get("function", {}).get("description", "")[:200] if isinstance(td, dict) else getattr(td, "description", "")[:200]
-                }
-                for td in tool_definitions
-            ],
+            tool_names=tool_names,
             additional_context={"context_provided": context} if context else None
         )
 
@@ -413,7 +453,8 @@ class Agent:
                 user_input=user_input,
                 context=context,
                 tier=self.config.tier,
-                exec_id=exec_id  # Pass exec_id for logging
+                exec_id=exec_id,  # Pass exec_id for logging
+                budget=self._budget  # Pass budget constraints from router
             )
 
             self.logger.plan_created(
@@ -502,6 +543,74 @@ class Agent:
                 confidence=reflection.confidence,
                 gaps=reflection.gaps
             )
+
+            # ========== LOG EPISODE SUMMARY WITH RL LABELS ==========
+            total_duration = (time.time() - start_time) * 1000
+            self.exec_logger.log_episode_summary(
+                req_id=req_id,
+                exec_id=exec_id,
+                tier=self.config.tier,
+                system_prompt_id=f"tier_{self.config.tier}_v1",
+                tool_manifest_id="default_tools_v1",
+                user_input=user_input,
+                goal=plan.goal,
+                goal_type=plan.goal_type,
+                total_duration_ms=total_duration,
+                tool_calls=trace.tool_calls,
+                tool_failures=trace.tool_failures,
+                max_tool_calls_allowed=self.config.max_tool_calls,
+                rl_labels=reflection.to_rl_labels()
+            )
+
+            # ========== EMIT EPISODE COMPLETE EVENT FOR RL TRAINING ==========
+            if self.event_bus:
+                try:
+                    episode_data = {
+                        "req_id": req_id,
+                        "exec_id": exec_id,
+                        "plan": {
+                            "goal": plan.goal,
+                            "goal_type": plan.goal_type,
+                            "steps": [
+                                {
+                                    "step_num": s.step_num,
+                                    "objective": s.objective,
+                                    "tool_hint": s.tool_hint,
+                                    "status": s.status.value
+                                }
+                                for s in plan.steps
+                            ]
+                        },
+                        "trace": {
+                            "steps_executed": [
+                                {
+                                    "step_id": f"{exec_id}-step-{s.step_num}",
+                                    "step_num": s.step_num,
+                                    "objective": s.objective,
+                                    "tool_hint": s.tool_hint,
+                                    "status": s.status.value,
+                                    "result": s.result,
+                                    "error": s.error,
+                                    "duration_ms": s.duration_ms
+                                }
+                                for s in trace.steps_executed
+                            ],
+                            "tool_calls": trace.tool_calls,
+                            "tool_failures": trace.tool_failures,
+                            "llm_calls": trace.llm_calls,
+                            "had_failures": trace.had_failures
+                        },
+                        "reflection": {
+                            "goal_achieved": reflection.goal_achieved,
+                            "confidence": reflection.confidence,
+                            "gaps": reflection.gaps,
+                            "evidence": reflection.evidence
+                        }
+                    }
+                    self.event_bus.emit_episode_complete(episode_data)
+                    self.logger.debug(f"Emitted episode complete event for {req_id}")
+                except Exception as e:
+                    self.logger.error(f"Failed to emit episode complete event: {e}")
 
             # ========== BUILD RESPONSE ==========
             self._current_state = AgentState.COMPLETE
@@ -720,11 +829,13 @@ class TieredAgent:
         self,
         config: AgentConfig,
         tool_registry: ToolRegistry,
-        tier_configs: Dict[str, LLMConfig]
+        tier_configs: Dict[str, LLMConfig],
+        event_bus: Optional[Any] = None  # EventBus for RL episode emission
     ):
         self.config = config
         self.tool_registry = tool_registry
         self.tier_configs = tier_configs
+        self.event_bus = event_bus
         self._agents: Dict[str, Agent] = {}
         self._current_tier = config.tier
         self.logger = get_logger()
@@ -764,6 +875,12 @@ class TieredAgent:
                 timeout=base_llm_config.timeout,
                 max_retries=base_llm_config.max_retries,
                 retry_delay=base_llm_config.retry_delay,
+                retry_backoff_multiplier=base_llm_config.retry_backoff_multiplier,
+                retry_backoff_max=base_llm_config.retry_backoff_max,
+                retry_jitter=base_llm_config.retry_jitter,
+                circuit_breaker_threshold=base_llm_config.circuit_breaker_threshold,
+                circuit_breaker_cooldown=base_llm_config.circuit_breaker_cooldown,
+                circuit_breaker_half_open_successes=base_llm_config.circuit_breaker_half_open_successes,
                 streaming=base_llm_config.streaming
             )
 
@@ -788,21 +905,49 @@ class TieredAgent:
                 "max_tools": tool_limit
             })
 
-            self._agents[tier] = Agent(tier_config, self.tool_registry, llm_config)
+            self._agents[tier] = Agent(tier_config, self.tool_registry, llm_config, self.event_bus)
         return self._agents[tier]
 
-    def run(self, user_input: str, tier: str = None, context: Optional[str] = None) -> AgentResponse:
-        """Run with specified tier and tier-appropriate behavior"""
+    def run(
+        self,
+        user_input: str,
+        tier: str = None,
+        context: Optional[str] = None,
+        budget: Optional[Dict[str, int]] = None,
+        classification: Optional[Any] = None
+    ) -> AgentResponse:
+        """
+        Run with specified tier and tier-appropriate behavior.
+
+        Args:
+            user_input: The user's request
+            tier: Which tier to use (simple/standard/advanced)
+            context: Optional additional context
+            budget: Budget constraints from router (max_tool_calls, max_tokens, max_steps)
+            classification: Full TaskClassification from router (for logging/debugging)
+        """
         tier = tier or self._current_tier
 
-        tool_limit = self.config.tier_tool_limits.get(tier)
+        # Use budget from classification if provided, otherwise fall back to config
+        if budget:
+            tool_limit = budget.get("max_tool_calls")
+            max_steps = budget.get("max_steps")
+        else:
+            tool_limit = self.config.tier_tool_limits.get(tier)
+            max_steps = None
+
         if tool_limit is None:
             tool_limit = self.config.max_tool_calls
 
-        self.logger.debug(f"Running agent at tier '{tier}' (max {tool_limit} tools)", component="agent")
+        self.logger.debug(
+            f"Running agent at tier '{tier}' (max {tool_limit} tools, max {max_steps} steps)",
+            component="agent"
+        )
 
         agent = self._get_agent(tier)
-        return agent.run(user_input, context)
+
+        # Pass budget to agent so it can enforce constraints
+        return agent.run(user_input, context, budget=budget, classification=classification)
 
     def set_tier(self, tier: str):
         """Set default tier"""

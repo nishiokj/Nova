@@ -275,18 +275,26 @@ def run_tts_worker_process(
             tts_speaking_event.set()
         try:
             if use_say_command:
-                # Use macOS 'say' command - runs in subprocess, very reliable
+                # Use macOS 'say' command with Popen for interruptibility
                 try:
                     rate = (voice_config or {}).get('rate', 180)
-                    result = subprocess.run(
+                    proc = subprocess.Popen(
                         ["say", "-r", str(rate), text],
-                        capture_output=True,
-                        timeout=300  # 5 minute timeout for long text
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
                     )
-                    return result.returncode == 0
-                except subprocess.TimeoutExpired:
-                    logger.warning("say command timed out")
-                    return False
+                    # Poll for completion while checking cancel_event
+                    while proc.poll() is None:
+                        if cancel_event.is_set():
+                            logger.info("Barge-in: interrupting TTS")
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=0.5)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            return False
+                        time.sleep(0.05)  # Check every 50ms
+                    return proc.returncode == 0
                 except Exception as e:
                     logger.error(f"say command failed: {e}")
                     return False

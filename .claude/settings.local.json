@@ -19,7 +19,8 @@
       "Bash(pip install:*)",
       "Bash(pip3:*)",
       "Bash(.venv/bin/python -m pytest:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(PYTHONPATH=. python3:*)"
     ],
     "deny": []
   }

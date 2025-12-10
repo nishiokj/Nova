@@ -46,7 +46,8 @@ class TTSEngine:
     Integrates with the voice.py module.
     """
 
-    def __init__(self, voice_config: Dict[str, Any] = None, speech_block_event: Optional[threading.Event] = None):
+    def __init__(self, voice_config: Dict[str, Any] = None, speech_block_event: Optional[threading.Event] = None,
+                 cancel_event: Optional[threading.Event] = None):
         self.logger = get_logger()
         self.voice_config = voice_config or {}
         self._engine = None
@@ -60,6 +61,8 @@ class TTSEngine:
         self._items_spoken = 0  # DIAGNOSTIC: track successful speaks
         self._last_error = None  # DIAGNOSTIC: track last error
         self._speech_block_event = speech_block_event
+        self._cancel_event = cancel_event  # For barge-in support
+        self._current_proc = None  # Track current TTS subprocess for interruption
 
     def initialize(self) -> bool:
         """Initialize TTS engine"""
@@ -156,20 +159,31 @@ class TTSEngine:
             if platform.system() == "Darwin":
                 try:
                     rate = self.voice_config.get('rate', 180)
-                    result = subprocess.run(
+                    # Use Popen for interruptibility (barge-in support)
+                    self._current_proc = subprocess.Popen(
                         ["say", "-r", str(rate), text],
-                        capture_output=True,
-                        timeout=300
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
                     )
-                    if result.returncode != 0:
-                        self.logger.tts_event("say_error", {"code": result.returncode})
-                    return
-                except subprocess.TimeoutExpired:
-                    self.logger.tts_event("say_timeout")
+                    # Poll for completion while checking cancel_event
+                    while self._current_proc.poll() is None:
+                        if self._cancel_event and self._cancel_event.is_set():
+                            self.logger.tts_event("barge_in_interrupt")
+                            self._current_proc.terminate()
+                            try:
+                                self._current_proc.wait(timeout=0.5)
+                            except subprocess.TimeoutExpired:
+                                self._current_proc.kill()
+                            return
+                        time.sleep(0.05)  # Check every 50ms
+                    if self._current_proc.returncode != 0:
+                        self.logger.tts_event("say_error", {"code": self._current_proc.returncode})
                     return
                 except Exception as e:
                     self.logger.tts_event("say_failed", {"error": str(e)})
                     # Fall through to other engines
+                finally:
+                    self._current_proc = None
 
             if not self._engine:
                 import sys
@@ -207,6 +221,7 @@ class TTSEngine:
 
         finally:
             self._speaking = False
+            self._current_proc = None
             if self._speech_block_event:
                 self._speech_block_event.clear()
 
@@ -238,15 +253,22 @@ class TTSEngine:
     def is_speaking(self) -> bool:
         return self._speaking
 
-    def stop(self):
-        """Stop TTS and clear queue"""
-        self._running = False
-        # Clear queue
+    def clear_queue(self):
+        """Clear pending TTS queue (for barge-in support)"""
+        cleared = 0
         while not self._speak_queue.empty():
             try:
                 self._speak_queue.get_nowait()
+                cleared += 1
             except queue.Empty:
                 break
+        if cleared > 0:
+            self.logger.tts_event("queue_cleared", {"items": cleared})
+
+    def stop(self):
+        """Stop TTS and clear queue"""
+        self._running = False
+        self.clear_queue()
 
         if self._speak_thread:
             self._speak_thread.join(timeout=2.0)
@@ -264,11 +286,13 @@ class ServiceRep:
     Generates natural acknowledgments and responses via TTS.
     """
 
-    def __init__(self, config: ServiceRepConfig, speech_block_event: Optional[threading.Event] = None):
+    def __init__(self, config: ServiceRepConfig, speech_block_event: Optional[threading.Event] = None,
+                 cancel_event: Optional[threading.Event] = None):
         self.config = config
         self.logger = get_logger()
         self.enabled = config.enabled
         self._speech_block_event = speech_block_event
+        self._cancel_event = cancel_event
 
         # LLM for generating acknowledgments
         self._llm: Optional[LLMAdapter] = None
@@ -280,7 +304,7 @@ class ServiceRep:
             "engine": config.voice_engine,
             "rate": config.voice_rate,
             "volume": config.voice_volume
-        }, speech_block_event=speech_block_event)
+        }, speech_block_event=speech_block_event, cancel_event=cancel_event)
 
         # Response callbacks
         self._response_callbacks: List[Callable[[SpokenResponse], None]] = []
@@ -578,8 +602,9 @@ class StreamingServiceRep(ServiceRep):
     Speaks chunks as they arrive for lower latency.
     """
 
-    def __init__(self, config: ServiceRepConfig, speech_block_event: Optional[threading.Event] = None):
-        super().__init__(config, speech_block_event=speech_block_event)
+    def __init__(self, config: ServiceRepConfig, speech_block_event: Optional[threading.Event] = None,
+                 cancel_event: Optional[threading.Event] = None):
+        super().__init__(config, speech_block_event=speech_block_event, cancel_event=cancel_event)
         self._buffer = ""
         self._buffer_threshold = 50  # Chars before speaking
 

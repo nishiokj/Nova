@@ -88,7 +88,8 @@ class AgentWorker:
             self.agent = TieredAgent(
                 config=self._config.agent,
                 tool_registry=self.tool_registry,
-                tier_configs=self._config.llm_configs
+                tier_configs=self._config.llm_configs,
+                event_bus=self.event_bus  # Pass EventBus for RL episode emission
             )
 
             self._initialized = True

@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Professional Training Program — Overview & Schedule</title>
+  <meta name="description" content="Information page for a professional training program: overview, schedule, curriculum, instructors, resources, FAQs, and signup/contact.">
+  <style>
+    :root{
+      --bg:#f7f9fb; --card:#ffffff; --accent:#0b76ef; --muted:#6b7280; --max-width:1100px; --radius:8px;
+      --gap:18px;
+    }
+    *{box-sizing:border-box}
+    body{font-family:Inter, Arial, sans-serif; margin:0; background:var(--bg); color:#0f1724; line-height:1.45}
+    .container{max-width:var(--max-width); margin:28px auto; padding:20px}
+    header{display:flex; align-items:center; justify-content:space-between; gap:16px}
+    h1{font-size:1.4rem; margin:0}
+    .tagline{color:var(--muted); font-size:0.95rem}
+    nav{margin-top:12px}
+    nav a{color:var(--accent); text-decoration:none; margin-right:12px; font-weight:600}
+
+    .grid{display:grid; grid-template-columns: 1fr 320px; gap:var(--gap); align-items:start}
+    main{background:transparent}
+    .card{background:var(--card); padding:18px; border-radius:var(--radius); box-shadow:0 1px 2px rgba(15,23,36,0.04)}
+    section + section{margin-top:14px}
+
+    .meta{display:flex; gap:10px; flex-wrap:wrap; margin-top:8px}
+    .meta span{background:#eef6ff; color:var(--accent); padding:6px 10px; border-radius:999px; font-size:0.85rem}
+
+    table{width:100%; border-collapse:collapse; margin-top:12px}
+    th,td{padding:10px 8px; border-bottom:1px solid #eef2f6; text-align:left; font-size:0.95rem}
+    th{background:#fbfdff; color:#0b1320; font-weight:700}
+
+    .instructor{display:flex; gap:12px; align-items:center; margin-top:12px}
+    .avatar{width:56px; height:56px; border-radius:999px; background:linear-gradient(90deg,#0b76ef,#00c2a8); color:white; display:flex; align-items:center; justify-content:center; font-weight:700}
+
+    ul.resources{padding-left:18px; margin:8px 0}
+
+    form{display:flex; flex-direction:column; gap:10px}
+    input,textarea,select{padding:10px; border:1px solid #e6eef8; border-radius:8px; font:inherit}
+    button{background:var(--accent); color:white; padding:10px 14px; border:0; border-radius:8px; cursor:pointer}
+    button.secondary{background:#111827; opacity:0.95}
+
+    footer{margin-top:22px; color:var(--muted); font-size:0.9rem}
+
+    /* responsive */
+    @media (max-width:900px){
+      .grid{grid-template-columns:1fr;}
+      header{flex-direction:column; align-items:flex-start}
+      .avatar{width:48px;height:48px}
+    }
+  </style>
+</head>
+<body>
+  <div class="container" role="main">
+    <header aria-label="Page header">
+      <div>
+        <h1>Professional Training Program</h1>
+        <div class="tagline">Upskill with project-based modules, live instruction, and career support</div>
+        <div class="meta" aria-hidden="false">
+          <span>Duration: 8 weeks</span>
+          <span>Format: Hybrid (live + self-paced)</span>
+          <span>Level: Beginner → Intermediate</span>
+        </div>
+        <nav aria-label="Primary navigation">
+          <a href="#overview">Overview</a>
+          <a href="#schedule">Schedule</a>
+          <a href="#curriculum">Curriculum</a>
+          <a href="#instructors">Instructors</a>
+          <a href="#resources">Resources</a>
+        </nav>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:0.9rem; color:var(--muted)">Next cohort starts:</div>
+        <div style="font-weight:700; font-size:1.05rem">March 3, 2026</div>
+        <div style="margin-top:10px"><a href="#signup" style="text-decoration:none"><button aria-label="Sign up">Sign up</button></a></div>
+      </div>
+    </header>
+
+    <div class="grid" style="margin-top:18px">
+      <main>
+        <section id="overview" class="card" aria-labelledby="overview-heading">
+          <h2 id="overview-heading">Overview</h2>
+          <p>This training program is designed to bring professionals up to speed with industry best practices through hands-on projects, weekly live sessions, and mentor feedback. By the end of the program you'll have a portfolio-ready capstone project and practical skills employers seek.</p>
+          <ul>
+            <li>Format: 8-week blended learning (weekly live workshops + on-demand materials)</li>
+            <li>Outcomes: portfolio project, certificate of completion, career prep</li>
+            <li>Support: mentors, peer groups, weekly office hours</li>
+          </ul>
+        </section>
+
+        <section id="schedule" class="card" aria-labelledby="schedule-heading">
+          <h2 id="schedule-heading">Schedule (sample)</h2>
+          <p>Weekly breakdown of live sessions and focus topics. Live sessions are 90 minutes; office hours and project work happen asynchronously.</p>
+          <table aria-describedby="schedule-desc">
+            <caption id="schedule-desc" style="text-align:left; font-weight:600; padding:10px 0">Week-by-week outline</caption>
+            <thead>
+              <tr><th>Week</th><th>Focus</th><th>Deliverable</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Week 1</td><td>Foundations & Tools</td><td>Environment setup + intro project</td></tr>
+              <tr><td>Week 2</td><td>Core Concepts</td><td>Mini project & quiz</td></tr>
+              <tr><td>Week 3</td><td>Applied Techniques</td><td>Feature implementation</td></tr>
+              <tr><td>Week 4</td><td>Midpoint project review</td><td>Peer review report</td></tr>
+              <tr><td>Week 5</td><td>Advanced Patterns</td><td>Integration task</td></tr>
+              <tr><td>Week 6</td><td>Performance & Testing</td><td>Test suite + benchmarks</td></tr>
+              <tr><td>Week 7</td><td>Capstone work</td><td>Draft capstone</td></tr>
+              <tr><td>Week 8</td><td>Final presentations</td><td>Capstone + certificate</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="curriculum" class="card" aria-labelledby="curriculum-heading">
+          <h2 id="curriculum-heading">Curriculum & Learning Objectives</h2>
+          <p>The curriculum focuses on practical skills with measurable objectives for each module. Instructors provide short lectures, guided exercises, and code reviews.</p>
+          <article>
+            <h3>Module 1 — Foundations</h3>
+            <p>Understand the core concepts and tools. Objectives: environment setup, version control, reproducible workflows.</p>
+          </article>
+          <article>
+            <h3>Module 2 — Applied Techniques</h3>
+            <p>Learn real-world patterns and project structuring. Objectives: testing, debugging, documentation.</p>
+          </article>
+          <article>
+            <h3>Module 3 — Capstone</h3>
+            <p>Plan, build, and present a capstone project. Objectives: delivery, presentation, and reflection.</p>
+          </article>
+        </section>
+
+        <section id="instructors" class="card" aria-labelledby="instructors-heading">
+          <h2 id="instructors-heading">Instructors & Mentors</h2>
+          <p>Our instructors are industry practitioners with hands-on experience mentoring teams.</p>
+          <div class="instructor">
+            <div class="avatar" aria-hidden="true">AL</div>
+            <div>
+              <div style="font-weight:700">Alex Lee — Lead Instructor</div>
+              <div style="color:var(--muted)">Senior engineer with 10+ years building scalable systems and mentoring cross-functional teams.</div>
+            </div>
+          </div>
+          <div class="instructor">
+            <div class="avatar" aria-hidden="true">MR</div>
+            <div>
+              <div style="font-weight:700">Maya Rios — Curriculum Designer</div>
+              <div style="color:var(--muted)">Learning designer focused on project-based curriculum and inclusive instruction.</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="resources" class="card" aria-labelledby="resources-heading">
+          <h2 id="resources-heading">Resources & Reading</h2>
+          <p>Core readings, tools, and reference material used throughout the program:</p>
+          <ul class="resources">
+            <li><a href="https://developer.mozilla.org/" target="_blank" rel="noopener">MDN Web Docs</a> — authoritative web docs and examples.</li>
+            <li><a href="https://www.w3.org/" target="_blank" rel="noopener">W3C</a> — standards and accessibility guidelines.</li>
+            <li><a href="https://docs.python.org/3/" target="_blank" rel="noopener">Python Docs</a> — language reference (if applicable).</li>
+            <li>Custom course notes and slide decks (provided to enrolled students).</li>
+          </ul>
+        </section>
+
+        <section id="faqs" class="card" aria-labelledby="faqs-heading">
+          <h2 id="faqs-heading">FAQs</h2>
+          <details>
+            <summary>Who is this course for?</summary>
+            <p>Professionals with basic familiarity in the subject area seeking practical, applied skills. No advanced prior knowledge required.</p>
+          </details>
+          <details>
+            <summary>What is the time commitment?</summary>
+            <p>Expect 6–10 hours per week including live sessions, exercises, and project work.</p>
+          </details>
+          <details>
+            <summary>Is there a certificate?</summary>
+            <p>Yes — participants who complete the capstone project and pass the final review receive a certificate of completion.</p>
+          </details>
+        </section>
+
+        <section id="capstone" class="card" aria-labelledby="capstone-heading">
+          <h2 id="capstone-heading">Capstone & Assessment</h2>
+          <p>The capstone demonstrates applied knowledge. Assessments are project-based: instructors and peers review deliverables against a rubric emphasizing correctness, design, and presentation.</p>
+        </section>
+
+      </main>
+
+      <aside>
+        <div class="card" aria-labelledby="signup-heading">
+          <h2 id="signup-heading">Sign up / Express interest</h2>
+          <p>Reserve your spot for the next cohort. We'll follow up with details and payment options.</p>
+          <form id="signup" action="#" method="post" aria-label="Sign up form">
+            <label for="name" style="font-weight:600">Full name</label>
+            <input id="name" name="name" type="text" placeholder="Jane Example" required>
+
+            <label for="email" style="font-weight:600">Email</label>
+            <input id="email" name="email" type="email" placeholder="you@example.com" required>
+
+            <label for="interest" style="font-weight:600">Area of interest</label>
+            <select id="interest" name="interest">
+              <option>Data Science</option>
+              <option>Software Engineering</option>
+              <option>Product Management</option>
+              <option>Other</option>
+            </select>
+
+            <label for="notes" style="font-weight:600">Brief notes (optional)</label>
+            <textarea id="notes" name="notes" rows="3" placeholder="Your goals or questions"></textarea>
+
+            <button type="submit">Submit interest</button>
+            <button type="button" class="secondary" onclick="window.location='#contact'">Contact us</button>
+          </form>
+        </div>
+
+        <div class="card" id="contact" style="margin-top:14px" aria-labelledby="contact-heading">
+          <h2 id="contact-heading">Contact & Support</h2>
+          <p>Email: <a href="mailto:info@training.example">info@training.example</a></p>
+          <p>Office hours: Tue & Thu 4–6pm (UTC)</p>
+          <p style="color:var(--muted); font-size:0.9rem">We aim to respond within 48 hours.</p>
+        </div>
+
+        <div class="card" style="margin-top:14px" aria-labelledby="access-heading">
+          <h2 id="access-heading">Accessibility</h2>
+          <p>We follow accessible content best practices: semantic HTML, keyboard-navigable controls, and readable color contrast. Contact us if you need accommodations.</p>
+        </div>
+      </aside>
+    </div>
+
+    <footer>
+      <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap">
+        <div>&copy; 2026 Professional Training Program</div>
+        <div style="color:var(--muted)">Privacy • Terms • Code of Conduct</div>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

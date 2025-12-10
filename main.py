@@ -1066,10 +1066,13 @@ class VoiceAgentSystem:
         self.processor_thread.start()
 
         # Create main audio processor (uses our threading queue)
+        # Pass barge-in support: cancel_event and clear_tts_queue callback
         self.main_processor = MainProcessor(
             self.audio_config,
             self.audio_queue,
-            tts_block_event=self.harness.tts_speaking_event
+            tts_block_event=self.harness.tts_speaking_event,
+            cancel_event=self.harness.cancel_event,
+            clear_tts_queue=self.harness.clear_tts_queue
         )
 
         # Start main processor in thread
@@ -1153,7 +1156,8 @@ class VoiceAgentSystemV2:
         audio_config_path: str = "config/audio_config.json",
         whisper_model: str = "base.en",
         use_whisper: bool = True,
-        default_tier: str = "standard"
+        default_tier: str = "standard",
+        rl_worker_enabled: bool = False
     ):
         self.logger = self._setup_logging()
         self.profiler = PROFILER
@@ -1165,12 +1169,16 @@ class VoiceAgentSystemV2:
         self.default_tier = default_tier
         self.whisper_model = whisper_model
         self.use_whisper = use_whisper
+        self.rl_worker_enabled = rl_worker_enabled
 
         # EventBus for inter-process communication
         self.event_bus = EventBus(max_agent_pending=1)
 
         # Process manager
         self.process_manager = ProcessManager(self.event_bus)
+
+        # RL Worker process (optional)
+        self.rl_worker_process = None
 
         # Audio components (run in main process)
         self.audio_queue = Queue()
@@ -1306,6 +1314,21 @@ class VoiceAgentSystemV2:
         self.logger.info("Starting worker processes...")
         self.process_manager.start()
 
+        # Start RL worker if enabled
+        if self.rl_worker_enabled:
+            from multiprocessing import Process
+            from harness.rl_worker import start_rl_worker
+
+            self.logger.info("Starting RL worker process...")
+            self.rl_worker_process = Process(
+                target=start_rl_worker,
+                args=(self.event_bus, "logs"),
+                daemon=True,
+                name="RLWorker"
+            )
+            self.rl_worker_process.start()
+            self.logger.info(f"RL worker started (PID: {self.rl_worker_process.pid})")
+
         # Give workers time to initialize
         time.sleep(1.0)
 
@@ -1331,11 +1354,13 @@ class VoiceAgentSystemV2:
         )
         self.processor_thread.start()
 
-        # Start main audio capture
+        # Start main audio capture with barge-in support
         self.main_processor = MainProcessor(
             self.audio_config,
             self.audio_queue,
-            tts_block_event=self.event_bus.tts_speaking_event
+            tts_block_event=self.event_bus.tts_speaking_event,
+            cancel_event=self.event_bus.cancel_event,
+            clear_tts_queue=self.event_bus.clear_tts_queue
         )
         self.main_processor_thread = threading.Thread(
             target=self.main_processor.run,
@@ -1390,6 +1415,15 @@ class VoiceAgentSystemV2:
         if self.audio_processor:
             self.audio_processor.stop()
             self.audio_queue.put(None)
+
+        # Stop RL worker if running
+        if self.rl_worker_process and self.rl_worker_process.is_alive():
+            self.logger.info("Stopping RL worker...")
+            self.event_bus.shutdown()  # Signal shutdown
+            self.rl_worker_process.join(timeout=2.0)
+            if self.rl_worker_process.is_alive():
+                self.logger.warning("RL worker did not stop gracefully, terminating...")
+                self.rl_worker_process.terminate()
 
         # Stop worker processes
         self.process_manager.stop()
@@ -1605,6 +1639,7 @@ def main():
 Examples:
   python main.py                    # Start with voice input (v1 single-process)
   python main.py --v2               # Start with voice input (v2 multiprocess - RECOMMENDED)
+  python main.py --v2 --rl-worker   # V2 with RL training data collection
   python main.py --interactive      # Text-only interactive mode
   python main.py --list-devices     # List audio devices
   python main.py --no-router        # Disable task routing (faster)
@@ -1615,6 +1650,9 @@ Examples:
 Architecture:
   v1 (default): Single process with threading - simpler but GIL-limited
   v2 (--v2):    Multiprocess - Agent and TTS in separate processes, no GIL contention
+
+RL Worker:
+  --rl-worker:  Enable background RL training data collection (writes to logs/rl_training.jsonl)
         """
     )
 
@@ -1675,6 +1713,11 @@ Architecture:
         action="store_true",
         help="Use v2 multiprocess architecture (Agent and TTS in separate processes)"
     )
+    parser.add_argument(
+        "--rl-worker",
+        action="store_true",
+        help="Enable RL worker for reinforcement learning training data collection"
+    )
 
     args = parser.parse_args()
 
@@ -1723,6 +1766,8 @@ Architecture:
         print("  - Main Process: Audio capture, Whisper STT")
         print("  - Agent Process: LLM reasoning, tool execution")
         print("  - TTS Process: Speech synthesis")
+        if args.rl_worker:
+            print("  - RL Worker: Reinforcement learning data collection")
         print("=" * 60)
 
         system = VoiceAgentSystemV2(
@@ -1730,7 +1775,8 @@ Architecture:
             audio_config_path=args.audio_config,
             whisper_model=args.whisper,
             use_whisper=not args.google_stt,
-            default_tier=args.tier
+            default_tier=args.tier,
+            rl_worker_enabled=args.rl_worker
         )
     else:
         # V1: Single process with threading (original)

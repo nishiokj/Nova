@@ -3,6 +3,8 @@ Configuration management for the agentic harness.
 Supports runtime mutation via APIs and environment variables.
 """
 
+from __future__ import annotations
+
 import os
 import json
 import threading
@@ -38,7 +40,16 @@ class LLMConfig:
     timeout: int = 60
     max_retries: int = 3
     retry_delay: float = 1.0
+    retry_backoff_multiplier: float = 2.0
+    retry_backoff_max: float = 30.0
+    retry_jitter: float = 0.1
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_cooldown: float = 30.0
+    circuit_breaker_half_open_successes: int = 1
     streaming: bool = True
+    # Optional failover models to try if this model repeatedly fails
+    # Each entry can be a dict (from JSON) or an LLMConfig instance.
+    failover_models: List["LLMConfig"] = field(default_factory=list)
 
     def __post_init__(self):
         # Load API key from environment if not provided
@@ -50,6 +61,19 @@ class LLMConfig:
             }
             env_var = env_key_map.get(self.provider, f"{self.provider.upper()}_API_KEY")
             self.api_key = os.environ.get(env_var)
+
+        # Normalize failover model configs to LLMConfig instances
+        if self.failover_models:
+            normalized: List[LLMConfig] = []
+            for entry in self.failover_models:
+                if isinstance(entry, LLMConfig):
+                    normalized.append(entry)
+                elif isinstance(entry, dict):
+                    normalized.append(LLMConfig(**entry))
+                else:
+                    # Ignore unsupported types silently to be robust against bad config
+                    continue
+            self.failover_models = normalized
 
 
 @dataclass
@@ -104,6 +128,14 @@ class ToolConfig:
     max_output_length: int = 10000
     bash_timeout: int = 30
     python_timeout: int = 60
+    max_retries: int = 0
+    retry_delay: float = 0.5
+    retry_backoff_multiplier: float = 2.0
+    retry_backoff_max: float = 5.0
+    retry_jitter: float = 0.1
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_cooldown: float = 15.0
+    circuit_breaker_half_open_successes: int = 1
 
 
 @dataclass
