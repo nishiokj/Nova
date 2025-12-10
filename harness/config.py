@@ -11,6 +11,18 @@ from typing import Dict, Any, Optional, List, Callable
 from pathlib import Path
 import copy
 
+DEFAULT_TIER_TOOL_LIMITS = {
+    "simple": 1,
+    "standard": 3,
+    "advanced": 10
+}
+
+DEFAULT_TIER_MAX_TOKENS = {
+    "simple": 1500,
+    "standard": 4000,
+    "advanced": 8000
+}
+
 
 @dataclass
 class LLMConfig:
@@ -100,6 +112,8 @@ When using tools, explain what you're doing briefly."""
     allow_code_execution: bool = True
     allow_internet: bool = True
     allow_bash: bool = True
+    tier_tool_limits: Dict[str, int] = field(default_factory=lambda: DEFAULT_TIER_TOOL_LIMITS.copy())
+    tier_max_tokens: Dict[str, int] = field(default_factory=lambda: DEFAULT_TIER_MAX_TOKENS.copy())
 
 
 @dataclass
@@ -108,7 +122,7 @@ class ToolConfig:
     enabled_tools: List[str] = field(default_factory=lambda: [
         "fast_answer",  # PREFERRED - single-hop search with parallel fetch
         "web_search", "web_fetch", "bash_execute", "python_execute",
-        "file_read", "file_write", "calculator", "get_current_time"
+        "file_read", "file_write", "search_filesystem", "calculator", "get_current_time"
     ])
     sandbox_bash: bool = True
     sandbox_python: bool = True

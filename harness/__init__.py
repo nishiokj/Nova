@@ -10,7 +10,7 @@ Communication via EventBus with multiprocessing.Queue
 """
 
 from .config import HarnessConfig, RuntimeConfig, load_or_create_config
-from .logger import StructuredLogger, LogEntry, get_logger, set_logger
+from .logger import StructuredLogger, get_logger, set_logger
 from .llm_adapter import LLMAdapter, LLMResponse, create_adapter
 from .tool_registry import ToolRegistry, Tool, ToolResult
 from .router import Router, TaskClassification
@@ -31,6 +31,7 @@ from .event_bus import (
 from .tts_worker import TTSWorker, create_tts_worker
 from .agent_worker import AgentWorker, create_agent_worker
 
+
 __all__ = [
     # Config
     "HarnessConfig",
@@ -38,7 +39,6 @@ __all__ = [
     "load_or_create_config",
     # Logging
     "StructuredLogger",
-    "LogEntry",
     "get_logger",
     "set_logger",
     # LLM

@@ -10,9 +10,11 @@ import time
 import subprocess
 import tempfile
 import threading
+import re
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Callable, Union
+from typing import Dict, Any, Optional, List, Callable, Union, Tuple
 from enum import Enum
 import traceback
 import signal
@@ -204,14 +206,8 @@ class ToolRegistry:
                 error=f"Tool '{name}' not found"
             )
 
-        self.logger.tool_call(name, kwargs)
+        # Note: Logging is handled by agent.py to avoid duplicates
         result = tool.execute(**kwargs)
-
-        if result.is_success:
-            self.logger.tool_result(name, result.output, result.duration_ms)
-        else:
-            self.logger.tool_error(name, Exception(result.error or "Unknown error"), result.duration_ms)
-
         return result
 
     def enable(self, name: str) -> bool:
@@ -365,6 +361,35 @@ class ToolRegistry:
             required_params=["path", "content"],
             executor=self._file_write,
             timeout=10
+        ))
+
+        # Filesystem Search Tool
+        self.register(Tool(
+            name="search_filesystem",
+            description="Fast filesystem search that looks for file names or contents. Use it to gather context on files in the current workspace.",
+            parameters={
+                "pattern": {
+                    "type": "string",
+                    "description": "Pattern to search for within file names or file contents"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative path to scope the search"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to return",
+                    "default": 20
+                },
+                "case_sensitive": {
+                    "type": "boolean",
+                    "description": "Whether the search should respect case",
+                    "default": False
+                }
+            },
+            required_params=["pattern"],
+            executor=self._search_filesystem,
+            timeout=20
         ))
 
         # Calculator Tool
@@ -997,6 +1022,152 @@ class ToolRegistry:
                 output=None,
                 error=f"Failed to get time: {str(e)}"
             )
+
+    def _sanitize_search_pattern(self, pattern: str) -> str:
+        """Clean user-provided pattern so it can safely be used for filesystem searches."""
+        if not pattern:
+            return ""
+        cleaned = pattern.strip()
+        cleaned = re.sub(r"[\r\n\t]+", " ", cleaned)
+        cleaned = re.sub(r"[\"'`]+", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned
+
+    def _match_filenames(self, root: str, pattern: str, limit: int) -> List[str]:
+        """Find files whose names contain the pattern."""
+        matches = []
+        needle = pattern.lower()
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                if needle in fname.lower():
+                    rel_path = os.path.relpath(os.path.join(dirpath, fname), root)
+                    matches.append(rel_path)
+                    if len(matches) >= limit:
+                        return matches
+        return matches
+
+    def _run_fast_search(self, root: str, pattern: str, max_results: int, case_sensitive: bool) -> Tuple[str, str]:
+        """
+        Attempt to run a fast grep-style search using rg/grep.
+        Returns (output, strategy) for the first method that succeeds.
+        """
+        strategies = []
+        if shutil.which("rg"):
+            cmd = [
+                "rg", "--line-number", "--no-heading", "--color", "never",
+                "--max-count", str(max_results)
+            ]
+            if not case_sensitive:
+                cmd.append("-i")
+            cmd.append(pattern)
+            strategies.append(("rg", cmd))
+        if shutil.which("grep"):
+            cmd = [
+                "grep", "-R", "-n", "--binary-files=without-match",
+                "-m", str(max_results)
+            ]
+            if not case_sensitive:
+                cmd.append("-i")
+            cmd.append(pattern)
+            strategies.append(("grep", cmd))
+
+        for name, cmd in strategies:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+            except subprocess.TimeoutExpired:
+                continue
+            except FileNotFoundError:
+                continue
+
+            if result.returncode in (0, 1):
+                output = result.stdout.strip()
+                return output, name
+        return "", ""
+
+    def _manual_content_search(self, root: str, pattern: str, max_results: int, case_sensitive: bool) -> str:
+        """Fallback content search that scans files line-by-line."""
+        matches = []
+        needle = pattern if case_sensitive else pattern.lower()
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                full_path = os.path.join(dirpath, fname)
+                try:
+                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                        for lineno, line in enumerate(f, start=1):
+                            haystack = line if case_sensitive else line.lower()
+                            if needle in haystack:
+                                rel_path = os.path.relpath(full_path, root)
+                                matches.append(f"{rel_path}:{lineno}:{line.strip()}")
+                                if len(matches) >= max_results:
+                                    return "\n".join(matches)
+                except (UnicodeDecodeError, OSError):
+                    continue
+        return "\n".join(matches)
+
+    def _search_filesystem(
+        self,
+        pattern: str,
+        path: Optional[str] = None,
+        max_results: int = 20,
+        case_sensitive: bool = False
+    ) -> ToolResult:
+        """Search the workspace for file names or contents matching the given pattern."""
+        sanitized = self._sanitize_search_pattern(pattern)
+        if not sanitized:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error="Empty or invalid search pattern"
+            )
+
+        max_results = max(1, min(max_results, 200))
+        search_root = self._resolve_path(path) if path else self._get_current_working_dir()
+        if not os.path.isdir(search_root):
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Search path does not exist or is not a directory: {search_root}"
+            )
+
+        filename_matches = self._match_filenames(search_root, sanitized, max_results)
+        content_output, strategy = self._run_fast_search(search_root, sanitized, max_results, case_sensitive)
+        if not content_output:
+            content_output = self._manual_content_search(search_root, sanitized, max_results, case_sensitive)
+            if not strategy:
+                strategy = "manual"
+
+        sections = []
+        if filename_matches:
+            sections.append("Matching filenames:\n" + "\n".join(filename_matches))
+        if content_output:
+            sections.append("Content matches:\n" + content_output)
+        else:
+            sections.append(f"No content matches for '{sanitized}' in {search_root}")
+
+        output = "\n\n".join(sections)
+        if len(output) > self.config.max_output_length:
+            output = output[:self.config.max_output_length] + "\n...[truncated]"
+
+        metadata = {
+            "path": search_root,
+            "pattern": sanitized,
+            "strategy": strategy or "manual",
+            "content_matches": bool(content_output)
+        }
+        if filename_matches:
+            metadata["filename_matches"] = len(filename_matches)
+
+        return ToolResult(
+            status=ToolStatus.SUCCESS,
+            output=output,
+            metadata=metadata
+        )
 
 
 # Decorator for easy tool registration

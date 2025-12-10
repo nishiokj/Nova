@@ -108,7 +108,7 @@ class AgentHarness:
         self._response_callbacks: List[Callable[[HarnessResponse], None]] = []
         self._state_callbacks: List[Callable[[HarnessState], None]] = []
 
-        self.logger.info("AgentHarness initialized", component="harness")
+        self.logger.system_init("harness", "ready")
 
     def _setup_logging(self):
         """Setup structured logging"""
@@ -184,16 +184,14 @@ class AgentHarness:
 
     def _prewarm_llm_clients(self):
         """Pre-warm LLM clients to avoid cold start penalty on first request"""
-        self.logger.info("Pre-warming LLM clients...", component="harness")
-
-        # Pre-warm the default tier's agent
         try:
             default_tier = self._base_config.agent.tier
             agent = self.agent._get_agent(default_tier)
             if agent._llm and hasattr(agent._llm, 'prewarm'):
                 agent._llm.prewarm()
+            self.logger.system_init("llm", "prewarmed", {"tier": default_tier})
         except Exception as e:
-            self.logger.error(f"Failed to pre-warm agent LLM: {e}", component="harness")
+            self.logger.error(f"Failed to pre-warm LLM: {e}", component="harness")
 
     def _set_state(self, state: HarnessState):
         """Set harness state and notify callbacks"""
@@ -218,12 +216,9 @@ class AgentHarness:
         request_id = self.logger.new_request()
         start_time = time.time()
 
-        self.logger.speech_received(speech_text)
+        self.logger.request_received(speech_text)
         call_dir = os.getcwd()
-        self.logger.debug("CALLING DIR", call_dir)
         self._set_state(HarnessState.PROCESSING)
-        if call_dir == None:
-            self.logger.debug("DIR IS NONE")
         classification = None
         agent_response = None
         spoken_response = ""
@@ -234,12 +229,7 @@ class AgentHarness:
             self._set_state(HarnessState.ROUTING)
             with self._profile("harness.route_ms"):
                 classification, tier_config = self.router.route(speech_text, context)
-
-            self.logger.info(
-                f"Routed to tier: {classification.tier_name}",
-                component="harness",
-                data={"confidence": classification.confidence}
-            )
+            # Note: router.py already logs input_parsed
 
             # Step 2: ServiceRep acknowledgment
             self._set_state(HarnessState.ACKNOWLEDGING)
@@ -262,7 +252,6 @@ class AgentHarness:
             tier_agent.add_step_callback(progress_callback)
 
             try:
-                self.logger.debug("ATTEMPTING TO RUN IN DIRECTORY", call_dir)
                 with self.tool_registry.with_working_dir(call_dir):
                     with self._profile("harness.agent_run_ms"):
                         agent_response = self.agent.run(
@@ -292,46 +281,9 @@ class AgentHarness:
                         detail=f"tool={op.get('tool')} action={op.get('action')}",
                         component="harness"
                     )
-                self.logger.debug(
-                    f"Spoken response ready (len={len(spoken_response)}): {spoken_response[:120]}",
-                    component="harness"
-                )
-
                 # Speak the response
                 with self._profile("harness.service_rep_respond_ms"):
-                    # DIAGNOSTIC: Aggressive logging for TTS failure investigation
-                    import threading
-                    text_preview = spoken_response[:100].replace('\n', ' ') if spoken_response else "(empty)"
-                    self.logger.info(
-                        f"🚀 HARNESS->TTS: DISPATCHING COMPLETION | thread={threading.current_thread().name} | "
-                        f"text='{text_preview}...' (len={len(spoken_response) if spoken_response else 0})",
-                        component="harness"
-                    )
-
-                    # Check ServiceRep state before calling
-                    sr_enabled = self.service_rep.enabled
-                    tts_initialized = self.service_rep.tts._initialized
-                    tts_thread_alive = self.service_rep.tts._speak_thread.is_alive() if self.service_rep.tts._speak_thread else False
-                    tts_queue_before = self.service_rep.tts._speak_queue.qsize()
-
-                    self.logger.info(
-                        f"🚀 HARNESS->TTS: PRE-CALL STATE | sr_enabled={sr_enabled}, tts_init={tts_initialized}, "
-                        f"tts_thread={tts_thread_alive}, queue_size={tts_queue_before}",
-                        component="harness"
-                    )
-
-                    if not sr_enabled:
-                        self.logger.error("🚀 HARNESS->TTS: ServiceRep is DISABLED! Completion will NOT be spoken!", component="harness")
-                    if not tts_thread_alive:
-                        self.logger.error(f"🚀 HARNESS->TTS: TTS thread DEAD! last_error={self.service_rep.tts._last_error}", component="harness")
-
                     self.service_rep.report_completion(spoken_response, full_response)
-
-                    tts_queue_after = self.service_rep.tts._speak_queue.qsize()
-                    self.logger.info(
-                        f"🚀 HARNESS->TTS: COMPLETION DISPATCHED | queue_after={tts_queue_after}",
-                        component="harness"
-                    )
             else:
                 # Handle error
                 error_msg = f"I ran into an issue: {agent_response.error or 'Unknown error'}"
@@ -346,14 +298,26 @@ class AgentHarness:
             duration_ms = (time.time() - start_time) * 1000
 
             with self._profile("harness.output_serialization_ms"):
-                self.logger.response_generated(
-                    spoken_response,
-                    metadata={
-                        "duration_ms": duration_ms,
-                        "tier": classification.tier_name,
-                        "tools_used": agent_response.tools_used if agent_response else []
-                    }
-                )
+                # Include success status from agent response
+                response_metadata = {
+                    "tier": classification.tier_name,
+                    "tools_used": agent_response.tools_used if agent_response else [],
+                    "success": agent_response.success if agent_response else False,
+                    "goal_achieved": agent_response.goal_achieved if agent_response else False,
+                }
+                if agent_response and agent_response.metadata:
+                    if "status" in agent_response.metadata:
+                        response_metadata["status"] = agent_response.metadata["status"]
+                    if "had_tool_failures" in agent_response.metadata:
+                        response_metadata["had_tool_failures"] = agent_response.metadata["had_tool_failures"]
+                    if "plan_type" in agent_response.metadata:
+                        response_metadata["plan_type"] = agent_response.metadata["plan_type"]
+                    if "reflection_confidence" in agent_response.metadata:
+                        response_metadata["reflection_conf"] = agent_response.metadata["reflection_confidence"]
+                if agent_response and agent_response.error:
+                    response_metadata["error"] = agent_response.error
+
+                self.logger.response_sent(spoken_response, metadata=response_metadata)
 
             response = HarnessResponse(
                 spoken_response=spoken_response,
@@ -408,7 +372,7 @@ class AgentHarness:
         request_id = self.logger.new_request()
         start_time = time.time()
 
-        self.logger.speech_received(speech_text)
+        self.logger.request_received(speech_text)
         call_dir = os.getcwd()
         self._set_state(HarnessState.PROCESSING)
 
@@ -419,6 +383,7 @@ class AgentHarness:
             # Route
             self._set_state(HarnessState.ROUTING)
             classification, _ = self.router.route(speech_text, context)
+            # Note: router.py already logs input_parsed
 
             # Acknowledge
             self._set_state(HarnessState.ACKNOWLEDGING)
@@ -553,7 +518,30 @@ class AgentHarness:
 
     def _generate_spoken_response(self, agent_response: AgentResponse) -> str:
         """Generate a spoken version of the response (may be abbreviated)"""
-        content = agent_response.content
+        content = agent_response.content or ""
+        metadata = agent_response.metadata or {}
+        file_ops = metadata.get("file_operations", [])
+
+        if file_ops:
+            summaries = []
+            seen_paths = set()
+            for op in file_ops:
+                path = op.get("path") or ""
+                action = (op.get("action") or "write").capitalize()
+                if path and path in seen_paths:
+                    continue
+                summaries.append(f"{action} {path or 'the requested file'}")
+                if path:
+                    seen_paths.add(path)
+                if len(summaries) >= 3:
+                    break
+
+            file_summary = "; ".join(summaries)
+            spoken = f"{file_summary}. I've saved the requested content to disk."
+            if len(file_ops) > len(summaries):
+                spoken += f" ({len(file_ops)} files total.)"
+            spoken += " Let me know if you want me to read any part of it aloud."
+            return spoken
 
         # If response is too long, summarize
         if len(content) > 5000:
