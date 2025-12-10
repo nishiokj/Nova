@@ -1,6 +1,11 @@
 """
 Agent - Main reasoning and tool execution agent.
 Handles user requests with tool usage and LLM reasoning.
+
+Architecture: Plan → Execute → Reflect
+- Planner: Creates explicit execution plans with success criteria
+- Executor: Runs plans step-by-step with validation
+- Reflector: Evaluates if goal was actually achieved
 """
 
 import json
@@ -9,20 +14,23 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Generator, Callable
 from enum import Enum
 
-from .config import AgentConfig, LLMConfig
+from .config import AgentConfig, LLMConfig, DEFAULT_TIER_TOOL_LIMITS, DEFAULT_TIER_MAX_TOKENS
 from .llm_adapter import (
     LLMAdapter, create_adapter, Message, MessageRole,
     LLMResponse, ToolCall, ToolDefinition
 )
 from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 from .logger import get_logger
+from .planner import Planner, Executor, Reflector, Plan, ExecutionTrace, Reflection, PlanStatus
 
 
 class AgentState(Enum):
     """Agent execution states"""
     IDLE = "idle"
+    PLANNING = "planning"
     THINKING = "thinking"
     EXECUTING_TOOL = "executing_tool"
+    REFLECTING = "reflecting"
     GENERATING_RESPONSE = "generating_response"
     COMPLETE = "complete"
     ERROR = "error"
@@ -67,6 +75,11 @@ class AgentResponse:
     error: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Plan/Execute/Reflect tracking
+    plan: Optional[Plan] = None
+    reflection: Optional[Reflection] = None
+    goal_achieved: bool = True            # Did we actually achieve the user's goal?
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "content": self.content,
@@ -76,14 +89,16 @@ class AgentResponse:
             "tools_used": self.tools_used,
             "success": self.success,
             "error": self.error,
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "goal_achieved": self.goal_achieved,
+            "plan": self.plan.to_dict() if self.plan else None
         }
 
 
 class Agent:
     """
     Main reasoning and execution agent.
-    Uses LLM for decision-making and tools for actions.
+    Uses Plan → Execute → Reflect architecture for structured execution.
     """
 
     def __init__(
@@ -101,6 +116,15 @@ class Agent:
         self._llm: Optional[LLMAdapter] = None
         if self._llm_config:
             self._llm = create_adapter(self._llm_config)
+
+        # Plan/Execute/Reflect components
+        self._planner: Optional[Planner] = None
+        self._executor: Optional[Executor] = None
+        self._reflector: Optional[Reflector] = None
+        if self._llm:
+            self._planner = Planner(self._llm, tool_registry)
+            self._executor = Executor(self._llm, tool_registry, config.max_tool_calls)
+            self._reflector = Reflector(self._llm)
 
         # Conversation history
         self._conversation: List[Message] = []
@@ -250,6 +274,9 @@ class Agent:
         )
         self._step_count += 1
 
+        # Log tool call start
+        self.logger.tool_call_start([{"name": tool_call.name, "params": tool_call.arguments}])
+
         # CRITICAL: Record step BEFORE execution so progress callbacks fire immediately
         # This allows ServiceRep to speak "Searching now..." before the actual search
         self._record_step(step)
@@ -262,9 +289,9 @@ class Agent:
         step.error = result.error if not result.is_success else None
 
         if result.is_success:
-            self.logger.tool_result(tool_call.name, result.output, step.duration_ms)
+            self.logger.tool_call_end(tool_call.name, True, step.duration_ms, str(result.output)[:100])
         else:
-            self.logger.tool_error(tool_call.name, Exception(result.error or "Unknown"))
+            self.logger.tool_call_end(tool_call.name, False, step.duration_ms, result.error)
 
         metadata = result.metadata or {}
         paths = []
@@ -282,10 +309,11 @@ class Agent:
 
         return result
 
-    def _process_tool_calls(self, tool_calls: List[ToolCall]) -> List[Dict[str, Any]]:
-        """Process multiple tool calls and return results (with de-duplication)"""
+    def _process_tool_calls(self, tool_calls: List[ToolCall]) -> tuple:
+        """Process multiple tool calls and return (results, any_failed)"""
         results = []
         seen_calls = set()  # Track (name, args_hash) to prevent duplicates
+        any_failed = False
 
         for tool_call in tool_calls:
             # De-duplicate: skip if we've already called this tool with same args
@@ -299,24 +327,30 @@ class Agent:
             seen_calls.add(args_key)
 
             result = self._execute_tool(tool_call)
+            if not result.is_success:
+                any_failed = True
             results.append({
                 "tool_call_id": tool_call.id,
                 "name": tool_call.name,
                 "result": result.output if result.is_success else f"Error: {result.error}",
                 "success": result.is_success
             })
-        return results
+        return results, any_failed
 
     def run(self, user_input: str, context: Optional[str] = None) -> AgentResponse:
         """
-        Run the agent on user input with tier-appropriate tool limits.
+        Run the agent using Plan → Execute → Reflect architecture.
+
+        1. PLAN: Create explicit execution plan with success criteria
+        2. EXECUTE: Run the plan step by step
+        3. REFLECT: Evaluate if the goal was actually achieved
 
         Args:
             user_input: The user's request
             context: Optional additional context
 
         Returns:
-            AgentResponse with content and execution details
+            AgentResponse with content, plan, and reflection
         """
         if not self._llm:
             return AgentResponse(
@@ -326,140 +360,124 @@ class Agent:
             )
 
         start_time = time.time()
-        self._current_state = AgentState.THINKING
         self._step_count = 0
         self._steps = []
         self._file_operations = []
-        tools_used = []
-        total_tool_calls = 0
-        max_tool_calls = self.config.max_tool_calls
-        input_lower = user_input.lower()
-        wants_search = any(
-            phrase in input_lower
-            for phrase in ["search", "look up", "lookup", "google", "find", "check online", "look online"]
-        )
 
         # Build messages
         messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
         messages.extend(self._conversation)
 
         # Add context if provided
+        full_input = user_input
         if context:
-            user_input = f"{user_input}\n\nContext: {context}"
+            full_input = f"{user_input}\n\nContext: {context}"
+        messages.append(Message(MessageRole.USER, full_input))
 
-        messages.append(Message(MessageRole.USER, user_input))
-
-        # Decide whether tools are allowed for this request
-        needs_realtime = self._needs_realtime_data(user_input)
-        needs_file_tools = self._needs_file_tools(user_input)
-        # Only allow tools when we truly need external/fresh data, the user asked to search, or file ops are needed
-        allow_tools = max_tool_calls > 0 and (needs_realtime or wants_search or needs_file_tools)
-        if not allow_tools:
-            max_tool_calls = 0
-        tool_definitions = self._get_tool_definitions() if allow_tools else []
+        # Get tool definitions
+        tool_definitions = self._get_tool_definitions()
 
         try:
-            # Initial LLM call
-            self._emit_thought("Processing request...")
+            # ========== PHASE 1: PLANNING ==========
+            self._current_state = AgentState.PLANNING
+            self._emit_thought("Creating execution plan...")
 
-            # CRITICAL: If this looks like a query that NEEDS real-time data, force tool usage
-            tool_choice = None
-            if needs_realtime and tool_definitions:
-                # Force the model to use fast_answer for real-time queries
-                fast_answer = next((t for t in tool_definitions if t.name == "fast_answer"), None)
-                if fast_answer:
-                    tool_choice = {"type": "function", "function": {"name": "fast_answer"}}
-                    self.logger.info(f"Forcing fast_answer tool for real-time query", component="agent")
-
-            response = self._llm.complete(
-                messages,
-                tools=tool_definitions if max_tool_calls > 0 else None,
-                tool_choice=tool_choice
+            plan = self._planner.create_plan(
+                user_input=user_input,
+                context=context,
+                tier=self.config.tier
             )
 
-            # Record thinking step
-            thinking_step = AgentStep(
+            self.logger.plan_created(
+                f"Plan: {plan.goal_type} - {plan.goal[:60]}",
+                tools=[s.tool_hint for s in plan.steps if s.tool_hint]
+            )
+
+            # Record planning step
+            planning_step = AgentStep(
                 step_number=self._step_count,
-                state=AgentState.THINKING,
-                thought=response.content[:200] if response.content else "Thinking..."
+                state=AgentState.PLANNING,
+                thought=f"Plan: {plan.goal} ({len(plan.steps)} steps)"
             )
             self._step_count += 1
-            self._record_step(thinking_step)
+            self._record_step(planning_step)
 
-            # If tools are disallowed, force the model to answer without them
-            if response.has_tool_calls and max_tool_calls == 0:
-                response = self._llm.complete(messages, tools=None)
+            # ========== PHASE 2: EXECUTION ==========
+            self._current_state = AgentState.THINKING
+            self._emit_thought(f"Executing plan: {plan.goal[:50]}...")
 
-            # Process tool calls with STRICT limit enforcement
-            while response.has_tool_calls and max_tool_calls > 0 and total_tool_calls < max_tool_calls:
-                # CRITICAL: Limit number of parallel tool calls per iteration
-                tool_calls_this_round = response.tool_calls[:max(1, max_tool_calls - total_tool_calls)]
+            trace = self._executor.execute(
+                plan=plan,
+                messages=messages,
+                tools=tool_definitions if plan.requires_tools else []
+            )
 
-                self._emit_thought(f"Using tool: {tool_calls_this_round[0].name}")
+            final_content = trace.final_response or "I apologize, I couldn't generate a response."
 
-                # Execute tools (limited)
-                tool_results = self._process_tool_calls(tool_calls_this_round)
-                tools_used.extend([tr["name"] for tr in tool_results])
-                total_tool_calls += len(tool_results)
-
-                # Add assistant message with tool calls
-                messages.append(Message(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content or "",
-                    tool_calls=[{
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}
-                    } for tc in tool_calls_this_round]
-                ))
-
-                # Add tool results
-                for tr in tool_results:
-                    messages.append(Message(
-                        role=MessageRole.TOOL,
-                        content=str(tr["result"])[:2000],  # Limit result size
-                        tool_call_id=tr["tool_call_id"],
-                        name=tr["name"]
-                    ))
-
-                # Check if we've hit the limit - if so, force final answer
-                if total_tool_calls >= max_tool_calls:
-                    self._emit_thought(f"Tool limit reached ({max_tool_calls}), generating final answer")
-                    # Don't pass tools to force a text-only response
-                    response = self._llm.complete(messages, tools=None)
-                    break
-
-                # Get next response (may include more tool calls)
-                self._current_state = AgentState.GENERATING_RESPONSE
-                response = self._llm.complete(messages, tools=tool_definitions)
-
-            # Final response
-            self._current_state = AgentState.COMPLETE
-            final_content = response.content or "I apologize, I couldn't generate a response."
+            # Record tool steps in our step list
+            for plan_step in trace.steps_executed:
+                if plan_step.tool_hint:
+                    agent_step = AgentStep(
+                        step_number=self._step_count,
+                        state=AgentState.EXECUTING_TOOL,
+                        tool_name=plan_step.tool_hint,
+                        tool_output=plan_step.result,
+                        duration_ms=plan_step.duration_ms,
+                        error=plan_step.error
+                    )
+                    self._step_count += 1
+                    self._record_step(agent_step)
 
             # Update conversation history
-            self._add_message(Message(MessageRole.USER, user_input))
+            self._add_message(Message(MessageRole.USER, full_input))
             self._add_message(Message(MessageRole.ASSISTANT, final_content))
 
+            # ========== PHASE 3: REFLECTION ==========
+            self._current_state = AgentState.REFLECTING
+
+            reflection = self._reflector.reflect(plan, trace)
+
+            # Log reflection result
+            status = "completed" if reflection.goal_achieved else "failed"
+            if trace.had_failures and reflection.goal_achieved:
+                status = "partial"
+
+            self.logger.reflection(
+                goal_achieved=reflection.goal_achieved,
+                confidence=reflection.confidence,
+                gaps=reflection.gaps
+            )
+
+            # ========== BUILD RESPONSE ==========
+            self._current_state = AgentState.COMPLETE
             total_duration = (time.time() - start_time) * 1000
 
-            self.logger.agent_decision(
-                f"Completed with {total_tool_calls} tool calls (limit: {max_tool_calls})",
-                tools=tools_used
-            )
+            # Determine success based on reflection
+            actual_success = reflection.goal_achieved
+            failure_reason = None if actual_success else "; ".join(reflection.gaps) if reflection.gaps else "Goal not achieved"
 
             return AgentResponse(
                 content=final_content,
-                structured_action=None,  # Removed ACTION: requirement
+                structured_action=plan.goal,
                 steps=self._steps,
                 total_duration_ms=total_duration,
-                tools_used=list(set(tools_used)),
-                success=True,
+                tools_used=[s.tool_hint for s in trace.steps_executed if s.tool_hint],
+                success=actual_success,
+                error=failure_reason,
+                plan=plan,
+                reflection=reflection,
+                goal_achieved=reflection.goal_achieved,
                 metadata={
                     "model": self._llm_config.model if self._llm_config else None,
-                    "tool_calls": total_tool_calls,
-                    "max_tool_calls": max_tool_calls,
-                    "file_operations": list(self._file_operations)
+                    "tool_calls": trace.tool_calls,
+                    "tool_failures": trace.tool_failures,
+                    "llm_calls": trace.llm_calls,
+                    "max_tool_calls": self.config.max_tool_calls,
+                    "file_operations": list(self._file_operations),
+                    "had_tool_failures": trace.had_failures,
+                    "status": status,
+                    "plan_type": plan.goal_type,
+                    "reflection_confidence": reflection.confidence
                 }
             )
 
@@ -472,7 +490,8 @@ class Agent:
                 success=False,
                 error=str(e),
                 steps=self._steps,
-                total_duration_ms=(time.time() - start_time) * 1000
+                total_duration_ms=(time.time() - start_time) * 1000,
+                goal_achieved=False
             )
 
     def run_streaming(
@@ -630,29 +649,19 @@ Principles:
 Available tools:
 {tools}"""
 
-ADVANCED_TIER_PROMPT = """You are an expert assistant for complex tasks. Optimize for correctness and clarity.
+ADVANCED_TIER_PROMPT = """You are an expert personal CLI assistant for complex tasks. Optimize for correctness and clarity.
 
 Principles:
-- Quickly outline the plan in your head, then execute. Use tools only where they add real evidence or fresh data.
+- Quickly outline the plan. This could be multiple steps and also could require discovery if called from an existing system. You are highly capable of multi-turn robust plans and should be very detail oriented for complex tasks. Use tools only where they add real evidence or fresh data.
 - Prefer fewer, high-impact tool calls (max 10). Avoid trivial tool calls (e.g., time) unless requested.
 - Double-check critical facts; provide a crisp, helpful final answer.
 
 Available tools:
 {tools}"""
 
-# Tool call limits by tier
-TIER_TOOL_LIMITS = {
-    "simple": 1,      # ONE tool call max - answer quickly
-    "standard": 3,    # Reasonable for most tasks
-    "advanced": 10    # Complex research/multi-step
-}
-
-# Max tokens by tier - keep latency low
-TIER_MAX_TOKENS = {
-    "simple": 1500,
-    "standard": 4000,
-    "advanced": 8000
-}
+# Tool call limits and max tokens are driven by the JSON config defaults above
+TIER_TOOL_LIMITS = DEFAULT_TIER_TOOL_LIMITS
+TIER_MAX_TOKENS = DEFAULT_TIER_MAX_TOKENS
 
 
 class TieredAgent:
@@ -694,7 +703,12 @@ class TieredAgent:
             # Clone LLM config with tier-specific max_tokens
             # CRITICAL: This prevents simple queries from generating 1000+ tokens
             from .config import LLMConfig
-            tier_max_tokens = TIER_MAX_TOKENS.get(tier, 500)
+            tier_max_tokens = self.config.tier_max_tokens.get(tier)
+            if tier_max_tokens is None:
+                llm_base_max = None
+                if self.config.llm_config and getattr(self.config.llm_config, "max_tokens", None):
+                    llm_base_max = self.config.llm_config.max_tokens
+                tier_max_tokens = llm_base_max or DEFAULT_TIER_MAX_TOKENS.get(tier, 500)
             llm_config = LLMConfig(
                 provider=base_llm_config.provider,
                 model=base_llm_config.model,
@@ -711,21 +725,25 @@ class TieredAgent:
             )
 
             # Create modified config with tier-specific tool limits
+            tool_limit = self.config.tier_tool_limits.get(tier)
+            if tool_limit is None:
+                tool_limit = self.config.max_tool_calls
+
             tier_config = AgentConfig(
                 llm_config=llm_config,
                 tier=tier,
                 system_prompt=self._get_tier_prompt(tier),
-                max_tool_calls=TIER_TOOL_LIMITS.get(tier, 3),
+                max_tool_calls=tool_limit,
                 tool_timeout=self.config.tool_timeout,
                 allow_code_execution=self.config.allow_code_execution,
                 allow_internet=self.config.allow_internet,
                 allow_bash=self.config.allow_bash
             )
 
-            self.logger.info(
-                f"Creating {tier} tier agent (max_tokens={tier_max_tokens}, max_tools={TIER_TOOL_LIMITS.get(tier, 3)})",
-                component="agent"
-            )
+            self.logger.system_init("agent", f"created_{tier}", {
+                "max_tokens": tier_max_tokens,
+                "max_tools": tool_limit
+            })
 
             self._agents[tier] = Agent(tier_config, self.tool_registry, llm_config)
         return self._agents[tier]
@@ -734,10 +752,11 @@ class TieredAgent:
         """Run with specified tier and tier-appropriate behavior"""
         tier = tier or self._current_tier
 
-        self.logger.info(
-            f"Running agent at tier '{tier}' (max {TIER_TOOL_LIMITS.get(tier, 3)} tool calls)",
-            component="agent"
-        )
+        tool_limit = self.config.tier_tool_limits.get(tier)
+        if tool_limit is None:
+            tool_limit = self.config.max_tool_calls
+
+        self.logger.debug(f"Running agent at tier '{tier}' (max {tool_limit} tools)", component="agent")
 
         agent = self._get_agent(tier)
         return agent.run(user_input, context)

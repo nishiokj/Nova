@@ -259,6 +259,8 @@ class VoiceStreamer:
         
         # Callbacks
         self.speech_callbacks: List[Callable] = []
+        self._last_spoken_sentence_normalized = ""
+        self._last_spoken_sentence_words: List[str] = []
         
         # Initialize engine
         if self.engine and not self.engine.initialize():
@@ -403,15 +405,20 @@ class VoiceStreamer:
         sentences = self._extract_sentences(self.buffer)
         
         for sentence in sentences:
-            if sentence.strip():
-                self._speak_sentence(sentence)
-                
-                # Notify callbacks
-                for callback in self.speech_callbacks:
-                    try:
-                        callback(sentence)
-                    except Exception as e:
-                        self.logger.error(f"Error in speech callback: {e}")
+            normalized = self._normalize_sentence(sentence)
+            if self._is_redundant_sentence(normalized):
+                self.logger.debug(f"VoiceStreamer: skipping redundant sentence '{sentence.strip()}'")
+                continue
+
+            self._speak_sentence(sentence)
+            self._record_spoken_sentence(normalized)
+
+            # Notify callbacks
+            for callback in self.speech_callbacks:
+                try:
+                    callback(sentence)
+                except Exception as e:
+                    self.logger.error(f"Error in speech callback: {e}")
     
     def _extract_sentences(self, text: str) -> List[str]:
         """Extract complete sentences from buffer"""
@@ -436,6 +443,31 @@ class VoiceStreamer:
         
         self.buffer = remaining_text
         return complete_sentences
+
+    def _normalize_sentence(self, sentence: str) -> str:
+        """Normalize a sentence by trimming whitespace and collapsing spaces"""
+        return " ".join(sentence.strip().lower().split())
+
+    def _is_redundant_sentence(self, normalized: str) -> bool:
+        """Detect duplicate sentences or short tails of the previous sentence"""
+        if not normalized:
+            return True
+
+        if normalized == self._last_spoken_sentence_normalized:
+            return True
+
+        words = normalized.split()
+        tail_len = len(words)
+        if tail_len <= 2 and tail_len <= len(self._last_spoken_sentence_words):
+            if self._last_spoken_sentence_words[-tail_len:] == words:
+                return True
+
+        return False
+
+    def _record_spoken_sentence(self, normalized: str):
+        """Save the normalized sentence for duplicate detection"""
+        self._last_spoken_sentence_normalized = normalized
+        self._last_spoken_sentence_words = normalized.split()
     
     def _speak_sentence(self, sentence: str):
         """Speak a single sentence in-order (pyttsx3 is not thread safe)."""
@@ -452,9 +484,19 @@ class VoiceStreamer:
     
     def _flush_buffer(self):
         """Flush remaining text in buffer"""
-        if self.buffer.strip():
-            self._speak_sentence(self.buffer)
+        if not self.buffer.strip():
             self.buffer = ""
+            return
+
+        normalized = self._normalize_sentence(self.buffer)
+        if self._is_redundant_sentence(normalized):
+            self.logger.debug(f"VoiceStreamer: flush buffer skipped redundant chunk '{self.buffer.strip()}'")
+            self.buffer = ""
+            return
+
+        self._speak_sentence(self.buffer)
+        self._record_spoken_sentence(normalized)
+        self.buffer = ""
     
     def add_speech_callback(self, callback: Callable):
         """Add callback for speech events"""

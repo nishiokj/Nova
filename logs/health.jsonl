@@ -1,0 +1,358 @@
+{"ts": "2025-12-10T03:23:40.904Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: web_search"}
+{"ts": "2025-12-10T03:23:40.904Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: web_fetch"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time"}
+{"ts": "2025-12-10T03:23:40.905Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: fast_answer"}
+{"ts": "2025-12-10T03:23:40.906Z", "lvl": "DEBUG", "svc": "tts", "evt": "init_starting"}
+{"ts": "2025-12-10T03:23:41.046Z", "lvl": "DEBUG", "svc": "tts", "evt": "init_ready", "data": {"engine": "VoiceStreamer"}}
+{"ts": "2025-12-10T03:23:41.046Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_thread_started"}
+{"ts": "2025-12-10T03:23:41.046Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "init_ready", "data": {"engine": "VoiceStreamer"}}
+{"ts": "2025-12-10T03:23:41.047Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_created_advanced", "data": {"max_tokens": 8000, "max_tools": 10}}
+{"ts": "2025-12-10T03:23:41.197Z", "lvl": "DEBUG", "svc": "llm", "evt": "OpenAI client pre-warmed for model gpt-5-mini"}
+{"ts": "2025-12-10T03:23:41.197Z", "lvl": "DEBUG", "svc": "llm", "evt": "init_prewarmed", "data": {"tier": "advanced"}}
+{"ts": "2025-12-10T03:23:41.197Z", "lvl": "DEBUG", "svc": "harness", "evt": "init_ready"}
+{"ts": "2025-12-10T03:23:41.197Z", "lvl": "DEBUG", "svc": "bridge", "evt": "TTS tracking registered"}
+{"ts": "2025-12-10T03:23:41.414Z", "lvl": "DEBUG", "svc": "harness", "evt": "Async processing started"}
+{"ts": "2025-12-10T03:23:46.052Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 0}}
+{"ts": "2025-12-10T03:23:51.057Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 0}}
+{"ts": "2025-12-10T03:23:56.061Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 0}}
+{"ts": "2025-12-10T03:24:01.066Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 0}}
+{"ts": "2025-12-10T03:24:05.825Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Processing: Create me a personal website and pure HTML based on my resume. You can find my resume on my desktop by searching my desktop for resume.txt."}
+{"ts": "2025-12-10T03:24:05.826Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: processing"}
+{"ts": "2025-12-10T03:24:05.826Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: routing"}
+{"ts": "2025-12-10T03:24:05.826Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: acknowledging"}
+{"ts": "2025-12-10T03:24:05.826Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "ack: Let me look that up quickly.", "data": {"input": "Create me a personal website and pure HTML based o"}}
+{"ts": "2025-12-10T03:24:05.826Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "acknowledgment", "len": 28}}
+{"ts": "2025-12-10T03:24:05.826Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: agent_working"}
+{"ts": "2025-12-10T03:24:05.826Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_created_standard", "data": {"max_tokens": 4000, "max_tools": 3}}
+{"ts": "2025-12-10T03:24:05.835Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'standard' (max 3 tools)"}
+{"ts": "2025-12-10T03:24:05.836Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Processing request..."}
+{"ts": "2025-12-10T03:24:05.849Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=['web_search', 'web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'fast_answer'], too"}
+{"ts": "2025-12-10T03:24:07.227Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 1400, "total": 1}}
+{"ts": "2025-12-10T03:24:10.648Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=0, tool_calls=1, finish=tool_calls"}
+{"ts": "2025-12-10T03:24:10.649Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Using tool: search_filesystem"}
+{"ts": "2025-12-10T03:24:10.649Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "progress", "len": 14}}
+{"ts": "2025-12-10T03:24:10.660Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=['web_search', 'web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'fast_answer'], too"}
+{"ts": "2025-12-10T03:24:11.728Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 1078, "total": 2}}
+{"ts": "2025-12-10T03:24:14.388Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=0, tool_calls=1, finish=tool_calls"}
+{"ts": "2025-12-10T03:24:14.390Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Using tool: search_filesystem"}
+{"ts": "2025-12-10T03:24:16.733Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 2}}
+{"ts": "2025-12-10T03:24:17.262Z", "lvl": "DEBUG", "svc": "agent", "evt": "file_agent_file_noted", "data": {"path": "/Users/jevinnishioka/Desktop/jesus", "detail": "tool=search_filesystem action=search_filesystem"}}
+{"ts": "2025-12-10T03:24:17.262Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=['web_search', 'web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'fast_answer'], too"}
+{"ts": "2025-12-10T03:24:21.388Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=0, tool_calls=1, finish=tool_calls"}
+{"ts": "2025-12-10T03:24:21.391Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Using tool: search_filesystem"}
+{"ts": "2025-12-10T03:24:21.736Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 2}}
+{"ts": "2025-12-10T03:24:22.946Z", "lvl": "DEBUG", "svc": "agent", "evt": "file_agent_file_noted", "data": {"path": "/Users/jevinnishioka/Desktop/jesus", "detail": "tool=search_filesystem action=search_filesystem"}}
+{"ts": "2025-12-10T03:24:22.946Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Tool limit reached (3), generating final answer"}
+{"ts": "2025-12-10T03:24:22.946Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=[], tool_choice=none"}
+{"ts": "2025-12-10T03:24:26.740Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 2}}
+{"ts": "2025-12-10T03:24:27.125Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=443, tool_calls=0, finish=stop"}
+{"ts": "2025-12-10T03:24:27.127Z", "lvl": "DEBUG", "svc": "harness", "evt": "file_harness_file_noted", "data": {"path": "/Users/jevinnishioka/Desktop/jesus", "detail": "tool=search_filesystem action=search_filesystem"}}
+{"ts": "2025-12-10T03:24:27.127Z", "lvl": "DEBUG", "svc": "harness", "evt": "file_harness_file_noted", "data": {"path": "/Users/jevinnishioka/Desktop/jesus", "detail": "tool=search_filesystem action=search_filesystem"}}
+{"ts": "2025-12-10T03:24:27.127Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "completion", "len": 169}}
+{"ts": "2025-12-10T03:24:27.128Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: idle"}
+{"ts": "2025-12-10T03:24:27.144Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Response generated in 21318ms"}
+{"ts": "2025-12-10T03:24:34.291Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 7163, "total": 3}}
+{"ts": "2025-12-10T03:24:39.294Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 3}}
+{"ts": "2025-12-10T03:24:40.550Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Processing: We did a lot."}
+{"ts": "2025-12-10T03:24:40.550Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: processing"}
+{"ts": "2025-12-10T03:24:40.550Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: routing"}
+{"ts": "2025-12-10T03:24:40.551Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: acknowledging"}
+{"ts": "2025-12-10T03:24:40.551Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "ack: Got it\u2014one sec.", "data": {"input": "We did a lot."}}
+{"ts": "2025-12-10T03:24:40.551Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "acknowledgment", "len": 15}}
+{"ts": "2025-12-10T03:24:40.551Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: agent_working"}
+{"ts": "2025-12-10T03:24:40.551Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'standard' (max 3 tools)"}
+{"ts": "2025-12-10T03:24:40.551Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Processing request..."}
+{"ts": "2025-12-10T03:24:40.559Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=[], tool_choice=none"}
+{"ts": "2025-12-10T03:24:41.936Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 1385, "total": 4}}
+{"ts": "2025-12-10T03:24:46.940Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 4}}
+{"ts": "2025-12-10T03:24:51.391Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=501, tool_calls=0, finish=stop"}
+{"ts": "2025-12-10T03:24:51.393Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "completion", "len": 501}}
+{"ts": "2025-12-10T03:24:51.393Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: idle"}
+{"ts": "2025-12-10T03:24:51.409Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Response generated in 10843ms"}
+{"ts": "2025-12-10T03:25:00.153Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_say_error", "data": {"code": -2}}
+{"ts": "2025-12-10T03:25:00.153Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 8760, "total": 5}}
+{"ts": "2025-12-10T03:25:00.457Z", "lvl": "DEBUG", "svc": "harness", "evt": "Async processing stopped"}
+{"ts": "2025-12-10T03:25:00.458Z", "lvl": "DEBUG", "svc": "harness", "evt": "Async processing stopped"}
+{"ts": "2025-12-10T03:25:02.463Z", "lvl": "DEBUG", "svc": "harness", "evt": "AgentHarness cleaned up"}
+{"ts": "2025-12-10T03:25:05.158Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_thread_stopped"}
+{"ts": "2025-12-10T03:25:07.467Z", "lvl": "DEBUG", "svc": "harness", "evt": "Async processing stopped"}
+{"ts": "2025-12-10T03:25:07.468Z", "lvl": "DEBUG", "svc": "harness", "evt": "Async processing stopped"}
+{"ts": "2025-12-10T03:25:07.468Z", "lvl": "DEBUG", "svc": "harness", "evt": "AgentHarness cleaned up"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: web_search"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: web_fetch"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time"}
+{"ts": "2025-12-10T03:30:00.824Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: fast_answer"}
+{"ts": "2025-12-10T03:30:00.826Z", "lvl": "DEBUG", "svc": "tts", "evt": "init_starting"}
+{"ts": "2025-12-10T03:30:00.969Z", "lvl": "DEBUG", "svc": "tts", "evt": "init_ready", "data": {"engine": "VoiceStreamer"}}
+{"ts": "2025-12-10T03:30:00.969Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_thread_started"}
+{"ts": "2025-12-10T03:30:00.969Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "init_ready", "data": {"engine": "VoiceStreamer"}}
+{"ts": "2025-12-10T03:30:00.969Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_created_advanced", "data": {"max_tokens": 8000, "max_tools": 10}}
+{"ts": "2025-12-10T03:30:01.134Z", "lvl": "DEBUG", "svc": "llm", "evt": "OpenAI client pre-warmed for model gpt-5-mini"}
+{"ts": "2025-12-10T03:30:01.134Z", "lvl": "DEBUG", "svc": "llm", "evt": "init_prewarmed", "data": {"tier": "advanced"}}
+{"ts": "2025-12-10T03:30:01.134Z", "lvl": "DEBUG", "svc": "harness", "evt": "init_ready"}
+{"ts": "2025-12-10T03:30:01.134Z", "lvl": "DEBUG", "svc": "bridge", "evt": "TTS tracking registered"}
+{"ts": "2025-12-10T03:30:01.369Z", "lvl": "DEBUG", "svc": "harness", "evt": "Async processing started"}
+{"ts": "2025-12-10T03:30:05.972Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 0}}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Processing: What's the capital of Alabama?"}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: processing"}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: routing"}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: acknowledging"}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "ack: Let me check that for you.", "data": {"input": "What's the capital of Alabama?"}}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "acknowledgment", "len": 26}}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: agent_working"}
+{"ts": "2025-12-10T03:30:06.335Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_created_simple", "data": {"max_tokens": 1500, "max_tools": 1}}
+{"ts": "2025-12-10T03:30:06.343Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'simple' (max 1 tools)"}
+{"ts": "2025-12-10T03:30:06.343Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Processing request..."}
+{"ts": "2025-12-10T03:30:06.357Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=[], tool_choice=none"}
+{"ts": "2025-12-10T03:30:07.575Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 1240, "total": 1}}
+{"ts": "2025-12-10T03:30:08.547Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=11, tool_calls=0, finish=stop"}
+{"ts": "2025-12-10T03:30:08.548Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "error", "len": 53}}
+{"ts": "2025-12-10T03:30:08.548Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: idle"}
+{"ts": "2025-12-10T03:30:08.549Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Response generated in 2214ms"}
+{"ts": "2025-12-10T03:30:11.472Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 2923, "total": 2}}
+{"ts": "2025-12-10T03:30:16.476Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 2}}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Processing: with the capital of New York."}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: processing"}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: routing"}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: acknowledging"}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "ack: Got it\u2014one sec.", "data": {"input": "with the capital of New York."}}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "acknowledgment", "len": 15}}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: agent_working"}
+{"ts": "2025-12-10T03:30:16.990Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'simple' (max 1 tools)"}
+{"ts": "2025-12-10T03:30:16.997Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Processing request..."}
+{"ts": "2025-12-10T03:30:16.998Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=[], tool_choice=none"}
+{"ts": "2025-12-10T03:30:18.382Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 1391, "total": 3}}
+{"ts": "2025-12-10T03:30:19.515Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=7, tool_calls=0, finish=stop"}
+{"ts": "2025-12-10T03:30:19.517Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "error", "len": 53}}
+{"ts": "2025-12-10T03:30:19.518Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: idle"}
+{"ts": "2025-12-10T03:30:19.535Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Response generated in 2544ms"}
+{"ts": "2025-12-10T03:30:22.449Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 2931, "total": 4}}
+{"ts": "2025-12-10T03:30:27.451Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 4}}
+{"ts": "2025-12-10T03:30:32.457Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 4}}
+{"ts": "2025-12-10T03:30:37.460Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 4}}
+{"ts": "2025-12-10T03:30:42.465Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 4}}
+{"ts": "2025-12-10T03:30:47.470Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 4}}
+{"ts": "2025-12-10T03:30:52.475Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 4}}
+{"ts": "2025-12-10T03:30:56.042Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Processing: What is the capital of New York?"}
+{"ts": "2025-12-10T03:30:56.042Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: processing"}
+{"ts": "2025-12-10T03:30:56.042Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: routing"}
+{"ts": "2025-12-10T03:30:56.042Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: acknowledging"}
+{"ts": "2025-12-10T03:30:56.043Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "ack: Let me check that for you.", "data": {"input": "What is the capital of New York?"}}
+{"ts": "2025-12-10T03:30:56.043Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "acknowledgment", "len": 26}}
+{"ts": "2025-12-10T03:30:56.043Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: agent_working"}
+{"ts": "2025-12-10T03:30:56.043Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'simple' (max 1 tools)"}
+{"ts": "2025-12-10T03:30:56.043Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Processing request..."}
+{"ts": "2025-12-10T03:30:56.050Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=[], tool_choice=none"}
+{"ts": "2025-12-10T03:30:57.275Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 1233, "total": 5}}
+{"ts": "2025-12-10T03:30:57.985Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=7, tool_calls=0, finish=stop"}
+{"ts": "2025-12-10T03:30:57.987Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "error", "len": 53}}
+{"ts": "2025-12-10T03:30:58.009Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: idle"}
+{"ts": "2025-12-10T03:30:58.010Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Response generated in 1967ms"}
+{"ts": "2025-12-10T03:31:00.918Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 2931, "total": 6}}
+{"ts": "2025-12-10T03:31:05.923Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:10.928Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:15.931Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:20.937Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:25.940Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:30.942Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:35.944Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:40.948Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:45.954Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:50.956Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:31:55.960Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:00.962Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:05.968Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:10.973Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:15.979Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:20.981Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:25.986Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:30.989Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:35.992Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:40.996Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:46.001Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:51.006Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:32:56.011Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:01.013Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:06.017Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:11.021Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:16.026Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:21.030Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:26.031Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:31.036Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:36.040Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:41.045Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:46.048Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:51.053Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:33:56.059Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:01.062Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:06.065Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:11.069Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:16.074Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:21.077Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:26.082Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:31.085Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:36.090Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:41.094Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:46.100Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:51.102Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:34:56.105Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:01.110Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:06.113Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:11.118Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:16.122Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:21.126Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:26.131Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:31.134Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:36.138Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:41.142Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:46.145Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:51.150Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:35:56.155Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:01.161Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:06.163Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:11.168Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:16.172Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:21.173Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:26.178Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:31.184Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:36.189Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:41.191Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:46.193Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:51.197Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:36:56.203Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:37:01.208Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:37:06.214Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:37:11.218Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:37:16.220Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:37:21.225Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 6}}
+{"ts": "2025-12-10T03:37:21.701Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Processing: I know you came around me."}
+{"ts": "2025-12-10T03:37:21.701Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: processing"}
+{"ts": "2025-12-10T03:37:21.701Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: routing"}
+{"ts": "2025-12-10T03:37:21.701Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: acknowledging"}
+{"ts": "2025-12-10T03:37:21.701Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "ack: On it.", "data": {"input": "I know you came around me."}}
+{"ts": "2025-12-10T03:37:21.701Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "acknowledgment", "len": 6}}
+{"ts": "2025-12-10T03:37:21.709Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: agent_working"}
+{"ts": "2025-12-10T03:37:21.710Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_created_standard", "data": {"max_tokens": 4000, "max_tools": 3}}
+{"ts": "2025-12-10T03:37:21.710Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'standard' (max 3 tools)"}
+{"ts": "2025-12-10T03:37:21.710Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Processing request..."}
+{"ts": "2025-12-10T03:37:21.722Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=[], tool_choice=none"}
+{"ts": "2025-12-10T03:37:22.444Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 742, "total": 7}}
+{"ts": "2025-12-10T03:37:27.447Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 7}}
+{"ts": "2025-12-10T03:37:29.425Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=344, tool_calls=0, finish=stop"}
+{"ts": "2025-12-10T03:37:29.427Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "completion", "len": 344}}
+{"ts": "2025-12-10T03:37:29.441Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: idle"}
+{"ts": "2025-12-10T03:37:29.442Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Response generated in 7740ms"}
+{"ts": "2025-12-10T03:37:43.183Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 13756, "total": 8}}
+{"ts": "2025-12-10T03:37:48.190Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:37:53.193Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:37:58.196Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:03.200Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:08.203Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:13.210Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:18.215Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:23.220Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:28.226Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:33.231Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:38.234Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:43.238Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:48.241Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:53.247Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 8}}
+{"ts": "2025-12-10T03:38:57.250Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Processing: Oh, my God. Oh, my God. The."}
+{"ts": "2025-12-10T03:38:57.251Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: processing"}
+{"ts": "2025-12-10T03:38:57.251Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: routing"}
+{"ts": "2025-12-10T03:38:57.251Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: acknowledging"}
+{"ts": "2025-12-10T03:38:57.251Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "ack: Let me think for a moment.", "data": {"input": "Oh, my God. Oh, my God. The."}}
+{"ts": "2025-12-10T03:38:57.251Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "acknowledgment", "len": 26}}
+{"ts": "2025-12-10T03:38:57.260Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: agent_working"}
+{"ts": "2025-12-10T03:38:57.261Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'standard' (max 3 tools)"}
+{"ts": "2025-12-10T03:38:57.261Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Processing request..."}
+{"ts": "2025-12-10T03:38:57.261Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=[], tool_choice=none"}
+{"ts": "2025-12-10T03:38:58.563Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 1311, "total": 9}}
+{"ts": "2025-12-10T03:39:01.964Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=601, tool_calls=0, finish=stop"}
+{"ts": "2025-12-10T03:39:01.966Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_queued", "data": {"type": "completion", "len": 601}}
+{"ts": "2025-12-10T03:39:01.982Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Harness state: idle"}
+{"ts": "2025-12-10T03:39:01.983Z", "lvl": "DEBUG", "svc": "bridge", "evt": "Response generated in 4732ms"}
+{"ts": "2025-12-10T03:39:28.558Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_spoke", "data": {"ms": 26592, "total": 10}}
+{"ts": "2025-12-10T03:39:33.559Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:39:38.560Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:39:43.564Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:39:48.567Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:39:53.573Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:39:58.574Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:03.575Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:08.577Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:13.582Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:18.584Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:23.588Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:28.590Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:33.594Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:38.600Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:43.602Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:48.607Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:53.612Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:40:58.616Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:03.621Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:08.626Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:13.628Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:18.632Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:23.637Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:28.641Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:33.645Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:38.649Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:43.654Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:48.660Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:53.665Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:41:58.669Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:03.675Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:08.677Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:13.678Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:18.684Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:23.689Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:28.694Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:33.696Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:38.700Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:43.704Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:48.706Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:53.712Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:42:58.718Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:03.719Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:08.722Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:13.727Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:18.730Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:23.735Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:28.738Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:33.744Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:38.749Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:43.751Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:48.755Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:53.758Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:43:58.763Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:03.769Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:08.772Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:13.777Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:18.783Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:23.788Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:28.790Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:33.793Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:38.798Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:43.798Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:48.802Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:53.807Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:44:58.811Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:45:03.816Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:45:08.821Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:45:13.825Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:45:18.827Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}
+{"ts": "2025-12-10T03:45:23.831Z", "lvl": "DEBUG", "svc": "tts", "evt": "heartbeat", "data": {"queue": 0, "spoken": 10}}

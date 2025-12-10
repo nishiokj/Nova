@@ -52,6 +52,7 @@ class TestToolRegistryBasics:
             "fast_answer", "web_search", "web_fetch",
             "bash_execute", "python_execute",
             "file_read", "file_write",
+            "search_filesystem",
             "calculator", "get_current_time"
         ]
         for expected in expected_tools:
@@ -380,6 +381,50 @@ class TestFileOperations:
         # Verify unicode was preserved
         with open(os.path.join(temp_working_dir, "unicode.txt"), encoding="utf-8") as f:
             assert f.read() == unicode_content
+
+
+class TestSearchFilesystemTool:
+    """Test the search_filesystem tool"""
+
+    def test_search_filesystem_matches_filename_and_content(self, tool_registry_with_workdir, temp_working_dir):
+        """Pattern should match both file name and its contents"""
+        notes_path = os.path.join(temp_working_dir, "project_notes.md")
+        with open(notes_path, "w", encoding="utf-8") as f:
+            f.write("Project TODOs:\n- search pattern context\nEnd of file.")
+
+        result = tool_registry_with_workdir.execute(
+            "search_filesystem",
+            pattern="project\n",
+            max_results=5
+        )
+
+        assert_tool_result_success(result)
+        assert "Matching filenames" in result.output
+        assert "project_notes.md" in result.output
+        assert "Content matches" in result.output
+        assert "Project TODOs" in result.output
+
+    def test_search_filesystem_respects_path(self, tool_registry_with_workdir, temp_working_dir):
+        """Search should be scoped when a path is provided"""
+        result = tool_registry_with_workdir.execute(
+            "search_filesystem",
+            pattern="deep",
+            path="subdir",
+            max_results=10
+        )
+
+        assert_tool_result_success(result)
+        assert "nested/deep_file.txt" in result.output
+        assert os.path.join(temp_working_dir, "subdir") == result.metadata["path"]
+
+    def test_search_filesystem_empty_pattern(self, tool_registry_with_workdir):
+        """Empty or whitespace-only patterns should return an error"""
+        result = tool_registry_with_workdir.execute(
+            "search_filesystem",
+            pattern="   \n   "
+        )
+
+        assert result.status == ToolStatus.ERROR
 
 
 class TestBashExecuteTool:
