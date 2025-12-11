@@ -1,0 +1,47 @@
+{
+  "runtime": {
+    "mode": "multi",
+    "max_agent_pending": 1,
+    "health_check_interval_s": 2.0,
+    "agent_timeout_s": 30.0,
+    "tts_timeout_s": 30.0,
+    "enable_rl_worker": false
+  },
+  "logging": {
+    "level": "INFO",
+    "log_dir": "logs",
+    "log_to_file": true,
+    "log_to_console": true,
+    "structured_format": true
+  },
+  "audio": {
+    "sample_rate": 32000,
+    "chunk_duration_ms": 30,
+    "channels": 1,
+    "vad_aggressiveness": 2,
+    "speech_timeout_ms": 1000,
+    "silence_timeout_ms": 500,
+    "min_speech_duration_s": 0.3,
+    "device_index": null,
+    "device_name": null
+  },
+  "stt": {
+    "engine": "whisper",
+    "model_size": "base.en",
+    "device": "auto",
+    "compute_type": "auto",
+    "beam_size": 1,
+    "vad_filter": true
+  },
+  "linter": {
+    "enabled": true,
+    "cache_size": 100,
+    "min_words": 2
+  },
+  "harness": {
+    "config_path": "config/harness_config.json",
+    "router_enabled": true,
+    "service_rep_enabled": true,
+    "default_tier": "standard"
+  }
+}

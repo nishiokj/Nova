@@ -97,6 +97,13 @@ class AgentResponse:
         }
 
 
+@dataclass
+class TierRuntime:
+    """Precomputed tier configuration and LLM state."""
+    agent_config: AgentConfig
+    llm_config: LLMConfig
+
+
 class Agent:
     """
     Main reasoning and execution agent.
@@ -837,8 +844,10 @@ class TieredAgent:
         self.tier_configs = tier_configs
         self.event_bus = event_bus
         self._agents: Dict[str, Agent] = {}
+        self._tier_runtimes: Dict[str, TierRuntime] = {}
         self._current_tier = config.tier
         self.logger = get_logger()
+        self._prepare_tier_runtimes()
 
     def _get_tier_prompt(self, tier: str) -> str:
         """Get the appropriate system prompt for the tier"""
@@ -849,63 +858,87 @@ class TieredAgent:
         prompt_template = _TIER_PROMPTS.get(tier, _TIER_PROMPTS.get("standard"))
         return prompt_template.format(tools=tool_descriptions)
 
+    def _prepare_tier_runtimes(self):
+        """Pre-compute tier runtimes so switching tiers is deterministic."""
+        for tier in self._resolve_tier_names():
+            self._tier_runtimes[tier] = self._build_tier_runtime(tier)
+
+    def _resolve_tier_names(self) -> List[str]:
+        """Determine which tiers should be available."""
+        tiers = set(self.config.tier_tool_limits.keys())
+        tiers.add(self.config.tier)
+        for tier in self.tier_configs.keys():
+            if tier in DEFAULT_TIER_TOOL_LIMITS or tier in DEFAULT_TIER_MAX_TOKENS:
+                tiers.add(tier)
+        return sorted(tiers)
+
+    def _build_tier_runtime(self, tier: str) -> TierRuntime:
+        """Create the AgentConfig/LLMConfig pair for a tier."""
+        base_llm_config = (
+            self.tier_configs.get(tier)
+            or self.tier_configs.get("standard")
+            or self.config.llm_config
+        )
+        if not base_llm_config:
+            raise ValueError(f"No LLM config available for tier '{tier}'")
+
+        tier_max_tokens = self.config.tier_max_tokens.get(tier)
+        if tier_max_tokens is None:
+            llm_base_max = getattr(self.config.llm_config, "max_tokens", None) if self.config.llm_config else None
+            tier_max_tokens = llm_base_max or DEFAULT_TIER_MAX_TOKENS.get(tier, 500)
+
+        llm_config = LLMConfig(
+            provider=base_llm_config.provider,
+            model=base_llm_config.model,
+            api_key=base_llm_config.api_key,
+            api_base=base_llm_config.api_base,
+            max_tokens=tier_max_tokens,
+            max_completion_tokens=tier_max_tokens,
+            failover_models=getattr(base_llm_config, "failover_models", []),
+            temperature=base_llm_config.temperature,
+            top_p=base_llm_config.top_p,
+            timeout=base_llm_config.timeout,
+            max_retries=base_llm_config.max_retries,
+            retry_delay=base_llm_config.retry_delay,
+            retry_backoff_multiplier=base_llm_config.retry_backoff_multiplier,
+            retry_backoff_max=base_llm_config.retry_backoff_max,
+            retry_jitter=base_llm_config.retry_jitter,
+            circuit_breaker_threshold=base_llm_config.circuit_breaker_threshold,
+            circuit_breaker_cooldown=base_llm_config.circuit_breaker_cooldown,
+            circuit_breaker_half_open_successes=base_llm_config.circuit_breaker_half_open_successes,
+            streaming=base_llm_config.streaming
+        )
+
+        tool_limit = self.config.tier_tool_limits.get(tier, self.config.max_tool_calls)
+
+        tier_config = AgentConfig(
+            llm_config=llm_config,
+            tier=tier,
+            system_prompt=self._get_tier_prompt(tier),
+            max_tool_calls=tool_limit,
+            tool_timeout=self.config.tool_timeout,
+            allow_code_execution=self.config.allow_code_execution,
+            allow_internet=self.config.allow_internet,
+            allow_bash=self.config.allow_bash,
+            tier_tool_limits=self.config.tier_tool_limits,
+            tier_max_tokens=self.config.tier_max_tokens
+        )
+
+        self.logger.system_init("agent", f"configured_{tier}", {
+            "max_tokens": tier_max_tokens,
+            "max_tools": tool_limit
+        })
+
+        return TierRuntime(agent_config=tier_config, llm_config=llm_config)
+
     def _get_agent(self, tier: str) -> Agent:
         """Get or create agent for tier with tier-specific config"""
+        if tier not in self._tier_runtimes:
+            self._tier_runtimes[tier] = self._build_tier_runtime(tier)
+
         if tier not in self._agents:
-            base_llm_config = self.tier_configs.get(tier, self.tier_configs.get("standard"))
-
-            # Clone LLM config with tier-specific max_tokens
-            # CRITICAL: This prevents simple queries from generating 1000+ tokens
-            from .config import LLMConfig
-            tier_max_tokens = self.config.tier_max_tokens.get(tier)
-            if tier_max_tokens is None:
-                llm_base_max = None
-                if self.config.llm_config and getattr(self.config.llm_config, "max_tokens", None):
-                    llm_base_max = self.config.llm_config.max_tokens
-                tier_max_tokens = llm_base_max or DEFAULT_TIER_MAX_TOKENS.get(tier, 500)
-            llm_config = LLMConfig(
-                provider=base_llm_config.provider,
-                model=base_llm_config.model,
-                api_key=base_llm_config.api_key,
-                api_base=base_llm_config.api_base,
-                max_tokens=tier_max_tokens,  # TIER-SPECIFIC LIMIT
-                max_completion_tokens=tier_max_tokens,  # Some models need this
-                temperature=base_llm_config.temperature,
-                top_p=base_llm_config.top_p,
-                timeout=base_llm_config.timeout,
-                max_retries=base_llm_config.max_retries,
-                retry_delay=base_llm_config.retry_delay,
-                retry_backoff_multiplier=base_llm_config.retry_backoff_multiplier,
-                retry_backoff_max=base_llm_config.retry_backoff_max,
-                retry_jitter=base_llm_config.retry_jitter,
-                circuit_breaker_threshold=base_llm_config.circuit_breaker_threshold,
-                circuit_breaker_cooldown=base_llm_config.circuit_breaker_cooldown,
-                circuit_breaker_half_open_successes=base_llm_config.circuit_breaker_half_open_successes,
-                streaming=base_llm_config.streaming
-            )
-
-            # Create modified config with tier-specific tool limits
-            tool_limit = self.config.tier_tool_limits.get(tier)
-            if tool_limit is None:
-                tool_limit = self.config.max_tool_calls
-
-            tier_config = AgentConfig(
-                llm_config=llm_config,
-                tier=tier,
-                system_prompt=self._get_tier_prompt(tier),
-                max_tool_calls=tool_limit,
-                tool_timeout=self.config.tool_timeout,
-                allow_code_execution=self.config.allow_code_execution,
-                allow_internet=self.config.allow_internet,
-                allow_bash=self.config.allow_bash
-            )
-
-            self.logger.system_init("agent", f"created_{tier}", {
-                "max_tokens": tier_max_tokens,
-                "max_tools": tool_limit
-            })
-
-            self._agents[tier] = Agent(tier_config, self.tool_registry, llm_config, self.event_bus)
+            runtime = self._tier_runtimes[tier]
+            self._agents[tier] = Agent(runtime.agent_config, self.tool_registry, runtime.llm_config, self.event_bus)
         return self._agents[tier]
 
     def run(

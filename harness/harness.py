@@ -12,13 +12,14 @@ from typing import Dict, Any, Optional, List, Callable, Generator
 from enum import Enum
 from contextlib import nullcontext
 
-from .config import HarnessConfig, RuntimeConfig, load_or_create_config, LLMConfig
-from .logger import StructuredLogger, get_logger, set_logger
+from .config import HarnessConfig, RuntimeConfig, load_or_create_config
+from .logger import get_logger
 from .llm_adapter import create_adapter, Message, MessageRole
 from .tool_registry import ToolRegistry, ToolConfig
 from .router import Router, TaskClassification, TaskTier
-from .service_rep import ServiceRep, StreamingServiceRep, ResponseType, SpokenResponse
+from .service_rep import ResponseType, SpokenResponse
 from .agent import Agent, AgentResponse, AgentStep, TieredAgent
+from .runtime import HarnessRuntime, create_runtime
 
 
 class HarnessState(Enum):
@@ -74,31 +75,38 @@ class AgentHarness:
         self,
         config: Optional[HarnessConfig] = None,
         config_path: str = None,
-        profiler: Optional[Any] = None
+        profiler: Optional[Any] = None,
+        runtime: Optional[HarnessRuntime] = None
     ):
-        # Load configuration
-        if config:
-            self._base_config = config
-        elif config_path:
-            self._base_config = load_or_create_config(config_path)
-        else:
-            self._base_config = load_or_create_config()
+        if runtime and (config or config_path):
+            raise ValueError("Provide either an existing runtime or configuration inputs, not both.")
 
-        self._runtime_config = RuntimeConfig(self._base_config)
-        self.profiler = profiler
+        self.runtime = runtime or create_runtime(
+            config=config,
+            config_path=config_path,
+            profiler=profiler
+        )
 
-        # Setup logging
-        self._setup_logging()
+        # Instrumentation
+        self.profiler = profiler if profiler is not None else self.runtime.profiler
+        self._runtime_config = self.runtime.runtime_config
         self.logger = get_logger()
 
         # State management
         self._state = HarnessState.IDLE
         self._lock = threading.Lock()
         self._tts_speaking_event = threading.Event()
-        self._cancel_event = threading.Event()  # Signal to cancel current work (barge-in)
 
-        # Initialize components
-        self._initialize_components()
+        # Core components sourced from runtime
+        self.tool_registry = self.runtime.tool_registry
+        self.router = self.runtime.router
+        self.agent = self.runtime.agent
+        self.service_rep = self.runtime.create_service_rep(
+            speech_block_event=self._tts_speaking_event
+        )
+
+        # Internal bookkeeping
+        self._last_progress_tool = None
 
         # Request queue for async processing
         self._request_queue: queue.Queue = queue.Queue()
@@ -111,89 +119,11 @@ class AgentHarness:
 
         self.logger.system_init("harness", "ready")
 
-    def _setup_logging(self):
-        """Setup structured logging"""
-        log_config = self._base_config.logging
-        logger = StructuredLogger(
-            name="harness",
-            log_dir=log_config.log_dir,
-            log_level=log_config.log_level,
-            log_to_file=log_config.log_to_file,
-            log_to_console=log_config.log_to_console,
-            structured_format=log_config.structured_format
-        )
-        set_logger(logger)
-
-    def _initialize_components(self):
-        """Initialize all harness components"""
-        config = self._base_config
-
-        # Tool Registry
-        self.tool_registry = ToolRegistry(config.tools)
-
-        # Router
-        self.router = Router(config.router)
-
-        # ServiceRep (with cancel_event for barge-in support)
-        self.service_rep = StreamingServiceRep(
-            config.service_rep,
-            speech_block_event=self._tts_speaking_event,
-            cancel_event=self._cancel_event
-        )
-        self.service_rep.initialize()
-
-        # LOUD FAILURE: Check if TTS is enabled but has no engine
-        if config.service_rep.enabled and self.service_rep.tts._engine_type == "none":
-            import sys
-            msg = (
-                "\n" + "="*70 + "\n"
-                "🚨 FATAL: TTS IS ENABLED BUT NO ENGINE AVAILABLE!\n"
-                "   ServiceRep.enabled=True but no TTS engine loaded.\n"
-                "   Audio output will NOT work!\n\n"
-                "   Fix options:\n"
-                "   1. pip install pyttsx3\n"
-                "   2. Ensure voice.py VoiceStreamer is importable\n"
-                "   3. Run with --no-tts to disable TTS\n"
-                + "="*70 + "\n"
-            )
-            print(msg, file=sys.stderr)
-            self.logger.error(msg, component="harness")
-
-        # Tiered Agent
-        self.agent = TieredAgent(
-            config=config.agent,
-            tool_registry=self.tool_registry,
-            tier_configs=config.llm_configs
-        )
-
-        # Setup tier configs in router
-        for tier in TaskTier:
-            tier_llm = config.llm_configs.get(tier.value)
-            if tier_llm:
-                self.router.set_tier_config(tier, tier_llm)
-
-        # OPTIMIZATION: Pre-warm LLM clients to avoid cold start latency
-        self._prewarm_llm_clients()
-
-        # Track tool usage for progress messages
-        self._last_progress_tool = None
-
     def _profile(self, metric_name: str):
         """Helper to get profiler context if available"""
         if not self.profiler:
             return nullcontext()
         return self.profiler.measure(metric_name)
-
-    def _prewarm_llm_clients(self):
-        """Pre-warm LLM clients to avoid cold start penalty on first request"""
-        try:
-            default_tier = self._base_config.agent.tier
-            agent = self.agent._get_agent(default_tier)
-            if agent._llm and hasattr(agent._llm, 'prewarm'):
-                agent._llm.prewarm()
-            self.logger.system_init("llm", "prewarmed", {"tier": default_tier})
-        except Exception as e:
-            self.logger.error(f"Failed to pre-warm LLM: {e}", component="harness")
 
     def _set_state(self, state: HarnessState):
         """Set harness state and notify callbacks"""
@@ -693,17 +623,6 @@ class AgentHarness:
         """Event that is set while ServiceRep/TTS is speaking"""
         return self._tts_speaking_event
 
-    @property
-    def cancel_event(self) -> threading.Event:
-        """Event to signal cancellation of current work (e.g., barge-in)"""
-        return self._cancel_event
-
-    def clear_tts_queue(self):
-        """Clear pending TTS queue (for barge-in support)"""
-        if self.service_rep and hasattr(self.service_rep, 'tts'):
-            self.service_rep.tts.clear_queue()
-            self.logger.info("TTS queue cleared (barge-in)", component="harness")
-
 
 # Factory function
 def create_harness(
@@ -732,4 +651,5 @@ def create_harness(
     config.service_rep.enabled = service_rep_enabled
     config.agent.tier = default_tier
 
-    return AgentHarness(config=config, profiler=profiler)
+    runtime = create_runtime(config=config, profiler=profiler)
+    return AgentHarness(runtime=runtime)

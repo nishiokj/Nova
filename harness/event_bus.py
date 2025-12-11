@@ -10,9 +10,9 @@ Provides:
 
 import time
 import multiprocessing as mp
-from multiprocessing import Queue, Event, Process
+from multiprocessing import Queue, Event
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, List
 from enum import Enum
 import queue
 import logging
@@ -168,7 +168,6 @@ class EventBus:
                 request_id=request.request_id
             )
             self.agent_request_queue.put_nowait(msg)
-            self.logger.debug(f"Submitted agent request: {request.request_id}")
             return True
         except queue.Full:
             # Queue full even after clearing - shouldn't happen
@@ -211,7 +210,6 @@ class EventBus:
             request_id=request.request_id
         )
         self.tts_queue.put(msg)
-        self.logger.debug(f"Submitted TTS request: {request.text[:50]}...")
 
     # =========================================================================
     # AGENT WORKER METHODS
@@ -272,7 +270,8 @@ class EventBus:
 
     def agent_heartbeat(self):
         """Called by Agent worker to signal it's alive"""
-        self._agent_last_heartbeat.value = time.time()
+        with self._agent_last_heartbeat.get_lock():
+            self._agent_last_heartbeat.value = time.time()
 
     # =========================================================================
     # TTS WORKER METHODS
@@ -302,7 +301,8 @@ class EventBus:
 
     def tts_heartbeat(self):
         """Called by TTS worker to signal it's alive"""
-        self._tts_last_heartbeat.value = time.time()
+        with self._tts_last_heartbeat.get_lock():
+            self._tts_last_heartbeat.value = time.time()
 
     # =========================================================================
     # CONTROL METHODS
@@ -327,13 +327,25 @@ class EventBus:
         """Check if shutdown has been signaled"""
         return self.shutdown_event.is_set()
 
+    def get_agent_last_heartbeat(self) -> float:
+        """Thread/process-safe read of the last Agent heartbeat timestamp"""
+        with self._agent_last_heartbeat.get_lock():
+            return self._agent_last_heartbeat.value
+
+    def get_tts_last_heartbeat(self) -> float:
+        """Thread/process-safe read of the last TTS heartbeat timestamp"""
+        with self._tts_last_heartbeat.get_lock():
+            return self._tts_last_heartbeat.value
+
     def check_agent_health(self, timeout_s: float = 10.0) -> bool:
         """Check if Agent worker is healthy"""
-        return (time.time() - self._agent_last_heartbeat.value) < timeout_s
+        last = self.get_agent_last_heartbeat()
+        return (time.time() - last) < timeout_s
 
     def check_tts_health(self, timeout_s: float = 10.0) -> bool:
         """Check if TTS worker is healthy"""
-        return (time.time() - self._tts_last_heartbeat.value) < timeout_s
+        last = self.get_tts_last_heartbeat()
+        return (time.time() - last) < timeout_s
 
     # =========================================================================
     # UTILITIES
@@ -365,7 +377,6 @@ class EventBus:
             request_id=episode_data.get("req_id", "")
         )
         self.rl_events_queue.put(msg)
-        self.logger.debug(f"Emitted episode complete: {episode_data.get('req_id')}")
 
     def get_episode_event(self, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
         """
@@ -381,154 +392,3 @@ class EventBus:
         except queue.Empty:
             return None
         return None
-
-
-class ProcessManager:
-    """
-    Manages worker processes and monitors their health.
-    Restarts crashed workers automatically.
-
-    Factory format: (target_function, args_tuple)
-    - target_function: Top-level function (not a closure) for proper pickling
-    - args_tuple: Arguments to pass to the function
-    """
-
-    def __init__(self, event_bus: EventBus):
-        self.event_bus = event_bus
-        self.logger = logging.getLogger(__name__)
-
-        self._agent_process: Optional[Process] = None
-        self._tts_process: Optional[Process] = None
-        self._monitor_thread = None
-        self._running = False
-
-        # Factory tuples: (target_function, args)
-        self._agent_factory: Optional[tuple] = None
-        self._tts_factory: Optional[tuple] = None
-
-    def set_agent_factory(self, factory: tuple):
-        """Set the factory tuple (target, args) for Agent worker process"""
-        self._agent_factory = factory
-
-    def set_tts_factory(self, factory: tuple):
-        """Set the factory tuple (target, args) for TTS worker process"""
-        self._tts_factory = factory
-
-    def start(self):
-        """Start worker processes and health monitor"""
-        if self._running:
-            return
-
-        self._running = True
-
-        # Start workers
-        self._start_agent_process()
-        self._start_tts_process()
-
-        # Start health monitor
-        import threading
-        self._monitor_thread = threading.Thread(
-            target=self._health_monitor_loop,
-            daemon=True,
-            name="ProcessMonitor"
-        )
-        self._monitor_thread.start()
-
-        self.logger.info("ProcessManager started")
-
-    def _start_agent_process(self):
-        """Start or restart Agent worker process"""
-        if self._agent_process and self._agent_process.is_alive():
-            return
-
-        if not self._agent_factory:
-            self.logger.error("No agent factory set!")
-            return
-
-        target, args = self._agent_factory
-        self._agent_process = Process(
-            target=target,
-            args=args,
-            name="AgentWorker",
-            daemon=True
-        )
-        self._agent_process.start()
-        self.logger.info(f"Agent process started (PID: {self._agent_process.pid})")
-
-    def _start_tts_process(self):
-        """Start or restart TTS worker process"""
-        if self._tts_process and self._tts_process.is_alive():
-            return
-
-        if not self._tts_factory:
-            self.logger.error("No TTS factory set!")
-            return
-
-        target, args = self._tts_factory
-        self._tts_process = Process(
-            target=target,
-            args=args,
-            name="TTSWorker",
-            daemon=True
-        )
-        self._tts_process.start()
-        self.logger.info(f"TTS process started (PID: {self._tts_process.pid})")
-
-    def _health_monitor_loop(self):
-        """Monitor worker health and restart if needed"""
-        while self._running and not self.event_bus.is_shutdown():
-            try:
-                # Check Agent health
-                if not self._agent_process or not self._agent_process.is_alive():
-                    self.logger.warning("Agent process died, restarting...")
-                    self._start_agent_process()
-                elif not self.event_bus.check_agent_health(timeout_s=30.0):
-                    self.logger.warning("Agent process unresponsive, restarting...")
-                    self._agent_process.terminate()
-                    self._agent_process.join(timeout=2.0)
-                    self._start_agent_process()
-
-                # Check TTS health
-                if not self._tts_process or not self._tts_process.is_alive():
-                    self.logger.warning("TTS process died, restarting...")
-                    self._start_tts_process()
-                elif not self.event_bus.check_tts_health(timeout_s=30.0):
-                    self.logger.warning("TTS process unresponsive, restarting...")
-                    self._tts_process.terminate()
-                    self._tts_process.join(timeout=2.0)
-                    self._start_tts_process()
-
-                time.sleep(2.0)  # Check every 2 seconds
-
-            except Exception as e:
-                self.logger.error(f"Health monitor error: {e}")
-                time.sleep(1.0)
-
-    def stop(self):
-        """Stop all worker processes"""
-        self._running = False
-        self.event_bus.shutdown()
-
-        # Wait for processes to terminate
-        if self._agent_process:
-            self._agent_process.join(timeout=5.0)
-            if self._agent_process.is_alive():
-                self._agent_process.terminate()
-
-        if self._tts_process:
-            self._tts_process.join(timeout=5.0)
-            if self._tts_process.is_alive():
-                self._tts_process.terminate()
-
-        if self._monitor_thread:
-            self._monitor_thread.join(timeout=2.0)
-
-        self.logger.info("ProcessManager stopped")
-
-    @property
-    def agent_alive(self) -> bool:
-        return self._agent_process is not None and self._agent_process.is_alive()
-
-    @property
-    def tts_alive(self) -> bool:
-        return self._tts_process is not None and self._tts_process.is_alive()

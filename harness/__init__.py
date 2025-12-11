@@ -17,17 +17,18 @@ from .router import Router, TaskClassification
 from .service_rep import ServiceRep
 from .agent import Agent, AgentResponse
 from .harness import AgentHarness, HarnessResponse, HarnessState, create_harness
+from .runtime import HarnessRuntime, create_runtime
 
 # Multiprocess components (v2)
 from .event_bus import (
     EventBus,
-    ProcessManager,
     AgentRequest,
     AgentResult,
     TTSRequest,
     MessageType,
     BusMessage
 )
+from .process_manager import ProcessManager
 from .tts_worker import TTSWorker, create_tts_worker
 from .agent_worker import AgentWorker, create_agent_worker
 
@@ -60,6 +61,8 @@ __all__ = [
     "HarnessResponse",
     "HarnessState",
     "create_harness",
+    "HarnessRuntime",
+    "create_runtime",
     # EventBus (v2 - multiprocess)
     "EventBus",
     "ProcessManager",

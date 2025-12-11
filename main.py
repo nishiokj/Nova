@@ -757,377 +757,377 @@ class SpeechTextBridge:
         return self._processing
 
 
-# =============================================================================
-# OPTIMIZED AUDIO PROCESSOR - Threading, blocking queue, direct Whisper
-# =============================================================================
-
-class OptimizedAudioProcessor:
-    """
-    Integrated audio processor with all optimizations.
-    - Uses threading.Queue instead of multiprocessing.Queue
-    - Blocking queue.get() instead of poll+sleep
-    - Direct PCM to Whisper (no WAV conversion)
-    - Local Whisper STT
-    """
-
-    def __init__(
-        self,
-        audio_queue: Queue,  # threading.Queue, not multiprocessing
-        audio_config: AudioConfig,
-        bridge: SpeechTextBridge,
-        whisper_model: str = "base.en",
-        use_whisper: bool = True,
-        profiler: RuntimeProfiler = None
-    ):
-        self.audio_queue = audio_queue
-        self.config = audio_config
-        self.bridge = bridge
-        self.logger = logging.getLogger(__name__)
-        self.running = False
-        self.profiler = profiler or PROFILER
-        self._tts_holdoff_s = 0.35
-        self._last_tts_activity = 0.0
-        self._harness_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="harness-worker"
-        )
-
-        # Choose STT engine
-        if use_whisper:
-            self.stt = LocalWhisperSTT(model_size=whisper_model)
-        else:
-            self.stt = GoogleSTT()
-
-    def _should_skip_for_tts(self) -> bool:
-        """Skip STT when TTS is speaking or has just finished"""
-        harness = getattr(self.bridge, "harness", None)
-        now = time.time()
-
-        if harness:
-            service_rep = getattr(harness, "service_rep", None)
-            if service_rep and getattr(service_rep, "enabled", False):
-                try:
-                    if service_rep.is_speaking:
-                        self._last_tts_activity = now
-                        return True
-                except Exception:
-                    pass
-
-        if self._last_tts_activity and (now - self._last_tts_activity) < self._tts_holdoff_s:
-            return True
-
-        return False
-
-    def _submit_transcription(self, transcript: str, receive_time: float):
-        """Send transcription to harness on a background worker"""
-        if not transcript or not self._harness_executor:
-            return
-        self._harness_executor.submit(self._process_transcription_task, transcript, receive_time)
-
-    def _process_transcription_task(self, transcript: str, receive_time: float):
-        """Background worker that routes transcription through the bridge"""
-        try:
-            response = self.bridge.process_transcription(transcript)
-            if not response:
-                return
-
-            total_time = time.time()
-            if self.profiler:
-                self.profiler.record(
-                    "pipeline.voice_to_response_ms",
-                    (total_time - receive_time) * 1000
-                )
-
-            preview = (
-                f"{response.spoken_response[:100]}..."
-                if len(response.spoken_response) > 100
-                else response.spoken_response
-            )
-            self.logger.info(
-                f"Total pipeline: {(total_time - receive_time)*1000:.0f}ms | Response: {preview}"
-            )
-        except Exception as e:
-            self.logger.error(f"Async transcription processing failed: {e}")
-
-    def initialize(self) -> bool:
-        """Pre-initialize STT model"""
-        return self.stt.initialize()
-
-    def run(self):
-        """Main processing loop - OPTIMIZED"""
-        self.running = True
-        self.logger.info("OptimizedAudioProcessor started")
-
-        # Pre-initialize Whisper
-        if not self.stt._initialized:
-            self.stt.initialize()
-
-        while self.running:
-            try:
-                # OPTIMIZED: Blocking get with short timeout (was poll+sleep)
-                queue_start = time.perf_counter()
-                try:
-                    audio_data = self.audio_queue.get(timeout=0.05)
-                except Empty:
-                    continue
-                finally:
-                    if self.profiler:
-                        wait_ms = (time.perf_counter() - queue_start) * 1000
-                        self.profiler.record("audio.queue_wait_ms", wait_ms)
-
-                if audio_data is None:
-                    break
-
-                if not audio_data or len(audio_data) < 100:
-                    self.logger.debug("Skipped empty audio chunk")
-                    continue
-
-                if self._should_skip_for_tts():
-                    self.logger.debug("Discarded audio chunk while TTS was active")
-                    continue
-
-                # Timestamp for latency tracking
-                receive_time = time.time()
-
-                # OPTIMIZED: Direct PCM to Whisper (no WAV conversion)
-                with (self.profiler.measure("stt.transcription_ms") if self.profiler else nullcontext()):
-                    transcript = self.stt.transcribe_pcm(
-                        audio_data,
-                        sample_rate=self.config.sample_rate
-                    )
-
-                if transcript:
-                    transcribe_time = time.time()
-                    self.logger.info(
-                        f"Transcribed in {(transcribe_time - receive_time)*1000:.0f}ms: {transcript}"
-                    )
-
-                    # Process through bridge asynchronously (which goes to harness)
-                    self._submit_transcription(transcript, receive_time)
-
-            except Exception as e:
-                self.logger.error(f"Error in OptimizedAudioProcessor: {e}")
-                import traceback
-                traceback.print_exc()
-
-        self.logger.info("OptimizedAudioProcessor stopped")
-
-    def stop(self):
-        """Stop the processor"""
-        self.running = False
-        if self._harness_executor:
-            self._harness_executor.shutdown(wait=False)
-
-
-# =============================================================================
-# OPTIMIZED VOICE AGENT SYSTEM
-# =============================================================================
-
-class VoiceAgentSystem:
-    """
-    Main voice agent system - OPTIMIZED for low latency.
-    Uses threading instead of multiprocessing for lower IPC overhead.
-    """
-
-    def __init__(
-        self,
-        harness_config_path: str = None,
-        audio_config_path: str = "config/audio_config.json",
-        router_enabled: bool = True,
-        tts_enabled: bool = True,
-        default_tier: str = "standard",
-        whisper_model: str = "base.en",
-        use_whisper: bool = True
-    ):
-        self.logger = self._setup_logging()
-        self.profiler = PROFILER
-        self.whisper_model = whisper_model
-        self.use_whisper = use_whisper
-
-        # Load configurations
-        self.audio_config = AudioConfig(audio_config_path)
-
-        # Create harness (pre-warms LLM clients)
-        self.harness = create_harness(
-            config_path=harness_config_path,
-            router_enabled=router_enabled,
-            service_rep_enabled=tts_enabled,
-            default_tier=default_tier,
-            profiler=self.profiler
-        )
-
-        # Create text linter
-        self.linter = TextLinter()
-
-        # Create bridge
-        self.bridge = SpeechTextBridge(
-            harness=self.harness,
-            text_linter=self.linter,
-            on_response=self._on_response,
-            profiler=self.profiler
-        )
-
-        # OPTIMIZED: Use threading.Queue instead of multiprocessing.Queue
-        self.audio_queue = Queue()
-        self.device_manager = AudioDeviceManager(self.audio_config)
-
-        # Processing components
-        self.audio_processor = None
-        self.main_processor = None
-        self.processor_thread = None
-        self.main_processor_thread = None
-
-        # State
-        self.running = False
-
-        self.logger.info("VoiceAgentSystem initialized (OPTIMIZED)")
-
-    def _setup_logging(self) -> logging.Logger:
-        """Setup logging for the system - CLEAN output"""
-        os.makedirs("logs", exist_ok=True)
-
-        # Only configure root logger for file output - harness logger handles console
-        logging.basicConfig(
-            level=logging.WARNING,  # Suppress INFO from other libraries
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler("logs/voice_agent.log"),
-            ]
-        )
-
-        # Suppress noisy libraries
-        for noisy in ['httpx', 'httpcore', 'openai', 'faster_whisper', 'urllib3', 'asyncio']:
-            logging.getLogger(noisy).setLevel(logging.WARNING)
-
-        # Our logger gets INFO level
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.INFO)
-
-        # Add console handler just for our module
-        console = logging.StreamHandler(sys.stdout)
-        console.setLevel(logging.INFO)
-        console.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
-        logger.addHandler(console)
-        logger.propagate = False
-
-        return logger
-
-    def _on_response(self, response: HarnessResponse):
-        """Callback for harness responses"""
-        self.logger.info(
-            f"[RESPONSE] {response.spoken_response[:200]}"
-            + ("..." if len(response.spoken_response) > 200 else "")
-        )
-
-        if response.classification:
-            self.logger.info(
-                f"[ROUTING] Tier: {response.classification.tier_name}, "
-                f"Confidence: {response.classification.confidence:.2f}"
-            )
-
-        if response.agent_response and response.agent_response.tools_used:
-            self.logger.info(f"[TOOLS] Used: {', '.join(response.agent_response.tools_used)}")
-
-    def start(self):
-        """Start the voice agent system"""
-        self.logger.info("Starting VoiceAgentSystem (OPTIMIZED)...")
-        self.running = True
-
-        # Find audio device
-        device_index = self.device_manager.wait_for_input_device()
-        if device_index is None:
-            self.logger.error("No audio input device found")
-            return False
-
-        self.logger.info(f"Using audio device index: {device_index}")
-
-        # Start harness async processing
-        self.harness.start_async_processing()
-
-        # Create OPTIMIZED audio processor
-        self.audio_processor = OptimizedAudioProcessor(
-            audio_queue=self.audio_queue,
-            audio_config=self.audio_config,
-            bridge=self.bridge,
-            whisper_model=self.whisper_model,
-            use_whisper=self.use_whisper,
-            profiler=self.profiler
-        )
-
-        # Pre-initialize STT model
-        self.logger.info("Pre-loading STT model...")
-        self.audio_processor.initialize()
-
-        # Start processor in thread
-        self.processor_thread = threading.Thread(
-            target=self.audio_processor.run,
-            daemon=True
-        )
-        self.processor_thread.start()
-
-        # Create main audio processor (uses our threading queue)
-        # Pass barge-in support: cancel_event and clear_tts_queue callback
-        self.main_processor = MainProcessor(
-            self.audio_config,
-            self.audio_queue,
-            tts_block_event=self.harness.tts_speaking_event,
-            cancel_event=self.harness.cancel_event,
-            clear_tts_queue=self.harness.clear_tts_queue
-        )
-
-        # Start main processor in thread
-        self.main_processor_thread = threading.Thread(
-            target=self.main_processor.run,
-            args=(device_index,),
-            daemon=True
-        )
-        self.main_processor_thread.start()
-
-        self.logger.info("VoiceAgentSystem started successfully (OPTIMIZED)")
-        self.logger.info("Speak to interact with the AI agent...")
-
-        return True
-
-    def run_blocking(self):
-        """Run the system and block until stopped"""
-        if not self.start():
-            return
-
-        try:
-            while self.running:
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            self.logger.info("Received interrupt signal")
-        finally:
-            self.stop()
-
-    def stop(self):
-        """Stop the voice agent system"""
-        self.logger.info("Stopping VoiceAgentSystem...")
-        self.running = False
-
-        # Stop components
-        if self.main_processor:
-            self.main_processor.stop()
-
-        if self.audio_processor:
-            self.audio_processor.stop()
-            self.audio_queue.put(None)  # Signal shutdown
-
-        # Stop harness
-        self.harness.stop_async_processing()
-        self.harness.cleanup()
-
-        # Wait for threads
-        if self.processor_thread and self.processor_thread.is_alive():
-            self.processor_thread.join(timeout=5.0)
-
-        if self.main_processor_thread and self.main_processor_thread.is_alive():
-            self.main_processor_thread.join(timeout=5.0)
-
-        self.logger.info("VoiceAgentSystem stopped")
-        # Emit profiling summary at shutdown
-        self.profiler.report_summary(logger=self.logger)
+# # =============================================================================
+# # OPTIMIZED AUDIO PROCESSOR - Threading, blocking queue, direct Whisper
+# # =============================================================================
+
+# class OptimizedAudioProcessor:
+#     """
+#     Integrated audio processor with all optimizations.
+#     - Uses threading.Queue instead of multiprocessing.Queue
+#     - Blocking queue.get() instead of poll+sleep
+#     - Direct PCM to Whisper (no WAV conversion)
+#     - Local Whisper STT
+#     """
+
+#     def __init__(
+#         self,
+#         audio_queue: Queue,  # threading.Queue, not multiprocessing
+#         audio_config: AudioConfig,
+#         bridge: SpeechTextBridge,
+#         whisper_model: str = "base.en",
+#         use_whisper: bool = True,
+#         profiler: RuntimeProfiler = None
+#     ):
+#         self.audio_queue = audio_queue
+#         self.config = audio_config
+#         self.bridge = bridge
+#         self.logger = logging.getLogger(__name__)
+#         self.running = False
+#         self.profiler = profiler or PROFILER
+#         self._tts_holdoff_s = 0.35
+#         self._last_tts_activity = 0.0
+#         self._harness_executor = ThreadPoolExecutor(
+#             max_workers=1,
+#             thread_name_prefix="harness-worker"
+#         )
+
+#         # Choose STT engine
+#         if use_whisper:
+#             self.stt = LocalWhisperSTT(model_size=whisper_model)
+#         else:
+#             self.stt = GoogleSTT()
+
+#     def _should_skip_for_tts(self) -> bool:
+#         """Skip STT when TTS is speaking or has just finished"""
+#         harness = getattr(self.bridge, "harness", None)
+#         now = time.time()
+
+#         if harness:
+#             service_rep = getattr(harness, "service_rep", None)
+#             if service_rep and getattr(service_rep, "enabled", False):
+#                 try:
+#                     if service_rep.is_speaking:
+#                         self._last_tts_activity = now
+#                         return True
+#                 except Exception:
+#                     pass
+
+#         if self._last_tts_activity and (now - self._last_tts_activity) < self._tts_holdoff_s:
+#             return True
+
+#         return False
+
+#     def _submit_transcription(self, transcript: str, receive_time: float):
+#         """Send transcription to harness on a background worker"""
+#         if not transcript or not self._harness_executor:
+#             return
+#         self._harness_executor.submit(self._process_transcription_task, transcript, receive_time)
+
+#     def _process_transcription_task(self, transcript: str, receive_time: float):
+#         """Background worker that routes transcription through the bridge"""
+#         try:
+#             response = self.bridge.process_transcription(transcript)
+#             if not response:
+#                 return
+
+#             total_time = time.time()
+#             if self.profiler:
+#                 self.profiler.record(
+#                     "pipeline.voice_to_response_ms",
+#                     (total_time - receive_time) * 1000
+#                 )
+
+#             preview = (
+#                 f"{response.spoken_response[:100]}..."
+#                 if len(response.spoken_response) > 100
+#                 else response.spoken_response
+#             )
+#             self.logger.info(
+#                 f"Total pipeline: {(total_time - receive_time)*1000:.0f}ms | Response: {preview}"
+#             )
+#         except Exception as e:
+#             self.logger.error(f"Async transcription processing failed: {e}")
+
+#     def initialize(self) -> bool:
+#         """Pre-initialize STT model"""
+#         return self.stt.initialize()
+
+#     def run(self):
+#         """Main processing loop - OPTIMIZED"""
+#         self.running = True
+#         self.logger.info("OptimizedAudioProcessor started")
+
+#         # Pre-initialize Whisper
+#         if not self.stt._initialized:
+#             self.stt.initialize()
+
+#         while self.running:
+#             try:
+#                 # OPTIMIZED: Blocking get with short timeout (was poll+sleep)
+#                 queue_start = time.perf_counter()
+#                 try:
+#                     audio_data = self.audio_queue.get(timeout=0.05)
+#                 except Empty:
+#                     continue
+#                 finally:
+#                     if self.profiler:
+#                         wait_ms = (time.perf_counter() - queue_start) * 1000
+#                         self.profiler.record("audio.queue_wait_ms", wait_ms)
+
+#                 if audio_data is None:
+#                     break
+
+#                 if not audio_data or len(audio_data) < 100:
+#                     self.logger.debug("Skipped empty audio chunk")
+#                     continue
+
+#                 if self._should_skip_for_tts():
+#                     self.logger.debug("Discarded audio chunk while TTS was active")
+#                     continue
+
+#                 # Timestamp for latency tracking
+#                 receive_time = time.time()
+
+#                 # OPTIMIZED: Direct PCM to Whisper (no WAV conversion)
+#                 with (self.profiler.measure("stt.transcription_ms") if self.profiler else nullcontext()):
+#                     transcript = self.stt.transcribe_pcm(
+#                         audio_data,
+#                         sample_rate=self.config.sample_rate
+#                     )
+
+#                 if transcript:
+#                     transcribe_time = time.time()
+#                     self.logger.info(
+#                         f"Transcribed in {(transcribe_time - receive_time)*1000:.0f}ms: {transcript}"
+#                     )
+
+#                     # Process through bridge asynchronously (which goes to harness)
+#                     self._submit_transcription(transcript, receive_time)
+
+#             except Exception as e:
+#                 self.logger.error(f"Error in OptimizedAudioProcessor: {e}")
+#                 import traceback
+#                 traceback.print_exc()
+
+#         self.logger.info("OptimizedAudioProcessor stopped")
+
+#     def stop(self):
+#         """Stop the processor"""
+#         self.running = False
+#         if self._harness_executor:
+#             self._harness_executor.shutdown(wait=False)
+
+
+# # =============================================================================
+# # OPTIMIZED VOICE AGENT SYSTEM
+# # =============================================================================
+
+# class VoiceAgentSystem:
+#     """
+#     Main voice agent system - OPTIMIZED for low latency.
+#     Uses threading instead of multiprocessing for lower IPC overhead.
+#     """
+
+#     def __init__(
+#         self,
+#         harness_config_path: str = None,
+#         audio_config_path: str = "config/audio_config.json",
+#         router_enabled: bool = True,
+#         tts_enabled: bool = True,
+#         default_tier: str = "standard",
+#         whisper_model: str = "base.en",
+#         use_whisper: bool = True
+#     ):
+#         self.logger = self._setup_logging()
+#         self.profiler = PROFILER
+#         self.whisper_model = whisper_model
+#         self.use_whisper = use_whisper
+
+#         # Load configurations
+#         self.audio_config = AudioConfig(audio_config_path)
+
+#         # Create harness (pre-warms LLM clients)
+#         self.harness = create_harness(
+#             config_path=harness_config_path,
+#             router_enabled=router_enabled,
+#             service_rep_enabled=tts_enabled,
+#             default_tier=default_tier,
+#             profiler=self.profiler
+#         )
+
+#         # Create text linter
+#         self.linter = TextLinter()
+
+#         # Create bridge
+#         self.bridge = SpeechTextBridge(
+#             harness=self.harness,
+#             text_linter=self.linter,
+#             on_response=self._on_response,
+#             profiler=self.profiler
+#         )
+
+#         # OPTIMIZED: Use threading.Queue instead of multiprocessing.Queue
+#         self.audio_queue = Queue()
+#         self.device_manager = AudioDeviceManager(self.audio_config)
+
+#         # Processing components
+#         self.audio_processor = None
+#         self.main_processor = None
+#         self.processor_thread = None
+#         self.main_processor_thread = None
+
+#         # State
+#         self.running = False
+
+#         self.logger.info("VoiceAgentSystem initialized (OPTIMIZED)")
+
+#     def _setup_logging(self) -> logging.Logger:
+#         """Setup logging for the system - CLEAN output"""
+#         os.makedirs("logs", exist_ok=True)
+
+#         # Only configure root logger for file output - harness logger handles console
+#         logging.basicConfig(
+#             level=logging.WARNING,  # Suppress INFO from other libraries
+#             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+#             handlers=[
+#                 logging.FileHandler("logs/voice_agent.log"),
+#             ]
+#         )
+
+#         # Suppress noisy libraries
+#         for noisy in ['httpx', 'httpcore', 'openai', 'faster_whisper', 'urllib3', 'asyncio']:
+#             logging.getLogger(noisy).setLevel(logging.WARNING)
+
+#         # Our logger gets INFO level
+#         logger = logging.getLogger(__name__)
+#         logger.setLevel(logging.INFO)
+
+#         # Add console handler just for our module
+#         console = logging.StreamHandler(sys.stdout)
+#         console.setLevel(logging.INFO)
+#         console.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+#         logger.addHandler(console)
+#         logger.propagate = False
+
+#         return logger
+
+#     def _on_response(self, response: HarnessResponse):
+#         """Callback for harness responses"""
+#         self.logger.info(
+#             f"[RESPONSE] {response.spoken_response[:200]}"
+#             + ("..." if len(response.spoken_response) > 200 else "")
+#         )
+
+#         if response.classification:
+#             self.logger.info(
+#                 f"[ROUTING] Tier: {response.classification.tier_name}, "
+#                 f"Confidence: {response.classification.confidence:.2f}"
+#             )
+
+#         if response.agent_response and response.agent_response.tools_used:
+#             self.logger.info(f"[TOOLS] Used: {', '.join(response.agent_response.tools_used)}")
+
+#     def start(self):
+#         """Start the voice agent system"""
+#         self.logger.info("Starting VoiceAgentSystem (OPTIMIZED)...")
+#         self.running = True
+
+#         # Find audio device
+#         device_index = self.device_manager.wait_for_input_device()
+#         if device_index is None:
+#             self.logger.error("No audio input device found")
+#             return False
+
+#         self.logger.info(f"Using audio device index: {device_index}")
+
+#         # Start harness async processing
+#         self.harness.start_async_processing()
+
+#         # Create OPTIMIZED audio processor
+#         self.audio_processor = OptimizedAudioProcessor(
+#             audio_queue=self.audio_queue,
+#             audio_config=self.audio_config,
+#             bridge=self.bridge,
+#             whisper_model=self.whisper_model,
+#             use_whisper=self.use_whisper,
+#             profiler=self.profiler
+#         )
+
+#         # Pre-initialize STT model
+#         self.logger.info("Pre-loading STT model...")
+#         self.audio_processor.initialize()
+
+#         # Start processor in thread
+#         self.processor_thread = threading.Thread(
+#             target=self.audio_processor.run,
+#             daemon=True
+#         )
+#         self.processor_thread.start()
+
+#         # Create main audio processor (uses our threading queue)
+#         # Pass barge-in support: cancel_event and clear_tts_queue callback
+#         self.main_processor = MainProcessor(
+#             self.audio_config,
+#             self.audio_queue,
+#             tts_block_event=self.harness.tts_speaking_event,
+#             cancel_event=self.harness.cancel_event,
+#             clear_tts_queue=self.harness.clear_tts_queue
+#         )
+
+#         # Start main processor in thread
+#         self.main_processor_thread = threading.Thread(
+#             target=self.main_processor.run,
+#             args=(device_index,),
+#             daemon=True
+#         )
+#         self.main_processor_thread.start()
+
+#         self.logger.info("VoiceAgentSystem started successfully (OPTIMIZED)")
+#         self.logger.info("Speak to interact with the AI agent...")
+
+#         return True
+
+#     def run_blocking(self):
+#         """Run the system and block until stopped"""
+#         if not self.start():
+#             return
+
+#         try:
+#             while self.running:
+#                 time.sleep(0.5)
+#         except KeyboardInterrupt:
+#             self.logger.info("Received interrupt signal")
+#         finally:
+#             self.stop()
+
+#     def stop(self):
+#         """Stop the voice agent system"""
+#         self.logger.info("Stopping VoiceAgentSystem...")
+#         self.running = False
+
+#         # Stop components
+#         if self.main_processor:
+#             self.main_processor.stop()
+
+#         if self.audio_processor:
+#             self.audio_processor.stop()
+#             self.audio_queue.put(None)  # Signal shutdown
+
+#         # Stop harness
+#         self.harness.stop_async_processing()
+#         self.harness.cleanup()
+
+#         # Wait for threads
+#         if self.processor_thread and self.processor_thread.is_alive():
+#             self.processor_thread.join(timeout=5.0)
+
+#         if self.main_processor_thread and self.main_processor_thread.is_alive():
+#             self.main_processor_thread.join(timeout=5.0)
+
+#         self.logger.info("VoiceAgentSystem stopped")
+#         # Emit profiling summary at shutdown
+#         self.profiler.report_summary(logger=self.logger)
 
 
 # =============================================================================

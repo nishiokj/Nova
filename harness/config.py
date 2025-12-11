@@ -38,12 +38,12 @@ class LLMConfig:
     max_completion_tokens: Optional[int] = None  # For models that require max_completion_tokens
     top_p: float = 0.9
     timeout: int = 60
-    max_retries: int = 3
+    max_retries: int = 2
     retry_delay: float = 1.0
     retry_backoff_multiplier: float = 2.0
     retry_backoff_max: float = 30.0
     retry_jitter: float = 0.1
-    circuit_breaker_threshold: int = 5
+    circuit_breaker_threshold: int = 2
     circuit_breaker_cooldown: float = 30.0
     circuit_breaker_half_open_successes: int = 1
     streaming: bool = True

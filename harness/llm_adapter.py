@@ -1151,6 +1151,9 @@ def create_adapter(config: LLMConfig) -> LLMAdapter:
         "openai": OpenAIAdapter,
         "anthropic": AnthropicAdapter,
         "custom": CustomAdapter,
+        # Gemini support: use OpenAI-compatible adapter (requires api_base to point
+        # at a Gemini/OpenAI-compatible endpoint and GEMINI_API_KEY to be set)
+        "gemini": OpenAIAdapter,
     }
 
     provider = config.provider.lower()
