@@ -7,7 +7,7 @@ Validates that each step has complete context (state) embedded for RL training.
 import json
 from pathlib import Path
 from harness.manifest_store import ManifestStore
-from harness.rl_reconstructor import EpisodeReconstructor
+from rl.reconstructor import EpisodeReconstructor
 
 
 def test_step_context_embedding():

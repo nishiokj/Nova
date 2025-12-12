@@ -11,14 +11,18 @@ import time
 from pathlib import Path
 from multiprocessing import Process
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
-from harness.event_bus import EventBus
+from communication.event_bus import EventBus
 from harness.agent import TieredAgent, AgentConfig
 from harness.tool_registry import ToolRegistry
 from harness.config import LLMConfig
-from harness.rl_worker import start_rl_worker
+from rl.worker import start_rl_worker
 
 
 def setup_with_rl_logging():

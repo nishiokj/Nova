@@ -10,8 +10,12 @@ import sys
 import os
 from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 
 def check_imports():
@@ -21,12 +25,11 @@ def check_imports():
     print("=" * 60)
 
     checks = [
-        ("EventBus", "from harness.event_bus import EventBus"),
-        ("RL Worker", "from harness.rl_worker import start_rl_worker"),
-        ("RewardShaper", "from harness.rl_reward_shaper import RewardShaper"),
-        ("EpisodeReconstructor", "from harness.rl_reconstructor import EpisodeReconstructor"),
+        ("EventBus", "from communication.event_bus import EventBus"),
+        ("RL Worker", "from rl.worker import start_rl_worker"),
+        ("RewardShaper", "from rl.reward_shaper import RewardShaper"),
+        ("EpisodeReconstructor", "from rl.reconstructor import EpisodeReconstructor"),
         ("TieredAgent", "from harness.agent import TieredAgent"),
-        ("AgentWorker", "from harness.agent_worker import AgentWorker"),
     ]
 
     all_passed = True
@@ -48,7 +51,7 @@ def check_event_bus_integration():
     print("Checking EventBus Integration...")
     print("=" * 60)
 
-    from harness.event_bus import EventBus, MessageType
+    from communication.event_bus import EventBus, MessageType
 
     # Check MessageType has EPISODE_COMPLETE
     if hasattr(MessageType, 'EPISODE_COMPLETE'):
@@ -88,7 +91,7 @@ def check_agent_integration():
 
     from harness.agent import TieredAgent, AgentConfig
     from harness.tool_registry import ToolRegistry
-    from harness.event_bus import EventBus
+    from communication.event_bus import EventBus
     import inspect
 
     # Check TieredAgent.__init__ signature
@@ -135,41 +138,13 @@ def check_agent_integration():
     return True
 
 
-def check_agent_worker_integration():
-    """Check that AgentWorker passes event_bus to TieredAgent"""
-    print("=" * 60)
-    print("Checking AgentWorker Integration...")
-    print("=" * 60)
-
-    import inspect
-    from harness.agent_worker import AgentWorker
-
-    # Read the source to check if event_bus is passed
-    try:
-        source = inspect.getsource(AgentWorker.initialize)
-
-        # Check if event_bus is passed to TieredAgent
-        if 'event_bus=self.event_bus' in source or 'event_bus = self.event_bus' in source:
-            print("✓ AgentWorker.initialize() passes event_bus to TieredAgent")
-        else:
-            print("✗ AgentWorker.initialize() doesn't pass event_bus to TieredAgent")
-            print("  This is CRITICAL - episodes won't be emitted!")
-            return False
-
-    except Exception as e:
-        print(f"⚠ Could not verify source (but may still work): {e}")
-
-    print()
-    return True
-
-
 def check_rl_worker():
     """Check RL worker can be imported and has correct signature"""
     print("=" * 60)
     print("Checking RL Worker...")
     print("=" * 60)
 
-    from harness.rl_worker import start_rl_worker
+    from rl.worker import start_rl_worker
     import inspect
 
     # Check signature
@@ -279,7 +254,7 @@ def check_reconstruction_system():
     print("=" * 60)
 
     try:
-        from harness.rl_reconstructor import EpisodeReconstructor, FullEpisode
+        from rl.reconstructor import EpisodeReconstructor, FullEpisode
         from harness.manifest_store import ManifestStore
 
         print("✓ EpisodeReconstructor imported")
@@ -311,7 +286,6 @@ def main():
         ("Imports", check_imports),
         ("EventBus Integration", check_event_bus_integration),
         ("Agent Integration", check_agent_integration),
-        ("AgentWorker Integration", check_agent_worker_integration),
         ("RL Worker", check_rl_worker),
         ("main.py Integration", check_main_integration),
         ("Log Directories", check_log_directories),

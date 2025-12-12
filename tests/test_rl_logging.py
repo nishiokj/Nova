@@ -11,7 +11,7 @@ This test verifies that the RL logging pipeline works end-to-end:
 import json
 import time
 from pathlib import Path
-from harness.rl_reward_shaper import RewardShaper, StepClassification
+from rl.reward_shaper import RewardShaper, StepClassification
 
 
 def test_reward_shaper():

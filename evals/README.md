@@ -15,35 +15,22 @@ This evaluation system provides:
 
 ## Quick Start
 
-### List Available Agent Configurations
-
-```bash
-python scripts/run_eval.py --list-agents
-```
-
 ### Run Full Evaluation (52 tasks)
 
 ```bash
-# Use default agent config
-python scripts/run_eval.py
-
-# Use specific agent config
-python scripts/run_eval.py --agent-config tiered_advanced
-
-# Override model from config
-python scripts/run_eval.py --agent-config tiered_advanced --model gpt-4-turbo
+python scripts/run_eval.py --model gpt-4o --tier advanced
 ```
 
 ### Quick Evaluation (10 representative tasks)
 
 ```bash
-python scripts/run_eval.py --quick --num-tasks 10
+python scripts/run_eval.py --quick --num-tasks 10 --model gpt-4o
 ```
 
 ### Test Specific Category
 
 ```bash
-python scripts/run_eval.py --category code_ops --agent-config claude_sonnet
+python scripts/run_eval.py --category code_ops --model claude-sonnet-4-5
 ```
 
 ### Compare Two Runs
@@ -95,7 +82,7 @@ python scripts/run_eval.py --batch-size 10 --model gpt-4o
 ```
 
 Benefits:
-- 5x faster grading with batch_size=5
+- 5x faster grading with batch_size=10
 - Efficient LLM API usage
 - Configurable parallelism
 
@@ -130,193 +117,46 @@ Compare two runs with rigorous statistical analysis:
 - Improvement tracking
 - Task-by-task comparison
 
-## Agent Configuration
-
-The evaluation system uses **configuration files** to specify which agent to test, making it easy to swap between different agent implementations or models.
-
-### Configuration File: `evals/configs/agent_config.json`
-
-```json
-{
-  "default_agent": {
-    "type": "TieredAgent",
-    "module": "harness.agent",
-    "class": "TieredAgent",
-    "tier": "advanced",
-    "llm_config": {
-      "provider": "openai",
-      "model": "gpt-4o",
-      "temperature": 0.7
-    }
-  },
-  "agents": {
-    "claude_sonnet": {
-      "type": "TieredAgent",
-      "tier": "advanced",
-      "llm_config": {
-        "provider": "anthropic",
-        "model": "claude-sonnet-4-5",
-        "temperature": 0.7
-      }
-    }
-  }
-}
-```
-
-### Using Agent Configs
-
-```bash
-# List all available agent configurations
-python scripts/run_eval.py --list-agents
-
-# Use default agent (from config file)
-python scripts/run_eval.py --quick
-
-# Use specific agent config
-python scripts/run_eval.py --agent-config tiered_advanced
-
-# Override model from config
-python scripts/run_eval.py --agent-config tiered_simple --model gpt-4-turbo
-
-# Override provider
-python scripts/run_eval.py --agent-config default_agent --provider anthropic
-
-# Override temperature
-python scripts/run_eval.py --agent-config claude_sonnet --temperature 0.5
-```
-
-### Router-Based Agent (Dynamic Tier Selection)
-
-The **routed_agent** configuration fully mimics your production system by using the Router to classify each task and dynamically select the appropriate tier:
-
-```json
-{
-  "routed_agent": {
-    "type": "RoutedAgent",
-    "use_router": true,
-    "router_config": {
-      "enabled": true,
-      "llm_config": {
-        "provider": "openai",
-        "model": "gpt-4o-mini",
-        "temperature": 0.1
-      }
-    },
-    "tier_configs": {
-      "simple": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.5},
-      "standard": {"provider": "openai", "model": "gpt-4o", "temperature": 0.7},
-      "advanced": {"provider": "openai", "model": "gpt-4o", "temperature": 0.7}
-    }
-  }
-}
-```
-
-**How it works:**
-1. Router classifies each eval task (simple/standard/advanced)
-2. Appropriate tier is selected based on classification
-3. Task executes with tier-specific model and prompts
-
-**Usage:**
-```bash
-# Use routed agent (mimics production system)
-python scripts/run_eval.py --agent-config routed_agent --quick
-
-# Test router with full eval suite
-python scripts/run_eval.py --agent-config routed_agent
-```
-
-This is the **most realistic** evaluation mode as it tests your full routing + tiered execution pipeline.
-
-### Adding Custom Agents
-
-To test your own agent implementation:
-
-1. **Add config to `agent_config.json`:**
-
-```json
-{
-  "agents": {
-    "my_custom_agent": {
-      "type": "CustomAgent",
-      "module": "my_module.agents",
-      "class": "MyAgentClass",
-      "init_params": {
-        "custom_param": "value"
-      },
-      "llm_config": {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "temperature": 0.7
-      }
-    }
-  }
-}
-```
-
-2. **Run evaluation:**
-
-```bash
-python scripts/run_eval.py --agent-config my_custom_agent
-```
-
-The system will automatically import and instantiate your agent class!
-
 ## CLI Usage
 
 ### run_eval.py
 
 ```bash
-# Full evaluation with default agent
-python scripts/run_eval.py
-
-# Use specific agent config
-python scripts/run_eval.py --agent-config tiered_advanced
+# Full evaluation
+python scripts/run_eval.py --model MODEL --tier TIER
 
 # Quick evaluation
-python scripts/run_eval.py --quick --num-tasks 10
+python scripts/run_eval.py --quick --num-tasks N --model MODEL
 
 # Category filter
-python scripts/run_eval.py --category code_ops
+python scripts/run_eval.py --category CATEGORY --model MODEL
 
 # Difficulty filter
-python scripts/run_eval.py --difficulty advanced
+python scripts/run_eval.py --difficulty DIFFICULTY --model MODEL
 
 # Specific tasks
-python scripts/run_eval.py --task-ids multi_step_001 code_002
-
-# Override model from config
-python scripts/run_eval.py --agent-config default_agent --model gpt-4-turbo
+python scripts/run_eval.py --task-ids task_001 task_002 --model MODEL
 
 # Parallel execution
-python scripts/run_eval.py --parallel --max-workers 5
+python scripts/run_eval.py --parallel --max-workers 5 --model MODEL
 
-# Use a configured judge
-python scripts/run_eval.py --judge-config default_judge
-
-# List judge configs
-python scripts/run_eval.py --list-judges
+# Custom judge
+python scripts/run_eval.py --model gpt-4o --judge-model claude-opus-4-5
 
 # Skip visualization
-python scripts/run_eval.py --no-viz
+python scripts/run_eval.py --model gpt-4o --no-viz
 ```
 
 **Options:**
-- `--agent-config`: Agent config name (default: default_agent)
-- `--list-agents`: List available agent configs and exit
-- `--model`: Override model from config
-- `--provider`: Override LLM provider
-- `--temperature`: Override temperature
+- `--model`: Model to test (required)
+- `--provider`: LLM provider (openai, anthropic)
+- `--tier`: Agent tier (simple, standard, advanced)
 - `--quick`: Run quick evaluation
 - `--num-tasks`: Number for quick eval (default: 10)
 - `--category`: Filter by category
 - `--difficulty`: Filter by difficulty
 - `--task-ids`: Run specific tasks
-- `--judge-config`: Judge config name from `evals/configs/judge_config.json` (default: default_judge)
-- `--list-judges`: List available judge configs and exit
-- `--judge-model`: Override judge model from selected config
-- `--judge-provider`: Override judge provider from selected config
-- `--judge-temperature`: Override judge temperature from selected config
-- `--judge-max-tokens`: Override judge max_tokens from selected config
+- `--judge-model`: Judge model (default: claude-opus-4-5)
 - `--batch-size`: Grading batch size (default: 5)
 - `--parallel`: Execute tasks in parallel
 - `--max-workers`: Parallel workers (default: 3)
@@ -385,20 +225,17 @@ evals/rubrics/
 ```python
 from evals.eval_runner import EvalRunner
 from evals.tasks.task_registry import get_all_tasks
-from evals.judge_loader import load_judge_config
 from harness.llm_adapter import LLMConfig, create_adapter
 
 # Create agent factory
 def agent_factory():
     return create_my_agent()
 
-# Create judge LLM (temperature=0!) from the shared JSON config
-judge_settings = load_judge_config()
+# Create judge LLM (temperature=0!)
 judge_config = LLMConfig(
-    provider=judge_settings["provider"],
-    model=judge_settings["model"],
-    temperature=judge_settings.get("temperature", 0),
-    max_tokens=judge_settings.get("max_tokens", 4000)
+    provider="anthropic",
+    model="claude-opus-4-5-20251101",
+    temperature=0
 )
 judge_llm = create_adapter(judge_config)
 
@@ -463,41 +300,12 @@ custom_task = EvalTask(
 ```json
 {
   "default_judge": {
-    "provider": "openai",
-    "model": "gpt-5.1",
-    "temperature": 0,
-    "max_tokens": 4000,
-    "note": "Temperature MUST be 0 for reproducible grading"
-  },
-  "alternative_judges": {
-    "gpt4": {
-      "provider": "openai",
-      "model": "gpt-4-turbo",
-      "temperature": 0,
-      "max_tokens": 4000
-    },
-    "claude_sonnet": {
-      "provider": "anthropic",
-      "model": "claude-sonnet-4-5",
-      "temperature": 0,
-      "max_tokens": 4000
-    }
-  },
-  "grading_parameters": {
-    "require_evidence": true,
-    "binary_questions_only": true,
-    "temperature": 0,
-    "deterministic_mode": true
-  },
-  "retry_policy": {
-    "max_retries": 2,
-    "retry_on_parse_failure": true,
-    "retry_delay_seconds": 1
+    "provider": "anthropic",
+    "model": "claude-opus-4-5-20251101",
+    "temperature": 0
   }
 }
 ```
-
-Use `--judge-config` or `load_judge_config()` to select one of these entries (run `python scripts/run_eval.py --list-judges` to inspect the names).
 
 ## Design Principles
 

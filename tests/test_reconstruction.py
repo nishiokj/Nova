@@ -7,7 +7,7 @@ Validates that we can fully reconstruct episodes from logs + manifests.
 import json
 from pathlib import Path
 from harness.manifest_store import ManifestStore, get_manifest_store, ensure_default_manifests
-from harness.rl_reconstructor import EpisodeReconstructor, generate_training_dataset
+from rl.reconstructor import EpisodeReconstructor, generate_training_dataset
 
 
 def test_manifest_storage():

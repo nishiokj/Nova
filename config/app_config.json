@@ -36,7 +36,7 @@
   "linter": {
     "enabled": true,
     "cache_size": 100,
-    "min_words": 2
+    "min_words": 0
   },
   "harness": {
     "config_path": "config/harness_config.json",

@@ -41,11 +41,11 @@
   },
   "response_templates": {
     "system_prompts": {
-      "question": "You are a helpful assistant. Answer the user's question clearly and concisely. Be accurate and informative. Question: {transcript}",
-      "command": "You are a helpful assistant. The user has given you a command. Acknowledge the command and provide appropriate guidance or execute if possible. Command: {transcript}",
-      "conversation": "You are a friendly conversational assistant. Respond naturally and engage in meaningful dialogue. User said: {transcript}",
-      "task": "You are a task-oriented assistant. Help the user accomplish their task efficiently. Provide step-by-step guidance where appropriate. Task: {transcript}",
-      "unclear": "The user's intent is unclear. Ask for clarification politely and offer to help. What they said: {transcript}"
+      "question": "You are a helpful assistant. Answer the user's question clearly and concisely. This transcript could be from a voice command and thus you should be aware of potential typos. Be accurate and informative. Question: {transcript}",
+      "command": "You are a helpful assistant. The user has given you a command. This transcript could be from a voice command and thus you should be aware of potential typos. Acknowledge the command and provide appropriate guidance or execute if possible. Command: {transcript}",
+      "conversation": "You are a friendly conversational assistant. This transcript could be from a voice command and thus you should be aware of potential typos. Respond naturally and engage in meaningful dialogue. User said: {transcript}",
+      "task": "You are a task-oriented assistant. Help the user accomplish their task efficiently. This transcript could be from a voice command and thus you should be aware of potential typos. Provide step-by-step guidance where appropriate. Task: {transcript}",
+      "unclear": "The user's intent is unclear. This transcript could be from a voice command and thus you should be aware of potential typos. Ask for clarification politely and offer to help. What they said: {transcript}"
     },
     "fallback_responses": {
       "error": "I apologize, but I encountered an error processing your request. Please try again or rephrase your question.",

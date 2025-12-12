@@ -20,7 +20,13 @@
       "Bash(pip3:*)",
       "Bash(.venv/bin/python -m pytest:*)",
       "Bash(cat:*)",
-      "Bash(PYTHONPATH=. python3:*)"
+      "Bash(PYTHONPATH=. python3:*)",
+      "Bash(git checkout:*)",
+      "Bash(git tag:*)",
+      "Bash(pytest:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(timeout 5 python:*)"
     ],
     "deny": []
   }

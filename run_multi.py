@@ -18,6 +18,12 @@ Usage:
 import sys
 import signal
 import argparse
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from app_config import AppConfig, create_default_config
 from app import MultiProcessVoiceApp
@@ -78,7 +84,7 @@ Architecture:
 
     # List devices if requested
     if args.list_devices:
-        from audio import AudioDeviceManager, AudioConfig
+        from audio_pipeline import AudioDeviceManager, AudioConfig
         from app_config import load_app_config
 
         app_config = load_app_config(args.config)
