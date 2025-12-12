@@ -1,0 +1,60 @@
+```mermaid
+flowchart TD
+    %% Processes
+    subgraph MAIN[Main Process]
+        MIC["Microphone / Audio Input"]
+        ADM["AudioDeviceManager"]
+        AS["AudioService (capture loop)"]
+        STT["STTService (Whisper, etc.)"]
+        LINT["TextLinterService"]
+        MAIN_MB["Mailbox: Main"]
+    end
+
+    subgraph AGENT[Agent Process]
+        AG_MB["Mailbox: Agent"]
+        HARNESS["Agent Harness / Agent Logic"]
+    end
+
+    subgraph TTS[TTS Process]
+        TTS_MB["Mailbox: TTS"]
+        TTS_SVC["TTS Service (speech synthesis)"]
+        SPK["Speaker / Audio Output"]
+    end
+
+    subgraph BUS[MultiProcessEventBus / Queues]
+        EVQ["Event Queues (multiprocessing.Queue)"]
+    end
+
+    %% Control / sync events
+    CANCEL["cancel_event (MPEvent)"]
+    SPEAKING["tts_speaking_event (MPEvent)"]
+
+    %% Main process audio + STT flow
+    MIC --> ADM --> AS
+    AS -->|audio chunks| STT
+    STT -->|"TranscriptionCompleteEvent"| LINT
+    LINT -->|clean text| MAIN_MB
+
+    %% Main publishes request to Agent via EventBus
+    MAIN_MB -->|"AgentRequestSubmittedEvent"| EVQ
+    EVQ --> AG_MB
+
+    %% Agent processing
+    AG_MB --> HARNESS
+    HARNESS -->|"AgentResponseCompleteEvent"| EVQ
+    HARNESS -->|"TTSRequestedEvent"| EVQ
+
+    %% EventBus routes to TTS process
+    EVQ --> TTS_MB
+
+    %% TTS processing
+    TTS_MB --> TTS_SVC --> SPK
+
+    %% Sync events
+    CANCEL -.-> AS
+    CANCEL -.-> HARNESS
+    CANCEL -.-> TTS_SVC
+
+    TTS_SVC --> SPEAKING
+    SPEAKING -.-> AS
+```

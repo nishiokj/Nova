@@ -11,8 +11,12 @@ import shutil
 from pathlib import Path
 import pytest
 
-# Add harness to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from harness.config import (
     HarnessConfig, LLMConfig, AgentConfig, ToolConfig,
@@ -20,8 +24,8 @@ from harness.config import (
 )
 from harness.tool_registry import ToolRegistry
 from harness.router import Router
-from harness.event_bus import EventBus
-from harness.logger import StructuredLogger, set_logger
+from communication.event_bus import EventBus
+from harness.logger import StructuredLogger
 
 # Import helpers from test_helpers module
 from tests.test_helpers import (
@@ -89,15 +93,12 @@ def mock_llm_config():
 @pytest.fixture
 def mock_logger():
     """Create a mock logger that captures all log entries"""
-    # Use in-memory logging only
-    logger = StructuredLogger(
+    return StructuredLogger(
         name="test_harness",
         log_to_file=False,
         log_to_console=False,
         log_level="DEBUG"
     )
-    set_logger(logger)
-    return logger
 
 
 @pytest.fixture
@@ -116,7 +117,7 @@ def tool_registry(mock_logger):
         bash_timeout=30,
         python_timeout=60
     )
-    return ToolRegistry(config)
+    return ToolRegistry(config, logger=mock_logger)
 
 
 @pytest.fixture
@@ -127,7 +128,7 @@ def tool_registry_with_workdir(temp_working_dir, mock_logger):
             "file_read", "file_write", "search_filesystem", "bash_execute", "python_execute"
         ]
     )
-    registry = ToolRegistry(config, default_working_dir=temp_working_dir)
+    registry = ToolRegistry(config, default_working_dir=temp_working_dir, logger=mock_logger)
     return registry
 
 

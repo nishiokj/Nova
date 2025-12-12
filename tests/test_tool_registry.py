@@ -32,6 +32,7 @@ from harness.tool_registry import (
     ToolRegistry, Tool, ToolResult, ToolStatus, ToolConfig, tool
 )
 from harness.llm_adapter import ToolDefinition
+from harness.resilience import CircuitBreakerOpenError
 
 from tests.test_helpers import (
     assert_tool_result_success, assert_tool_result_error,
@@ -168,6 +169,47 @@ class TestToolRegistryBasics:
 
         # Re-enable for other tests
         tool_registry.enable("calculator")
+
+
+class TestToolCircuitBreaker:
+    """Tests for tool circuit breaker behaviour."""
+
+    def test_circuit_breaker_blocks_after_failures(self):
+        config = ToolConfig(
+            enabled_tools=["flaky_tool"],
+            max_retries=0,
+            retry_delay=0.0,
+            circuit_breaker_threshold=2,
+            circuit_breaker_cooldown=60.0,
+        )
+        registry = ToolRegistry(config)
+
+        def failing_executor(**kwargs):
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error="intentional failure"
+            )
+
+        flaky_tool = Tool(
+            name="flaky_tool",
+            description="Always fails",
+            parameters={},
+            executor=failing_executor,
+            enabled=True
+        )
+
+        registry.register(flaky_tool)
+        registry.enable("flaky_tool")
+
+        result1 = registry.execute("flaky_tool")
+        assert result1.status == ToolStatus.ERROR
+
+        result2 = registry.execute("flaky_tool")
+        assert result2.status == ToolStatus.ERROR
+
+        with pytest.raises(CircuitBreakerOpenError):
+            registry.execute("flaky_tool")
 
 
 class TestCalculatorTool:

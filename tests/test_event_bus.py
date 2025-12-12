@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from harness.event_bus import (
-    EventBus, ProcessManager,
+from communication.event_bus import (
+    EventBus,
     MessageType, BusMessage,
     AgentRequest, AgentResult,
     TTSRequest

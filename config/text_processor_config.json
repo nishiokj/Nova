@@ -1,5 +1,4 @@
 {
-  "_description": "Text processor settings consumed by the voice bridge, TTS worker, and linting pipeline.",
   "llm_handler": {
     "model": "qwen2.5-7b-instruct",
     "api_base": "http://localhost:8000",
@@ -42,11 +41,11 @@
   },
   "response_templates": {
     "system_prompts": {
-      "question": "You are a helpful assistant. Answer the user's question clearly and concisely. Be accurate and informative. Question: {transcript}",
-      "command": "You are a helpful assistant. The user has given you a command. Acknowledge the command and provide appropriate guidance or execute if possible. Command: {transcript}",
-      "conversation": "You are a friendly conversational assistant. Respond naturally and engage in meaningful dialogue. User said: {transcript}",
-      "task": "You are a task-oriented assistant. Help the user accomplish their task efficiently. Provide step-by-step guidance where appropriate. Task: {transcript}",
-      "unclear": "The user's intent is unclear. Ask for clarification politely and offer to help. What they said: {transcript}"
+      "question": "You are a helpful assistant. Answer the user's question clearly and concisely. This transcript could be from a voice command and thus you should be aware of potential typos. Be accurate and informative. Question: {transcript}",
+      "command": "You are a helpful assistant. The user has given you a command. This transcript could be from a voice command and thus you should be aware of potential typos. Acknowledge the command and provide appropriate guidance or execute if possible. Command: {transcript}",
+      "conversation": "You are a friendly conversational assistant. This transcript could be from a voice command and thus you should be aware of potential typos. Respond naturally and engage in meaningful dialogue. User said: {transcript}",
+      "task": "You are a task-oriented assistant. Help the user accomplish their task efficiently. This transcript could be from a voice command and thus you should be aware of potential typos. Provide step-by-step guidance where appropriate. Task: {transcript}",
+      "unclear": "The user's intent is unclear. This transcript could be from a voice command and thus you should be aware of potential typos. Ask for clarification politely and offer to help. What they said: {transcript}"
     },
     "fallback_responses": {
       "error": "I apologize, but I encountered an error processing your request. Please try again or rephrase your question.",
@@ -56,18 +55,13 @@
     }
   },
   "processing": {
-    "_comment": "Timing thresholds used by the optimized audio pipeline (seconds).",
     "max_context_length": 10,
     "processing_timeout": 30,
     "stream_responses": true,
     "enable_conversation_history": true,
-    "log_interactions": true,
-    "tts_holdoff_seconds": 0.35,
-    "min_response_interval": 0.5,
-    "tts_feedback_window": 8.0
+    "log_interactions": true
   },
   "voice_output": {
-    "_comment": "Passed directly to the TTS worker to control spoken responses.",
     "engine": "pyttsx3",
     "voice_id": null,
     "rate": 180,
