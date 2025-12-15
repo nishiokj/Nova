@@ -7,24 +7,33 @@ FROM python:3.11-slim
 # Prevent Python from buffering stdout/stderr (better for container logs)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1
 
 # Install system dependencies for audio processing
-# - portaudio19-dev: Required for PyAudio (microphone access)
-# - ffmpeg: Audio format conversion for pydub
-# - espeak: Text-to-speech backend for pyttsx3
-# - alsa-utils: ALSA audio tools for device management
-# - pulseaudio-utils: PulseAudio client for audio passthrough
-# - tini: Proper init system for signal handling
+# Build dependencies (gcc, etc.) needed for compiling Python packages
+# Runtime dependencies for audio
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build tools (needed for PyAudio, webrtcvad compilation)
+    gcc \
+    g++ \
+    make \
+    python3-dev \
+    # Audio libraries (runtime + development headers)
     portaudio19-dev \
     ffmpeg \
     espeak \
     alsa-utils \
     pulseaudio-utils \
+    # Process management
     tini \
+    # For downloading uv
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Install uv - the fast Python package installer
+# https://github.com/astral-sh/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Set working directory
 WORKDIR /app
@@ -32,15 +41,26 @@ WORKDIR /app
 # Copy Python dependencies first (layer caching optimization)
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies using uv (much faster than pip)
+# Note: Build tools (gcc, g++, make, python3-dev) are needed for compilation
+# We filter out macOS-specific packages (pyobjc*) that can't install on Linux
+# This also removes indented comment lines that reference pyobjc
+RUN grep -vE "^pyobjc|^    #   pyobjc" requirements.txt > requirements-docker.txt && \
+    uv pip install --system -r requirements-docker.txt && \
+    rm requirements-docker.txt
 
 # Copy application code
 COPY . .
 
-# Install voice-agent package in editable mode
+# Install voice-agent package in editable mode without dependencies
 # This creates the 'voice-agent' CLI command
-RUN pip install --no-cache-dir -e .
+# We use --no-deps because dependencies are already installed above (excluding macOS-only packages)
+RUN uv pip install --system --no-deps -e .
+
+# Optional: Remove build dependencies to reduce image size
+# Uncomment if you want a smaller image (~200MB savings)
+# RUN apt-get purge -y --auto-remove gcc g++ make python3-dev \
+#     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user with audio group membership
 # UID 1000 matches typical Linux user for easier volume permissions

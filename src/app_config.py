@@ -177,24 +177,68 @@ class AppConfig:
 
 def load_app_config(path: Optional[str] = None) -> AppConfig:
     """
-    Load application configuration.
+    Load application configuration with environment variable overrides.
+
+    Environment variables take precedence over config file values,
+    enabling Docker-friendly configuration management.
+
+    Supported environment variables:
+    - LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR)
+    - LOG_DIR: Log directory path
+    - STT_MODEL: Whisper model size (tiny.en, base.en, small.en, etc.)
+    - STT_DEVICE: STT device (auto, cpu, cuda, mps)
+    - STT_COMPUTE_TYPE: Compute type (auto, int8, float16, float32)
+    - AUDIO_DEVICE_INDEX: Audio input device index
+    - AUDIO_SAMPLE_RATE: Audio sample rate in Hz
+    - HARNESS_CONFIG_PATH: Path to harness configuration file
 
     Args:
         path: Path to config file (defaults to config/app_config.json)
 
     Returns:
-        AppConfig instance
+        AppConfig instance with environment variable overrides applied
     """
     if path is None:
         path = "config/app_config.json"
 
     if os.path.exists(path):
-        return AppConfig.load(path)
+        config = AppConfig.load(path)
     else:
-        logging.info(f"Config file not found at {path}, creating default config")
+        logging.info(f"Config file not found at {path}, using defaults")
         config = AppConfig()
-        config.save(path)
-        return config
+
+    # Apply environment variable overrides
+    # Logging
+    if os.getenv("LOG_LEVEL"):
+        config.logging.level = os.getenv("LOG_LEVEL")
+    if os.getenv("LOG_DIR"):
+        config.logging.log_dir = os.getenv("LOG_DIR")
+
+    # STT
+    if os.getenv("STT_MODEL"):
+        config.stt.model_size = os.getenv("STT_MODEL")
+    if os.getenv("STT_DEVICE"):
+        config.stt.device = os.getenv("STT_DEVICE")
+    if os.getenv("STT_COMPUTE_TYPE"):
+        config.stt.compute_type = os.getenv("STT_COMPUTE_TYPE")
+
+    # Audio
+    if os.getenv("AUDIO_DEVICE_INDEX"):
+        try:
+            config.audio.device_index = int(os.getenv("AUDIO_DEVICE_INDEX"))
+        except ValueError:
+            logging.warning(f"Invalid AUDIO_DEVICE_INDEX: {os.getenv('AUDIO_DEVICE_INDEX')}")
+    if os.getenv("AUDIO_SAMPLE_RATE"):
+        try:
+            config.audio.sample_rate = int(os.getenv("AUDIO_SAMPLE_RATE"))
+        except ValueError:
+            logging.warning(f"Invalid AUDIO_SAMPLE_RATE: {os.getenv('AUDIO_SAMPLE_RATE')}")
+
+    # Harness
+    if os.getenv("HARNESS_CONFIG_PATH"):
+        config.harness.config_path = os.getenv("HARNESS_CONFIG_PATH")
+
+    return config
 
 
 def create_default_config(path: str = "config/app_config.json"):

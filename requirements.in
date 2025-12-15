@@ -1,5 +1,6 @@
 # Audio Processing
-numpy<=2.3.1
+# numpy>=2.3 requires Python>=3.11, so lock to the latest 3.10-compatible release.
+numpy<=2.2.6
 PyAudio==0.2.14
 pydub==0.25.1
 scipy<=1.16.0

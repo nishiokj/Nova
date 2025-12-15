@@ -2909,3 +2909,147 @@
 {"ts": "2025-12-15T20:52:04.935Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=['web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'fast_answer', 'get_working_direc"}
 {"ts": "2025-12-15T20:52:14.890Z", "lvl": "DEBUG", "svc": "llm", "evt": "API RESPONSE: content_len=0, tool_calls=1, finish=tool_calls"}
 {"ts": "2025-12-15T20:52:14.891Z", "lvl": "DEBUG", "svc": "llm", "evt": "API REQUEST: model=gpt-5-mini, tools=['web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'fast_answer', 'get_working_direc"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: web_fetch"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: fast_answer"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_working_directory"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: list_files"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_configured_advanced", "data": {"max_tokens": 32000, "max_tools": 25}}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_configured_simple", "data": {"max_tokens": 1500, "max_tools": 1}}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_configured_standard", "data": {"max_tokens": 4000, "max_tools": 5}}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "llm", "evt": "init_prewarmed", "data": {"tier": "standard"}}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "runtime", "evt": "init_ready"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "harness", "evt": "init_ready"}
+{"ts": "2025-12-15T21:25:25.873Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "init_ready"}
+{"ts": "2025-12-15T21:26:57.820Z", "lvl": "DEBUG", "svc": "intent_classifier", "evt": "Intent defaulted to: normal_request"}
+{"ts": "2025-12-15T21:26:57.820Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "[req_5_req_1f43] Routed to tier=standard, queued=1"}
+{"ts": "2025-12-15T21:26:57.820Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'standard' (max 5 tools, max None steps)"}
+{"ts": "2025-12-15T21:26:57.820Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Creating execution plan..."}
+{"ts": "2025-12-15T21:26:58.269Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:26:59.302Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:01.389Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:01.390Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:01.390Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:02.449Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:04.593Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:04.594Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:04.595Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:05.607Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:07.799Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:07.800Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:07.801Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Executing plan: Based on events emitted in my communication folder..."}
+{"ts": "2025-12-15T21:27:07.802Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:08.815Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:10.835Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:10.836Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gpt-5-mini OPEN for 30.0s"}
+{"ts": "2025-12-15T21:27:10.837Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:10.838Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:11.902Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:13.920Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:13.921Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-flash OPEN for 30.0s"}
+{"ts": "2025-12-15T21:27:13.922Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:13.923Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:14.982Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:17.114Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:17.115Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-pro OPEN for 30.0s"}
+{"ts": "2025-12-15T21:27:17.115Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:27:17.115Z", "lvl": "DEBUG", "svc": "agent", "evt": "Agent execution failed: Client.__init__() got an unexpected keyword argument 'proxies'"}
+{"ts": "2025-12-15T21:27:17.116Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_requested", "data": {"type": "error", "len": 116, "priority": 1}}
+{"ts": "2025-12-15T21:27:17.116Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "[req_5_req_1f43] Response delivered: success=False"}
+{"ts": "2025-12-15T21:28:35.403Z", "lvl": "DEBUG", "svc": "intent_classifier", "evt": "Intent defaulted to: normal_request"}
+{"ts": "2025-12-15T21:28:35.404Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "[req_28_req_b07c] Routed to tier=standard, queued=1"}
+{"ts": "2025-12-15T21:28:35.404Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'standard' (max 5 tools, max None steps)"}
+{"ts": "2025-12-15T21:28:35.404Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Creating execution plan..."}
+{"ts": "2025-12-15T21:28:35.404Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gpt-5-mini entering HALF-OPEN"}
+{"ts": "2025-12-15T21:28:35.404Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:36.487Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:38.642Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:38.642Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:38.642Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-flash entering HALF-OPEN"}
+{"ts": "2025-12-15T21:28:38.643Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:39.727Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:41.851Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:41.851Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:41.851Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-pro entering HALF-OPEN"}
+{"ts": "2025-12-15T21:28:41.852Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:42.887Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:45.042Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:45.042Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:45.043Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Executing plan: Okay. And then... This is the last one. So... Okay..."}
+{"ts": "2025-12-15T21:28:45.043Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:46.074Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:48.119Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:48.119Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gpt-5-mini OPEN for 30.0s"}
+{"ts": "2025-12-15T21:28:48.119Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:48.119Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:49.215Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:51.234Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:51.234Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-flash OPEN for 30.0s"}
+{"ts": "2025-12-15T21:28:51.235Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:51.235Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:52.293Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:54.479Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:54.479Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-pro OPEN for 30.0s"}
+{"ts": "2025-12-15T21:28:54.479Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:28:54.479Z", "lvl": "DEBUG", "svc": "agent", "evt": "Agent execution failed: Client.__init__() got an unexpected keyword argument 'proxies'"}
+{"ts": "2025-12-15T21:28:54.479Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_requested", "data": {"type": "error", "len": 116, "priority": 1}}
+{"ts": "2025-12-15T21:28:54.479Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "[req_28_req_b07c] Response delivered: success=False"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: web_fetch"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: fast_answer"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_working_directory"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: list_files"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_configured_advanced", "data": {"max_tokens": 32000, "max_tools": 25}}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_configured_simple", "data": {"max_tokens": 1500, "max_tools": 1}}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "agent", "evt": "init_configured_standard", "data": {"max_tokens": 4000, "max_tools": 5}}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "llm", "evt": "init_prewarmed", "data": {"tier": "standard"}}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "runtime", "evt": "init_ready"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "harness", "evt": "init_ready"}
+{"ts": "2025-12-15T21:32:22.436Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "init_ready"}
+{"ts": "2025-12-15T21:32:33.873Z", "lvl": "DEBUG", "svc": "intent_classifier", "evt": "Intent defaulted to: normal_request"}
+{"ts": "2025-12-15T21:32:33.873Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "[req_1_req_5958] Routed to tier=standard, queued=1"}
+{"ts": "2025-12-15T21:32:33.873Z", "lvl": "DEBUG", "svc": "agent", "evt": "Running agent at tier 'standard' (max 5 tools, max None steps)"}
+{"ts": "2025-12-15T21:32:33.873Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Creating execution plan..."}
+{"ts": "2025-12-15T21:32:33.974Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:35.034Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:37.162Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:37.162Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:37.163Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:38.259Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:40.286Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:40.287Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:40.287Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:41.354Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:43.446Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:43.446Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:43.446Z", "lvl": "DEBUG", "svc": "agent", "evt": "thinking: Executing plan: Okay. Let's just go. Okay. There we go. All right...."}
+{"ts": "2025-12-15T21:32:43.446Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:44.542Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:46.633Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:46.634Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gpt-5-mini OPEN for 30.0s"}
+{"ts": "2025-12-15T21:32:46.635Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:46.636Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:47.718Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:49.732Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:49.732Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-flash OPEN for 30.0s"}
+{"ts": "2025-12-15T21:32:49.732Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:49.733Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:50.768Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:52.862Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:52.862Z", "lvl": "DEBUG", "svc": "llm", "evt": "llm circuit for openai:gemini-2.5-pro OPEN for 30.0s"}
+{"ts": "2025-12-15T21:32:52.863Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'", "data": {"error": "Client.__init__() got an unexpected keyword argument 'proxies'"}}
+{"ts": "2025-12-15T21:32:52.863Z", "lvl": "DEBUG", "svc": "agent", "evt": "Agent execution failed: Client.__init__() got an unexpected keyword argument 'proxies'"}
+{"ts": "2025-12-15T21:32:52.863Z", "lvl": "DEBUG", "svc": "tts", "evt": "tts_requested", "data": {"type": "error", "len": 116, "priority": 1}}
+{"ts": "2025-12-15T21:32:52.863Z", "lvl": "DEBUG", "svc": "service_rep", "evt": "[req_1_req_5958] Response delivered: success=False"}

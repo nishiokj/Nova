@@ -18,6 +18,8 @@ from typing import Optional
 from app import MultiProcessVoiceApp
 from app_config import AppConfig, RuntimeMode, load_app_config
 from rl.worker import start_rl_worker as run_rl_worker
+from util.config_discovery import find_config_file, init_user_config
+from util.config_validator import ConfigValidator
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -34,16 +36,56 @@ Examples:
     )
 
 
+def _get_version() -> str:
+    """Get version from pyproject.toml."""
+    try:
+        from importlib.metadata import version
+        return version("voice-agent-system")
+    except Exception:
+        return "0.1.0 (development)"
+
+
 def _register_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"%(prog)s {_get_version()}",
+        help="Show version and exit",
+    )
+    parser.add_argument(
         "--config",
-        default="config/app_config.json",
-        help="Path to application configuration file",
+        default=None,  # Will use discovery if not specified
+        help="Path to application configuration file (default: XDG config search)",
+    )
+    parser.add_argument(
+        "--config-dir",
+        help="Custom config directory to search for configs",
     )
     parser.add_argument(
         "--create-config",
         action="store_true",
-        help="Create default configuration file and exit",
+        help="[DEPRECATED] Use --init-config instead",
+    )
+    parser.add_argument(
+        "--init-config",
+        action="store_true",
+        help="Initialize config in ~/.config/voice-agent/ and exit",
+    )
+    parser.add_argument(
+        "--validate-config",
+        action="store_true",
+        help="Validate configuration and exit (no app startup)",
+    )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="List available audio input devices and exit",
+    )
+    parser.add_argument(
+        "--health-check",
+        action="store_true",
+        help="Run health checks and exit (for Docker HEALTHCHECK)",
     )
     parser.add_argument(
         "--debug",
@@ -53,7 +95,7 @@ def _register_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rl",
         action="store_true",
-        help="Worker for RL log creation",
+        help="Enable RL worker for log creation",
     )
 
 
@@ -105,21 +147,130 @@ def main(argv: Optional[list[str]] = None) -> int:
     _register_arguments(parser)
     args = parser.parse_args(argv)
 
-    if args.create_config:
-        from app_config import create_default_config
+    # Handle --init-config: Create user config directory
+    if args.init_config:
+        print("Initializing user configuration directory...")
+        try:
+            config_dir = init_user_config(args.config_dir)
+            print(f"\n✓ Configuration initialized in: {config_dir}")
+            print("\nNext steps:")
+            print(f"  1. Edit {config_dir}/app_config.json")
+            print(f"  2. Edit {config_dir}/harness_config.json")
+            print(f"  3. Add API keys to {config_dir}/.env")
+            print(f"  4. Run: voice-agent")
+            return 0
+        except Exception as e:
+            print(f"\n✗ Error initializing config: {e}")
+            return 1
 
-        create_default_config(args.config)
+    # Handle --list-devices: Show audio devices
+    if args.list_devices:
+        print("Available audio input devices:\n")
+        try:
+            import pyaudio
+            pa = pyaudio.PyAudio()
+            found_devices = False
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                if info['maxInputChannels'] > 0:
+                    found_devices = True
+                    default = " (DEFAULT)" if i == pa.get_default_input_device_info()['index'] else ""
+                    print(f"  [{i}] {info['name']}{default}")
+                    print(f"      Channels: {info['maxInputChannels']}, "
+                          f"Sample Rate: {int(info['defaultSampleRate'])} Hz")
+            pa.terminate()
+
+            if not found_devices:
+                print("  No input devices found.")
+                return 1
+
+            print("\nTo use a specific device, set AUDIO_DEVICE_INDEX environment variable")
+            print("or update audio.device_index in app_config.json")
+            return 0
+        except Exception as e:
+            print(f"Error listing devices: {e}")
+            return 1
+
+    # Handle --health-check: Quick validation (for Docker HEALTHCHECK)
+    if args.health_check:
+        try:
+            # Check 1: Audio devices
+            import pyaudio
+            pa = pyaudio.PyAudio()
+            device_count = pa.get_device_count()
+            pa.terminate()
+
+            if device_count == 0:
+                print("FAIL: No audio devices found")
+                return 1
+
+            # Check 2: Config file exists (if not using defaults)
+            if args.config:
+                config_path = Path(args.config)
+                if not config_path.exists():
+                    print(f"FAIL: Config file not found: {args.config}")
+                    return 1
+
+            print("PASS: Health check successful")
+            return 0
+        except Exception as e:
+            print(f"FAIL: {e}")
+            return 1
+
+    # Handle deprecated --create-config
+    if args.create_config:
+        print("Warning: --create-config is deprecated. Use --init-config instead.")
+        from app_config import create_default_config
+        create_default_config(args.config or "config/app_config.json")
         return 0
 
-    print(f"Loading configuration from: {args.config}")
-    config = load_app_config(args.config)
+    # Load configuration using discovery
+    try:
+        if args.config:
+            # Explicit path provided
+            config_path = Path(args.config)
+            if not config_path.exists():
+                print(f"Error: Config file not found: {args.config}")
+                return 1
+            config_path_str = str(config_path)
+        else:
+            # Use discovery
+            config_path = find_config_file(
+                explicit_path=args.config,
+                config_dir=args.config_dir
+            )
+            config_path_str = str(config_path)
+            print(f"Using configuration: {config_path_str}")
+    except FileNotFoundError as e:
+        print(f"\nError: {e}")
+        return 1
 
+    config = load_app_config(config_path_str)
+
+    # Apply CLI overrides
     if args.debug:
         config.logging.level = "DEBUG"
 
     if args.rl:
         config.runtime.enable_rl_worker = True
 
+    # Handle --validate-config: Validate and exit
+    if args.validate_config:
+        print(f"\nValidating configuration: {config_path_str}")
+        validator = ConfigValidator(config)
+        validator.validate_all()
+        validator.print_report()
+        return 0 if not validator.has_errors() else 1
+
+    # Auto-validate before starting (fail fast on errors)
+    validator = ConfigValidator(config)
+    if not validator.validate_all():
+        print(f"\nConfiguration validation failed for: {config_path_str}")
+        validator.print_report()
+        print("\nFix errors and try again, or run with --validate-config for details.")
+        return 1
+
+    # Force multi-process mode (current requirement)
     if config.runtime.mode != RuntimeMode.MULTI_PROCESS:
         print(f"Warning: Forcing multi-process mode (was {config.runtime.mode.value})")
         config.runtime.mode = RuntimeMode.MULTI_PROCESS

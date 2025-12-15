@@ -14,7 +14,8 @@ pytest-watch>=4.2.0     # Watch mode for development
 pytest-randomly>=3.0    # Randomize test order
 
 # Mocking and fixtures
-unittest-mock>=1.4.0    # For Python < 3.8 compatibility (included in 3.8+)
+# Python 3.10+ already has sufficient unittest.mock support.
+unittest-mock>=1.4.0; python_version < "3.10"
 
 # Type checking
 mypy>=1.10.0
