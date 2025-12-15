@@ -84,7 +84,7 @@ html2text==2020.1.16
     # via -r /Users/jevinnishioka/Desktop/jesus/requirements.in
 httpcore==1.0.9
     # via httpx
-httpx==0.28.1
+httpx>=0.29.0,<0.30
     # via
     #   anthropic
     #   huggingface-hub

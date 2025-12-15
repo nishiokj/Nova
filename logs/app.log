@@ -3339,3 +3339,271 @@ TypeError: TranscriptionCompleteEvent.__init__() got an unexpected keyword argum
 2025-12-15 15:32:58,415 - app.process_manager - INFO - Stopped worker 'service_rep'
 2025-12-15 15:32:58,415 - app.process_manager - INFO - ProcessManager stopped
 2025-12-15 15:32:58,415 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 15:34:06,048 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 15:34:06,048 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 15:34:06,048 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 15:34:06,050 - audio_pipeline.audio_pipeline - INFO - PyAudio found 4 audio devices
+2025-12-15 15:34:06,290 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 15:34:06,290 - audio_pipeline.audio_pipeline - INFO -   Device 1: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:34:06,290 - audio_pipeline.audio_pipeline - INFO -   Device 3: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:34:06,290 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 15:34:06,290 - app - INFO - Using audio device index: 1
+2025-12-15 15:34:06,290 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 15:34:06,290 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 15:34:06,290 - app - INFO - Starting worker processes...
+2025-12-15 15:34:06,291 - app.process_manager - INFO - Started worker 'tts' (PID: 16282)
+2025-12-15 15:34:06,292 - app.process_manager - INFO - Started worker 'service_rep' (PID: 16283)
+2025-12-15 15:34:06,293 - app.process_manager - INFO - ProcessManager started
+2025-12-15 15:34:07,298 - app - INFO - Initializing STT service...
+2025-12-15 15:34:07,413 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 15:34:07,413 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 15:34:07,414 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 15:34:07,778 - app.stt - INFO - Whisper model loaded in 365ms (device=cpu, compute_type=int8)
+2025-12-15 15:34:07,779 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 15:34:07,779 - app - INFO - Audio capture loop started
+2025-12-15 15:34:07,779 - app - INFO - Audio processing loop started
+2025-12-15 15:34:07,779 - app - INFO - Response monitor started
+2025-12-15 15:34:07,779 - app - INFO - Calibrating noise floor...
+2025-12-15 15:34:07,779 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 15:34:07,779 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 15:34:08,286 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 15:34:11,824 - app.audio - INFO - Speech segment finalized: 132480 bytes, 1.88s
+2025-12-15 15:34:12,415 - app - INFO - Transcribed: What's the capital of Turkey?
+2025-12-15 15:34:12,415 - app - INFO - [req_1_req_ea49] Transcription complete: What's the capital of Turkey?
+2025-12-15 15:34:12,944 - app.audio - INFO - Speech segment finalized: 71040 bytes, 0.53s
+2025-12-15 15:34:20,442 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 15:34:21,822 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 15:34:25,137 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 15:34:25,138 - app - INFO - Response monitor stopped
+2025-12-15 15:34:25,320 - app - INFO - Audio capture loop stopped
+2025-12-15 15:34:25,594 - app - INFO - Audio processing loop stopped
+2025-12-15 15:38:35,233 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 15:38:35,233 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 15:38:35,233 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 15:38:35,235 - audio_pipeline.audio_pipeline - INFO - PyAudio found 4 audio devices
+2025-12-15 15:38:35,468 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 15:38:35,468 - audio_pipeline.audio_pipeline - INFO -   Device 1: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:38:35,468 - audio_pipeline.audio_pipeline - INFO -   Device 3: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:38:35,468 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 15:38:35,468 - app - INFO - Using audio device index: 1
+2025-12-15 15:38:35,468 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 15:38:35,468 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 15:38:35,468 - app - INFO - Starting worker processes...
+2025-12-15 15:38:35,470 - app.process_manager - INFO - Started worker 'tts' (PID: 16453)
+2025-12-15 15:38:35,471 - app.process_manager - INFO - Started worker 'service_rep' (PID: 16454)
+2025-12-15 15:38:35,471 - app.process_manager - INFO - ProcessManager started
+2025-12-15 15:38:36,476 - app - INFO - Initializing STT service...
+2025-12-15 15:38:36,594 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 15:38:36,594 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 15:38:36,594 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 15:38:36,982 - app.stt - INFO - Whisper model loaded in 388ms (device=cpu, compute_type=int8)
+2025-12-15 15:38:36,982 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 15:38:36,982 - app - INFO - Audio capture loop started
+2025-12-15 15:38:36,982 - app - INFO - Audio processing loop started
+2025-12-15 15:38:36,982 - app - INFO - Response monitor started
+2025-12-15 15:38:36,982 - app - INFO - Calibrating noise floor...
+2025-12-15 15:38:36,982 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 15:38:36,982 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 15:38:37,485 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 15:38:41,965 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 15:38:45,924 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 15:38:51,442 - app.audio - INFO - Speech segment finalized: 253440 bytes, 0.52s
+2025-12-15 15:38:55,527 - app.audio - INFO - Speech segment finalized: 72960 bytes, 0.96s
+2025-12-15 15:39:00,045 - app.audio - INFO - Speech segment finalized: 286080 bytes, 0.56s
+2025-12-15 15:39:03,827 - app - INFO - Transcribed: .
+2025-12-15 15:39:04,345 - app.audio - INFO - Speech segment finalized: 59520 bytes, 0.51s
+2025-12-15 15:39:07,880 - app.audio - INFO - Speech segment finalized: 155520 bytes, 0.53s
+2025-12-15 15:39:51,519 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 15:39:51,519 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 15:39:51,519 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 15:39:51,520 - audio_pipeline.audio_pipeline - INFO - PyAudio found 4 audio devices
+2025-12-15 15:39:51,757 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 15:39:51,757 - audio_pipeline.audio_pipeline - INFO -   Device 1: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:39:51,757 - audio_pipeline.audio_pipeline - INFO -   Device 3: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:39:51,757 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 15:39:51,757 - app - INFO - Using audio device index: 1
+2025-12-15 15:39:51,757 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 15:39:51,757 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 15:39:51,757 - app - INFO - Starting worker processes...
+2025-12-15 15:39:51,758 - app.process_manager - INFO - Started worker 'tts' (PID: 16600)
+2025-12-15 15:39:51,760 - app.process_manager - INFO - Started worker 'service_rep' (PID: 16601)
+2025-12-15 15:39:51,760 - app.process_manager - INFO - ProcessManager started
+2025-12-15 15:39:52,765 - app - INFO - Initializing STT service...
+2025-12-15 15:39:52,880 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 15:39:52,880 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 15:39:52,880 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 15:39:53,224 - app.stt - INFO - Whisper model loaded in 344ms (device=cpu, compute_type=int8)
+2025-12-15 15:39:53,224 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 15:39:53,224 - app - INFO - Audio capture loop started
+2025-12-15 15:39:53,225 - app - INFO - Audio processing loop started
+2025-12-15 15:39:53,225 - app - INFO - Response monitor started
+2025-12-15 15:39:53,225 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 15:39:53,225 - app - INFO - Calibrating noise floor...
+2025-12-15 15:39:53,225 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 15:39:53,728 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 15:39:56,409 - app.audio - INFO - Speech segment finalized: 55680 bytes, 0.70s
+2025-12-15 15:40:05,469 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 15:40:08,096 - app - INFO - Transcribed: Okay. Okay. Keep it up. Okay. Okay. All right. Let's have a look. Okay. I'll see you next week. Okay. Okay. All right. Okay. Good. All right. Okay. Thank you. All right.
+2025-12-15 15:40:08,096 - app - INFO - [req_2_req_f68d] Transcription complete: Okay. Keep it up. Okay. All right. Let's have a look. Okay. I'll see you next week. Okay. All right. Okay. Good. All right. Okay. Thank you. All right.
+2025-12-15 15:40:08,609 - app.audio - INFO - Speech segment finalized: 107520 bytes, 0.51s
+2025-12-15 15:40:11,945 - app.audio - INFO - Speech segment finalized: 94080 bytes, 0.50s
+2025-12-15 15:40:28,396 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 15:40:28,396 - app - INFO - Response monitor stopped
+2025-12-15 15:40:28,630 - app - INFO - Audio capture loop stopped
+2025-12-15 15:40:28,658 - app - INFO - Audio processing loop stopped
+2025-12-15 15:40:30,521 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 15:40:30,521 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 15:40:30,521 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 15:40:30,523 - audio_pipeline.audio_pipeline - INFO - PyAudio found 4 audio devices
+2025-12-15 15:40:30,764 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 15:40:30,764 - audio_pipeline.audio_pipeline - INFO -   Device 1: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:40:30,764 - audio_pipeline.audio_pipeline - INFO -   Device 3: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:40:30,764 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 15:40:30,764 - app - INFO - Using audio device index: 1
+2025-12-15 15:40:30,764 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 15:40:30,764 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 15:40:30,764 - app - INFO - Starting worker processes...
+2025-12-15 15:40:30,765 - app.process_manager - INFO - Started worker 'tts' (PID: 16695)
+2025-12-15 15:40:30,767 - app.process_manager - INFO - Started worker 'service_rep' (PID: 16696)
+2025-12-15 15:40:30,767 - app.process_manager - INFO - ProcessManager started
+2025-12-15 15:40:31,769 - app - INFO - Initializing STT service...
+2025-12-15 15:40:31,887 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 15:40:31,887 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 15:40:31,887 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 15:40:32,199 - app.stt - INFO - Whisper model loaded in 312ms (device=cpu, compute_type=int8)
+2025-12-15 15:40:32,199 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 15:40:32,200 - app - INFO - Audio capture loop started
+2025-12-15 15:40:32,200 - app - INFO - Audio processing loop started
+2025-12-15 15:40:32,200 - app - INFO - Calibrating noise floor...
+2025-12-15 15:40:32,200 - app - INFO - Response monitor started
+2025-12-15 15:40:32,200 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 15:40:32,200 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 15:40:32,704 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 15:40:36,882 - app.audio - INFO - Speech segment finalized: 71040 bytes, 0.94s
+2025-12-15 15:40:39,573 - app - INFO - Transcribed: Okay. Okay. Okay. Okay. Okay. Okay. Okay. Okay. All right.
+2025-12-15 15:40:39,573 - app - INFO - [req_1_req_e48a] Transcription complete: Okay. All right.
+2025-12-15 15:40:40,082 - app.audio - INFO - Speech segment finalized: 199680 bytes, 0.51s
+2025-12-15 15:40:44,557 - app - INFO - Transcribed: Okay. All right. Okay. All right. Okay. Great. All right. Okay. I'll have a little break. Okay. Okay. All right. Okay. Good. Okay. Kinda. Okay. Okay. Good. Okay. We're just trying to go to the point where we make it.
+2025-12-15 15:40:44,558 - app - INFO - [req_2_req_a961] Transcription complete: Okay. All right. Okay. All right. Okay. Great. All right. Okay. I'll have a little break. Okay. All right. Okay. Good. Okay. kind of. Okay. Good. Okay. We're just trying to go to the point where we make it.
+2025-12-15 15:40:45,065 - app.audio - INFO - Speech segment finalized: 238080 bytes, 0.50s
+2025-12-15 15:40:53,192 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 15:40:53,193 - app - INFO - Response monitor stopped
+2025-12-15 15:40:53,198 - app - INFO - Audio processing loop stopped
+2025-12-15 15:40:53,332 - app - INFO - Audio capture loop stopped
+2025-12-15 15:40:56,699 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 15:40:56,699 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 15:40:56,699 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 15:40:56,701 - audio_pipeline.audio_pipeline - INFO - PyAudio found 4 audio devices
+2025-12-15 15:40:56,941 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 15:40:56,941 - audio_pipeline.audio_pipeline - INFO -   Device 1: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:40:56,941 - audio_pipeline.audio_pipeline - INFO -   Device 3: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:40:56,941 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 15:40:56,941 - app - INFO - Using audio device index: 1
+2025-12-15 15:40:56,941 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 15:40:56,941 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 15:40:56,941 - app - INFO - Starting worker processes...
+2025-12-15 15:40:56,943 - app.process_manager - INFO - Started worker 'tts' (PID: 16817)
+2025-12-15 15:40:56,943 - app.process_manager - INFO - Started worker 'service_rep' (PID: 16818)
+2025-12-15 15:40:56,944 - app.process_manager - INFO - ProcessManager started
+2025-12-15 15:40:57,947 - app - INFO - Initializing STT service...
+2025-12-15 15:40:58,062 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 15:40:58,062 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 15:40:58,062 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 15:40:58,449 - app.stt - INFO - Whisper model loaded in 387ms (device=cpu, compute_type=int8)
+2025-12-15 15:40:58,449 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 15:40:58,449 - app - INFO - Audio capture loop started
+2025-12-15 15:40:58,449 - app - INFO - Audio processing loop started
+2025-12-15 15:40:58,450 - app - INFO - Response monitor started
+2025-12-15 15:40:58,450 - app - INFO - Calibrating noise floor...
+2025-12-15 15:40:58,450 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 15:40:58,450 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 15:40:58,953 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 15:41:10,055 - app.audio - INFO - Speech segment finalized: 130560 bytes, 1.86s
+2025-12-15 15:41:10,643 - app - INFO - Transcribed: What's the capital of Turkey?
+2025-12-15 15:41:10,643 - app - INFO - [req_1_req_bd6d] Transcription complete: What's the capital of Turkey?
+2025-12-15 15:41:15,199 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 15:41:15,201 - app - INFO - Response monitor stopped
+2025-12-15 15:41:15,211 - app - INFO - Audio processing loop stopped
+2025-12-15 15:41:15,346 - app - INFO - Audio capture loop stopped
+2025-12-15 15:41:16,978 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 15:41:16,978 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 15:41:16,979 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 15:41:16,979 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 15:44:56,549 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 15:44:56,550 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 15:44:56,550 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 15:44:56,552 - audio_pipeline.audio_pipeline - INFO - PyAudio found 4 audio devices
+2025-12-15 15:44:56,774 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 15:44:56,774 - audio_pipeline.audio_pipeline - INFO -   Device 1: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:44:56,774 - audio_pipeline.audio_pipeline - INFO -   Device 3: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 15:44:56,774 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 15:44:56,774 - app - INFO - Using audio device index: 1
+2025-12-15 15:44:56,774 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 15:44:56,774 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 15:44:56,774 - app - INFO - Starting worker processes...
+2025-12-15 15:44:56,776 - app.process_manager - INFO - Started worker 'tts' (PID: 17446)
+2025-12-15 15:44:56,776 - app.process_manager - INFO - Started worker 'service_rep' (PID: 17447)
+2025-12-15 15:44:56,777 - app.process_manager - INFO - ProcessManager started
+2025-12-15 15:44:57,781 - app - INFO - Initializing STT service...
+2025-12-15 15:44:57,900 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 15:44:57,900 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 15:44:57,900 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 15:44:58,224 - app.stt - INFO - Whisper model loaded in 324ms (device=cpu, compute_type=int8)
+2025-12-15 15:44:58,224 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 15:44:58,224 - app - INFO - Audio capture loop started
+2025-12-15 15:44:58,224 - app - INFO - Audio processing loop started
+2025-12-15 15:44:58,224 - app - INFO - Response monitor started
+2025-12-15 15:44:58,224 - app - INFO - Calibrating noise floor...
+2025-12-15 15:44:58,224 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 15:44:58,224 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 15:44:58,730 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 15:45:02,906 - app.audio - INFO - Speech segment finalized: 134400 bytes, 1.92s
+2025-12-15 15:45:03,481 - app - INFO - Transcribed: What is the capital of Turkey?
+2025-12-15 15:45:03,481 - app - INFO - [req_1_req_ec4e] Transcription complete: What is the capital of Turkey?
+2025-12-15 15:45:05,464 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 15:45:05,465 - app - INFO - Response monitor stopped
+2025-12-15 15:45:05,483 - app - INFO - Audio processing loop stopped
+2025-12-15 15:45:05,615 - app - INFO - Audio capture loop stopped
+2025-12-15 15:45:06,798 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 15:45:06,799 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 15:45:06,799 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 15:45:06,799 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 16:01:56,969 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 16:01:56,969 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 16:01:56,969 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 16:01:56,971 - audio_pipeline.audio_pipeline - INFO - PyAudio found 4 audio devices
+2025-12-15 16:01:57,193 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 16:01:57,193 - audio_pipeline.audio_pipeline - INFO -   Device 1: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 16:01:57,193 - audio_pipeline.audio_pipeline - INFO -   Device 3: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 16:01:57,193 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 16:01:57,193 - app - INFO - Using audio device index: 1
+2025-12-15 16:01:57,193 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 16:01:57,193 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 16:01:57,193 - app - INFO - Starting worker processes...
+2025-12-15 16:01:57,194 - app.process_manager - INFO - Started worker 'tts' (PID: 19039)
+2025-12-15 16:01:57,195 - app.process_manager - INFO - Started worker 'service_rep' (PID: 19040)
+2025-12-15 16:01:57,196 - app.process_manager - INFO - ProcessManager started
+2025-12-15 16:01:58,197 - app - INFO - Initializing STT service...
+2025-12-15 16:01:58,321 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 16:01:58,321 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 16:01:58,321 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 16:01:58,765 - app.stt - INFO - Whisper model loaded in 444ms (device=cpu, compute_type=int8)
+2025-12-15 16:01:58,765 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 16:01:58,765 - app - INFO - Audio capture loop started
+2025-12-15 16:01:58,765 - app - INFO - Audio processing loop started
+2025-12-15 16:01:58,765 - app - INFO - Calibrating noise floor...
+2025-12-15 16:01:58,765 - app - INFO - Response monitor started
+2025-12-15 16:01:58,765 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 16:01:58,766 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 16:01:59,265 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 16:02:08,427 - app.audio - INFO - Speech segment finalized: 132480 bytes, 1.90s
+2025-12-15 16:02:09,009 - app - INFO - Transcribed: What's the capital of Turkey?
+2025-12-15 16:02:09,009 - app - INFO - [req_1_req_ab9d] Transcription complete: What's the capital of Turkey?
+2025-12-15 16:02:22,406 - app.audio - INFO - Speech segment finalized: 168960 bytes, 2.46s
+2025-12-15 16:02:22,705 - app - INFO - Transcribed: What question did I just ask you?
+2025-12-15 16:02:22,705 - app - INFO - [req_2_req_6dac] Transcription complete: What question did I just ask you?
+2025-12-15 16:02:49,213 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 16:03:04,895 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 16:03:05,915 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 16:03:05,916 - app - INFO - Response monitor stopped
+2025-12-15 16:03:06,084 - app - INFO - Audio capture loop stopped

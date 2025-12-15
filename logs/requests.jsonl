@@ -19425,3 +19425,2231 @@
   "span": "error",
   "evt": "Agent execution failed: Client.__init__() got an unexpected keyword argument 'proxies'"
 }
+{
+  "ts": "2025-12-15T21:34:12.415Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What's the capital of Turkey?",
+  "detail": {
+    "len": 29
+  }
+}
+{
+  "ts": "2025-12-15T21:34:12.417Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to standard",
+  "detail": {
+    "tier": "standard",
+    "conf": 0.6
+  }
+}
+{
+  "ts": "2025-12-15T21:34:12.417Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What's the capital of Turkey?",
+  "detail": {
+    "len": 29
+  }
+}
+{
+  "ts": "2025-12-15T21:34:12.417Z",
+  "lvl": "INFO",
+  "svc": "agent",
+  "req_id": "fe0d1da6-0001",
+  "span": "plan_created",
+  "evt": "Plan: question - Answer: What's the capital of Turkey?"
+}
+{
+  "ts": "2025-12-15T21:34:12.417Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-fe0d1da6-0001"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:12.522Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:12.522Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 1/3); retrying in 1.05s"
+}
+{
+  "ts": "2025-12-15T21:34:13.580Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-fe0d1da6-0002"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:13.580Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:13.580Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 2/3); retrying in 2.16s"
+}
+{
+  "ts": "2025-12-15T21:34:15.743Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-fe0d1da6-0003"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:15.743Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:15.743Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gpt-5-mini (count=1)"
+}
+{
+  "ts": "2025-12-15T21:34:15.744Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:15.744Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-flash"
+}
+{
+  "ts": "2025-12-15T21:34:15.744Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-fe0d1da6-0004"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:15.744Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:15.744Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 1/3); retrying in 1.05s"
+}
+{
+  "ts": "2025-12-15T21:34:16.796Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-fe0d1da6-0005"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:16.796Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:16.796Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 2/3); retrying in 2.09s"
+}
+{
+  "ts": "2025-12-15T21:34:18.885Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-fe0d1da6-0006"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:18.885Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:18.886Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-flash (count=1)"
+}
+{
+  "ts": "2025-12-15T21:34:18.886Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:18.886Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-pro"
+}
+{
+  "ts": "2025-12-15T21:34:18.886Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-fe0d1da6-0007"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:18.886Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:18.886Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 1/3); retrying in 1.01s"
+}
+{
+  "ts": "2025-12-15T21:34:19.906Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-fe0d1da6-0008"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:19.907Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:19.908Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 2/3); retrying in 2.14s"
+}
+{
+  "ts": "2025-12-15T21:34:22.049Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-fe0d1da6-0009"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:22.049Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:22.050Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-pro (count=1)"
+}
+{
+  "ts": "2025-12-15T21:34:22.050Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:34:22.050Z",
+  "lvl": "ERROR",
+  "svc": "agent",
+  "req_id": "fe0d1da6-0001",
+  "span": "error",
+  "evt": "Agent execution failed: Client.__init__() got an unexpected keyword argument 'proxies'"
+}
+{
+  "ts": "2025-12-15T21:40:08.097Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "Okay. Keep it up. Okay. All right. Let's have a look. Okay. I'll see you next week. Okay. All right....",
+  "detail": {
+    "len": 151
+  }
+}
+{
+  "ts": "2025-12-15T21:40:08.097Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to standard",
+  "detail": {
+    "tier": "standard",
+    "conf": 0.6
+  }
+}
+{
+  "ts": "2025-12-15T21:40:08.097Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "Okay. Keep it up. Okay. All right. Let's have a look. Okay. I'll see you next week. Okay. All right....",
+  "detail": {
+    "len": 151
+  }
+}
+{
+  "ts": "2025-12-15T21:40:08.098Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-e169c9ea-0001"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:08.199Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:08.199Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 1/3); retrying in 1.07s"
+}
+{
+  "ts": "2025-12-15T21:40:09.270Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-e169c9ea-0002"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:09.271Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:09.271Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 2/3); retrying in 2.02s"
+}
+{
+  "ts": "2025-12-15T21:40:11.299Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-e169c9ea-0003"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:11.299Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:11.299Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gpt-5-mini (count=1)"
+}
+{
+  "ts": "2025-12-15T21:40:11.299Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:11.299Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-flash"
+}
+{
+  "ts": "2025-12-15T21:40:11.299Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-e169c9ea-0004"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:11.300Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:11.300Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 1/3); retrying in 1.00s"
+}
+{
+  "ts": "2025-12-15T21:40:12.302Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-e169c9ea-0005"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:12.302Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:12.302Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 2/3); retrying in 2.01s"
+}
+{
+  "ts": "2025-12-15T21:40:14.317Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-e169c9ea-0006"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:14.317Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:14.318Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-flash (count=1)"
+}
+{
+  "ts": "2025-12-15T21:40:14.318Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:14.318Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-pro"
+}
+{
+  "ts": "2025-12-15T21:40:14.318Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-e169c9ea-0007"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:14.318Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:14.318Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 1/3); retrying in 1.05s"
+}
+{
+  "ts": "2025-12-15T21:40:15.371Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-e169c9ea-0008"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:15.371Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:15.371Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 2/3); retrying in 2.15s"
+}
+{
+  "ts": "2025-12-15T21:40:17.526Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-e169c9ea-0009"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:17.526Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:17.526Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-pro (count=1)"
+}
+{
+  "ts": "2025-12-15T21:40:17.526Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:17.527Z",
+  "lvl": "INFO",
+  "svc": "agent",
+  "req_id": "e169c9ea-0001",
+  "span": "plan_created",
+  "evt": "Plan: task - Okay. Keep it up. Okay. All right. Let's have a look. Okay. "
+}
+{
+  "ts": "2025-12-15T21:40:17.527Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-e169c9ea-0010"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:17.527Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:17.527Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 1/3); retrying in 1.06s"
+}
+{
+  "ts": "2025-12-15T21:40:18.595Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-e169c9ea-0011"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:18.596Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:18.597Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 2/3); retrying in 2.11s"
+}
+{
+  "ts": "2025-12-15T21:40:20.711Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-e169c9ea-0012"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:20.712Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:20.712Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gpt-5-mini (count=2)"
+}
+{
+  "ts": "2025-12-15T21:40:20.712Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "llm circuit for openai:gpt-5-mini OPEN for 30.0s"
+}
+{
+  "ts": "2025-12-15T21:40:20.712Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:20.712Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-flash"
+}
+{
+  "ts": "2025-12-15T21:40:20.713Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-e169c9ea-0013"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:20.713Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:20.713Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 1/3); retrying in 1.03s"
+}
+{
+  "ts": "2025-12-15T21:40:21.747Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-e169c9ea-0014"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:21.748Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:21.748Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 2/3); retrying in 2.14s"
+}
+{
+  "ts": "2025-12-15T21:40:23.894Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-e169c9ea-0015"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:23.894Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:23.894Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-flash (count=2)"
+}
+{
+  "ts": "2025-12-15T21:40:23.894Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "llm circuit for openai:gemini-2.5-flash OPEN for 30.0s"
+}
+{
+  "ts": "2025-12-15T21:40:23.894Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:23.895Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-pro"
+}
+{
+  "ts": "2025-12-15T21:40:23.895Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-e169c9ea-0016"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:23.895Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:23.895Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 1/3); retrying in 1.06s"
+}
+{
+  "ts": "2025-12-15T21:40:24.962Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-e169c9ea-0017"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:24.963Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:24.963Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 2/3); retrying in 2.17s"
+}
+{
+  "ts": "2025-12-15T21:40:27.138Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-e169c9ea-0018"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:27.139Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:27.139Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-pro (count=2)"
+}
+{
+  "ts": "2025-12-15T21:40:27.139Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "llm circuit for openai:gemini-2.5-pro OPEN for 30.0s"
+}
+{
+  "ts": "2025-12-15T21:40:27.139Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:27.140Z",
+  "lvl": "ERROR",
+  "svc": "agent",
+  "req_id": "e169c9ea-0001",
+  "span": "error",
+  "evt": "Agent execution failed: Client.__init__() got an unexpected keyword argument 'proxies'"
+}
+{
+  "ts": "2025-12-15T21:40:39.573Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "Okay. All right.",
+  "detail": {
+    "len": 16
+  }
+}
+{
+  "ts": "2025-12-15T21:40:39.574Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to standard",
+  "detail": {
+    "tier": "standard",
+    "conf": 0.6
+  }
+}
+{
+  "ts": "2025-12-15T21:40:39.574Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "Okay. All right.",
+  "detail": {
+    "len": 16
+  }
+}
+{
+  "ts": "2025-12-15T21:40:39.574Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-07514125-0001"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:39.675Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:39.675Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 1/3); retrying in 1.07s"
+}
+{
+  "ts": "2025-12-15T21:40:40.744Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-07514125-0002"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:40.744Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:40.744Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 2/3); retrying in 2.04s"
+}
+{
+  "ts": "2025-12-15T21:40:42.785Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-07514125-0003"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:42.785Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:42.785Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gpt-5-mini (count=1)"
+}
+{
+  "ts": "2025-12-15T21:40:42.785Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:42.785Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-flash"
+}
+{
+  "ts": "2025-12-15T21:40:42.785Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-07514125-0004"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:42.786Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:42.786Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 1/3); retrying in 1.04s"
+}
+{
+  "ts": "2025-12-15T21:40:43.835Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-07514125-0005"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:43.836Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:43.836Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 2/3); retrying in 2.08s"
+}
+{
+  "ts": "2025-12-15T21:40:44.558Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "07514125-0001",
+  "span": "request_received",
+  "evt": "Okay. All right. Okay. All right. Okay. Great. All right. Okay. I'll have a little break. Okay. All ...",
+  "detail": {
+    "len": 206
+  }
+}
+{
+  "ts": "2025-12-15T21:40:44.558Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to standard",
+  "detail": {
+    "tier": "standard",
+    "conf": 0.6
+  }
+}
+{
+  "ts": "2025-12-15T21:40:45.921Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-07514125-0006"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:45.924Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:45.925Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-flash (count=1)"
+}
+{
+  "ts": "2025-12-15T21:40:45.925Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:45.925Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-pro"
+}
+{
+  "ts": "2025-12-15T21:40:45.926Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-07514125-0007"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:45.926Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:45.926Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 1/3); retrying in 1.01s"
+}
+{
+  "ts": "2025-12-15T21:40:46.943Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-07514125-0008"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:46.944Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:46.944Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-pro failed (attempt 2/3); retrying in 2.19s"
+}
+{
+  "ts": "2025-12-15T21:40:49.138Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-pro",
+  "detail": {
+    "model": "gemini-2.5-pro",
+    "prompt_id": "p-07514125-0009"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:49.138Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:49.138Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gemini-2.5-pro (count=1)"
+}
+{
+  "ts": "2025-12-15T21:40:49.139Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-pro: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:49.139Z",
+  "lvl": "INFO",
+  "svc": "agent",
+  "req_id": "07514125-0001",
+  "span": "plan_created",
+  "evt": "Plan: task - Okay. All right."
+}
+{
+  "ts": "2025-12-15T21:40:49.139Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-07514125-0010"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:49.139Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:49.140Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 1/3); retrying in 1.04s"
+}
+{
+  "ts": "2025-12-15T21:40:50.188Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-07514125-0011"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:50.189Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:50.189Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 2/3); retrying in 2.08s"
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-07514125-0012"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gpt-5-mini (count=2)"
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "llm circuit for openai:gpt-5-mini OPEN for 30.0s"
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-flash"
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-07514125-0013"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:52.277Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:40:52.278Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "07514125-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 1/3); retrying in 1.07s"
+}
+{
+  "ts": "2025-12-15T21:41:10.643Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What's the capital of Turkey?",
+  "detail": {
+    "len": 29
+  }
+}
+{
+  "ts": "2025-12-15T21:41:10.644Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to standard",
+  "detail": {
+    "tier": "standard",
+    "conf": 0.6
+  }
+}
+{
+  "ts": "2025-12-15T21:41:10.644Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What's the capital of Turkey?",
+  "detail": {
+    "len": 29
+  }
+}
+{
+  "ts": "2025-12-15T21:41:10.644Z",
+  "lvl": "INFO",
+  "svc": "agent",
+  "req_id": "9f1b3fb0-0001",
+  "span": "plan_created",
+  "evt": "Plan: question - Answer: What's the capital of Turkey?"
+}
+{
+  "ts": "2025-12-15T21:41:10.644Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-9f1b3fb0-0001"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:10.742Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:10.742Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 1/3); retrying in 1.04s"
+}
+{
+  "ts": "2025-12-15T21:41:11.790Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-9f1b3fb0-0002"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:11.791Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:11.791Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-mini failed (attempt 2/3); retrying in 2.07s"
+}
+{
+  "ts": "2025-12-15T21:41:13.870Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-9f1b3fb0-0003"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:13.870Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:13.870Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "warning",
+  "evt": "llm failure recorded for openai:gpt-5-mini (count=1)"
+}
+{
+  "ts": "2025-12-15T21:41:13.870Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-mini: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:13.870Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "warning",
+  "evt": "LLM failover: primary failed, trying openai:gemini-2.5-flash"
+}
+{
+  "ts": "2025-12-15T21:41:13.871Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-9f1b3fb0-0004"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:13.871Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:13.871Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 1/3); retrying in 1.04s"
+}
+{
+  "ts": "2025-12-15T21:41:14.919Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "request_sent",
+  "evt": "sent to gemini-2.5-flash",
+  "detail": {
+    "model": "gemini-2.5-flash",
+    "prompt_id": "p-9f1b3fb0-0005"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:14.920Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "error",
+  "evt": "LLM error from gemini-2.5-flash: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:41:14.920Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "9f1b3fb0-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gemini-2.5-flash failed (attempt 2/3); retrying in 2.19s"
+}
+{
+  "ts": "2025-12-15T21:45:03.481Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What is the capital of Turkey?",
+  "detail": {
+    "len": 30
+  }
+}
+{
+  "ts": "2025-12-15T21:45:03.482Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to simple",
+  "detail": {
+    "tier": "simple",
+    "conf": 0.9
+  }
+}
+{
+  "ts": "2025-12-15T21:45:03.482Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What is the capital of Turkey?",
+  "detail": {
+    "len": 30
+  }
+}
+{
+  "ts": "2025-12-15T21:45:03.482Z",
+  "lvl": "INFO",
+  "svc": "agent",
+  "req_id": "37fa8236-0001",
+  "span": "plan_created",
+  "evt": "Plan: question - Answer: What is the capital of Turkey?"
+}
+{
+  "ts": "2025-12-15T21:45:03.482Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "37fa8236-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-nano",
+  "detail": {
+    "model": "gpt-5-nano",
+    "prompt_id": "p-37fa8236-0001"
+  }
+}
+{
+  "ts": "2025-12-15T21:45:03.580Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "37fa8236-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-nano: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:45:03.580Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "37fa8236-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-nano failed (attempt 1/3); retrying in 1.08s"
+}
+{
+  "ts": "2025-12-15T21:45:04.662Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "37fa8236-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-nano",
+  "detail": {
+    "model": "gpt-5-nano",
+    "prompt_id": "p-37fa8236-0002"
+  }
+}
+{
+  "ts": "2025-12-15T21:45:04.663Z",
+  "lvl": "ERROR",
+  "svc": "llm",
+  "req_id": "37fa8236-0001",
+  "span": "error",
+  "evt": "LLM error from gpt-5-nano: Client.__init__() got an unexpected keyword argument 'proxies'",
+  "detail": {
+    "error": "Client.__init__() got an unexpected keyword argument 'proxies'",
+    "type": "TypeError"
+  }
+}
+{
+  "ts": "2025-12-15T21:45:04.664Z",
+  "lvl": "WARN",
+  "svc": "llm",
+  "req_id": "37fa8236-0001",
+  "span": "warning",
+  "evt": "llm call for openai:gpt-5-nano failed (attempt 2/3); retrying in 2.11s"
+}
+{
+  "ts": "2025-12-15T22:02:09.010Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What's the capital of Turkey?",
+  "detail": {
+    "len": 29
+  }
+}
+{
+  "ts": "2025-12-15T22:02:09.010Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to standard",
+  "detail": {
+    "tier": "standard",
+    "conf": 0.6
+  }
+}
+{
+  "ts": "2025-12-15T22:02:09.010Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "no-req",
+  "span": "request_received",
+  "evt": "What's the capital of Turkey?",
+  "detail": {
+    "len": 29
+  }
+}
+{
+  "ts": "2025-12-15T22:02:09.011Z",
+  "lvl": "INFO",
+  "svc": "agent",
+  "req_id": "39e1366a-0001",
+  "span": "plan_created",
+  "evt": "Plan: question - Answer: What's the capital of Turkey?"
+}
+{
+  "ts": "2025-12-15T22:02:09.012Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "39e1366a-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-39e1366a-0001"
+  }
+}
+{
+  "ts": "2025-12-15T22:02:11.794Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "39e1366a-0001",
+  "span": "response_received",
+  "evt": "received from gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "ms": 2782,
+    "tokens": {
+      "prompt_tokens": 372,
+      "completion_tokens": 30,
+      "total_tokens": 402
+    }
+  }
+}
+{
+  "ts": "2025-12-15T22:02:11.794Z",
+  "lvl": "INFO",
+  "svc": "reflect",
+  "req_id": "39e1366a-0001",
+  "span": "reflection",
+  "evt": "goal achieved",
+  "detail": {
+    "goal_achieved": true,
+    "conf": 0.9
+  }
+}
+{
+  "ts": "2025-12-15T22:02:22.705Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "39e1366a-0001",
+  "span": "request_received",
+  "evt": "What question did I just ask you?",
+  "detail": {
+    "len": 33
+  }
+}
+{
+  "ts": "2025-12-15T22:02:22.705Z",
+  "lvl": "INFO",
+  "svc": "router",
+  "req_id": "no-req",
+  "span": "input_parsed",
+  "evt": "routed to standard",
+  "detail": {
+    "tier": "standard",
+    "conf": 0.6
+  }
+}
+{
+  "ts": "2025-12-15T22:02:22.706Z",
+  "lvl": "INFO",
+  "svc": "input",
+  "req_id": "39e1366a-0001",
+  "span": "request_received",
+  "evt": "What question did I just ask you?",
+  "detail": {
+    "len": 33
+  }
+}
+{
+  "ts": "2025-12-15T22:02:22.706Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "39e1366a-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-39e1366a-0002"
+  }
+}
+{
+  "ts": "2025-12-15T22:02:30.724Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "39e1366a-0001",
+  "span": "response_received",
+  "evt": "received from gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "ms": 8018,
+    "tokens": {
+      "prompt_tokens": 592,
+      "completion_tokens": 431,
+      "total_tokens": 1023
+    }
+  }
+}
+{
+  "ts": "2025-12-15T22:02:30.725Z",
+  "lvl": "INFO",
+  "svc": "agent",
+  "req_id": "39e1366a-0001",
+  "span": "plan_created",
+  "evt": "Plan: question - Restate exactly what the user asked in their immediately pre"
+}
+{
+  "ts": "2025-12-15T22:02:30.725Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "39e1366a-0001",
+  "span": "request_sent",
+  "evt": "sent to gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "prompt_id": "p-39e1366a-0003"
+  }
+}
+{
+  "ts": "2025-12-15T22:02:34.079Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "39e1366a-0001",
+  "span": "response_received",
+  "evt": "received from gpt-5-mini",
+  "detail": {
+    "model": "gpt-5-mini",
+    "ms": 3354,
+    "tokens": {
+      "prompt_tokens": 411,
+      "completion_tokens": 83,
+      "total_tokens": 494
+    }
+  }
+}
+{
+  "ts": "2025-12-15T22:02:34.080Z",
+  "lvl": "INFO",
+  "svc": "reflect",
+  "req_id": "39e1366a-0001",
+  "span": "reflection",
+  "evt": "goal achieved",
+  "detail": {
+    "goal_achieved": true,
+    "conf": 0.9
+  }
+}
