@@ -24,12 +24,12 @@ from enum import Enum
 from contextlib import nullcontext
 
 # No communication layer imports - AgentHarness is decoupled from EventBus
-from .config import HarnessConfig, RuntimeConfig, load_or_create_config
-from .logger import StructuredLogger
-from .tool_registry import ToolRegistry
-from .agent import Agent, AgentResponse, AgentStep, TieredAgent
-from .runtime import HarnessRuntime, create_runtime
-from .agent_execution_logger import AgentExecutionLogger
+from util.config import HarnessConfig, RuntimeConfig, load_or_create_config
+from util.logger import StructuredLogger
+from .agent.tool_registry import ToolRegistry
+from .agent.agent import Agent, AgentResponse, AgentStep, TieredAgent
+from util.runtime import HarnessRuntime, create_runtime
+from util.agent_execution_logger import AgentExecutionLogger
 
 
 class HarnessState(Enum):
@@ -40,7 +40,7 @@ class HarnessState(Enum):
     PAUSED = "paused"
     STOPPING = "stopping"
     ERROR = "error"
-
+[]
 
 @dataclass
 class HarnessResponse:
@@ -187,7 +187,10 @@ class AgentHarness:
             progress_callback = self._create_progress_callback(request_id)
 
             # Get the agent for this tier and add progress callback
-            tier_agent = self.agent._get_agent(tier)
+            if hasattr(self.agent, "get_agent_for_tier"):
+                tier_agent = self.agent.get_agent_for_tier(tier)
+            else:
+                tier_agent = self.agent
             tier_agent.add_step_callback(progress_callback)
 
             try:
@@ -199,9 +202,8 @@ class AgentHarness:
                             context=context
                         )
             finally:
-                # Clean up callback
-                if progress_callback in tier_agent._step_callbacks:
-                    tier_agent._step_callbacks.remove(progress_callback)
+                if hasattr(tier_agent, "remove_step_callback"):
+                    tier_agent.remove_step_callback(progress_callback)
 
             # Step 2: Build response
             full_response = agent_response.content
@@ -284,7 +286,7 @@ class AgentHarness:
         tool_lower = tool_name.lower()
 
         # Map tools to progress messages
-        if "search" in tool_lower or "web" in tool_lower:
+        if "search" in tool_lower or "web" in tool_lower or "fast_answer" in tool_lower:
             return "Searching now."
         elif "fetch" in tool_lower or "get" in tool_lower:
             return "Getting that information."

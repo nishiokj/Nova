@@ -19,9 +19,9 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from communication.event_bus import EventBus
-from harness.agent import TieredAgent, AgentConfig
-from harness.tool_registry import ToolRegistry
-from harness.config import LLMConfig
+from harness.agent import TieredAgent
+from harness.agent.tool_registry import ToolRegistry
+from util.config import AgentConfig, LLMConfig
 from rl.worker import start_rl_worker
 
 

@@ -9,12 +9,16 @@ import os
 import tempfile
 import shutil
 import signal
+import logging
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from .eval_task import EvalTask, EvalResult, create_error_result
+from evals.eval_task import EvalTask, EvalResult, create_error_result
+
+
+logger = logging.getLogger(__name__)
 
 
 class TimeoutError(Exception):
@@ -142,6 +146,36 @@ class IsolatedEnvironment:
             else:
                 os.environ.pop(key, None)
 
+    def preserve_artifacts(self, destination: Path) -> Path:
+        """
+        Copy the entire working directory to a permanent destination.
+
+        Args:
+            destination: Directory where artifacts should be copied
+
+        Returns:
+            Path to the preserved artifact directory
+        """
+        if not self.workdir or not self.workdir.exists():
+            raise RuntimeError("Cannot preserve artifacts; workdir is unavailable")
+
+        # Convert destination to absolute path
+        # This is critical because preserve_artifacts is called while CWD is the temp directory
+        # If destination is relative, we must resolve it relative to the original CWD
+        destination = Path(destination)
+        if not destination.is_absolute():
+            if self.original_cwd:
+                destination = Path(self.original_cwd) / destination
+            destination = destination.resolve()
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        if destination.exists():
+            shutil.rmtree(destination, ignore_errors=True)
+
+        shutil.copytree(self.workdir, destination)
+        return destination
+
     def get_context_string(self) -> str:
         """
         Get context string to pass to agent.
@@ -194,7 +228,7 @@ class TaskExecutor:
         """
         self.agent_factory = agent_factory
 
-    def execute_task(self, task: EvalTask) -> Any:
+    def execute_task(self, task: EvalTask, artifact_dir: Optional[Path] = None) -> Any:
         """
         Execute a single task with isolation.
 
@@ -216,6 +250,9 @@ class TaskExecutor:
             Exception: Any other execution error
         """
         # Create isolated environment
+        response = None
+        preserved_path: Optional[Path] = None
+
         with IsolatedEnvironment(task) as env:
             # Create fresh agent instance
             agent = self.agent_factory()
@@ -252,12 +289,10 @@ class TaskExecutor:
                 with timeout(task.timeout_seconds):
                     # Call agent with clean separation of prompt and context
                     response = agent.run(user_input, context=context_str)
-                return response
-
             except TimeoutError:
                 # Create timeout response
-                from harness.agent import AgentResponse
-                return AgentResponse(
+                from harness.agent.agent import AgentResponse
+                response = AgentResponse(
                     content="Task timed out",
                     success=False,
                     error=f"Timeout after {task.timeout_seconds}s",
@@ -267,8 +302,25 @@ class TaskExecutor:
                     steps=[],
                     metadata={"timeout": True}
                 )
+            finally:
+                if artifact_dir:
+                    try:
+                        preserved_path = env.preserve_artifacts(artifact_dir)
+                    except Exception as exc:
+                        preserved_path = None
+                        logger.warning(
+                            "Failed to preserve artifacts for task %s: %s",
+                            task.task_id,
+                            exc
+                        )
 
-    def execute_task_with_retries(self, task: EvalTask) -> Any:
+        if response and preserved_path:
+            response.metadata = dict(response.metadata or {})
+            response.metadata["artifact_dir"] = str(preserved_path)
+
+        return response
+
+    def execute_task_with_retries(self, task: EvalTask, artifact_dir: Optional[Path] = None) -> Any:
         """
         Execute task with retry logic.
 
@@ -282,7 +334,7 @@ class TaskExecutor:
 
         for attempt in range(task.max_retries + 1):
             try:
-                return self.execute_task(task)
+                return self.execute_task(task, artifact_dir=artifact_dir)
             except Exception as e:
                 last_error = e
                 if attempt < task.max_retries:

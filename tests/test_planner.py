@@ -3,10 +3,10 @@
 import sys
 sys.path.insert(0, '.')
 
-from harness.planner import Planner, Plan
-from harness.tool_registry import ToolRegistry
-from harness.llm_factory import create_llm
-from harness.config import AgentConfig
+from harness.agent.planner import Planner, Plan
+from harness.agent.tool_registry import ToolRegistry
+from util.llm_adapter import create_adapter
+from util.config import AgentConfig, LLMConfig
 import json
 
 # Create minimal components
@@ -15,7 +15,12 @@ with open(config_path) as f:
     config_data = json.load(f)
 
 # Create LLM
-llm = create_llm(config_data["llm"])
+llm_config_data = (
+    config_data.get("llm_configs", {}).get("standard") or
+    config_data.get("llm", {})
+)
+llm_config = LLMConfig(**llm_config_data) if llm_config_data else LLMConfig()
+llm = create_adapter(llm_config)
 
 # Create tool registry
 tool_registry = ToolRegistry()

@@ -58,6 +58,7 @@ class STTServiceConfig:
     compute_type: str = "auto"
     beam_size: int = 1
     vad_filter: bool = True
+    filter_hallucinations: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

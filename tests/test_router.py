@@ -14,11 +14,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from harness.router import (
+from services.router import (
     Router, PatternClassifier, TaskClassification, TaskTier,
     RouterConfig, AdaptiveRouter
 )
-from harness.config import LLMConfig
+from util.config import LLMConfig
 
 from tests.test_helpers import TEST_DATA
 

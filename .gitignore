@@ -1,3 +1,16 @@
 venv
 .venv
 __pycache__
+.pycache_eval
+.pytest_cache
+.claude
+logs
+dist
+build
+.env
+.coverage
+.mypy_cache
+.ruff_cache
+.idea
+.vscode
+*.egg-info

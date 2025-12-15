@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 from scipy import stats
 import numpy as np
 
-from .eval_task import EvalResult, EvalTask, EvalRun
+from evals.eval_task import EvalResult, EvalTask, EvalRun
 
 
 class MetricsCalculator:

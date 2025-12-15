@@ -31,14 +31,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from harness.harness import (
     AgentHarness, HarnessState, HarnessResponse, create_harness
 )
-from harness.config import (
+from util.config import (
     HarnessConfig, AgentConfig, RouterConfig,
     ServiceRepConfig, ToolConfig, LoggingConfig, LLMConfig
 )
 from harness.agent import AgentResponse, TieredAgent
-from harness.router import TaskClassification, TaskTier
-from harness.tool_registry import ToolRegistry, ToolResult, ToolStatus
-from harness.llm_adapter import ToolCall
+from services.router import TaskClassification, TaskTier
+from harness.agent.tool_registry import ToolRegistry, ToolResult, ToolStatus
+from util.llm_adapter import ToolCall
 
 from tests.test_helpers import (
     MockLLMAdapter, MockLLMBehavior, create_tool_call,
@@ -535,7 +535,7 @@ class TestHarnessProgressMessages:
             return harness
 
     @pytest.mark.parametrize("tool_name,expected_message", [
-        ("web_search", "searching"),
+        ("fast_answer", "searching"),
         ("fetch_url", "getting"),
         ("file_read", "reading"),
         # Note: file_write matches "file" first, so it returns "reading" (implementation quirk)
@@ -555,8 +555,8 @@ class TestHarnessProgressMessages:
         """Test that same tool doesn't repeat progress message"""
         harness._last_progress_tool = None
 
-        msg1 = harness._get_tool_progress_message("web_search", 0)
-        msg2 = harness._get_tool_progress_message("web_search", 1)
+        msg1 = harness._get_tool_progress_message("fast_answer", 0)
+        msg2 = harness._get_tool_progress_message("fast_answer", 1)
 
         assert msg1 is not None
         assert msg2 is None  # Should not repeat

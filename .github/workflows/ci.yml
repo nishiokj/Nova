@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+
+jobs:
+  backend:
+    name: Lint & Test (Python)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev ffmpeg
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-test.txt') }}
+
+      - name: Install Python dependencies via pip-sync
+        run: |
+          python -m pip install pip-tools
+          pip-sync requirements-test.txt
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Black formatting check
+        run: black --check .
+
+      - name: isort formatting check
+        run: isort --check-only src tests run_app.py
+
+      - name: Run pytest
+        run: pytest -m "not slow"
+
+      - name: Build distributable artifacts
+        run: |
+          python -m pip install build
+          python -m build --outdir dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-agent-build
+          path: dist
+
+  frontend:
+    name: Front-End Install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: front-end/package-lock.json
+
+      - name: Install dependencies
+        working-directory: front-end
+        run: npm ci
+
+      - name: Verify dev server script exists
+        working-directory: front-end
+        run: npm run start -- --help || true

@@ -9,12 +9,12 @@ This test verifies that:
 """
 
 import json
-from harness.planner import (
+from harness.agent.planner import (
     Plan, PlanStep, SuccessCriteria, StepContext, PlanStatus,
     ToolCallRecord, ValidationResult, Executor
 )
-from harness.llm_adapter import Message, MessageRole, LLMResponse, ToolCall
-from harness.tool_registry import ToolResult, ToolStatus
+from util.llm_adapter import Message, MessageRole, LLMResponse, ToolCall
+from harness.agent.tool_registry import ToolResult, ToolStatus
 
 
 def test_step_context_accumulation():
@@ -112,8 +112,8 @@ def test_validation():
     }
 
     # Create minimal executor just for validation
-    from harness.llm_adapter import OpenAIAdapter
-    from harness.tool_registry import ToolRegistry
+    from util.llm_adapter import OpenAIAdapter
+    from harness.agent.tool_registry import ToolRegistry
 
     # Use mock objects
     class MockLLM:

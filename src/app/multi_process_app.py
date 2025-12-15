@@ -20,6 +20,7 @@ from communication import (
     EventBus,
     TranscriptionCompleteEvent,
     AgentRequestSubmittedEvent,
+    TTSRequestedEvent,
     Mailbox,
 )
 from communication.events import EventType
@@ -31,7 +32,7 @@ from services.audio import (
 )
 from services.language import TextLinterService
 from audio_pipeline import AudioDeviceManager, AudioConfig as DeviceAudioConfig
-from harness import ProcessManager
+from .process_manager import ProcessManager
 
 from .base_app import BaseVoiceApp
 
@@ -127,7 +128,8 @@ class MultiProcessVoiceApp(BaseVoiceApp):
             device=self.config.stt.device,
             compute_type=self.config.stt.compute_type,
             beam_size=self.config.stt.beam_size,
-            vad_filter=self.config.stt.vad_filter
+            vad_filter=self.config.stt.vad_filter,
+            filter_hallucinations=getattr(self.config.stt, 'filter_hallucinations', True)
         )
 
         return STTService(
@@ -204,7 +206,21 @@ class MultiProcessVoiceApp(BaseVoiceApp):
                 audio_result = self.audio_service.process_frame(audio_chunk)
 
                 if audio_result:
-                    # Transcribe
+                    # OPTIMIZATION: Immediate pre-acknowledgment on silence detection
+                    # User just stopped speaking - acknowledge IMMEDIATELY before STT completes
+                    # This gives instant feedback (~50-100ms) while STT processes in background
+                    self._request_count += 1
+                    request_id = f"req_{self._request_count}_{self._generate_request_id()[:8]}"
+
+                    # Publish instant acknowledgment (before transcription)
+                    # self.event_bus.publish(TTSRequestedEvent(
+                    #     request_id=request_id,
+                    #     text="Got it.",  # Ultra-short for speed
+                    #     priority=0,
+                    #     response_type="pre_acknowledgment"
+                    # ))
+
+                    # NOW transcribe (user already heard "Got it")
                     stt_result = self.stt_service.transcribe(audio_result)
 
                     if stt_result and stt_result.text:
@@ -220,10 +236,7 @@ class MultiProcessVoiceApp(BaseVoiceApp):
                             self.logger.debug(f"Invalid input rejected: {stt_result.text[:50]}")
                             continue
 
-                        # Submit to ServiceRep process via EventBus
-                        self._request_count += 1
-                        request_id = f"req_{self._request_count}_{self._generate_request_id()[:8]}"
-
+                        # request_id already created above for pre-ack
                         self.logger.info(f"[{request_id}] Transcription complete: {lint_result.cleaned}")
 
                         self.event_bus.publish(TranscriptionCompleteEvent(
@@ -279,7 +292,7 @@ class MultiProcessVoiceApp(BaseVoiceApp):
         # Register TTS worker
         from communication.events import EventType
         from harness import TTSWorker
-        from harness.service_rep_worker import ServiceRepWorker
+        from workers.service_rep_worker import ServiceRepWorker
 
         voice_config = {
             "engine": "pyttsx3",
@@ -300,7 +313,7 @@ class MultiProcessVoiceApp(BaseVoiceApp):
 
         # Register ServiceRep worker (contains AgentHarness)
         # ServiceRep receives transcriptions, calls harness directly, publishes TTS
-        from harness.config import ServiceRepConfig
+        from util.config import ServiceRepConfig
 
         service_rep_config = ServiceRepConfig(
             enabled=True,

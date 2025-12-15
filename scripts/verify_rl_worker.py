@@ -89,8 +89,9 @@ def check_agent_integration():
     print("Checking Agent Integration...")
     print("=" * 60)
 
-    from harness.agent import TieredAgent, AgentConfig
-    from harness.tool_registry import ToolRegistry
+    from harness.agent import TieredAgent
+    from util.config import AgentConfig
+    from harness.agent.tool_registry import ToolRegistry
     from communication.event_bus import EventBus
     import inspect
 
@@ -255,7 +256,7 @@ def check_reconstruction_system():
 
     try:
         from rl.reconstructor import EpisodeReconstructor, FullEpisode
-        from harness.manifest_store import ManifestStore
+        from util.manifest_store import ManifestStore
 
         print("✓ EpisodeReconstructor imported")
         print("✓ FullEpisode imported")

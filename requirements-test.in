@@ -1,0 +1,29 @@
+# Development and test dependencies for the Agent Harness
+# This file is the source of truth for pip-compile (see requirements-test.txt).
+
+-r requirements.in
+
+# Core testing framework
+pytest>=8.0.0
+pytest-cov>=4.1.0      # Coverage reporting
+pytest-timeout>=2.2.0   # Test timeouts
+pytest-xdist>=3.5.0     # Parallel test execution
+
+# Optional test utilities
+pytest-watch>=4.2.0     # Watch mode for development
+pytest-randomly>=3.0    # Randomize test order
+
+# Mocking and fixtures
+unittest-mock>=1.4.0    # For Python < 3.8 compatibility (included in 3.8+)
+
+# Type checking
+mypy>=1.10.0
+
+# Formatting and linting
+black>=24.10.0
+isort>=5.13.2
+ruff>=0.7.0
+
+# Tooling
+pip-tools>=7.4.1
+pre-commit>=3.7.0

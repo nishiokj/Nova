@@ -15,10 +15,10 @@ import importlib
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional
 
-from harness.llm_adapter import LLMConfig
-from harness.tool_registry import ToolRegistry
-from harness.config import ToolConfig, AgentConfig
-from .agent_interface import EvalAgentProtocol, validate_agent_response
+from util.llm_adapter import LLMConfig
+from harness.agent.tool_registry import ToolRegistry
+from util.config import ToolConfig, AgentConfig
+from evals.agent_interface import EvalAgentProtocol, validate_agent_response
 
 
 def load_agent_config(config_name: str = "default_agent") -> Dict[str, Any]:
@@ -117,7 +117,7 @@ def _create_tiered_agent_factory(config: Dict[str, Any]) -> Callable:
     tier = config.get("tier", "advanced")
 
     # Import TieredAgent
-    from harness.agent import TieredAgent
+    from harness.agent.agent import TieredAgent
 
     def factory():
         """Create fresh TieredAgent instance."""
@@ -154,7 +154,7 @@ def _create_routed_agent_factory(config: Dict[str, Any]) -> Callable:
     router_config_dict = config.get("router_config", {})
     router_llm_config_dict = router_config_dict.get("llm_config", config["llm_config"])
 
-    from harness.config import RouterConfig
+    from util.config import RouterConfig
     router_max_tokens = router_llm_config_dict.get("max_tokens", 100)
     router_llm_config = LLMConfig(
         provider=router_llm_config_dict["provider"],
@@ -189,9 +189,9 @@ def _create_routed_agent_factory(config: Dict[str, Any]) -> Callable:
         tool_config.enabled_tools = tool_config_dict["enabled_tools"]
 
     # Import required classes
-    from harness.agent import TieredAgent
-    from harness.router import Router
-    from harness.tool_registry import ToolRegistry
+    from harness.agent.agent import TieredAgent
+    from services.router import Router
+    from harness.agent.tool_registry import ToolRegistry
 
     def factory():
         """Create fresh TieredAgent with Router."""

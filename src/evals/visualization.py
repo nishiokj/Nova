@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 import seaborn as sns
 
-from .eval_task import EvalRun, EvalResult
+from evals.eval_task import EvalRun, EvalResult
 
 
 # Set style

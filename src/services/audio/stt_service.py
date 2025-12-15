@@ -28,6 +28,7 @@ class STTConfig:
     compute_type: str = "auto"  # auto or specific type
     beam_size: int = 1
     vad_filter: bool = True
+    filter_hallucinations: bool = True  # Filter out common Whisper hallucinations
 
 
 @dataclass
@@ -51,6 +52,21 @@ class STTService:
     - Config
     - Logger
     """
+
+    # Common Whisper hallucinations (especially from tiny.en model)
+    # These are often transcribed from silence, background noise, or very short audio
+    HALLUCINATION_PATTERNS = {
+        # Single word hallucinations
+        'okay', 'ok', 'thanks', 'thank you', 'yeah', 'yes', 'no', 'um', 'uh',
+        'you', 'bye', 'hello', 'hi', 'oh', 'so', 'well', 'now', 'like',
+        'uh-huh', 'mm-hmm', 'hmm', 'ah', 'eh',
+        # Common filler phrases
+        'you know', 'i mean', 'thank you very much',
+        # Whisper-specific artifacts
+        'subscribe', 'thank you for watching', 'music', 'applause',
+        # Empty/meaningless
+        '.', '...', '...',
+    }
 
     def __init__(self, config: STTConfig, logger: logging.Logger):
         """
@@ -124,6 +140,37 @@ class STTService:
         self.logger.info("Google STT initialized")
         return recognizer
 
+    def _is_likely_hallucination(self, text: str) -> bool:
+        """
+        Check if transcription is likely a Whisper hallucination.
+
+        Args:
+            text: Transcribed text to check
+
+        Returns:
+            True if likely hallucination, False otherwise
+        """
+        if not self.config.filter_hallucinations:
+            return False
+
+        # Normalize text for comparison
+        normalized = text.lower().strip()
+
+        # Remove punctuation for comparison
+        normalized = normalized.replace('.', '').replace('!', '').replace('?', '').replace(',', '').strip()
+
+        # Check against known hallucination patterns
+        if normalized in self.HALLUCINATION_PATTERNS:
+            return True
+
+        # Check for very short transcriptions (likely hallucinations)
+        word_count = len(normalized.split())
+        if word_count == 1 and len(normalized) <= 5:
+            # Single very short word - likely hallucination
+            return True
+
+        return False
+
     def transcribe(self, audio: AudioChunk) -> Optional[TranscriptionResult]:
         """
         Transcribe audio chunk to text.
@@ -139,7 +186,14 @@ class STTService:
                 return None
 
         if self.config.engine == "whisper":
-            return self._transcribe_whisper(audio)
+            result = self._transcribe_whisper(audio)
+
+            # Filter hallucinations
+            if result and self._is_likely_hallucination(result.text):
+                self.logger.debug(f"Filtered likely hallucination: '{result.text}'")
+                return None
+
+            return result
         elif self.config.engine == "google":
             return self._transcribe_google(audio)
         else:
@@ -179,14 +233,21 @@ class STTService:
 
             # Transcribe
             start = time.time()
-            segments, info = self._engine.transcribe(
-                audio_np,
-                beam_size=self.config.beam_size,
-                vad_filter=self.config.vad_filter,
-                vad_parameters=dict(
+
+            # Build transcribe kwargs
+            transcribe_kwargs = {
+                "beam_size": self.config.beam_size,
+                "vad_filter": self.config.vad_filter,
+            }
+
+            # Only add vad_parameters if VAD filter is enabled
+            # (We already do VAD in audio_service, so duplicate VAD adds latency)
+            if self.config.vad_filter:
+                transcribe_kwargs["vad_parameters"] = dict(
                     min_silence_duration_ms=200,
                 )
-            )
+
+            segments, info = self._engine.transcribe(audio_np, **transcribe_kwargs)
 
             # Collect all segments
             text_parts = []
@@ -252,38 +313,54 @@ class STTService:
     def _detect_backend(self) -> str:
         """Infer which device backend we should target"""
         if self.config.device != "auto":
+            self.logger.info(f"Using explicitly configured device: {self.config.device}")
             return self.config.device
 
-        # Try to detect CUDA
-        try:
-            import ctranslate2
-            if hasattr(ctranslate2, "get_cuda_device_count"):
-                if ctranslate2.get_cuda_device_count() > 0:
-                    return "cuda"
-        except Exception:
-            pass
-
-        # Try to detect via torch
+        # PRIORITY 1: Check for Mac MPS (Metal Performance Shaders) first
+        # This gives significant speedup on M1/M2/M3 Macs
         try:
             import torch
-            if hasattr(torch, "cuda") and torch.cuda.is_available():
-                return "cuda"
             if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.logger.info("Detected Apple Silicon GPU (MPS) - using hardware acceleration")
                 return "mps"
         except Exception:
             pass
 
+        # PRIORITY 2: Check for NVIDIA CUDA
+        try:
+            import ctranslate2
+            if hasattr(ctranslate2, "get_cuda_device_count"):
+                if ctranslate2.get_cuda_device_count() > 0:
+                    self.logger.info("Detected NVIDIA GPU (CUDA) - using hardware acceleration")
+                    return "cuda"
+        except Exception:
+            pass
+
+        # Try CUDA via torch as fallback
+        try:
+            import torch
+            if hasattr(torch, "cuda") and torch.cuda.is_available():
+                self.logger.info("Detected NVIDIA GPU via PyTorch - using CUDA")
+                return "cuda"
+        except Exception:
+            pass
+
+        # PRIORITY 3: Fall back to CPU
+        self.logger.info("No GPU detected - using CPU (may be slower)")
         return "cpu"
 
     def _select_compute_type(self, backend: str) -> str:
         """Pick the best compute_type supported by the backend"""
         if self.config.compute_type not in ("auto", None):
+            self.logger.info(f"Using explicitly configured compute type: {self.config.compute_type}")
             return self.config.compute_type
 
+        # Optimized compute types for each backend
+        # MPS benefits from float16, CUDA from int8_float16, CPU from int8
         preferred_order = {
-            "cuda": ["float16", "int8_float16", "int8"],
-            "mps": ["float16", "int8_float16"],
-            "cpu": ["int8_float32", "int8", "float32"]
+            "cuda": ["int8_float16", "float16", "int8"],  # int8_float16 is fastest on modern GPUs
+            "mps": ["float16", "int8_float16"],  # MPS works best with float16
+            "cpu": ["int8", "int8_float32", "float32"]  # int8 is fastest on CPU
         }
 
         target = "cuda" if backend in ("cuda", "mps") else "cpu"
@@ -297,6 +374,10 @@ class STTService:
 
         for option in preferred_order.get(backend, preferred_order["cpu"]):
             if not supported or option in supported:
+                self.logger.info(f"Selected compute type '{option}' for {backend} backend")
                 return option
 
-        return "int8" if target == "cpu" else "float16"
+        # Fallback
+        fallback = "int8" if target == "cpu" else "float16"
+        self.logger.warning(f"No preferred compute type found, falling back to: {fallback}")
+        return fallback

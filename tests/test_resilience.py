@@ -3,7 +3,7 @@
 import logging
 import pytest
 
-from harness.resilience import (
+from util.resilience import (
     CircuitBreakerOpenError,
     ResilienceConfig,
     resilient_call,
@@ -75,7 +75,7 @@ def test_circuit_breaker_opens_after_threshold(monkeypatch):
     def fake_now():
         return fake_time["value"]
 
-    monkeypatch.setattr("harness.resilience._current_time", fake_now)
+    monkeypatch.setattr("util.resilience._current_time", fake_now)
 
     config = ResilienceConfig(
         max_retries=0,

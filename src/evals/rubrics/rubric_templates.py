@@ -4,7 +4,7 @@ Reusable rubric templates and utilities for creating task-specific rubrics.
 Provides template functions for common patterns.
 """
 
-from ..eval_task import GradingRubric, RubricCriterion
+from evals.eval_task import GradingRubric, RubricCriterion
 from typing import Dict, Any
 
 

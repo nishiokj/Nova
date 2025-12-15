@@ -9,7 +9,7 @@ Responsibilities:
 """
 
 from .base_app import BaseVoiceApp
-#from .single_process_app import SingleProcessVoiceApp
+from .single_process_app import SingleProcessVoiceApp
 from .multi_process_app import MultiProcessVoiceApp
 
 __all__ = [

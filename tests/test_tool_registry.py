@@ -7,7 +7,7 @@ Tests all built-in tools:
 - file_read / file_write
 - bash_execute
 - python_execute
-- web_search / web_fetch (mocked)
+- web_fetch (mocked)
 - fast_answer (mocked)
 
 Also tests:
@@ -28,11 +28,12 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from harness.tool_registry import (
-    ToolRegistry, Tool, ToolResult, ToolStatus, ToolConfig, tool
+from harness.agent.tool_registry import (
+    ToolRegistry, Tool, ToolResult, ToolStatus, tool
 )
-from harness.llm_adapter import ToolDefinition
-from harness.resilience import CircuitBreakerOpenError
+from util.config import ToolConfig
+from util.llm_adapter import ToolDefinition
+from util.resilience import CircuitBreakerOpenError
 
 from tests.test_helpers import (
     assert_tool_result_success, assert_tool_result_error,
@@ -50,7 +51,7 @@ class TestToolRegistryBasics:
 
         # Check all expected tools are registered
         expected_tools = [
-            "fast_answer", "web_search", "web_fetch",
+            "fast_answer", "web_fetch",
             "bash_execute", "python_execute",
             "file_read", "file_write",
             "search_filesystem",
@@ -658,24 +659,7 @@ print("Line 3")
 
 
 class TestWebTools:
-    """Test web_search, web_fetch, and fast_answer tools (with mocking)"""
-
-    def test_web_search_success(self, tool_registry):
-        """Test web_search with mocked results"""
-        # DDGS is imported inside the function, so patch at 'ddgs.DDGS'
-        with patch('ddgs.DDGS') as mock_ddgs:
-            mock_instance = MagicMock()
-            mock_ddgs.return_value.__enter__.return_value = mock_instance
-            mock_instance.text.return_value = [
-                {"title": "Result 1", "href": "http://example.com/1", "body": "First result"},
-                {"title": "Result 2", "href": "http://example.com/2", "body": "Second result"},
-            ]
-
-            result = tool_registry.execute("web_search", query="test query")
-
-            if result.is_success:
-                assert len(result.output) == 2
-                assert result.output[0]["title"] == "Result 1"
+    """Test web_fetch and fast_answer tools (with mocking)"""
 
     def test_web_fetch_success(self, tool_registry):
         """Test web_fetch with mocked response"""

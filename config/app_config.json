@@ -31,12 +31,13 @@
     "device": "auto",
     "compute_type": "auto",
     "beam_size": 1,
-    "vad_filter": true
+    "vad_filter": false,
+    "filter_hallucinations": true
   },
   "linter": {
     "enabled": true,
     "cache_size": 100,
-    "min_words": 0
+    "min_words": 2
   },
   "harness": {
     "config_path": "config/harness_config.json",

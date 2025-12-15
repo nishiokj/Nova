@@ -9,9 +9,9 @@ These tasks test the agent's ability to:
 - Implement algorithms
 """
 
-from ..eval_task import EvalTask
-from ..rubrics.category_rubrics import CODE_GENERATION_RUBRIC, CODE_DEBUG_RUBRIC
-from ..rubrics.rubric_templates import template_file_path
+from evals.eval_task import EvalTask
+from evals.rubrics.category_rubrics import CODE_GENERATION_RUBRIC, CODE_DEBUG_RUBRIC
+from evals.rubrics.rubric_templates import template_file_path
 
 
 # Task 1: Simple function generation

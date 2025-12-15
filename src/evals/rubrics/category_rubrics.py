@@ -8,7 +8,7 @@ All rubrics are designed for:
 - Automated checks before LLM judgment
 """
 
-from ..eval_task import GradingRubric, RubricCriterion
+from evals.eval_task import GradingRubric, RubricCriterion
 
 
 # Multi-Step Reasoning Rubric
@@ -168,7 +168,7 @@ SEARCH_SYNTHESIS_RUBRIC = GradingRubric(
             description="Agent used web search or fast_answer to gather information",
             points=20,
             eval_type="contains",
-            eval_config={"required_tools": ["web_search", "fast_answer"]}
+            eval_config={"required_tools": ["fast_answer"]}
         ),
         RubricCriterion(
             criterion_id="information_accurate",

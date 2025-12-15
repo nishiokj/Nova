@@ -31,7 +31,6 @@
   "tools": {
       "enabled_tools": [
         "fast_answer",
-        "web_search",
         "web_fetch",
         "bash_execute",
         "python_execute",

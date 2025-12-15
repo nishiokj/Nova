@@ -20,14 +20,14 @@ from typing import List
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from harness.agent import (
+from harness.agent.agent import (
     Agent, AgentConfig, AgentResponse, AgentStep, AgentState,
     TieredAgent, TIER_TOOL_LIMITS, TIER_MAX_TOKENS,
     SIMPLE_TIER_PROMPT, STANDARD_TIER_PROMPT, ADVANCED_TIER_PROMPT
 )
-from harness.config import LLMConfig
-from harness.tool_registry import ToolRegistry, ToolConfig, ToolResult, ToolStatus
-from harness.llm_adapter import ToolCall, ToolDefinition, Message, MessageRole
+from util.config import LLMConfig
+from harness.agent.tool_registry import ToolRegistry, ToolConfig, ToolResult, ToolStatus
+from util.llm_adapter import ToolCall, ToolDefinition, Message, MessageRole
 
 from tests.test_helpers import (
     MockLLMAdapter, MockLLMBehavior,

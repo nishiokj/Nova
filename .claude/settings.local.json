@@ -26,7 +26,10 @@
       "Bash(pytest:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(timeout 5 python:*)"
+      "Bash(timeout 5 python:*)",
+      "Bash(PYTHONPATH=/Users/jevinnishioka/Desktop/jesus/src python3:*)",
+      "Bash(timeout 5 python3:*)",
+      "Bash(echo:*)"
     ],
     "deny": []
   }

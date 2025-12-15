@@ -9,8 +9,8 @@ These tasks test the agent's ability to:
 - Provide well-organized summaries
 """
 
-from ..eval_task import EvalTask
-from ..rubrics.category_rubrics import SEARCH_SYNTHESIS_RUBRIC, SIMPLE_QA_RUBRIC
+from evals.eval_task import EvalTask
+from evals.rubrics.category_rubrics import SEARCH_SYNTHESIS_RUBRIC, SIMPLE_QA_RUBRIC
 
 
 # Task 1: Current information lookup
@@ -29,7 +29,7 @@ Use web search to find the most recent estimate.""",
         "Cites source or year of estimate"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["fast_answer", "web_search"],
+    requires_tools=["fast_answer"],
     timeout_seconds=120,
     tags=["current_data", "facts", "geography"]
 )
@@ -52,7 +52,7 @@ Search for documentation and provide a clear comparison.""",
         "Provides practical guidance on when to use each"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=150,
     tags=["programming", "documentation", "python"]
 )
@@ -83,7 +83,7 @@ Synthesize information from multiple sources.""",
         "Well-organized synthesis (not copy-paste)"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["research", "programming", "comparison"]
 )
@@ -107,7 +107,7 @@ Use web search to verify and explain your answer with dates.""",
         "Provides dates as evidence"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=120,
     tags=["fact_checking", "verification", "history"]
 )
@@ -130,7 +130,7 @@ Search for the latest TIOBE index and list them.""",
         "Information appears current"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=120,
     tags=["current_data", "programming", "trends"]
 )
@@ -160,7 +160,7 @@ Synthesize from multiple sources into a coherent explanation.""",
         "Well-organized synthesis"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["research", "api_design", "tutorial"]
 )
@@ -182,7 +182,7 @@ Search for the exact release date.""",
         "Cites source or confirms accuracy"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["fast_answer", "web_search"],
+    requires_tools=["fast_answer"],
     timeout_seconds=90,
     tags=["history", "facts", "technology"]
 )
@@ -213,7 +213,7 @@ Cite specific technical details.""",
         "Provides usage recommendations"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["research", "containers", "comparison"]
 )
@@ -241,7 +241,7 @@ Research and provide:
         "Well-organized explanation"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=150,
     tags=["research", "cloud", "architecture"]
 )
@@ -273,7 +273,7 @@ Synthesize into a comprehensive guide.""",
         "Well-organized and comprehensive"
     ],
     rubric=SEARCH_SYNTHESIS_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["research", "api_design", "best_practices"]
 )

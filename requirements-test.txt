@@ -1,22 +1,19 @@
-# Test dependencies for Agent Harness
-
-# Core testing framework
-pytest>=7.0.0
-pytest-cov>=4.0.0      # Coverage reporting
-pytest-timeout>=2.0.0  # Test timeouts
-pytest-xdist>=3.0.0    # Parallel test execution
-
-# Optional test utilities
-pytest-watch>=4.2.0    # Watch mode for development
-pytest-randomly>=3.0   # Randomize test order
-
-# Mocking and fixtures
-unittest-mock>=1.4.0   # For Python < 3.8 compatibility (included in 3.8+)
-
-# Code quality (optional)
-flake8>=6.0.0
-black>=23.0.0
-mypy>=1.0.0
-
-# Documentation
-# pytest-html>=3.0.0   # HTML test reports
+# This file is auto-generated via pip-compile.
+# To update, install pip-tools and run:
+#
+#    pip-compile --output-file=requirements-test.txt requirements-test.in
+#
+-r requirements.txt
+black==24.10.0
+isort==5.13.2
+mypy==1.11.2
+pip-tools==7.4.1
+pre-commit==3.8.0
+pytest==8.3.3
+pytest-cov==5.0.0
+pytest-randomly==3.15.0
+pytest-timeout==2.3.1
+pytest-watch==4.2.0
+pytest-xdist==3.6.1
+ruff==0.7.3
+unittest-mock==1.4.0

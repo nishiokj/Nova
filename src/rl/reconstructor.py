@@ -16,7 +16,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from harness.manifest_store import (
+from util.manifest_store import (
     get_manifest_store,
     SystemPromptManifest,
     ToolManifest,

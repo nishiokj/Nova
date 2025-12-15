@@ -25,7 +25,8 @@ from evals.eval_runner import EvalRunner, AgentFactory
 from evals.tasks.task_registry import get_all_tasks, get_tasks_by_category
 from evals.agent_loader import create_agent_from_config, list_available_agents, print_available_agents
 from evals.judge_loader import load_judge_config, list_available_judges
-from harness.llm_adapter import LLMConfig, create_adapter
+from util.config import LLMConfig
+from util.llm_adapter import create_adapter
 
 
 # Set up logging
