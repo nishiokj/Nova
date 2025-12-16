@@ -5,12 +5,12 @@ Provides access to all 52 tasks organized by category.
 """
 
 from typing import List, Optional, Dict
-from ..eval_task import EvalTask
+from evals.eval_task import EvalTask
 
-from .multi_step_reasoning import MULTI_STEP_TASKS
-from .code_operations import CODE_TASKS
-from .file_operations import FILE_TASKS
-from .search_synthesis import SEARCH_TASKS
+from evals.tasks.multi_step_reasoning import MULTI_STEP_TASKS
+from evals.tasks.code_operations import CODE_TASKS
+from evals.tasks.file_operations import FILE_TASKS
+from evals.tasks.search_synthesis import SEARCH_TASKS
 
 
 # All tasks in one place

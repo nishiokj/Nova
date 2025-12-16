@@ -9,8 +9,8 @@ These tasks test the agent's ability to:
 - Perform multi-file operations
 """
 
-from ..eval_task import EvalTask
-from ..rubrics.category_rubrics import FILE_OPERATIONS_RUBRIC
+from evals.eval_task import EvalTask
+from evals.rubrics.category_rubrics import FILE_OPERATIONS_RUBRIC
 
 
 # Task 1: Create project structure

@@ -11,8 +11,8 @@ from typing import Tuple, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
 
-from harness.llm_adapter import LLMAdapter, Message, MessageRole
-from .eval_task import EvalTask, GradingRubric, RubricCriterion, EvalResult
+from util.llm_adapter import LLMAdapter, Message, MessageRole
+from evals.eval_task import EvalTask, GradingRubric, RubricCriterion, EvalResult
 
 
 class LLMJudge:
@@ -258,16 +258,31 @@ class LLMJudge:
         filepath = criterion.eval_config.get("path", "")
         path = Path(filepath)
 
-        exists = path.exists()
+        candidate_paths = []
+        if path.is_absolute():
+            candidate_paths.append(path)
+        else:
+            candidate_paths.append(Path.cwd() / path)
+            artifact_dir = None
+            if agent_response and getattr(agent_response, "metadata", None):
+                artifact_dir = agent_response.metadata.get("artifact_dir")
+            if artifact_dir:
+                candidate_paths.append(Path(artifact_dir) / path)
+
+        matched_path = next((candidate for candidate in candidate_paths if candidate.exists()), None)
+        exists = matched_path is not None
         points = criterion.points if exists else 0
 
         reasoning = f"[{criterion.criterion_id}] {'PASS' if exists else 'FAIL'} - "
-        reasoning += f"File '{filepath}' {'exists' if exists else 'does not exist'}"
+        if exists:
+            reasoning += f"File '{filepath}' exists at {matched_path}"
+        else:
+            reasoning += f"File '{filepath}' does not exist"
 
         # If file exists, optionally check content
         if exists and "content_contains" in criterion.eval_config:
             try:
-                content = path.read_text()
+                content = matched_path.read_text()
                 required = criterion.eval_config["content_contains"]
 
                 if isinstance(required, str):
@@ -392,6 +407,11 @@ class LLMJudge:
         """Build the prompt for LLM judge."""
         # Summarize file operations
         file_ops_summary = self._summarize_file_ops(agent_response)
+        tool_activity_summary = self._summarize_tool_activity(agent_response)
+        metadata = getattr(agent_response, "metadata", {}) or {}
+        artifact_dir = metadata.get("artifact_dir")
+        tool_failures = metadata.get("tool_failures")
+        tool_failure_line = tool_failures if tool_failures is not None else "unknown"
 
         # Get reflection evidence if available
         reflection_evidence = ""
@@ -414,7 +434,12 @@ AGENT RESPONSE:
 
 AGENT ACTIONS TAKEN:
 - Tools used: {', '.join(agent_response.tools_used) if agent_response and agent_response.tools_used else 'None'}
+- Tool failures recorded: {tool_failure_line}
 - Files created/modified: {file_ops_summary}
+- Artifact directory: {artifact_dir or 'Not provided'}
+- Artifact note: {"Sandbox paths referenced in tool output correspond to the artifact directory above." if artifact_dir else "Temporary sandbox paths may not persist beyond this evaluation."}
+- Tool execution summary:
+{tool_activity_summary}
 - Goal achieved (self-assessment): {agent_response.goal_achieved if agent_response else 'N/A'}
 - Execution reflection: {reflection_evidence if reflection_evidence else 'N/A'}
 
@@ -454,6 +479,33 @@ Be strict and objective. Only answer YES if the evidence clearly supports it.
             summary_parts.append(f"Read: {', '.join(read[:5])}")
 
         return '; '.join(summary_parts) if summary_parts else "None"
+
+    def _summarize_tool_activity(self, agent_response: Any) -> str:
+        """Summarize tool usage with success/failure snippets for the judge."""
+        if not agent_response or not getattr(agent_response, "steps", None):
+            return "  (no tool activity recorded)"
+
+        lines: List[str] = []
+        for step in agent_response.steps:
+            tool_name = getattr(step, "tool_name", None)
+            if not tool_name:
+                continue
+            status = "ERROR" if step.error else "OK"
+            output = step.tool_output or step.error or ""
+            snippet = self._truncate_text(str(output))
+            lines.append(f"  - Step {step.step_number} [{tool_name}] {status}: {snippet}")
+            if len(lines) >= 8:
+                break
+
+        return "\n".join(lines) if lines else "  (no tool activity recorded)"
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 200) -> str:
+        """Trim long outputs for prompt readability."""
+        simplified = text.strip()
+        if len(simplified) <= limit:
+            return simplified or "(no output)"
+        return simplified[: limit - 3] + "..."
 
     def _parse_judge_answer(self, response_content: str) -> Dict[str, Any]:
         """

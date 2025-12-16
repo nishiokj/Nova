@@ -20,12 +20,12 @@ from typing import Dict, Any, Optional, List, Generator
 # Add harness to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from harness.tool_registry import ToolResult, ToolStatus
-from harness.llm_adapter import (
+from harness.agent.tool_registry import ToolResult, ToolStatus
+from util.llm_adapter import (
     LLMAdapter, LLMResponse, Message, MessageRole,
     ToolCall, ToolDefinition
 )
-from harness.config import LLMConfig
+from util.config import LLMConfig
 
 
 # =============================================================================

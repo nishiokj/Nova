@@ -8,8 +8,8 @@ These tasks test the agent's ability to:
 - Make decisions with trade-off evaluation
 """
 
-from ..eval_task import EvalTask
-from ..rubrics.category_rubrics import MULTI_STEP_REASONING_RUBRIC, CALCULATION_RUBRIC
+from evals.eval_task import EvalTask
+from evals.rubrics.category_rubrics import MULTI_STEP_REASONING_RUBRIC, CALCULATION_RUBRIC
 
 
 # Task 1: Chain of calculations
@@ -63,7 +63,7 @@ Be specific and cite examples.""",
         "Cites concrete examples"
     ],
     rubric=MULTI_STEP_REASONING_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["research", "cs_fundamentals", "comparison"]
 )
@@ -92,7 +92,7 @@ Provide specific examples and cite your sources.""",
         "Well-organized and synthesized (not copy-paste)"
     ],
     rubric=MULTI_STEP_REASONING_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["research", "distributed_systems", "synthesis"]
 )
@@ -122,7 +122,7 @@ Provide a recommendation with clear reasoning.""",
         "Provides clear recommendation with reasoning"
     ],
     rubric=MULTI_STEP_REASONING_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["decision_making", "architecture", "trade_offs"]
 )
@@ -249,7 +249,7 @@ Include:
         "Well-organized synthesis"
     ],
     rubric=MULTI_STEP_REASONING_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["research", "security", "synthesis"]
 )
@@ -298,7 +298,7 @@ Provide:
         "Makes reasoned recommendation for the social media scenario"
     ],
     rubric=MULTI_STEP_REASONING_RUBRIC,
-    requires_tools=["web_search", "fast_answer"],
+    requires_tools=["fast_answer"],
     timeout_seconds=180,
     tags=["api_design", "comparison", "architecture"]
 )

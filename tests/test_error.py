@@ -3,8 +3,8 @@
 import sys
 sys.path.insert(0, '.')
 
-from harness.agent import TieredAgent
-from harness.config import HarnessConfig
+from harness.agent.agent import TieredAgent
+from util.config import HarnessConfig
 import json
 
 # Load config
@@ -12,8 +12,8 @@ with open("config/harness_config.json") as f:
     config_data = json.load(f)
 
 # Create harness config
-from harness.config import AgentConfig, LLMConfig
-from harness.tool_registry import ToolRegistry
+from util.config import AgentConfig, LLMConfig
+from harness.agent.tool_registry import ToolRegistry
 
 tier_configs = {}
 for tier_name, llm_conf in config_data.get("llm_configs", {}).items():

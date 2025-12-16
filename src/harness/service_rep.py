@@ -13,6 +13,7 @@ This is a complete refactoring to be event-driven and decoupled from voice/TTS.
 
 import time
 import threading
+import queue
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from enum import Enum
@@ -28,10 +29,15 @@ from communication.events import (
     TTSRequestedEvent,
 )
 from communication.event_bus import EventBusProtocol
-from .intent_classifier import HybridIntentClassifier, UserIntent, IntentClassification, create_intent_classifier
-from .router import Router, TaskClassification
-from .config import ServiceRepConfig, LLMConfig
-from .logger import StructuredLogger
+from services.intent_classifier import (
+    HybridIntentClassifier,
+    UserIntent,
+    IntentClassification,
+    create_intent_classifier,
+)
+from services.router import Router, TaskClassification
+from util.config import ServiceRepConfig, LLMConfig
+from util.logger import StructuredLogger
 
 
 class ResponseType(Enum):
@@ -104,9 +110,14 @@ class ServiceRep:
         # Register progress callback with harness
         self.harness.add_progress_callback(self._on_harness_progress)
 
-        # Threading for async agent execution
-        self._agent_thread: Optional[threading.Thread] = None
-        self._agent_lock = threading.Lock()
+        # Thread/queue management for asynchronous execution
+        self._task_queue: "queue.Queue[Optional[tuple[str, str, str]]]" = queue.Queue()
+        self._worker_threads: List[threading.Thread] = []
+        self._shutdown_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending_requests = 0
+        self._active_thread_name: Optional[str] = None
 
         # Intent classifier
         self.intent_classifier = create_intent_classifier(
@@ -123,8 +134,106 @@ class ServiceRep:
         self._agent_is_busy = False
         self._current_task: Optional[str] = None
         self._current_request_id: Optional[str] = None
+        self._worker_count = max(1, getattr(config, "max_worker_threads", 1) or 1)
+        self._start_worker_threads()
 
         self.logger.system_init("service_rep", "ready")
+
+    def _start_worker_threads(self):
+        """Spawn worker threads that consume tasks from the queue"""
+        for idx in range(self._worker_count):
+            worker = threading.Thread(
+                target=self._worker_loop,
+                name=f"ServiceRepWorker-{idx + 1}",
+                daemon=True
+            )
+            worker.start()
+            self._worker_threads.append(worker)
+
+    def _worker_loop(self):
+        """Continuously process tasks from the queue"""
+        while True:
+            try:
+                task = self._task_queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._shutdown_event.is_set():
+                    break
+                continue
+
+            if task is None:
+                self._task_queue.task_done()
+                break
+
+            request_id, text, tier = task
+            with self._pending_lock:
+                if self._pending_requests > 0:
+                    self._pending_requests -= 1
+
+            try:
+                self._process_agent_task(request_id, text, tier)
+            finally:
+                self._task_queue.task_done()
+
+    def _enqueue_agent_task(self, request_id: str, text: str, tier: str):
+        """Add a normal request to the worker queue"""
+        with self._pending_lock:
+            self._pending_requests += 1
+        self._task_queue.put((request_id, text, tier))
+
+    def _process_agent_task(self, request_id: str, text: str, tier: str):
+        """Execute a queued agent task (runs inside worker thread)"""
+        self._set_active_request(request_id, text)
+        try:
+            harness_response = self.harness.process(
+                speech_text=text,
+                tier=tier,
+                context=None,
+                request_id=request_id
+            )
+            self._handle_harness_response(request_id, harness_response)
+
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Harness call failed: {e}", component="service_rep")
+            self._handle_harness_error(request_id, str(e))
+
+        finally:
+            self._clear_active_request()
+
+    def _set_active_request(self, request_id: str, text: str):
+        """Mark a request as currently being processed"""
+        with self._state_lock:
+            self._agent_is_busy = True
+            self._current_request_id = request_id
+            self._current_task = text
+            self._active_thread_name = threading.current_thread().name
+
+    def _clear_active_request(self):
+        """Reset active request tracking"""
+        with self._state_lock:
+            self._agent_is_busy = False
+            self._current_request_id = None
+            self._current_task = None
+            self._active_thread_name = None
+
+    def _get_current_request_id(self) -> Optional[str]:
+        with self._state_lock:
+            return self._current_request_id
+
+    def _get_current_task(self) -> Optional[str]:
+        with self._state_lock:
+            return self._current_task
+
+    def _get_active_thread_name(self) -> Optional[str]:
+        with self._state_lock:
+            return self._active_thread_name
+
+    def _is_agent_busy(self) -> bool:
+        with self._state_lock:
+            return self._agent_is_busy
+
+    def _get_pending_request_count(self) -> int:
+        with self._pending_lock:
+            return self._pending_requests
 
     def _load_canned_responses(self) -> Dict[str, List[str]]:
         """Load canned responses from config"""
@@ -174,8 +283,8 @@ class ServiceRep:
         # Step 1: Classify intent
         intent_result: IntentClassification = self.intent_classifier.classify(
             text,
-            agent_is_busy=self._agent_is_busy,
-            current_task=self._current_task
+            agent_is_busy=self._is_agent_busy(),
+            current_task=self._get_current_task()
         )
 
         # Step 2: Handle based on intent
@@ -196,73 +305,24 @@ class ServiceRep:
 
     def _handle_normal_request(self, request_id: str, text: str):
         """Handle normal agent request - spawns background thread for agent"""
-        # Step 1: Route to determine tier
+        # Route to determine tier
         classification, tier_config = self.router.route(text, context=None)
 
-        # Step 2: Generate acknowledgment
-        ack_text = self._generate_acknowledgment(text, classification)
+        # NOTE: Pre-acknowledgment is handled upstream in multi_process_app
+        # We skip the ack phase here to avoid duplicate "Got it" messages
+        # The pre-ack gives instant feedback (~50-100ms) before STT completes
 
-        # Step 3: Publish acknowledgment TTS
-        if self.enabled and ack_text:
-            self._publish_tts(
-                text=ack_text,
-                response_type=ResponseType.ACKNOWLEDGMENT,
-                priority=0,
-                request_id=request_id
-            )
-
-        # Step 4: Spawn background thread to run agent
-        # This allows ServiceRep to remain responsive and handle STOP/CANCEL events
-        self._agent_is_busy = True
-        self._current_task = text
-        self._current_request_id = request_id
-
+        # Queue the request for worker threads to process
         self.logger.info(
-            f"[{request_id}] Routed to tier={classification.tier_name}, ack='{ack_text}'",
+            f"[{request_id}] Routed to tier={classification.tier_name}, queued={self._get_pending_request_count() + 1}",
             component="service_rep"
         )
+        self._enqueue_agent_task(request_id, text, classification.tier_name)
 
-        # Start agent in background thread
-        with self._agent_lock:
-            self._agent_thread = threading.Thread(
-                target=self._run_agent_in_thread,
-                args=(request_id, text, classification.tier_name),
-                name=f"Agent-{request_id}",
-                daemon=False  # Want to wait for completion
-            )
-            self._agent_thread.start()
-
-    def _run_agent_in_thread(self, request_id: str, text: str, tier: str):
-        """
-        Run agent in background thread.
-
-        This allows the main ServiceRep thread to continue processing events
-        (like STOP, CLARIFICATION) while the agent is running.
-        """
-        try:
-            # Call harness (this is blocking but runs in background thread)
-            harness_response = self.harness.process(
-                speech_text=text,
-                tier=tier,
-                context=None,
-                request_id=request_id
-            )
-
-            # Handle response (publishes TTS)
-            self._handle_harness_response(request_id, harness_response)
-
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Harness call failed: {e}", component="service_rep")
-            self._handle_harness_error(request_id, str(e))
-
-        finally:
-            # Clean up thread reference
-            with self._agent_lock:
-                self._agent_thread = None
 
     def _handle_stop_intent(self, request_id: str, text: str):
         """Handle STOP intent - cancel current work"""
-        if not self._agent_is_busy:
+        if not self._is_agent_busy():
             # Nothing to stop
             self._publish_tts(
                 text="I'm not doing anything right now.",
@@ -280,7 +340,7 @@ class ServiceRep:
         from communication.events import Event, EventType
         cancel_event = Event()
         object.__setattr__(cancel_event, 'event_type', EventType.CANCEL)
-        object.__setattr__(cancel_event, 'request_id', self._current_request_id)
+        object.__setattr__(cancel_event, 'request_id', self._get_current_request_id())
         self.event_bus.publish(cancel_event)
 
         # Acknowledge cancellation
@@ -292,7 +352,7 @@ class ServiceRep:
         )
 
         self.logger.info(
-            f"[{request_id}] Stop signal sent to running agent (thread: {self._agent_thread.name if self._agent_thread else 'none'})",
+            f"[{request_id}] Stop signal sent to running agent (thread: {self._get_active_thread_name() or 'none'})",
             component="service_rep"
         )
 
@@ -300,7 +360,7 @@ class ServiceRep:
 
     def _handle_clarification(self, request_id: str, text: str, intent: IntentClassification):
         """Handle CLARIFICATION intent - user is clarifying previous request"""
-        if not self._agent_is_busy:
+        if not self._is_agent_busy():
             # Treat as new request
             self._handle_normal_request(request_id, text)
             return
@@ -321,7 +381,7 @@ class ServiceRep:
 
     def _handle_addition(self, request_id: str, text: str, intent: IntentClassification):
         """Handle ADDITION intent - user adding to current request"""
-        if not self._agent_is_busy:
+        if not self._is_agent_busy():
             # Treat as new request
             self._handle_normal_request(request_id, text)
             return
@@ -342,10 +402,15 @@ class ServiceRep:
 
     def _handle_status_question(self, request_id: str, text: str):
         """Handle status question"""
-        if not self._agent_is_busy:
-            response_text = "I'm ready for your next request."
+        if not self._is_agent_busy():
+            pending = self._get_pending_request_count()
+            if pending > 0:
+                response_text = f"I have {pending} request{'s' if pending != 1 else ''} queued up."
+            else:
+                response_text = "I'm ready for your next request."
         else:
-            response_text = f"I'm working on: {self._current_task}"
+            current_task = self._get_current_task()
+            response_text = f"I'm working on: {current_task}" if current_task else "I'm working on your last request."
 
         self._publish_tts(
             text=response_text,
@@ -360,7 +425,11 @@ class ServiceRep:
 
         Called by AgentHarness during execution.
         """
-        if not self.enabled or not self._current_request_id:
+        if not self.enabled:
+            return
+
+        current_request_id = self._get_current_request_id()
+        if not current_request_id:
             return
 
         # Publish progress TTS
@@ -368,7 +437,7 @@ class ServiceRep:
             text=message,
             response_type=ResponseType.PROGRESS,
             priority=1,
-            request_id=self._current_request_id
+            request_id=current_request_id
         )
 
     def _handle_harness_response(self, request_id: str, harness_response):
@@ -379,11 +448,6 @@ class ServiceRep:
             request_id: Request identifier
             harness_response: HarnessResponse from AgentHarness
         """
-        # Clear busy state
-        self._agent_is_busy = False
-        self._current_task = None
-        self._current_request_id = None
-
         if not self.enabled:
             return
 
@@ -391,7 +455,13 @@ class ServiceRep:
         success = harness_response.agent_response.success if harness_response.agent_response else False
 
         if success:
-            spoken_text = self._summarize_harness_response(harness_response)
+            # OPTIMIZATION: Use speech_text if agent provided it (direct TTS passthrough)
+            # This bypasses LLM summarization and uses agent's pre-formatted speech text
+            if harness_response.agent_response and harness_response.agent_response.speech_text:
+                spoken_text = harness_response.agent_response.speech_text
+            else:
+                # Fallback: Summarize response for TTS
+                spoken_text = self._summarize_harness_response(harness_response)
         else:
             # Get error from the right place
             agent_error = None
@@ -473,11 +543,6 @@ class ServiceRep:
 
     def _handle_harness_error(self, request_id: str, error_msg: str):
         """Handle harness execution error"""
-        # Clear busy state
-        self._agent_is_busy = False
-        self._current_task = None
-        self._current_request_id = None
-
         if not self.enabled:
             return
 
@@ -597,22 +662,18 @@ class ServiceRep:
     def cleanup(self):
         """Cleanup resources"""
         # Stop any running agent
-        if self._agent_is_busy:
+        if self._is_agent_busy():
             self.harness.stop()
 
-        # Wait for agent thread to complete
-        thread = None
-        with self._agent_lock:
-            if self._agent_thread and self._agent_thread.is_alive():
-                self.logger.info("Waiting for agent thread to complete...", component="service_rep")
-                # Save reference before releasing lock
-                thread = self._agent_thread
+        # Signal worker threads to exit after finishing current work
+        self._shutdown_event.set()
+        for _ in self._worker_threads:
+            self._task_queue.put(None)
 
-        # Join outside the lock to avoid deadlock
-        if thread:
+        for thread in self._worker_threads:
             thread.join(timeout=5.0)
             if thread.is_alive():
-                self.logger.warning("Agent thread did not complete in time", component="service_rep")
+                self.logger.warning(f"{thread.name} did not complete in time", component="service_rep")
 
         # Cleanup harness
         if self.harness:

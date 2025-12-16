@@ -125,7 +125,7 @@ def test_harness_imports():
     try:
         # Test agent.py loading
         sys.path.insert(0, str(Path(__file__).parent))
-        from harness.agent import _TIER_PROMPTS
+        from harness.agent.agent import _TIER_PROMPTS
 
         if not _TIER_PROMPTS:
             print("  ❌ FAILED: agent._TIER_PROMPTS is empty")
@@ -136,14 +136,14 @@ def test_harness_imports():
             return False
 
         # Test planner.py loading
-        from harness.planner import PLANNING_PROMPT, REFLECTION_PROMPT
+        from harness.agent.planner import PLANNING_PROMPT, REFLECTION_PROMPT
 
         if not PLANNING_PROMPT or not REFLECTION_PROMPT:
             print("  ❌ FAILED: Planner prompts are empty")
             return False
 
         # Test router.py loading (instantiate to trigger config load)
-        from harness.router import PatternClassifier
+        from services.router import PatternClassifier
         classifier = PatternClassifier()
 
         if not classifier.simple_patterns or not classifier.advanced_patterns or not classifier.tool_patterns:

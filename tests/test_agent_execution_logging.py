@@ -14,7 +14,7 @@ def test_agent_execution_logger():
     print("Testing agent execution logger...")
 
     try:
-        from harness.agent_execution_logger import AgentExecutionLogger
+        from util.agent_execution_logger import AgentExecutionLogger
 
         logger = AgentExecutionLogger(log_dir="logs_test")
 

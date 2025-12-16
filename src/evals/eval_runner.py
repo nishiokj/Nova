@@ -4,20 +4,83 @@ Main evaluation orchestration.
 Coordinates task execution, grading, metrics computation, and result saving.
 """
 
+import sys
+from pathlib import Path
+
+# Add src to path for standalone execution
+_src_dir = Path(__file__).parent.parent
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
+
 import logging
+import uuid
 from typing import List, Callable, Optional, Dict, Any
 from datetime import datetime
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 
-from .eval_task import EvalTask, EvalResult, EvalRun, create_error_result
-from .isolation import TaskExecutor
-from .grading import LLMJudge
-from harness.llm_adapter import LLMAdapter
+from evals.eval_task import EvalTask, EvalResult, EvalRun, create_error_result
+from evals.isolation import TaskExecutor
+from evals.grading import LLMJudge
+from util.llm_adapter import LLMAdapter
+from harness.agent.agent import AgentResponse
 
 
 logger = logging.getLogger(__name__)
+
+
+class HarnessAgentAdapter:
+    """
+    Adapter that lets evals treat AgentHarness like a regular agent.
+
+    Exposes a run(user_input, context) method that internally calls
+    harness.process() and extracts the AgentResponse for grading.
+    """
+
+    def __init__(self, harness: Any, default_tier: str = "standard", logger_obj: Optional[logging.Logger] = None):
+        self._harness = harness
+        self._default_tier = default_tier or "standard"
+        self._logger = logger_obj or logging.getLogger(__name__)
+        self.tool_registry = getattr(harness, "tool_registry", None)
+        self.tiered_agent = getattr(harness, "agent", None)
+
+    def run(self, user_input: str, context: Optional[str] = None) -> AgentResponse:
+        """Invoke the harness and always return an AgentResponse."""
+        response = self._harness.process(
+            speech_text=user_input,
+            tier=self._resolve_tier(),
+            context=context,
+            request_id=f"eval_{uuid.uuid4().hex[:8]}"
+        )
+        return self._extract_agent_response(response)
+
+    def _resolve_tier(self) -> str:
+        runtime_config = getattr(self._harness, "config", None)
+        if runtime_config and hasattr(runtime_config, "get"):
+            tier = runtime_config.get("agent.tier")
+            if tier:
+                return tier
+        return self._default_tier
+
+    def _extract_agent_response(self, harness_response: Any) -> AgentResponse:
+        if harness_response is None:
+            raise RuntimeError("Harness returned no response")
+
+        agent_response = getattr(harness_response, "agent_response", None)
+        if agent_response:
+            return agent_response
+
+        metadata = getattr(harness_response, "metadata", {}) or {}
+        self._logger.warning("Harness response missing agent_response; synthesizing fallback AgentResponse")
+        return AgentResponse(
+            content=getattr(harness_response, "full_response", ""),
+            success=False,
+            error=metadata.get("error") or "Harness returned no agent_response",
+            goal_achieved=False,
+            total_duration_ms=getattr(harness_response, "duration_ms", 0),
+            tools_used=metadata.get("tools_used", []),
+            metadata=metadata
+        )
 
 
 class EvalRunner:
@@ -47,12 +110,18 @@ class EvalRunner:
             output_dir: Directory to save results
             batch_size: Number of tasks to grade in parallel (default 5)
         """
-        self.agent_factory = agent_factory
+        self.agent_factory = agent_factory  # Backwards compatibility for callers that inspect this attribute
+        self._raw_agent_factory = agent_factory
+        self.agent_metadata = getattr(agent_factory, "config", {})
+        self._default_tier = self._infer_default_tier()
+        self._backend_hint = getattr(agent_factory, "execution_backend", None)
+        self._execution_backend: Optional[str] = None
         self.judge = LLMJudge(judge_llm)
-        self.executor = TaskExecutor(agent_factory)
+        self.executor = TaskExecutor(self._create_agent_instance)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.batch_size = batch_size
+        self._current_run_artifact_root: Optional[Path] = None
 
     def run_evaluation(
         self,
@@ -78,56 +147,69 @@ class EvalRunner:
         if not run_id:
             run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        if not config:
-            config = {"agent_type": "unknown"}
+        run_dir = self.output_dir / run_id
+        artifact_root = run_dir / "artifacts"
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        self._current_run_artifact_root = artifact_root
 
-        logger.info(f"Starting evaluation run: {run_id}")
-        logger.info(f"Total tasks: {len(tasks)}")
+        try:
+            run_config = dict(config) if config else {}
+            if "agent_type" not in run_config:
+                if isinstance(self.agent_metadata, dict) and self.agent_metadata.get("agent_type"):
+                    run_config["agent_type"] = self.agent_metadata["agent_type"]
+                else:
+                    run_config["agent_type"] = "unknown"
 
-        self._ensure_judge_ready()
+            logger.info(f"Starting evaluation run: {run_id}")
+            logger.info(f"Total tasks: {len(tasks)}")
 
-        # Phase 1: Execute all tasks
-        logger.info("Phase 1: Executing tasks...")
-        if parallel_execution:
-            execution_results = self._execute_tasks_parallel(tasks, max_workers)
-        else:
-            execution_results = self._execute_tasks_sequential(tasks)
+            self._ensure_judge_ready()
 
-        # Phase 2: Grade all tasks in batches
-        logger.info(f"Phase 2: Grading tasks (batch size: {self.batch_size})...")
-        eval_results = self._grade_tasks_batched(tasks, execution_results)
+            # Phase 1: Execute all tasks
+            logger.info("Phase 1: Executing tasks...")
+            if parallel_execution:
+                execution_results = self._execute_tasks_parallel(tasks, max_workers)
+            else:
+                execution_results = self._execute_tasks_sequential(tasks)
+            run_config["execution_backend"] = self._get_execution_backend()
 
-        # Phase 3: Compute metrics
-        logger.info("Phase 3: Computing metrics...")
-        from .metrics import MetricsCalculator
-        metrics_calc = MetricsCalculator()
-        overall_metrics = metrics_calc.calculate_metrics(eval_results)
-        category_metrics = metrics_calc.calculate_category_metrics(eval_results, tasks)
-        difficulty_metrics = metrics_calc.calculate_difficulty_metrics(eval_results, tasks)
+            # Phase 2: Grade all tasks in batches
+            logger.info(f"Phase 2: Grading tasks (batch size: {self.batch_size})...")
+            eval_results = self._grade_tasks_batched(tasks, execution_results)
 
-        # Create eval run
-        eval_run = EvalRun(
-            run_id=run_id,
-            timestamp=datetime.utcnow().isoformat(),
-            config=config,
-            task_results=eval_results,
-            total_tasks=len(tasks),
-            metrics=overall_metrics,
-            category_metrics=category_metrics,
-            difficulty_metrics=difficulty_metrics
-        )
+            # Phase 3: Compute metrics
+            logger.info("Phase 3: Computing metrics...")
+            from evals.metrics import MetricsCalculator
+            metrics_calc = MetricsCalculator()
+            overall_metrics = metrics_calc.calculate_metrics(eval_results)
+            category_metrics = metrics_calc.calculate_category_metrics(eval_results, tasks)
+            difficulty_metrics = metrics_calc.calculate_difficulty_metrics(eval_results, tasks)
 
-        # Save results
-        result_file = self.output_dir / f"{run_id}.json"
-        eval_run.save(str(result_file))
-        logger.info(f"Results saved to: {result_file}")
+            # Create eval run
+            eval_run = EvalRun(
+                run_id=run_id,
+                timestamp=datetime.utcnow().isoformat(),
+                config=run_config,
+                task_results=eval_results,
+                total_tasks=len(tasks),
+                metrics=overall_metrics,
+                category_metrics=category_metrics,
+                difficulty_metrics=difficulty_metrics
+            )
 
-        # Log summary
-        logger.info(f"Evaluation complete!")
-        logger.info(f"Pass rate: {overall_metrics['pass_rate']*100:.1f}%")
-        logger.info(f"Mean score: {overall_metrics['mean_score']:.1f}/100")
+            # Save results
+            result_file = self.output_dir / f"{run_id}.json"
+            eval_run.save(str(result_file))
+            logger.info(f"Results saved to: {result_file}")
 
-        return eval_run
+            # Log summary
+            logger.info(f"Evaluation complete!")
+            logger.info(f"Pass rate: {overall_metrics['pass_rate']*100:.1f}%")
+            logger.info(f"Mean score: {overall_metrics['mean_score']:.1f}/100")
+
+            return eval_run
+        finally:
+            self._current_run_artifact_root = None
 
     def _ensure_judge_ready(self) -> None:
         """Ensure the judge LLM is initialized before running tasks."""
@@ -138,6 +220,71 @@ class EvalRunner:
             logger.error("Judge initialization failed; aborting evaluation.")
             raise
 
+    def _infer_default_tier(self) -> str:
+        """Derive default tier from factory metadata or fall back to standard."""
+        metadata = self.agent_metadata
+        if isinstance(metadata, dict):
+            for key in ("tier", "default_tier"):
+                tier = metadata.get(key)
+                if tier:
+                    return tier
+        return "standard"
+
+    def _create_agent_instance(self):
+        """Instantiate an agent/harness instance compatible with TaskExecutor."""
+        raw_agent = self._raw_agent_factory()
+        return self._normalize_agent_instance(raw_agent)
+
+    def _normalize_agent_instance(self, agent_instance: Any):
+        """
+        Wrap harness/process targets so TaskExecutor always sees a run() interface.
+        """
+        run_attr = getattr(agent_instance, "run", None)
+        process_attr = getattr(agent_instance, "process", None)
+
+        if callable(run_attr):
+            backend = "agent"
+            wrapped = agent_instance
+        elif callable(process_attr):
+            backend = "harness"
+            wrapped = HarnessAgentAdapter(
+                agent_instance,
+                default_tier=self._default_tier,
+                logger_obj=logger
+            )
+        else:
+            raise TypeError(
+                f"Agent factory must return object with run() or process(); got {type(agent_instance)}"
+            )
+
+        self._record_execution_backend(backend)
+        return wrapped
+
+    def _record_execution_backend(self, backend: str) -> None:
+        """Track which execution backend is actually being used for this run."""
+        if not self._execution_backend:
+            self._execution_backend = backend
+            logger.info("Eval runner using %s backend for task execution", backend)
+        elif self._execution_backend != backend:
+            logger.warning(
+                "Agent factory produced inconsistent backends (%s vs %s)",
+                self._execution_backend,
+                backend
+            )
+
+    def _get_execution_backend(self) -> str:
+        """Best-effort description of which module handled task execution."""
+        return self._execution_backend or self._backend_hint or "agent"
+
+    def _get_artifact_dir(self, task: EvalTask, index: int) -> Optional[Path]:
+        """Build a per-task artifact directory for preserved files."""
+        if not self._current_run_artifact_root:
+            return None
+
+        safe_task_id = task.task_id.replace("/", "_")
+        dir_name = f"{index:03d}_{safe_task_id}"
+        return self._current_run_artifact_root / dir_name
+
     def _execute_tasks_sequential(self, tasks: List[EvalTask]) -> List[Any]:
         """Execute tasks sequentially."""
         execution_results = []
@@ -146,7 +293,8 @@ class EvalRunner:
             logger.info(f"[{i}/{len(tasks)}] Executing {task.task_id}...")
 
             try:
-                agent_response = self.executor.execute_task(task)
+                artifact_dir = self._get_artifact_dir(task, i)
+                agent_response = self.executor.execute_task(task, artifact_dir=artifact_dir)
                 execution_results.append(agent_response)
             except Exception as e:
                 logger.error(f"Task {task.task_id} failed with exception: {e}")
@@ -166,7 +314,14 @@ class EvalRunner:
             # Submit all tasks
             future_to_idx = {}
             for i, task in enumerate(tasks):
-                future = executor.submit(self._execute_single_task, task, i + 1, len(tasks))
+                artifact_dir = self._get_artifact_dir(task, i + 1)
+                future = executor.submit(
+                    self._execute_single_task,
+                    task,
+                    i + 1,
+                    len(tasks),
+                    artifact_dir
+                )
                 future_to_idx[future] = i
 
             # Collect results as they complete
@@ -181,10 +336,16 @@ class EvalRunner:
 
         return execution_results
 
-    def _execute_single_task(self, task: EvalTask, task_num: int, total: int) -> Any:
+    def _execute_single_task(
+        self,
+        task: EvalTask,
+        task_num: int,
+        total: int,
+        artifact_dir: Optional[Path]
+    ) -> Any:
         """Execute a single task (helper for parallel execution)."""
         logger.info(f"[{task_num}/{total}] Executing {task.task_id}...")
-        return self.executor.execute_task(task)
+        return self.executor.execute_task(task, artifact_dir=artifact_dir)
 
     def _grade_tasks_batched(
         self,
@@ -260,7 +421,7 @@ class EvalRunner:
         Returns:
             EvalRun with results
         """
-        from .tasks.task_registry import get_all_tasks
+        from evals.tasks.task_registry import get_all_tasks
 
         all_tasks = get_all_tasks()
 

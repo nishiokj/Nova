@@ -18,14 +18,14 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from harness.config import (
+from util.config import (
     HarnessConfig, LLMConfig, AgentConfig, ToolConfig,
     RouterConfig, ServiceRepConfig, LoggingConfig
 )
-from harness.tool_registry import ToolRegistry
-from harness.router import Router
+from harness.agent.tool_registry import ToolRegistry
+from services.router import Router
 from communication.event_bus import EventBus
-from harness.logger import StructuredLogger
+from util.logger import StructuredLogger
 
 # Import helpers from test_helpers module
 from tests.test_helpers import (
@@ -106,7 +106,7 @@ def tool_registry(mock_logger):
     """Create a fresh ToolRegistry for testing"""
     config = ToolConfig(
         enabled_tools=[
-            "fast_answer", "web_search", "web_fetch",
+            "fast_answer", "web_fetch",
             "bash_execute", "python_execute",
             "file_read", "file_write", "search_filesystem",
             "calculator", "get_current_time"

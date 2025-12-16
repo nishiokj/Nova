@@ -6,7 +6,7 @@ Validates that we can fully reconstruct episodes from logs + manifests.
 
 import json
 from pathlib import Path
-from harness.manifest_store import ManifestStore, get_manifest_store, ensure_default_manifests
+from util.manifest_store import ManifestStore, get_manifest_store, ensure_default_manifests
 from rl.reconstructor import EpisodeReconstructor, generate_training_dataset
 
 
@@ -195,7 +195,7 @@ def test_episode_reconstruction():
     print(f"✓ Created mock RL log at {rl_log_path}")
 
     # Reconstruct episode (using same manifest store)
-    from harness import manifest_store as ms
+    from util import manifest_store as ms
     ms._global_manifest_store = store  # Use our test manifest store
 
     reconstructor = EpisodeReconstructor(
@@ -261,7 +261,7 @@ def test_batch_reconstruction():
     exec_ids = ["test-exec-0001"]
 
     # Use the test manifest store
-    from harness import manifest_store as ms
+    from util import manifest_store as ms
     store = ManifestStore(base_dir="logs/test/manifests")
     ms._global_manifest_store = store
 

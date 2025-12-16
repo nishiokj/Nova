@@ -12,7 +12,6 @@
     },
     "tool_config": {
       "enabled_tools": [
-        "web_search",
         "fast_answer",
         "file_read",
         "file_write",
@@ -37,6 +36,19 @@
         "model": "gpt-5-nano",
         "temperature": 0.7,
         "max_tokens": 4000
+      }
+    },
+
+    "tiered_standard": {
+      "type": "TieredAgent",
+      "module": "harness.agent",
+      "class": "TieredAgent",
+      "tier": "standard",
+      "llm_config": {
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "temperature": 0.7,
+        "max_tokens": 6000
       }
     },
 

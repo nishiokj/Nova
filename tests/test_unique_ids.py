@@ -5,7 +5,7 @@ Verifies that each agent.run() call generates unique IDs and doesn't overwrite f
 """
 
 from pathlib import Path
-from harness.logger import StructuredLogger
+from util.logger import StructuredLogger
 
 
 def test_unique_req_ids():
@@ -39,8 +39,8 @@ def test_req_id_auto_generation():
     print("Testing automatic req_id generation in agent...")
 
     from harness.agent import Agent
-    from harness.config import AgentConfig, LLMConfig
-    from harness.tool_registry import ToolRegistry
+    from util.config import AgentConfig, LLMConfig
+    from harness.agent.tool_registry import ToolRegistry
 
     # Create minimal agent (no actual LLM calls)
     config = AgentConfig(
@@ -82,7 +82,7 @@ def test_exec_id_uniqueness():
     """Test that exec_ids are unique even for same req_id"""
     print("Testing exec_id uniqueness...")
 
-    from harness.agent_execution_logger import AgentExecutionLogger
+    from util.agent_execution_logger import AgentExecutionLogger
 
     exec_logger = AgentExecutionLogger(log_dir="logs/test")
 

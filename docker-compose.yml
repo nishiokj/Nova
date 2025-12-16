@@ -1,0 +1,130 @@
+version: '3.8'
+
+# Voice Agent System - Docker Compose Configuration
+# Supports both CPU and GPU variants with cross-platform audio passthrough
+
+services:
+  # CPU-only variant (default)
+  # Best for: Development, testing, production without GPU
+  voice-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voice-agent
+
+    # Audio device passthrough (Linux/WSL2)
+    # For macOS: Remove devices section and use native installation
+    devices:
+      - /dev/snd:/dev/snd  # ALSA audio devices
+
+    # Volume mounts
+    volumes:
+      # Config directory (read-only for safety)
+      - ./config:/config:ro
+
+      # Logs (persistent across restarts)
+      - ./logs:/app/logs
+
+      # Whisper model cache (avoid re-downloading)
+      - whisper-models:/app/.cache/whisper
+
+      # Optional: PulseAudio socket (Linux)
+      # Uncomment if using PulseAudio instead of ALSA
+      # - /run/user/1000/pulse:/run/user/1000/pulse:ro
+
+    # Environment variables
+    # Option 1: Load from .env file (recommended)
+    env_file:
+      - .env
+
+    # Option 2: Inline environment variables
+    environment:
+      # PulseAudio configuration (uncomment if using PulseAudio)
+      # - PULSE_SERVER=unix:/run/user/1000/pulse/native
+
+      # Configuration overrides (optional - can also set in .env)
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=/app/logs
+
+      # STT Configuration
+      # - STT_MODEL=base.en
+      # - STT_DEVICE=cpu
+
+      # Audio device override (if not using default)
+      # - AUDIO_DEVICE_INDEX=0
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits (adjust based on your system)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'
+    #       memory: 4G
+    #     reservations:
+    #       cpus: '1.0'
+    #       memory: 2G
+
+  # GPU-accelerated variant (NVIDIA)
+  # Best for: Production with faster STT inference
+  # Requires: nvidia-docker2, NVIDIA Container Toolkit
+  voice-agent-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voice-agent-gpu
+
+    # NVIDIA GPU runtime
+    runtime: nvidia
+
+    # Audio devices
+    devices:
+      - /dev/snd:/dev/snd
+
+    # Volumes
+    volumes:
+      - ./config:/config:ro
+      - ./logs:/app/logs
+      - whisper-models-gpu:/app/.cache/whisper
+
+    # Environment
+    env_file:
+      - .env
+    environment:
+      # NVIDIA GPU configuration
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+      # Force CUDA for STT
+      - STT_DEVICE=cuda
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=/app/logs
+
+    restart: unless-stopped
+
+    # GPU resource limits
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+    # Don't start by default (use: docker-compose up voice-agent-gpu)
+    profiles:
+      - gpu
+
+# Named volumes for persistent data
+volumes:
+  whisper-models:
+    driver: local
+  whisper-models-gpu:
+    driver: local
+
+# Networks (default bridge network is sufficient for single container)
+# Uncomment if you want to isolate the voice agent network
+# networks:
+#   voice-agent-net:
+#     driver: bridge

@@ -12,8 +12,8 @@ import shutil
 # Add harness to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from harness.tool_registry import ToolRegistry
-from harness.config import ToolConfig
+from harness.agent.tool_registry import ToolRegistry
+from util.config import ToolConfig
 
 def test_working_directory_context():
     """Test that tool registry maintains proper working directory context"""
@@ -39,7 +39,7 @@ def test_working_directory_context():
         # Create config with all tools enabled
         config = ToolConfig()
         config.enabled_tools = [
-            "fast_answer", "web_search", "web_fetch", "bash_execute",
+            "fast_answer", "web_fetch", "bash_execute",
             "python_execute", "file_read", "file_write", "search_filesystem",
             "calculator", "get_current_time", "get_working_directory", "list_files"
         ]

@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-agent-system"
+version = "0.1.0"
+description = "Multi-process voice agent with harness, RL worker, and Web UI"
+readme = "README.md"
+license = { text = "UNLICENSED" }
+requires-python = ">=3.10"
+authors = [
+  { name = "Voice Agent Team" }
+]
+keywords = ["voice", "agent", "multi-process", "speech", "ai"]
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+dev = [
+  "black==24.10.0",
+  "isort==5.13.2",
+  "mypy==1.11.2",
+  "pip-tools==7.4.1",
+  "pre-commit==3.8.0",
+  "pytest==8.3.3",
+  "pytest-cov==5.0.0",
+  "pytest-randomly==3.15.0",
+  "pytest-timeout==2.3.1",
+  "pytest-watch==4.2.0",
+  "pytest-xdist==3.6.1",
+  "ruff==0.7.3",
+  "unittest-mock==1.4.0"
+]
+
+[project.scripts]
+voice-agent = "app.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["config/*.json"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "B", "W", "I",
+  "UP", "N", "S", "RUF", "ASYNC", "PL"
+]
+ignore = [
+  "E501"
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
