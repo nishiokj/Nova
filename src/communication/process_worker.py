@@ -85,9 +85,9 @@ class ProcessWorker(ABC):
 
         self.logger.info(f"{self.__class__.__name__}: Running")
 
-        while not self._shutdown.is_set():
+        while True:
             try:
-                event = self.mailbox.receive(timeout=0.5)
+                event = self.mailbox.receive()
 
                 if event is None:
                     continue
@@ -101,9 +101,14 @@ class ProcessWorker(ABC):
             except Exception as e:
                 self.logger.error(f"Error processing event: {e}", exc_info=True)
 
+            if self._shutdown.is_set():
+                break
+
         self.cleanup()
         self.logger.info(f"{self.__class__.__name__}: Stopped")
 
     def shutdown(self) -> None:
         """Signal shutdown"""
-        self._shutdown.set()
+        if not self._shutdown.is_set():
+            self._shutdown.set()
+            self.mailbox.deliver(ShutdownEvent())

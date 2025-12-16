@@ -41,18 +41,20 @@ class Mailbox:
             # Worker should increase queue size or process faster
             pass
 
-    def receive(self, timeout: float = 0.5) -> Optional[Event]:
+    def receive(self, timeout: Optional[float] = None) -> Optional[Event]:
         """
         Receive next event from mailbox.
         Called by worker process.
 
         Args:
-            timeout: Max seconds to wait for event
+            timeout: Max seconds to wait for event (None = block indefinitely)
 
         Returns:
             Event if available, None if timeout
         """
         try:
+            if timeout is None:
+                return self._queue.get()
             return self._queue.get(timeout=timeout)
         except queue.Empty:
             return None

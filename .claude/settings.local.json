@@ -35,7 +35,9 @@
       "Bash(say -v \"?\")",
       "Bash(grep:*)",
       "Bash(pkill:*)",
-      "Bash(say:*)"
+      "Bash(say:*)",
+      "Bash(.venv/bin/python3:*)",
+      "Bash(source /Users/jevinnishioka/Desktop/jesus/.venv/bin/activate)"
     ],
     "deny": []
   }

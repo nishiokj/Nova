@@ -865,55 +865,173 @@ class Planner:
             return False
         return True
 
-    def _clean_search_pattern(self, text: Optional[str]) -> str:
-        """Generate a safe filesystem search pattern from user input."""
-        if not text:
-            return "."
-        truncated = text[:80]
-        cleaned_chars = [
-            ch if ch.isalnum() or ch in ("_", "-", ".", " ") else " "
-            for ch in truncated
-        ]
-        cleaned = "".join(cleaned_chars)
-        cleaned = " ".join(cleaned.split())
-        if cleaned:
-            tokens = cleaned.split(" ")
-            return " ".join(tokens[:3])
-        fallback = (text.split() or ["."])[0]
-        return fallback or "."
+    def _extract_file_mentions(self, text: str) -> List[str]:
+        """
+        Aggressively extract ALL file/module mentions from user input.
+
+        Looks for:
+        - @mentions: @file.py, @module.js
+        - Direct filenames: harness.py, planner.py
+        - Paths: src/agent.py, ./config.json
+        - Common extensions: .py, .js, .ts, .go, .java, etc.
+        """
+        import re
+
+        mentions = []
+
+        # @mentions - highest priority
+        mentions.extend(re.findall(r'@([\w/\-\.]+\.[\w]+)', text))
+
+        # Direct file references with common extensions
+        extensions = r'(?:py|js|ts|jsx|tsx|go|java|cpp|h|hpp|c|rs|rb|php|swift|kt|m|mm|sh|bash|json|yaml|yml|toml|xml|md|txt|csv|sql)'
+        mentions.extend(re.findall(rf'\b([\w/\-\.]+\.{extensions})\b', text, re.IGNORECASE))
+
+        # Handle typos: "harnessss.py" -> try "harness.py"
+        cleaned_mentions = []
+        for mention in mentions:
+            # Remove duplicate consecutive characters (harnessss -> harness)
+            cleaned = re.sub(r'(.)\1{2,}', r'\1', mention)
+            cleaned_mentions.append(cleaned)
+            if cleaned != mention:
+                cleaned_mentions.append(mention)  # Keep original too
+
+        return list(set(cleaned_mentions))
+
+    def _extract_key_terms(self, text: str) -> List[str]:
+        """Extract key technical terms that might be class/function/module names."""
+        import re
+
+        # Remove common question words and filler
+        noise = r'\b(where|what|how|why|when|who|which|the|a|an|in|on|at|to|for|of|with|by|from|do|you|see|find|show|tell|me|my|your|our|their|opportunities|optimization|optimizations)\b'
+        cleaned = re.sub(noise, ' ', text.lower())
+
+        # Extract CamelCase and snake_case identifiers
+        terms = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b|\b[a-z_]+\b', text)
+
+        # Filter to meaningful terms (length > 3, not just articles/conjunctions)
+        meaningful = [t for t in terms if len(t) > 3 and t not in ('that', 'this', 'these', 'those', 'with', 'from')]
+
+        return list(set(meaningful))[:5]  # Top 5 terms
 
     def _default_discovery_steps(self, user_input: str) -> List[PlanStep]:
-        """Inject baseline discovery actions when the plan omitted them."""
-        pattern = self._clean_search_pattern(user_input)
-        steps = [
-            PlanStep(
-                step_num=-2,
-                objective="Discovery: inspect repository root structure",
-                tool_hint="list_files",
-                tool_args_hint={"path": "."},
-                success_criteria=SuccessCriteria(
-                    description="Repo structure enumerated",
-                    required_outputs=["list_files_output"]
-                ),
-                phase=PlanPhase.DISCOVERY,
-                max_tool_calls=2
-            ),
-            PlanStep(
-                step_num=-1,
-                objective="Discovery: locate files or symbols related to the request",
-                tool_hint="search_filesystem",
-                tool_args_hint={"pattern": pattern, "path": "."},
-                success_criteria=SuccessCriteria(
-                    description="Relevant files identified",
-                    required_outputs=["search_filesystem_output"]
-                ),
-                depends_on=[-2],
-                phase=PlanPhase.DISCOVERY,
-                max_tool_calls=2
+        """
+        AGGRESSIVE discovery - don't give up until files are found!
+
+        Strategy:
+        1. Extract ALL file mentions from user input
+        2. Search filesystem for each specific file
+        3. If files mentioned, read them and parse imports
+        4. Follow dependency chain
+        5. Fallback to keyword search only if NO files mentioned
+        """
+        steps = []
+        step_num = 1
+
+        # STEP 1: Extract file mentions
+        file_mentions = self._extract_file_mentions(user_input)
+
+        if file_mentions:
+            # User explicitly mentioned files - FIND THEM!
+            for file_pattern in file_mentions:
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective=f"Discovery: Search for '{file_pattern}' in repository",
+                        tool_hint="search_filesystem",
+                        tool_args_hint={"pattern": file_pattern, "path": "."},
+                        success_criteria=SuccessCriteria(
+                            description=f"Located {file_pattern}",
+                            required_outputs=[f"search_filesystem_output"]
+                        ),
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=3  # Try harder - grep multiple times if needed
+                    )
+                )
+                step_num += 1
+
+            # STEP 2: Read each found file
+            for file_pattern in file_mentions:
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective=f"Discovery: Read {file_pattern} contents",
+                        tool_hint="file_read",
+                        tool_args_hint={"path": file_pattern},
+                        success_criteria=SuccessCriteria(
+                            description=f"File {file_pattern} contents loaded",
+                            required_outputs=[f"file_read_output"]
+                        ),
+                        depends_on=[step_num - len(file_mentions)],  # Depends on corresponding search
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=2
+                    )
+                )
+                step_num += 1
+
+            # STEP 3: Parse imports from found files (for dependency analysis)
+            if any('.py' in f for f in file_mentions):
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective="Discovery: Extract imports and dependencies from Python files",
+                        tool_hint="search_filesystem",
+                        tool_args_hint={"pattern": "^import |^from ", "path": "."},
+                        success_criteria=SuccessCriteria(
+                            description="Dependencies identified",
+                            required_outputs=["search_filesystem_output"]
+                        ),
+                        depends_on=list(range(len(file_mentions) + 1, step_num)),
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=2
+                    )
+                )
+                step_num += 1
+
+        else:
+            # No files mentioned - fall back to keyword search
+            # Extract technical terms from query
+            key_terms = self._extract_key_terms(user_input)
+
+            # STEP 1: List repo structure
+            steps.append(
+                PlanStep(
+                    step_num=step_num,
+                    objective="Discovery: Inspect repository root structure",
+                    tool_hint="list_files",
+                    tool_args_hint={"path": "."},
+                    success_criteria=SuccessCriteria(
+                        description="Repo structure enumerated",
+                        required_outputs=["list_files_output"]
+                    ),
+                    phase=PlanPhase.DISCOVERY,
+                    max_tool_calls=2
+                )
             )
-        ]
+            step_num += 1
+
+            # STEP 2: Search for each key term
+            for term in key_terms[:3]:  # Top 3 terms
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective=f"Discovery: Search for '{term}' in codebase",
+                        tool_hint="search_filesystem",
+                        tool_args_hint={"pattern": term, "path": "."},
+                        success_criteria=SuccessCriteria(
+                            description=f"Files containing '{term}' found",
+                            required_outputs=["search_filesystem_output"]
+                        ),
+                        depends_on=[step_num - 1],
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=3
+                    )
+                )
+                step_num += 1
+
+        # Mark original step numbers for resequencing
         for step in steps:
             setattr(step, "_original_step_num", step.step_num)
+
         return steps
 
     def _resequence_steps(self, steps: List[PlanStep]) -> List[PlanStep]:

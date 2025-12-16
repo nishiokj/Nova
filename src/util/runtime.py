@@ -65,16 +65,18 @@ class HarnessRuntime:
             if tier_llm:
                 self.router.set_tier_config(tier, tier_llm)
 
-    def prewarm_default_tier(self):
-        """Prewarm the default agent tier if supported by the adapter."""
+    def prewarm_all_tiers(self):
+        """Prewarm every configured agent tier to keep HTTP pools hot."""
         try:
-            default_tier = self.config.agent.tier
-            agent = self.agent._get_agent(default_tier)
-            if agent._llm and hasattr(agent._llm, "prewarm"):
-                agent._llm.prewarm()
-            self.logger.system_init("llm", "prewarmed", {"tier": default_tier})
+            warmed_tiers = self.agent.prewarm_all_tiers()
+            self.logger.system_init("llm", "prewarmed", {"tiers": warmed_tiers})
         except Exception as exc:
-            self.logger.error(f"Failed to pre-warm LLM: {exc}", component="harness")
+            self.logger.error(f"Failed to pre-warm LLM tiers: {exc}", component="harness")
+
+    # Backwards-compatible alias
+    def prewarm_default_tier(self):
+        """Legacy entrypoint retained for compatibility."""
+        return self.prewarm_all_tiers()
 
 
 def _build_logger(config: HarnessConfig) -> StructuredLogger:
@@ -133,6 +135,6 @@ def create_runtime(
         profiler=profiler
     )
     runtime.configure_router_tiers()
-    runtime.prewarm_default_tier()
+    runtime.prewarm_all_tiers()
     runtime.logger.system_init("runtime", "ready")
     return runtime

@@ -718,7 +718,18 @@ class AnthropicAdapter(LLMAdapter):
 
         try:
             client = self._get_client()
-            system_message, chat_messages = self._prepare_messages(messages)
+
+            # Check if we have system_blocks in kwargs (from ContextManager)
+            system_blocks = kwargs.pop("system_blocks", None)
+
+            if system_blocks is not None:
+                # Use system blocks directly (from ContextManager serializer)
+                chat_messages = [m.to_dict() for m in messages if m.role != MessageRole.SYSTEM]
+                system_param = system_blocks  # Array of content blocks
+            else:
+                # Legacy path: extract system message from messages
+                system_message, chat_messages = self._prepare_messages(messages)
+                system_param = system_message if system_message else None
 
             params = {
                 "model": self.config.model,
@@ -727,8 +738,8 @@ class AnthropicAdapter(LLMAdapter):
                 "temperature": kwargs.get("temperature", self.config.temperature),
             }
 
-            if system_message:
-                params["system"] = system_message
+            if system_param:
+                params["system"] = system_param
 
             if tools:
                 params["tools"] = [t.to_anthropic_format() for t in tools]
@@ -756,7 +767,18 @@ class AnthropicAdapter(LLMAdapter):
 
         try:
             client = self._get_client()
-            system_message, chat_messages = self._prepare_messages(messages)
+
+            # Check if we have system_blocks in kwargs (from ContextManager)
+            system_blocks = kwargs.pop("system_blocks", None)
+
+            if system_blocks is not None:
+                # Use system blocks directly (from ContextManager serializer)
+                chat_messages = [m.to_dict() for m in messages if m.role != MessageRole.SYSTEM]
+                system_param = system_blocks  # Array of content blocks
+            else:
+                # Legacy path: extract system message from messages
+                system_message, chat_messages = self._prepare_messages(messages)
+                system_param = system_message if system_message else None
 
             params = {
                 "model": self.config.model,
@@ -765,8 +787,8 @@ class AnthropicAdapter(LLMAdapter):
                 "temperature": kwargs.get("temperature", self.config.temperature),
             }
 
-            if system_message:
-                params["system"] = system_message
+            if system_param:
+                params["system"] = system_param
 
             if tools:
                 params["tools"] = [t.to_anthropic_format() for t in tools]
@@ -836,7 +858,18 @@ class AnthropicAdapter(LLMAdapter):
 
         try:
             client = self._get_async_client()
-            system_message, chat_messages = self._prepare_messages(messages)
+
+            # Check if we have system_blocks in kwargs (from ContextManager)
+            system_blocks = kwargs.pop("system_blocks", None)
+
+            if system_blocks is not None:
+                # Use system blocks directly (from ContextManager serializer)
+                chat_messages = [m.to_dict() for m in messages if m.role != MessageRole.SYSTEM]
+                system_param = system_blocks  # Array of content blocks
+            else:
+                # Legacy path: extract system message from messages
+                system_message, chat_messages = self._prepare_messages(messages)
+                system_param = system_message if system_message else None
 
             params = {
                 "model": self.config.model,
@@ -845,8 +878,8 @@ class AnthropicAdapter(LLMAdapter):
                 "temperature": kwargs.get("temperature", self.config.temperature),
             }
 
-            if system_message:
-                params["system"] = system_message
+            if system_param:
+                params["system"] = system_param
 
             if tools:
                 params["tools"] = [t.to_anthropic_format() for t in tools]
@@ -873,7 +906,18 @@ class AnthropicAdapter(LLMAdapter):
 
         try:
             client = self._get_async_client()
-            system_message, chat_messages = self._prepare_messages(messages)
+
+            # Check if we have system_blocks in kwargs (from ContextManager)
+            system_blocks = kwargs.pop("system_blocks", None)
+
+            if system_blocks is not None:
+                # Use system blocks directly (from ContextManager serializer)
+                chat_messages = [m.to_dict() for m in messages if m.role != MessageRole.SYSTEM]
+                system_param = system_blocks  # Array of content blocks
+            else:
+                # Legacy path: extract system message from messages
+                system_message, chat_messages = self._prepare_messages(messages)
+                system_param = system_message if system_message else None
 
             params = {
                 "model": self.config.model,
@@ -882,8 +926,8 @@ class AnthropicAdapter(LLMAdapter):
                 "temperature": kwargs.get("temperature", self.config.temperature),
             }
 
-            if system_message:
-                params["system"] = system_message
+            if system_param:
+                params["system"] = system_param
 
             if tools:
                 params["tools"] = [t.to_anthropic_format() for t in tools]

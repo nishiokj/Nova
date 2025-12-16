@@ -4378,3 +4378,47 @@ TypeError: TranscriptionCompleteEvent.__init__() got an unexpected keyword argum
 2025-12-15 21:10:05,673 - app.process_manager - INFO - Stopped worker 'service_rep'
 2025-12-15 21:10:05,673 - app.process_manager - INFO - ProcessManager stopped
 2025-12-15 21:10:05,673 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 22:07:39,216 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 22:07:39,216 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 22:07:39,216 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 22:07:39,218 - audio_pipeline.audio_pipeline - INFO - PyAudio found 5 audio devices
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO -   Device 4: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 22:07:39,429 - app - INFO - Using audio device index: 2
+2025-12-15 22:07:39,429 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 22:07:39,429 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 22:07:39,429 - app - INFO - Starting worker processes...
+2025-12-15 22:07:39,430 - app.process_manager - INFO - Started worker 'tts' (PID: 52638)
+2025-12-15 22:07:39,431 - app.process_manager - INFO - Started worker 'service_rep' (PID: 52639)
+2025-12-15 22:07:39,432 - app.process_manager - INFO - ProcessManager started
+2025-12-15 22:07:40,433 - app - INFO - Initializing STT service...
+2025-12-15 22:07:40,541 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 22:07:40,541 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 22:07:40,541 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 22:07:40,857 - app.stt - INFO - Whisper model loaded in 316ms (device=cpu, compute_type=int8)
+2025-12-15 22:07:40,857 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 22:07:40,857 - app - INFO - Audio capture loop started
+2025-12-15 22:07:40,857 - app - INFO - Audio processing loop started
+2025-12-15 22:07:40,857 - app - INFO - Calibrating noise floor...
+2025-12-15 22:07:40,857 - app - INFO - Response monitor started
+2025-12-15 22:07:40,857 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 22:07:40,858 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 22:07:41,356 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 22:07:43,339 - app.audio - INFO - Speech segment finalized: 84480 bytes, 1.14s
+2025-12-15 22:07:46,788 - app - INFO - Transcribed: Yes. Okay. Good morning. Good morning. I'm excited. Thank you. I'm glad you're here. I'll be back. Okay. Thank you. Thank you. It's a great day. I'll see you tonight. Thank you. Bye. Hey. Bye. Bye. Thank you. Bye. Bye. Bye. Bye. Bye. Bye. Bye.
+2025-12-15 22:07:46,788 - app - INFO - [req_1_req_91ba] Transcription complete: Yes. Okay. Good morning. Good morning. I'm excited. Thank you. I'm glad you're here. I'll be back. Okay. Thank you. Thank you. It's a great day. I'll see you tonight. Thank you. Bye. Hey. Bye. Thank you. Bye.
+2025-12-15 22:07:47,298 - app.audio - INFO - Speech segment finalized: 241920 bytes, 0.51s
+2025-12-15 22:07:49,555 - app.audio - INFO - Speech segment finalized: 145920 bytes, 1.98s
+2025-12-15 22:08:01,915 - app.audio - INFO - Speech segment finalized: 69120 bytes, 0.90s
+2025-12-15 22:08:05,211 - app.audio - INFO - Speech segment finalized: 99840 bytes, 1.38s
+2025-12-15 22:08:17,147 - app.audio - INFO - Speech segment finalized: 63360 bytes, 0.82s
+2025-12-15 22:08:20,807 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 22:08:20,808 - app - INFO - Response monitor stopped
+2025-12-15 22:08:20,961 - app - INFO - Audio capture loop stopped
+2025-12-15 22:08:21,163 - app - INFO - Transcribed: Okay. So. An. In. He. He. He. I. Th we. Mm hmm. One. Th we. He. Th we. Th we. Oh. My. Th we. Mm hmm. Th we. We are. Th we. Th we. Th we. Th we. Th we. Th we. Th we.
+2025-12-15 22:08:21,164 - app - INFO - [req_6_req_9f47] Transcription complete: Okay. So. An. In. He. I. Th we. Mm . One. Th we. He. Th we. Th we. Oh. My. Th we. Mm . Th we. We are. Th we. Th we. Th we. Th we. Th we. Th we. Th we.
+2025-12-15 22:08:21,164 - app - INFO - Audio processing loop stopped
+2025-12-16 10:24:50,288 - app.process_manager - WARNING - Worker 'service_rep' died, restarting...
+2025-12-16 10:24:50,288 - app.process_manager - ERROR - Monitor error: [Errno 5] Input/output error

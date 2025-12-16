@@ -10,6 +10,8 @@ Architecture: Plan → Execute → Reflect
 
 import json
 import time
+import uuid
+import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Generator, Callable
 from enum import Enum
@@ -34,6 +36,18 @@ from .planner import (
     ToolCallRecord
 )
 from util.resilience import CircuitBreakerOpenError
+from harness.context_manager import (
+    ContextState,
+    WorkingMemoryStore,
+    ContextBuild,
+    ContextPlanner,
+    ContextSerializer,
+    TokenEstimator,
+    ToolTraceSummary,
+    ArtifactRegistry,
+    DefaultWritePolicy,
+    CacheStrategy
+)
 
 
 class AgentState(Enum):
@@ -142,7 +156,7 @@ class Agent:
         self._llm: Optional[LLMAdapter] = None
         if self._llm_config:
             self._llm = create_adapter(self._llm_config, logger=self.logger)
-        self.stop = False
+        self._stop_requested = False
         # Plan/Execute/Reflect components
         self._planner: Optional[Planner] = None
         self._executor: Optional[Executor] = None
@@ -154,9 +168,45 @@ class Agent:
             if self._executor:
                 self._executor.add_step_callback(self._handle_executor_step)
 
-        # Conversation history
+        # Conversation history (legacy)
         self._conversation: List[Message] = []
         self._max_conversation_length = 20
+
+        # ========== CONTEXT MANAGER INTEGRATION ==========
+        # Session-level persistent state
+        # Create WorkingMemoryStore with working_dir, then pass to ContextState
+        working_memory = WorkingMemoryStore(
+            max_entries=100,
+            working_dir=os.getcwd()
+        )
+        self.context_state = ContextState(
+            session_id=str(uuid.uuid4()),
+            working_memory=working_memory
+        )
+
+        # Token estimator for accurate token counting
+        provider = self._llm_config.provider if self._llm_config else "anthropic"
+        model = self._llm_config.model if self._llm_config else "claude-3-5-sonnet-20241022"
+        self.token_estimator = TokenEstimator(provider=provider, model=model)
+
+        # Context planner and serializer
+        self.context_planner = ContextPlanner(
+            token_estimator=self.token_estimator,
+            model_family="claude-3"  # For cache keys
+        )
+        self.context_serializer = ContextSerializer()
+
+        # Tool trace for execution history
+        self.tool_trace = ToolTraceSummary(max_turns=3)
+
+        # Artifact registry for large content
+        self.artifacts = ArtifactRegistry(
+            max_artifacts=20,
+            max_artifact_size=50_000
+        )
+
+        # Memory write policy for gating writes
+        self.memory_policy = DefaultWritePolicy()
 
         # Execution state
         self._current_state = AgentState.IDLE
@@ -167,6 +217,94 @@ class Agent:
         # Callbacks
         self._step_callbacks: List[Callable[[AgentStep], None]] = []
         self._thought_callbacks: List[Callable[[str], None]] = []
+
+    def _log_full_llm_request(
+        self,
+        serialization_result: Any,
+        user_input: str,
+        tier: str,
+        plan: Any
+    ):
+        """
+        THICK LOGGING: Log the entire LLM request with formatting for debugging.
+
+        This helps us understand exactly what context is being sent to the LLM.
+        """
+        try:
+            # Format the full request as readable text
+            log_lines = [
+                "\n" + "=" * 80,
+                "FULL LLM REQUEST",
+                "=" * 80,
+                f"Tier: {tier}",
+                f"Request ID: {serialization_result.plan.request_id}",
+                f"Total Budget: {serialization_result.plan.total_budget:,} tokens",
+                f"Estimated Cost: ${serialization_result.plan.estimated_cost:.4f}",
+                f"Cache Strategy: {serialization_result.plan.cache_strategy}",
+                "",
+                "CONTEXT PLAN SUMMARY:",
+                plan.explain(),
+                "",
+                "SERIALIZED REQUEST:",
+                "-" * 80
+            ]
+
+            # Log system blocks (if Anthropic format)
+            serialized = serialization_result.serialized_messages
+            if "system" in serialized:
+                log_lines.append("\nSYSTEM BLOCKS:")
+                for i, block in enumerate(serialized["system"]):
+                    cache_info = ""
+                    if "cache_control" in block:
+                        cache_info = f" [CACHED: {block['cache_control']['type']}]"
+
+                    log_lines.append(f"\nBlock {i+1}{cache_info}:")
+                    log_lines.append("-" * 40)
+
+                    # Format text with proper line breaks
+                    text = block.get("text", "")
+                    if len(text) > 1000:
+                        # Truncate very long blocks but show structure
+                        log_lines.append(f"{text[:500]}")
+                        log_lines.append(f"... ({len(text) - 1000} more characters) ...")
+                        log_lines.append(f"{text[-500:]}")
+                    else:
+                        log_lines.append(text)
+
+            # Log messages array
+            if "messages" in serialized:
+                log_lines.append("\n\nMESSAGES:")
+                for i, msg in enumerate(serialized["messages"]):
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    log_lines.append(f"\nMessage {i+1} ({role.upper()}):")
+                    log_lines.append("-" * 40)
+                    if len(content) > 500:
+                        log_lines.append(f"{content[:250]}")
+                        log_lines.append(f"... ({len(content) - 500} more characters) ...")
+                        log_lines.append(f"{content[-250:]}")
+                    else:
+                        log_lines.append(content)
+
+            log_lines.append("\n" + "=" * 80)
+            log_lines.append("END LLM REQUEST")
+            log_lines.append("=" * 80 + "\n")
+
+            # Log as info
+            full_log = "\n".join(log_lines)
+            self.logger.info(full_log, component="agent_context")
+
+            # Also log to file for easier debugging
+            log_file = "logs/llm_requests.log"
+            os.makedirs("logs", exist_ok=True)
+            with open(log_file, "a") as f:
+                f.write(full_log + "\n\n")
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to log full LLM request: {e}",
+                component="agent"
+            )
 
     def _build_system_prompt(self) -> str:
         """Build system prompt - uses tier-specific prompt from config"""
@@ -491,9 +629,76 @@ class Agent:
                 "success": result.is_success
             })
         return results, any_failed
-    
+
+    def run_simple_response(
+        self,
+        user_input: str,
+        context: Optional[str] = None
+    ) -> AgentResponse:
+        """
+        Simple-tier fast path: single LLM call with minimal context.
+        """
+        if not self._llm:
+            return AgentResponse(
+                content="Agent not configured with an LLM backend.",
+                success=False,
+                error="No LLM configured"
+            )
+
+        start_time = time.time()
+        prompt_input = user_input
+        if context:
+            prompt_input = f"{user_input}\n\nContext: {context}"
+
+        messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
+        messages.extend(self._conversation)
+        messages.append(Message(MessageRole.USER, prompt_input))
+
+        try:
+            response = self._llm.complete(messages, tools=None)
+            duration_ms = (time.time() - start_time) * 1000
+            content = response.content or ""
+
+            if response.has_tool_calls:
+                self.logger.warning(
+                    "Simple tier response ignored tool calls",
+                    component="agent"
+                )
+
+            self._add_message(Message(MessageRole.USER, prompt_input))
+            self._add_message(Message(MessageRole.ASSISTANT, content))
+
+            return AgentResponse(
+                content=content,
+                total_duration_ms=duration_ms,
+                tools_used=[],
+                success=True,
+                metadata={
+                    "tier": self.config.tier,
+                    "fast_path": "simple",
+                    "model": self._llm_config.model if self._llm_config else None
+                }
+            )
+
+        except Exception as exc:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.error(f"Simple tier completion failed: {exc}", component="agent")
+            return AgentResponse(
+                content="I ran into an error answering that.",
+                success=False,
+                error=str(exc),
+                total_duration_ms=duration_ms,
+                metadata={
+                    "tier": self.config.tier,
+                    "fast_path": "simple",
+                    "model": self._llm_config.model if self._llm_config else None
+                }
+            )
+
     def stop(self):
-        self.stop=True
+        """Request the agent to stop execution at next checkpoint"""
+        self._stop_requested = True
+        self.logger.info("Agent stop requested", component="agent")
     
     def run(
         self,
@@ -535,15 +740,64 @@ class Agent:
         self._file_operations = []
         contract_checklist: Optional[Dict[str, str]] = None
 
-        # Build messages
-        system_prompt = self._build_system_prompt()
-        messages = [Message(MessageRole.SYSTEM, system_prompt)]
-        messages.extend(self._conversation)
-
         # Add context if provided
         full_input = user_input
         if context:
             full_input = f"{user_input}\n\nContext: {context}"
+
+        # ========== CONTEXT MANAGER WORKFLOW ==========
+        # 1. Build context for request
+        context_build = ContextBuild.from_request(
+            state=self.context_state,
+            request_id=self.logger.request_id or str(uuid.uuid4()),
+            user_request=full_input,
+            tier=self.config.tier,
+            tool_trace=self.tool_trace,
+            artifacts=self.artifacts,
+            recent_file_operations=list(self._file_operations),
+            working_dir=os.getcwd(),
+            token_estimator=self.token_estimator
+        )
+
+        # 2. Plan context (allocate budgets, decide caching)
+        total_budget = 180_000  # Claude's context window
+        context_plan = self.context_planner.plan(
+            build=context_build,
+            total_budget=total_budget,
+            cache_strategy=CacheStrategy.CONSERVATIVE
+        )
+
+        # 3. Serialize to API format
+        serialization_result = self.context_serializer.serialize(
+            plan=context_plan,
+            build=context_build,
+            provider=self._llm_config.provider if self._llm_config else "anthropic"
+        )
+
+        if not serialization_result.success:
+            self.logger.error(
+                f"Context serialization failed: {serialization_result.error}",
+                component="agent"
+            )
+            return AgentResponse(
+                content="Failed to prepare context for LLM",
+                success=False,
+                error=serialization_result.error
+            )
+
+        # 4. Log the full serialized request for debugging (THICK LOGGING)
+        self._log_full_llm_request(
+            serialization_result=serialization_result,
+            user_input=full_input,
+            tier=self.config.tier,
+            plan=context_plan
+        )
+
+        # Build legacy messages for compatibility with executor
+        # (Will be replaced with ContextManager in executor later)
+        system_prompt = self._build_system_prompt()
+        messages = [Message(MessageRole.SYSTEM, system_prompt)]
+        messages.extend(self._conversation)
         messages.append(Message(MessageRole.USER, full_input))
 
         # Get tool definitions
@@ -926,6 +1180,11 @@ class Agent:
         return self._current_state
 
     @property
+    def is_stop_requested(self) -> bool:
+        """Check if stop has been requested"""
+        return self._stop_requested
+
+    @property
     def conversation_history(self) -> List[Dict[str, str]]:
         """Get conversation history as list of dicts"""
         return [{"role": m.role.value, "content": m.content} for m in self._conversation]
@@ -1094,6 +1353,40 @@ class TieredAgent:
         """Public accessor for tier-specific Agent instances."""
         return self._get_agent(tier)
 
+    def prewarm_all_tiers(self) -> List[str]:
+        """Prewarm every tier's LLM adapter to keep connections warm."""
+        warmed: List[str] = []
+        warmed_keys = set()
+
+        for tier in self._resolve_tier_names():
+            agent = self._get_agent(tier)
+            if not agent._llm:
+                continue
+
+            provider = agent._llm.provider
+            model = agent._llm.config.model if agent._llm.config else "unknown"
+            key = f"{provider}:{model}"
+            prewarm_fn = getattr(agent._llm, "prewarm", None)
+            if callable(prewarm_fn):
+                try:
+                    if key in warmed_keys or prewarm_fn():
+                        warmed_keys.add(key)
+                        warmed.append(tier)
+                    else:
+                        self.logger.warning(
+                            f"Prewarm returned False for tier {tier}",
+                            component="agent"
+                        )
+                except Exception as exc:
+                    self.logger.error(
+                        f"Prewarm failed for tier {tier}: {exc}",
+                        component="agent"
+                    )
+            else:
+                warmed.append(tier)
+
+        return warmed
+
     def run(
         self,
         user_input: str,
@@ -1130,10 +1423,24 @@ class TieredAgent:
             component="agent"
         )
 
+        if tier == "simple":
+            self.logger.info("Using simple tier fast path", component="agent")
+            return self._run_simple_tier_fast_path(user_input, tier, context)
+
         agent = self._get_agent(tier)
 
         # Pass budget to agent so it can enforce constraints
         return agent.run(user_input, context, budget=budget, classification=classification)
+
+    def _run_simple_tier_fast_path(
+        self,
+        user_input: str,
+        tier: str,
+        context: Optional[str] = None
+    ) -> AgentResponse:
+        """Bypass the plan/execution pipeline for simple tier requests."""
+        agent = self._get_agent(tier)
+        return agent.run_simple_response(user_input, context)
 
     def set_tier(self, tier: str):
         """Set default tier"""
