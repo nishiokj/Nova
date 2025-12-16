@@ -39,17 +39,49 @@ trap _term SIGTERM SIGINT SIGHUP
 log_info "Voice Agent System - Container Initialization"
 log_info "=============================================="
 
-# Pre-flight check 1: Validate audio devices
-log_info "Checking audio device accessibility..."
-if ! python3 -c "import pyaudio; pa = pyaudio.PyAudio(); count = pa.get_device_count(); pa.terminate(); print(f'Found {count} audio device(s)'); exit(0 if count > 0 else 1)" 2>&1; then
-    log_error "No audio devices found!"
-    log_error "Ensure you passed through audio devices:"
-    log_error "  Linux:   --device /dev/snd:/dev/snd"
-    log_error "  macOS:   Audio passthrough not well supported - use native installation"
-    log_error "  Windows: Use WSL2 with PulseAudio configuration"
-    exit 1
+is_truthy() {
+    case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|y|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+skip_audio_check=0
+if is_truthy "${VOICE_AGENT_HEADLESS:-}"; then
+    skip_audio_check=1
 fi
-log_info "✓ Audio devices accessible"
+
+# Skip audio preflight for headless or other non-runtime commands.
+# Iterate arguments so we detect --headless even if VOICE_AGENT_HEADLESS is cleared later.
+for arg in "$@"; do
+    case "$arg" in
+        --help|--version|--init-config|--validate-config|--health-check|--list-devices)
+            skip_audio_check=1
+            ;;
+        --headless|--headless=*)
+            skip_audio_check=1
+            export VOICE_AGENT_HEADLESS=1
+            ;;
+    esac
+done
+
+# Pre-flight check 1: Validate audio devices (unless headless)
+if [ "$skip_audio_check" -eq 1 ]; then
+    log_warn "Skipping audio device preflight check (headless or non-audio command)"
+else
+    log_info "Checking audio device accessibility..."
+    if ! python3 -c "import pyaudio; pa = pyaudio.PyAudio(); count = pa.get_device_count(); pa.terminate(); print(f'Found {count} audio device(s)'); exit(0 if count > 0 else 1)" 2>&1; then
+        log_error "No audio devices found!"
+        log_error "Ensure you passed through audio devices:"
+        log_error "  Linux:   --device /dev/snd:/dev/snd"
+        log_error "  macOS:   Audio passthrough not well supported - use native installation"
+        log_error "  Windows: Use WSL2 with PulseAudio configuration"
+        log_error ""
+        log_error "If you want to run without audio input, set: VOICE_AGENT_HEADLESS=1"
+        exit 1
+    fi
+    log_info "✓ Audio devices accessible"
+fi
 
 # Pre-flight check 2: Validate API keys
 log_info "Checking API key configuration..."

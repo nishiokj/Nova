@@ -8,6 +8,7 @@ This module powers both the local `run_app.py` script and the packaged
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -40,7 +41,7 @@ def _get_version() -> str:
     """Get version from pyproject.toml."""
     try:
         from importlib.metadata import version
-        return version("voice-agent-system")
+        return version("rex")
     except Exception:
         return "0.1.0 (development)"
 
@@ -88,6 +89,11 @@ def _register_arguments(parser: argparse.ArgumentParser) -> None:
         help="Run health checks and exit (for Docker HEALTHCHECK)",
     )
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without audio device requirements (reads text from stdin if interactive)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -104,6 +110,7 @@ def _print_banner(config: AppConfig) -> None:
     print("Voice Agent System - Refactored Architecture")
     print("=" * 60)
     print(f"Runtime Mode: {config.runtime.mode.value}")
+    print(f"Headless: {getattr(config.runtime, 'headless', False)}")
     print(f"STT Engine: {config.stt.engine} ({config.stt.model_size})")
     print(f"Harness Config: {config.harness.config_path}")
     print(f"Default Tier: {config.harness.default_tier}")
@@ -193,6 +200,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Handle --health-check: Quick validation (for Docker HEALTHCHECK)
     if args.health_check:
+        if args.headless or (str(os.environ.get("VOICE_AGENT_HEADLESS", "")).strip().lower() in {"1", "true", "yes", "y", "on"}):
+            print("PASS: Headless mode enabled (skipping audio device check)")
+            return 0
         try:
             # Check 1: Audio devices
             import pyaudio
@@ -253,6 +263,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.rl:
         config.runtime.enable_rl_worker = True
+
+    if args.headless:
+        config.runtime.headless = True
 
     # Handle --validate-config: Validate and exit
     if args.validate_config:

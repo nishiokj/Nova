@@ -74,10 +74,10 @@ RUN mkdir -p /app/logs /app/.cache/whisper && \
 # Switch to non-root user for security
 USER voiceagent
 
-# Health check: Verify audio devices accessible
-# Returns 0 if at least one audio device found, 1 otherwise
+# Health check: Verify audio devices accessible (unless running headless)
+# Returns 0 if headless OR at least one audio device found, 1 otherwise.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import pyaudio; pa = pyaudio.PyAudio(); count = pa.get_device_count(); pa.terminate(); exit(0 if count > 0 else 1)" || exit 1
+    CMD python -c "import os; headless=os.getenv('VOICE_AGENT_HEADLESS','').strip().lower() in {'1','true','yes','y','on'}; import pyaudio; pa=pyaudio.PyAudio(); count=pa.get_device_count(); pa.terminate(); exit(0 if headless or count>0 else 1)" || exit 1
 
 # Use tini as init system for proper signal handling
 # This ensures SIGTERM/SIGINT are properly forwarded to the application

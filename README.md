@@ -49,6 +49,9 @@ source .venv/bin/activate
 # 3. Install package
 pip install -e .
 
+# 3a. Optional: add audio dependencies (PyAudio, TTS) if you plan to use a microphone
+pip install -e ".[audio]"
+
 # 4. Initialize configuration
 voice-agent --init-config
 # Edit ~/.config/voice-agent/.env and add API keys
@@ -56,6 +59,16 @@ voice-agent --init-config
 # 5. Run
 voice-agent
 ```
+
+### Distribution via PyPI
+
+```bash
+pip install rex
+# Optional: include audio dependencies for microphone + TTS hardware
+pip install rex[audio]
+```
+
+`rex` installs the core runtime without OS-dependent audio packages, so headless environments avoid PortAudio/TTS headaches until you opt in.
 
 See [docs/environment_setup.md](docs/environment_setup.md) for detailed platform instructions.
 
@@ -65,7 +78,7 @@ See [docs/environment_setup.md](docs/environment_setup.md) for detailed platform
 |--------|----------|------------|-------|
 | **Docker** | Linux production/dev | 5 min | Best audio support on Linux |
 | **Native** | macOS, Windows dev | 10 min | Direct hardware access |
-| **pip install** | Distribution | 2 min | Requires system deps pre-installed |
+| **pip install** | Distribution | 2 min | `pip install rex` installs the core runtime; add audio helpers with `pip install rex[audio]` when you need PyAudio/TTS |
 
 ## CLI Commands
 
@@ -243,6 +256,14 @@ docker run -it --rm \
   --env-file .env \
   voice-agent:latest
 
+# Run headless (no audio devices required; reads text from stdin if interactive)
+docker run -it --rm \
+  -e VOICE_AGENT_HEADLESS=1 \
+  -v $(pwd)/config:/config:ro \
+  -v $(pwd)/logs:/app/logs \
+  --env-file .env \
+  voice-agent:latest voice-agent --config /config/app_config.json --headless
+
 # Health check
 docker run --rm --device /dev/snd:/dev/snd voice-agent:latest voice-agent --health-check
 
@@ -269,6 +290,9 @@ sudo usermod -a -G audio $USER
 
 # Docker: ensure device passthrough
 docker run --device /dev/snd:/dev/snd ...
+
+# Or run headless (no audio input required)
+docker run -e VOICE_AGENT_HEADLESS=1 voice-agent:latest voice-agent --headless
 ```
 
 **API key errors:**

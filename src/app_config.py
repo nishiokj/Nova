@@ -91,6 +91,9 @@ class HarnessReferenceConfig:
 class RuntimeConfig:
     """Runtime-specific configuration"""
     mode: RuntimeMode = RuntimeMode.MULTI_PROCESS
+    # Headless mode: run without microphone/audio hardware requirements.
+    # Intended for Docker/macOS/CI where audio passthrough is unavailable.
+    headless: bool = False
     max_agent_pending: int = 1
     health_check_interval_s: float = 2.0
     agent_timeout_s: float = 30.0
@@ -191,6 +194,7 @@ def load_app_config(path: Optional[str] = None) -> AppConfig:
     - AUDIO_DEVICE_INDEX: Audio input device index
     - AUDIO_SAMPLE_RATE: Audio sample rate in Hz
     - HARNESS_CONFIG_PATH: Path to harness configuration file
+    - VOICE_AGENT_HEADLESS: Enable headless mode (true/1)
 
     Args:
         path: Path to config file (defaults to config/app_config.json)
@@ -237,6 +241,10 @@ def load_app_config(path: Optional[str] = None) -> AppConfig:
     # Harness
     if os.getenv("HARNESS_CONFIG_PATH"):
         config.harness.config_path = os.getenv("HARNESS_CONFIG_PATH")
+
+    # Runtime
+    if os.getenv("VOICE_AGENT_HEADLESS"):
+        config.runtime.headless = os.getenv("VOICE_AGENT_HEADLESS", "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
     return config
 

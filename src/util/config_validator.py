@@ -92,6 +92,14 @@ class ConfigValidator:
         """Validate audio configuration."""
         audio = self.config.audio
 
+        # Headless mode: allow running without audio devices (e.g., Docker on macOS/CI).
+        if getattr(self.config.runtime, "headless", False):
+            self.add_info(
+                "runtime.headless",
+                "Headless mode enabled: skipping audio device validation."
+            )
+            return
+
         # Sample rate validation
         valid_sample_rates = [8000, 16000, 32000, 48000]
         if audio.sample_rate not in valid_sample_rates:

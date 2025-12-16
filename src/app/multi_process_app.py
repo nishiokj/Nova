@@ -13,6 +13,7 @@ import time
 import threading
 from queue import Queue, Empty
 from typing import Optional
+import sys
 
 from app_config import AppConfig
 from communication import (
@@ -96,6 +97,7 @@ class MultiProcessVoiceApp(BaseVoiceApp):
         self.audio_capture_thread: Optional[threading.Thread] = None
         self.audio_process_thread: Optional[threading.Thread] = None
         self.response_monitor_thread: Optional[threading.Thread] = None
+        self.headless_input_thread: Optional[threading.Thread] = None
 
         # Request counter
         self._request_count = 0
@@ -276,10 +278,93 @@ class MultiProcessVoiceApp(BaseVoiceApp):
 
         self.logger.info("Response monitor stopped")
 
+    def _headless_stdin_loop(self):
+        """Read text lines from stdin and publish TranscriptionCompleteEvent."""
+        self.logger.info("Headless input loop started (stdin)")
+
+        try:
+            if sys.stdin is None or sys.stdin.closed:
+                self.logger.info("No stdin available; headless input disabled")
+                return
+
+            for line in sys.stdin:
+                if not self.running:
+                    break
+
+                text = (line or "").strip()
+                if not text:
+                    continue
+
+                if text in {"/quit", "/exit"}:
+                    self.logger.info("Received headless exit command")
+                    self.running = False
+                    self.event_bus.shutdown()
+                    self.process_manager.stop()
+                    break
+
+                self._request_count += 1
+                request_id = f"headless_{self._request_count}_{self._generate_request_id()[:8]}"
+                self.logger.info(f"[{request_id}] Headless input: {text}")
+
+                self.event_bus.publish(TranscriptionCompleteEvent(
+                    request_id=request_id,
+                    text=text,
+                    confidence=None,
+                    duration_ms=0.0
+                ))
+        except Exception as e:
+            self.logger.error(f"Headless input loop error: {e}", exc_info=True)
+        finally:
+            self.logger.info("Headless input loop stopped")
+
     def start(self) -> bool:
         """Start the multi-process application"""
         self.logger.info("Starting MultiProcessVoiceApp (MULTIPROCESS)...")
         self.running = True
+
+        # Headless mode: skip microphone/STT and accept text via stdin.
+        if getattr(self.config.runtime, "headless", False):
+            from communication.events import EventType
+            from workers.console_tts_worker import ConsoleTTSWorker
+            from workers.service_rep_worker import ServiceRepWorker
+            from util.config import ServiceRepConfig
+
+            self.process_manager.register_worker(
+                worker_id="tts",
+                worker_class=ConsoleTTSWorker,
+                subscribe_to=[EventType.TTS_REQUESTED],
+                worker_kwargs={}
+            )
+
+            service_rep_config = ServiceRepConfig(
+                enabled=True,
+                llm_config=None
+            )
+            self.process_manager.register_worker(
+                worker_id="service_rep",
+                worker_class=ServiceRepWorker,
+                subscribe_to=[EventType.TRANSCRIPTION_COMPLETE],
+                worker_kwargs={
+                    "event_bus": self.event_bus,
+                    "service_rep_config": service_rep_config,
+                    "harness_config_path": self.config.harness.config_path
+                }
+            )
+
+            self.logger.info("Starting worker processes (headless)...")
+            self.process_manager.start()
+            time.sleep(1.0)
+
+            self.headless_input_thread = threading.Thread(
+                target=self._headless_stdin_loop,
+                daemon=True,
+                name="HeadlessInput"
+            )
+            self.headless_input_thread.start()
+
+            self.logger.info("MultiProcessVoiceApp started in headless mode")
+            self.logger.info("Type a request and press Enter (use /exit to quit)")
+            return True
 
         # Find audio device
         device_index = self.device_manager.wait_for_input_device()
@@ -394,5 +479,9 @@ class MultiProcessVoiceApp(BaseVoiceApp):
 
         if self.response_monitor_thread and self.response_monitor_thread.is_alive():
             self.response_monitor_thread.join(timeout=2.0)
+
+        if self.headless_input_thread and self.headless_input_thread.is_alive():
+            if threading.current_thread() is not self.headless_input_thread:
+                self.headless_input_thread.join(timeout=2.0)
 
         self.logger.info("MultiProcessVoiceApp stopped")
