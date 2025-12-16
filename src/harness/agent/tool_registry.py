@@ -37,6 +37,14 @@ class ToolStatus(Enum):
 
 
 @dataclass
+class CachedToolResult:
+    """Cached result of a tool execution"""
+    result: 'ToolResult'
+    timestamp: float
+    hit_count: int = 0
+
+
+@dataclass
 class ToolResult:
     """Result of a tool execution"""
     status: ToolStatus
@@ -138,6 +146,22 @@ class ToolRegistry:
         self._thread_local = threading.local()
         self._tool_circuit_state: Dict[str, Any] = {}
 
+        # ========== TOOL RESULT CACHING ==========
+        # Cache for read-only, deterministic tool results
+        self._result_cache: Dict[str, CachedToolResult] = {}
+        self._cache_lock = threading.Lock()
+        self._cache_ttl: float = 60.0  # seconds - results expire after this
+        self._cache_max_size: int = 100  # max cached entries
+        # Only cache read-only tools with deterministic outputs
+        self._cacheable_tools: set = {
+            "file_read",           # File contents (invalidate on write)
+            "search_filesystem",   # Search results
+            "list_files",          # Directory listings
+            "get_working_directory",  # CWD (rarely changes)
+        }
+        # Track file writes to invalidate relevant caches
+        self._cache_invalidation_paths: Dict[str, float] = {}
+
         # Register built-in tools
         self._register_builtin_tools()
 
@@ -212,6 +236,101 @@ class ToolRegistry:
         """Get tool definitions for LLM"""
         return [t.to_definition() for t in self.list_tools(enabled_only)]
 
+    # ========== CACHE HELPER METHODS ==========
+
+    def _generate_cache_key(self, tool_name: str, kwargs: Dict[str, Any]) -> str:
+        """Generate a deterministic cache key for a tool call."""
+        # Sort kwargs for consistent ordering
+        sorted_items = sorted(kwargs.items(), key=lambda x: x[0])
+        # Create hashable representation
+        key_parts = [tool_name]
+        for k, v in sorted_items:
+            key_parts.append(f"{k}={v}")
+        return "|".join(key_parts)
+
+    def _get_cached_result(self, cache_key: str) -> Optional[ToolResult]:
+        """
+        Get cached result if valid (not expired).
+        Returns None if cache miss or expired.
+        """
+        with self._cache_lock:
+            cached = self._result_cache.get(cache_key)
+            if cached is None:
+                return None
+
+            # Check TTL
+            age = time.time() - cached.timestamp
+            if age > self._cache_ttl:
+                # Expired - remove from cache
+                del self._result_cache[cache_key]
+                return None
+
+            # Cache hit - increment counter
+            cached.hit_count += 1
+            return cached.result
+
+    def _store_cached_result(self, cache_key: str, result: ToolResult):
+        """Store result in cache, evicting oldest if at capacity."""
+        with self._cache_lock:
+            # Evict oldest entries if at capacity
+            if len(self._result_cache) >= self._cache_max_size:
+                # Find oldest entry
+                oldest_key = min(
+                    self._result_cache.keys(),
+                    key=lambda k: self._result_cache[k].timestamp
+                )
+                del self._result_cache[oldest_key]
+
+            self._result_cache[cache_key] = CachedToolResult(
+                result=result,
+                timestamp=time.time(),
+                hit_count=0
+            )
+
+    def _invalidate_cache_for_path(self, path: str):
+        """Invalidate cache entries that might be affected by a file write."""
+        resolved = os.path.abspath(path) if path else ""
+        with self._cache_lock:
+            keys_to_remove = []
+            for key in self._result_cache:
+                # Invalidate file_read for this exact path
+                if f"file_read|path={resolved}" in key:
+                    keys_to_remove.append(key)
+                # Invalidate list_files for parent directory
+                elif "list_files|" in key and resolved.startswith(key.split("path=")[-1].split("|")[0] if "path=" in key else ""):
+                    keys_to_remove.append(key)
+                # Invalidate search_filesystem that might include this file
+                elif "search_filesystem|" in key:
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self._result_cache[key]
+
+            if keys_to_remove:
+                self.logger.debug(
+                    f"Invalidated {len(keys_to_remove)} cache entries for path: {path}",
+                    component="tools.cache"
+                )
+
+    def clear_cache(self):
+        """Clear all cached tool results."""
+        with self._cache_lock:
+            count = len(self._result_cache)
+            self._result_cache.clear()
+            self.logger.debug(f"Cleared {count} cached tool results", component="tools.cache")
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics for monitoring."""
+        with self._cache_lock:
+            total_hits = sum(c.hit_count for c in self._result_cache.values())
+            return {
+                "size": len(self._result_cache),
+                "max_size": self._cache_max_size,
+                "ttl_seconds": self._cache_ttl,
+                "total_hits": total_hits,
+                "cacheable_tools": list(self._cacheable_tools)
+            }
+
     def _tool_resilience_config(self) -> ResilienceConfig:
         """Resilience settings for tool calls."""
         return ResilienceConfig(
@@ -234,7 +353,7 @@ class ToolRegistry:
         result_validator=lambda result: getattr(result, "is_success", True),
     )
     def execute(self, name: str, **kwargs) -> ToolResult:
-        """Execute a tool by name"""
+        """Execute a tool by name with optional caching."""
         tool = self.get(name)
         if not tool:
             return ToolResult(
@@ -243,9 +362,66 @@ class ToolRegistry:
                 error=f"Tool '{name}' not found"
             )
 
-        # Note: Logging is handled by agent.py to avoid duplicates
+        # ========== CACHE CHECK (read-only tools only) ==========
+        is_cacheable = name in self._cacheable_tools and tool.read_only
+        cache_key = None
+
+        if is_cacheable:
+            cache_key = self._generate_cache_key(name, kwargs)
+            cached_result = self._get_cached_result(cache_key)
+            if cached_result is not None:
+                # Cache hit - add metadata and return
+                cached_result.metadata["cache_hit"] = True
+                self.logger.debug(
+                    f"Cache hit for {name}",
+                    component="tools.cache",
+                    data={"cache_key": cache_key[:50]}
+                )
+                return cached_result
+
+        # ========== EXECUTE TOOL ==========
         result = tool.execute(**kwargs)
+
+        # ========== CACHE STORAGE (successful read-only results) ==========
+        if is_cacheable and cache_key and result.is_success:
+            self._store_cached_result(cache_key, result)
+            result.metadata["cached"] = True
+
+        # ========== CACHE INVALIDATION (write operations) ==========
+        if result.is_success:
+            if name == "file_write":
+                path = kwargs.get("path", "")
+                if path:
+                    self._invalidate_cache_for_path(path)
+            elif name in ("bash_execute", "python_execute"):
+                # These can modify files in unknown ways - clear filesystem caches
+                # Only clear if the command likely modified files
+                command = kwargs.get("command", "") or kwargs.get("code", "")
+                write_indicators = [
+                    ">", ">>",  # redirects
+                    "touch ", "mkdir ", "rm ", "mv ", "cp ",  # file ops
+                    "echo ", "printf ",  # with redirects
+                    "open(", "write(", "save(",  # python file ops
+                ]
+                if any(ind in command for ind in write_indicators):
+                    self._invalidate_filesystem_caches()
+
         return result
+
+    def _invalidate_filesystem_caches(self):
+        """Clear all filesystem-related caches (file_read, list_files, search_filesystem)."""
+        with self._cache_lock:
+            keys_to_remove = [
+                key for key in self._result_cache
+                if any(tool in key for tool in ("file_read", "list_files", "search_filesystem"))
+            ]
+            for key in keys_to_remove:
+                del self._result_cache[key]
+            if keys_to_remove:
+                self.logger.debug(
+                    f"Invalidated {len(keys_to_remove)} filesystem cache entries",
+                    component="tools.cache"
+                )
 
     def enable(self, name: str) -> bool:
         """Enable a tool"""
@@ -479,7 +655,10 @@ class ToolRegistry:
             parameters={},
             required_params=[],
             executor=self._get_working_directory,
-            timeout=5
+            timeout=5,
+            read_only=True,
+            parallelizable=True,
+            cost_hint="low"
         ))
 
         # List Files Tool
@@ -510,7 +689,10 @@ class ToolRegistry:
             },
             required_params=[],
             executor=self._list_files,
-            timeout=10
+            timeout=10,
+            read_only=True,
+            parallelizable=True,
+            cost_hint="low"
         ))
 
     # Tool Executors

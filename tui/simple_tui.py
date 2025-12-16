@@ -30,6 +30,8 @@ from communication.events import (
     AgentResponseCompleteEvent,
     TTSRequestedEvent,
 )
+from tui.autocomplete import FileCache
+from tui.input_handler import RawInputHandler
 
 
 # Terminal colors and formatting
@@ -119,10 +121,20 @@ def draw_box(text: str, width: Optional[int] = None, title: str = "") -> str:
     else:
         lines.append(f"{top_left}{horizontal * (width - 2)}{top_right}")
 
+    # Wrap long lines instead of truncating them
+    import textwrap
+    max_content_width = width - 4  # 2 for borders, 2 for padding
     for raw_line in text.split("\n"):
-        content = raw_line[: width - 4]
-        padding = max(0, width - 4 - len(content))
-        lines.append(f"{vertical} {content}{' ' * padding} {vertical}")
+        if len(raw_line) <= max_content_width:
+            # Short line - just add padding
+            padding = max(0, max_content_width - len(raw_line))
+            lines.append(f"{vertical} {raw_line}{' ' * padding} {vertical}")
+        else:
+            # Long line - wrap it
+            wrapped = textwrap.wrap(raw_line, width=max_content_width, break_long_words=False, break_on_hyphens=False)
+            for wrapped_line in wrapped:
+                padding = max(0, max_content_width - len(wrapped_line))
+                lines.append(f"{vertical} {wrapped_line}{' ' * padding} {vertical}")
 
     lines.append(f"{bottom_left}{horizontal * (width - 2)}{bottom_right}")
     return "\n".join(lines)
@@ -162,6 +174,10 @@ class SimpleTUI:
 
         # Configure readline for better input editing
         self._setup_readline()
+
+        # File autocomplete
+        self.file_cache = FileCache(PROJECT_ROOT)
+        self.input_handler = RawInputHandler(self.file_cache, self)
 
     # ------------------------------------------------------------------ UI utils
     def _setup_readline(self):
@@ -428,7 +444,8 @@ class SimpleTUI:
 
     def _handle_agent_response(self, event: AgentResponseCompleteEvent):
         """Store agent response for rendering and signal completion."""
-        response_lines = event.spoken_response or ""
+        # Use full content for TUI display (spoken_response is truncated for TTS)
+        response_lines = event.content or event.spoken_response or ""
         if not response_lines.strip():
             response_lines = "[No response]"
 
@@ -666,10 +683,10 @@ class SimpleTUI:
                     logger.removeHandler(handler)
 
     def _get_input(self) -> str:
-        """Render the UI and wait for user input."""
+        """Render the UI and wait for user input with file autocomplete."""
         self._render_screen("Enter message", interactive=True)
         try:
-            text = input().strip()
+            text = self.input_handler.read_input_with_autocomplete()
         except EOFError:
             self.running = False
             text = ""
@@ -678,7 +695,7 @@ class SimpleTUI:
             text = ""
         finally:
             self._finish_input_box()
-        return text
+        return text.strip()
 
     def _send_message(self, text: str):
         """Send text message to agent harness."""
@@ -707,11 +724,24 @@ class SimpleTUI:
                 self._response_event.clear()
                 break
 
+    def _refresh_file_cache_loop(self):
+        """Background thread to refresh file cache periodically."""
+        while self.running:
+            time.sleep(10)  # Refresh every 10 seconds
+            if self.running:
+                self.file_cache.refresh_background()
+
     # ---------------------------------------------------------------- Main loop
     def run(self):
         """Main TUI loop."""
         self._suppress_console_logging()
         self._add_message("system", "Type /help for commands or start chatting.")
+
+        # Build file cache for autocomplete
+        self._add_message("system", "Indexing files for autocomplete...")
+        self._render_screen("Starting...", interactive=False, placeholder="Indexing...")
+        self.file_cache.build_initial()
+
         self._render_screen("Starting...", interactive=False, placeholder="Loading...")
 
         original_stdout = sys.stdout.fileno()
@@ -741,6 +771,12 @@ class SimpleTUI:
             target=self._monitor_events, daemon=True, name="EventMonitor"
         )
         monitor_thread.start()
+
+        # Start file cache refresh thread
+        refresh_thread = threading.Thread(
+            target=self._refresh_file_cache_loop, daemon=True, name="FileCacheRefresh"
+        )
+        refresh_thread.start()
 
         try:
             while self.running:

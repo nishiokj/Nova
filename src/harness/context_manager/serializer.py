@@ -15,11 +15,32 @@ This is where the plan becomes reality.
 """
 
 import time
+import json
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 from .plan import ContextPlan, PlanExecutionResult
 from .build import ContextBuild
 from .sections import ContextSection
+
+
+def _load_prompts() -> Dict[str, Any]:
+    """Load prompts from config file"""
+    # Path: src/harness/context_manager/serializer.py -> parent x4 -> project root
+    config_path = Path(__file__).parent.parent.parent.parent / "config" / "prompts_config.json"
+    try:
+        with open(config_path, 'r') as f:
+            data = json.load(f)
+            return data
+    except Exception as e:
+        # Fallback to minimal defaults if config fails to load
+        return {
+            "agent_tier_prompts": {
+                "simple": "You are a helpful AI assistant.",
+                "standard": "You are a helpful AI assistant.",
+                "advanced": "You are a helpful AI assistant."
+            }
+        }
 
 
 class ContextSerializer:
@@ -31,11 +52,22 @@ class ContextSerializer:
     - OpenAI Chat Completions API
     """
 
+    def __init__(self, prompts: Optional[Dict[str, Any]] = None):
+        """
+        Initialize serializer with prompts from config.
+
+        Args:
+            prompts: Optional prompts dict. If None, loads from config/prompts_config.json
+        """
+        self.prompts = prompts if prompts is not None else _load_prompts()
+        self.tier_prompts = self.prompts.get("agent_tier_prompts", {})
+
     def serialize(
         self,
         plan: ContextPlan,
         build: ContextBuild,
-        provider: str = "anthropic"
+        provider: str = "anthropic",
+        use_responses_api: bool = False
     ) -> PlanExecutionResult:
         """
         Execute plan and serialize to API format.
@@ -44,6 +76,7 @@ class ContextSerializer:
             plan: Context plan to execute
             build: Context build with content
             provider: API provider ('anthropic' or 'openai')
+            use_responses_api: If True and provider is 'openai', use Responses API format
 
         Returns:
             PlanExecutionResult with serialized messages
@@ -58,10 +91,19 @@ class ContextSerializer:
                     "messages": messages
                 }
             elif provider.lower() == "openai":
-                messages = self.to_openai(plan, build)
-                serialized = {
-                    "messages": messages
-                }
+                if use_responses_api:
+                    # New Responses API format
+                    instructions, input_context = self.to_openai_responses(plan, build)
+                    serialized = {
+                        "instructions": instructions,
+                        "input": input_context
+                    }
+                else:
+                    # Legacy Chat Completions format
+                    messages = self.to_openai(plan, build)
+                    serialized = {
+                        "messages": messages
+                    }
             else:
                 raise ValueError(f"Unsupported provider: {provider}")
 
@@ -215,6 +257,60 @@ class ContextSerializer:
 
         return messages
 
+    def to_openai_responses(
+        self,
+        plan: ContextPlan,
+        build: ContextBuild
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """
+        Serialize to OpenAI Responses API format.
+
+        Separates instructions (system-level context) from input (user context).
+
+        Args:
+            plan: Context plan
+            build: Context build
+
+        Returns:
+            (instructions, input_context)
+        """
+        instructions_parts = []
+
+        # Build instructions from all system sections
+        section_order = [
+            ContextSection.SYSTEM_CORE,
+            ContextSection.TOOL_MANIFEST,
+            ContextSection.EXECUTION_CONTRACT,
+            ContextSection.USER_RULES,
+            ContextSection.WORKING_MEMORY,
+            ContextSection.TOOL_TRACE_SUMMARY,
+            ContextSection.ARTIFACTS,
+            ContextSection.FILESYSTEM_CONTEXT,
+        ]
+
+        for section in section_order:
+            sp = plan.get_section_plan(section)
+            if not sp or not sp.included:
+                continue
+
+            content_text = self._render_section(section, build)
+            if content_text:
+                instructions_parts.append(content_text)
+
+        instructions = "\n\n".join(instructions_parts)
+
+        # Build input context array
+        input_context = []
+
+        user_request_plan = plan.get_section_plan(ContextSection.USER_REQUEST)
+        if user_request_plan and user_request_plan.included:
+            input_context.append({
+                "role": "user",
+                "content": build.user_request
+            })
+
+        return instructions, input_context
+
     def _render_section(self, section: ContextSection, build: ContextBuild) -> str:
         """
         Render section content to text.
@@ -227,7 +323,7 @@ class ContextSerializer:
             Rendered text
         """
         if section == ContextSection.SYSTEM_CORE:
-            return self._render_system_core()
+            return self._render_system_core(build)
 
         elif section == ContextSection.TOOL_MANIFEST:
             return self._render_tool_manifest(build)
@@ -255,27 +351,23 @@ class ContextSerializer:
 
         return ""
 
-    def _render_system_core(self) -> str:
-        """Render system core section."""
-        return """# System Core
+    def _render_system_core(self, build: ContextBuild) -> str:
+        """
+        Render system core section from config.
 
-You are a helpful AI assistant designed to help users with their tasks.
+        Uses tier-specific prompt from config/prompts_config.json.
 
-## Principles
-- Be helpful, harmless, and honest
-- Provide clear, accurate information
-- Ask clarifying questions when needed
+        Args:
+            build: Context build with tier information
 
-## Formatting
-- Use markdown for structure
-- Be concise but complete
-- Code blocks for code examples
+        Returns:
+            System core prompt for the specified tier
+        """
+        tier = build.tier
+        tier_prompt = self.tier_prompts.get(tier, self.tier_prompts.get("standard", ""))
 
-## Safety
-- Refuse harmful or unethical requests
-- Protect user privacy
-- Acknowledge limitations
-"""
+        # Note: Tool placeholder {tools} will be replaced by actual tools in the API call
+        return tier_prompt
 
     def _render_tool_manifest(self, build: ContextBuild) -> str:
         """Render tool manifest section."""

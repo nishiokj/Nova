@@ -20,9 +20,9 @@ DEFAULT_TIER_TOOL_LIMITS = {
 }
 
 DEFAULT_TIER_MAX_TOKENS = {
-    "simple": 1500,
-    "standard": 4000,
-    "advanced": 8000
+    "simple": 4096,
+    "standard": 16000,
+    "advanced": 32000
 }
 
 

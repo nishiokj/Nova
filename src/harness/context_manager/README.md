@@ -287,7 +287,7 @@ context_text = fs_context.build(
 # Includes:
 # 1. auth.py (explicit mention)
 # 2. test_auth.py (recent operation)
-# 3. README.md (hot file)
+# 3. package.json (hot file)
 # 4. src/main.py (language anchor)
 # 5. File tree (if budget allows)
 ```

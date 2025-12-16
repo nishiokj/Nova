@@ -23,8 +23,8 @@
       "advanced": 25
     },
     "tier_max_tokens": {
-      "simple": 1500,
-      "standard": 4000,
+      "simple": 4098,
+      "standard": 16000,
       "advanced": 32000
     }
   },

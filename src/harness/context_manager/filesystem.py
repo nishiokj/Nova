@@ -7,7 +7,7 @@ heuristics - no embeddings, no "similarity magic", just clear logic.
 Injection priority (deterministic):
 1. Explicit paths in request (highest priority)
 2. Recent file operations (from tool trace)
-3. Repository "hot files" (README, package.json, etc.)
+3. Repository "hot files" (pyproject.toml, package.json, etc.)
 4. Language-specific anchors (main.py, index.js, etc.)
 5. Compact file tree (always include if budget allows)
 
@@ -72,20 +72,25 @@ class FilesystemContext:
 
     # Repository anchor files (in priority order)
     HOT_FILES = [
-        "README.md",
-        "README",
         "package.json",
-        "pyproject.toml",
-        "requirements.txt",
         "Cargo.toml",
         "go.mod",
         "pom.xml",
         "Makefile",
         "setup.py",
-        ".env.example",
         "docker-compose.yml",
         "Dockerfile"
     ]
+
+    # Files we should not auto-inject unless explicitly requested.
+    # (They may be large/noisy or frequently irrelevant.)
+    AUTO_EXCLUDE_BASENAMES = {
+        "README.md",
+        "README",
+        "requirements.txt",
+        ".env.example",
+        "pyproject.toml",
+    }
 
     # Language-specific entry points
     LANGUAGE_ANCHORS = {
@@ -120,7 +125,7 @@ class FilesystemContext:
         Priority order:
         1. Explicit paths in request
         2. Recent file operations
-        3. Hot files (README, etc.)
+        3. Hot files (pyproject.toml, package.json, etc.)
         4. Language anchors (main.py, etc.)
         5. File tree
 
@@ -159,6 +164,8 @@ class FilesystemContext:
         recent_paths = self._extract_recent_paths(recent_operations, limit=5)
         for path in recent_paths:
             if path in included_paths:
+                continue
+            if os.path.basename(path) in self.AUTO_EXCLUDE_BASENAMES:
                 continue
             if budget_remaining < 500:
                 break
@@ -221,12 +228,12 @@ class FilesystemContext:
         # 5. Compact file tree (always include if budget allows)
         tree_text = ""
         if budget_remaining > 1000:
-            tree = self._get_file_tree(max_depth=2)
+            tree = self._get_file_tree(max_depth=1, max_entries_per_dir=20, max_total_lines=120)
             tree_text = f"## File Tree\n\n```\n{tree}\n```\n\n"
             tree_tokens = self._estimate_tokens(tree_text)
             if tree_tokens > budget_remaining:
                 # Try shallower tree
-                tree = self._get_file_tree(max_depth=1)
+                tree = self._get_file_tree(max_depth=0, max_entries_per_dir=30, max_total_lines=80)
                 tree_text = f"## File Tree\n\n```\n{tree}\n```\n\n"
 
         # Assemble final context
@@ -257,7 +264,7 @@ class FilesystemContext:
         matches = re.findall(pattern, request)
 
         # Validate that paths look reasonable
-        valid_paths = []
+        valid_paths: List[str] = []
         for match in matches:
             # Must have an extension
             if '.' not in os.path.basename(match):
@@ -267,6 +274,15 @@ class FilesystemContext:
             full_path = os.path.join(self.working_dir, match)
             if os.path.isfile(full_path):
                 valid_paths.append(match)
+
+        # Also allow explicit mentions of common root files without extensions.
+        # These are excluded from auto-injection, but should be included when asked for.
+        for candidate in ("README.md", "README", "requirements.txt", ".env.example"):
+            if candidate.lower() not in request.lower():
+                continue
+            full_path = os.path.join(self.working_dir, candidate)
+            if os.path.isfile(full_path) and candidate not in valid_paths:
+                valid_paths.append(candidate)
 
         return valid_paths
 
@@ -396,20 +412,58 @@ class FilesystemContext:
             # Can't read file, skip it
             return None
 
-    def _get_file_tree(self, max_depth: int = 2) -> str:
+    def _get_file_tree(
+        self,
+        max_depth: int = 1,
+        max_entries_per_dir: int = 20,
+        max_total_lines: int = 120,
+    ) -> str:
         """
         Generate compact file tree.
 
         Args:
             max_depth: Maximum directory depth
+            max_entries_per_dir: Maximum entries to show per directory
+            max_total_lines: Maximum total lines in tree output
 
         Returns:
             Tree string
         """
         lines = []
+        truncated = False
+
+        # Root-level files to show (avoid dumping every top-level file).
+        root_key_files = {
+            "package.json",
+            "Cargo.toml",
+            "go.mod",
+            "pom.xml",
+            "Makefile",
+            "setup.py",
+            "docker-compose.yml",
+            "Dockerfile",
+        }
+        ignored_names = {
+            "node_modules",
+            "__pycache__",
+            "venv",
+            ".venv",
+            "dist",
+            "build",
+            "site-packages",
+            "coverage",
+            "htmlcov",
+            "logs",
+            "tmp",
+            "temp",
+        }
 
         def walk_dir(dir_path: str, prefix: str = "", depth: int = 0):
+            nonlocal truncated
             if depth > max_depth:
+                return
+            if truncated or len(lines) >= max_total_lines:
+                truncated = True
                 return
 
             try:
@@ -418,26 +472,53 @@ class FilesystemContext:
                 return
 
             # Filter out common ignore patterns
-            entries = [
-                e for e in entries
-                if not e.startswith('.') and
-                e not in {'node_modules', '__pycache__', 'venv', '.venv', 'dist', 'build'}
-            ]
+            filtered: List[str] = []
+            for entry in entries:
+                if entry.startswith("."):
+                    continue
+                if entry in ignored_names:
+                    continue
+
+                full_path = os.path.join(dir_path, entry)
+                if os.path.isdir(full_path):
+                    filtered.append(entry)
+                    continue
+
+                # Only show a small set of root-level files; omit files inside dirs
+                if depth == 0 and entry in root_key_files:
+                    filtered.append(entry)
+
+            entries = filtered
+
+            if len(entries) > max_entries_per_dir:
+                shown = entries[:max_entries_per_dir]
+                remaining = len(entries) - max_entries_per_dir
+                entries = shown + [f"... ({remaining} more entries)"]
 
             for i, entry in enumerate(entries):
-                full_path = os.path.join(dir_path, entry)
                 is_last = i == len(entries) - 1
                 connector = "└── " if is_last else "├── "
 
+                if entry.startswith("... (") and entry.endswith(" more entries)"):
+                    lines.append(f"{prefix}{connector}{entry}")
+                    continue
+
+                full_path = os.path.join(dir_path, entry)
                 if os.path.isdir(full_path):
                     lines.append(f"{prefix}{connector}{entry}/")
                     extension = "    " if is_last else "│   "
                     walk_dir(full_path, prefix + extension, depth + 1)
                 else:
                     lines.append(f"{prefix}{connector}{entry}")
+                if truncated or len(lines) >= max_total_lines:
+                    truncated = True
+                    return
 
         lines.append(os.path.basename(self.working_dir) + "/")
         walk_dir(self.working_dir, "", 0)
+
+        if truncated:
+            lines.append("... (tree truncated)")
 
         return "\n".join(lines)
 

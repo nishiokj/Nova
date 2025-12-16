@@ -16,6 +16,7 @@ import threading
 from .config import LLMConfig
 from .logger import StructuredLogger
 from .resilience import ResilienceConfig, resilient_call
+from .perf_trace import get_tracer
 
 
 class MessageRole(Enum):
@@ -79,6 +80,19 @@ class ToolDefinition:
             "name": self.name,
             "description": self.description,
             "input_schema": {
+                "type": "object",
+                "properties": self.parameters,
+                "required": self.required
+            }
+        }
+
+    def to_responses_format(self) -> Dict[str, Any]:
+        """Convert to OpenAI Responses API format (internally-tagged)"""
+        return {
+            "type": "function",
+            "name": self.name,
+            "description": self.description,
+            "parameters": {
                 "type": "object",
                 "properties": self.parameters,
                 "required": self.required
@@ -177,6 +191,28 @@ class LLMAdapter(ABC):
         """
         Synchronous completion.
         Returns full response after completion.
+        """
+        pass
+
+    @abstractmethod
+    def respond(
+        self,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        Synchronous response using Responses API format.
+
+        Args:
+            input: User input (string or context array)
+            instructions: System instructions (separated from input)
+            tools: Tool definitions (internally-tagged format)
+            **kwargs: Additional API parameters
+
+        Returns:
+            LLMResponse with output
         """
         pass
 
@@ -320,6 +356,115 @@ class OpenAIAdapter(LLMAdapter):
         model = (self.config.model or "").lower()
         return model.startswith(("gpt-5", "o1", "o3"))
 
+    def _normalize_responses_input(
+        self,
+        input: Union[str, List[Dict[str, Any]]]
+    ) -> Union[str, List[Dict[str, Any]]]:
+        """
+        Normalize "input" to the Responses API's message content-block shape when possible.
+
+        - If input is a plain string, keep it as-is.
+        - If input is a list of message dicts with string "content", convert to:
+            {"role": "...", "content": [{"type": "input_text", "text": "..."}]}
+        - Leave non-message items (e.g. function_call_output) untouched.
+        """
+        if not isinstance(input, list):
+            return input
+
+        normalized: List[Dict[str, Any]] = []
+        for item in input:
+            if not isinstance(item, dict):
+                # Unknown structure; don't risk mutating it.
+                return input
+
+            if "role" not in item:
+                normalized.append(item)
+                continue
+
+            content = item.get("content", "")
+            if isinstance(content, str):
+                normalized.append({**item, "content": [{"type": "input_text", "text": content}]})
+            else:
+                # Already content blocks (or something else) - pass through.
+                normalized.append(item)
+
+        return normalized
+
+    def _parse_responses_output_text(self, response: Any) -> str:
+        """Best-effort extraction of assistant-visible text from a Responses API response."""
+        output_text = getattr(response, "output_text", None)
+        if isinstance(output_text, str) and output_text:
+            return output_text
+
+        output = getattr(response, "output", None)
+        if not isinstance(output, list):
+            return output_text or ""
+
+        parts: List[str] = []
+        for item in output:
+            item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+            if item_type != "message":
+                continue
+
+            content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+            if not isinstance(content, list):
+                continue
+
+            for block in content:
+                block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+                if block_type != "output_text":
+                    continue
+                text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+                if isinstance(text, str) and text:
+                    parts.append(text)
+
+        return "".join(parts) if parts else (output_text or "")
+
+    def _parse_responses_tool_calls(self, response: Any) -> List[ToolCall]:
+        """Extract function tool calls from a Responses API response."""
+        output = getattr(response, "output", None)
+        if not isinstance(output, list):
+            return []
+
+        tool_calls: List[ToolCall] = []
+        for item in output:
+            item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+            if item_type != "function_call":
+                continue
+
+            call_id = (
+                (item.get("call_id") if isinstance(item, dict) else getattr(item, "call_id", None))
+                or (item.get("id") if isinstance(item, dict) else getattr(item, "id", None))
+                or ""
+            )
+            name = (
+                (item.get("name") if isinstance(item, dict) else getattr(item, "name", None))
+                or ""
+            )
+            raw_args = (
+                (item.get("arguments") if isinstance(item, dict) else getattr(item, "arguments", None))
+                or {}
+            )
+
+            arguments: Dict[str, Any]
+            if isinstance(raw_args, str):
+                try:
+                    arguments = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+            elif isinstance(raw_args, dict):
+                arguments = raw_args
+            else:
+                arguments = {}
+
+            tool_calls.append(ToolCall(
+                id=str(call_id),
+                name=str(name),
+                arguments=arguments
+            ))
+
+        return tool_calls
+
     def _prepare_request(
         self,
         messages: List[Message],
@@ -458,13 +603,132 @@ class OpenAIAdapter(LLMAdapter):
                 component="llm"
             )
 
-            response = client.chat.completions.create(**params)
-            result = self._parse_response(response)
+            tracer = get_tracer()
+            with tracer.span("openai_api_call", model=self.config.model):
+                response = client.chat.completions.create(**params)
+
+            with tracer.span("parse_openai_response"):
+                result = self._parse_response(response)
+
+            tracer.add_metadata("input_tokens", result.usage.get("prompt_tokens", 0) if result.usage else 0)
+            tracer.add_metadata("output_tokens", result.usage.get("completion_tokens", 0) if result.usage else 0)
 
             # DIAGNOSTIC: Log what we got back
             self.logger.info(
                 f"API RESPONSE: content_len={len(result.content) if result.content else 0}, "
                 f"tool_calls={len(result.tool_calls)}, finish={result.finish_reason}",
+                component="llm"
+            )
+
+            duration_ms = (time.time() - start_time) * 1000
+            self._log_response(result, duration_ms)
+            return result
+
+        except Exception as e:
+            self.logger.llm_error(self.provider, self.config.model, e)
+            raise
+
+    @llm_resilience
+    def respond(
+        self,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        Synchronous response using OpenAI Responses API.
+
+        Args:
+            input: User input (string or context array)
+            instructions: System instructions
+            tools: Tool definitions (internally-tagged format)
+            **kwargs: Additional API parameters
+
+        Returns:
+            LLMResponse with output
+        """
+        start_time = time.time()
+
+        try:
+            client = self._get_client()
+
+            # Prepare request parameters for Responses API
+            max_output_tokens_value = kwargs.get("max_output_tokens")
+            if max_output_tokens_value is None:
+                max_output_tokens_value = kwargs.get("max_tokens", self.config.max_tokens)
+            temperature_value = kwargs.get("temperature", self.config.temperature)
+            max_tool_calls_value = kwargs.get("max_tool_calls")
+            parallel_tool_calls_value = kwargs.get("parallel_tool_calls")
+
+            params = {
+                "model": self.config.model,
+                "input": self._normalize_responses_input(input),
+            }
+
+            if instructions:
+                params["instructions"] = instructions
+
+            # Temperature handling
+            if self._supports_sampling_params():
+                if temperature_value is not None:
+                    params["temperature"] = temperature_value
+                top_p_value = kwargs.get("top_p", self.config.top_p)
+                if top_p_value is not None:
+                    params["top_p"] = top_p_value
+
+            # Token limit parameter (Responses API)
+            if max_output_tokens_value is not None:
+                params["max_output_tokens"] = max_output_tokens_value
+
+            # Tool call limiting (Responses API)
+            if max_tool_calls_value is not None:
+                params["max_tool_calls"] = max_tool_calls_value
+            if parallel_tool_calls_value is not None:
+                params["parallel_tool_calls"] = parallel_tool_calls_value
+
+            if tools:
+                params["tools"] = tools  # Already internally-tagged format
+                # For reasoning models, force "required"
+                default_choice = "required" if self._is_reasoning_model() else "auto"
+                explicit_choice = kwargs.get("tool_choice")
+                params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
+
+            # DIAGNOSTIC: Log what we're sending
+            tool_names = [t.get("name") for t in tools] if tools else []
+            self.logger.info(
+                f"RESPONSES API REQUEST: model={params.get('model')}, tools={tool_names}, "
+                f"tool_choice={params.get('tool_choice', 'none')}",
+                component="llm"
+            )
+
+            # Call Responses API endpoint
+            tracer = get_tracer()
+            with tracer.span("openai_responses_api_call", model=self.config.model):
+                response = client.responses.create(**params)
+
+            with tracer.span("parse_responses_output"):
+                output_text = self._parse_responses_output_text(response)
+                tool_calls = self._parse_responses_tool_calls(response)
+
+            result = LLMResponse(
+                content=output_text,
+                role=MessageRole.ASSISTANT,
+                tool_calls=tool_calls,
+                finish_reason=getattr(response, "status", None) or getattr(response, "finish_reason", "stop"),
+                usage={
+                    "prompt_tokens": getattr(response.usage, "input_tokens", None),
+                    "completion_tokens": getattr(response.usage, "output_tokens", None),
+                    "total_tokens": getattr(response.usage, "total_tokens", None)
+                } if hasattr(response, "usage") and response.usage else None,
+                model=getattr(response, "model", self.config.model),
+                raw_response=response
+            )
+
+            # DIAGNOSTIC: Log what we got back
+            self.logger.info(
+                f"RESPONSES API RESPONSE: output_len={len(output_text)}, "
+                f"tool_calls={len(tool_calls)}, finish={result.finish_reason}",
                 component="llm"
             )
 
@@ -734,7 +998,7 @@ class AnthropicAdapter(LLMAdapter):
             params = {
                 "model": self.config.model,
                 "messages": chat_messages,
-                "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+                "max_output_tokens": kwargs.get("max_tokens", self.config.max_tokens),
                 "temperature": kwargs.get("temperature", self.config.temperature),
             }
 
@@ -744,8 +1008,15 @@ class AnthropicAdapter(LLMAdapter):
             if tools:
                 params["tools"] = [t.to_anthropic_format() for t in tools]
 
-            response = client.messages.create(**params)
-            result = self._parse_response(response)
+            tracer = get_tracer()
+            with tracer.span("anthropic_api_call", model=self.config.model):
+                response = client.messages.create(**params)
+
+            with tracer.span("parse_anthropic_response"):
+                result = self._parse_response(response)
+
+            tracer.add_metadata("input_tokens", result.usage.get("prompt_tokens", 0) if result.usage else 0)
+            tracer.add_metadata("output_tokens", result.usage.get("completion_tokens", 0) if result.usage else 0)
 
             duration_ms = (time.time() - start_time) * 1000
             self._log_response(result, duration_ms)
@@ -783,7 +1054,7 @@ class AnthropicAdapter(LLMAdapter):
             params = {
                 "model": self.config.model,
                 "messages": chat_messages,
-                "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+                "max_output_tokens": kwargs.get("max_tokens", self.config.max_tokens),
                 "temperature": kwargs.get("temperature", self.config.temperature),
             }
 
@@ -940,6 +1211,92 @@ class AnthropicAdapter(LLMAdapter):
             self.logger.llm_error(self.provider, self.config.model, e)
             raise
 
+    def respond(
+        self,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        Anthropic doesn't have Responses API - convert to Messages API format.
+        """
+        def _extract_text(content: Any) -> str:
+            if content is None:
+                return ""
+            if isinstance(content, str):
+                return content
+            if isinstance(content, dict):
+                # e.g. {"type": "input_text", "text": "..."} or similar
+                text = content.get("text")
+                return text if isinstance(text, str) else ""
+            if isinstance(content, list):
+                parts: List[str] = []
+                for block in content:
+                    if isinstance(block, str):
+                        parts.append(block)
+                        continue
+                    if isinstance(block, dict):
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+                        continue
+                    # Unknown block type (pydantic objects, etc.)
+                    block_text = getattr(block, "text", None)
+                    if isinstance(block_text, str):
+                        parts.append(block_text)
+                return "".join(parts)
+            return str(content)
+
+        # Convert Responses API format to Messages API format
+        messages = []
+
+        if instructions:
+            messages.append(Message(MessageRole.SYSTEM, instructions))
+
+        if isinstance(input, str):
+            messages.append(Message(MessageRole.USER, input))
+        elif isinstance(input, list):
+            # Convert input array to messages
+            for item in input:
+                if not isinstance(item, dict):
+                    continue
+
+                # Responses input can include non-message items (e.g. function_call_output)
+                if "role" not in item:
+                    item_type = item.get("type")
+                    if item_type in ("function_call_output", "tool_output"):
+                        messages.append(Message(
+                            role=MessageRole.TOOL,
+                            content=_extract_text(item.get("output", "")),
+                            name=item.get("name"),
+                            tool_call_id=item.get("call_id") or item.get("id")
+                        ))
+                    continue
+
+                role_value = item.get("role", "user")
+                try:
+                    role = MessageRole(role_value)
+                except Exception:
+                    role = MessageRole.USER
+                messages.append(Message(role, _extract_text(item.get("content", ""))))
+
+        # Convert internally-tagged tools to ToolDefinition format
+        tool_defs = None
+        if tools:
+            tool_defs = []
+            for tool in tools:
+                if tool.get("type") == "function":
+                    tool_defs.append(ToolDefinition(
+                        name=tool.get("name", ""),
+                        description=tool.get("description", ""),
+                        parameters=tool.get("parameters", {}).get("properties", {}),
+                        required=tool.get("parameters", {}).get("required", [])
+                    ))
+
+        # Use existing complete() method
+        return self.complete(messages, tool_defs, **kwargs)
+
 
 class CustomAdapter(LLMAdapter):
     """
@@ -1001,6 +1358,16 @@ class CustomAdapter(LLMAdapter):
         """Async streaming via custom endpoint"""
         async for chunk in self._get_adapter().astream(messages, tools, **kwargs):
             yield chunk
+
+    def respond(
+        self,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """Delegate to underlying OpenAI adapter"""
+        return self._get_adapter().respond(input, instructions, tools, **kwargs)
 
 
 class FailoverLLMAdapter(LLMAdapter):
@@ -1187,6 +1554,37 @@ class FailoverLLMAdapter(LLMAdapter):
         if last_exc:
             raise last_exc
         raise RuntimeError("FailoverLLMAdapter: no adapters available for async streaming")
+
+    def respond(
+        self,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """Respond with failover support"""
+        last_exc: Optional[Exception] = None
+
+        for idx, adapter in enumerate(self._iter_adapters()):
+            provider = adapter.provider
+            model = getattr(adapter, "config", self.config).model
+
+            if idx > 0:
+                self.logger.warning(
+                    f"LLM respond failover: primary failed, trying {provider}:{model}",
+                    component="llm"
+                )
+
+            try:
+                return adapter.respond(input, instructions, tools, **kwargs)
+            except Exception as e:
+                last_exc = e
+                self.logger.llm_error(provider, model, e)
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("FailoverLLMAdapter: no adapters available for respond")
 
 
 def create_adapter(config: LLMConfig, logger: Optional[StructuredLogger] = None) -> LLMAdapter:
