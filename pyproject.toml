@@ -3,17 +3,31 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "voice-agent-system"
+name = "rex"
 version = "0.1.0"
 description = "Multi-process voice agent with harness, RL worker, and Web UI"
 readme = "README.md"
 license = { text = "UNLICENSED" }
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 authors = [
   { name = "Voice Agent Team" }
 ]
 keywords = ["voice", "agent", "multi-process", "speech", "ai"]
-dynamic = ["dependencies"]
+dependencies = [
+  "anthropic>=0.20.0",
+  "beautifulsoup4>=4.12.0",
+  "faster-whisper>=1.0.0",
+  "html2text>=2020.1.16",
+  "httpx==0.27.2",
+  "matplotlib>=3.7.0",
+  "numpy<=2.2.6",
+  "openai>=1.0.0",
+  "pytz>=2023.3",
+  "requests>=2.28.0",
+  "scipy<=1.16.0",
+  "seaborn>=0.12.0",
+  "typing_extensions==4.14.0",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -32,11 +46,20 @@ dev = [
   "unittest-mock==1.4.0"
 ]
 
+audio = [
+  "PyAudio==0.2.14",
+  "pydub==0.25.1",
+  "pyttsx3>=2.90",
+  "SpeechRecognition==3.14.3",
+  "webrtcvad==2.0.10",
+]
+
 [project.scripts]
 voice-agent = "app.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = ["app_config"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
@@ -44,9 +67,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["config/*.json"]
-
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
 
 [tool.black]
 line-length = 100

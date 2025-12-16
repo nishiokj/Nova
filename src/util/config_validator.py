@@ -92,6 +92,14 @@ class ConfigValidator:
         """Validate audio configuration."""
         audio = self.config.audio
 
+        # Headless mode: allow running without audio devices (e.g., Docker on macOS/CI).
+        if getattr(self.config.runtime, "headless", False):
+            self.add_info(
+                "runtime.headless",
+                "Headless mode enabled: skipping audio device validation."
+            )
+            return
+
         # Sample rate validation
         valid_sample_rates = [8000, 16000, 32000, 48000]
         if audio.sample_rate not in valid_sample_rates:
@@ -124,15 +132,23 @@ class ConfigValidator:
             if device_count == 0:
                 self.add_error(
                     "audio",
-                    "No audio devices found. Ensure microphone is connected and accessible."
+                    "No audio devices found.\n\n"
+                    "      To fix this:\n"
+                    "      1. Connect a microphone or audio input device\n"
+                    "      2. Ensure audio permissions are granted (System Settings > Privacy & Security > Microphone)\n"
+                    "      3. If running in Docker, use --headless mode: voice-agent --headless\n"
+                    "      4. If testing without audio: voice-agent --headless"
                 )
             else:
                 if audio.device_index is not None and audio.device_index >= device_count:
                     self.add_error(
                         "audio.device_index",
-                        f"Device index {audio.device_index} not found. "
-                        f"Available devices: 0-{device_count-1}. "
-                        f"Run 'voice-agent --list-devices' to see devices."
+                        f"Device index {audio.device_index} not found (only {device_count} device(s) available).\n\n"
+                        f"      To fix this:\n"
+                        f"      1. Run: voice-agent --list-devices\n"
+                        f"      2. Choose a valid device index (0-{device_count-1})\n"
+                        f"      3. Update audio.device_index in your config file\n"
+                        f"      4. Or set AUDIO_DEVICE_INDEX environment variable"
                     )
                 else:
                     self.add_info(
@@ -142,10 +158,21 @@ class ConfigValidator:
                     )
 
             pa.terminate()
+        except ImportError:
+            self.add_error(
+                "audio",
+                "PyAudio not installed or not accessible.\n\n"
+                "      To fix this:\n"
+                "      1. Install PyAudio: pip install pyaudio\n"
+                "      2. On macOS: brew install portaudio && pip install pyaudio\n"
+                "      3. On Linux: sudo apt-get install portaudio19-dev python3-pyaudio\n"
+                "      4. Or run in headless mode: voice-agent --headless"
+            )
         except Exception as e:
             self.add_warning(
                 "audio",
-                f"Could not validate audio devices: {e}"
+                f"Could not validate audio devices: {e}\n"
+                "      If this persists, try: voice-agent --headless"
             )
 
     def _validate_stt(self) -> None:
@@ -263,11 +290,20 @@ class ConfigValidator:
         configured = [name for name, value in providers.items() if value]
 
         if not configured:
-            self.add_warning(
+            from util.config_discovery import get_user_config_dir
+            env_path = get_user_config_dir() / ".env"
+
+            self.add_error(
                 "environment.api_keys",
-                "No API keys found in environment. "
-                "Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY. "
-                "Agent will fail when making LLM calls."
+                "No API keys found in environment.\n"
+                "      At least one LLM provider API key is required.\n\n"
+                "      To fix this:\n"
+                f"      1. Edit {env_path}\n"
+                "      2. Add your API key (e.g., OPENAI_API_KEY=sk-...)\n"
+                "      3. Restart voice-agent\n\n"
+                "      Alternatively, set environment variables before running:\n"
+                "        export OPENAI_API_KEY=sk-...\n"
+                "        voice-agent"
             )
         else:
             self.add_info(

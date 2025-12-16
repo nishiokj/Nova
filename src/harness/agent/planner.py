@@ -18,6 +18,7 @@ from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from util.llm_adapter import LLMAdapter, Message, MessageRole, LLMResponse, ToolCall
+from util.perf_trace import PerfTracer, get_tracer
 from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 # NO logger imports - Planner/Executor/Reflector don't log, Agent does
 
@@ -80,6 +81,12 @@ class PlanStatus(Enum):
     PARTIAL = "partial"
 
 
+class PlanPhase(Enum):
+    """Execution phase for a plan step"""
+    DISCOVERY = "discovery"
+    EXECUTION = "execution"
+
+
 @dataclass
 class SuccessCriteria:
     """Defines what success looks like for a step or plan"""
@@ -105,6 +112,8 @@ class StepResult:
     final_response: Optional[str] = None  # If step generated final response
     error: Optional[str] = None  # Error message if step failed
     duration_ms: float = 0
+    phase: PlanPhase = PlanPhase.EXECUTION
+    context: Optional[StepContext] = None
 
     # Validation results (can be filled by Agent after executor returns)
     validation_passed: bool = False
@@ -118,6 +127,10 @@ class PlanStep:
 
     A step is a unit of work (sub-goal), not a single tool call.
     It may involve 0-N tool calls plus reasoning to achieve its objective.
+
+    EXPLICIT UNCERTAINTY AND VERIFICATION:
+    - Discovery steps reduce specific uncertainties
+    - Execution steps have verifiable pre/postconditions
     """
     step_num: int
     objective: str                        # What this step should accomplish
@@ -130,6 +143,17 @@ class PlanStep:
     success_criteria: Optional[SuccessCriteria] = None
     max_tool_calls: int = 3               # Safety limit per step (reduced from 10)
     depends_on: List[int] = field(default_factory=list)  # Step dependencies
+    phase: PlanPhase = PlanPhase.EXECUTION              # Discovery vs execution phase
+
+    # UNCERTAINTY REDUCTION (for discovery steps)
+    uncertainties_targeted: List[str] = field(default_factory=list)  # Which uncertainties this reduces
+    expected_uncertainty_reduction: float = 0.0  # Expected entropy reduction (0.0-1.0)
+    actual_uncertainty_reduction: float = 0.0    # Actual reduction achieved
+
+    # PRE/POSTCONDITIONS (for execution steps)
+    preconditions: List[str] = field(default_factory=list)   # Must be true before this step
+    postconditions: List[str] = field(default_factory=list)  # Will be true after this step
+    verification_method: Optional[str] = None  # How to verify postconditions met
 
     # Execution state (filled during execution)
     status: PlanStatus = PlanStatus.PENDING
@@ -156,6 +180,10 @@ class Plan:
 
     Key difference from current approach: we know WHAT we're trying to do
     and HOW we'll know if we succeeded BEFORE we start.
+
+    TWO-PHASE ARCHITECTURE (Epistemic → Instrumental):
+    - Phase A (Discovery/Triage): Reduce uncertainty through observation
+    - Phase B (Execution): Take minimal actions with verification gates
     """
     goal: str                             # The user's actual goal
     goal_type: str                        # "question", "task", "creation", "search"
@@ -164,6 +192,24 @@ class Plan:
     estimated_complexity: str             # "simple", "standard", "advanced"
     requires_tools: bool                  # Does this need external tools?
     reasoning: str                        # Why this plan
+    discovery_plan: List[PlanStep] = field(default_factory=list)
+    execution_plan: List[PlanStep] = field(default_factory=list)
+    discovery_required: bool = True
+    assumptions: List[str] = field(default_factory=list)
+
+    # EXPLICIT UNCERTAINTY TRACKING (Phase A)
+    user_intent: str = ""                 # Explicitly modeled user intent
+    uncertainties: List[str] = field(default_factory=list)  # What we don't know
+    uncertainty_threshold: float = 0.2    # Max acceptable uncertainty before execution (0.0-1.0)
+    current_uncertainty: float = 1.0      # Current uncertainty level
+
+    # PRE/POSTCONDITIONS
+    preconditions: List[str] = field(default_factory=list)   # Must be true before execution
+    postconditions: List[str] = field(default_factory=list)  # Will be true after completion
+
+    # PHASE TRACKING
+    triage_complete: bool = False         # Has Phase A (discovery) completed?
+    triage_summary: Optional[str] = None  # What did we learn in discovery?
 
     # Metadata
     created_at: float = field(default_factory=time.time)
@@ -173,18 +219,28 @@ class Plan:
         return {
             "goal": self.goal,
             "goal_type": self.goal_type,
+            "user_intent": self.user_intent,
             "steps": [
                 {
                     "step_num": s.step_num,
                     "objective": s.objective,
                     "tool_hint": s.tool_hint,
-                    "status": s.status.value
+                    "status": s.status.value,
+                    "phase": s.phase.value
                 }
                 for s in self.steps
             ],
             "success_criteria": self.success_criteria.description,
             "complexity": self.estimated_complexity,
-            "requires_tools": self.requires_tools
+            "requires_tools": self.requires_tools,
+            "discovery_required": self.discovery_required,
+            "triage_complete": self.triage_complete,
+            "assumptions": self.assumptions,
+            "uncertainties": self.uncertainties,
+            "uncertainty_threshold": self.uncertainty_threshold,
+            "current_uncertainty": self.current_uncertainty,
+            "preconditions": self.preconditions,
+            "postconditions": self.postconditions
         }
 
 
@@ -256,7 +312,8 @@ def _load_planner_prompts():
     import json
     from pathlib import Path
 
-    config_path = Path(__file__).parent.parent / "config" / "prompts_config.json"
+    # Path: planner.py -> agent/ -> harness/ -> src/ -> project_root/ -> config/
+    config_path = Path(__file__).parent.parent.parent.parent / "config" / "prompts_config.json"
     try:
         with open(config_path, 'r') as f:
             data = json.load(f)
@@ -264,37 +321,92 @@ def _load_planner_prompts():
     except Exception:
         # Fallback to hardcoded defaults
         return {
-            "planning": """You are a planning assistant. Given a user request, create an execution plan.
+            "planning": """You are a ruthless planning assistant obsessed with reducing uncertainty before taking action.
 
-IMPORTANT: Your job is to determine:
-1. What is the user's ACTUAL GOAL? (not just what they said, but what they want to achieve)
-2. What steps are needed to achieve this goal?
-3. How will we KNOW if we succeeded?
+CRITICAL: TWO-PHASE ARCHITECTURE (Epistemic → Instrumental)
 
-Respond with a JSON plan:
-```json
+PHASE A (TRIAGE/DISCOVERY) - ALWAYS REQUIRED for non-trivial tasks:
+- Purpose: Reduce uncertainty through observation ONLY
+- Tools: ONLY read-only observation tools (list_files, file_read, search_filesystem, bash_execute for inspection)
+- NO modifications, writes, or actions in this phase
+- Success: Gather enough evidence to plan execution confidently
+
+PHASE B (EXECUTION) - Only after Phase A reduces uncertainty below threshold:
+- Purpose: Take minimal viable actions with verification gates
+- Precondition: Discovery complete, uncertainties resolved
+- Tools: Action tools (file_write, python_execute, deployments)
+- Success: Postconditions verified
+
+YOUR JOB:
+1. Model the user's TRUE INTENT (not just literal request)
+2. List ALL UNCERTAINTIES that could affect success
+3. Design discovery steps that REDUCE EACH UNCERTAINTY
+4. Design execution steps with EXPLICIT pre/postconditions
+5. Define how to VERIFY each postcondition
+
+Respond with valid JSON (NO markdown, NO explanations):
 {{
   "goal": "Clear statement of what user wants to achieve",
   "goal_type": "question|task|creation|search",
+  "user_intent": "Single sentence: what the user TRULY wants (beyond literal request)",
   "requires_tools": true/false,
-  "steps": [
+
+  "uncertainties": [
+    "Specific thing we don't know that could affect success",
+    "Assumption that needs verification",
+    "Missing information about constraints/environment"
+  ],
+  "uncertainty_threshold": 0.2,
+
+  "discovery_plan": [
     {{
       "step_num": 1,
-      "objective": "What this step accomplishes",
-      "tool_hint": "tool_name or null for reasoning",
-      "tool_args_hint": {{"arg": "value"}} or null
+      "objective": "Concrete observation action (e.g., read X, search for Y, inspect Z)",
+      "tool_hint": "list_files|file_read|search_filesystem|bash_execute",
+      "tool_args_hint": {{"arg": "value"}} or null,
+      "uncertainties_targeted": ["Which uncertainty from above this step reduces"],
+      "expected_uncertainty_reduction": 0.3,
+      "postconditions": ["What we will KNOW after this step"],
+      "success_criteria": {{
+        "description": "What evidence must be collected",
+        "required_outputs": ["tool_name_output"]
+      }}
     }}
   ],
-  "success_criteria": "How we know the goal was achieved",
-  "reasoning": "Why this plan will work"
-}}
-```
 
-GUIDELINES:
-- For simple questions (capital of X, math, facts): goal_type="question", requires_tools=false, 1 step
-- For searches/lookups: goal_type="search", requires_tools=true, include search step
-- For file operations: goal_type="task", requires_tools=true, include file tool steps
-- For creation tasks: goal_type="creation", may need multiple steps
+  "execution_plan": [
+    {{
+      "step_num": 1,
+      "objective": "Concrete action leveraging discovery evidence",
+      "tool_hint": "file_write|python_execute|bash_execute",
+      "tool_args_hint": {{"arg": "value"}} or null,
+      "depends_on": [1, 2],
+      "preconditions": ["What must be TRUE before this step"],
+      "postconditions": ["What will be TRUE after this step"],
+      "verification_method": "How to verify postconditions (e.g., run tests, check file exists)",
+      "success_criteria": {{
+        "description": "Definition of done",
+        "required_outputs": ["tool_name_output"]
+      }}
+    }}
+  ],
+
+  "success_criteria": "How we know the overall goal was achieved",
+  "reasoning": "Why this plan will work",
+  "assumptions": ["Explicit assumptions about environment/constraints"],
+  "preconditions": ["Must be true BEFORE any execution"],
+  "postconditions": ["Will be true when COMPLETE"],
+  "discovery_required": true/false
+}}
+
+RULES:
+1. For tasks involving code/files/systems: discovery_required=true, ALWAYS include discovery_plan
+2. Discovery steps MUST target specific uncertainties and reduce them
+3. Sum of expected_uncertainty_reduction across discovery steps should bring uncertainty below threshold
+4. Execution steps MUST have explicit preconditions/postconditions
+5. Execution steps MUST specify verification_method
+6. For simple factual questions with no tools: discovery_required=false, empty discovery_plan
+7. Be AGGRESSIVE in discovery - prefer too much inspection over too little
 
 Available tools: {tools}
 
@@ -384,6 +496,7 @@ class Planner:
     def __init__(self, llm: LLMAdapter, tool_registry: ToolRegistry):
         self.llm = llm
         self.tool_registry = tool_registry
+        self._tracer = get_tracer()
         # NO logger - Planner doesn't log, Agent does
 
     def create_plan(
@@ -410,8 +523,10 @@ class Planner:
             budget: Budget constraints from router (max_tool_calls, max_tokens, max_steps)
         """
         # Fast path: detect simple patterns that don't need LLM planning
-        simple_plan = self._try_simple_plan(user_input)
+        with self._tracer.span("try_simple_plan"):
+            simple_plan = self._try_simple_plan(user_input)
         if simple_plan:
+            self._tracer.add_metadata("plan_path", "simple")
             # Validate plan fits within budget constraints
             if budget:
                 validation = self._validate_plan_budget(simple_plan, budget, tier)
@@ -423,7 +538,9 @@ class Planner:
             return simple_plan
 
         # Complex path: use LLM to create plan
-        plan = self._create_llm_plan(user_input, context, tier)
+        self._tracer.add_metadata("plan_path", "llm")
+        with self._tracer.span("create_llm_plan"):
+            plan = self._create_llm_plan(user_input, context, tier)
 
         # Validate LLM-generated plan fits within budget
         if budget:
@@ -490,7 +607,7 @@ class Planner:
         This is better than attempting execution and failing mid-way.
         The agent should recognize this and return a clear error.
         """
-        return Plan(
+        plan = Plan(
             goal=f"BUDGET_EXCEEDED: {user_input[:100]}",
             goal_type="error",
             steps=[
@@ -498,6 +615,7 @@ class Planner:
                     step_num=1,
                     objective=f"Return error: Task cannot be completed within {tier} tier budget",
                     tool_hint=None,
+                    phase=PlanPhase.EXECUTION,
                     success_criteria=SuccessCriteria(
                         description="Inform user of budget constraints"
                     )
@@ -509,8 +627,10 @@ class Planner:
             estimated_complexity=tier,
             requires_tools=False,
             reasoning=f"BUDGET_EXCEEDED: {reason}. Consider re-routing to a higher tier.",
+            discovery_required=False,
             status=PlanStatus.FAILED  # Mark as already failed
         )
+        return self._finalize_plan(plan, user_input)
 
     def _try_simple_plan(self, user_input: str) -> Optional[Plan]:
         """
@@ -536,17 +656,32 @@ class Planner:
             "search", "look up", "find information", "google", "check online"
         ])
         # File/folder creation/modification keywords
-        is_creation_task = any(kw in input_lower for kw in [
+        # Note: "build", "generate", "implement" can appear in questions like
+        # "how does X build its context?" - only treat as creation if used as a command
+        creation_keywords = [
             "create file", "write file", "create folder", "make folder", "mkdir",
-            "create directory", "build", "generate", "set up", "initialize",
-            "instantiate", "implement"
+            "create directory", "set up", "initialize", "instantiate"
+        ]
+        # These are only creation tasks when used as commands, not in questions
+        command_verbs_with_object = [
+            "build a ", "build the ", "build me ", "build new ", "build this ",
+            "generate a ", "generate the ", "generate me ", "generate new ",
+            "implement a ", "implement the ", "implement new ", "implement this "
+        ]
+        # Check if starts with a question pattern (these are NOT creation tasks)
+        is_question_about_code = any(input_lower.startswith(q) for q in [
+            "how does", "how do", "what does", "explain how", "describe how"
         ])
+        is_creation_task = (
+            any(kw in input_lower for kw in creation_keywords) or
+            (any(kw in input_lower for kw in command_verbs_with_object) and not is_question_about_code)
+        )
         needs_files = any(kw in input_lower for kw in [
             "read file", "open file", "save", "delete file", "edit file", "modify"
         ])
 
         if is_simple_question and not needs_realtime and not needs_search and not needs_files and not is_creation_task:
-            return Plan(
+            plan = Plan(
                 goal=f"Answer: {user_input}",
                 goal_type="question",
                 steps=[
@@ -554,6 +689,7 @@ class Planner:
                         step_num=1,
                         objective="Answer the question from knowledge",
                         tool_hint=None,
+                        phase=PlanPhase.EXECUTION,
                         success_criteria=SuccessCriteria(
                             description="Provide accurate, direct answer"
                         )
@@ -564,12 +700,54 @@ class Planner:
                 ),
                 estimated_complexity="simple",
                 requires_tools=False,
-                reasoning="Simple factual question - answer from knowledge"
+                reasoning="Simple factual question - answer from knowledge",
+                discovery_required=False,
+                assumptions=["Question appears self-contained and does not require repository inspection"]
             )
+            return self._finalize_plan(plan, user_input)
+
+        # Code explanation questions: "how does X work?", "explain Y", etc.
+        # These mention file paths and ask explanatory questions
+        code_question_patterns = ["how does", "how do", "explain", "what does", "describe"]
+        has_file_path = any(ext in input_lower for ext in [".py", ".js", ".ts", ".go", ".java", ".cpp", ".h", ".rs"])
+        is_code_question = any(input_lower.startswith(pattern) for pattern in code_question_patterns) and has_file_path
+
+        if is_code_question and not is_creation_task:
+            # Extract file paths from input
+            import re
+            file_pattern = r'\.?/[\w/\-\.]+\.[\w]+'
+            mentioned_files = re.findall(file_pattern, user_input)
+
+            # Simple plan: read the file(s) and explain
+            plan = Plan(
+                goal=f"Explain: {user_input}",
+                goal_type="question",
+                steps=[
+                    PlanStep(
+                        step_num=1,
+                        objective=f"Read and explain the code",
+                        tool_hint="file_read" if mentioned_files else None,
+                        tool_args_hint={"path": mentioned_files[0]} if mentioned_files else None,
+                        phase=PlanPhase.EXECUTION,
+                        success_criteria=SuccessCriteria(
+                            description="Provide clear explanation of how the code works"
+                        )
+                    )
+                ],
+                success_criteria=SuccessCriteria(
+                    description="Code behavior explained clearly"
+                ),
+                estimated_complexity="simple",
+                requires_tools=bool(mentioned_files),
+                reasoning="Code explanation question - read file and explain",
+                discovery_required=False,
+                assumptions=["User wants to understand existing code, not modify it"]
+            )
+            return self._finalize_plan(plan, user_input)
 
         # Search/lookup requests (but NOT creation tasks)
         if (needs_search or needs_realtime) and not is_creation_task and not needs_files:
-            return Plan(
+            plan = Plan(
                 goal=f"Find information: {user_input}",
                 goal_type="search",
                 steps=[
@@ -578,6 +756,7 @@ class Planner:
                         objective="Search for current/relevant information",
                         tool_hint="fast_answer",
                         tool_args_hint={"query": user_input},
+                        phase=PlanPhase.DISCOVERY,
                         success_criteria=SuccessCriteria(
                             description="Find relevant, current information"
                         )
@@ -586,6 +765,7 @@ class Planner:
                         step_num=2,
                         objective="Synthesize findings into answer",
                         tool_hint=None,
+                        phase=PlanPhase.EXECUTION,
                         depends_on=[1],
                         success_criteria=SuccessCriteria(
                             description="Provide clear answer based on search results"
@@ -597,8 +777,10 @@ class Planner:
                 ),
                 estimated_complexity="standard",
                 requires_tools=True,
-                reasoning="Needs current/external information"
+                reasoning="Needs current/external information",
+                assumptions=["External data required; fast_answer expected to provide up-to-date context"]
             )
+            return self._finalize_plan(plan, user_input)
 
         # Not a simple pattern - need LLM planning
         # This includes creation tasks, file operations, and complex requests
@@ -610,49 +792,62 @@ class Planner:
         context: Optional[str],
         tier: str
     ) -> Plan:
-        """Use LLM to create a plan for complex requests"""
-        tools = self.tool_registry.list_tools(enabled_only=True)
-        tool_descriptions = "\n".join([f"- {t.name}: {t.description}" for t in tools])
+        """Use LLM to create a plan for complex requests with explicit discovery/execution phases"""
+        with self._tracer.span("build_planning_prompt"):
+            tools = self.tool_registry.list_tools(enabled_only=True)
+            tool_descriptions = "\n".join([f"- {t.name}: {t.description}" for t in tools])
 
-        context_str = f"\nContext: {context}" if context else ""
+            context_str = f"\nContext: {context}" if context else ""
 
-        prompt = PLANNING_PROMPT.format(
-            tools=tool_descriptions,
-            user_input=user_input,
-            context=context_str
-        )
+            prompt = PLANNING_PROMPT.format(
+                tools=tool_descriptions,
+                user_input=user_input,
+                context=context_str
+            )
 
-        messages = [
-            Message(MessageRole.SYSTEM, "You are a planning assistant. Output valid JSON only."),
-            Message(MessageRole.USER, prompt)
-        ]
+            messages = [
+                Message(MessageRole.SYSTEM, "You are a planning assistant. Output valid JSON only."),
+                Message(MessageRole.USER, prompt)
+            ]
+            self._tracer.add_metadata("prompt_len", len(prompt))
 
         try:
-            response = self.llm.complete(messages)
-            plan_data = self._parse_plan_response(response.content, user_input)
+            with self._tracer.span("llm_complete_planning"):
+                response = self.llm.complete(messages)
+            self._tracer.add_metadata("response_len", len(response.content) if response.content else 0)
 
-            # Convert to Plan object
-            steps = []
-            for i, step_data in enumerate(plan_data.get("steps", [])):
-                steps.append(PlanStep(
-                    step_num=step_data.get("step_num", i + 1),
-                    objective=step_data.get("objective", "Execute step"),
-                    tool_hint=step_data.get("tool_hint"),
-                    tool_args_hint=step_data.get("tool_args_hint"),
-                    success_criteria=SuccessCriteria(
-                        description=step_data.get("success_criteria", "Step completed")
-                    )
-                ))
+            with self._tracer.span("parse_plan_response"):
+                plan_data = self._parse_plan_response(response.content, user_input)
 
-            # Ensure at least one step
+            discovery_steps = self._build_phase_steps(
+                plan_data.get("discovery_plan"),
+                PlanPhase.DISCOVERY
+            )
+            execution_steps = self._build_phase_steps(
+                plan_data.get("execution_plan"),
+                PlanPhase.EXECUTION
+            )
+
+            # Backwards compatibility: fall back to legacy `steps`
+            if not discovery_steps and not execution_steps and plan_data.get("steps"):
+                inferred = self._build_phase_steps(plan_data.get("steps"), PlanPhase.EXECUTION)
+                execution_steps.extend(inferred)
+
+            steps = discovery_steps + execution_steps
             if not steps:
                 steps = [PlanStep(
                     step_num=1,
                     objective="Process user request",
-                    success_criteria=SuccessCriteria(description="Request handled")
+                    success_criteria=SuccessCriteria(description="Request handled"),
+                    phase=PlanPhase.DISCOVERY
                 )]
 
-            return Plan(
+            discovery_required = plan_data.get(
+                "discovery_required",
+                self._infer_discovery_requirement(plan_data.get("goal_type"), plan_data.get("requires_tools", False))
+            )
+
+            plan = Plan(
                 goal=plan_data.get("goal", user_input),
                 goal_type=plan_data.get("goal_type", "task"),
                 steps=steps,
@@ -661,25 +856,40 @@ class Planner:
                 ),
                 estimated_complexity=tier,
                 requires_tools=plan_data.get("requires_tools", False),
-                reasoning=plan_data.get("reasoning", "LLM-generated plan")
+                reasoning=plan_data.get("reasoning", "LLM-generated plan"),
+                discovery_required=discovery_required,
+                assumptions=plan_data.get("assumptions", []) or [],
+                # NEW: Explicit uncertainty tracking
+                user_intent=plan_data.get("user_intent", ""),
+                uncertainties=plan_data.get("uncertainties", []) or [],
+                uncertainty_threshold=plan_data.get("uncertainty_threshold", 0.2),
+                current_uncertainty=1.0 if plan_data.get("uncertainties") else 0.0,
+                # NEW: Pre/postconditions
+                preconditions=plan_data.get("preconditions", []) or [],
+                postconditions=plan_data.get("postconditions", []) or []
             )
+            return self._finalize_plan(plan, user_input)
 
         except Exception as e:
             # Executor can throw exceptions - Agent will handle them
             # Return fallback plan
-            return Plan(
+            fallback = Plan(
                 goal=user_input,
                 goal_type="task",
                 steps=[PlanStep(
                     step_num=1,
                     objective="Handle user request",
-                    success_criteria=SuccessCriteria(description="Request processed")
+                    success_criteria=SuccessCriteria(description="Request processed"),
+                    phase=PlanPhase.DISCOVERY
                 )],
                 success_criteria=SuccessCriteria(description="Request handled"),
                 estimated_complexity=tier,
                 requires_tools=False,
-                reasoning=f"Fallback plan due to planning error: {str(e)}"
+                reasoning=f"Fallback plan due to planning error: {str(e)}",
+                assumptions=[f"Planning failed: {str(e)}"]
             )
+            fallback.discovery_required = True
+            return self._finalize_plan(fallback, user_input)
 
     def _parse_plan_response(self, content: str, user_input: str) -> Dict[str, Any]:
         """Parse LLM response to extract plan JSON"""
@@ -693,9 +903,32 @@ class Planner:
             else:
                 json_str = content
 
-            result = json.loads(json_str.strip())
+            # Clean up common JSON issues
+            json_str = json_str.strip()
+
+            # Try to parse
+            result = json.loads(json_str)
+
+            # Validate required fields
+            if not isinstance(result, dict):
+                raise ValueError("Plan response must be a JSON object")
+
+            # Ensure we have at minimum the basic structure
+            if "goal" not in result:
+                result["goal"] = user_input
+            if "goal_type" not in result:
+                result["goal_type"] = "task"
+            if "requires_tools" not in result:
+                result["requires_tools"] = False
+
             return result
-        except (json.JSONDecodeError, IndexError):
+
+        except (json.JSONDecodeError, IndexError, ValueError) as e:
+            # Log parsing error for debugging (will be handled by Agent's logger)
+            import sys
+            print(f"[PLANNER DEBUG] Failed to parse plan JSON: {e}", file=sys.stderr)
+            print(f"[PLANNER DEBUG] Raw LLM response (first 500 chars): {content[:500]}", file=sys.stderr)
+
             # Return minimal plan structure
             return {
                 "goal": user_input,
@@ -703,11 +936,323 @@ class Planner:
                 "requires_tools": False,
                 "steps": [{"step_num": 1, "objective": "Process request"}],
                 "success_criteria": "Request handled",
-                "reasoning": "Could not parse plan"
+                "reasoning": f"Plan parsing failed: {str(e)[:100]}"
             }
         except Exception:
             # Re-raise for Agent to handle
             raise
+
+    def _build_phase_steps(
+        self,
+        steps_data: Optional[List[Dict[str, Any]]],
+        phase: PlanPhase
+    ) -> List[PlanStep]:
+        """Convert structured plan data into PlanStep objects for a specific phase."""
+        if not steps_data:
+            return []
+
+        built_steps: List[PlanStep] = []
+        for idx, step_data in enumerate(steps_data):
+            raw_step_num = step_data.get("step_num", idx + 1)
+            try:
+                step_num = int(raw_step_num)
+            except (TypeError, ValueError):
+                step_num = idx + 1
+
+            success = self._build_success_criteria(
+                step_data.get("success_criteria"),
+                step_data.get("objective", "Complete the objective")
+            )
+
+            tool_args_hint = step_data.get("tool_args_hint")
+            if tool_args_hint is not None and not isinstance(tool_args_hint, dict):
+                tool_args_hint = None
+
+            depends_on = self._normalize_dependencies(step_data.get("depends_on"))
+
+            step = PlanStep(
+                step_num=step_num,
+                objective=step_data.get("objective", "Execute step"),
+                tool_hint=step_data.get("tool_hint"),
+                tool_args_hint=tool_args_hint,
+                success_criteria=success,
+                depends_on=depends_on,
+                phase=phase,
+                # NEW: Uncertainty reduction (for discovery steps)
+                uncertainties_targeted=step_data.get("uncertainties_targeted", []) or [],
+                expected_uncertainty_reduction=step_data.get("expected_uncertainty_reduction", 0.0),
+                # NEW: Pre/postconditions (for execution steps)
+                preconditions=step_data.get("preconditions", []) or [],
+                postconditions=step_data.get("postconditions", []) or [],
+                verification_method=step_data.get("verification_method")
+            )
+            setattr(step, "_original_step_num", step_num)
+            built_steps.append(step)
+
+        return built_steps
+
+    def _build_success_criteria(self, raw: Any, default_description: str) -> SuccessCriteria:
+        """Create a SuccessCriteria object from planner JSON."""
+        if isinstance(raw, dict):
+            return SuccessCriteria(
+                description=raw.get("description", default_description),
+                required_outputs=raw.get("required_outputs", []),
+                validation_hints=raw.get("validation_hints", []),
+                automated_checks=raw.get("automated_checks")
+            )
+        if isinstance(raw, str):
+            return SuccessCriteria(description=raw)
+        if isinstance(raw, list):
+            return SuccessCriteria(
+                description=default_description,
+                required_outputs=[str(item) for item in raw]
+            )
+        return SuccessCriteria(description=default_description)
+
+    def _normalize_dependencies(self, depends_on: Any) -> List[int]:
+        """Ensure depends_on is a list of ints."""
+        if not depends_on:
+            return []
+        if not isinstance(depends_on, list):
+            depends = [depends_on]
+        else:
+            depends = depends_on
+
+        normalized: List[int] = []
+        for dep in depends:
+            if isinstance(dep, bool):
+                continue
+            if isinstance(dep, (int, float)):
+                normalized.append(int(dep))
+            elif isinstance(dep, str) and dep.strip().isdigit():
+                normalized.append(int(dep.strip()))
+        return normalized
+
+    def _infer_discovery_requirement(
+        self,
+        goal_type: Optional[str],
+        requires_tools: bool
+    ) -> bool:
+        """Determine if discovery should be mandatory."""
+        if goal_type == "question" and not requires_tools:
+            return False
+        return True
+
+    def _extract_file_mentions(self, text: str) -> List[str]:
+        """
+        Aggressively extract ALL file/module mentions from user input.
+
+        Looks for:
+        - @mentions: @file.py, @module.js
+        - Direct filenames: harness.py, planner.py
+        - Paths: src/agent.py, ./config.json
+        - Common extensions: .py, .js, .ts, .go, .java, etc.
+        """
+        import re
+
+        mentions = []
+
+        # @mentions - highest priority
+        mentions.extend(re.findall(r'@([\w/\-\.]+\.[\w]+)', text))
+
+        # Direct file references with common extensions
+        extensions = r'(?:py|js|ts|jsx|tsx|go|java|cpp|h|hpp|c|rs|rb|php|swift|kt|m|mm|sh|bash|json|yaml|yml|toml|xml|md|txt|csv|sql)'
+        mentions.extend(re.findall(rf'\b([\w/\-\.]+\.{extensions})\b', text, re.IGNORECASE))
+
+        # Handle typos: "harnessss.py" -> try "harness.py"
+        cleaned_mentions = []
+        for mention in mentions:
+            # Remove duplicate consecutive characters (harnessss -> harness)
+            cleaned = re.sub(r'(.)\1{2,}', r'\1', mention)
+            cleaned_mentions.append(cleaned)
+            if cleaned != mention:
+                cleaned_mentions.append(mention)  # Keep original too
+
+        return list(set(cleaned_mentions))
+
+    def _extract_key_terms(self, text: str) -> List[str]:
+        """Extract key technical terms that might be class/function/module names."""
+        import re
+
+        # Remove common question words and filler
+        noise = r'\b(where|what|how|why|when|who|which|the|a|an|in|on|at|to|for|of|with|by|from|do|you|see|find|show|tell|me|my|your|our|their|opportunities|optimization|optimizations)\b'
+        cleaned = re.sub(noise, ' ', text.lower())
+
+        # Extract CamelCase and snake_case identifiers
+        terms = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b|\b[a-z_]+\b', text)
+
+        # Filter to meaningful terms (length > 3, not just articles/conjunctions)
+        meaningful = [t for t in terms if len(t) > 3 and t not in ('that', 'this', 'these', 'those', 'with', 'from')]
+
+        return list(set(meaningful))[:5]  # Top 5 terms
+
+    def _default_discovery_steps(self, user_input: str) -> List[PlanStep]:
+        """
+        AGGRESSIVE discovery - don't give up until files are found!
+
+        Strategy:
+        1. Extract ALL file mentions from user input
+        2. Search filesystem for each specific file
+        3. If files mentioned, read them and parse imports
+        4. Follow dependency chain
+        5. Fallback to keyword search only if NO files mentioned
+        """
+        steps = []
+        step_num = 1
+
+        # STEP 1: Extract file mentions
+        file_mentions = self._extract_file_mentions(user_input)
+
+        if file_mentions:
+            # User explicitly mentioned files - FIND THEM!
+            for file_pattern in file_mentions:
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective=f"Discovery: Search for '{file_pattern}' in repository",
+                        tool_hint="search_filesystem",
+                        tool_args_hint={"pattern": file_pattern, "path": "."},
+                        success_criteria=SuccessCriteria(
+                            description=f"Located {file_pattern}",
+                            required_outputs=[f"search_filesystem_output"]
+                        ),
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=3  # Try harder - grep multiple times if needed
+                    )
+                )
+                step_num += 1
+
+            # STEP 2: Read each found file
+            for file_pattern in file_mentions:
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective=f"Discovery: Read {file_pattern} contents",
+                        tool_hint="file_read",
+                        tool_args_hint={"path": file_pattern},
+                        success_criteria=SuccessCriteria(
+                            description=f"File {file_pattern} contents loaded",
+                            required_outputs=[f"file_read_output"]
+                        ),
+                        depends_on=[step_num - len(file_mentions)],  # Depends on corresponding search
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=2
+                    )
+                )
+                step_num += 1
+
+            # STEP 3: Parse imports from found files (for dependency analysis)
+            if any('.py' in f for f in file_mentions):
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective="Discovery: Extract imports and dependencies from Python files",
+                        tool_hint="search_filesystem",
+                        tool_args_hint={"pattern": "^import |^from ", "path": "."},
+                        success_criteria=SuccessCriteria(
+                            description="Dependencies identified",
+                            required_outputs=["search_filesystem_output"]
+                        ),
+                        depends_on=list(range(len(file_mentions) + 1, step_num)),
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=2
+                    )
+                )
+                step_num += 1
+
+        else:
+            # No files mentioned - fall back to keyword search
+            # Extract technical terms from query
+            key_terms = self._extract_key_terms(user_input)
+
+            # STEP 1: List repo structure
+            steps.append(
+                PlanStep(
+                    step_num=step_num,
+                    objective="Discovery: Inspect repository root structure",
+                    tool_hint="list_files",
+                    tool_args_hint={"path": "."},
+                    success_criteria=SuccessCriteria(
+                        description="Repo structure enumerated",
+                        required_outputs=["list_files_output"]
+                    ),
+                    phase=PlanPhase.DISCOVERY,
+                    max_tool_calls=2
+                )
+            )
+            step_num += 1
+
+            # STEP 2: Search for each key term
+            for term in key_terms[:3]:  # Top 3 terms
+                steps.append(
+                    PlanStep(
+                        step_num=step_num,
+                        objective=f"Discovery: Search for '{term}' in codebase",
+                        tool_hint="search_filesystem",
+                        tool_args_hint={"pattern": term, "path": "."},
+                        success_criteria=SuccessCriteria(
+                            description=f"Files containing '{term}' found",
+                            required_outputs=["search_filesystem_output"]
+                        ),
+                        depends_on=[step_num - 1],
+                        phase=PlanPhase.DISCOVERY,
+                        max_tool_calls=3
+                    )
+                )
+                step_num += 1
+
+        # Mark original step numbers for resequencing
+        for step in steps:
+            setattr(step, "_original_step_num", step.step_num)
+
+        return steps
+
+    def _resequence_steps(self, steps: List[PlanStep]) -> List[PlanStep]:
+        """Sort steps (discovery first) and reassign sequential numbers."""
+        if not steps:
+            return steps
+
+        sorted_steps = sorted(
+            steps,
+            key=lambda step: (
+                0 if step.phase == PlanPhase.DISCOVERY else 1,
+                getattr(step, "_original_step_num", step.step_num)
+            )
+        )
+        mapping: Dict[int, int] = {}
+        for idx, step in enumerate(sorted_steps, 1):
+            original = getattr(step, "_original_step_num", step.step_num)
+            mapping[original] = idx
+            step.step_num = idx
+
+        for step in sorted_steps:
+            if not step.depends_on:
+                continue
+            new_deps = []
+            for dep in step.depends_on:
+                if isinstance(dep, bool):
+                    continue
+                dep_int = int(dep)
+                new_deps.append(mapping.get(dep_int, dep_int))
+            step.depends_on = new_deps
+
+        return sorted_steps
+
+    def _finalize_plan(self, plan: Plan, user_input: str) -> Plan:
+        """Ensure discovery plan exists, phases ordered, and metadata populated."""
+        plan.steps = self._resequence_steps(plan.steps)
+        plan.discovery_plan = [s for s in plan.steps if s.phase == PlanPhase.DISCOVERY]
+        plan.execution_plan = [s for s in plan.steps if s.phase == PlanPhase.EXECUTION]
+
+        if plan.discovery_required and not plan.discovery_plan:
+            injected = self._default_discovery_steps(user_input)
+            plan.steps = injected + plan.steps
+            plan.steps = self._resequence_steps(plan.steps)
+            plan.discovery_plan = [s for s in plan.steps if s.phase == PlanPhase.DISCOVERY]
+            plan.execution_plan = [s for s in plan.steps if s.phase == PlanPhase.EXECUTION]
+            plan.assumptions.append("Auto-added discovery plan to inspect repository context")
+
+        return plan
 
 
 # =============================================================================
@@ -731,6 +1276,7 @@ class Executor:
         self.llm = llm
         self.tool_registry = tool_registry
         self.max_tool_calls = max_tool_calls
+        self._tracer = get_tracer()
         # NO logger - Executor doesn't log, Agent does
         self._step_callbacks: List[Callable[[int, ToolCallRecord], None]] = []
 
@@ -751,10 +1297,17 @@ class Executor:
         self,
         plan: Plan,
         messages: List[Message],
-        tools: List[Any]
+        tools: List[Any],
+        serialized_context: Optional[Dict[str, Any]] = None
     ) -> ExecutionTrace:
         """
         Execute a plan and return trace of what happened.
+
+        Args:
+            plan: Execution plan
+            messages: Legacy messages format (for backward compatibility)
+            tools: Tool definitions
+            serialized_context: Serialized context from ContextManager (Responses API format)
 
         Does NOT mutate plan - Agent is responsible for updating plan state.
         Does NOT log - Agent handles all logging.
@@ -769,27 +1322,41 @@ class Executor:
                 plan.steps[0].tool_hint and
                 not plan.steps[0].depends_on and
                 plan.requires_tools):
-                trace = self._execute_simple_tool_task(plan, messages, tools, trace, start_time)
+                with self._tracer.span("execute_simple_tool_task"):
+                    trace = self._execute_simple_tool_task(plan, messages, tools, trace, start_time, serialized_context)
 
             elif not plan.requires_tools:
                 # Simple execution - just get LLM response
-                response = self.llm.complete(messages, tools=None)
-                trace.llm_calls += 1
-                trace.final_response = response.content
+                with self._tracer.span("execute_no_tools"):
+                    if serialized_context and "instructions" in serialized_context:
+                        # Use Responses API
+                        with self._tracer.span("llm_respond"):
+                            response = self.llm.respond(
+                                input=serialized_context.get("input", ""),
+                                instructions=serialized_context.get("instructions", ""),
+                                tools=None
+                            )
+                    else:
+                        # Legacy path
+                        with self._tracer.span("llm_complete"):
+                            response = self.llm.complete(messages, tools=None)
+                    trace.llm_calls += 1
+                    trace.final_response = response.content
 
-                # Create a StepResult for the single reasoning step
-                if plan.steps:
-                    step_result = StepResult(
-                        step_num=plan.steps[0].step_num,
-                        status=PlanStatus.COMPLETED,
-                        accumulated_data={"response": response.content},
-                        final_response=response.content,
-                        duration_ms=(time.time() - start_time) * 1000
-                    )
-                    trace.step_results.append(step_result)
+                    # Create a StepResult for the single reasoning step
+                    if plan.steps:
+                        step_result = StepResult(
+                            step_num=plan.steps[0].step_num,
+                            status=PlanStatus.COMPLETED,
+                            accumulated_data={"response": response.content},
+                            final_response=response.content,
+                            duration_ms=(time.time() - start_time) * 1000
+                        )
+                        trace.step_results.append(step_result)
             else:
                 # Step-by-step execution
-                trace = self._execute_plan_stepwise(plan, messages, tools, trace)
+                with self._tracer.span("execute_plan_stepwise", steps=len(plan.steps)):
+                    trace = self._execute_plan_stepwise(plan, messages, tools, trace, serialized_context)
 
         except Exception as e:
             # Executor can throw exceptions - Agent will handle them
@@ -805,16 +1372,58 @@ class Executor:
         messages: List[Message],
         tools: List[Any],
         trace: ExecutionTrace,
-        start_time: float
+        start_time: float,
+        serialized_context: Optional[Dict[str, Any]] = None
     ) -> ExecutionTrace:
         """
         Fast path for simple single-step, single-tool tasks.
 
         Examples: search queries, file reads, calculations
         Reduces LLM calls from 3-5 down to 1 by skipping stepwise execution.
+
+        OPTIMIZATION: If we have explicit tool_hint AND tool_args_hint,
+        skip the LLM call entirely and execute the tool directly.
+        This saves 500-1500ms per request.
         """
         step = plan.steps[0]
 
+        # ========== DIRECT EXECUTION PATH (NO LLM CALL) ==========
+        # If we have explicit tool name and args, execute directly
+        if step.tool_hint and step.tool_args_hint:
+            tool_start = time.time()
+            result = self.tool_registry.execute(step.tool_hint, **step.tool_args_hint)
+            duration_ms = (time.time() - tool_start) * 1000
+            trace.tool_calls += 1
+            # NOTE: No LLM call made - trace.llm_calls stays at 0
+
+            step_result = StepResult(
+                step_num=1,
+                status=PlanStatus.COMPLETED if result.is_success else PlanStatus.FAILED,
+                tool_calls_made=[ToolCallRecord(
+                    tool_name=step.tool_hint,
+                    arguments=step.tool_args_hint,
+                    result=result,
+                    duration_ms=duration_ms,
+                    timestamp=time.time()
+                )],
+                accumulated_data={"result": result.output} if result.is_success else {},
+                final_response=str(result.output)[:2000] if result.is_success else f"Tool failed: {result.error}",
+                duration_ms=(time.time() - start_time) * 1000,
+                phase=step.phase
+            )
+            trace.step_results.append(step_result)
+
+            # Synthesize readable response from tool result
+            if result.is_success:
+                trace.final_response = self._synthesize_final_response(plan, trace, messages, serialized_context)
+            else:
+                trace.tool_failures += 1
+                trace.final_response = f"Tool failed: {result.error}"
+
+            return trace
+
+        # ========== LLM-GUIDED EXECUTION PATH ==========
+        # Fallback: Use LLM to determine tool call when args not pre-specified
         # Add focused guidance for single-tool execution
         focused_guidance = f"""Execute this single-step task:
 
@@ -824,11 +1433,23 @@ SUGGESTED ACTION: Call {step.tool_hint} to complete the task.
 
 CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."""
 
-        messages_focused = messages.copy()
-        messages_focused.append(Message(MessageRole.SYSTEM, focused_guidance))
-
         # Single LLM call with tool
-        response = self.llm.complete(messages_focused, tools=tools)
+        if serialized_context and "instructions" in serialized_context:
+            # Use Responses API: append guidance to instructions
+            combined_instructions = serialized_context.get("instructions", "") + "\n\n" + focused_guidance
+            # Convert tool definitions to internally-tagged format
+            tools_internally_tagged = [t.to_responses_format() if hasattr(t, 'to_responses_format') else t for t in tools]
+            response = self.llm.respond(
+                input=serialized_context.get("input", ""),
+                instructions=combined_instructions,
+                tools=tools_internally_tagged
+            )
+        else:
+            # Legacy path
+            messages_focused = messages.copy()
+            messages_focused.append(Message(MessageRole.SYSTEM, focused_guidance))
+            response = self.llm.complete(messages_focused, tools=tools)
+
         trace.llm_calls += 1
 
         # Execute tool if called
@@ -836,12 +1457,6 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
             tool_call = response.tool_calls[0]
             result = self.tool_registry.execute(tool_call.name, **tool_call.arguments)
             trace.tool_calls += 1
-
-            if result.is_success:
-                trace.final_response = str(result.output)[:1000]  # Limit output size
-            else:
-                trace.tool_failures += 1
-                trace.final_response = f"Tool failed: {result.error}"
 
             # Create step result
             step_result = StepResult(
@@ -855,10 +1470,18 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                     timestamp=time.time()
                 )],
                 accumulated_data={"result": result.output} if result.is_success else {},
-                final_response=trace.final_response,
-                duration_ms=(time.time() - start_time) * 1000
+                final_response=str(result.output)[:1000] if result.is_success else f"Tool '{tool_call.name}' failed: {result.error}",
+                duration_ms=(time.time() - start_time) * 1000,
+                phase=step.phase
             )
             trace.step_results.append(step_result)
+
+            # Synthesize readable response from tool result
+            if result.is_success:
+                trace.final_response = self._synthesize_final_response(plan, trace, messages, serialized_context)
+            else:
+                trace.tool_failures += 1
+                trace.final_response = f"Tool failed: {result.error}"
         else:
             # LLM didn't call tool - use its response
             trace.final_response = response.content
@@ -866,7 +1489,8 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                 step_num=1,
                 status=PlanStatus.COMPLETED,
                 final_response=response.content,
-                duration_ms=(time.time() - start_time) * 1000
+                duration_ms=(time.time() - start_time) * 1000,
+                phase=step.phase
             )
             trace.step_results.append(step_result)
 
@@ -877,7 +1501,8 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         plan: Plan,
         messages: List[Message],
         tools: List[Any],
-        trace: ExecutionTrace
+        trace: ExecutionTrace,
+        serialized_context: Optional[Dict[str, Any]] = None
     ) -> ExecutionTrace:
         """
         Execute plan step-by-step.
@@ -888,18 +1513,75 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         Updates plan step status after each step so dependencies work correctly.
         """
 
+        remaining_discovery = {
+            s.step_num for s in plan.steps if s.phase == PlanPhase.DISCOVERY
+        }
+        discovery_required = plan.discovery_required and bool(remaining_discovery)
+
         for step in plan.steps:
+            # PHASE GATE: Cannot start execution phase before discovery completes
+            if discovery_required and step.phase == PlanPhase.EXECUTION and remaining_discovery:
+                raise RuntimeError("Cannot execute action steps before completing discovery.")
+
+            # UNCERTAINTY GATE: Check uncertainty threshold before first execution step
+            # For questions, be lenient - we can still answer even with uncertainty
+            if (step.phase == PlanPhase.EXECUTION and
+                plan.discovery_required and
+                not plan.triage_complete and
+                plan.current_uncertainty > plan.uncertainty_threshold):
+                if plan.goal_type == "question":
+                    # For questions, just note the uncertainty - don't fail
+                    plan.triage_summary = f"Proceeding despite uncertainty {plan.current_uncertainty:.2f}"
+                    plan.triage_complete = True
+                else:
+                    # For tasks/creation, be strict
+                    raise RuntimeError(
+                        f"Uncertainty too high for execution: {plan.current_uncertainty:.2f} > {plan.uncertainty_threshold:.2f}. "
+                        f"Unresolved uncertainties: {plan.uncertainties}"
+                    )
+
+            # PRECONDITION CHECK: Verify preconditions before execution steps
+            # For questions, we're lenient - continue even if preconditions not perfectly met
+            if step.phase == PlanPhase.EXECUTION and step.preconditions:
+                preconditions_met, unmet = self._verify_preconditions(step.preconditions)
+                if not preconditions_met:
+                    # For questions, just log a warning - don't fail
+                    if plan.goal_type == "question":
+                        step.validation_details = f"Warning: Preconditions not fully met: {unmet}"
+                    else:
+                        # For tasks/creation, be strict
+                        raise RuntimeError(f"Step {step.step_num} preconditions not met: {unmet}")
+
             # Check dependencies - throw exception if not met
             if not self._dependencies_met(step, plan.steps):
                 raise RuntimeError(f"Step {step.step_num} dependencies not satisfied: {step.depends_on}")
 
             # Execute the step and get result
-            step_result = self._execute_step(step, messages, tools, trace)
+            step_result = self._execute_step(step, messages, tools, trace, serialized_context)
 
             # Update plan step status so dependencies work correctly for subsequent steps
             step.status = step_result.status
             step.error = step_result.error
             step.duration_ms = step_result.duration_ms
+            step.context = step_result.context if hasattr(step_result, "context") else step.context
+
+            # UNCERTAINTY TRACKING: Update uncertainty after discovery steps
+            if step.phase == PlanPhase.DISCOVERY:
+                self._update_uncertainty(plan, step, step_result)
+
+            # POSTCONDITION VERIFICATION: Verify postconditions after execution steps
+            if step.phase == PlanPhase.EXECUTION and step.postconditions:
+                postconditions_met, unmet = self._verify_postconditions(
+                    step.postconditions,
+                    step.verification_method,
+                    step_result
+                )
+                if not postconditions_met:
+                    step.validation_passed = False
+                    step.validation_details = f"Postconditions not met: {unmet}"
+                else:
+                    step.validation_passed = True
+                    step.validation_details = "Postconditions verified"
 
             # Append messages from this step to conversation (for next steps)
             messages.extend(step_result.llm_messages)
@@ -911,29 +1593,93 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
             if step_result.status == PlanStatus.FAILED and not trace.final_response:
                 break
 
-        # OPTIMIZATION: Reuse step results instead of making another LLM call
+            # Track discovery phase completion
+            if discovery_required and step.phase == PlanPhase.DISCOVERY:
+                remaining_discovery.discard(step.step_num)
+                if not remaining_discovery:
+                    discovery_required = False
+                    plan.triage_complete = True
+                    plan.triage_summary = f"Discovery complete. Uncertainty reduced to {plan.current_uncertainty:.2f}"
+
+        # FINAL RESPONSE SYNTHESIS: Generate human-readable response from tool results
         if not trace.final_response:
-            # Use last successful step's response
-            if trace.step_results:
-                last_step = trace.step_results[-1]
-                if last_step.final_response:
-                    trace.final_response = last_step.final_response
-                elif last_step.accumulated_data:
-                    # Synthesize from accumulated data
-                    trace.final_response = f"Completed {len(trace.step_results)} steps"
-                else:
-                    trace.final_response = "Task completed"
-            else:
-                trace.final_response = "No steps executed"
+            trace.final_response = self._synthesize_final_response(
+                plan, trace, messages, serialized_context
+            )
 
         return trace
+
+    def _synthesize_final_response(
+        self,
+        plan: Plan,
+        trace: ExecutionTrace,
+        messages: List[Message],
+        serialized_context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Generate a human-readable final response from tool results.
+        Makes an LLM call to synthesize findings into a proper answer.
+        """
+        # Collect evidence from tool executions
+        tool_results_summary = []
+        for step_result in trace.step_results:
+            if step_result.status == PlanStatus.COMPLETED:
+                for tool_record in step_result.tool_calls_made:
+                    if tool_record.result.is_success:
+                        output_preview = str(tool_record.result.output)[:1000]
+                        tool_results_summary.append(
+                            f"- {tool_record.tool_name}: {output_preview}"
+                        )
+
+        # If no completed work, provide fallback
+        if not tool_results_summary:
+            if trace.step_results:
+                return f"Attempted {len(trace.step_results)} step(s) but couldn't complete the task."
+            else:
+                return "No steps were executed."
+
+        # Create synthesis prompt
+        synthesis_prompt = f"""Based on the tool executions below, provide a clear, concise answer to the user's request.
+
+User's request: {plan.goal}
+
+Tool results:
+{chr(10).join(tool_results_summary[:5])}
+
+Provide a natural, conversational response that directly answers the user's question. Do not repeat the raw data - summarize and explain the key findings."""
+
+        # Make LLM call to synthesize
+        try:
+            if serialized_context and "instructions" in serialized_context:
+                # Use Responses API
+                response = self.llm.respond(
+                    input=serialized_context.get("input", ""),
+                    instructions=synthesis_prompt,
+                    tools=None
+                )
+            else:
+                # Legacy path: append synthesis request to messages
+                synthesis_messages = messages.copy()
+                synthesis_messages.append(Message(
+                    role=MessageRole.SYSTEM,
+                    content=synthesis_prompt
+                ))
+                response = self.llm.complete(synthesis_messages, tools=None)
+
+            trace.llm_calls += 1
+            return response.content or "I completed the task but couldn't generate a summary."
+
+        except Exception:
+            # Fallback: use simple concatenation
+            return "\n".join(tool_results_summary[:3])
 
     def _execute_step(
         self,
         step: PlanStep,
         messages: List[Message],
         tools: List[Any],
-        trace: ExecutionTrace
+        trace: ExecutionTrace,
+        serialized_context: Optional[Dict[str, Any]] = None
     ) -> StepResult:
         """
         Execute a single step (may involve multiple tool calls).
@@ -954,11 +1700,23 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         # Add step guidance to help LLM focus
         # Pass context so guidance can show what data we already have
         step_guidance = self._create_step_guidance(step, context)
-        messages_with_guidance = messages.copy()
-        messages_with_guidance.append(Message(
-            role=MessageRole.SYSTEM,
-            content=step_guidance
-        ))
+
+        # Initialize messages_with_guidance for conversation tracking
+        messages_with_guidance = messages.copy() if messages else []
+
+        # Prepare LLM call parameters based on whether we have serialized context
+        if serialized_context and "instructions" in serialized_context:
+            # Use Responses API: append guidance to instructions
+            combined_instructions = serialized_context.get("instructions", "") + "\n\n" + step_guidance
+            llm_input = serialized_context.get("input", "")
+            # Convert tool definitions to internally-tagged format
+            tools_internally_tagged = [t.to_responses_format() if hasattr(t, 'to_responses_format') else t for t in tools]
+        else:
+            # Legacy path: add guidance as a system message
+            messages_with_guidance.append(Message(
+                role=MessageRole.SYSTEM,
+                content=step_guidance
+            ))
 
         tool_calls_in_step = 0
         step_complete = False
@@ -968,7 +1726,17 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
 
         # Execute until step completes or hits limit
         while not step_complete and tool_calls_in_step < step.max_tool_calls:
-            response = self.llm.complete(messages_with_guidance, tools=tools)
+            if serialized_context and "instructions" in serialized_context:
+                # Use Responses API
+                response = self.llm.respond(
+                    input=llm_input,
+                    instructions=combined_instructions,
+                    tools=tools_internally_tagged
+                )
+            else:
+                # Legacy path
+                response = self.llm.complete(messages_with_guidance, tools=tools)
+
             trace.llm_calls += 1
 
             if not response.has_tool_calls:
@@ -1012,7 +1780,13 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                     if batch_last_success_output is not None:
                         final_response_content = str(batch_last_success_output)[:500]
                     else:
-                        final_response_content = f"Step {step.step_num} completed"
+                        # Extract any successful results from the batch
+                        batch_outputs = [
+                            str(record.result.output)[:200]
+                            for record in context.tool_calls_made
+                            if record.result.is_success and record.result.output
+                        ]
+                        final_response_content = "\n".join(batch_outputs) if batch_outputs else f"Completed: {step.objective}"
                     trace.final_response = final_response_content
                     break
 
@@ -1049,7 +1823,16 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                     if context.has_required_data(step.success_criteria.required_outputs):
                         step_complete = True
                         # Use tool result directly, don't make another LLM call
-                        final_response_content = str(result.output) if result.is_success else "Step completed"
+                        if result.is_success:
+                            final_response_content = str(result.output)
+                        else:
+                            # Collect any successful outputs from this step
+                            successful_outputs = [
+                                str(r.result.output)[:200]
+                                for r in context.tool_calls_made
+                                if r.result.is_success and r.result.output
+                            ]
+                            final_response_content = "\n".join(successful_outputs) if successful_outputs else f"Completed: {step.objective}"
                         trace.final_response = final_response_content
                         break
 
@@ -1098,7 +1881,16 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                 if last_tool_result.is_success:
                     final_response_content = str(last_tool_result.output)[:500]  # Truncate long outputs
                 else:
-                    final_response_content = f"Step {step.step_num} completed"
+                    # Extract any successful results from earlier tool calls in this step
+                    successful_outputs = [
+                        str(record.result.output)[:200]
+                        for record in context.tool_calls_made
+                        if record.result.is_success and record.result.output
+                    ]
+                    if successful_outputs:
+                        final_response_content = "\n".join(successful_outputs)
+                    else:
+                        final_response_content = f"Completed step: {step.objective}"
                 trace.final_response = final_response_content
                 break
 
@@ -1124,7 +1916,9 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
             accumulated_data=context.accumulated_data,
             final_response=final_response_content,
             error=error_message,
-            duration_ms=duration_ms
+            duration_ms=duration_ms,
+            phase=step.phase,
+            context=context
         )
 
     def _can_parallelize_batch(self, tool_calls: List[ToolCall]) -> bool:
@@ -1228,10 +2022,18 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         if step.success_criteria and step.success_criteria.required_outputs:
             if context.has_required_data(step.success_criteria.required_outputs):
                 criteria_met = True
-                target_output = last_success_output
-                if target_output is None and ordered_results:
-                    target_output = ordered_results[-1][1].output
-                criteria_output = str(target_output) if target_output is not None else "Step completed"
+                # Collect all successful outputs
+                successful_outputs = [
+                    str(result.output)[:200]
+                    for _, result in ordered_results
+                    if result.is_success and result.output
+                ]
+                if successful_outputs:
+                    criteria_output = "\n".join(successful_outputs)
+                elif last_success_output is not None:
+                    criteria_output = str(last_success_output)
+                else:
+                    criteria_output = f"Completed: {step.objective}"
 
         return tool_hint_executed, last_success_output, criteria_met, criteria_output
 
@@ -1339,6 +2141,72 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
 
         return True
 
+    def _update_uncertainty(self, plan: Plan, step: PlanStep, step_result: StepResult):
+        """
+        Update plan uncertainty after discovery step completes.
+
+        Discovery steps reduce uncertainty by gathering evidence.
+        Execution is only allowed once uncertainty drops below threshold.
+        """
+        if step.phase != PlanPhase.DISCOVERY:
+            return
+
+        # If step succeeded and targeted uncertainties
+        if step_result.status == PlanStatus.COMPLETED:
+            # Remove targeted uncertainties from the plan
+            for uncertainty in step.uncertainties_targeted:
+                if uncertainty in plan.uncertainties:
+                    plan.uncertainties.remove(uncertainty)
+
+            # Reduce current uncertainty level
+            plan.current_uncertainty -= step.expected_uncertainty_reduction
+            step.actual_uncertainty_reduction = step.expected_uncertainty_reduction
+
+        # Clamp to [0, 1]
+        plan.current_uncertainty = max(0.0, min(1.0, plan.current_uncertainty))
+
+    def _verify_preconditions(self, preconditions: List[str], context: Optional[Dict[str, Any]] = None) -> tuple[bool, List[str]]:
+        """
+        Verify preconditions are met before execution.
+
+        Returns:
+            (all_met, list of unmet preconditions)
+        """
+        if not preconditions:
+            return True, []
+
+        # For now, we trust that discovery has gathered the needed information
+        # In a more sophisticated implementation, we could check context/accumulated_data
+        # to verify specific preconditions programmatically
+
+        # TODO: Add programmatic precondition checking based on context
+        return True, []
+
+    def _verify_postconditions(
+        self,
+        postconditions: List[str],
+        verification_method: Optional[str],
+        step_result: StepResult
+    ) -> tuple[bool, List[str]]:
+        """
+        Verify postconditions after step execution.
+
+        Returns:
+            (all_met, list of unmet postconditions)
+        """
+        if not postconditions:
+            return True, []
+
+        # Check if step completed successfully - basic verification
+        if step_result.status != PlanStatus.COMPLETED:
+            return False, postconditions
+
+        # If verification method specified, could execute it here
+        # For now, we trust successful completion means postconditions met
+        # TODO: Add programmatic postcondition verification
+
+        return True, []
+
 
 # =============================================================================
 # REFLECTOR: Evaluates execution against goals
@@ -1354,6 +2222,7 @@ class Reflector:
 
     def __init__(self, llm: LLMAdapter):
         self.llm = llm
+        self._tracer = get_tracer()
         # NO logger - Reflector doesn't log, Agent does
 
     def reflect(
@@ -1477,8 +2346,10 @@ class Reflector:
         ]
 
         try:
-            response = self.llm.complete(messages)
-            eval_data = self._parse_reflection(response.content)
+            with self._tracer.span("llm_complete_reflection"):
+                response = self.llm.complete(messages)
+            with self._tracer.span("parse_reflection"):
+                eval_data = self._parse_reflection(response.content)
 
             return Reflection(
                 plan_goal=plan.goal,

@@ -65,6 +65,18 @@ class STTServiceConfig:
 
 
 @dataclass
+class TTSServiceConfig:
+    """TTS service configuration"""
+    engine: str = "auto"  # "auto", "macos_say", or "pyttsx3"
+    voice: Optional[str] = None  # Voice name (e.g., "Samantha", "Alex", "Karen")
+    rate: int = 180  # Speech rate (words per minute)
+    volume: float = 0.8  # Volume level (0.0 to 1.0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class LinterServiceConfig:
     """Text linter service configuration"""
     enabled: bool = True
@@ -91,6 +103,9 @@ class HarnessReferenceConfig:
 class RuntimeConfig:
     """Runtime-specific configuration"""
     mode: RuntimeMode = RuntimeMode.MULTI_PROCESS
+    # Headless mode: run without microphone/audio hardware requirements.
+    # Intended for Docker/macOS/CI where audio passthrough is unavailable.
+    headless: bool = False
     max_agent_pending: int = 1
     health_check_interval_s: float = 2.0
     agent_timeout_s: float = 30.0
@@ -120,6 +135,7 @@ class AppConfig:
     # Services
     audio: AudioServiceConfig = field(default_factory=AudioServiceConfig)
     stt: STTServiceConfig = field(default_factory=STTServiceConfig)
+    tts: TTSServiceConfig = field(default_factory=TTSServiceConfig)
     linter: LinterServiceConfig = field(default_factory=LinterServiceConfig)
 
     # Harness (domain layer)
@@ -156,6 +172,7 @@ class AppConfig:
             logging=LoggingConfig(**data.get('logging', {})),
             audio=AudioServiceConfig(**data.get('audio', {})),
             stt=STTServiceConfig(**data.get('stt', {})),
+            tts=TTSServiceConfig(**data.get('tts', {})),
             linter=LinterServiceConfig(**data.get('linter', {})),
             harness=HarnessReferenceConfig(**data.get('harness', {}))
         )
@@ -168,11 +185,30 @@ class AppConfig:
                 data = json.load(f)
             return cls.from_dict(data)
         except FileNotFoundError:
-            logging.warning(f"Config file not found: {path}, using defaults")
-            return cls()
+            raise FileNotFoundError(
+                f"Configuration file not found: {path}\n\n"
+                "To fix this:\n"
+                "  1. Run: voice-agent --init-config\n"
+                "  2. Or specify a valid config: voice-agent --config /path/to/config.json"
+            )
         except json.JSONDecodeError as e:
-            logging.error(f"Invalid JSON in config file: {e}, using defaults")
-            return cls()
+            raise ValueError(
+                f"Invalid JSON in configuration file: {path}\n\n"
+                f"Error details: {e}\n\n"
+                "To fix this:\n"
+                "  1. Check the JSON syntax in your config file\n"
+                "  2. Ensure all brackets, braces, and quotes are properly matched\n"
+                "  3. Remove any trailing commas\n"
+                "  4. Or restore from template: voice-agent --init-config"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Unexpected error loading configuration from {path}: {e}\n\n"
+                "To fix this:\n"
+                "  1. Verify the file is readable and not corrupted\n"
+                "  2. Check file permissions\n"
+                "  3. Or restore from template: voice-agent --init-config"
+            )
 
 
 def load_app_config(path: Optional[str] = None) -> AppConfig:
@@ -188,9 +224,13 @@ def load_app_config(path: Optional[str] = None) -> AppConfig:
     - STT_MODEL: Whisper model size (tiny.en, base.en, small.en, etc.)
     - STT_DEVICE: STT device (auto, cpu, cuda, mps)
     - STT_COMPUTE_TYPE: Compute type (auto, int8, float16, float32)
+    - TTS_VOICE: TTS voice name (e.g., Samantha, Alex, Karen for macOS)
+    - TTS_RATE: TTS speech rate in words per minute (default: 200)
+    - TTS_VOLUME: TTS volume level 0.0-1.0 (default: 0.9)
     - AUDIO_DEVICE_INDEX: Audio input device index
     - AUDIO_SAMPLE_RATE: Audio sample rate in Hz
     - HARNESS_CONFIG_PATH: Path to harness configuration file
+    - VOICE_AGENT_HEADLESS: Enable headless mode (true/1)
 
     Args:
         path: Path to config file (defaults to config/app_config.json)
@@ -222,6 +262,20 @@ def load_app_config(path: Optional[str] = None) -> AppConfig:
     if os.getenv("STT_COMPUTE_TYPE"):
         config.stt.compute_type = os.getenv("STT_COMPUTE_TYPE")
 
+    # TTS
+    if os.getenv("TTS_VOICE"):
+        config.tts.voice = os.getenv("TTS_VOICE")
+    if os.getenv("TTS_RATE"):
+        try:
+            config.tts.rate = int(os.getenv("TTS_RATE"))
+        except ValueError:
+            logging.warning(f"Invalid TTS_RATE: {os.getenv('TTS_RATE')}")
+    if os.getenv("TTS_VOLUME"):
+        try:
+            config.tts.volume = float(os.getenv("TTS_VOLUME"))
+        except ValueError:
+            logging.warning(f"Invalid TTS_VOLUME: {os.getenv('TTS_VOLUME')}")
+
     # Audio
     if os.getenv("AUDIO_DEVICE_INDEX"):
         try:
@@ -230,13 +284,18 @@ def load_app_config(path: Optional[str] = None) -> AppConfig:
             logging.warning(f"Invalid AUDIO_DEVICE_INDEX: {os.getenv('AUDIO_DEVICE_INDEX')}")
     if os.getenv("AUDIO_SAMPLE_RATE"):
         try:
-            config.audio.sample_rate = int(os.getenv("AUDIO_SAMPLE_RATE"))
+            config.audio.sample_rate = int(
+                os.getenv("AUDIO_SAMPLE_RATE"))
         except ValueError:
             logging.warning(f"Invalid AUDIO_SAMPLE_RATE: {os.getenv('AUDIO_SAMPLE_RATE')}")
 
     # Harness
     if os.getenv("HARNESS_CONFIG_PATH"):
         config.harness.config_path = os.getenv("HARNESS_CONFIG_PATH")
+
+    # Runtime
+    if os.getenv("VOICE_AGENT_HEADLESS"):
+        config.runtime.headless = os.getenv("VOICE_AGENT_HEADLESS", "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
     return config
 

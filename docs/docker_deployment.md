@@ -166,11 +166,12 @@ voice-agent
 - Or use Docker for testing without audio:
 
 ```bash
-# Testing without audio (health checks will fail)
+# Testing without audio (headless mode)
 docker run -it --rm \
+  -e VOICE_AGENT_HEADLESS=1 \
   -v $(pwd)/config:/config:ro \
   --env-file .env \
-  voice-agent:latest voice-agent --help
+  voice-agent:latest voice-agent --headless
 ```
 
 ### Windows
@@ -395,6 +396,11 @@ ERROR     Linux:   --device /dev/snd:/dev/snd
    ```bash
    docker run --rm --device /dev/snd:/dev/snd alpine ls -la /dev/snd
    # Should show audio devices
+   ```
+
+4. **Run headless (skip audio device requirements):**
+   ```bash
+   docker run --rm -e VOICE_AGENT_HEADLESS=1 voice-agent:latest voice-agent --headless
    ```
 
 ### Permission Denied

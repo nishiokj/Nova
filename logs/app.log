@@ -3607,3 +3607,818 @@ TypeError: TranscriptionCompleteEvent.__init__() got an unexpected keyword argum
 2025-12-15 16:03:05,915 - app - INFO - Stopping MultiProcessVoiceApp...
 2025-12-15 16:03:05,916 - app - INFO - Response monitor stopped
 2025-12-15 16:03:06,084 - app - INFO - Audio capture loop stopped
+2025-12-15 18:25:57,168 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 18:25:57,168 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 18:25:57,168 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 18:25:57,171 - audio_pipeline.audio_pipeline - INFO - PyAudio found 7 audio devices
+2025-12-15 18:25:57,508 - audio_pipeline.audio_pipeline - INFO - Found 3 input devices:
+2025-12-15 18:25:57,508 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 18:25:57,508 - audio_pipeline.audio_pipeline - INFO -   Device 4: WH-H900N (h.ear) (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 18:25:57,508 - audio_pipeline.audio_pipeline - INFO -   Device 6: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 18:25:57,508 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 18:25:57,508 - app - INFO - Using audio device index: 2
+2025-12-15 18:25:57,509 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 18:25:57,509 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 18:25:57,509 - app - INFO - Starting worker processes...
+2025-12-15 18:25:57,510 - app.process_manager - INFO - Started worker 'tts' (PID: 24259)
+2025-12-15 18:25:57,511 - app.process_manager - INFO - Started worker 'service_rep' (PID: 24260)
+2025-12-15 18:25:57,511 - app.process_manager - INFO - ProcessManager started
+2025-12-15 18:25:58,516 - app - INFO - Initializing STT service...
+2025-12-15 18:25:58,626 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 18:25:58,627 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 18:25:58,627 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 18:25:58,935 - app.stt - INFO - Whisper model loaded in 309ms (device=cpu, compute_type=int8)
+2025-12-15 18:25:58,935 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 18:25:58,935 - app - INFO - Audio capture loop started
+2025-12-15 18:25:58,936 - app - INFO - Audio processing loop started
+2025-12-15 18:25:58,936 - app - INFO - Calibrating noise floor...
+2025-12-15 18:25:58,936 - app - INFO - Response monitor started
+2025-12-15 18:25:58,936 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 18:25:58,936 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 18:25:59,442 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 18:26:06,557 - app.audio - INFO - Speech segment finalized: 55680 bytes, 0.70s
+2025-12-15 18:26:39,268 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.56s
+2025-12-15 18:26:50,345 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 18:26:52,688 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 18:27:04,167 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.56s
+2025-12-15 18:27:21,962 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 18:27:26,995 - app.audio - INFO - Speech segment finalized: 186240 bytes, 0.52s
+2025-12-15 18:27:37,280 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.56s
+2025-12-15 18:27:41,717 - app.audio - INFO - Speech segment finalized: 195840 bytes, 0.51s
+2025-12-15 18:28:21,525 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 18:28:24,527 - app - INFO - Transcribed: . . . . . . . . . . . . . .
+2025-12-15 18:28:46,603 - app.audio - INFO - Speech segment finalized: 59520 bytes, 0.76s
+2025-12-15 18:28:49,858 - app - INFO - Transcribed: Okay. Okay. All right. So I'll go ahead and show you the next one. All right. All right. All right. All right. All right. All right. So, let's go ahead and see how that works. All right.
+2025-12-15 18:28:49,859 - app - INFO - [req_11_req_3e63] Transcription complete: Okay. All right. So I'll go ahead and show you the next one. All right. All right. All right. All right. All right. All right. So, let's go ahead and see how that works. All right.
+2025-12-15 18:28:54,059 - app.audio - INFO - Speech segment finalized: 403200 bytes, 4.20s
+2025-12-15 18:28:54,414 - app - INFO - Transcribed: In my app folder, construct a new app. This one will not use voice. It will only use text to input.
+2025-12-15 18:28:54,414 - app - INFO - [req_12_req_3646] Transcription complete: In my app folder, construct a new app. This one will not use voice. It will only use text to input.
+2025-12-15 18:29:02,860 - app.audio - INFO - Speech segment finalized: 188160 bytes, 2.76s
+2025-12-15 18:29:11,917 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 18:29:17,097 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.57s
+2025-12-15 18:29:35,546 - app.audio - INFO - Speech segment finalized: 120960 bytes, 1.72s
+2025-12-15 18:29:38,787 - app.audio - INFO - Speech segment finalized: 207360 bytes, 0.57s
+2025-12-15 18:29:41,424 - app.audio - INFO - Speech segment finalized: 151680 bytes, 0.51s
+2025-12-15 18:30:14,840 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 18:30:19,035 - app.audio - INFO - Speech segment finalized: 134400 bytes, 0.77s
+2025-12-15 18:30:21,909 - app - INFO - Transcribed: Good. Good.
+2025-12-15 18:30:39,789 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 18:30:49,810 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 18:30:55,146 - app.audio - INFO - Speech segment finalized: 274560 bytes, 1.20s
+2025-12-15 18:30:58,095 - app - INFO - Transcribed: . . . . .
+2025-12-15 18:30:58,625 - app.audio - INFO - Speech segment finalized: 126720 bytes, 0.53s
+2025-12-15 18:31:03,242 - app.audio - INFO - Speech segment finalized: 82560 bytes, 1.12s
+2025-12-15 18:31:05,824 - app.audio - INFO - Speech segment finalized: 138240 bytes, 0.54s
+2025-12-15 18:31:07,626 - app.audio - INFO - Speech segment finalized: 59520 bytes, 0.76s
+2025-12-15 18:31:08,823 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 18:31:11,342 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 18:31:21,242 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 18:31:38,038 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 18:31:42,855 - app.audio - INFO - Speech segment finalized: 124800 bytes, 0.51s
+2025-12-15 18:31:51,531 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 18:31:54,956 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.59s
+2025-12-15 18:31:57,055 - app.audio - INFO - Speech segment finalized: 69120 bytes, 0.90s
+2025-12-15 18:32:03,014 - app.audio - INFO - Speech segment finalized: 84480 bytes, 1.14s
+2025-12-15 18:32:05,872 - app.audio - INFO - Speech segment finalized: 153600 bytes, 1.05s
+2025-12-15 18:32:11,210 - app.audio - INFO - Speech segment finalized: 134400 bytes, 0.95s
+2025-12-15 18:32:24,594 - app.audio - INFO - Speech segment finalized: 92160 bytes, 11.01s
+2025-12-15 18:32:34,845 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.59s
+2025-12-15 18:32:38,681 - app.audio - INFO - Speech segment finalized: 228480 bytes, 0.52s
+2025-12-15 18:32:41,860 - app.audio - INFO - Speech segment finalized: 203520 bytes, 0.54s
+2025-12-15 18:32:48,337 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 18:32:51,636 - app - INFO - Transcribed: . . . . . . . . . . . . .
+2025-12-15 18:32:52,176 - app.audio - INFO - Speech segment finalized: 168960 bytes, 0.54s
+2025-12-15 18:32:56,676 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 18:33:02,258 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.52s
+2025-12-15 18:33:05,316 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 18:33:08,977 - app.audio - INFO - Speech segment finalized: 159360 bytes, 0.93s
+2025-12-15 18:33:12,337 - app.audio - INFO - Speech segment finalized: 178560 bytes, 1.91s
+2025-12-15 18:33:21,812 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 18:33:46,649 - app.audio - INFO - Speech segment finalized: 97920 bytes, 1.37s
+2025-12-15 18:33:49,781 - app - INFO - Transcribed: Okay. Okay. Thank you. Good. That's all. Bye-bye. Alright. Bye-bye. Alright. Bye-bye. This is the second phrase. Okay. Thank you. Alright. Come on. Good. Okay. Thank you. Good. Good. Good. Good. Good. Good. Okay. Okay. Good. Good.
+2025-12-15 18:33:49,781 - app - INFO - [req_51_req_9039] Transcription complete: Okay. Thank you. Good. That's all. Bye-bye. Alright. Bye-bye. Alright. Bye-bye. This is the second phrase. Okay. Thank you. Alright. Come on. Good. Okay. Thank you. Good. Okay. Good.
+2025-12-15 18:33:50,308 - app.audio - INFO - Speech segment finalized: 167040 bytes, 0.52s
+2025-12-15 18:33:52,763 - app.audio - INFO - Speech segment finalized: 145920 bytes, 0.61s
+2025-12-15 18:33:56,240 - app.audio - INFO - Speech segment finalized: 159360 bytes, 1.39s
+2025-12-15 18:33:59,601 - app.audio - INFO - Speech segment finalized: 199680 bytes, 0.53s
+2025-12-15 18:34:02,219 - app - INFO - Transcribed: . . . . .
+2025-12-15 18:34:02,900 - app.audio - INFO - Speech segment finalized: 165120 bytes, 0.68s
+2025-12-15 18:34:05,182 - app.audio - INFO - Speech segment finalized: 109440 bytes, 1.54s
+2025-12-15 18:34:09,038 - app.audio - INFO - Speech segment finalized: 247680 bytes, 0.52s
+2025-12-15 18:34:25,416 - app.audio - INFO - Speech segment finalized: 49920 bytes, 7.52s
+2025-12-15 18:34:29,552 - app - INFO - Transcribed: OK. All right. Everybody. We'll see you in a minute. Bye. Okay. Bye. Bye. Bye, bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Ah. Bye. Bye. Bye. Bye. Bye. Bye.
+2025-12-15 18:34:29,552 - app - INFO - [req_59_req_ef6e] Transcription complete: OK. All right. Everybody. We'll see you in a minute. Bye. Okay. Bye. Bye, bye. . Bye.
+2025-12-15 18:34:30,074 - app.audio - INFO - Speech segment finalized: 240000 bytes, 0.52s
+2025-12-15 18:34:33,615 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 18:34:45,731 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 19:13:16,131 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 19:13:16,131 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 19:13:16,131 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 19:13:16,133 - audio_pipeline.audio_pipeline - INFO - PyAudio found 7 audio devices
+2025-12-15 19:13:16,456 - audio_pipeline.audio_pipeline - INFO - Found 3 input devices:
+2025-12-15 19:13:16,456 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:13:16,456 - audio_pipeline.audio_pipeline - INFO -   Device 4: WH-H900N (h.ear) (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:13:16,456 - audio_pipeline.audio_pipeline - INFO -   Device 6: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:13:16,456 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 19:13:16,456 - app - INFO - Using audio device index: 2
+2025-12-15 19:13:16,456 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 19:13:16,456 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 19:13:16,456 - app - INFO - Starting worker processes...
+2025-12-15 19:13:16,460 - app.process_manager - INFO - Started worker 'tts' (PID: 39635)
+2025-12-15 19:13:16,461 - app.process_manager - INFO - Started worker 'service_rep' (PID: 39636)
+2025-12-15 19:13:16,461 - app.process_manager - INFO - ProcessManager started
+2025-12-15 19:13:17,464 - app - INFO - Initializing STT service...
+2025-12-15 19:13:25,029 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 19:13:25,029 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 19:13:25,029 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 19:13:25,693 - app.stt - INFO - Whisper model loaded in 664ms (device=cpu, compute_type=int8)
+2025-12-15 19:13:25,693 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 19:13:25,693 - app - INFO - Audio capture loop started
+2025-12-15 19:13:25,693 - app - INFO - Audio processing loop started
+2025-12-15 19:13:25,693 - app - INFO - Response monitor started
+2025-12-15 19:13:25,693 - app - INFO - Calibrating noise floor...
+2025-12-15 19:13:25,693 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 19:13:25,694 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 19:13:26,207 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 19:13:28,889 - app.audio - INFO - Speech segment finalized: 80640 bytes, 1.08s
+2025-12-15 19:13:56,375 - app.audio - INFO - Speech segment finalized: 1695360 bytes, 13.06s
+2025-12-15 19:13:57,108 - app - INFO - Transcribed: Create a new directory called tui and build a terminal user interface for this application that really serves users well. You're going to have to do a decent amount of discovery in order to understand how this is going to work. You'll have to start in the app folder.
+2025-12-15 19:13:57,109 - app - INFO - [req_2_req_2cad] Transcription complete: Create a new directory called tui and build a terminal user interface for this application that really serves users well. You're going to have to do a decent amount of discovery in order to understand how this is going to work. You'll have to start in the app folder.
+2025-12-15 19:14:08,468 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 19:14:11,968 - app.audio - INFO - Speech segment finalized: 188160 bytes, 0.51s
+2025-12-15 19:14:52,098 - app.audio - INFO - Speech segment finalized: 88320 bytes, 1.20s
+2025-12-15 19:14:58,934 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 19:15:12,413 - app.audio - INFO - Speech segment finalized: 61440 bytes, 0.78s
+2025-12-15 19:15:16,868 - app.audio - INFO - Speech segment finalized: 288000 bytes, 0.51s
+2025-12-15 19:15:18,229 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 19:15:20,567 - app.audio - INFO - Speech segment finalized: 61440 bytes, 0.78s
+2025-12-15 19:15:25,811 - app.audio - INFO - Speech segment finalized: 336000 bytes, 0.53s
+2025-12-15 19:15:54,404 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 19:16:07,600 - app.audio - INFO - Speech segment finalized: 105600 bytes, 1.48s
+2025-12-15 19:16:32,193 - app.audio - INFO - Speech segment finalized: 332160 bytes, 5.02s
+2025-12-15 19:16:32,524 - app - INFO - Transcribed: Do a robust code review on the work you've just accomplished in the 2A folder.
+2025-12-15 19:16:32,524 - app - INFO - [req_14_req_5ede] Transcription complete: Do a robust code review on the work you've just accomplished in the 2A folder.
+2025-12-15 19:16:33,035 - app.audio - INFO - Speech segment finalized: 55680 bytes, 0.51s
+2025-12-15 19:16:35,734 - app.audio - INFO - Speech segment finalized: 65280 bytes, 0.84s
+2025-12-15 19:16:40,230 - app.audio - INFO - Speech segment finalized: 251520 bytes, 0.50s
+2025-12-15 19:16:42,333 - app.audio - INFO - Speech segment finalized: 120960 bytes, 0.54s
+2025-12-15 19:16:43,228 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.59s
+2025-12-15 19:16:58,704 - app.audio - INFO - Speech segment finalized: 174720 bytes, 2.56s
+2025-12-15 19:17:03,868 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 19:17:14,807 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.50s
+2025-12-15 19:17:24,804 - app.audio - INFO - Speech segment finalized: 197760 bytes, 2.92s
+2025-12-15 19:17:29,363 - app.audio - INFO - Speech segment finalized: 90240 bytes, 0.53s
+2025-12-15 19:17:34,098 - app.audio - INFO - Speech segment finalized: 167040 bytes, 0.50s
+2025-12-15 19:17:38,119 - app.audio - INFO - Speech segment finalized: 211200 bytes, 0.53s
+2025-12-15 19:17:39,519 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 19:17:42,380 - app.audio - INFO - Speech segment finalized: 172800 bytes, 0.54s
+2025-12-15 19:17:46,176 - app.audio - INFO - Speech segment finalized: 122880 bytes, 0.51s
+2025-12-15 19:17:49,939 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 19:17:55,332 - app.audio - INFO - Speech segment finalized: 312960 bytes, 0.53s
+2025-12-15 19:17:59,017 - app.audio - INFO - Speech segment finalized: 197760 bytes, 0.98s
+2025-12-15 19:18:03,491 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 19:18:09,192 - app.audio - INFO - Speech segment finalized: 113280 bytes, 1.60s
+2025-12-15 19:18:18,990 - app.audio - INFO - Speech segment finalized: 96000 bytes, 1.32s
+2025-12-15 19:18:20,048 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 19:18:22,690 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 19:18:25,826 - app.audio - INFO - Speech segment finalized: 193920 bytes, 0.51s
+2025-12-15 19:18:28,345 - app.audio - INFO - Speech segment finalized: 132480 bytes, 0.51s
+2025-12-15 19:18:32,849 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 19:18:54,798 - app.audio - INFO - Speech segment finalized: 113280 bytes, 1.58s
+2025-12-15 19:19:00,300 - app.audio - INFO - Speech segment finalized: 67200 bytes, 0.89s
+2025-12-15 19:19:04,375 - app.audio - INFO - Speech segment finalized: 259200 bytes, 0.54s
+2025-12-15 19:19:10,371 - app.audio - INFO - Speech segment finalized: 71040 bytes, 2.46s
+2025-12-15 19:19:14,452 - app.audio - INFO - Speech segment finalized: 197760 bytes, 0.52s
+2025-12-15 19:19:16,732 - app.audio - INFO - Speech segment finalized: 130560 bytes, 0.60s
+2025-12-15 19:19:20,694 - app.audio - INFO - Speech segment finalized: 134400 bytes, 0.82s
+2025-12-15 19:19:24,732 - app.audio - INFO - Speech segment finalized: 163200 bytes, 0.52s
+2025-12-15 19:19:27,842 - app - INFO - Transcribed: Okay. Time for the second. Good. First we have the second. Thank you. Thank you. Good. All right. Good. All right. Thank you. Good. All right. All right. All right. Okay. Let's move this.
+2025-12-15 19:19:27,843 - app - INFO - [req_48_req_6f06] Transcription complete: Okay. Time for the second. Good. First we have the second. Thank you. Thank you. Good. All right. Good. All right. Thank you. Good. All right. All right. All right. Okay. Let's move this.
+2025-12-15 19:19:29,089 - app.audio - INFO - Speech segment finalized: 278400 bytes, 1.25s
+2025-12-15 19:19:31,331 - app.audio - INFO - Speech segment finalized: 113280 bytes, 0.58s
+2025-12-15 19:19:36,110 - app.audio - INFO - Speech segment finalized: 226560 bytes, 1.54s
+2025-12-15 19:19:41,446 - app.audio - INFO - Speech segment finalized: 99840 bytes, 1.38s
+2025-12-15 19:19:45,881 - app.audio - INFO - Speech segment finalized: 247680 bytes, 2.01s
+2025-12-15 19:19:50,386 - app.audio - INFO - Speech segment finalized: 288000 bytes, 1.19s
+2025-12-15 19:19:56,441 - app.audio - INFO - Speech segment finalized: 385920 bytes, 1.26s
+2025-12-15 19:20:01,061 - app.audio - INFO - Speech segment finalized: 99840 bytes, 0.54s
+2025-12-15 19:20:05,218 - app.audio - INFO - Speech segment finalized: 255360 bytes, 0.51s
+2025-12-15 19:20:09,816 - app.audio - INFO - Speech segment finalized: 264960 bytes, 1.00s
+2025-12-15 19:20:16,478 - app.audio - INFO - Speech segment finalized: 55680 bytes, 0.70s
+2025-12-15 19:20:17,253 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.51s
+2025-12-15 19:20:25,175 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 19:20:28,315 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 19:20:32,572 - app.audio - INFO - Speech segment finalized: 172800 bytes, 0.50s
+2025-12-15 19:20:36,571 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 19:20:40,127 - app.audio - INFO - Speech segment finalized: 193920 bytes, 0.51s
+2025-12-15 19:20:59,547 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 19:21:29,463 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 19:21:29,472 - app - INFO - Response monitor stopped
+2025-12-15 19:21:29,669 - app - INFO - Audio capture loop stopped
+2025-12-15 19:21:29,953 - app - INFO - Audio processing loop stopped
+2025-12-15 19:21:31,455 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 19:21:31,455 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 19:21:31,456 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 19:21:31,456 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 19:29:36,895 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 19:29:36,895 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 19:29:36,895 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 19:29:36,897 - audio_pipeline.audio_pipeline - INFO - PyAudio found 7 audio devices
+2025-12-15 19:29:37,247 - audio_pipeline.audio_pipeline - INFO - Found 3 input devices:
+2025-12-15 19:29:37,247 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:29:37,247 - audio_pipeline.audio_pipeline - INFO -   Device 4: WH-H900N (h.ear) (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:29:37,247 - audio_pipeline.audio_pipeline - INFO -   Device 6: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:29:37,247 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 19:29:37,247 - app - INFO - Using audio device index: 2
+2025-12-15 19:29:37,247 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 19:29:37,247 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 19:29:37,247 - app - INFO - Starting worker processes...
+2025-12-15 19:29:37,250 - app.process_manager - INFO - Started worker 'tts' (PID: 41079)
+2025-12-15 19:29:37,251 - app.process_manager - INFO - Started worker 'service_rep' (PID: 41080)
+2025-12-15 19:29:37,251 - app.process_manager - INFO - ProcessManager started
+2025-12-15 19:29:38,256 - app - INFO - Initializing STT service...
+2025-12-15 19:29:38,377 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 19:29:38,377 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 19:29:38,378 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 19:29:38,734 - app.stt - INFO - Whisper model loaded in 356ms (device=cpu, compute_type=int8)
+2025-12-15 19:29:38,734 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 19:29:38,734 - app - INFO - Audio capture loop started
+2025-12-15 19:29:38,734 - app - INFO - Audio processing loop started
+2025-12-15 19:29:38,734 - app - INFO - Response monitor started
+2025-12-15 19:29:38,734 - app - INFO - Calibrating noise floor...
+2025-12-15 19:29:38,734 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 19:29:38,734 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 19:29:39,243 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 19:29:42,456 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 19:29:46,196 - app.audio - INFO - Speech segment finalized: 96000 bytes, 0.52s
+2025-12-15 19:29:51,941 - app.audio - INFO - Speech segment finalized: 88320 bytes, 1.20s
+2025-12-15 19:29:52,230 - app - INFO - Transcribed: Hey, hello.
+2025-12-15 19:29:52,230 - app - INFO - [req_3_req_fcc8] Transcription complete: Hey, hello.
+2025-12-15 19:30:00,056 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 19:30:04,893 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 19:30:09,290 - app.audio - INFO - Speech segment finalized: 264960 bytes, 0.52s
+2025-12-15 19:30:12,174 - app - INFO - Transcribed: All right. Thank you. And again. That is my pleasure. Have a great day. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye.
+2025-12-15 19:30:12,174 - app - INFO - [req_6_req_cd2a] Transcription complete: All right. Thank you. And again. That is my pleasure. Have a great day. Bye.
+2025-12-15 19:30:15,653 - app.audio - INFO - Speech segment finalized: 209280 bytes, 3.48s
+2025-12-15 19:30:19,468 - app.audio - INFO - Speech segment finalized: 130560 bytes, 0.63s
+2025-12-15 19:30:19,766 - app - INFO - Transcribed: Why are you so robotic?
+2025-12-15 19:30:19,766 - app - INFO - [req_8_req_7247] Transcription complete: Why are you so robotic?
+2025-12-15 19:30:32,966 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 19:30:32,967 - app - INFO - Response monitor stopped
+2025-12-15 19:30:32,983 - app - INFO - Audio processing loop stopped
+2025-12-15 19:30:33,116 - app - INFO - Audio capture loop stopped
+2025-12-15 19:30:33,364 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 19:30:33,364 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 19:30:33,364 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 19:30:33,364 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 19:31:13,675 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 19:31:13,675 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 19:31:13,675 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 19:31:13,677 - audio_pipeline.audio_pipeline - INFO - PyAudio found 7 audio devices
+2025-12-15 19:31:14,022 - audio_pipeline.audio_pipeline - INFO - Found 3 input devices:
+2025-12-15 19:31:14,022 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:31:14,022 - audio_pipeline.audio_pipeline - INFO -   Device 4: WH-H900N (h.ear) (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:31:14,022 - audio_pipeline.audio_pipeline - INFO -   Device 6: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:31:14,022 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 19:31:14,022 - app - INFO - Using audio device index: 2
+2025-12-15 19:31:14,022 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 19:31:14,022 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 19:31:14,022 - app - INFO - Starting worker processes...
+2025-12-15 19:31:14,024 - app.process_manager - INFO - Started worker 'tts' (PID: 41354)
+2025-12-15 19:31:14,024 - app.process_manager - INFO - Started worker 'service_rep' (PID: 41355)
+2025-12-15 19:31:14,025 - app.process_manager - INFO - ProcessManager started
+2025-12-15 19:31:15,030 - app - INFO - Initializing STT service...
+2025-12-15 19:31:15,144 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 19:31:15,144 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 19:31:15,144 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 19:31:15,523 - app.stt - INFO - Whisper model loaded in 378ms (device=cpu, compute_type=int8)
+2025-12-15 19:31:15,523 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 19:31:15,523 - app - INFO - Audio capture loop started
+2025-12-15 19:31:15,523 - app - INFO - Audio processing loop started
+2025-12-15 19:31:15,523 - app - INFO - Calibrating noise floor...
+2025-12-15 19:31:15,523 - app - INFO - Response monitor started
+2025-12-15 19:31:15,523 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 19:31:15,523 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 19:31:16,028 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 19:31:20,270 - app.audio - INFO - Speech segment finalized: 103680 bytes, 1.44s
+2025-12-15 19:31:24,187 - app.audio - INFO - Speech segment finalized: 176640 bytes, 0.52s
+2025-12-15 19:31:24,494 - app - INFO - Transcribed: Yo, what's up?
+2025-12-15 19:31:24,494 - app - INFO - [req_2_req_6697] Transcription complete: Yo, what's up?
+2025-12-15 19:31:26,564 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 19:31:32,442 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 19:31:43,181 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 19:31:43,182 - app - INFO - Response monitor stopped
+2025-12-15 19:31:43,204 - app - INFO - Audio processing loop stopped
+2025-12-15 19:31:43,337 - app - INFO - Audio capture loop stopped
+2025-12-15 19:31:44,087 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 19:31:44,088 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 19:31:44,088 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 19:31:44,088 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 19:32:29,278 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 19:32:29,278 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 19:32:29,278 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 19:32:29,280 - audio_pipeline.audio_pipeline - INFO - PyAudio found 7 audio devices
+2025-12-15 19:32:29,627 - audio_pipeline.audio_pipeline - INFO - Found 3 input devices:
+2025-12-15 19:32:29,627 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:32:29,627 - audio_pipeline.audio_pipeline - INFO -   Device 4: WH-H900N (h.ear) (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:32:29,627 - audio_pipeline.audio_pipeline - INFO -   Device 6: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 19:32:29,627 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 19:32:29,627 - app - INFO - Using audio device index: 2
+2025-12-15 19:32:29,627 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 19:32:29,627 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 19:32:29,627 - app - INFO - Starting worker processes...
+2025-12-15 19:32:29,628 - app.process_manager - INFO - Started worker 'tts' (PID: 41500)
+2025-12-15 19:32:29,629 - app.process_manager - INFO - Started worker 'service_rep' (PID: 41501)
+2025-12-15 19:32:29,630 - app.process_manager - INFO - ProcessManager started
+2025-12-15 19:32:30,631 - app - INFO - Initializing STT service...
+2025-12-15 19:32:30,752 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 19:32:30,752 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 19:32:30,752 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 19:32:31,049 - app.stt - INFO - Whisper model loaded in 297ms (device=cpu, compute_type=int8)
+2025-12-15 19:32:31,049 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 19:32:31,049 - app - INFO - Audio capture loop started
+2025-12-15 19:32:31,049 - app - INFO - Audio processing loop started
+2025-12-15 19:32:31,049 - app - INFO - Calibrating noise floor...
+2025-12-15 19:32:31,049 - app - INFO - Response monitor started
+2025-12-15 19:32:31,049 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 19:32:31,050 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 19:32:31,558 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 19:32:34,076 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.50s
+2025-12-15 19:32:36,148 - app - INFO - Transcribed: and I I I I I I I I
+2025-12-15 19:32:36,149 - app - INFO - [req_1_req_11fc] Transcription complete: and I.
+2025-12-15 19:32:40,596 - app.audio - INFO - Speech segment finalized: 103680 bytes, 1.44s
+2025-12-15 19:32:40,891 - app - INFO - Transcribed: Hey, what's up?
+2025-12-15 19:32:40,892 - app - INFO - [req_2_req_7c30] Transcription complete: Hey, what's up?
+2025-12-15 19:32:41,914 - app.audio - INFO - Speech segment finalized: 84480 bytes, 1.02s
+2025-12-15 19:33:21,585 - app.audio - INFO - Speech segment finalized: 78720 bytes, 1.04s
+2025-12-15 19:33:24,983 - app.audio - INFO - Speech segment finalized: 199680 bytes, 0.83s
+2025-12-15 19:33:29,185 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.61s
+2025-12-15 19:33:33,857 - app.audio - INFO - Speech segment finalized: 182400 bytes, 0.54s
+2025-12-15 19:33:35,659 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.51s
+2025-12-15 19:33:40,700 - app.audio - INFO - Speech segment finalized: 307200 bytes, 0.53s
+2025-12-15 19:33:43,620 - app - INFO - Transcribed: Okay. Good. Well, thank you. Thank you. Okay. We'll see you next time. Bye. Good night. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye.
+2025-12-15 19:33:43,620 - app - INFO - [req_9_req_17e4] Transcription complete: Okay. Good. Well, thank you. Thank you. Okay. We'll see you next time. Bye. Good night. Bye.
+2025-12-15 19:33:45,136 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 19:33:49,936 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 19:34:23,525 - app.audio - INFO - Speech segment finalized: 88320 bytes, 1.20s
+2025-12-15 19:34:27,722 - app.audio - INFO - Speech segment finalized: 261120 bytes, 0.52s
+2025-12-15 19:34:33,725 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 19:34:51,117 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 19:34:55,396 - app.audio - INFO - Speech segment finalized: 190080 bytes, 0.51s
+2025-12-15 19:34:57,537 - app.audio - INFO - Speech segment finalized: 63360 bytes, 0.82s
+2025-12-15 19:35:07,877 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 19:35:12,657 - app.audio - INFO - Speech segment finalized: 65280 bytes, 0.84s
+2025-12-15 19:35:17,695 - app.audio - INFO - Speech segment finalized: 324480 bytes, 0.53s
+2025-12-15 19:35:25,134 - app.audio - INFO - Speech segment finalized: 67200 bytes, 0.88s
+2025-12-15 19:35:26,282 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 19:35:26,282 - app - INFO - Response monitor stopped
+2025-12-15 19:35:26,425 - app - INFO - Audio capture loop stopped
+2025-12-15 19:35:28,001 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 19:35:28,001 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 19:35:28,001 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 19:35:29,431 - app - INFO - Audio processing loop stopped
+2025-12-15 19:35:29,431 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 20:24:13,800 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 20:24:13,800 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 20:24:13,800 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 20:24:13,801 - audio_pipeline.audio_pipeline - INFO - PyAudio found 5 audio devices
+2025-12-15 20:24:14,013 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 20:24:14,013 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 20:24:14,013 - audio_pipeline.audio_pipeline - INFO -   Device 4: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 20:24:14,013 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 20:24:14,013 - app - INFO - Using audio device index: 2
+2025-12-15 20:24:14,013 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 20:24:14,013 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 20:24:14,013 - app - INFO - Starting worker processes...
+2025-12-15 20:24:14,015 - app.process_manager - INFO - Started worker 'tts' (PID: 44776)
+2025-12-15 20:24:14,016 - app.process_manager - INFO - Started worker 'service_rep' (PID: 44777)
+2025-12-15 20:24:14,016 - app.process_manager - INFO - ProcessManager started
+2025-12-15 20:24:15,017 - app - INFO - Initializing STT service...
+2025-12-15 20:24:15,129 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 20:24:15,129 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 20:24:15,129 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 20:24:15,501 - app.stt - INFO - Whisper model loaded in 373ms (device=cpu, compute_type=int8)
+2025-12-15 20:24:15,501 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 20:24:15,502 - app - INFO - Audio capture loop started
+2025-12-15 20:24:15,502 - app - INFO - Audio processing loop started
+2025-12-15 20:24:15,502 - app - INFO - Calibrating noise floor...
+2025-12-15 20:24:15,502 - app - INFO - Response monitor started
+2025-12-15 20:24:15,502 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 20:24:15,502 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 20:24:16,007 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 20:24:18,261 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 20:24:33,255 - app.audio - INFO - Speech segment finalized: 635520 bytes, 9.76s
+2025-12-15 20:24:33,638 - app - INFO - Transcribed: Make the TUI more robust. It's inside the TUI folder. I want it to do a great job of serving users It should be able to
+2025-12-15 20:24:33,638 - app - INFO - [req_2_req_1867] Transcription complete: Make the TUI more robust. It's inside the TUI folder. I want it to do a great job of serving users It should be able to.
+2025-12-15 20:24:38,559 - app.audio - INFO - Speech segment finalized: 341760 bytes, 4.92s
+2025-12-15 20:24:38,876 - app - INFO - Transcribed: serve users through a text interface that should help guide users to
+2025-12-15 20:24:38,877 - app - INFO - [req_3_req_3469] Transcription complete: serve users through a text interface that should help guide users to.
+2025-12-15 20:24:40,220 - app.audio - INFO - Speech segment finalized: 107520 bytes, 1.34s
+2025-12-15 20:24:40,506 - app - INFO - Transcribed: config
+2025-12-15 20:24:41,237 - app.audio - INFO - Speech segment finalized: 65280 bytes, 0.73s
+2025-12-15 20:26:08,055 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 20:26:18,830 - app.audio - INFO - Speech segment finalized: 63360 bytes, 0.82s
+2025-12-15 20:26:23,532 - app.audio - INFO - Speech segment finalized: 268800 bytes, 0.53s
+2025-12-15 20:26:27,344 - app - INFO - Transcribed: Okay, a little bit of EDCo start over to reach now right back to the core. All right, I just come out.
+2025-12-15 20:26:27,344 - app - INFO - [req_8_req_f3c4] Transcription complete: Okay, a little bit of EDCo start over to reach now right back to the core. All right, I just come out.
+2025-12-15 20:26:27,950 - app.audio - INFO - Speech segment finalized: 284160 bytes, 0.61s
+2025-12-15 20:26:31,805 - app - INFO - Transcribed: All right.
+2025-12-15 20:26:31,805 - app - INFO - [req_9_req_e61f] Transcription complete: All right.
+2025-12-15 20:26:33,289 - app.audio - INFO - Speech segment finalized: 305280 bytes, 1.48s
+2025-12-15 20:26:36,706 - app.audio - INFO - Speech segment finalized: 209280 bytes, 0.96s
+2025-12-15 20:26:45,125 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.50s
+2025-12-15 20:27:08,340 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:27:36,535 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.56s
+2025-12-15 20:27:48,390 - app.audio - INFO - Speech segment finalized: 67200 bytes, 0.88s
+2025-12-15 20:27:51,855 - app - INFO - Transcribed: And we'll see you in a little bit later.
+2025-12-15 20:27:51,855 - app - INFO - [req_15_req_cf2e] Transcription complete: And we'll see you in a little bit later.
+2025-12-15 20:28:02,728 - app.audio - INFO - Speech segment finalized: 72960 bytes, 0.96s
+2025-12-15 20:28:22,224 - app.audio - INFO - Speech segment finalized: 96000 bytes, 1.32s
+2025-12-15 20:28:25,900 - app.audio - INFO - Speech segment finalized: 238080 bytes, 0.51s
+2025-12-15 20:28:28,760 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:29:46,283 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.56s
+2025-12-15 20:30:18,850 - app.audio - INFO - Speech segment finalized: 69120 bytes, 0.90s
+2025-12-15 20:30:21,719 - app - INFO - Transcribed: Okay. Good. Good. Okay. Good. Good. Good. Good. Now. I'm going to get a little bit more.
+2025-12-15 20:30:21,719 - app - INFO - [req_21_req_3572] Transcription complete: Okay. Good. Okay. Good. Now. I'm going to get a little bit more.
+2025-12-15 20:30:26,212 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:30:34,725 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:30:58,477 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 20:31:01,176 - app.audio - INFO - Speech segment finalized: 59520 bytes, 0.50s
+2025-12-15 20:31:03,834 - app - INFO - Transcribed: Okay. All right. Okay. Yeah. Thank you. All right. All right. All right. All right. All right.
+2025-12-15 20:31:03,834 - app - INFO - [req_25_req_bb27] Transcription complete: Okay. All right. Okay. Yeah. Thank you. All right. All right. All right. All right. All right.
+2025-12-15 20:31:10,138 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:31:15,455 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:31:19,116 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:31:19,414 - app - INFO - Transcribed: Okay. Okay.
+2025-12-15 20:31:33,214 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:31:42,871 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 20:32:07,881 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:32:11,080 - app.audio - INFO - Speech segment finalized: 63360 bytes, 0.51s
+2025-12-15 20:32:14,903 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.59s
+2025-12-15 20:32:18,978 - app.audio - INFO - Speech segment finalized: 149760 bytes, 0.52s
+2025-12-15 20:32:26,538 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:32:30,320 - app.audio - INFO - Speech segment finalized: 86400 bytes, 0.52s
+2025-12-15 20:32:40,517 - app.audio - INFO - Speech segment finalized: 144000 bytes, 2.08s
+2025-12-15 20:32:42,519 - app.audio - INFO - Speech segment finalized: 130560 bytes, 1.66s
+2025-12-15 20:32:43,956 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.50s
+2025-12-15 20:32:48,856 - app.audio - INFO - Speech segment finalized: 307200 bytes, 1.32s
+2025-12-15 20:32:52,875 - app.audio - INFO - Speech segment finalized: 253440 bytes, 0.53s
+2025-12-15 20:32:57,779 - app - INFO - Transcribed: Yeah, not big. But those was what it was. It was really sick. So I'm sure you did. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No. No.
+2025-12-15 20:32:57,779 - app - INFO - [req_41_req_66d6] Transcription complete: Yeah, not big. But those was what it was. It was really sick. So I'm sure you did. No.
+2025-12-15 20:32:58,296 - app.audio - INFO - Speech segment finalized: 341760 bytes, 0.52s
+2025-12-15 20:32:59,676 - app - INFO - Transcribed: ... ... ... ... ...
+2025-12-15 20:33:00,215 - app.audio - INFO - Speech segment finalized: 94080 bytes, 0.54s
+2025-12-15 20:33:00,521 - app - INFO - Transcribed: That's it. No.
+2025-12-15 20:33:00,522 - app - INFO - [req_43_req_5193] Transcription complete: That's it. No.
+2025-12-15 20:33:02,529 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.53s
+2025-12-15 20:33:07,812 - app.audio - INFO - Speech segment finalized: 213120 bytes, 0.53s
+2025-12-15 20:33:10,268 - app.audio - INFO - Speech segment finalized: 71040 bytes, 0.94s
+2025-12-15 20:33:13,349 - app.audio - INFO - Speech segment finalized: 72960 bytes, 0.96s
+2025-12-15 20:33:18,849 - app.audio - INFO - Speech segment finalized: 238080 bytes, 1.97s
+2025-12-15 20:33:23,469 - app.audio - INFO - Speech segment finalized: 295680 bytes, 0.51s
+2025-12-15 20:33:27,966 - app.audio - INFO - Speech segment finalized: 69120 bytes, 0.90s
+2025-12-15 20:33:32,901 - app.audio - INFO - Speech segment finalized: 90240 bytes, 1.22s
+2025-12-15 20:33:34,503 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:33:39,125 - app.audio - INFO - Speech segment finalized: 297600 bytes, 0.52s
+2025-12-15 20:33:43,982 - app.audio - INFO - Speech segment finalized: 266880 bytes, 0.76s
+2025-12-15 20:33:47,563 - app - INFO - Transcribed: ... ... ...
+2025-12-15 20:33:48,180 - app.audio - INFO - Speech segment finalized: 203520 bytes, 0.61s
+2025-12-15 20:33:49,563 - app.audio - INFO - Speech segment finalized: 67200 bytes, 0.88s
+2025-12-15 20:33:54,421 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:34:05,878 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.54s
+2025-12-15 20:34:11,037 - app.audio - INFO - Speech segment finalized: 305280 bytes, 0.54s
+2025-12-15 20:34:15,514 - app - INFO - Transcribed: I hope I'm not asking you so bad. I get all the facts that they've ever gone.
+2025-12-15 20:34:15,514 - app - INFO - [req_59_req_053e] Transcription complete: I hope I'm not asking you so bad. I get all the facts that they've ever gone.
+2025-12-15 20:34:16,035 - app.audio - INFO - Speech segment finalized: 107520 bytes, 0.51s
+2025-12-15 20:34:19,558 - app.audio - INFO - Speech segment finalized: 216960 bytes, 0.82s
+2025-12-15 20:34:23,059 - app.audio - INFO - Speech segment finalized: 209280 bytes, 3.09s
+2025-12-15 20:34:23,370 - app - INFO - Transcribed: I will give you this one by the side.
+2025-12-15 20:34:23,370 - app - INFO - [req_62_req_b7ad] Transcription complete: I will give you this one by the side.
+2025-12-15 20:34:23,877 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.51s
+2025-12-15 20:34:30,592 - app.audio - INFO - Speech segment finalized: 382080 bytes, 1.07s
+2025-12-15 20:34:33,532 - app.audio - INFO - Speech segment finalized: 151680 bytes, 2.20s
+2025-12-15 20:34:34,104 - app - INFO - Transcribed: People go one guy, one cat, one.
+2025-12-15 20:34:34,104 - app - INFO - [req_65_req_865b] Transcription complete: People go one guy, one cat, one.
+2025-12-15 20:34:35,414 - app.audio - INFO - Speech segment finalized: 113280 bytes, 1.31s
+2025-12-15 20:34:41,693 - app.audio - INFO - Speech segment finalized: 370560 bytes, 1.92s
+2025-12-15 20:34:45,229 - app - INFO - Transcribed: Okay. Okay. That one last weapon, huh? Probably not. But it makes you fall.
+2025-12-15 20:34:45,229 - app - INFO - [req_67_req_ae2b] Transcription complete: Okay. That one last weapon, huh? Probably not. But it makes you fall.
+2025-12-15 20:34:47,390 - app.audio - INFO - Speech segment finalized: 366720 bytes, 2.16s
+2025-12-15 20:34:48,252 - app.audio - INFO - Speech segment finalized: 57600 bytes, 0.50s
+2025-12-15 20:34:50,981 - app - INFO - Transcribed: Okay. Good. And that's it. Okay. All right. Now, let's see. Okay. Okay. All right. All right. We're going to be in the loop. All right. So, let's go ahead and go ahead and read this. All right. Okay. All right. Okay. Okay. All right. All right. All right. Okay. Okay. All right. All right. All right.
+2025-12-15 20:34:50,981 - app - INFO - [req_69_req_076d] Transcription complete: Okay. Good. And that's it. Okay. All right. Now, let's see. Okay. All right. All right. We're going to be in the loop. All right. So, let's go ahead and go ahead and read this. All right. Okay. All right. Okay. All right. All right. All right. Okay. All right. All right. All right.
+2025-12-15 20:34:51,970 - app.audio - INFO - Speech segment finalized: 226560 bytes, 0.99s
+2025-12-15 20:34:53,531 - app.audio - INFO - Speech segment finalized: 94080 bytes, 1.25s
+2025-12-15 20:34:55,491 - app.audio - INFO - Speech segment finalized: 69120 bytes, 0.90s
+2025-12-15 20:35:01,548 - app.audio - INFO - Speech segment finalized: 341760 bytes, 1.11s
+2025-12-15 20:35:02,444 - app.audio - INFO - Speech segment finalized: 59520 bytes, 0.54s
+2025-12-15 20:35:07,544 - app.audio - INFO - Speech segment finalized: 232320 bytes, 1.33s
+2025-12-15 20:35:11,406 - app.audio - INFO - Speech segment finalized: 247680 bytes, 0.52s
+2025-12-15 20:35:13,361 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:35:15,706 - app.audio - INFO - Speech segment finalized: 120960 bytes, 1.72s
+2025-12-15 20:35:19,126 - app.audio - INFO - Speech segment finalized: 107520 bytes, 1.51s
+2025-12-15 20:35:20,623 - app.audio - INFO - Speech segment finalized: 97920 bytes, 1.19s
+2025-12-15 20:35:23,223 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.62s
+2025-12-15 20:35:28,138 - app.audio - INFO - Speech segment finalized: 316800 bytes, 0.94s
+2025-12-15 20:35:28,480 - app - INFO - Transcribed: I hope it's a light go through for a second. I want to find out.
+2025-12-15 20:35:28,481 - app - INFO - [req_82_req_5a47] Transcription complete: I hope it's a light go through for a second. I want to find out.
+2025-12-15 20:35:29,679 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:35:33,581 - app.audio - INFO - Speech segment finalized: 251520 bytes, 0.52s
+2025-12-15 20:35:39,637 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:35:42,824 - app - INFO - Transcribed: . . . . . . . . .
+2025-12-15 20:35:43,360 - app.audio - INFO - Speech segment finalized: 63360 bytes, 0.53s
+2025-12-15 20:35:47,012 - app.audio - INFO - Speech segment finalized: 63360 bytes, 0.82s
+2025-12-15 20:35:53,313 - app.audio - INFO - Speech segment finalized: 395520 bytes, 1.22s
+2025-12-15 20:35:53,742 - app - INFO - Transcribed: I've been here a long time, just you can't rap. You can't run for new games, it's like, oh, I'm gonna go home. So right now, this is about the ...
+2025-12-15 20:35:53,742 - app - INFO - [req_88_req_a4f1] Transcription complete: I've been here a long time, just you can't rap. You can't run for new games, it's , oh, I'm going to go home. So right now, this is about the ...
+2025-12-15 20:35:57,417 - app.audio - INFO - Speech segment finalized: 105600 bytes, 1.46s
+2025-12-15 20:35:59,137 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:36:03,932 - app.audio - INFO - Speech segment finalized: 249600 bytes, 0.51s
+2025-12-15 20:36:08,335 - app.audio - INFO - Speech segment finalized: 245760 bytes, 0.52s
+2025-12-15 20:36:10,590 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 20:36:15,569 - app.audio - INFO - Speech segment finalized: 76800 bytes, 0.50s
+2025-12-15 20:36:17,752 - app.audio - INFO - Speech segment finalized: 55680 bytes, 0.68s
+2025-12-15 20:36:35,003 - app.audio - INFO - Speech segment finalized: 57600 bytes, 0.72s
+2025-12-15 20:36:40,365 - app.audio - INFO - Speech segment finalized: 312960 bytes, 0.77s
+2025-12-15 20:36:42,340 - app.audio - INFO - Speech segment finalized: 57600 bytes, 0.51s
+2025-12-15 20:36:47,185 - app.audio - INFO - Speech segment finalized: 311040 bytes, 0.57s
+2025-12-15 20:36:48,320 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:36:53,127 - app - INFO - Transcribed: Yeah. Okay. Okay. Okay.
+2025-12-15 20:36:53,128 - app - INFO - [req_100_req_5fdb] Transcription complete: Yeah. Okay.
+2025-12-15 20:36:53,664 - app.audio - INFO - Speech segment finalized: 336000 bytes, 0.54s
+2025-12-15 20:36:54,018 - app - INFO - Transcribed: Yes, it's good. So reverse. First of all, it's a one-fuss.
+2025-12-15 20:36:54,018 - app - INFO - [req_101_req_e48c] Transcription complete: Yes, it's good. So reverse. First of all, it's a one-fuss.
+2025-12-15 20:36:56,356 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.57s
+2025-12-15 20:37:00,738 - app.audio - INFO - Speech segment finalized: 144000 bytes, 0.53s
+2025-12-15 20:37:03,619 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:37:07,814 - app.audio - INFO - Speech segment finalized: 253440 bytes, 0.53s
+2025-12-15 20:37:17,311 - app.audio - INFO - Speech segment finalized: 44160 bytes, 5.27s
+2025-12-15 20:37:22,990 - app.audio - INFO - Speech segment finalized: 339840 bytes, 1.47s
+2025-12-15 20:37:24,508 - app - INFO - Transcribed: and it's one of those games for two hours and 30-year-old Bill Okan.
+2025-12-15 20:37:24,508 - app - INFO - [req_107_req_5551] Transcription complete: and it's one of those games for two hours and 30-year-old Bill Okan.
+2025-12-15 20:37:25,472 - app.audio - INFO - Speech segment finalized: 126720 bytes, 0.96s
+2025-12-15 20:37:26,375 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.60s
+2025-12-15 20:37:27,191 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.53s
+2025-12-15 20:37:29,835 - app - INFO - Transcribed: Okay. Okay. Yeah. Okay. All right. So, we're going to be about to get started. So, you know, let's do it. All right. All right, so, we're going to do something new. All right. Good. All right. All right. So, let's go back here to check this out. Let's go to the next slide. I'll go to the next slide. We'll go to the next slide. All right. All right. All right. All right. All right. All right.
+2025-12-15 20:37:29,835 - app - INFO - [req_110_req_f95b] Transcription complete: Okay. Yeah. Okay. All right. So, we're going to be about to get started. So, , let's do it. All right. All right, so, we're going to do something new. All right. Good. All right. All right. So, let's go back here to check this out. Let's go to the next slide. I'll go to the next slide. We'll go to the next slide. All right. All right. All right. All right. All right. All right.
+2025-12-15 20:37:31,390 - app.audio - INFO - Speech segment finalized: 255360 bytes, 1.55s
+2025-12-15 20:37:32,263 - app - INFO - Transcribed: and it's a little bit more of a bad longer than my 14-hour snow. And it's a very good way for a good day. So, we'll be back in a minute. We'll be back in a minute. So, we'll be back in a minute. So, we'll be back in a minute. So, we'll be back in a minute.
+2025-12-15 20:37:32,263 - app - INFO - [req_111_req_5a50] Transcription complete: and it's a little bit more of a bad longer than my 14-hour snow. And it's a very good way for a good day. So, we'll be back in a minute. We'll be back in a minute. So, we'll be back in a minute. So, we'll be back in a minute. So, we'll be back in a minute.
+2025-12-15 20:37:33,667 - app.audio - INFO - Speech segment finalized: 142080 bytes, 1.40s
+2025-12-15 20:37:34,810 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:37:39,387 - app.audio - INFO - Speech segment finalized: 72960 bytes, 0.51s
+2025-12-15 20:37:44,705 - app.audio - INFO - Speech segment finalized: 299520 bytes, 0.54s
+2025-12-15 20:37:49,212 - app - INFO - Transcribed: We have the CRT to come. And you can see how it's going to lose.
+2025-12-15 20:37:49,212 - app - INFO - [req_115_req_3df3] Transcription complete: We have the CRT to come. And you can see how it's going to lose.
+2025-12-15 20:38:59,452 - app.audio - INFO - Speech segment finalized: 228480 bytes, 70.24s
+2025-12-15 20:39:04,547 - app.audio - INFO - Speech segment finalized: 286080 bytes, 0.82s
+2025-12-15 20:39:10,724 - app.audio - INFO - Speech segment finalized: 312960 bytes, 1.07s
+2025-12-15 20:39:18,545 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.56s
+2025-12-15 20:39:22,187 - app.audio - INFO - Speech segment finalized: 124800 bytes, 0.67s
+2025-12-15 20:39:23,681 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 20:39:39,936 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 20:39:44,315 - app.audio - INFO - Speech segment finalized: 257280 bytes, 1.78s
+2025-12-15 20:39:50,311 - app.audio - INFO - Speech segment finalized: 337920 bytes, 0.99s
+2025-12-15 20:41:17,232 - app.audio - INFO - Speech segment finalized: 80640 bytes, 1.08s
+2025-12-15 20:41:25,385 - app.audio - INFO - Speech segment finalized: 510720 bytes, 3.84s
+2025-12-15 20:41:26,286 - app.audio - INFO - Speech segment finalized: 59520 bytes, 0.51s
+2025-12-15 20:41:27,363 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:41:28,986 - app.audio - INFO - Speech segment finalized: 97920 bytes, 1.34s
+2025-12-15 20:41:30,190 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.61s
+2025-12-15 20:41:36,623 - app.audio - INFO - Speech segment finalized: 414720 bytes, 0.60s
+2025-12-15 20:41:37,001 - app - INFO - Transcribed: So, on other words, if there are anything like this, here's the best he can be asked about it after the game is really...
+2025-12-15 20:41:37,002 - app - INFO - [req_131_req_618f] Transcription complete: So, on other words, if there are anything this, here's the best he can be asked about it after the game is really...
+2025-12-15 20:41:37,925 - app.audio - INFO - Speech segment finalized: 82560 bytes, 0.92s
+2025-12-15 20:41:38,961 - app.audio - INFO - Speech segment finalized: 69120 bytes, 0.74s
+2025-12-15 20:41:43,019 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:41:50,401 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:41:50,701 - app - INFO - Transcribed: Yeah. Yeah.
+2025-12-15 20:41:51,779 - app.audio - INFO - Speech segment finalized: 90240 bytes, 1.08s
+2025-12-15 20:41:53,284 - app.audio - INFO - Speech segment finalized: 88320 bytes, 1.20s
+2025-12-15 20:41:53,583 - app - INFO - Transcribed: I will see you.
+2025-12-15 20:41:53,583 - app - INFO - [req_137_req_1f78] Transcription complete: I will see you.
+2025-12-15 20:41:54,983 - app.audio - INFO - Speech segment finalized: 72960 bytes, 0.96s
+2025-12-15 20:41:56,880 - app.audio - INFO - Speech segment finalized: 122880 bytes, 1.60s
+2025-12-15 20:41:58,518 - app.audio - INFO - Speech segment finalized: 107520 bytes, 1.34s
+2025-12-15 20:41:58,830 - app - INFO - Transcribed: I'm right here. Thank you.
+2025-12-15 20:41:58,830 - app - INFO - [req_140_req_1057] Transcription complete: I'm right here. Thank you.
+2025-12-15 20:41:59,939 - app.audio - INFO - Speech segment finalized: 74880 bytes, 1.00s
+2025-12-15 20:42:04,637 - app.audio - INFO - Speech segment finalized: 71040 bytes, 0.92s
+2025-12-15 20:42:09,054 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:42:12,954 - app.audio - INFO - Speech segment finalized: 74880 bytes, 0.56s
+2025-12-15 20:42:13,874 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.63s
+2025-12-15 20:42:14,754 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:42:19,013 - app.audio - INFO - Speech segment finalized: 168960 bytes, 2.46s
+2025-12-15 20:42:21,173 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 20:42:23,212 - app.audio - INFO - Speech segment finalized: 76800 bytes, 1.02s
+2025-12-15 20:42:25,190 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:42:29,147 - app.audio - INFO - Speech segment finalized: 255360 bytes, 0.52s
+2025-12-15 20:42:30,649 - app.audio - INFO - Speech segment finalized: 92160 bytes, 1.16s
+2025-12-15 20:42:32,212 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:42:38,926 - app.audio - INFO - Speech segment finalized: 408960 bytes, 0.59s
+2025-12-15 20:42:39,316 - app - INFO - Transcribed: I'm not working with you. I'm just not in the ITA to see the nearly everything that's wrong. I mean, every school has a summary.
+2025-12-15 20:42:39,317 - app - INFO - [req_154_req_cf67] Transcription complete: I'm not working with you. I'm just not in the ITA to see the nearly everything that's wrong. , every school has a summary.
+2025-12-15 20:42:40,306 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:42:44,449 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:42:46,069 - app.audio - INFO - Speech segment finalized: 105600 bytes, 1.30s
+2025-12-15 20:42:54,104 - app.audio - INFO - Speech segment finalized: 76800 bytes, 1.02s
+2025-12-15 20:42:56,983 - app.audio - INFO - Speech segment finalized: 67200 bytes, 0.50s
+2025-12-15 20:43:04,362 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:43:17,859 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.52s
+2025-12-15 20:43:41,798 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:43:46,238 - app.audio - INFO - Speech segment finalized: 138240 bytes, 0.82s
+2025-12-15 20:43:58,796 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.55s
+2025-12-15 20:44:05,972 - app.audio - INFO - Speech segment finalized: 65280 bytes, 0.84s
+2025-12-15 20:44:28,727 - app.audio - INFO - Speech segment finalized: 67200 bytes, 0.86s
+2025-12-15 20:44:33,449 - app.audio - INFO - Speech segment finalized: 249600 bytes, 0.53s
+2025-12-15 20:44:37,077 - app - INFO - Transcribed: This is the first time I've ever seen a person in the world, and this is the first time I've
+2025-12-15 20:44:37,077 - app - INFO - [req_167_req_bad5] Transcription complete: This is the first time I've ever seen a person in the world, and this is the first time I've.
+2025-12-15 20:44:55,819 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:45:11,422 - app.audio - INFO - Speech segment finalized: 42240 bytes, 7.43s
+2025-12-15 20:45:14,267 - app - INFO - Transcribed: . . . . . . .
+2025-12-15 20:45:14,772 - app.audio - INFO - Speech segment finalized: 168960 bytes, 0.50s
+2025-12-15 20:45:49,269 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.58s
+2025-12-15 20:45:51,817 - app - INFO - Transcribed: . . . . .
+2025-12-15 20:45:54,429 - app.audio - INFO - Speech segment finalized: 92160 bytes, 1.26s
+2025-12-15 20:45:57,481 - app.audio - INFO - Speech segment finalized: 161280 bytes, 0.52s
+2025-12-15 20:46:03,266 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:46:18,958 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:46:31,038 - app.audio - INFO - Speech segment finalized: 48000 bytes, 0.56s
+2025-12-15 20:47:04,331 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:47:06,932 - app - INFO - Transcribed: Subs by www.zeoranger.co.uk
+2025-12-15 20:47:06,932 - app - INFO - [req_177_req_2955] Transcription complete: Subs by www.zeoranger.co.uk.
+2025-12-15 20:47:13,488 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:47:23,681 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 20:47:27,698 - app.audio - INFO - Speech segment finalized: 215040 bytes, 0.52s
+2025-12-15 20:47:51,776 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.62s
+2025-12-15 20:48:03,092 - app.audio - INFO - Speech segment finalized: 71040 bytes, 0.94s
+2025-12-15 20:48:07,473 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 20:48:11,108 - app - INFO - Transcribed: Right? I'll see you later. Bye. Bye. Bye. Bye. All right. Everybody? Yeah. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. Bye. All right. Bye. Bye. Bye. Bye. Bye. Bye. Bye.
+2025-12-15 20:48:11,108 - app - INFO - [req_183_req_9b72] Transcription complete: Right? I'll see you later. Bye. All right. Everybody? Yeah. Bye. All right. Bye.
+2025-12-15 20:48:11,632 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.52s
+2025-12-15 20:48:32,249 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:48:36,228 - app.audio - INFO - Speech segment finalized: 238080 bytes, 0.52s
+2025-12-15 20:48:40,343 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 20:48:52,364 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 20:49:01,763 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 20:49:05,300 - app.audio - INFO - Speech segment finalized: 109440 bytes, 0.54s
+2025-12-15 20:50:06,865 - app.audio - INFO - Speech segment finalized: 44160 bytes, 34.51s
+2025-12-15 20:50:10,388 - app.audio - INFO - Speech segment finalized: 193920 bytes, 0.53s
+2025-12-15 20:51:31,487 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 20:51:41,623 - app.audio - INFO - Speech segment finalized: 359040 bytes, 5.44s
+2025-12-15 20:51:44,528 - app.audio - INFO - Speech segment finalized: 105600 bytes, 1.46s
+2025-12-15 20:51:50,801 - app.audio - INFO - Speech segment finalized: 395520 bytes, 3.77s
+2025-12-15 20:52:01,600 - app.audio - INFO - Speech segment finalized: 664320 bytes, 10.20s
+2025-12-15 20:52:03,282 - app.audio - INFO - Speech segment finalized: 109440 bytes, 1.38s
+2025-12-15 20:52:05,017 - app.audio - INFO - Speech segment finalized: 113280 bytes, 1.42s
+2025-12-15 20:52:12,100 - app.audio - INFO - Speech segment finalized: 455040 bytes, 6.78s
+2025-12-15 20:52:12,522 - app - INFO - Transcribed: Some of those people just said no, I don't know. Some of them showed me cool things, and others found that they, like, what do you do here? And they became friends.
+2025-12-15 20:52:12,522 - app - INFO - [req_200_req_381a] Transcription complete: Some of those people just said no, I don't know. Some of them showed me cool things, and others found that they, , what do you do here? And they became friends.
+2025-12-15 20:52:24,837 - app.audio - INFO - Speech segment finalized: 808320 bytes, 12.31s
+2025-12-15 20:52:25,294 - app - INFO - Transcribed: Do not use your phones for things that other people can help you with. But I went to this new town studying abroad today, whatever I want to do is go to Yelp, do Go to Airbnb, do a fine-awaited all of their needs met without ever having.
+2025-12-15 20:52:25,294 - app - INFO - [req_201_req_6803] Transcription complete: Do not use your phones for things that other people can help you with. But I went to this new town studying abroad today, whatever I want to do is go to Yelp, do Go to Airbnb, do a fine-awaited all of their needs met without ever having.
+2025-12-15 20:53:11,865 - app.audio - INFO - Speech segment finalized: 2966400 bytes, 46.15s
+2025-12-15 20:53:13,090 - app - INFO - Transcribed: During the pandemic, I was fired from a job because I burped in a zoom meeting. It's true. Has that happened? Has that happened? I'll tell you. I went to burped. You just can't be it, coaches. I got five reasons why. One, today's players don't respond to that energy. Look at guys like Dan Lanning. They're fighting for fights. We're fighting for wins. From our district. We got to report. I'm not saying to you to say, we got to find different ways and better ways to do it. Player coach relationships at a ball. Players want leadership, not dictatorship. Two, social media exposes everything. He has student film practice from a lift on a windy day and the kid sadly in tragic lead. He never reached out to a player after brain tumor surgery. Specifically.
+2025-12-15 20:53:13,090 - app - INFO - [req_202_req_6416] Transcription complete: During the pandemic, I was fired from a job because I burped in a zoom meeting. It's true. Has that happened? Has that happened? I'll tell you. I went to burped. You just can't be it, coaches. I got five reasons why. One, today's players don't respond to that energy. Look at guys Dan Lanning. They're fighting for fights. We're fighting for wins. From our district. We got to report. I'm not saying to you to say, we got to find different ways and better ways to do it. Player coach relationships at a ball. Players want leadership, not dictatorship. Two, social media exposes everything. He has student film practice from a lift on a windy day and the kid sadly in tragic lead. He never reached out to a player after brain tumor surgery. Specifically.
+2025-12-15 20:53:15,623 - app.audio - INFO - Speech segment finalized: 234240 bytes, 2.53s
+2025-12-15 20:53:15,964 - app - INFO - Transcribed: I don't care if my son almost lost his life coach. Where were you?
+2025-12-15 20:53:15,964 - app - INFO - [req_203_req_128f] Transcription complete: I don't care if my son almost lost his life coach. Where were you?
+2025-12-15 20:53:34,481 - app.audio - INFO - Speech segment finalized: 1165440 bytes, 18.02s
+2025-12-15 20:53:35,060 - app - INFO - Transcribed: For a kid with half a ball, pick up the phone to see you love the kid. And those moments run like wildfire down. You see those on Twitter right next to a video of Freeman firing guys up. Who would you want to play for? Who are fans going to have more patients for? Three, Kelly could laugh at himself. Remember the fake southern accent? It's a great night.
+2025-12-15 20:53:35,060 - app - INFO - [req_204_req_2a4f] Transcription complete: For a kid with half a ball, pick up the phone to see you love the kid. And those moments run wildfire down. You see those on Twitter right next to a video of Freeman firing guys up. Who would you want to play for? Who are fans going to have more patients for? Three, Kelly could laugh at himself. Remember the fake southern accent? It's a great night.
+2025-12-15 20:54:22,571 - app.audio - INFO - Speech segment finalized: 3062400 bytes, 47.51s
+2025-12-15 20:54:24,088 - app - INFO - Transcribed: I'm here with my cliently. In the awkward 360 camera moments, I say, Radcliffe, Greenville, Wasmard, and E. Blum, Northern, on stage, and all, and that's what I don't see. So, you're telling me to leave into those moments or laugh about them? It comes across as just super corny. Four, today's athletes are getting paid. They can just leave if you don't treat them well. And five, reporters now have self-sufficient platform. So, those B-writers that Brian Kelly snapped at, is that the first question? We won the game 20 to 10. Try another question. They've got podcasts and social media followers now outside of the network they work for. Any comeback will open it up to this later-driving media crowd that must have enjoyed the weekend. Aah! Got it!
+2025-12-15 20:54:24,088 - app - INFO - [req_205_req_b10b] Transcription complete: I'm here with my cliently. In the awkward 360 camera moments, I say, Radcliffe, Greenville, Wasmard, and E. Blum, Northern, on stage, and all, and that's what I don't see. So, you're telling me to leave into those moments or laugh about them? It comes across as just super corny. Four, today's athletes are getting paid. They can just leave if you don't treat them well. And five, reporters now have self-sufficient platform. So, those B-writers that Brian Kelly snapped at, is that the first question? We won the game 20 to 10. Try another question. They've got podcasts and social media followers now outside of the network they work for. Any comeback will open it up to this later-driving media crowd that must have enjoyed the weekend. Aah! Got it!
+2025-12-15 20:54:26,427 - app.audio - INFO - Speech segment finalized: 232320 bytes, 2.34s
+2025-12-15 20:54:26,968 - app - INFO - Transcribed: Get it? Hell, man, me and Bully.
+2025-12-15 20:54:26,968 - app - INFO - [req_206_req_1f6a] Transcription complete: Get it? Hell, man, me and Bully.
+2025-12-15 20:54:34,805 - app.audio - INFO - Speech segment finalized: 518400 bytes, 7.84s
+2025-12-15 20:54:35,193 - app - INFO - Transcribed: Oh, sorry if it feels that way. I'm just seeing you taking on your shirt then. If you're just playing around, that's what I'm saying.
+2025-12-15 20:54:35,193 - app - INFO - [req_207_req_88f2] Transcription complete: Oh, sorry if it feels that way. I'm just seeing you taking on your shirt then. If you're just playing around, that's what I'm saying.
+2025-12-15 20:54:42,086 - app.audio - INFO - Speech segment finalized: 364800 bytes, 5.52s
+2025-12-15 20:54:42,441 - app - INFO - Transcribed: Oh, I get it. You're just kind of teasing around. No. They're lifting me off the ground.
+2025-12-15 20:54:42,441 - app - INFO - [req_208_req_1438] Transcription complete: Oh, I get it. You're just kind of teasing around. No. They're lifting me off the ground.
+2025-12-15 20:54:54,142 - app.audio - INFO - Speech segment finalized: 704640 bytes, 10.82s
+2025-12-15 20:54:54,571 - app - INFO - Transcribed: It definitely looks like you're still setting on your own 2P from here so I think you're just having a bit of fun but if you actually need me help, I just want to keep joking around. I'm here for it.
+2025-12-15 20:54:54,571 - app - INFO - [req_209_req_39e6] Transcription complete: It definitely looks you're still setting on your own 2P from here so I think you're just having a bit of fun but if you actually need me help, I just want to keep joking around. I'm here for it.
+2025-12-15 20:54:55,461 - app.audio - INFO - Speech segment finalized: 72960 bytes, 0.89s
+2025-12-15 20:54:58,499 - app.audio - INFO - Speech segment finalized: 115200 bytes, 0.63s
+2025-12-15 20:54:58,799 - app - INFO - Transcribed: Alright, I get your heaven.
+2025-12-15 20:54:58,799 - app - INFO - [req_211_req_eaa5] Transcription complete: Alright, I get your heaven.
+2025-12-15 20:55:01,622 - app.audio - INFO - Speech segment finalized: 201600 bytes, 2.82s
+2025-12-15 20:55:05,819 - app.audio - INFO - Speech segment finalized: 270720 bytes, 3.87s
+2025-12-15 20:55:09,429 - app - INFO - Transcribed: Everything looks like a single hand move. I'll try to beat you up.
+2025-12-15 20:55:09,429 - app - INFO - [req_213_req_74d0] Transcription complete: Everything looks a single hand move. I'll try to beat you up.
+2025-12-15 20:55:09,960 - app.audio - INFO - Speech segment finalized: 266880 bytes, 0.53s
+2025-12-15 20:55:10,820 - app.audio - INFO - Speech segment finalized: 57600 bytes, 0.52s
+2025-12-15 20:55:17,340 - app.audio - INFO - Speech segment finalized: 117120 bytes, 0.93s
+2025-12-15 20:55:28,376 - app.audio - INFO - Speech segment finalized: 685440 bytes, 10.54s
+2025-12-15 20:55:28,780 - app - INFO - Transcribed: 30 grand. And any of you in the midst will tell you, the Saudi way. When a contract is aborted in the kingdom, some member of the royal family gets a commission.
+2025-12-15 20:55:28,780 - app - INFO - [req_217_req_e487] Transcription complete: 30 grand. And any of you in the midst will tell you, the Saudi way. When a contract is aborted in the kingdom, some member of the royal family gets a commission.
+2025-12-15 20:55:49,203 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 20:55:49,204 - app - INFO - Response monitor stopped
+2025-12-15 20:55:49,433 - app - INFO - Audio capture loop stopped
+2025-12-15 20:55:49,462 - app - INFO - Audio processing loop stopped
+2025-12-15 20:55:49,903 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 20:55:49,904 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 20:55:49,904 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 20:55:49,904 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 21:06:19,052 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 21:06:19,052 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 21:06:19,052 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 21:06:19,055 - audio_pipeline.audio_pipeline - INFO - PyAudio found 5 audio devices
+2025-12-15 21:06:19,283 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 21:06:19,283 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 21:06:19,283 - audio_pipeline.audio_pipeline - INFO -   Device 4: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 21:06:19,283 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 21:06:19,283 - app - INFO - Using audio device index: 2
+2025-12-15 21:06:19,283 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 21:06:19,283 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 21:06:19,283 - app - INFO - Starting worker processes...
+2025-12-15 21:06:19,285 - app.process_manager - INFO - Started worker 'tts' (PID: 46571)
+2025-12-15 21:06:19,286 - app.process_manager - INFO - Started worker 'service_rep' (PID: 46572)
+2025-12-15 21:06:19,286 - app.process_manager - INFO - ProcessManager started
+2025-12-15 21:06:20,291 - app - INFO - Initializing STT service...
+2025-12-15 21:06:20,405 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 21:06:20,406 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 21:06:20,406 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 21:06:20,717 - app.stt - INFO - Whisper model loaded in 311ms (device=cpu, compute_type=int8)
+2025-12-15 21:06:20,717 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 21:06:20,717 - app - INFO - Audio capture loop started
+2025-12-15 21:06:20,717 - app - INFO - Audio processing loop started
+2025-12-15 21:06:20,717 - app - INFO - Calibrating noise floor...
+2025-12-15 21:06:20,717 - app - INFO - Response monitor started
+2025-12-15 21:06:20,717 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 21:06:20,717 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 21:06:21,221 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 21:06:52,175 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 21:06:57,368 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 21:07:01,390 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.53s
+2025-12-15 21:07:21,666 - app.audio - INFO - Speech segment finalized: 51840 bytes, 0.64s
+2025-12-15 21:07:26,226 - app.audio - INFO - Speech segment finalized: 293760 bytes, 0.92s
+2025-12-15 21:07:29,584 - app - INFO - Transcribed: .
+2025-12-15 21:07:30,182 - app.audio - INFO - Speech segment finalized: 240000 bytes, 0.60s
+2025-12-15 21:07:32,462 - app.audio - INFO - Speech segment finalized: 86400 bytes, 0.52s
+2025-12-15 21:07:36,964 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 21:07:47,059 - app.audio - INFO - Speech segment finalized: 44160 bytes, 0.50s
+2025-12-15 21:07:54,680 - app.audio - INFO - Speech segment finalized: 94080 bytes, 1.28s
+2025-12-15 21:07:59,160 - app.audio - INFO - Speech segment finalized: 197760 bytes, 0.53s
+2025-12-15 21:08:08,157 - app.audio - INFO - Speech segment finalized: 53760 bytes, 0.66s
+2025-12-15 21:08:08,449 - app - INFO - Transcribed: Okay. Okay.
+2025-12-15 21:08:27,171 - app.audio - INFO - Speech segment finalized: 88320 bytes, 1.20s
+2025-12-15 21:09:19,021 - app.audio - INFO - Speech segment finalized: 103680 bytes, 1.44s
+2025-12-15 21:09:23,920 - app.audio - INFO - Speech segment finalized: 314880 bytes, 0.54s
+2025-12-15 21:09:29,016 - app.audio - INFO - Speech segment finalized: 49920 bytes, 0.60s
+2025-12-15 21:09:33,816 - app.audio - INFO - Speech segment finalized: 46080 bytes, 0.54s
+2025-12-15 21:10:04,784 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 21:10:04,785 - app - INFO - Response monitor stopped
+2025-12-15 21:10:04,787 - app - INFO - Audio processing loop stopped
+2025-12-15 21:10:04,919 - app - INFO - Audio capture loop stopped
+2025-12-15 21:10:05,672 - app.process_manager - INFO - Stopped worker 'tts'
+2025-12-15 21:10:05,673 - app.process_manager - INFO - Stopped worker 'service_rep'
+2025-12-15 21:10:05,673 - app.process_manager - INFO - ProcessManager stopped
+2025-12-15 21:10:05,673 - app - INFO - MultiProcessVoiceApp stopped
+2025-12-15 22:07:39,216 - app - INFO - MultiProcessVoiceApp initialized
+2025-12-15 22:07:39,216 - app - INFO - Starting MultiProcessVoiceApp (MULTIPROCESS)...
+2025-12-15 22:07:39,216 - audio_pipeline.audio_pipeline - INFO - Waiting for input device to become available...
+2025-12-15 22:07:39,218 - audio_pipeline.audio_pipeline - INFO - PyAudio found 5 audio devices
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO - Found 2 input devices:
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO -   Device 2: USB PnP Sound Device (channels: 1, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO -   Device 4: Splashtop Remote Sound (channels: 2, VAD rates: [8000, 16000, 32000, 48000])
+2025-12-15 22:07:39,429 - audio_pipeline.audio_pipeline - INFO - Using VAD-compatible device: USB PnP Sound Device
+2025-12-15 22:07:39,429 - app - INFO - Using audio device index: 2
+2025-12-15 22:07:39,429 - app.process_manager - INFO - Registered worker 'tts' (subscribes to: ['TTS_REQUESTED'])
+2025-12-15 22:07:39,429 - app.process_manager - INFO - Registered worker 'service_rep' (subscribes to: ['TRANSCRIPTION_COMPLETE'])
+2025-12-15 22:07:39,429 - app - INFO - Starting worker processes...
+2025-12-15 22:07:39,430 - app.process_manager - INFO - Started worker 'tts' (PID: 52638)
+2025-12-15 22:07:39,431 - app.process_manager - INFO - Started worker 'service_rep' (PID: 52639)
+2025-12-15 22:07:39,432 - app.process_manager - INFO - ProcessManager started
+2025-12-15 22:07:40,433 - app - INFO - Initializing STT service...
+2025-12-15 22:07:40,541 - app.stt - INFO - Loading Whisper model: base.en
+2025-12-15 22:07:40,541 - app.stt - INFO - No GPU detected - using CPU (may be slower)
+2025-12-15 22:07:40,541 - app.stt - INFO - Selected compute type 'int8' for cpu backend
+2025-12-15 22:07:40,857 - app.stt - INFO - Whisper model loaded in 316ms (device=cpu, compute_type=int8)
+2025-12-15 22:07:40,857 - app.stt - INFO - STT engine initialized: whisper
+2025-12-15 22:07:40,857 - app - INFO - Audio capture loop started
+2025-12-15 22:07:40,857 - app - INFO - Audio processing loop started
+2025-12-15 22:07:40,857 - app - INFO - Calibrating noise floor...
+2025-12-15 22:07:40,857 - app - INFO - Response monitor started
+2025-12-15 22:07:40,857 - app - INFO - MultiProcessVoiceApp started successfully
+2025-12-15 22:07:40,858 - app - INFO - Speak to interact with the AI agent...
+2025-12-15 22:07:41,356 - app - INFO - Noise floor calibrated, listening for speech...
+2025-12-15 22:07:43,339 - app.audio - INFO - Speech segment finalized: 84480 bytes, 1.14s
+2025-12-15 22:07:46,788 - app - INFO - Transcribed: Yes. Okay. Good morning. Good morning. I'm excited. Thank you. I'm glad you're here. I'll be back. Okay. Thank you. Thank you. It's a great day. I'll see you tonight. Thank you. Bye. Hey. Bye. Bye. Thank you. Bye. Bye. Bye. Bye. Bye. Bye. Bye.
+2025-12-15 22:07:46,788 - app - INFO - [req_1_req_91ba] Transcription complete: Yes. Okay. Good morning. Good morning. I'm excited. Thank you. I'm glad you're here. I'll be back. Okay. Thank you. Thank you. It's a great day. I'll see you tonight. Thank you. Bye. Hey. Bye. Thank you. Bye.
+2025-12-15 22:07:47,298 - app.audio - INFO - Speech segment finalized: 241920 bytes, 0.51s
+2025-12-15 22:07:49,555 - app.audio - INFO - Speech segment finalized: 145920 bytes, 1.98s
+2025-12-15 22:08:01,915 - app.audio - INFO - Speech segment finalized: 69120 bytes, 0.90s
+2025-12-15 22:08:05,211 - app.audio - INFO - Speech segment finalized: 99840 bytes, 1.38s
+2025-12-15 22:08:17,147 - app.audio - INFO - Speech segment finalized: 63360 bytes, 0.82s
+2025-12-15 22:08:20,807 - app - INFO - Stopping MultiProcessVoiceApp...
+2025-12-15 22:08:20,808 - app - INFO - Response monitor stopped
+2025-12-15 22:08:20,961 - app - INFO - Audio capture loop stopped
+2025-12-15 22:08:21,163 - app - INFO - Transcribed: Okay. So. An. In. He. He. He. I. Th we. Mm hmm. One. Th we. He. Th we. Th we. Oh. My. Th we. Mm hmm. Th we. We are. Th we. Th we. Th we. Th we. Th we. Th we. Th we.
+2025-12-15 22:08:21,164 - app - INFO - [req_6_req_9f47] Transcription complete: Okay. So. An. In. He. I. Th we. Mm . One. Th we. He. Th we. Th we. Oh. My. Th we. Mm . Th we. We are. Th we. Th we. Th we. Th we. Th we. Th we. Th we.
+2025-12-15 22:08:21,164 - app - INFO - Audio processing loop stopped
+2025-12-16 10:24:50,288 - app.process_manager - WARNING - Worker 'service_rep' died, restarting...
+2025-12-16 10:24:50,288 - app.process_manager - ERROR - Monitor error: [Errno 5] Input/output error

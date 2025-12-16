@@ -14,6 +14,8 @@ This is a complete refactoring to be event-driven and decoupled from voice/TTS.
 import time
 import threading
 import queue
+import random
+import re
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from enum import Enum
@@ -129,6 +131,31 @@ class ServiceRep:
         # Load canned responses
         self._canned_responses = self._load_canned_responses()
         self._response_index: Dict[str, int] = {}
+
+        # Lightweight small-talk patterns we can answer without invoking harness
+        self._small_talk_patterns = [
+            (re.compile(r"^(hi|hello|hey|hiya|yo|sup|hey there|hi there)$"), "greeting"),
+            (re.compile(r"^good (morning|afternoon|evening)$"), "greeting"),
+            (re.compile(r"^(thanks|thank you|thanks so much|thank you so much|thx|ty)$"), "thanks"),
+            (re.compile(r"^(how are you|how are you doing|how's it going|hows it going|what's up|whats up)$"), "checkin"),
+        ]
+        self._small_talk_responses = {
+            "greeting": [
+                "Hi there! I'm ready whenever you need me.",
+                "Hello! I'm here and ready to help.",
+                "Hey there! Just say the word when you're ready."
+            ],
+            "thanks": [
+                "You're welcome! Happy to help with anything else.",
+                "No problem at all—just let me know if you need anything else.",
+                "Anytime! I'm here whenever you need me."
+            ],
+            "checkin": [
+                "I'm doing great and ready to help. What can I do for you?",
+                "All good on my end—let me know what you need.",
+                "Doing well and standing by whenever you're ready."
+            ],
+        }
 
         # Track current agent state
         self._agent_is_busy = False
@@ -279,6 +306,10 @@ class ServiceRep:
 
         request_id = event.request_id or self.logger.new_request()
         self.logger.request_received(text)
+
+        # Fast path: greetings / small-talk should bypass the harness entirely
+        if self._handle_small_talk(request_id, text):
+            return
 
         # Step 1: Classify intent
         intent_result: IntentClassification = self.intent_classifier.classify(
@@ -433,12 +464,12 @@ class ServiceRep:
             return
 
         # Publish progress TTS
-        self._publish_tts(
-            text=message,
-            response_type=ResponseType.PROGRESS,
-            priority=1,
-            request_id=current_request_id
-        )
+        # self._publish_tts(
+        #     text=message,
+        #     response_type=ResponseType.PROGRESS,
+        #     priority=1,
+        #     request_id=current_request_id
+        # )
 
     def _handle_harness_response(self, request_id: str, harness_response):
         """
@@ -489,6 +520,33 @@ class ServiceRep:
             request_id=request_id,
             metadata={"success": success, "tools_used": tools_used}
         )
+
+        # Publish full agent response event for listeners (e.g., TUI/status panes)
+        if self.event_bus:
+            try:
+                error_msg = None
+                if not success:
+                    if harness_response.agent_response and harness_response.agent_response.error:
+                        error_msg = harness_response.agent_response.error
+                    else:
+                        error_msg = harness_response.metadata.get("error")
+
+                agent_event = AgentResponseCompleteEvent(
+                    request_id=request_id,
+                    success=success,
+                    content=harness_response.full_response,
+                    spoken_response=spoken_text,
+                    tools_used=tools_used,
+                    duration_ms=harness_response.duration_ms,
+                    error=error_msg,
+                    metadata=harness_response.metadata or {}
+                )
+                self.event_bus.publish(agent_event)
+            except Exception as event_err:
+                self.logger.error(
+                    f"[{request_id}] Failed to publish AgentResponseCompleteEvent: {event_err}",
+                    component="service_rep"
+                )
 
         self.logger.info(
             f"[{request_id}] Response delivered: success={success}",
@@ -553,6 +611,25 @@ class ServiceRep:
             priority=1,
             request_id=request_id
         )
+
+        if self.event_bus:
+            try:
+                failure_event = AgentResponseCompleteEvent(
+                    request_id=request_id,
+                    success=False,
+                    content="",
+                    spoken_response=f"I'm sorry, something went wrong: {error_msg}",
+                    tools_used=[],
+                    duration_ms=0.0,
+                    error=error_msg,
+                    metadata={"error": error_msg or "unknown_error"}
+                )
+                self.event_bus.publish(failure_event)
+            except Exception as event_err:
+                self.logger.error(
+                    f"[{request_id}] Failed to publish failure response event: {event_err}",
+                    component="service_rep"
+                )
 
     def _summarize_harness_response(self, harness_response) -> str:
         """
@@ -680,6 +757,48 @@ class ServiceRep:
             self.harness.cleanup()
 
         self.logger.info("ServiceRep cleaned up", component="service_rep")
+
+    def _handle_small_talk(self, request_id: str, text: str) -> bool:
+        """Handle simple greetings/thanks without invoking the harness."""
+        normalized = (text or "").strip().lower()
+        if not normalized:
+            return False
+
+        normalized = re.sub(r"[!.?]+$", "", normalized)
+
+        for pattern, category in self._small_talk_patterns:
+            if pattern.match(normalized):
+                response_text = random.choice(
+                    self._small_talk_responses.get(category, ["I'm here whenever you need me."])
+                )
+
+                self.logger.info(
+                    f"[{request_id}] Auto-responded to {category} small talk",
+                    component="service_rep"
+                )
+
+                self._publish_tts(
+                    text=response_text,
+                    response_type=ResponseType.COMPLETION,
+                    priority=1,
+                    request_id=request_id
+                )
+
+                if self.event_bus:
+                    auto_event = AgentResponseCompleteEvent(
+                        request_id=request_id,
+                        success=True,
+                        content=response_text,
+                        spoken_response=response_text,
+                        tools_used=[],
+                        duration_ms=0.0,
+                        metadata={"auto_response": category}
+                    )
+                    self.event_bus.publish(auto_event)
+
+                return True
+
+        return False
 
 
 def create_service_rep(

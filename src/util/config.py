@@ -15,14 +15,14 @@ import copy
 
 DEFAULT_TIER_TOOL_LIMITS = {
     "simple": 1,
-    "standard": 3,
-    "advanced": 10
+    "standard": 15,
+    "advanced": 30
 }
 
 DEFAULT_TIER_MAX_TOKENS = {
-    "simple": 1500,
-    "standard": 4000,
-    "advanced": 8000
+    "simple": 4096,
+    "standard": 16000,
+    "advanced": 32000
 }
 
 
@@ -107,7 +107,7 @@ class AgentConfig:
     # system_prompt moved to config/prompts_config.json (tier-specific prompts)
     system_prompt: str = ""  # Will be populated from tier-specific prompts
 
-    max_tool_calls: int = 10
+    max_tool_calls: int = 20
     tool_timeout: int = 30
     allow_code_execution: bool = True
     allow_internet: bool = True

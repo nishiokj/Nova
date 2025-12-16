@@ -54,12 +54,13 @@ This guide expands on `scripts/setup_env.sh` and documents the minimum steps nee
 
 ## 5. Packaging & distribution checklist
 - Run `python -m build` to produce wheels/sdists for distribution; CI already validates this path.
-- Upload artifacts to your internal PyPI/registry and install via `pip install voice-agent-system==VERSION`.
+- Upload artifacts to your internal PyPI/registry and install via `pip install rex==VERSION`.
+- Add the optional audio dependencies when you need microphone or TTS hardware support: `pip install rex[audio]==VERSION`.
 - Include the `config/*.json` templates in release archives so operators can copy them without editing in-place.
 
 ## 6. Sanity checks before running on a new machine
 - `python -m sounddevice` or `python - <<<'import pyaudio'` to confirm PortAudio loads
-- `pip list | grep voice-agent-system` to confirm wheel installation (if not running from source)
+- `pip list | grep rex` to confirm wheel installation (if not running from source)
 - `pytest -m "unit and not requires_network"` to ensure harness utilities behave on the platform
 - `npm --prefix front-end run start` to confirm front-end assets load
 
