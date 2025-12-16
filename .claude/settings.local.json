@@ -30,7 +30,12 @@
       "Bash(PYTHONPATH=/Users/jevinnishioka/Desktop/jesus/src python3:*)",
       "Bash(timeout 5 python3:*)",
       "Bash(echo:*)",
-      "Bash(docker build:*)"
+      "Bash(docker build:*)",
+      "Bash(git remote:*)",
+      "Bash(say -v \"?\")",
+      "Bash(grep:*)",
+      "Bash(pkill:*)",
+      "Bash(say:*)"
     ],
     "deny": []
   }

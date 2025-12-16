@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -95,9 +96,6 @@ def find_config_file(
 
     # 6. Bundled package templates
     try:
-        from pathlib import Path
-        import sys
-
         # Check if installed as package
         if hasattr(sys, "prefix"):
             package_config = Path(sys.prefix) / "config" / filename

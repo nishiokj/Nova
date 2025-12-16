@@ -34,6 +34,12 @@
     "vad_filter": false,
     "filter_hallucinations": true
   },
+  "tts": {
+    "engine": "auto",
+    "voice": "Samantha",
+    "rate": 200,
+    "volume": 0.9
+  },
   "linter": {
     "enabled": true,
     "cache_size": 100,

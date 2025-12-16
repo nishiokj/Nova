@@ -80,6 +80,12 @@ class PlanStatus(Enum):
     PARTIAL = "partial"
 
 
+class PlanPhase(Enum):
+    """Execution phase for a plan step"""
+    DISCOVERY = "discovery"
+    EXECUTION = "execution"
+
+
 @dataclass
 class SuccessCriteria:
     """Defines what success looks like for a step or plan"""
@@ -105,6 +111,8 @@ class StepResult:
     final_response: Optional[str] = None  # If step generated final response
     error: Optional[str] = None  # Error message if step failed
     duration_ms: float = 0
+    phase: PlanPhase = PlanPhase.EXECUTION
+    context: Optional[StepContext] = None
 
     # Validation results (can be filled by Agent after executor returns)
     validation_passed: bool = False
@@ -130,6 +138,7 @@ class PlanStep:
     success_criteria: Optional[SuccessCriteria] = None
     max_tool_calls: int = 3               # Safety limit per step (reduced from 10)
     depends_on: List[int] = field(default_factory=list)  # Step dependencies
+    phase: PlanPhase = PlanPhase.EXECUTION              # Discovery vs execution phase
 
     # Execution state (filled during execution)
     status: PlanStatus = PlanStatus.PENDING
@@ -164,6 +173,10 @@ class Plan:
     estimated_complexity: str             # "simple", "standard", "advanced"
     requires_tools: bool                  # Does this need external tools?
     reasoning: str                        # Why this plan
+    discovery_plan: List[PlanStep] = field(default_factory=list)
+    execution_plan: List[PlanStep] = field(default_factory=list)
+    discovery_required: bool = True
+    assumptions: List[str] = field(default_factory=list)
 
     # Metadata
     created_at: float = field(default_factory=time.time)
@@ -178,13 +191,16 @@ class Plan:
                     "step_num": s.step_num,
                     "objective": s.objective,
                     "tool_hint": s.tool_hint,
-                    "status": s.status.value
+                    "status": s.status.value,
+                    "phase": s.phase.value
                 }
                 for s in self.steps
             ],
             "success_criteria": self.success_criteria.description,
             "complexity": self.estimated_complexity,
-            "requires_tools": self.requires_tools
+            "requires_tools": self.requires_tools,
+            "discovery_required": self.discovery_required,
+            "assumptions": self.assumptions
         }
 
 
@@ -264,37 +280,63 @@ def _load_planner_prompts():
     except Exception:
         # Fallback to hardcoded defaults
         return {
-            "planning": """You are a planning assistant. Given a user request, create an execution plan.
+            "planning": """You are a ruthless planning assistant obsessed with user intent.
 
-IMPORTANT: Your job is to determine:
-1. What is the user's ACTUAL GOAL? (not just what they said, but what they want to achieve)
-2. What steps are needed to achieve this goal?
-3. How will we KNOW if we succeeded?
+MANDATORY STRUCTURE:
+- Always create TWO explicit plans: a discovery plan (what to inspect/measure) and an execution plan (what to build/change after discovery).
+- Discovery is required for every real task involving code/files/systems. Only skip when the request is trivially self-contained (e.g., factual question already answerable from memory).
+- Be explicit about assumptions; list them upfront so the executor can challenge them later if evidence contradicts them.
 
-Respond with a JSON plan:
+Your job:
+1. Clarify what the user truly needs.
+2. Define the discovery steps necessary to understand the context (repo layout, configs, relevant files, constraints, reproduction steps, etc.).
+3. Define the execution steps that use discovery evidence to implement/answer.
+4. Describe success criteria and explicit assumptions.
+
+Respond with valid JSON:
 ```json
 {{
   "goal": "Clear statement of what user wants to achieve",
   "goal_type": "question|task|creation|search",
   "requires_tools": true/false,
-  "steps": [
+  "discovery_plan": [
     {{
       "step_num": 1,
-      "objective": "What this step accomplishes",
-      "tool_hint": "tool_name or null for reasoning",
-      "tool_args_hint": {{"arg": "value"}} or null
+      "objective": "Very concrete discovery action (e.g., inspect repo root, read config file, run tests)",
+      "tool_hint": "list_files|file_read|search_filesystem|bash_execute|python_execute|null",
+      "tool_args_hint": {{"arg": "value"}} or null,
+      "success_criteria": {{
+        "description": "What evidence must be collected",
+        "required_outputs": ["list_files_output"],
+        "validation_hints": ["ls output includes project directories"]
+      }}
     }}
   ],
-  "success_criteria": "How we know the goal was achieved",
-  "reasoning": "Why this plan will work"
+  "execution_plan": [
+    {{
+      "step_num": 1,
+      "objective": "Concrete change or synthesis leveraging discovery",
+      "tool_hint": "tool_name or null",
+      "tool_args_hint": {{"arg": "value"}} or null,
+      "depends_on": [1, 2],
+      "success_criteria": {{
+        "description": "Definition of done",
+        "required_outputs": ["file_write_output"]
+      }}
+    }}
+  ],
+  "success_criteria": "How we know the overall goal was achieved",
+  "reasoning": "Why this plan will work",
+  "assumptions": ["List explicit assumptions about the repo/task/user constraints"],
+  "discovery_required": true/false
 }}
 ```
 
 GUIDELINES:
-- For simple questions (capital of X, math, facts): goal_type="question", requires_tools=false, 1 step
-- For searches/lookups: goal_type="search", requires_tools=true, include search step
-- For file operations: goal_type="task", requires_tools=true, include file tool steps
-- For creation tasks: goal_type="creation", may need multiple steps
+- Discovery steps should mention concrete inspections: list directories, read README/requirements, search for symbols, inspect configs, reproduce failures, check OS/runtime constraints.
+- Execution steps must reference discovery outputs via depends_on. Global step numbers should enumerate discovery steps first, then execution steps.
+- For self-contained Q&A with no tools, mark discovery_required=false and leave discovery_plan empty.
+- Prefer high-signal tools (list_files, file_read, search_filesystem, bash_execute) for discovery. Do not skip them when touching a repo.
 
 Available tools: {tools}
 
@@ -490,7 +532,7 @@ class Planner:
         This is better than attempting execution and failing mid-way.
         The agent should recognize this and return a clear error.
         """
-        return Plan(
+        plan = Plan(
             goal=f"BUDGET_EXCEEDED: {user_input[:100]}",
             goal_type="error",
             steps=[
@@ -498,6 +540,7 @@ class Planner:
                     step_num=1,
                     objective=f"Return error: Task cannot be completed within {tier} tier budget",
                     tool_hint=None,
+                    phase=PlanPhase.EXECUTION,
                     success_criteria=SuccessCriteria(
                         description="Inform user of budget constraints"
                     )
@@ -509,8 +552,10 @@ class Planner:
             estimated_complexity=tier,
             requires_tools=False,
             reasoning=f"BUDGET_EXCEEDED: {reason}. Consider re-routing to a higher tier.",
+            discovery_required=False,
             status=PlanStatus.FAILED  # Mark as already failed
         )
+        return self._finalize_plan(plan, user_input)
 
     def _try_simple_plan(self, user_input: str) -> Optional[Plan]:
         """
@@ -546,7 +591,7 @@ class Planner:
         ])
 
         if is_simple_question and not needs_realtime and not needs_search and not needs_files and not is_creation_task:
-            return Plan(
+            plan = Plan(
                 goal=f"Answer: {user_input}",
                 goal_type="question",
                 steps=[
@@ -554,6 +599,7 @@ class Planner:
                         step_num=1,
                         objective="Answer the question from knowledge",
                         tool_hint=None,
+                        phase=PlanPhase.EXECUTION,
                         success_criteria=SuccessCriteria(
                             description="Provide accurate, direct answer"
                         )
@@ -564,12 +610,15 @@ class Planner:
                 ),
                 estimated_complexity="simple",
                 requires_tools=False,
-                reasoning="Simple factual question - answer from knowledge"
+                reasoning="Simple factual question - answer from knowledge",
+                discovery_required=False,
+                assumptions=["Question appears self-contained and does not require repository inspection"]
             )
+            return self._finalize_plan(plan, user_input)
 
         # Search/lookup requests (but NOT creation tasks)
         if (needs_search or needs_realtime) and not is_creation_task and not needs_files:
-            return Plan(
+            plan = Plan(
                 goal=f"Find information: {user_input}",
                 goal_type="search",
                 steps=[
@@ -578,6 +627,7 @@ class Planner:
                         objective="Search for current/relevant information",
                         tool_hint="fast_answer",
                         tool_args_hint={"query": user_input},
+                        phase=PlanPhase.DISCOVERY,
                         success_criteria=SuccessCriteria(
                             description="Find relevant, current information"
                         )
@@ -586,6 +636,7 @@ class Planner:
                         step_num=2,
                         objective="Synthesize findings into answer",
                         tool_hint=None,
+                        phase=PlanPhase.EXECUTION,
                         depends_on=[1],
                         success_criteria=SuccessCriteria(
                             description="Provide clear answer based on search results"
@@ -597,8 +648,10 @@ class Planner:
                 ),
                 estimated_complexity="standard",
                 requires_tools=True,
-                reasoning="Needs current/external information"
+                reasoning="Needs current/external information",
+                assumptions=["External data required; fast_answer expected to provide up-to-date context"]
             )
+            return self._finalize_plan(plan, user_input)
 
         # Not a simple pattern - need LLM planning
         # This includes creation tasks, file operations, and complex requests
@@ -610,7 +663,7 @@ class Planner:
         context: Optional[str],
         tier: str
     ) -> Plan:
-        """Use LLM to create a plan for complex requests"""
+        """Use LLM to create a plan for complex requests with explicit discovery/execution phases"""
         tools = self.tool_registry.list_tools(enabled_only=True)
         tool_descriptions = "\n".join([f"- {t.name}: {t.description}" for t in tools])
 
@@ -631,28 +684,35 @@ class Planner:
             response = self.llm.complete(messages)
             plan_data = self._parse_plan_response(response.content, user_input)
 
-            # Convert to Plan object
-            steps = []
-            for i, step_data in enumerate(plan_data.get("steps", [])):
-                steps.append(PlanStep(
-                    step_num=step_data.get("step_num", i + 1),
-                    objective=step_data.get("objective", "Execute step"),
-                    tool_hint=step_data.get("tool_hint"),
-                    tool_args_hint=step_data.get("tool_args_hint"),
-                    success_criteria=SuccessCriteria(
-                        description=step_data.get("success_criteria", "Step completed")
-                    )
-                ))
+            discovery_steps = self._build_phase_steps(
+                plan_data.get("discovery_plan"),
+                PlanPhase.DISCOVERY
+            )
+            execution_steps = self._build_phase_steps(
+                plan_data.get("execution_plan"),
+                PlanPhase.EXECUTION
+            )
 
-            # Ensure at least one step
+            # Backwards compatibility: fall back to legacy `steps`
+            if not discovery_steps and not execution_steps and plan_data.get("steps"):
+                inferred = self._build_phase_steps(plan_data.get("steps"), PlanPhase.EXECUTION)
+                execution_steps.extend(inferred)
+
+            steps = discovery_steps + execution_steps
             if not steps:
                 steps = [PlanStep(
                     step_num=1,
                     objective="Process user request",
-                    success_criteria=SuccessCriteria(description="Request handled")
+                    success_criteria=SuccessCriteria(description="Request handled"),
+                    phase=PlanPhase.DISCOVERY
                 )]
 
-            return Plan(
+            discovery_required = plan_data.get(
+                "discovery_required",
+                self._infer_discovery_requirement(plan_data.get("goal_type"), plan_data.get("requires_tools", False))
+            )
+
+            plan = Plan(
                 goal=plan_data.get("goal", user_input),
                 goal_type=plan_data.get("goal_type", "task"),
                 steps=steps,
@@ -661,25 +721,32 @@ class Planner:
                 ),
                 estimated_complexity=tier,
                 requires_tools=plan_data.get("requires_tools", False),
-                reasoning=plan_data.get("reasoning", "LLM-generated plan")
+                reasoning=plan_data.get("reasoning", "LLM-generated plan"),
+                discovery_required=discovery_required,
+                assumptions=plan_data.get("assumptions", []) or []
             )
+            return self._finalize_plan(plan, user_input)
 
         except Exception as e:
             # Executor can throw exceptions - Agent will handle them
             # Return fallback plan
-            return Plan(
+            fallback = Plan(
                 goal=user_input,
                 goal_type="task",
                 steps=[PlanStep(
                     step_num=1,
                     objective="Handle user request",
-                    success_criteria=SuccessCriteria(description="Request processed")
+                    success_criteria=SuccessCriteria(description="Request processed"),
+                    phase=PlanPhase.DISCOVERY
                 )],
                 success_criteria=SuccessCriteria(description="Request handled"),
                 estimated_complexity=tier,
                 requires_tools=False,
-                reasoning=f"Fallback plan due to planning error: {str(e)}"
+                reasoning=f"Fallback plan due to planning error: {str(e)}",
+                assumptions=[f"Planning failed: {str(e)}"]
             )
+            fallback.discovery_required = True
+            return self._finalize_plan(fallback, user_input)
 
     def _parse_plan_response(self, content: str, user_input: str) -> Dict[str, Any]:
         """Parse LLM response to extract plan JSON"""
@@ -708,6 +775,193 @@ class Planner:
         except Exception:
             # Re-raise for Agent to handle
             raise
+
+    def _build_phase_steps(
+        self,
+        steps_data: Optional[List[Dict[str, Any]]],
+        phase: PlanPhase
+    ) -> List[PlanStep]:
+        """Convert structured plan data into PlanStep objects for a specific phase."""
+        if not steps_data:
+            return []
+
+        built_steps: List[PlanStep] = []
+        for idx, step_data in enumerate(steps_data):
+            raw_step_num = step_data.get("step_num", idx + 1)
+            try:
+                step_num = int(raw_step_num)
+            except (TypeError, ValueError):
+                step_num = idx + 1
+
+            success = self._build_success_criteria(
+                step_data.get("success_criteria"),
+                step_data.get("objective", "Complete the objective")
+            )
+
+            tool_args_hint = step_data.get("tool_args_hint")
+            if tool_args_hint is not None and not isinstance(tool_args_hint, dict):
+                tool_args_hint = None
+
+            depends_on = self._normalize_dependencies(step_data.get("depends_on"))
+
+            step = PlanStep(
+                step_num=step_num,
+                objective=step_data.get("objective", "Execute step"),
+                tool_hint=step_data.get("tool_hint"),
+                tool_args_hint=tool_args_hint,
+                success_criteria=success,
+                depends_on=depends_on,
+                phase=phase
+            )
+            setattr(step, "_original_step_num", step_num)
+            built_steps.append(step)
+
+        return built_steps
+
+    def _build_success_criteria(self, raw: Any, default_description: str) -> SuccessCriteria:
+        """Create a SuccessCriteria object from planner JSON."""
+        if isinstance(raw, dict):
+            return SuccessCriteria(
+                description=raw.get("description", default_description),
+                required_outputs=raw.get("required_outputs", []),
+                validation_hints=raw.get("validation_hints", []),
+                automated_checks=raw.get("automated_checks")
+            )
+        if isinstance(raw, str):
+            return SuccessCriteria(description=raw)
+        if isinstance(raw, list):
+            return SuccessCriteria(
+                description=default_description,
+                required_outputs=[str(item) for item in raw]
+            )
+        return SuccessCriteria(description=default_description)
+
+    def _normalize_dependencies(self, depends_on: Any) -> List[int]:
+        """Ensure depends_on is a list of ints."""
+        if not depends_on:
+            return []
+        if not isinstance(depends_on, list):
+            depends = [depends_on]
+        else:
+            depends = depends_on
+
+        normalized: List[int] = []
+        for dep in depends:
+            if isinstance(dep, bool):
+                continue
+            if isinstance(dep, (int, float)):
+                normalized.append(int(dep))
+            elif isinstance(dep, str) and dep.strip().isdigit():
+                normalized.append(int(dep.strip()))
+        return normalized
+
+    def _infer_discovery_requirement(
+        self,
+        goal_type: Optional[str],
+        requires_tools: bool
+    ) -> bool:
+        """Determine if discovery should be mandatory."""
+        if goal_type == "question" and not requires_tools:
+            return False
+        return True
+
+    def _clean_search_pattern(self, text: Optional[str]) -> str:
+        """Generate a safe filesystem search pattern from user input."""
+        if not text:
+            return "."
+        truncated = text[:80]
+        cleaned_chars = [
+            ch if ch.isalnum() or ch in ("_", "-", ".", " ") else " "
+            for ch in truncated
+        ]
+        cleaned = "".join(cleaned_chars)
+        cleaned = " ".join(cleaned.split())
+        if cleaned:
+            tokens = cleaned.split(" ")
+            return " ".join(tokens[:3])
+        fallback = (text.split() or ["."])[0]
+        return fallback or "."
+
+    def _default_discovery_steps(self, user_input: str) -> List[PlanStep]:
+        """Inject baseline discovery actions when the plan omitted them."""
+        pattern = self._clean_search_pattern(user_input)
+        steps = [
+            PlanStep(
+                step_num=-2,
+                objective="Discovery: inspect repository root structure",
+                tool_hint="list_files",
+                tool_args_hint={"path": "."},
+                success_criteria=SuccessCriteria(
+                    description="Repo structure enumerated",
+                    required_outputs=["list_files_output"]
+                ),
+                phase=PlanPhase.DISCOVERY,
+                max_tool_calls=2
+            ),
+            PlanStep(
+                step_num=-1,
+                objective="Discovery: locate files or symbols related to the request",
+                tool_hint="search_filesystem",
+                tool_args_hint={"pattern": pattern, "path": "."},
+                success_criteria=SuccessCriteria(
+                    description="Relevant files identified",
+                    required_outputs=["search_filesystem_output"]
+                ),
+                depends_on=[-2],
+                phase=PlanPhase.DISCOVERY,
+                max_tool_calls=2
+            )
+        ]
+        for step in steps:
+            setattr(step, "_original_step_num", step.step_num)
+        return steps
+
+    def _resequence_steps(self, steps: List[PlanStep]) -> List[PlanStep]:
+        """Sort steps (discovery first) and reassign sequential numbers."""
+        if not steps:
+            return steps
+
+        sorted_steps = sorted(
+            steps,
+            key=lambda step: (
+                0 if step.phase == PlanPhase.DISCOVERY else 1,
+                getattr(step, "_original_step_num", step.step_num)
+            )
+        )
+        mapping: Dict[int, int] = {}
+        for idx, step in enumerate(sorted_steps, 1):
+            original = getattr(step, "_original_step_num", step.step_num)
+            mapping[original] = idx
+            step.step_num = idx
+
+        for step in sorted_steps:
+            if not step.depends_on:
+                continue
+            new_deps = []
+            for dep in step.depends_on:
+                if isinstance(dep, bool):
+                    continue
+                dep_int = int(dep)
+                new_deps.append(mapping.get(dep_int, dep_int))
+            step.depends_on = new_deps
+
+        return sorted_steps
+
+    def _finalize_plan(self, plan: Plan, user_input: str) -> Plan:
+        """Ensure discovery plan exists, phases ordered, and metadata populated."""
+        plan.steps = self._resequence_steps(plan.steps)
+        plan.discovery_plan = [s for s in plan.steps if s.phase == PlanPhase.DISCOVERY]
+        plan.execution_plan = [s for s in plan.steps if s.phase == PlanPhase.EXECUTION]
+
+        if plan.discovery_required and not plan.discovery_plan:
+            injected = self._default_discovery_steps(user_input)
+            plan.steps = injected + plan.steps
+            plan.steps = self._resequence_steps(plan.steps)
+            plan.discovery_plan = [s for s in plan.steps if s.phase == PlanPhase.DISCOVERY]
+            plan.execution_plan = [s for s in plan.steps if s.phase == PlanPhase.EXECUTION]
+            plan.assumptions.append("Auto-added discovery plan to inspect repository context")
+
+        return plan
 
 
 # =============================================================================
@@ -856,7 +1110,8 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                 )],
                 accumulated_data={"result": result.output} if result.is_success else {},
                 final_response=trace.final_response,
-                duration_ms=(time.time() - start_time) * 1000
+                duration_ms=(time.time() - start_time) * 1000,
+                phase=step.phase
             )
             trace.step_results.append(step_result)
         else:
@@ -866,7 +1121,8 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                 step_num=1,
                 status=PlanStatus.COMPLETED,
                 final_response=response.content,
-                duration_ms=(time.time() - start_time) * 1000
+                duration_ms=(time.time() - start_time) * 1000,
+                phase=step.phase
             )
             trace.step_results.append(step_result)
 
@@ -888,7 +1144,15 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         Updates plan step status after each step so dependencies work correctly.
         """
 
+        remaining_discovery = {
+            s.step_num for s in plan.steps if s.phase == PlanPhase.DISCOVERY
+        }
+        discovery_required = plan.discovery_required and bool(remaining_discovery)
+
         for step in plan.steps:
+            if discovery_required and step.phase == PlanPhase.EXECUTION and remaining_discovery:
+                raise RuntimeError("Cannot execute action steps before completing discovery.")
+
             # Check dependencies - throw exception if not met
             if not self._dependencies_met(step, plan.steps):
                 raise RuntimeError(f"Step {step.step_num} dependencies not satisfied: {step.depends_on}")
@@ -900,6 +1164,7 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
             step.status = step_result.status
             step.error = step_result.error
             step.duration_ms = step_result.duration_ms
+            step.context = step_result.context if hasattr(step_result, "context") else step.context
 
             # Append messages from this step to conversation (for next steps)
             messages.extend(step_result.llm_messages)
@@ -910,6 +1175,11 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
             # Stop if critical step failed and no response yet
             if step_result.status == PlanStatus.FAILED and not trace.final_response:
                 break
+
+            if discovery_required and step.phase == PlanPhase.DISCOVERY:
+                remaining_discovery.discard(step.step_num)
+                if not remaining_discovery:
+                    discovery_required = False
 
         # OPTIMIZATION: Reuse step results instead of making another LLM call
         if not trace.final_response:
@@ -1124,7 +1394,9 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
             accumulated_data=context.accumulated_data,
             final_response=final_response_content,
             error=error_message,
-            duration_ms=duration_ms
+            duration_ms=duration_ms,
+            phase=step.phase,
+            context=context
         )
 
     def _can_parallelize_batch(self, tool_calls: List[ToolCall]) -> bool:

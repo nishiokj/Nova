@@ -433,12 +433,12 @@ class ServiceRep:
             return
 
         # Publish progress TTS
-        self._publish_tts(
-            text=message,
-            response_type=ResponseType.PROGRESS,
-            priority=1,
-            request_id=current_request_id
-        )
+        # self._publish_tts(
+        #     text=message,
+        #     response_type=ResponseType.PROGRESS,
+        #     priority=1,
+        #     request_id=current_request_id
+        # )
 
     def _handle_harness_response(self, request_id: str, harness_response):
         """

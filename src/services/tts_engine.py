@@ -38,13 +38,26 @@ class MacOSSayEngine(TTSEngine):
 
     def __init__(self, config: Dict[str, Any]):
         self.rate = config.get("rate", 180)
+        self.voice = config.get("voice")  # Optional voice name
         self.engine_type = "macos_say"
         self.logger = logging.getLogger(self.__class__.__name__)
 
+        # Log voice selection
+        if self.voice:
+            self.logger.info(f"Using macOS voice: {self.voice} at {self.rate} wpm")
+        else:
+            self.logger.info(f"Using default macOS voice at {self.rate} wpm")
+
     def speak(self, text: str) -> bool:
         try:
+            # Build command with optional voice parameter
+            cmd = ["say", "-r", str(self.rate)]
+            if self.voice:
+                cmd.extend(["-v", self.voice])
+            cmd.append(text)
+
             proc = subprocess.Popen(
-                ["say", "-r", str(self.rate), text],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -66,6 +79,18 @@ class Pyttsx3Engine(TTSEngine):
         self.engine = pyttsx3.init()
         self.engine.setProperty("rate", config.get("rate", 180))
         self.engine.setProperty("volume", config.get("volume", 0.8))
+
+        # Set voice if specified
+        voice_name = config.get("voice")
+        if voice_name:
+            voices = self.engine.getProperty("voices")
+            for voice in voices:
+                if voice_name.lower() in voice.name.lower():
+                    self.engine.setProperty("voice", voice.id)
+                    self.logger = logging.getLogger(self.__class__.__name__)
+                    self.logger.info(f"Using pyttsx3 voice: {voice.name}")
+                    break
+
         self.engine_type = "pyttsx3"
         self.logger = logging.getLogger(self.__class__.__name__)
 

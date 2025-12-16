@@ -150,6 +150,40 @@ def _stop_rl_worker(process: Optional[Process]) -> None:
 
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry point."""
+    try:
+        return _main_impl(argv)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user. Exiting...")
+        return 130  # Standard exit code for SIGINT
+    except FileNotFoundError as e:
+        print(f"\n✗ Configuration Error:\n{e}\n", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"\n✗ Validation Error:\n{e}\n", file=sys.stderr)
+        return 1
+    except PermissionError as e:
+        print(f"\n✗ Permission Error:\n{e}\n", file=sys.stderr)
+        print("Ensure you have proper permissions to access required files and devices.\n", file=sys.stderr)
+        return 1
+    except ImportError as e:
+        print(f"\n✗ Missing Dependency:\n{e}\n", file=sys.stderr)
+        print("To fix this:\n  1. Ensure all dependencies are installed: pip install -r requirements.txt\n  2. Or reinstall the package: pip install --force-reinstall rex\n", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"\n✗ Unexpected Error:\n{type(e).__name__}: {e}\n", file=sys.stderr)
+        print("If this issue persists, please report it at:", file=sys.stderr)
+        print("  https://github.com/nishiokj/jesus/issues\n", file=sys.stderr)
+
+        # Print stack trace in debug mode
+        if "--debug" in (argv or sys.argv):
+            import traceback
+            print("\nStack trace:", file=sys.stderr)
+            traceback.print_exc()
+        return 1
+
+
+def _main_impl(argv: Optional[list[str]] = None) -> int:
+    """Main implementation (wrapped by error handler)."""
     parser = _build_parser()
     _register_arguments(parser)
     args = parser.parse_args(argv)

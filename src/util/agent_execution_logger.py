@@ -23,7 +23,7 @@ from logging.handlers import RotatingFileHandler
 class AgentContextLog:
     """Log entry for full agent request context"""
     ts: str                         # timestamp
-    lvl: str                        # level (INFO)
+    lvl: str                        # level (INFO)s
     svc: str                        # service (agent_context)
     req_id: str                     # request ID
     exec_id: str                    # execution ID
@@ -283,7 +283,9 @@ class AgentExecutionLogger:
         success_criteria: str,
         estimated_complexity: str,
         reasoning: str,
-        plan_status: str = "pending"
+        plan_status: str = "pending",
+        discovery_required: bool = True,
+        assumptions: Optional[List[str]] = None
     ):
         """
         Log the complete planning result with all substeps.
@@ -300,6 +302,8 @@ class AgentExecutionLogger:
             estimated_complexity: Complexity estimate
             reasoning: Why this plan was chosen
             plan_status: Status of the plan
+            discovery_required: Whether discovery must run before execution
+            assumptions: Planner assumptions captured for transparency
         """
         # Truncate reasoning to keep logs manageable
         reasoning_truncated = reasoning[:512] if len(reasoning) > 512 else reasoning
@@ -313,8 +317,11 @@ class AgentExecutionLogger:
             "reasoning": reasoning_truncated,
             "status": plan_status,
             "steps": steps,
-            "step_count": len(steps)
+            "step_count": len(steps),
+            "discovery_required": discovery_required
         }
+        if assumptions:
+            plan["assumptions"] = assumptions
 
         entry = PlanningResultLog(
             ts=self._ts(),
@@ -544,4 +551,3 @@ class AgentExecutionLogger:
         )
 
         self.logger.info(entry.to_json())
-

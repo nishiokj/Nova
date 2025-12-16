@@ -22,7 +22,17 @@ from util.llm_adapter import (
 from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 from util.logger import StructuredLogger
 from util.agent_execution_logger import AgentExecutionLogger
-from .planner import Planner, Executor, Reflector, Plan, ExecutionTrace, Reflection, PlanStatus, ToolCallRecord
+from .planner import (
+    Planner,
+    Executor,
+    Reflector,
+    Plan,
+    ExecutionTrace,
+    Reflection,
+    PlanStatus,
+    PlanPhase,
+    ToolCallRecord
+)
 from util.resilience import CircuitBreakerOpenError
 
 
@@ -283,6 +293,83 @@ class Agent:
             component="agent"
         )
 
+    def _build_contract_checklist(
+        self,
+        user_input: str,
+        plan: Plan,
+        trace: ExecutionTrace,
+        reflection: Reflection
+    ) -> Dict[str, str]:
+        """Compile the mandatory execution contract before responding."""
+        intent_summary = plan.goal or user_input
+
+        results_by_step = {sr.step_num: sr for sr in trace.step_results}
+        discovery_items: List[str] = []
+        for step in plan.discovery_plan:
+            step_result = results_by_step.get(step.step_num)
+            if not step_result:
+                continue
+            tool_names = sorted({record.tool_name for record in step_result.tool_calls_made})
+            if tool_names:
+                discovery_items.append(f"{step.objective} via {', '.join(tool_names)}")
+            else:
+                discovery_items.append(f"{step.objective} (reasoned only)")
+
+        if not discovery_items:
+            if plan.discovery_required:
+                discovery_summary = "Discovery incomplete - no evidence captured"
+            else:
+                discovery_summary = "Discovery skipped (request was self-contained)"
+        else:
+            max_items = 4
+            summary_slice = discovery_items[:max_items]
+            discovery_summary = "; ".join(summary_slice)
+            if len(discovery_items) > max_items:
+                discovery_summary += f"; +{len(discovery_items) - max_items} more discovery actions"
+
+        if self._file_operations:
+            changes = []
+            for op in self._file_operations[:5]:
+                changes.append(f"{op['action']} {op['path']}")
+            if len(self._file_operations) > 5:
+                changes.append(f"+{len(self._file_operations) - 5} more operations")
+            changes_summary = "; ".join(changes)
+        else:
+            changes_summary = "No files modified; provided analysis/instructions"
+
+        validation_actions: List[str] = []
+        for step_result in trace.step_results:
+            for record in step_result.tool_calls_made:
+                arguments = record.arguments or {}
+                command = arguments.get("command") or arguments.get("code") or ""
+                command_str = str(command)
+                if record.tool_name == "bash_execute" and any(
+                    keyword in command_str for keyword in ["pytest", "unittest", "npm test", "go test"]
+                ):
+                    validation_actions.append(f"{record.tool_name}: {command_str}")
+                elif record.tool_name == "python_execute" and "pytest" in command_str:
+                    validation_actions.append(f"{record.tool_name}: pytest run")
+        if validation_actions:
+            validation_summary = "; ".join(validation_actions[:3])
+            if len(validation_actions) > 3:
+                validation_summary += f"; +{len(validation_actions) - 3} more checks"
+        else:
+            validation_summary = "Validation via reasoning and inspection (no automated tests run)"
+
+        if reflection.goal_achieved:
+            remaining_summary = "Nothing pending"
+        else:
+            remaining_summary = "; ".join(reflection.gaps) if reflection.gaps else "Goal not fully achieved"
+
+        contract = {
+            "user_intent": intent_summary,
+            "context_inspected": discovery_summary,
+            "changes_made": changes_summary,
+            "validation": validation_summary,
+            "remaining": remaining_summary
+        }
+        return contract
+
     def _emit_thought(self, thought: str):
         """Emit a thought to callbacks"""
         self.logger.agent_thinking(thought)
@@ -446,6 +533,7 @@ class Agent:
         self._step_count = 0
         self._steps = []
         self._file_operations = []
+        contract_checklist: Optional[Dict[str, str]] = None
 
         # Build messages
         system_prompt = self._build_system_prompt()
@@ -507,6 +595,8 @@ class Agent:
                 f"Plan: {plan.goal_type} - {plan.goal[:60]}",
                 tools=[s.tool_hint for s in plan.steps if s.tool_hint]
             )
+            if plan.assumptions:
+                self._emit_thought(f"Assumptions: {', '.join(plan.assumptions[:4])}")
 
             # ========== LOG PLANNING RESULT ==========
             self.exec_logger.log_planning_result(
@@ -523,14 +613,17 @@ class Agent:
                         "tool_args_hint": s.tool_args_hint,
                         "success_criteria": s.success_criteria.description if s.success_criteria else None,
                         "depends_on": s.depends_on,
-                        "status": s.status.value
+                        "status": s.status.value,
+                        "phase": s.phase.value
                     }
                     for s in plan.steps
                 ],
                 success_criteria=plan.success_criteria.description,
                 estimated_complexity=plan.estimated_complexity,
                 reasoning=plan.reasoning,
-                plan_status=plan.status.value
+                plan_status=plan.status.value,
+                discovery_required=plan.discovery_required,
+                assumptions=plan.assumptions
             )
 
             # Record planning step
@@ -577,6 +670,8 @@ class Agent:
                 confidence=reflection.confidence,
                 gaps=reflection.gaps
             )
+            contract_checklist = self._build_contract_checklist(user_input, plan, trace, reflection)
+            self.logger.info("contract_checklist", component="agent", data=contract_checklist)
 
             # ========== LOG EPISODE SUMMARY WITH RL LABELS ==========
             total_duration = (time.time() - start_time) * 1000
@@ -682,7 +777,8 @@ class Agent:
                     "had_tool_failures": trace.had_failures,
                     "status": status,
                     "plan_type": plan.goal_type,
-                    "reflection_confidence": reflection.confidence
+                    "reflection_confidence": reflection.confidence,
+                    "contract_checklist": contract_checklist
                 }
             )
 

@@ -12,14 +12,14 @@
   },
   "agent": {
     "tier": "standard",
-    "max_tool_calls": 15,
+    "max_tool_calls": 20,
     "tool_timeout": 30,
     "allow_code_execution": true,
     "allow_internet": true,
     "allow_bash": true,
     "tier_tool_limits": {
       "simple": 1,
-      "standard": 5,
+      "standard": 20,
       "advanced": 25
     },
     "tier_max_tokens": {

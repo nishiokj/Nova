@@ -379,11 +379,8 @@ class MultiProcessVoiceApp(BaseVoiceApp):
         from harness import TTSWorker
         from workers.service_rep_worker import ServiceRepWorker
 
-        voice_config = {
-            "engine": "pyttsx3",
-            "rate": 180,
-            "volume": 0.8
-        }
+        # Use TTS config from AppConfig
+        voice_config = self.config.tts.to_dict()
 
         self.process_manager.register_worker(
             worker_id="tts",

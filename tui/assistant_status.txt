@@ -1,0 +1,10 @@
+Status: Ready for next step.
+Last action: inspected TUI folder and README.
+Files found: test_tui_smoke.py, config.py, logging_config.py, shutdown.py, __init__.py, ui_resize.py, README.md, usability.py, screens.py, main.py
+Timestamp: Monday, December 15, 2025 at 08:48 PM
+
+Next steps: reply with one of the options:
+1) Inspect & modify the TUI folder (confirm language: Python; permit read/write).
+2) Provide a prioritized step-by-step plan and code/templates (give constraints/libraries).
+3) Scaffold a new TUI from scratch (specify language/library).
+Or say "pause" to wait.
