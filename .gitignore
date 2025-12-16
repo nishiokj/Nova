@@ -17,3 +17,6 @@ build
 .env
 temp
 */venv
+logs/*
+logs/*.jsonl
+*/*.jsonl
