@@ -32,7 +32,7 @@ from services.audio import (
 )
 from services.language import TextLinterService
 from audio_pipeline import AudioDeviceManager, AudioConfig as DeviceAudioConfig
-from harness import create_harness
+from harness.harness import create_harness
 
 from .base_app import BaseVoiceApp
 

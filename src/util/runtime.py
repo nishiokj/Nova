@@ -79,12 +79,22 @@ class HarnessRuntime:
         return self.prewarm_all_tiers()
 
 
-def _build_logger(config: HarnessConfig) -> StructuredLogger:
-    """Initialize structured logging for the harness runtime."""
+def _build_logger(config: HarnessConfig, log_dir: Optional[str] = None) -> StructuredLogger:
+    """Initialize structured logging for the harness runtime.
+
+    Args:
+        config: Harness configuration
+        log_dir: Optional override for log directory. If not provided, uses config.logging.log_dir
+    """
     log_config = config.logging
+    resolved_log_dir = log_dir or log_config.log_dir
+
+    if not resolved_log_dir:
+        raise ValueError("log_dir is required - either pass it explicitly or set it in config")
+
     logger = StructuredLogger(
+        log_dir=resolved_log_dir,
         name="harness",
-        log_dir=log_config.log_dir,
         log_level=log_config.log_level,
         log_to_file=log_config.log_to_file,
         log_to_console=log_config.log_to_console,
@@ -98,10 +108,22 @@ def create_runtime(
     config_path: Optional[str] = None,
     profiler: Optional[Any] = None,
     logger: Optional[StructuredLogger] = None,
-    execution_logger: Optional[AgentExecutionLogger] = None
+    execution_logger: Optional[AgentExecutionLogger] = None,
+    log_dir: Optional[str] = None
 ) -> HarnessRuntime:
     """
     Build a HarnessRuntime from the provided config or config_path.
+
+    Args:
+        config: Harness configuration object
+        config_path: Path to configuration file
+        profiler: Optional profiler for runtime metrics
+        logger: Optional pre-configured StructuredLogger (if not provided, one will be created)
+        execution_logger: Optional pre-configured AgentExecutionLogger
+        log_dir: Optional log directory override. Takes precedence over config.logging.log_dir
+
+    Returns:
+        Configured HarnessRuntime instance
     """
     if config:
         resolved_config = config
@@ -110,9 +132,14 @@ def create_runtime(
     else:
         resolved_config = load_or_create_config()
 
+    # Resolve log_dir: explicit param > config > error
+    resolved_log_dir = log_dir or resolved_config.logging.log_dir
+    if not resolved_log_dir:
+        raise ValueError("log_dir is required - pass it explicitly or set it in config")
+
     runtime_config = RuntimeConfig(resolved_config)
-    runtime_logger = logger or _build_logger(resolved_config)
-    exec_logger = execution_logger or AgentExecutionLogger(log_dir=resolved_config.logging.log_dir)
+    runtime_logger = logger or _build_logger(resolved_config, log_dir=resolved_log_dir)
+    exec_logger = execution_logger or AgentExecutionLogger(log_dir=resolved_log_dir)
 
     tool_registry = ToolRegistry(resolved_config.tools, logger=runtime_logger)
     router = Router(resolved_config.router, logger=runtime_logger)

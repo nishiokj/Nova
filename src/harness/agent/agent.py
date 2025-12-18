@@ -12,9 +12,6 @@ import json
 import time
 import uuid
 import os
-import queue
-import threading
-import atexit
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Generator, Callable, Tuple
 from enum import Enum
@@ -28,16 +25,17 @@ from util.perf_trace import PerfTracer
 from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 from util.logger import StructuredLogger
 from util.agent_execution_logger import AgentExecutionLogger
-from .planner import (
-    Planner,
-    Executor,
-    Reflector,
+from .planner import Planner
+from .executor import Executor
+from .reflector import Reflector
+from .agent_logger import AgentLogger
+from .plan_models import (
     Plan,
     ExecutionTrace,
     Reflection,
     PlanStatus,
     PlanPhase,
-    ToolCallRecord
+    ToolCallRecord,
 )
 from util.resilience import CircuitBreakerOpenError
 from harness.context_manager import (
@@ -52,6 +50,58 @@ from harness.context_manager import (
     DefaultWritePolicy,
     CacheStrategy
 )
+
+
+class NullLogger:
+    """
+    A no-op logger that silently ignores all calls.
+    Used when no logger is provided to avoid None checks everywhere.
+
+    This class does NOT create files or access global state.
+    """
+
+    def __init__(self):
+        self._session_id = str(uuid.uuid4())[:8]
+        self._request_id = None
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
+    def request_id(self) -> Optional[str]:
+        return self._request_id
+
+    def new_request(self) -> str:
+        import time
+        self._request_id = f"{self._session_id}-null-{int(time.time() * 1000) % 100000}"
+        return self._request_id
+
+    def __getattr__(self, name):
+        """Return a no-op function for any method call."""
+        def noop(*args, **kwargs):
+            pass
+        return noop
+
+
+class NullExecutionLogger:
+    """
+    A no-op execution logger that silently ignores all calls.
+    Used when no execution logger is provided.
+    """
+
+    def __init__(self):
+        self._counter = 0
+
+    def new_execution_id(self, req_id: str) -> str:
+        self._counter += 1
+        return f"{req_id}-null-exec-{self._counter:04d}"
+
+    def __getattr__(self, name):
+        """Return a no-op function for any method call."""
+        def noop(*args, **kwargs):
+            pass
+        return noop
 
 
 class AgentState(Enum):
@@ -147,13 +197,32 @@ class Agent:
         llm_config: Optional[LLMConfig] = None,
         event_bus: Optional[Any] = None,
         logger: Optional[StructuredLogger] = None,
-        execution_logger: Optional[AgentExecutionLogger] = None
+        execution_logger: Optional[AgentExecutionLogger] = None,
+        agent_logger: Optional[AgentLogger] = None
     ):
+        """
+        Initialize Agent.
+
+        IMPORTANT: All loggers should be injected by the application root.
+        This class does NOT create default loggers to avoid global state.
+
+        Args:
+            config: Agent configuration
+            tool_registry: Registry of available tools
+            llm_config: LLM configuration (optional, uses config.llm_config if not provided)
+            event_bus: Optional EventBus for RL training
+            logger: StructuredLogger for request/health logging (optional)
+            execution_logger: AgentExecutionLogger for detailed traces (optional)
+            agent_logger: AgentLogger for LLM request logging (optional)
+        """
         self.config = config
         self.tool_registry = tool_registry
-        self.logger = logger or StructuredLogger()
-        self.exec_logger = execution_logger or AgentExecutionLogger()
+        # Use NullLogger fallbacks to avoid None checks everywhere
+        # These do NOT create files or access global state
+        self.logger = logger or NullLogger()
+        self.exec_logger = execution_logger or NullExecutionLogger()
         self.event_bus = event_bus  # Optional EventBus for RL training
+        self._agent_logger = agent_logger  # May be None - only logs if provided
 
         # Use provided LLM config or agent's config
         self._llm_config = llm_config or config.llm_config
@@ -168,13 +237,9 @@ class Agent:
         if self._llm:
             self._planner = Planner(self._llm, tool_registry)
             self._executor = Executor(self._llm, tool_registry, config.max_tool_calls)
-            self._reflector = Reflector(self._llm)
+            self._reflector = Reflector(self._llm, tool_registry)
             if self._executor:
                 self._executor.add_step_callback(self._handle_executor_step)
-
-        # Conversation history (legacy)
-        self._conversation: List[Message] = []
-        self._max_conversation_length = 20
 
         # ========== CONTEXT MANAGER INTEGRATION ==========
         # Session-level persistent state
@@ -222,49 +287,14 @@ class Agent:
         self._step_callbacks: List[Callable[[AgentStep], None]] = []
         self._thought_callbacks: List[Callable[[str], None]] = []
 
-        # ========== ASYNC LOGGING INFRASTRUCTURE ==========
-        # Background thread for non-blocking file I/O
-        self._log_queue: queue.Queue = queue.Queue()
-        self._log_thread = threading.Thread(target=self._log_worker, daemon=True)
-        self._log_thread.start()
-        # Ensure queue is flushed on exit
-        atexit.register(self._flush_log_queue)
+        # ========== ASYNC LOGGING ==========
+        # Note: self._agent_logger is injected via constructor, not created here
 
         # ========== PERFORMANCE TRACING ==========
         # Enable via AGENT_PERF_TRACE=1 environment variable
         self._perf_tracer = PerfTracer("agent", enabled=os.getenv("AGENT_PERF_TRACE", "0") == "1")
-
-    def _log_worker(self):
-        """Background worker that processes log entries from the queue."""
-        while True:
-            try:
-                log_entry = self._log_queue.get(timeout=1.0)
-                if log_entry is None:  # Poison pill for shutdown
-                    break
-                stage, args = log_entry
-                if stage == "stage_1":
-                    self._log_stage_1_sync(*args)
-                elif stage == "stage_2":
-                    self._log_stage_2_sync(*args)
-                elif stage == "stage_3":
-                    self._log_stage_3_sync(*args)
-                self._log_queue.task_done()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                # Don't let logging errors crash the worker
-                try:
-                    self.logger.error(f"Async log worker error: {e}", component="agent")
-                except:
-                    pass
-
-    def _flush_log_queue(self):
-        """Flush remaining log entries on shutdown."""
-        try:
-            self._log_queue.put(None)  # Signal shutdown
-            self._log_thread.join(timeout=2.0)
-        except:
-            pass
+        # Lightweight per-step status tracker to feed execution context
+        self._plan_status: Dict[int, Dict[str, Any]] = {}
 
     def _log_stage_1_agent_context(
         self,
@@ -277,124 +307,8 @@ class Agent:
         STAGE 1: Queue async logging of agent context.
         Non-blocking - actual I/O happens in background thread.
         """
-        self._log_queue.put(("stage_1", (serialization_result, user_input, tier, context_plan)))
-
-    def _log_stage_1_sync(
-        self,
-        serialization_result: Any,
-        user_input: str,
-        tier: str,
-        context_plan: Any
-    ):
-        """
-        STAGE 1 (sync): Log the COMPLETE agent context sent to LLM.
-        Called by background worker thread.
-        """
-        try:
-            log_lines = [
-                "\n" + "=" * 80,
-                "STAGE 1: AGENT CONTEXT (COMPLETE SERIALIZED PROMPT)",
-                "=" * 80,
-                f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                f"Request ID: {serialization_result.plan.request_id}",
-                f"Tier: {tier}",
-                f"User Input: {user_input}",
-                "",
-                "CONTEXT BUDGET ALLOCATION:",
-                f"  Total Budget: {serialization_result.plan.total_budget:,} tokens",
-                f"  Actual Tokens: {serialization_result.actual_tokens_sent:,} tokens",
-                f"  Cache Hits: {serialization_result.cache_hits}",
-                f"  Cache Misses: {serialization_result.cache_misses}",
-                f"  Cache Strategy: {serialization_result.plan.cache_strategy}",
-                f"  Estimated Cost: ${serialization_result.plan.estimated_cost:.4f}",
-                "",
-                "CONTEXT SECTIONS INCLUDED:",
-            ]
-
-            # Show which sections were included
-            for section_plan in context_plan.sections:
-                if section_plan.included:
-                    cache_marker = " [CACHED]" if section_plan.cache_key else ""
-                    log_lines.append(
-                        f"  - {section_plan.section.value}: {section_plan.actual_tokens:,} tokens{cache_marker}"
-                    )
-
-            log_lines.append("")
-            log_lines.append("=" * 80)
-            log_lines.append("COMPLETE SERIALIZED CONTEXT (SENT TO LLM)")
-            log_lines.append("=" * 80)
-
-            # Log THE ENTIRE serialized context - NO TRUNCATION
-            serialized = serialization_result.serialized_messages
-
-            # OpenAI Responses API format
-            if "instructions" in serialized:
-                log_lines.append("")
-                log_lines.append("FORMAT: OpenAI Responses API")
-                log_lines.append("")
-                log_lines.append("INSTRUCTIONS (COMPLETE):")
-                log_lines.append("-" * 80)
-                log_lines.append(serialized["instructions"])
-                log_lines.append("-" * 80)
-
-                log_lines.append("")
-                log_lines.append("INPUT CONTEXT (COMPLETE):")
-                log_lines.append("-" * 80)
-                input_ctx = serialized.get("input", [])
-                if isinstance(input_ctx, list):
-                    for i, msg in enumerate(input_ctx):
-                        role = msg.get("role", "unknown")
-                        content = msg.get("content", "")
-                        log_lines.append(f"\n[Input Message {i+1} - Role: {role.upper()}]")
-                        log_lines.append(content)
-                        log_lines.append("")
-                else:
-                    log_lines.append(str(input_ctx))
-                log_lines.append("-" * 80)
-
-            # Anthropic Messages API format
-            elif "system" in serialized:
-                log_lines.append("")
-                log_lines.append("FORMAT: Anthropic Messages API")
-                log_lines.append("")
-                log_lines.append("SYSTEM BLOCKS (COMPLETE):")
-                log_lines.append("-" * 80)
-                for i, block in enumerate(serialized["system"]):
-                    cache_info = ""
-                    if "cache_control" in block:
-                        cache_info = f" [CACHE: {block['cache_control']['type']}]"
-
-                    log_lines.append(f"\n[System Block {i+1}{cache_info}]")
-                    log_lines.append(block.get("text", ""))
-                    log_lines.append("")
-                log_lines.append("-" * 80)
-
-                if "messages" in serialized:
-                    log_lines.append("")
-                    log_lines.append("MESSAGES (COMPLETE):")
-                    log_lines.append("-" * 80)
-                    for i, msg in enumerate(serialized["messages"]):
-                        role = msg.get("role", "unknown")
-                        content = msg.get("content", "")
-                        log_lines.append(f"\n[Message {i+1} - Role: {role.upper()}]")
-                        log_lines.append(content)
-                        log_lines.append("")
-                    log_lines.append("-" * 80)
-
-            log_lines.append("")
-            log_lines.append("=" * 80)
-            log_lines.append("END STAGE 1 (COMPLETE CONTEXT)")
-            log_lines.append("=" * 80 + "\n")
-
-            # Write to file
-            full_log = "\n".join(log_lines)
-            log_file = "logs/llm_requests.log"
-            os.makedirs("logs", exist_ok=True)
-            with open(log_file, "a") as f:
-                f.write(full_log + "\n\n")
-
-        except Exception as e:
-            self.logger.error(f"Failed to log stage 1: {e}", component="agent")
+        if self._agent_logger:
+            self._agent_logger.log_stage_1_agent_context(serialization_result, user_input, tier, context_plan)
 
     def _log_stage_2_planning_result(
         self,
@@ -406,96 +320,8 @@ class Agent:
         STAGE 2: Queue async logging of planning result.
         Non-blocking - actual I/O happens in background thread.
         """
-        self._log_queue.put(("stage_2", (plan, user_input, tier)))
-
-    def _log_stage_2_sync(
-        self,
-        plan: Any,
-        user_input: str,
-        tier: str
-    ):
-        """
-        STAGE 2 (sync): Log the planning result.
-        Called by background worker thread.
-        """
-        try:
-            log_lines = [
-                "\n" + "=" * 80,
-                "STAGE 2: PLANNING RESULT",
-                "=" * 80,
-                f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                f"User Input: {user_input[:200]}{'...' if len(user_input) > 200 else ''}",
-                f"Tier: {tier}",
-                "",
-                "PLAN OVERVIEW:",
-                f"  Goal: {plan.goal}",
-                f"  Goal Type: {plan.goal_type}",
-                f"  Estimated Complexity: {plan.estimated_complexity}",
-                f"  Requires Tools: {plan.requires_tools}",
-                f"  Discovery Required: {plan.discovery_required}",
-                f"  Total Steps: {len(plan.steps)}",
-                f"  Discovery Steps: {len(plan.discovery_plan)}",
-                f"  Execution Steps: {len(plan.execution_plan)}",
-                "",
-                "SUCCESS CRITERIA:",
-                f"  {plan.success_criteria.description}",
-                "",
-            ]
-
-            # Show uncertainties and preconditions if present
-            if plan.uncertainties:
-                log_lines.append("UNCERTAINTIES TO RESOLVE:")
-                for uncertainty in plan.uncertainties:
-                    log_lines.append(f"  - {uncertainty}")
-                log_lines.append(f"  Uncertainty Threshold: {plan.uncertainty_threshold}")
-                log_lines.append(f"  Current Uncertainty: {plan.current_uncertainty}")
-                log_lines.append("")
-
-            if plan.preconditions:
-                log_lines.append("PRECONDITIONS:")
-                for precondition in plan.preconditions:
-                    log_lines.append(f"  - {precondition}")
-                log_lines.append("")
-
-            # Show steps
-            log_lines.append("EXECUTION STEPS:")
-            for step in plan.steps:
-                phase_marker = "[DISCOVERY]" if step.phase.value == "discovery" else "[EXECUTION]"
-                tool_info = f" → {step.tool_hint}" if step.tool_hint else ""
-                log_lines.append(f"  {step.step_num}. {phase_marker} {step.objective}{tool_info}")
-
-                if step.uncertainties_targeted:
-                    log_lines.append(f"     Targets: {', '.join(step.uncertainties_targeted)}")
-                if step.preconditions:
-                    log_lines.append(f"     Preconditions: {len(step.preconditions)} items")
-                if step.postconditions:
-                    log_lines.append(f"     Postconditions: {len(step.postconditions)} items")
-
-            log_lines.append("")
-
-            # Show assumptions and reasoning
-            if plan.assumptions:
-                log_lines.append("ASSUMPTIONS:")
-                for assumption in plan.assumptions:
-                    log_lines.append(f"  - {assumption}")
-                log_lines.append("")
-
-            log_lines.append("PLANNER REASONING:")
-            log_lines.append(f"  {plan.reasoning}")
-
-            log_lines.append("")
-            log_lines.append("=" * 80)
-            log_lines.append("END STAGE 2")
-            log_lines.append("=" * 80 + "\n")
-
-            # Write to file
-            full_log = "\n".join(log_lines)
-            log_file = "logs/llm_requests.log"
-            with open(log_file, "a") as f:
-                f.write(full_log + "\n\n")
-
-        except Exception as e:
-            self.logger.error(f"Failed to log stage 2: {e}", component="agent")
+        if self._agent_logger:
+            self._agent_logger.log_stage_2_planning_result(plan, user_input, tier)
 
     def _log_stage_3_episode_summary(
         self,
@@ -510,110 +336,8 @@ class Agent:
         STAGE 3: Queue async logging of episode summary.
         Non-blocking - actual I/O happens in background thread.
         """
-        self._log_queue.put(("stage_3", (plan, trace, reflection, user_input, tier, total_duration_ms)))
-
-    def _log_stage_3_sync(
-        self,
-        plan: Any,
-        trace: Any,
-        reflection: Any,
-        user_input: str,
-        tier: str,
-        total_duration_ms: float
-    ):
-        """
-        STAGE 3 (sync): Log the final episode summary.
-        Called by background worker thread.
-        """
-        try:
-            log_lines = [
-                "\n" + "=" * 80,
-                "STAGE 3: EPISODE SUMMARY",
-                "=" * 80,
-                f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                f"User Input: {user_input[:200]}{'...' if len(user_input) > 200 else ''}",
-                f"Tier: {tier}",
-                f"Total Duration: {total_duration_ms:.0f} ms",
-                "",
-                "EXECUTION METRICS:",
-                f"  LLM Calls: {trace.llm_calls}",
-                f"  Tool Calls: {trace.tool_calls}",
-                f"  Tool Failures: {trace.tool_failures}",
-                f"  Steps Executed: {len(trace.step_results)}/{len(plan.steps)}",
-                f"  All Steps Succeeded: {trace.all_steps_succeeded}",
-                "",
-                "STEP-BY-STEP EXECUTION:",
-            ]
-
-            # Show each step's result
-            for step_result in trace.step_results:
-                status_marker = "✓" if step_result.status.value == "completed" else "✗"
-                log_lines.append(
-                    f"  {status_marker} Step {step_result.step_num}: {step_result.status.value} "
-                    f"({len(step_result.tool_calls_made)} tools, {step_result.duration_ms:.0f}ms)"
-                )
-
-                # Show tool calls for this step
-                for tool_record in step_result.tool_calls_made:
-                    tool_status = "✓" if tool_record.result.is_success else "✗"
-                    log_lines.append(
-                        f"      {tool_status} {tool_record.tool_name}: "
-                        f"{tool_record.duration_ms:.0f}ms"
-                    )
-                    if not tool_record.result.is_success:
-                        log_lines.append(f"         Error: {tool_record.result.error}")
-
-                if step_result.error:
-                    log_lines.append(f"      Error: {step_result.error}")
-
-            log_lines.append("")
-            log_lines.append("REFLECTION:")
-            log_lines.append(f"  Goal Achieved: {reflection.goal_achieved}")
-            log_lines.append(f"  Confidence: {reflection.confidence:.2f}")
-
-            if reflection.evidence:
-                log_lines.append("  Evidence:")
-                for evidence in reflection.evidence:
-                    log_lines.append(f"    - {evidence}")
-
-            if reflection.gaps:
-                log_lines.append("  Gaps:")
-                for gap in reflection.gaps:
-                    log_lines.append(f"    - {gap}")
-
-            if reflection.suggestions:
-                log_lines.append("  Suggestions:")
-                for suggestion in reflection.suggestions:
-                    log_lines.append(f"    - {suggestion}")
-
-            log_lines.append("")
-            log_lines.append("RL LABELS:")
-            log_lines.append(f"  Reward: {reflection.reward:.2f}")
-            log_lines.append(f"  Plan Quality: {reflection.plan_quality:.2f}")
-            log_lines.append(f"  Execution Quality: {reflection.execution_quality:.2f}")
-            log_lines.append(f"  Response Quality: {reflection.response_quality:.2f}")
-
-            log_lines.append("")
-            log_lines.append("FINAL RESPONSE:")
-            final_response = trace.final_response or "(no response)"
-            if len(final_response) > 500:
-                log_lines.append(f"  {final_response[:500]}...")
-            else:
-                log_lines.append(f"  {final_response}")
-
-            log_lines.append("")
-            log_lines.append("=" * 80)
-            log_lines.append("END STAGE 3")
-            log_lines.append("=" * 80 + "\n")
-
-            # Write to file
-            full_log = "\n".join(log_lines)
-            log_file = "logs/llm_requests.log"
-            with open(log_file, "a") as f:
-                f.write(full_log + "\n\n")
-
-        except Exception as e:
-            self.logger.error(f"Failed to log stage 3: {e}", component="agent")
+        if self._agent_logger:
+            self._agent_logger.log_stage_3_episode_summary(plan, trace, reflection, user_input, tier, total_duration_ms)
 
     def _build_system_prompt(self) -> str:
         """Build system prompt - uses tier-specific prompt from config"""
@@ -665,6 +389,108 @@ class Agent:
             return True
 
         return False
+
+    def _shorten_text(self, text: Optional[str], max_length: int = 120) -> str:
+        """Compact text for prompts without newlines or long rambles."""
+        if not text:
+            return ""
+        clean = " ".join(str(text).split())
+        if len(clean) <= max_length:
+            return clean
+        return clean[: max_length - 3] + "..."
+
+    def _status_symbol(self, status: Any) -> str:
+        """Map PlanStatus to a compact symbol for plan summaries."""
+        try:
+            status_enum = status if isinstance(status, PlanStatus) else PlanStatus(status)
+        except Exception:
+            status_enum = PlanStatus.PENDING
+
+        if status_enum == PlanStatus.COMPLETED:
+            return "✅"
+        if status_enum == PlanStatus.PARTIAL:
+            return "⚠️"
+        if status_enum == PlanStatus.FAILED:
+            return "⚠️"
+        if status_enum == PlanStatus.SKIPPED:
+            return "⚠️"
+        return "⏳"  # Pending or in progress
+
+    def _initialize_plan_status(self, plan: Plan) -> Dict[int, Dict[str, Any]]:
+        """Seed plan status tracker with pending steps and short summaries."""
+        status: Dict[int, Dict[str, Any]] = {}
+        for step in plan.steps:
+            status[step.step_num] = {
+                "status": step.status if step.status else PlanStatus.PENDING,
+                "summary": self._shorten_text(step.objective, 80)
+            }
+        return status
+
+    def _format_plan_summary(
+        self,
+        plan: Plan,
+        plan_status: Optional[Dict[int, Dict[str, Any]]]
+    ) -> str:
+        """Create a compact plan sketch to prepend to execution instructions."""
+        if not plan or not plan.steps:
+            return ""
+
+        steps = sorted(plan.steps, key=lambda s: s.step_num)
+        total_steps = len(steps)
+        extra_steps = 0
+        if total_steps > 15:
+            extra_steps = total_steps - 10
+            steps = steps[:10]
+
+        lines: List[str] = [
+            "PLAN SKETCH",
+            f"Goal: {self._shorten_text(plan.goal, 180)}",
+            "Steps:"
+        ]
+
+        for step in steps:
+            entry = plan_status.get(step.step_num, {}) if plan_status else {}
+            status_value = entry.get("status") or step.status or PlanStatus.PENDING
+            try:
+                status_enum = status_value if isinstance(status_value, PlanStatus) else PlanStatus(status_value)
+            except Exception:
+                status_enum = PlanStatus.PENDING
+            symbol = self._status_symbol(status_enum)
+            summary = entry.get("summary") or self._shorten_text(step.objective, 80)
+            tool_hint = f" tool:{step.tool_hint}" if step.tool_hint else ""
+            deps = f" deps:{','.join(str(d) for d in step.depends_on)}" if step.depends_on else ""
+            step_line = f"{step.step_num} {symbol} {summary}{tool_hint}{deps}"
+            lines.append(self._shorten_text(step_line, 160))
+
+        if extra_steps:
+            lines.append(f"+{extra_steps} more steps")
+
+        plan_text = "\n".join(lines).strip()
+        if len(plan_text) > 2000:
+            plan_text = plan_text[:2000]
+        return plan_text
+
+    def _augment_context_with_plan(
+        self,
+        serialized_context: Dict[str, Any],
+        plan: Plan,
+        plan_status: Optional[Dict[int, Dict[str, Any]]]
+    ) -> Dict[str, Any]:
+        """
+        Prepend compact plan sketch to instructions without changing the shape
+        of the serialized context payload.
+        """
+        if not serialized_context or "instructions" not in serialized_context:
+            return serialized_context
+
+        plan_summary = self._format_plan_summary(plan, plan_status)
+        if not plan_summary:
+            return serialized_context
+
+        combined_instructions = f"{plan_summary}\n\n{serialized_context.get('instructions', '')}".strip()
+        updated_context = dict(serialized_context)
+        updated_context["instructions"] = combined_instructions
+        return updated_context
 
     def _is_fast_path_eligible(self, user_input: str, budget: Optional[Dict[str, int]] = None) -> bool:
         """
@@ -733,12 +559,14 @@ class Agent:
 
             # For questions that don't need tools, just answer directly
             if not simple_plan.requires_tools:
-                messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
+                prompt_input = user_input
                 if context:
-                    user_input = f"{user_input}\n\nContext: {context}"
-                messages.append(Message(MessageRole.USER, user_input))
+                    prompt_input = f"{user_input}\n\nContext: {context}"
 
-                response = self._llm.complete(messages, tools=None)
+                response = self._llm.respond(
+                    input=prompt_input,
+                    instructions=self._build_system_prompt()
+                )
                 duration_ms = (time.time() - start_time) * 1000
 
                 self.logger.debug(f"Fast path completed in {duration_ms:.0f}ms (no tools)", component="agent")
@@ -818,17 +646,6 @@ class Agent:
     def _get_tool_definitions(self) -> List[ToolDefinition]:
         """Get tool definitions for LLM"""
         return self.tool_registry.get_definitions(enabled_only=True)
-
-    def _add_message(self, message: Message):
-        """Add message to conversation history"""
-        self._conversation.append(message)
-
-        # Trim conversation if too long
-        if len(self._conversation) > self._max_conversation_length:
-            # Keep system message and recent messages
-            system_msgs = [m for m in self._conversation if m.role == MessageRole.SYSTEM]
-            other_msgs = [m for m in self._conversation if m.role != MessageRole.SYSTEM]
-            self._conversation = system_msgs + other_msgs[-(self._max_conversation_length - len(system_msgs)):]
 
     def _record_step(self, step: AgentStep):
         """Record an execution step"""
@@ -975,119 +792,6 @@ class Agent:
             except Exception as e:
                 self.logger.error(f"Thought callback error: {e}", component="agent")
 
-    def _extract_action_description(self, content: str) -> tuple:
-        """
-        Extract action description and remaining content.
-        Returns (action_description, remaining_content)
-        """
-        if "ACTION:" in content:
-            parts = content.split("---", 1)
-            action_part = parts[0]
-            remaining = parts[1] if len(parts) > 1 else ""
-
-            # Extract action text
-            action_lines = action_part.split("ACTION:", 1)
-            if len(action_lines) > 1:
-                action = action_lines[1].strip()
-                return action, remaining.strip()
-
-        return None, content
-
-    def _execute_tool(self, tool_call: ToolCall) -> ToolResult:
-        """Execute a single tool call"""
-        self._current_state = AgentState.EXECUTING_TOOL
-        start_time = time.time()
-
-        step = AgentStep(
-            step_number=self._step_count,
-            state=AgentState.EXECUTING_TOOL,
-            tool_name=tool_call.name,
-            tool_input=tool_call.arguments
-        )
-        self._step_count += 1
-
-        # Log tool call start
-        self.logger.tool_call_start([{"name": tool_call.name, "params": tool_call.arguments}])
-
-        # CRITICAL: Record step BEFORE execution so progress callbacks fire immediately
-        # This allows ServiceRep to speak "Searching now..." before the actual search
-        self._record_step(step)
-
-        try:
-            result = self.tool_registry.execute(tool_call.name, **tool_call.arguments)
-        except CircuitBreakerOpenError as cb_error:
-            retry_after = cb_error.retry_after
-            if retry_after is not None:
-                retry_hint = f"{max(1, int(retry_after))}s"
-            else:
-                retry_hint = "a short while"
-
-            message = (
-                f"Tool '{tool_call.name}' temporarily disabled after repeated failures. "
-                f"Please wait {retry_hint} before retrying."
-            )
-            self.logger.warning(message, component="agent")
-            result = ToolResult(
-                status=ToolStatus.ERROR,
-                output=None,
-                error=message,
-                metadata={"circuit_breaker": True}
-            )
-
-        # Update step with results after execution
-        step.tool_output = result.output if result.is_success else result.error
-        step.duration_ms = (time.time() - start_time) * 1000
-        step.error = result.error if not result.is_success else None
-
-        if result.is_success:
-            self.logger.tool_call_end(tool_call.name, True, step.duration_ms, str(result.output)[:100])
-        else:
-            self.logger.tool_call_end(tool_call.name, False, step.duration_ms, result.error)
-
-        metadata = result.metadata or {}
-        paths = []
-        if metadata.get("path"):
-            paths.append(metadata["path"])
-        if metadata.get("paths"):
-            additional = metadata["paths"]
-            if isinstance(additional, list):
-                paths.extend(additional)
-            else:
-                paths.append(additional)
-        action = metadata.get("action", tool_call.name)
-        for path in paths:
-            self._record_file_operation(path, tool_call.name, action)
-
-        return result
-
-    def _process_tool_calls(self, tool_calls: List[ToolCall]) -> tuple:
-        """Process multiple tool calls and return (results, any_failed)"""
-        results = []
-        seen_calls = set()  # Track (name, args_hash) to prevent duplicates
-        any_failed = False
-
-        for tool_call in tool_calls:
-            # De-duplicate: skip if we've already called this tool with same args
-            args_key = (tool_call.name, json.dumps(tool_call.arguments, sort_keys=True))
-            if args_key in seen_calls:
-                self.logger.warning(
-                    f"Skipping duplicate tool call: {tool_call.name}",
-                    component="agent"
-                )
-                continue
-            seen_calls.add(args_key)
-
-            result = self._execute_tool(tool_call)
-            if not result.is_success:
-                any_failed = True
-            results.append({
-                "tool_call_id": tool_call.id,
-                "name": tool_call.name,
-                "result": result.output if result.is_success else f"Error: {result.error}",
-                "success": result.is_success
-            })
-        return results, any_failed
-
     def run_simple_response(
         self,
         user_input: str,
@@ -1108,12 +812,11 @@ class Agent:
         if context:
             prompt_input = f"{user_input}\n\nContext: {context}"
 
-        messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
-        messages.extend(self._conversation)
-        messages.append(Message(MessageRole.USER, prompt_input))
-
         try:
-            response = self._llm.complete(messages, tools=None)
+            response = self._llm.respond(
+                input=prompt_input,
+                instructions=self._build_system_prompt()
+            )
             duration_ms = (time.time() - start_time) * 1000
             content = response.content or ""
 
@@ -1122,9 +825,6 @@ class Agent:
                     "Simple tier response ignored tool calls",
                     component="agent"
                 )
-
-            self._add_message(Message(MessageRole.USER, prompt_input))
-            self._add_message(Message(MessageRole.ASSISTANT, content))
 
             return AgentResponse(
                 content=content,
@@ -1163,7 +863,8 @@ class Agent:
         user_input: str,
         context: Optional[str] = None,
         budget: Optional[Dict[str, int]] = None,
-        classification: Optional[Any] = None
+        classification: Optional[Any] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
     ) -> AgentResponse:
         """
         Run the agent using Plan → Execute → Reflect architecture.
@@ -1177,6 +878,8 @@ class Agent:
             context: Optional additional context
             budget: Budget constraints from router - MUST be enforced
             classification: Full TaskClassification for logging
+            on_stream_chunk: Optional callback for streaming final response synthesis.
+                            Called with (chunk: str, chunk_index: int, is_final: bool)
 
         Returns:
             AgentResponse with content, plan, and reflection
@@ -1199,6 +902,7 @@ class Agent:
         self._step_count = 0
         self._steps = []
         self._file_operations = []
+        self._plan_status = {}
         contract_checklist: Optional[Dict[str, str]] = None
 
         # Add context if provided
@@ -1272,10 +976,10 @@ class Agent:
 
         # Build legacy messages for compatibility with executor
         # (Will be replaced with ContextManager in executor later)
-        system_prompt = self._build_system_prompt()
-        messages = [Message(MessageRole.SYSTEM, system_prompt)]
-        messages.extend(self._conversation)
-        messages.append(Message(MessageRole.USER, full_input))
+        # system_prompt = self._build_system_prompt()
+        # messages = [Message(MessageRole.SYSTEM, system_prompt)]
+        # messages.extend(self._conversation)
+        # messages.append(Message(MessageRole.USER, full_input))
 
         # Get tool definitions
         tool_definitions = self._get_tool_definitions()
@@ -1302,10 +1006,7 @@ class Agent:
             tier=self.config.tier,
             system_prompt_id=f"tier_{self.config.tier}_v1",
             tool_manifest_id="default_tools_v1",
-            conversation_history=[
-                {"role": m.role.value, "content": m.content[:500] if m.content else ""}
-                for m in self._conversation
-            ],
+            conversation_history=[],  # No longer tracking conversation history
             tool_names=tool_names,
             additional_context={"context_provided": context} if context else None
         )
@@ -1378,27 +1079,32 @@ class Agent:
             self._step_count += 1
             self._record_step(planning_step)
 
+            # Seed plan status tracker for execution guidance
+            self._plan_status = self._initialize_plan_status(plan)
+
             # ========== PHASE 2: EXECUTION ==========
             with self._perf_tracer.span("phase2_execution", steps=len(plan.steps)):
                 self._current_state = AgentState.THINKING
                 self._emit_thought(f"Executing plan: {plan.goal[:50]}...")
 
                 with self._perf_tracer.span("executor_execute"):
+                    execution_context = self._augment_context_with_plan(
+                        serialization_result.serialized_messages,
+                        plan,
+                        self._plan_status
+                    )
                     trace = self._executor.execute(
                         plan=plan,
-                        messages=messages,
+                        serialized_context=execution_context,
                         tools=tool_definitions if plan.requires_tools else [],
-                        serialized_context=serialization_result.serialized_messages if serialization_result.success else None
+                        on_stream_chunk=on_stream_chunk,
+                        plan_status=self._plan_status
                     )
 
                 self._perf_tracer.add_metadata("tool_calls", trace.tool_calls)
                 self._perf_tracer.add_metadata("llm_calls", trace.llm_calls)
 
                 final_content = trace.final_response or "I apologize, I couldn't generate a response."
-
-                # Update conversation history
-                self._add_message(Message(MessageRole.USER, full_input))
-                self._add_message(Message(MessageRole.ASSISTANT, final_content))
 
             # ========== PHASE 3: REFLECTION ==========
             with self._perf_tracer.span("phase3_reflection"):
@@ -1583,118 +1289,6 @@ class Agent:
                 goal_achieved=False
             )
 
-    def run_streaming(
-        self,
-        user_input: str,
-        context: Optional[str] = None
-    ) -> Generator[str, None, AgentResponse]:
-        """
-        Run agent with streaming output.
-        Yields content chunks as they arrive.
-        """
-        if not self._llm:
-            yield "Agent not properly configured."
-            return AgentResponse(
-                content="Agent not properly configured.",
-                success=False,
-                error="No LLM configured"
-            )
-
-        start_time = time.time()
-        self._current_state = AgentState.THINKING
-        self._step_count = 0
-        self._steps = []
-        tools_used = []
-        full_content = ""
-        self._file_operations = []
-
-        # Build messages
-        messages = [Message(MessageRole.SYSTEM, self._build_system_prompt())]
-        messages.extend(self._conversation)
-
-        if context:
-            user_input = f"{user_input}\n\nContext: {context}"
-
-        messages.append(Message(MessageRole.USER, user_input))
-        tool_definitions = self._get_tool_definitions()
-
-        try:
-            # Stream initial response
-            response = None
-            for chunk in self._llm.stream(messages, tools=tool_definitions):
-                full_content += chunk
-                yield chunk
-                response = chunk  # Will be replaced with final response
-
-            # Get the actual response object (returned from generator)
-            # For now, do a non-streaming call if we need tool handling
-            response = self._llm.complete(messages, tools=tool_definitions)
-
-            # Handle tool calls (non-streaming for tool execution)
-            iteration = 0
-            while response.has_tool_calls and iteration < self.config.max_tool_calls:
-                iteration += 1
-
-                yield f"\n[Using tools: {', '.join(tc.name for tc in response.tool_calls)}]\n"
-
-                tool_results = self._process_tool_calls(response.tool_calls)
-                tools_used.extend([tr["name"] for tr in tool_results])
-
-                messages.append(Message(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
-                    tool_calls=[{
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}
-                    } for tc in response.tool_calls]
-                ))
-
-                for tr in tool_results:
-                    messages.append(Message(
-                        role=MessageRole.TOOL,
-                        content=str(tr["result"]),
-                        tool_call_id=tr["tool_call_id"],
-                        name=tr["name"]
-                    ))
-
-                # Stream next response
-                for chunk in self._llm.stream(messages, tools=tool_definitions):
-                    full_content += chunk
-                    yield chunk
-
-                response = self._llm.complete(messages, tools=tool_definitions)
-
-            # Update conversation
-            self._add_message(Message(MessageRole.USER, user_input))
-            self._add_message(Message(MessageRole.ASSISTANT, full_content))
-
-            self._current_state = AgentState.COMPLETE
-
-            return AgentResponse(
-                content=full_content,
-                steps=self._steps,
-                total_duration_ms=(time.time() - start_time) * 1000,
-                tools_used=list(set(tools_used)),
-                success=True,
-                metadata={"file_operations": list(self._file_operations)}
-            )
-
-        except Exception as e:
-            self._current_state = AgentState.ERROR
-            yield f"\nError: {str(e)}"
-
-            return AgentResponse(
-                content=full_content + f"\nError: {str(e)}",
-                success=False,
-                error=str(e),
-                total_duration_ms=(time.time() - start_time) * 1000
-            )
-
-    def reset_conversation(self):
-        """Reset conversation history"""
-        self._conversation = []
-
     def add_step_callback(self, callback: Callable[[AgentStep], None]):
         """Add callback for execution steps"""
         self._step_callbacks.append(callback)
@@ -1718,11 +1312,6 @@ class Agent:
         """Check if stop has been requested"""
         return self._stop_requested
 
-    @property
-    def conversation_history(self) -> List[Dict[str, str]]:
-        """Get conversation history as list of dicts"""
-        return [{"role": m.role.value, "content": m.content} for m in self._conversation]
-
 
 # =============================================================================
 # TIER-SPECIFIC SYSTEM PROMPTS - Loaded from config
@@ -1741,8 +1330,8 @@ def _load_tier_prompts():
     except Exception:
         # Fallback to hardcoded defaults if config fails to load
         return {
-            "simple": "You are a fast assistant. Answer from your own knowledge unless the user explicitly asks for a lookup or the request is about fresh data (time/date/weather/stocks/news).\n\nPrinciples:\n- Be decisive and brief (under 40 words).\n- ZERO tools unless the user asks you to search OR it's clearly fresh-data. If you must fetch, call fast_answer once, then answer.\n- No preambles; just give the answer.\n\nAvailable tools (use only if necessary):\n{tools}",
-            "standard": "You are a capable assistant. Optimize for fast, accurate answers with minimal tool use.\n\nPrinciples:\n- First, answer directly if you can. Only reach for tools when data is missing, stale, or explicitly requested.\n- If you need to search, prefer fast_answer and keep tool calls to the minimum required (max 3, but aim for 1).\n- Keep responses concise and clear; avoid boilerplate.\n\nAvailable tools:\n{tools}",
+            "simple": "You are a fast assistant. Answer from your own knowledge unless the user explicitly asks for a lookup or the request is about fresh data (time/date/weather/stocks/news).\n\nPrinciples:\n- Be decisive and brief (under 40 words).\n- ZERO tools unless the user asks you to search OR it's clearly fresh-data.\n- No preambles; just give the answer.\n\nAvailable tools (use only if necessary):\n{tools}",
+            "standard": "You are a capable assistant. Optimize for fast, accurate answers with minimal tool use.\n\nPrinciples:\n- First, answer directly if you can. Only reach for tools when data is missing, stale, or explicitly requested.\n- Keep responses concise and clear; avoid boilerplate.\n\nAvailable tools:\n{tools}",
             "advanced": "You are an expert personal CLI assistant for complex tasks. Optimize for correctness and clarity.\n\nPrinciples:\n- Quickly outline the plan. This could be multiple steps and also could require discovery if called from an existing system. You are highly capable of multi-turn robust plans and should be very detail oriented for complex tasks. Use tools only where they add real evidence or fresh data.\n- Prefer fewer, high-impact tool calls (max 10). Avoid trivial tool calls (e.g., time) unless requested.\n- Double-check critical facts; provide a crisp, helpful final answer.\n\nAvailable tools:\n{tools}"
         }
 
@@ -1762,6 +1351,9 @@ class TieredAgent:
     """
     Agent that operates with tier-specific behavior.
     Each tier has different prompts, tool limits, and response styles.
+
+    IMPORTANT: All loggers should be injected by the application root.
+    This class does NOT create default loggers to avoid global state.
     """
 
     def __init__(
@@ -1771,8 +1363,21 @@ class TieredAgent:
         tier_configs: Dict[str, LLMConfig],
         event_bus: Optional[Any] = None,
         logger: Optional[StructuredLogger] = None,
-        execution_logger: Optional[AgentExecutionLogger] = None
+        execution_logger: Optional[AgentExecutionLogger] = None,
+        agent_logger: Optional[AgentLogger] = None
     ):
+        """
+        Initialize TieredAgent.
+
+        Args:
+            config: Agent configuration
+            tool_registry: Registry of available tools
+            tier_configs: LLM configs per tier
+            event_bus: Optional EventBus for RL training
+            logger: StructuredLogger for request/health logging (optional)
+            execution_logger: AgentExecutionLogger for detailed traces (optional)
+            agent_logger: AgentLogger for LLM request logging (optional)
+        """
         self.config = config
         self.tool_registry = tool_registry
         self.tier_configs = tier_configs
@@ -1780,8 +1385,10 @@ class TieredAgent:
         self._agents: Dict[str, Agent] = {}
         self._tier_runtimes: Dict[str, TierRuntime] = {}
         self._current_tier = config.tier
-        self.logger = logger or StructuredLogger()
-        self.execution_logger = execution_logger or AgentExecutionLogger()
+        # Use NullLogger fallbacks - no global state access
+        self.logger = logger or NullLogger()
+        self.execution_logger = execution_logger or NullExecutionLogger()
+        self._agent_logger = agent_logger  # May be None
         self._prepare_tier_runtimes()
 
     def _get_tier_prompt(self, tier: str) -> str:
@@ -1879,7 +1486,8 @@ class TieredAgent:
                 runtime.llm_config,
                 self.event_bus,
                 logger=self.logger,
-                execution_logger=self.execution_logger
+                execution_logger=self.execution_logger,
+                agent_logger=self._agent_logger
             )
         return self._agents[tier]
 
@@ -1927,7 +1535,8 @@ class TieredAgent:
         tier: str = None,
         context: Optional[str] = None,
         budget: Optional[Dict[str, int]] = None,
-        classification: Optional[Any] = None
+        classification: Optional[Any] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
     ) -> AgentResponse:
         """
         Run with specified tier and tier-appropriate behavior.
@@ -1938,6 +1547,8 @@ class TieredAgent:
             context: Optional additional context
             budget: Budget constraints from router (max_tool_calls, max_tokens, max_steps)
             classification: Full TaskClassification from router (for logging/debugging)
+            on_stream_chunk: Optional callback for streaming final response synthesis.
+                            Called with (chunk: str, chunk_index: int, is_final: bool)
         """
         tier = tier or self._current_tier
 
@@ -1963,8 +1574,13 @@ class TieredAgent:
 
         agent = self._get_agent(tier)
 
-        # Pass budget to agent so it can enforce constraints
-        return agent.run(user_input, context, budget=budget, classification=classification)
+        # Pass budget and streaming callback to agent
+        return agent.run(
+            user_input, context,
+            budget=budget,
+            classification=classification,
+            on_stream_chunk=on_stream_chunk
+        )
 
     def _run_simple_tier_fast_path(
         self,

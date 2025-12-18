@@ -5,26 +5,43 @@ Clean Refactored Architecture:
 - ProcessWorker interface for all workers
 - Mailbox pattern for event delivery
 - EventBus for pub/sub communication
+
+IMPORT GUIDELINES (to avoid circular imports):
+- Use direct imports: from harness.harness import AgentHarness
+- Use direct imports: from util.runtime import create_runtime
+- Workers: from workers.service_rep_worker import ServiceRepWorker
 """
 
+# Only import things that don't trigger circular dependencies
 from util.config import HarnessConfig, RuntimeConfig, load_or_create_config
 from util.logger import StructuredLogger
-from util.llm_adapter import LLMAdapter, LLMResponse, create_adapter
-from .agent.tool_registry import ToolRegistry, Tool, ToolResult
-from services.router import Router, TaskClassification
-from .service_rep import ServiceRep
-from .agent.agent import Agent, AgentResponse
-from .harness import AgentHarness, HarnessResponse, HarnessState, create_harness
-from util.runtime import HarnessRuntime, create_runtime
 
-# Refactored multiprocess components
+# Tools can be imported safely
+from .agent.tool_registry import ToolRegistry, Tool, ToolResult
+
+# Agent components (these don't import harness.harness)
+from .agent.agent import Agent, AgentResponse
+
+# Communication (safe)
 from communication.process_worker import ProcessWorker
-try:
-    from workers.tts_worker import TTSWorker
-except ImportError:
-    TTSWorker = None  # Optional: needs pyaudio
-from workers.harness_worker import HarnessWorker  # Legacy, kept for compatibility
-from workers.service_rep_worker import ServiceRepWorker
+
+
+def get_harness_class():
+    """Lazy import of AgentHarness to avoid circular imports."""
+    from .harness import AgentHarness
+    return AgentHarness
+
+
+def get_service_rep_class():
+    """Lazy import of ServiceRep to avoid circular imports."""
+    from .service_rep import ServiceRep
+    return ServiceRep
+
+
+def get_runtime_factory():
+    """Lazy import of create_runtime to avoid circular imports."""
+    from util.runtime import create_runtime
+    return create_runtime
 
 
 __all__ = [
@@ -34,32 +51,19 @@ __all__ = [
     "load_or_create_config",
     # Logging
     "StructuredLogger",
-    # LLM
-    "LLMAdapter",
-    "LLMResponse",
-    "create_adapter",
     # Tools
     "ToolRegistry",
     "Tool",
     "ToolResult",
-    # Components
-    "Router",
-    "TaskClassification",
-    "ServiceRep",
+    # Agent
     "Agent",
     "AgentResponse",
-    # Harness
-    "AgentHarness",
-    "HarnessResponse",
-    "HarnessState",
-    "create_harness",
-    "HarnessRuntime",
-    "create_runtime",
-    # Multiprocess (refactored)
+    # Communication
     "ProcessWorker",
-    "TTSWorker",
-    "HarnessWorker",  # Legacy
-    "ServiceRepWorker",
+    # Lazy getters (for backwards compatibility)
+    "get_harness_class",
+    "get_service_rep_class",
+    "get_runtime_factory",
 ]
 
 __version__ = "2.0.0"

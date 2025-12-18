@@ -14,7 +14,7 @@ import re
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Callable, Union, Tuple
+from typing import Dict, Any, Optional, List, Callable, Union, Tuple, Set
 from enum import Enum
 import traceback
 import signal
@@ -26,6 +26,42 @@ from util.config import ToolConfig
 from util.logger import StructuredLogger
 from util.llm_adapter import ToolDefinition
 from util.resilience import ResilienceConfig, resilient_call
+
+
+# ========== FILESYSTEM SEARCH EXCLUSIONS ==========
+# Directories and patterns to always exclude from filesystem searches
+DEFAULT_EXCLUDE_DIRS: Set[str] = {
+    "__pycache__",
+    ".venv",
+    "venv",
+    "site-packages",
+    "dist",
+    "build",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    "node_modules",
+    ".tox",
+    ".eggs",
+    "*.egg-info",
+    ".cache",
+    ".ruff_cache",
+    "htmlcov",
+    "coverage",
+}
+
+# File extensions to exclude from search results
+DEFAULT_EXCLUDE_EXTENSIONS: Set[str] = {
+    ".pyc",
+    ".pyo",
+    ".so",
+    ".o",
+    ".a",
+    ".dylib",
+    ".dll",
+    ".exe",
+    ".class",
+}
 
 
 class ToolStatus(Enum):
@@ -442,26 +478,26 @@ class ToolRegistry:
     def _register_builtin_tools(self):
         """Register built-in tools"""
 
-        # Web Fetch Tool
-        self.register(Tool(
-            name="web_fetch",
-            description="Fetch and extract content from a URL. Returns the main text content of the page.",
-            parameters={
-                "url": {
-                    "type": "string",
-                    "description": "The URL to fetch"
-                },
-                "extract_type": {
-                    "type": "string",
-                    "enum": ["text", "html", "markdown"],
-                    "description": "Type of content to extract",
-                    "default": "text"
-                }
-            },
-            required_params=["url"],
-            executor=self._web_fetch,
-            timeout=60
-        ))
+        # # Web Fetch Tool
+        # self.register(Tool(
+        #     name="web_fetch",
+        #     description="Fetch and extract content from a URL. Returns the main text content of the page.",
+        #     parameters={
+        #         "url": {
+        #             "type": "string",
+        #             "description": "The URL to fetch"
+        #         },
+        #         "extract_type": {
+        #             "type": "string",
+        #             "enum": ["text", "html", "markdown"],
+        #             "description": "Type of content to extract",
+        #             "default": "text"
+        #         }
+        #     },
+        #     required_params=["url"],
+        #     executor=self._web_fetch,
+        #     timeout=60
+        # ))
 
         # Bash Execute Tool
         self.register(Tool(
@@ -625,27 +661,6 @@ class ToolRegistry:
             required_params=[],
             executor=self._get_current_time,
             timeout=5
-        ))
-
-        # FAST ANSWER TOOL - Single-hop search with parallel fetch
-        # This is THE tool to use for simple questions - returns actual content, not just URLs
-        self.register(Tool(
-            name="fast_answer",
-            description="PREFERRED for simple questions. Searches the web AND fetches content from top results IN PARALLEL. Returns actual answer content, not just URLs. Use this for weather, stock prices, facts, current events.",
-            parameters={
-                "query": {
-                    "type": "string",
-                    "description": "The search query (be specific for best results)"
-                },
-                "num_sources": {
-                    "type": "integer",
-                    "description": "Number of sources to fetch in parallel (default: 3)",
-                    "default": 3
-                }
-            },
-            required_params=["query"],
-            executor=self._fast_answer,
-            timeout=15  # Fast timeout - we fetch in parallel
         ))
 
         # Get Working Directory Tool
@@ -1072,174 +1087,6 @@ class ToolRegistry:
                 error=f"Calculation failed: {str(e)}"
             )
 
-    def _fast_answer(self, query: str, num_sources: int = 3) -> ToolResult:
-        """
-        FAST single-hop search: search + parallel fetch in one call.
-        Returns actual content, not just URLs.
-        """
-        try:
-            import requests
-            from urllib.parse import urlparse
-
-            # Step 1: Search
-            search_results = []
-            try:
-                from ddgs import DDGS
-                with DDGS() as ddgs:
-                    results = list(ddgs.text(query, max_results=num_sources + 2))  # Get extra in case some fail
-                    for r in results[:num_sources + 2]:
-                        url = r.get("href", r.get("link", ""))
-                        if url:
-                            search_results.append({
-                                "title": r.get("title", ""),
-                                "url": url,
-                                "snippet": r.get("body", r.get("snippet", ""))
-                            })
-            except ImportError:
-                return ToolResult(
-                    status=ToolStatus.ERROR,
-                    output=None,
-                    error="Web search requires 'duckduckgo-search'. Install: pip install duckduckgo-search"
-                )
-
-            if not search_results:
-                self.logger.warning(
-                    "fast_answer_no_results",
-                    component="tools.fast_answer",
-                    data={"query": query}
-                )
-                return ToolResult(
-                    status=ToolStatus.ERROR,
-                    output=None,
-                    error=f"No search results found for: {query}"
-                )
-
-            # Step 2: Fetch URLs in PARALLEL
-            def fetch_url(result: dict) -> dict:
-                """Fetch a single URL and extract text content"""
-                url = result["url"]
-                try:
-                    headers = {"User-Agent": "Mozilla/5.0 (compatible; AgentHarness/1.0)"}
-                    response = requests.get(url, headers=headers, timeout=5)
-                    response.raise_for_status()
-
-                    # Extract text content
-                    try:
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(response.text, "html.parser")
-                        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                            tag.decompose()
-                        text = soup.get_text(separator=" ", strip=True)
-                        # Truncate to reasonable size
-                        text = text[:2000] if len(text) > 2000 else text
-                    except ImportError:
-                        text = response.text[:2000]
-
-                    return {
-                        "title": result["title"],
-                        "url": url,
-                        "content": text,
-                        "success": True
-                    }
-                except Exception as e:
-                    return {
-                        "title": result["title"],
-                        "url": url,
-                        "content": result.get("snippet", ""),  # Fall back to snippet
-                        "success": False,
-                        "error": str(e)
-                    }
-
-            # Execute parallel fetches with ThreadPoolExecutor
-            fetched_content = []
-            fetch_errors: List[Dict[str, Any]] = []
-            with ThreadPoolExecutor(max_workers=min(num_sources, 5)) as executor:
-                futures = {executor.submit(fetch_url, r): r for r in search_results[:num_sources]}
-
-                for future in as_completed(futures, timeout=5):
-                    try:
-                        result = future.result()
-                        if not result.get("success"):
-                            fetch_errors.append({
-                                "url": result.get("url"),
-                                "error": result.get("error")
-                            })
-                        if result["content"]:  # Only add if we got content
-                            fetched_content.append(result)
-                    except Exception:
-                        pass
-
-            # Step 3: Format combined results
-            if not fetched_content:
-                # Fall back to snippets if all fetches failed
-                output = f"Search results for '{query}':\n\n"
-                for r in search_results[:num_sources]:
-                    output += f"• {r['title']}: {r['snippet']}\n"
-                preview = output[:400]
-                self.logger.info(
-                    "fast_answer_result_fallback",
-                    component="tools.fast_answer",
-                    data={
-                        "query": query,
-                        "sources_found": len(search_results),
-                        "sources_fetched": 0,
-                        "preview": preview,
-                        "urls": [r["url"] for r in search_results[:num_sources]]
-                    }
-                )
-                return ToolResult(
-                    status=ToolStatus.SUCCESS,
-                    output=output,
-                    metadata={"query": query, "sources": len(search_results), "fetched": 0}
-                )
-
-            # Build combined output
-            output = f"Information about '{query}' from {len(fetched_content)} sources:\n\n"
-            for i, item in enumerate(fetched_content, 1):
-                output += f"[Source {i}: {item['title']}]\n"
-                output += f"{item['content'][:1500]}\n\n"
-
-            # Truncate total if too long
-            if len(output) > 6000:
-                output = output[:6000] + "\n...[truncated]"
-
-            preview = output[:400]
-            log_data = {
-                "query": query,
-                "sources_searched": len(search_results),
-                "sources_fetched": len(fetched_content),
-                "urls": [r["url"] for r in fetched_content],
-                "preview": preview
-            }
-            if fetch_errors:
-                log_data["fetch_errors"] = [
-                    {k: v for k, v in err.items() if v} for err in fetch_errors[:3]
-                ]
-
-            self.logger.info(
-                "fast_answer_result",
-                component="tools.fast_answer",
-                data=log_data
-            )
-
-            return ToolResult(
-                status=ToolStatus.SUCCESS,
-                output=output,
-                metadata={
-                    "query": query,
-                    "sources_searched": len(search_results),
-                    "sources_fetched": len(fetched_content),
-                    "urls": [r["url"] for r in fetched_content]
-                }
-            )
-
-        except Exception as e:
-            return ToolResult(
-                status=ToolStatus.ERROR,
-                output=None,
-                error=f"Fast answer failed: {str(e)}"
-            )
-
     def _get_current_time(self, format: str = "human", timezone: str = "local") -> ToolResult:
         """Get current time"""
         try:
@@ -1280,6 +1127,99 @@ class ToolRegistry:
                 error=f"Failed to get time: {str(e)}"
             )
 
+    # ========== FILESYSTEM SEARCH HELPERS ==========
+
+    def _get_repo_root(self, start_path: Optional[str] = None) -> str:
+        """
+        Determine the repository root directory.
+
+        Tries git first, then falls back to the working directory.
+        This ensures searches are always anchored to a sensible root.
+        """
+        start = start_path or self._get_current_working_dir()
+
+        # Try git root first
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=start,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                git_root = result.stdout.strip()
+                if git_root and os.path.isdir(git_root):
+                    return git_root
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # Fallback to working directory
+        return start
+
+    def _should_skip_dir(self, dirname: str) -> bool:
+        """
+        Check if a directory should be skipped during filesystem search.
+
+        Args:
+            dirname: Directory name (not full path)
+
+        Returns:
+            True if directory should be skipped
+        """
+        # Check exact matches
+        if dirname in DEFAULT_EXCLUDE_DIRS:
+            return True
+
+        # Check glob patterns (e.g., *.egg-info)
+        for pattern in DEFAULT_EXCLUDE_DIRS:
+            if "*" in pattern:
+                # Simple glob matching
+                if pattern.startswith("*") and dirname.endswith(pattern[1:]):
+                    return True
+                elif pattern.endswith("*") and dirname.startswith(pattern[:-1]):
+                    return True
+
+        return False
+
+    def _should_skip_file(self, filename: str) -> bool:
+        """
+        Check if a file should be skipped during filesystem search.
+
+        Args:
+            filename: File name (not full path)
+
+        Returns:
+            True if file should be skipped
+        """
+        # Check extension
+        _, ext = os.path.splitext(filename)
+        if ext.lower() in DEFAULT_EXCLUDE_EXTENSIONS:
+            return True
+
+        return False
+
+    def _is_safe_path(self, path: str, root: str) -> bool:
+        """
+        Check if a path is safe (within repo root, not a symlink escape).
+
+        Args:
+            path: Path to check
+            root: Repository root to stay within
+
+        Returns:
+            True if path is safe to include
+        """
+        try:
+            # Resolve the real path (follows symlinks)
+            real_path = os.path.realpath(path)
+            real_root = os.path.realpath(root)
+
+            # Check if resolved path is within root
+            return real_path.startswith(real_root + os.sep) or real_path == real_root
+        except (OSError, ValueError):
+            return False
+
     def _sanitize_search_pattern(self, pattern: str) -> str:
         """Clean user-provided pattern so it can safely be used for filesystem searches."""
         if not pattern:
@@ -1291,38 +1231,100 @@ class ToolRegistry:
         return cleaned
 
     def _match_filenames(self, root: str, pattern: str, limit: int) -> List[str]:
-        """Find files whose names contain the pattern."""
+        """
+        Find files whose names contain the pattern.
+
+        Excludes:
+        - Directories in DEFAULT_EXCLUDE_DIRS
+        - Files with extensions in DEFAULT_EXCLUDE_EXTENSIONS
+        - Symlinks that point outside the repo root
+        """
         matches = []
         needle = pattern.lower()
-        for dirpath, _, filenames in os.walk(root):
+
+        # Don't follow symlinks to prevent escaping the repo
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            # Filter out excluded directories IN-PLACE (modifying dirnames affects os.walk)
+            dirnames[:] = [
+                d for d in dirnames
+                if not self._should_skip_dir(d)
+                and self._is_safe_path(os.path.join(dirpath, d), root)
+            ]
+
             for fname in filenames:
-                if needle in fname.lower():
-                    rel_path = os.path.relpath(os.path.join(dirpath, fname), root)
-                    matches.append(rel_path)
-                    if len(matches) >= limit:
-                        return matches
+                # Skip excluded file types
+                if self._should_skip_file(fname):
+                    continue
+
+                # Check if pattern matches
+                if needle not in fname.lower():
+                    continue
+
+                full_path = os.path.join(dirpath, fname)
+
+                # Skip symlinks pointing outside repo
+                if os.path.islink(full_path) and not self._is_safe_path(full_path, root):
+                    continue
+
+                rel_path = os.path.relpath(full_path, root)
+                matches.append(rel_path)
+
+                if len(matches) >= limit:
+                    return matches
+
         return matches
 
     def _run_fast_search(self, root: str, pattern: str, max_results: int, case_sensitive: bool) -> Tuple[str, str]:
         """
         Attempt to run a fast grep-style search using rg/grep.
         Returns (output, strategy) for the first method that succeeds.
+
+        Automatically excludes:
+        - Directories in DEFAULT_EXCLUDE_DIRS
+        - Files with extensions in DEFAULT_EXCLUDE_EXTENSIONS
+        - Does not follow symlinks
         """
         strategies = []
+
+        # Build ripgrep command with exclusions
         if shutil.which("rg"):
             cmd = [
-                "rg", "--line-number", "--no-heading", "--color", "never",
-                "--max-count", str(max_results)
+                "rg",
+                "--line-number",
+                "--no-heading",
+                "--color", "never",
+                "--max-count", str(max_results),
+                "--no-follow",  # Don't follow symlinks
             ]
+            # Add directory exclusions
+            for exclude_dir in DEFAULT_EXCLUDE_DIRS:
+                cmd.extend(["--glob", f"!**/{exclude_dir}/**"])
+            # Add file extension exclusions
+            for ext in DEFAULT_EXCLUDE_EXTENSIONS:
+                cmd.extend(["--glob", f"!*{ext}"])
+
             if not case_sensitive:
                 cmd.append("-i")
             cmd.append(pattern)
             strategies.append(("rg", cmd))
+
+        # Build grep command with exclusions
         if shutil.which("grep"):
             cmd = [
-                "grep", "-R", "-n", "--binary-files=without-match",
-                "-m", str(max_results)
+                "grep", "-R", "-n",
+                "--binary-files=without-match",
+                "-m", str(max_results),
             ]
+            # Add directory exclusions
+            for exclude_dir in DEFAULT_EXCLUDE_DIRS:
+                # grep uses --exclude-dir without glob wildcards
+                clean_dir = exclude_dir.replace("*", "")
+                if clean_dir:
+                    cmd.append(f"--exclude-dir={clean_dir}")
+            # Add file pattern exclusions
+            for ext in DEFAULT_EXCLUDE_EXTENSIONS:
+                cmd.append(f"--exclude=*{ext}")
+
             if not case_sensitive:
                 cmd.append("-i")
             cmd.append(pattern)
@@ -1348,12 +1350,37 @@ class ToolRegistry:
         return "", ""
 
     def _manual_content_search(self, root: str, pattern: str, max_results: int, case_sensitive: bool) -> str:
-        """Fallback content search that scans files line-by-line."""
+        """
+        Fallback content search that scans files line-by-line.
+
+        Excludes:
+        - Directories in DEFAULT_EXCLUDE_DIRS
+        - Files with extensions in DEFAULT_EXCLUDE_EXTENSIONS
+        - Symlinks that point outside the repo root
+        """
         matches = []
         needle = pattern if case_sensitive else pattern.lower()
-        for dirpath, _, filenames in os.walk(root):
+
+        # Don't follow symlinks to prevent escaping the repo
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            # Filter out excluded directories IN-PLACE
+            dirnames[:] = [
+                d for d in dirnames
+                if not self._should_skip_dir(d)
+                and self._is_safe_path(os.path.join(dirpath, d), root)
+            ]
+
             for fname in filenames:
+                # Skip excluded file types
+                if self._should_skip_file(fname):
+                    continue
+
                 full_path = os.path.join(dirpath, fname)
+
+                # Skip symlinks pointing outside repo
+                if os.path.islink(full_path) and not self._is_safe_path(full_path, root):
+                    continue
+
                 try:
                     with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
                         for lineno, line in enumerate(f, start=1):
@@ -1365,6 +1392,7 @@ class ToolRegistry:
                                     return "\n".join(matches)
                 except (UnicodeDecodeError, OSError):
                     continue
+
         return "\n".join(matches)
 
     def _search_filesystem(
@@ -1374,7 +1402,16 @@ class ToolRegistry:
         max_results: int = 20,
         case_sensitive: bool = False
     ) -> ToolResult:
-        """Search the workspace for file names or contents matching the given pattern."""
+        """
+        Search the workspace for file names or contents matching the given pattern.
+
+        Search is anchored to the repository root (git root if available, else cwd).
+        Automatically excludes:
+        - Directories: __pycache__, .venv, venv, site-packages, dist, build, .git,
+                       .mypy_cache, .pytest_cache, node_modules, etc.
+        - File types: .pyc, .pyo, .so, .o, .dll, .exe, .class, etc.
+        - Symlinks pointing outside the repository root
+        """
         sanitized = self._sanitize_search_pattern(pattern)
         if not sanitized:
             return ToolResult(
@@ -1384,7 +1421,14 @@ class ToolRegistry:
             )
 
         max_results = max(1, min(max_results, 200))
-        search_root = self._resolve_path(path) if path else self._get_current_working_dir()
+
+        # Anchor search to repo root for safety
+        if path:
+            search_root = self._resolve_path(path)
+        else:
+            # Use git repo root if available, else working directory
+            search_root = self._get_repo_root()
+
         if not os.path.isdir(search_root):
             return ToolResult(
                 status=ToolStatus.ERROR,

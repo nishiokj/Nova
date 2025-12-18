@@ -33,7 +33,7 @@ from services.audio import (
 )
 from services.language import TextLinterService
 from audio_pipeline import AudioDeviceManager, AudioConfig as DeviceAudioConfig
-from .process_manager import ProcessManager
+from communication.process_manager import ProcessManager
 
 from .base_app import BaseVoiceApp
 
@@ -376,7 +376,7 @@ class MultiProcessVoiceApp(BaseVoiceApp):
 
         # Register TTS worker
         from communication.events import EventType
-        from harness import TTSWorker
+        from workers.tts_worker import TTSWorker
         from workers.service_rep_worker import ServiceRepWorker
 
         # Use TTS config from AppConfig

@@ -32,6 +32,9 @@ class ServiceRepWorker(ProcessWorker):
       * Task routing
       * Direct calls to AgentHarness (in-process)
       * TTS event publishing
+
+    IMPORTANT: log_dir is required for proper logging. All logs (requests.jsonl,
+    health.jsonl, llm_requests.log, etc.) will be written to this directory.
     """
 
     def __init__(
@@ -40,7 +43,8 @@ class ServiceRepWorker(ProcessWorker):
         logger: Optional[logging.Logger] = None,
         event_bus: Optional[EventBusProtocol] = None,
         service_rep_config: Optional[ServiceRepConfig] = None,
-        harness_config_path: Optional[str] = None
+        harness_config_path: Optional[str] = None,
+        log_dir: Optional[str] = None
     ):
         super().__init__(mailbox, logger)
         self.event_bus = event_bus
@@ -48,6 +52,7 @@ class ServiceRepWorker(ProcessWorker):
         # Configuration
         self.service_rep_config = service_rep_config or ServiceRepConfig(enabled=True)
         self.harness_config_path = harness_config_path
+        self._log_dir = log_dir
 
         # Will be initialized in initialize()
         self.service_rep: Optional[ServiceRep] = None
@@ -56,6 +61,10 @@ class ServiceRepWorker(ProcessWorker):
     def initialize(self) -> bool:
         """Initialize ServiceRep and dependencies"""
         try:
+            # Validate log_dir is provided
+            if not self._log_dir:
+                raise ValueError("log_dir is required for ServiceRepWorker - pass it via worker_kwargs")
+
             # Create router
             from services.router import Router
             from util.config import RouterConfig
@@ -68,15 +77,16 @@ class ServiceRepWorker(ProcessWorker):
             self.router = Router(config=router_config)
 
             # Create ServiceRep (which will create AgentHarness)
+            # Pass log_dir so all loggers write to the application's log directory
             self.service_rep = create_service_rep(
                 config=self.service_rep_config,
                 event_bus=self.event_bus,
                 router=self.router,
                 harness_config_path=self.harness_config_path,
-                logger=None  # ServiceRep will create its own
+                log_dir=self._log_dir  # All logs go to the application's log folder
             )
 
-            self.logger.info("ServiceRepWorker initialized")
+            self.logger.info(f"ServiceRepWorker initialized (log_dir={self._log_dir})")
             return True
 
         except Exception as e:

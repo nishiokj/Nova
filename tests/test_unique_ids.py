@@ -38,7 +38,7 @@ def test_req_id_auto_generation():
     """Test that agent auto-generates req_id when logger doesn't have one"""
     print("Testing automatic req_id generation in agent...")
 
-    from harness.agent import Agent
+    from harness.agent.agent import Agent
     from util.config import AgentConfig, LLMConfig
     from harness.agent.tool_registry import ToolRegistry
 

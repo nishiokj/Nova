@@ -287,7 +287,6 @@ def ensure_default_manifests():
     # Note: In production, get actual tool definitions from ToolRegistry
     # For now, create a reference manifest
     default_tools = [
-        {"name": "fast_answer", "description": "Search the web and fetch answer snippets"},
         {"name": "bash_execute", "description": "Execute bash command"},
         {"name": "file_read", "description": "Read file contents"},
         {"name": "file_write", "description": "Write to file"},

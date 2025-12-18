@@ -120,7 +120,6 @@ class AgentConfig:
 class ToolConfig:
     """Configuration for the Tool Registry"""
     enabled_tools: List[str] = field(default_factory=lambda: [
-        "fast_answer",  # PREFERRED - single-hop search with parallel fetch
         "web_fetch", "bash_execute", "python_execute",
         "file_read", "file_write", "search_filesystem", "calculator", "get_current_time"
     ])

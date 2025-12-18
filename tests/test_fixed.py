@@ -3,7 +3,7 @@
 import sys
 sys.path.insert(0, '.')
 
-from harness.agent import TieredAgent
+from harness.agent.agent import TieredAgent
 from util.config import AgentConfig, LLMConfig
 from harness.agent.tool_registry import ToolRegistry
 import json

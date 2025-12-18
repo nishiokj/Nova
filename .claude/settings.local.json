@@ -38,7 +38,14 @@
       "Bash(say:*)",
       "Bash(.venv/bin/python3:*)",
       "Bash(source /Users/jevinnishioka/Desktop/jesus/.venv/bin/activate)",
-      "Bash(PYTHONPATH=src python3:*)"
+      "Bash(PYTHONPATH=src python3:*)",
+      "Bash(PYTHONPATH=src python:*)",
+      "Bash(git -C /Users/jevinnishioka/Desktop/jesus/evals/results/multiturn_run_gpt-5-mini20251217_153600/artifacts/multiturn_code_dev_001_688994f1 log --oneline)",
+      "Bash(git -C /Users/jevinnishioka/Desktop/jesus/evals/results/multiturn_run_gpt-5-mini20251217_153600/artifacts/multiturn_code_dev_001_688994f1 diff --stat 0deb9e7..e61448c)",
+      "Bash(git -C /Users/jevinnishioka/Desktop/jesus/evals/results/multiturn_run_gpt-5-mini20251217_153600/artifacts/multiturn_code_dev_001_688994f1 show --stat e61448c)",
+      "Bash(git -C /Users/jevinnishioka/Desktop/jesus/evals/results/multiturn_run_gpt-5-mini20251217_153600/artifacts/multiturn_code_dev_001_688994f1 log --oneline --stat)",
+      "Bash(wc:*)",
+      "Bash(timeout 5 PYTHONPATH=src python3:*)"
     ],
     "deny": []
   }

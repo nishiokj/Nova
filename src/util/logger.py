@@ -108,12 +108,14 @@ class StructuredLogger:
     - requests.jsonl: Clean request lifecycle (INFO) - readable JSON
     - health.jsonl: System diagnostics (DEBUG) - heartbeat, VAD, etc.
     - prompts.jsonl: Full prompts stored by prompt_id
+
+    log_dir defaults to "logs" if not provided.
     """
 
     def __init__(
         self,
+        log_dir: Optional[str] = None,
         name: str = "harness",
-        log_dir: str = "logs",
         log_level: str = "INFO",
         log_to_file: bool = True,
         log_to_console: bool = True,
@@ -121,6 +123,8 @@ class StructuredLogger:
         max_log_size: int = 10 * 1024 * 1024,
         backup_count: int = 5
     ):
+        if not log_dir:
+            log_dir = "logs"  # Default to logs directory for backward compatibility
         self.name = name
         self.log_dir = Path(log_dir)
         self.log_level = getattr(logging, log_level.upper(), logging.INFO)

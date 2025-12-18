@@ -29,6 +29,7 @@ from communication.events import (
     AgentResponseCompleteEvent,
     AgentProgressEvent,
     TTSRequestedEvent,
+    StreamingChunkEvent,
 )
 from communication.event_bus import EventBusProtocol
 from services.intent_classifier import (
@@ -91,12 +92,24 @@ class ServiceRep:
         router: Router,
         harness: Optional['AgentHarness'] = None,  # Can inject or will create
         harness_config_path: Optional[str] = None,
-        logger: Optional[StructuredLogger] = None
+        logger: Optional[StructuredLogger] = None,
+        log_dir: Optional[str] = None
     ):
         self.config = config
         self.event_bus = event_bus
         self.router = router
-        self.logger = logger or StructuredLogger()
+
+        # Store log_dir for passing to child components
+        self._log_dir = log_dir
+
+        # Logger: use injected, or create from log_dir, or error
+        if logger:
+            self.logger = logger
+        elif log_dir:
+            self.logger = StructuredLogger(log_dir=log_dir, log_to_console=False)
+        else:
+            raise ValueError("ServiceRep requires either logger or log_dir parameter")
+
         self.enabled = config.enabled
 
         # Create or use injected AgentHarness
@@ -106,7 +119,8 @@ class ServiceRep:
             from .harness import AgentHarness
             self.harness = AgentHarness(
                 config_path=harness_config_path,
-                logger=self.logger
+                logger=self.logger,
+                log_dir=self._log_dir
             )
 
         # Register progress callback with harness
@@ -211,11 +225,37 @@ class ServiceRep:
         """Execute a queued agent task (runs inside worker thread)"""
         self._set_active_request(request_id, text)
         try:
+            # Create streaming callback to emit chunks as events
+            def on_stream_chunk(chunk: str, chunk_index: int, is_final: bool):
+                """Callback that emits StreamingChunkEvent for each chunk"""
+                import sys
+                print(f"[DEBUG ServiceRep] on_stream_chunk called: idx={chunk_index}, final={is_final}, chunk_len={len(chunk)}", file=sys.stderr, flush=True)
+                if self.event_bus:
+                    try:
+                        chunk_event = StreamingChunkEvent(
+                            request_id=request_id,
+                            chunk=chunk,
+                            chunk_index=chunk_index,
+                            is_final=is_final
+                        )
+                        # Debug: check subscriptions
+                        subs = self.event_bus._subscriptions.get(chunk_event.event_type, [])
+                        print(f"[DEBUG ServiceRep] Publishing to event_bus, {len(subs)} subscribers for STREAMING_CHUNK", file=sys.stderr, flush=True)
+                        self.event_bus.publish(chunk_event)
+                    except Exception as e:
+                        self.logger.error(
+                            f"[{request_id}] Failed to publish StreamingChunkEvent: {e}",
+                            component="service_rep"
+                        )
+                        import traceback
+                        traceback.print_exc()
+
             harness_response = self.harness.process(
                 speech_text=text,
                 tier=tier,
                 context=None,
-                request_id=request_id
+                request_id=request_id,
+                on_stream_chunk=on_stream_chunk
             )
             self._handle_harness_response(request_id, harness_response)
 
@@ -785,6 +825,25 @@ class ServiceRep:
                 )
 
                 if self.event_bus:
+                    # Emit streaming chunk for quick answer (for TUI display)
+                    chunk_event = StreamingChunkEvent(
+                        request_id=request_id,
+                        chunk=response_text,
+                        chunk_index=0,
+                        is_final=False
+                    )
+                    self.event_bus.publish(chunk_event)
+
+                    # Emit final streaming chunk
+                    final_chunk_event = StreamingChunkEvent(
+                        request_id=request_id,
+                        chunk="",
+                        chunk_index=1,
+                        is_final=True
+                    )
+                    self.event_bus.publish(final_chunk_event)
+
+                    # Emit completion event
                     auto_event = AgentResponseCompleteEvent(
                         request_id=request_id,
                         success=True,
@@ -807,7 +866,8 @@ def create_service_rep(
     router: Router,
     harness: Optional['AgentHarness'] = None,
     harness_config_path: Optional[str] = None,
-    logger: Optional[StructuredLogger] = None
+    logger: Optional[StructuredLogger] = None,
+    log_dir: Optional[str] = None
 ) -> ServiceRep:
     """
     Factory function to create ServiceRep.
@@ -818,7 +878,8 @@ def create_service_rep(
         router: Router for task classification
         harness: Optional AgentHarness instance (will create if not provided)
         harness_config_path: Path to harness config (used if harness not provided)
-        logger: Logger instance
+        logger: Optional pre-configured logger instance
+        log_dir: Optional log directory (used to create logger if not provided)
 
     Returns:
         ServiceRep instance with integrated AgentHarness
@@ -829,5 +890,6 @@ def create_service_rep(
         router=router,
         harness=harness,
         harness_config_path=harness_config_path,
-        logger=logger
+        logger=logger,
+        log_dir=log_dir
     )

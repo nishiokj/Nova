@@ -5,6 +5,9 @@ __pycache__
 .pytest_cache
 .claude
 logs
+tui/logs
+evals/logs
+src/app/logs
 dist
 build
 .env
@@ -20,3 +23,5 @@ temp
 logs/*
 logs/*.jsonl
 */*.jsonl
+evals/results/*
+evals/results/*/*/*

@@ -40,7 +40,6 @@ class HarnessState(Enum):
     PAUSED = "paused"
     STOPPING = "stopping"
     ERROR = "error"
-[]
 
 @dataclass
 class HarnessResponse:
@@ -87,7 +86,8 @@ class AgentHarness:
         profiler: Optional[Any] = None,
         runtime: Optional[HarnessRuntime] = None,
         logger: Optional[StructuredLogger] = None,
-        execution_logger: Optional[AgentExecutionLogger] = None
+        execution_logger: Optional[AgentExecutionLogger] = None,
+        log_dir: Optional[str] = None
     ):
         if runtime and (config or config_path):
             raise ValueError("Provide either an existing runtime or configuration inputs, not both.")
@@ -97,7 +97,8 @@ class AgentHarness:
             config_path=config_path,
             profiler=profiler,
             logger=logger,
-            execution_logger=execution_logger
+            execution_logger=execution_logger,
+            log_dir=log_dir
         )
 
         # Instrumentation
@@ -148,7 +149,8 @@ class AgentHarness:
         speech_text: str,
         tier: str = "standard",
         context: Optional[str] = None,
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
     ) -> HarnessResponse:
         """
         Process request through the agent.
@@ -158,6 +160,8 @@ class AgentHarness:
             tier: Agent tier (determined by ServiceRep/Router)
             context: Optional additional context
             request_id: Request identifier
+            on_stream_chunk: Optional callback for streaming final response synthesis.
+                            Called with (chunk: str, chunk_index: int, is_final: bool)
 
         Returns:
             HarnessResponse with results
@@ -199,7 +203,8 @@ class AgentHarness:
                         agent_response = self.agent.run(
                             user_input=speech_text,
                             tier=tier,
-                            context=context
+                            context=context,
+                            on_stream_chunk=on_stream_chunk
                         )
             finally:
                 if hasattr(tier_agent, "remove_step_callback"):
@@ -440,7 +445,8 @@ def create_harness(
     default_tier: str = "standard",
     profiler: Optional[Any] = None,
     logger: Optional[StructuredLogger] = None,
-    execution_logger: Optional[AgentExecutionLogger] = None
+    execution_logger: Optional[AgentExecutionLogger] = None,
+    log_dir: Optional[str] = None
 ) -> AgentHarness:
     """
     Create and configure an AgentHarness instance.
@@ -451,6 +457,7 @@ def create_harness(
         profiler: Optional profiler for runtime metrics
         logger: Logger instance
         execution_logger: Execution logger
+        log_dir: Optional log directory override
 
     Returns:
         Configured AgentHarness instance
@@ -462,7 +469,8 @@ def create_harness(
         config=config,
         profiler=profiler,
         logger=logger,
-        execution_logger=execution_logger
+        execution_logger=execution_logger,
+        log_dir=log_dir
     )
 
     return AgentHarness(runtime=runtime)

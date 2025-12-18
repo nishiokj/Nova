@@ -175,7 +175,7 @@ def test_step_context_embedding():
     print(f"✓ Created RL training log")
 
     # Reconstruct with step contexts
-    from harness import manifest_store as ms
+    from util import manifest_store as ms
     ms._global_manifest_store = store
 
     reconstructor = EpisodeReconstructor(
@@ -252,7 +252,7 @@ def test_training_sample_format():
     # Use episode from previous test
     store = ManifestStore(base_dir="logs/test/manifests")
 
-    from harness import manifest_store as ms
+    from util import manifest_store as ms
     ms._global_manifest_store = store
 
     reconstructor = EpisodeReconstructor(
