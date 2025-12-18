@@ -2,16 +2,49 @@
 Executor - runs plans step by step and returns an ExecutionTrace.
 
 This module intentionally contains no logging. Logging is handled by the Agent.
+
+Architecture:
+- Standard execution: Linear step execution with retry logic
+- Microloop execution: State machine with reasoning, adaptation, and explicit artifact tracking
+
+The microloop provides:
+1. Explicit state machine (READY -> TOOL_PENDING -> REASONING -> COMPLETE/ESCALATE)
+2. Monotonic reasoning (COMMITs cannot be undone)
+3. Detailed artifact tracking (files created, modified, failures)
+4. Extension points for invariants and completion conditions
 """
 
 import json
+import os
+import sys
 import time
+import time as _time  # Alias for observability logging
+import uuid
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional
 
-from util.llm_adapter import LLMAdapter, Message, MessageRole, LLMResponse, ToolCall
-from util.perf_trace import get_tracer
+# ========== OBSERVABILITY TRACE FILE ==========
+# Writes to a file you can `tail -f` in another terminal
+_TRACE_FILE = None
+_TRACE_FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "logs", "execution_trace.log")
+
+def _trace(msg: str) -> None:
+    """Write observability trace to file for debugging."""
+    global _TRACE_FILE
+    try:
+        if _TRACE_FILE is None:
+            os.makedirs(os.path.dirname(_TRACE_FILE_PATH), exist_ok=True)
+            _TRACE_FILE = open(_TRACE_FILE_PATH, "a", buffering=1)  # Line buffered
+        _TRACE_FILE.write(f"{msg}\n")
+        _TRACE_FILE.flush()
+    except Exception:
+        pass  # Don't let tracing errors affect execution
+
+from util.llm_adapter import LLMAdapter, ToolCall
 from .plan_models import (
+    Discovery,
+    DiscoveryType,
     ExecutionTrace,
     Plan,
     PlanPhase,
@@ -25,6 +58,22 @@ from .plan_models import (
 from .prompts import EXECUTION_STEP_PROMPT, SYNTHESIS_PROMPT, format_prompt
 from .tool_registry import ToolRegistry, ToolResult, ToolStatus
 
+# Microloop imports (optional - gracefully degrade if not available)
+try:
+    from .execution_models import (
+        ExecutionManifest,
+        StepManifestEntry,
+        MicroloopContext,
+        StepExecutionState,
+        get_timeout_policy,
+    )
+    from .microloop import Microloop, MicroloopConfig, MicroloopResult
+    MICROLOOP_AVAILABLE = True
+except ImportError:
+    MICROLOOP_AVAILABLE = False
+    ExecutionManifest = None
+    Microloop = None
+
 
 class Executor:
     """
@@ -32,24 +81,149 @@ class Executor:
 
     Key difference from current approach: we're executing against a PLAN
     with known success criteria, not just reacting to LLM tool calls.
+
+    Supports two execution modes:
+    1. Standard: Linear step execution with retry logic (default)
+    2. Microloop: State machine with reasoning, adaptation, and artifact tracking
+
+    Enable microloop with: executor.enable_microloop()
     """
 
     def __init__(
         self,
         llm: LLMAdapter,
         tool_registry: ToolRegistry,
-        max_tool_calls: int = 5
+        max_tool_calls: int = 5,
+        graphd_client: Optional[Any] = None
     ):
         self.llm = llm
         self.tool_registry = tool_registry
         self.max_tool_calls = max_tool_calls
-        self._tracer = get_tracer()
+        self.graphd_client = graphd_client  # Optional graphd client for microloop
         # NO logger - Executor doesn't log, Agent does
         self._step_callbacks: List[Callable[[int, ToolCallRecord], None]] = []
+        self._llm_lock = threading.Lock()  # Serialize LLM calls; adapter is not thread-safe
+
+        # Logging callback for full LLM call details (set by Agent)
+        self._llm_call_logger: Optional[Callable[[int, str, str, str, str, List, List, float, str, Optional[Dict]], None]] = None
+
+        # Microloop support
+        self._use_microloop = False
+        self._microloop: Optional[Microloop] = None
+        self._microloop_config: Optional[MicroloopConfig] = None
+        self._current_manifest: Optional[ExecutionManifest] = None
+
+    def enable_microloop(self, config: Optional["MicroloopConfig"] = None) -> bool:
+        """
+        Enable microloop execution mode.
+
+        Args:
+            config: Optional MicroloopConfig for customization
+
+        Returns:
+            True if microloop was enabled, False if not available
+        """
+        if not MICROLOOP_AVAILABLE:
+            return False
+
+        self._use_microloop = True
+        self._microloop_config = config or MicroloopConfig()
+        self._microloop = Microloop(
+            tool_registry=self.tool_registry,
+            llm=self.llm,
+            config=self._microloop_config,
+            graphd_client=self.graphd_client
+        )
+        if hasattr(self._microloop, "set_log_callback"):
+            self._microloop.set_log_callback(self._handle_microloop_log_event)
+
+        return True
+
+    def disable_microloop(self) -> None:
+        """Disable microloop execution mode."""
+        self._use_microloop = False
+        self._microloop = None
+        self._current_manifest = None
 
     def add_step_callback(self, callback: Callable[[int, ToolCallRecord], None]):
         """Register callback invoked when a tool call completes within a step."""
         self._step_callbacks.append(callback)
+
+    def set_llm_call_logger(
+        self,
+        logger_fn: Callable[[int, str, str, str, str, List, List, float, str, Optional[Dict]], None]
+    ):
+        """
+        Set callback for logging full LLM call details.
+
+        Callback signature:
+            logger_fn(step_num, objective, instructions, input_str, raw_response,
+                      tool_calls, tool_results, duration_ms, phase, manifest)
+        """
+        self._llm_call_logger = logger_fn
+
+    def _log_llm_call(
+        self,
+        step_num: int,
+        objective: str,
+        instructions: str,
+        input_str: str,
+        raw_response: str,
+        tool_calls: List,
+        tool_results: List,
+        duration_ms: float,
+        phase: str,
+        manifest: Optional[Dict[str, Discovery]] = None
+    ):
+        """Emit LLM call details to logger callback if set."""
+        if not self._llm_call_logger:
+            return
+        try:
+            self._llm_call_logger(
+                step_num, objective, instructions, input_str, raw_response,
+                tool_calls, tool_results, duration_ms, phase, manifest
+            )
+        except Exception as e:
+            # ========== MAKE LOGGING ERRORS VISIBLE ==========
+            import sys
+            _trace(f"[EXECUTOR ERROR] _log_llm_call failed: {type(e).__name__}: {str(e)[:200]}")
+
+    def _log_tool_execution(
+        self,
+        step_num: int,
+        objective: str,
+        tool_name: str,
+        tool_args: Dict,
+        result: ToolResult,
+        duration_ms: float,
+        phase: str,
+        manifest: Optional[Dict[str, Discovery]] = None
+    ):
+        """Log tool execution result for visibility."""
+        if not self._llm_call_logger:
+            return
+        try:
+            self._llm_call_logger(
+                step_num,
+                objective,
+                f"[TOOL EXECUTION]\nTool: {tool_name}",
+                json.dumps(tool_args, indent=2) if tool_args else "",
+                str(result.output)[:2000] if result.output else "",
+                [{"name": tool_name, "arguments": tool_args}],
+                [{
+                    "tool": tool_name,
+                    "output": str(result.output)[:2000] if result.output else "",
+                    "success": result.is_success,
+                    "error": str(result.error) if result.error else None
+                }],
+                duration_ms,
+                f"{phase}_tool_result",
+                manifest
+            )
+        except Exception as e:
+            # ========== MAKE LOGGING ERRORS VISIBLE ==========
+            import sys
+            _trace(f"[EXECUTOR ERROR] _log_tool_execution failed: {type(e).__name__}: {str(e)[:200]}")
 
     def _emit_step_callback(self, step_num: int, record: ToolCallRecord):
         """Emit tool progress callbacks safely."""
@@ -60,6 +234,32 @@ class Executor:
                 # Executor deliberately stays silent - Agent handles logging
                 continue
 
+    def _safe_extract_discovery(
+        self,
+        tool_name: str,
+        result: ToolResult,
+        discoveries: Optional[Dict[str, Discovery]],
+        step_num: Optional[int] = None
+    ) -> None:
+        """Safely extract discovery - never crashes execution if this fails."""
+        if discoveries is None:
+            return
+        try:
+            self._extract_and_store_discovery(tool_name, result, discoveries, step_num)
+        except (AttributeError, TypeError, Exception):
+            # Discovery extraction is optional - don't let it crash execution
+            # This handles bytecode cache issues where method may not exist
+            pass
+
+    def _clip_output(self, data: Any, max_length: int = 800) -> str:
+        """Compact tool outputs before feeding them back into prompts/logs."""
+        if data is None:
+            return ""
+        text = str(data).replace("\r\n", "\n")
+        if len(text) <= max_length:
+            return text
+        return text[: max_length] + "..."
+
     def _shorten_summary(self, text: Optional[str], max_length: int = 80) -> str:
         """Compact helper to keep progress/status snippets tiny."""
         if not text:
@@ -68,19 +268,6 @@ class Executor:
         if len(clean) <= max_length:
             return clean
         return clean[: max_length - 3] + "..."
-
-    def _status_symbol(self, status: Any) -> str:
-        """Convert PlanStatus to compact icon."""
-        try:
-            status_enum = status if isinstance(status, PlanStatus) else PlanStatus(status)
-        except Exception:
-            status_enum = PlanStatus.PENDING
-
-        if status_enum == PlanStatus.COMPLETED:
-            return "✅"
-        if status_enum in (PlanStatus.PARTIAL, PlanStatus.FAILED, PlanStatus.SKIPPED):
-            return "⚠️"
-        return "⏳"
 
     def _update_plan_status_tracker(
         self,
@@ -109,37 +296,6 @@ class Executor:
             return "partial"
         return step.objective or f"step {step.step_num}"
 
-    def _render_progress_block(
-        self,
-        plan_status: Optional[Dict[int, Dict[str, Any]]],
-        current_step_num: int,
-        max_items: int = 4
-    ) -> Optional[str]:
-        """Render a short progress board for step guidance."""
-        if not plan_status:
-            return None
-
-        entries = []
-        current_entry = None
-        for step_num in sorted(plan_status.keys()):
-            entry = plan_status.get(step_num, {})
-            status_symbol = self._status_symbol(entry.get("status", PlanStatus.PENDING))
-            summary = self._shorten_summary(entry.get("summary") or f"step {step_num}", 28)
-            if step_num == current_step_num:
-                current_entry = f"you are on {step_num}: {summary}"
-            else:
-                entries.append(f"{step_num} {status_symbol} {summary}".strip())
-
-        if current_entry:
-            entries.append(current_entry)
-
-        if len(entries) > max_items:
-            entries = entries[-max_items:]
-
-        board = "; ".join(entries)
-        board = self._shorten_summary(board, 200)
-        return f"Progress: {board}"
-
     def execute(
         self,
         plan: Plan,
@@ -163,77 +319,115 @@ class Executor:
         Does NOT mutate plan - Agent is responsible for updating plan state.
         Does NOT log - Agent handles all logging.
         """
+        # ========== CRITICAL: LOG EXECUTION ENTRY POINT ==========
+        # This log MUST fire immediately so we know execution started
+        _exec_start = _time.time()
+        _trace(f"\n[EXECUTOR] {_time.strftime('%H:%M:%S')} | execute() ENTRY | plan_goal={plan.goal[:80] if plan.goal else 'none'}... | steps={len(plan.steps)} | requires_tools={plan.requires_tools} | microloop={self._use_microloop}")
+
         # Validate serialized_context
         if not serialized_context or "instructions" not in serialized_context:
             raise ValueError("serialized_context with 'instructions' key is required")
         trace = ExecutionTrace(plan=plan)
+        execution_discoveries: Dict[str, Discovery] = {}  # Shared across all steps
         start_time = time.time()
 
         try:
-            # OPTIMIZATION: Fast path for simple single-tool tasks
-            # Reduces LLM calls from 3-5 down to 1 for common cases like search
-            if (len(plan.steps) == 1 and
-                plan.steps[0].tool_hint and
-                not plan.steps[0].depends_on and
-                plan.requires_tools):
-                with self._tracer.span("execute_simple_tool_task"):
-                    trace = self._execute_simple_tool_task(
-                        plan, tools, trace, start_time, serialized_context, on_stream_chunk, plan_status
-                    )
-
-            elif not plan.requires_tools:
+            if not plan.requires_tools:
                 # Simple execution - just get LLM response (with optional streaming)
-                with self._tracer.span("execute_no_tools"):
-                    if plan.steps:
-                        self._update_plan_status_tracker(
-                            plan_status,
-                            plan.steps[0].step_num,
-                            PlanStatus.IN_PROGRESS,
-                            plan.steps[0].objective
-                        )
-                    if on_stream_chunk:
-                        # Stream the response directly
-                        trace.final_response = self._stream_direct_response(
-                            serialized_context, on_stream_chunk
-                        )
-                    else:
-                        # Use Responses API
-                        # Get tools for LLM (even for direct response, LLM should know what tools exist)
-                        tools = self.tool_registry.list_tools(enabled_only=True)
-                        tool_defs = [t.to_definition() for t in tools]
-                        tools_internally_tagged = [td.to_responses_format() for td in tool_defs]
+                if plan.steps:
+                    self._update_plan_status_tracker(
+                        plan_status,
+                        plan.steps[0].step_num,
+                        PlanStatus.IN_PROGRESS,
+                        plan.steps[0].objective
+                    )
+                step = plan.steps[0] if plan.steps else None
+                base_instructions = serialized_context.get("instructions", "")
+                execution_instructions = format_prompt(
+                    EXECUTION_STEP_PROMPT,
+                    base_instructions=base_instructions,
+                    step_num=step.step_num if step else 1,
+                    objective=step.objective if step else plan.goal,
+                    tool_hint=(step.tool_hint or "") if step else "",
+                    phase=step.phase.value if step else PlanPhase.EXECUTION.value,
+                    success_criteria=step.success_criteria.description if step and step.success_criteria else "",
+                    preconditions="; ".join(step.preconditions) if step else "",
+                    postconditions="; ".join(step.postconditions) if step else "",
+                    verification_method=step.verification_method if step else "",
+                    max_tool_calls=step.max_tool_calls if step else self.max_tool_calls
+                )
+                if not execution_instructions:
+                    execution_instructions = base_instructions
+                step_guidance = (
+                    self._create_step_guidance(step, StepContext(), plan_status)
+                    if step else None
+                )
+                combined_instructions = "\n\n".join(
+                    part for part in [execution_instructions, step_guidance] if part
+                ) or base_instructions
+                if on_stream_chunk:
+                    # Stream the response directly
+                    trace.final_response = self._stream_direct_response(
+                        serialized_context, on_stream_chunk, combined_instructions
+                    )
+                else:
+                    # Use Responses API
+                    # Get tools for LLM (even for direct response, LLM should know what tools exist)
+                    tools = self.tool_registry.list_tools(enabled_only=True)
+                    tool_defs = [t.to_definition() for t in tools]
+                    tools_internally_tagged = [td.to_responses_format() for td in tool_defs]
 
-                        with self._tracer.span("llm_respond"):
-                            response = self.llm.respond(
-                                input=serialized_context.get("input", ""),
-                                instructions=serialized_context.get("instructions", ""),
-                                tools=tools_internally_tagged
-                            )
-                        trace.final_response = response.content
-                    trace.llm_calls += 1
+                    llm_start = time.time()
+                    llm_input = serialized_context.get("input", "")
+                    # ========== LOG PRE-LLM CALL ==========
+                    _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | LLM CALL STARTING | type=direct_response | input_len={len(llm_input)} | instructions_len={len(combined_instructions)}")
+                    with self._llm_lock:
+                        response = self.llm.respond(
+                            input=llm_input,
+                            instructions=combined_instructions,
+                            tools=tools_internally_tagged
+                        )
+                    llm_duration_ms = (time.time() - llm_start) * 1000
+                    _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | LLM CALL COMPLETE | duration={llm_duration_ms:.0f}ms | response_len={len(response.content or '')}")
 
-                    # Create a StepResult for the single reasoning step
-                    if plan.steps:
-                        step_result = StepResult(
-                            step_num=plan.steps[0].step_num,
-                            status=PlanStatus.COMPLETED,
-                            accumulated_data={"response": trace.final_response},
-                            final_response=trace.final_response,
-                            duration_ms=(time.time() - start_time) * 1000
-                        )
-                        trace.step_results.append(step_result)
-                        self._update_plan_status_tracker(
-                            plan_status,
-                            plan.steps[0].step_num,
-                            step_result.status,
-                            self._status_note_for_result(step_result, plan.steps[0])
-                        )
+                    # Log the complete LLM call
+                    self._log_llm_call(
+                        step_num=step.step_num if step else 1,
+                        objective=step.objective if step else plan.goal,
+                        instructions=combined_instructions,
+                        input_str=llm_input,
+                        raw_response=response.content or "",
+                        tool_calls=[],
+                        tool_results=[],
+                        duration_ms=llm_duration_ms,
+                        phase="execution",
+                        manifest=execution_discoveries
+                    )
+                    trace.final_response = response.content
+                trace.llm_calls += 1
+
+                # Create a StepResult for the single reasoning step
+                if plan.steps:
+                    step_result = StepResult(
+                        step_num=plan.steps[0].step_num,
+                        status=PlanStatus.COMPLETED,
+                        accumulated_data={"response": trace.final_response},
+                        final_response=trace.final_response,
+                        duration_ms=(time.time() - start_time) * 1000
+                    )
+                    trace.step_results.append(step_result)
+                    self._update_plan_status_tracker(
+                        plan_status,
+                        plan.steps[0].step_num,
+                        step_result.status,
+                        self._status_note_for_result(step_result, plan.steps[0])
+                    )
             else:
                 # Step-by-step execution
-                with self._tracer.span("execute_plan_stepwise", steps=len(plan.steps)):
-                    trace = self._execute_plan_stepwise(
-                        plan, tools, trace, serialized_context, on_stream_chunk, plan_status
-                    )
+                trace = self._execute_plan_stepwise(
+                    plan, tools, trace, serialized_context, on_stream_chunk, plan_status,
+                    execution_discoveries
+                )
 
         except Exception as e:
             # Executor can throw exceptions - Agent will handle them
@@ -243,171 +437,6 @@ class Executor:
         trace.total_duration_ms = (time.time() - start_time) * 1000
         return trace
 
-    def _execute_simple_tool_task(
-        self,
-        plan: Plan,
-        tools: List[Any],
-        trace: ExecutionTrace,
-        start_time: float,
-        serialized_context: Dict[str, Any],
-        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
-        plan_status: Optional[Dict[int, Dict[str, Any]]] = None
-    ) -> ExecutionTrace:
-        """
-        Fast path for simple single-step, single-tool tasks.
-
-        Examples: search queries, file reads, calculations
-        Reduces LLM calls from 3-5 down to 1 by skipping stepwise execution.
-
-        OPTIMIZATION: If we have explicit tool_hint AND tool_args_hint,
-        skip the LLM call entirely and execute the tool directly.
-        This saves 500-1500ms per request.
-        """
-        step = plan.steps[0]
-        self._update_plan_status_tracker(plan_status, step.step_num, PlanStatus.IN_PROGRESS, step.objective)
-
-        # ========== DIRECT EXECUTION PATH (NO LLM CALL) ==========
-        # If we have explicit tool name and args, execute directly
-        if step.tool_hint and step.tool_args_hint:
-            tool_start = time.time()
-            result = self.tool_registry.execute(step.tool_hint, **step.tool_args_hint)
-            duration_ms = (time.time() - tool_start) * 1000
-            trace.tool_calls += 1
-            # NOTE: No LLM call made - trace.llm_calls stays at 0
-
-            step_result = StepResult(
-                step_num=1,
-                status=PlanStatus.COMPLETED if result.is_success else PlanStatus.FAILED,
-                tool_calls_made=[ToolCallRecord(
-                    tool_name=step.tool_hint,
-                    arguments=step.tool_args_hint,
-                    result=result,
-                    duration_ms=duration_ms,
-                    timestamp=time.time()
-                )],
-                accumulated_data={"result": result.output} if result.is_success else {},
-                final_response=str(result.output)[:2000] if result.is_success else f"Tool failed: {result.error}",
-                duration_ms=(time.time() - start_time) * 1000,
-                phase=step.phase
-            )
-            trace.step_results.append(step_result)
-            self._update_plan_status_tracker(
-                plan_status,
-                step.step_num,
-                step_result.status,
-                self._status_note_for_result(step_result, step)
-            )
-
-            # Synthesize readable response from tool result
-            if result.is_success:
-                trace.final_response = self._synthesize_final_response(
-                    plan, trace, serialized_context, on_stream_chunk
-                )
-            else:
-                trace.tool_failures += 1
-                trace.final_response = f"Tool failed: {result.error}"
-
-            return trace
-
-        # ========== LLM-GUIDED EXECUTION PATH ==========
-        # Fallback: Use LLM to determine tool call when args not pre-specified
-        # Add focused guidance for single-tool execution
-        focused_guidance = f"""Execute this single-step task:
-
-OBJECTIVE: {step.objective}
-
-SUGGESTED ACTION: Call {step.tool_hint} to complete the task.
-
-CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."""
-
-        # Single LLM call with tool - Use Responses API
-        base_instructions = serialized_context.get("instructions", "")
-        execution_instructions = format_prompt(
-            EXECUTION_STEP_PROMPT,
-            base_instructions=base_instructions,
-            step_num=step.step_num,
-            objective=step.objective,
-            tool_hint=step.tool_hint or "",
-            phase=step.phase.value,
-            success_criteria=step.success_criteria.description if step.success_criteria else "",
-            preconditions="; ".join(step.preconditions),
-            postconditions="; ".join(step.postconditions),
-            verification_method=step.verification_method or "",
-            max_tool_calls=step.max_tool_calls
-        )
-        if not execution_instructions:
-            execution_instructions = base_instructions
-        combined_instructions = "\n\n".join(
-            part for part in [execution_instructions, focused_guidance] if part
-        )
-        # Convert tool definitions to internally-tagged format
-        tools_internally_tagged = [t.to_responses_format() if hasattr(t, 'to_responses_format') else t for t in tools]
-        response = self.llm.respond(
-            input=serialized_context.get("input", ""),
-            instructions=combined_instructions,
-            tools=tools_internally_tagged
-        )
-
-        trace.llm_calls += 1
-
-        # Execute tool if called
-        if response.has_tool_calls and response.tool_calls:
-            tool_call = response.tool_calls[0]
-            result = self.tool_registry.execute(tool_call.name, **tool_call.arguments)
-            trace.tool_calls += 1
-
-            # Create step result
-            step_result = StepResult(
-                step_num=1,
-                status=PlanStatus.COMPLETED if result.is_success else PlanStatus.FAILED,
-                tool_calls_made=[ToolCallRecord(
-                    tool_name=tool_call.name,
-                    arguments=tool_call.arguments,
-                    result=result,
-                    duration_ms=0,
-                    timestamp=time.time()
-                )],
-                accumulated_data={"result": result.output} if result.is_success else {},
-                final_response=str(result.output)[:1000] if result.is_success else f"Tool '{tool_call.name}' failed: {result.error}",
-                duration_ms=(time.time() - start_time) * 1000,
-                phase=step.phase
-            )
-            trace.step_results.append(step_result)
-            self._update_plan_status_tracker(
-                plan_status,
-                step.step_num,
-                step_result.status,
-                self._status_note_for_result(step_result, step)
-            )
-
-            # Synthesize readable response from tool result
-            if result.is_success:
-                trace.final_response = self._synthesize_final_response(
-                    plan, trace, serialized_context, on_stream_chunk
-                )
-            else:
-                trace.tool_failures += 1
-                trace.final_response = f"Tool failed: {result.error}"
-        else:
-            # LLM didn't call tool - use its response
-            trace.final_response = response.content
-            step_result = StepResult(
-                step_num=1,
-                status=PlanStatus.COMPLETED,
-                final_response=response.content,
-                duration_ms=(time.time() - start_time) * 1000,
-                phase=step.phase
-            )
-            trace.step_results.append(step_result)
-            self._update_plan_status_tracker(
-                plan_status,
-                step.step_num,
-                step_result.status,
-                self._status_note_for_result(step_result, step)
-            )
-
-        return trace
-
     def _execute_plan_stepwise(
         self,
         plan: Plan,
@@ -415,7 +444,8 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         trace: ExecutionTrace,
         serialized_context: Dict[str, Any],
         on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
-        plan_status: Optional[Dict[int, Dict[str, Any]]] = None
+        plan_status: Optional[Dict[int, Dict[str, Any]]] = None,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None
     ) -> ExecutionTrace:
         """
         Execute plan step-by-step with resilient dependency handling.
@@ -430,6 +460,13 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         Each step is a unit of work that may involve multiple tool calls.
         Updates plan step status after each step so dependencies work correctly.
         """
+        # ========== CRITICAL: LOG STEPWISE EXECUTION ENTRY ==========
+        _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | _execute_plan_stepwise() ENTRY | total_steps={len(plan.steps)} | discovery_required={plan.discovery_required} | microloop={self._use_microloop}")
+
+        # ========== PHASE 0: MANIFEST INITIALIZATION (MICROLOOP MODE) ==========
+        if self._use_microloop and MICROLOOP_AVAILABLE:
+            self._current_manifest = self._create_manifest_for_plan(plan)
+
         # ========== PHASE 1: DEPENDENCY GRAPH PREPARATION ==========
         # Normalize and sanitize dependencies
         self._normalize_dependencies(plan.steps)
@@ -457,6 +494,10 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
         discovery_required = plan.discovery_required and bool(remaining_discovery)
 
         for level_idx, level_steps in enumerate(execution_levels):
+            # ========== LOG LEVEL EXECUTION START ==========
+            step_nums = [s.step_num for s in level_steps]
+            _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | level {level_idx + 1}/{len(execution_levels)} | steps={step_nums}")
+
             # ---- PRE-EXECUTION CHECKS FOR ALL STEPS IN LEVEL ----
             steps_to_execute = []
             for step in level_steps:
@@ -563,9 +604,20 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                         PlanStatus.IN_PROGRESS,
                         step.objective
                     )
-                level_results = self._execute_level_parallel(
-                    steps_to_execute, tools, trace, serialized_context, plan, plan_status
-                )
+
+                # Choose execution path: microloop or standard
+                if self._use_microloop and self._microloop:
+                    _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | executing via MICROLOOP | steps={[s.step_num for s in steps_to_execute]}")
+                    level_results = self._execute_level_parallel_microloop(
+                        steps_to_execute, tools, trace, serialized_context, plan, plan_status,
+                        execution_discoveries
+                    )
+                else:
+                    _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | executing via STANDARD | steps={[s.step_num for s in steps_to_execute]}")
+                    level_results = self._execute_level_parallel(
+                        steps_to_execute, tools, trace, serialized_context, plan, plan_status,
+                        execution_discoveries
+                    )
 
                 # ---- POST-EXECUTION UPDATES FOR EACH STEP ----
                 for step, step_result in zip(steps_to_execute, level_results):
@@ -602,6 +654,10 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                         self._status_note_for_result(step_result, step)
                     )
 
+                    # Record step summary in discoveries for future steps to see
+                    if execution_discoveries is not None:
+                        self._record_step_summary(step, step_result, execution_discoveries)
+
                     # Track discovery phase completion
                     if discovery_required and step.phase == PlanPhase.DISCOVERY:
                         remaining_discovery.discard(step.step_num)
@@ -625,7 +681,11 @@ CRITICAL: Call the tool ONCE and return the result. Do not call multiple tools."
                     discovery_required = False
                     remaining_discovery.clear()
 
-        # ========== PHASE 3: FINAL RESPONSE SYNTHESIS ==========
+        # ========== PHASE 3: FINALIZE MANIFEST (MICROLOOP MODE) ==========
+        if self._use_microloop and self._current_manifest:
+            self._current_manifest.finalize()
+
+        # ========== PHASE 4: FINAL RESPONSE SYNTHESIS ==========
         if trace.tool_calls > 0 or not trace.final_response:
             trace.final_response = self._synthesize_final_response(
                 plan, trace, serialized_context, on_stream_chunk
@@ -693,47 +753,64 @@ Provide a natural, conversational response that directly answers the user's ques
         try:
             if on_stream_chunk:
                 # STREAMING PATH: Use Responses API format for stream()
-                import sys
-                print(f"[DEBUG] Streaming synthesis starting, callback present", file=sys.stderr, flush=True)
-
                 full_content = ""
                 chunk_index = 0
                 had_chunks = False
-                stream_gen = self.llm.stream(
-                    input=serialized_context.get("input", ""),
-                    instructions=synthesis_prompt
-                )
+                with self._llm_lock:
+                    stream_gen = self.llm.stream(
+                        input=serialized_context.get("input", ""),
+                        instructions=synthesis_prompt
+                    )
 
-                try:
-                    while True:
-                        chunk = next(stream_gen)
-                        full_content += chunk
-                        if chunk:
-                            had_chunks = True
-                        print(f"[DEBUG] Emitting chunk {chunk_index}: {chunk[:30] if chunk else '(empty)'}...", file=sys.stderr, flush=True)
-                        on_stream_chunk(chunk, chunk_index, False)
-                        chunk_index += 1
-                except StopIteration as stop:
-                    # Generator finished - emit final marker
-                    print(f"[DEBUG] Stream complete, emitting final marker", file=sys.stderr, flush=True)
-                    # Get final response from generator return value if available
-                    if hasattr(stop, 'value') and stop.value:
-                        full_content = stop.value.content or full_content
-                    if had_chunks:
-                        on_stream_chunk("", chunk_index, True)
-                    else:
-                        final_text = full_content or "I completed the task but couldn't generate a summary."
-                        full_content = final_text
-                        on_stream_chunk(final_text, chunk_index, True)
+                    try:
+                        while True:
+                            chunk = next(stream_gen)
+                            full_content += chunk
+                            if chunk:
+                                had_chunks = True
+                            on_stream_chunk(chunk, chunk_index, False)
+                            chunk_index += 1
+                    except StopIteration as stop:
+                        # Generator finished - emit final marker
+                        # Get final response from generator return value if available
+                        if hasattr(stop, 'value') and stop.value:
+                            full_content = stop.value.content or full_content
+                        if had_chunks:
+                            on_stream_chunk("", chunk_index, True)
+                        else:
+                            final_text = full_content or "I completed the task but couldn't generate a summary."
+                            full_content = final_text
+                            on_stream_chunk(final_text, chunk_index, True)
 
                 trace.llm_calls += 1
                 return full_content or "I completed the task but couldn't generate a summary."
 
             else:
-                # Use Responses API (non-streaming)
-                response = self.llm.respond(
-                    input=serialized_context.get("input", ""),
-                    instructions=synthesis_prompt
+                # Use Responses API (non-streaming) - Time the LLM call for logging
+                llm_start = time.time()
+                synthesis_input = serialized_context.get("input", "")
+                # ========== LOG PRE-LLM CALL ==========
+                _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | LLM CALL STARTING | type=synthesis | input_len={len(synthesis_input)} | prompt_len={len(synthesis_prompt)}")
+                with self._llm_lock:
+                    response = self.llm.respond(
+                        input=synthesis_input,
+                        instructions=synthesis_prompt
+                    )
+                llm_duration_ms = (time.time() - llm_start) * 1000
+                _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | LLM CALL COMPLETE | type=synthesis | duration={llm_duration_ms:.0f}ms")
+
+                # Log the synthesis call (manifest=None as synthesis happens post-execution)
+                self._log_llm_call(
+                    step_num=0,  # Synthesis is not a numbered step
+                    objective="Synthesize final response",
+                    instructions=synthesis_prompt,
+                    input_str=synthesis_input,
+                    raw_response=response.content or "",
+                    tool_calls=[],
+                    tool_results=[],
+                    duration_ms=llm_duration_ms,
+                    phase="synthesis",
+                    manifest=None
                 )
 
             trace.llm_calls += 1
@@ -749,7 +826,8 @@ Provide a natural, conversational response that directly answers the user's ques
     def _stream_direct_response(
         self,
         serialized_context: Dict[str, Any],
-        on_stream_chunk: Callable[[str, int, bool], None]
+        on_stream_chunk: Callable[[str, int, bool], None],
+        instructions: Optional[str] = None
     ) -> str:
         """
         Stream a direct LLM response (no tool synthesis needed).
@@ -761,31 +839,32 @@ Provide a natural, conversational response that directly answers the user's ques
 
         try:
             # Use Responses API format for stream()
-            stream_gen = self.llm.stream(
-                input=serialized_context.get("input", ""),
-                instructions=serialized_context.get("instructions", ""),
-                tools=None
-            )
+            with self._llm_lock:
+                stream_gen = self.llm.stream(
+                    input=serialized_context.get("input", ""),
+                    instructions=instructions or serialized_context.get("instructions", ""),
+                    tools=None
+                )
 
-            try:
-                while True:
-                    chunk = next(stream_gen)
-                    full_content += chunk
-                    if chunk:
-                        had_chunks = True
-                    on_stream_chunk(chunk, chunk_index, False)
-                    chunk_index += 1
-            except StopIteration as stop:
-                # Generator finished - emit final marker
-                # Get final response from generator return value if available
-                if hasattr(stop, 'value') and stop.value:
-                    full_content = stop.value.content or full_content
-                if had_chunks:
-                    on_stream_chunk("", chunk_index, True)
-                else:
-                    final_text = full_content or "I couldn't generate a response."
-                    full_content = final_text
-                    on_stream_chunk(final_text, chunk_index, True)
+                try:
+                    while True:
+                        chunk = next(stream_gen)
+                        full_content += chunk
+                        if chunk:
+                            had_chunks = True
+                        on_stream_chunk(chunk, chunk_index, False)
+                        chunk_index += 1
+                except StopIteration as stop:
+                    # Generator finished - emit final marker
+                    # Get final response from generator return value if available
+                    if hasattr(stop, 'value') and stop.value:
+                        full_content = stop.value.content or full_content
+                    if had_chunks:
+                        on_stream_chunk("", chunk_index, True)
+                    else:
+                        final_text = full_content or "I couldn't generate a response."
+                        full_content = final_text
+                        on_stream_chunk(final_text, chunk_index, True)
 
             return full_content or "I couldn't generate a response."
 
@@ -800,7 +879,8 @@ Provide a natural, conversational response that directly answers the user's ques
         tools: List[Any],
         trace: ExecutionTrace,
         serialized_context: Dict[str, Any],
-        plan_status: Optional[Dict[int, Dict[str, Any]]] = None
+        plan_status: Optional[Dict[int, Dict[str, Any]]] = None,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None
     ) -> StepResult:
         """
         Execute a single step (may involve multiple tool calls).
@@ -816,14 +896,10 @@ Provide a natural, conversational response that directly answers the user's ques
 
         start_time = time.time()
         context = StepContext()
-        llm_messages_to_add = []  # Messages generated during this step
 
         # Add step guidance to help LLM focus
         # Pass context so guidance can show what data we already have
-        step_guidance = self._create_step_guidance(step, context, plan_status)
-
-        # Initialize messages tracking for tool call history within step
-        messages_with_guidance: List[Message] = []
+        step_guidance = self._create_step_guidance(step, context, plan_status, execution_discoveries)
 
         # Prepare LLM call parameters - Use Responses API
         base_instructions = serialized_context.get("instructions", "")
@@ -857,14 +933,34 @@ Provide a natural, conversational response that directly answers the user's ques
 
         # Execute until step completes or hits limit
         while not step_complete and tool_calls_in_step < step.max_tool_calls:
-            # Use Responses API
-            response = self.llm.respond(
-                input=llm_input,
-                instructions=combined_instructions,
-                tools=tools_internally_tagged
-            )
+            # Use Responses API - Time the LLM call for logging
+            llm_start = time.time()
+            # ========== LOG PRE-LLM CALL ==========
+            _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | LLM CALL STARTING | type=step_execution | step={step.step_num} | objective={step.objective[:50] if step.objective else 'none'}... | tool_calls_so_far={tool_calls_in_step}")
+            with self._llm_lock:
+                response = self.llm.respond(
+                    input=llm_input,
+                    instructions=combined_instructions,
+                    tools=tools_internally_tagged
+                )
+            llm_duration_ms = (time.time() - llm_start) * 1000
+            _trace(f"[EXECUTOR] {_time.strftime('%H:%M:%S')} | LLM CALL COMPLETE | step={step.step_num} | duration={llm_duration_ms:.0f}ms | has_tool_calls={response.has_tool_calls}")
 
             trace.llm_calls += 1
+
+            # Log the complete LLM call
+            self._log_llm_call(
+                step_num=step.step_num,
+                objective=step.objective,
+                instructions=combined_instructions,
+                input_str=llm_input,
+                raw_response=response.content or "",
+                tool_calls=response.tool_calls if response.has_tool_calls else [],
+                tool_results=[],  # Will be populated after tool execution
+                duration_ms=llm_duration_ms,
+                phase=step.phase.value,
+                manifest=execution_discoveries
+            )
 
             if not response.has_tool_calls:
                 # LLM thinks step is done (no more tools needed)
@@ -886,12 +982,10 @@ Provide a natural, conversational response that directly answers the user's ques
                     criteria_output
                 ) = self._execute_tool_calls_parallel(
                     tool_calls_batch,
-                    response,
                     step,
                     context,
-                    messages_with_guidance,
-                    llm_messages_to_add,
-                    trace
+                    trace,
+                    execution_discoveries
                 )
 
                 tool_calls_in_step += len(tool_calls_batch)
@@ -941,6 +1035,21 @@ Provide a natural, conversational response that directly answers the user's ques
                 context.add_tool_result(tool_call.name, result)
                 self._emit_step_callback(step.step_num, record)
 
+                # Log the tool execution result
+                self._log_tool_execution(
+                    step_num=step.step_num,
+                    objective=step.objective,
+                    tool_name=tool_call.name,
+                    tool_args=tool_call.arguments,
+                    result=result,
+                    duration_ms=duration_ms,
+                    phase=step.phase.value,
+                    manifest=execution_discoveries
+                )
+
+                # Extract discovery from tool result (safe - won't crash on failure)
+                self._safe_extract_discovery(tool_call.name, result, execution_discoveries, step.step_num)
+
                 tool_calls_in_step += 1
                 trace.tool_calls += 1
 
@@ -950,7 +1059,7 @@ Provide a natural, conversational response that directly answers the user's ques
                         step_complete = True
                         # Use tool result directly, don't make another LLM call
                         if result.is_success:
-                            final_response_content = str(result.output)
+                            final_response_content = self._clip_output(result.output)
                         else:
                             # Collect any successful outputs from this step
                             successful_outputs = [
@@ -969,33 +1078,6 @@ Provide a natural, conversational response that directly answers the user's ques
                 if not result.is_success:
                     trace.tool_failures += 1
 
-                # Create messages for conversation history
-                assistant_msg = Message(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content or "",
-                    tool_calls=[{
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {"name": tool_call.name, "arguments": json.dumps(tool_call.arguments)}
-                    }]
-                )
-                tool_msg = Message(
-                    role=MessageRole.TOOL,
-                    content=str(result.output if result.is_success else f"Error: {result.error}")[:2000],
-                    tool_call_id=tool_call.id,
-                    name=tool_call.name
-                )
-
-                # Add to guidance messages for continued execution
-                messages_with_guidance.append(assistant_msg)
-                messages_with_guidance.append(tool_msg)
-
-                # Track messages to be added to main conversation (Agent will do this)
-                llm_messages_to_add.append(assistant_msg)
-                llm_messages_to_add.append(tool_msg)
-
-                # DON'T append to main messages - Agent controls conversation state
-
             # HEURISTIC: If the suggested tool was executed successfully, consider step complete
             # This prevents the LLM from looping on the same tool repeatedly
             if tool_hint_executed and tool_calls_in_step >= 1:
@@ -1004,7 +1086,7 @@ Provide a natural, conversational response that directly answers the user's ques
                 # This saves 1 LLM call per step (significant performance improvement)
                 last_tool_result = context.tool_calls_made[-1].result
                 if last_tool_result.is_success:
-                    final_response_content = str(last_tool_result.output)[:500]  # Truncate long outputs
+                    final_response_content = self._clip_output(last_tool_result.output, 500)
                 else:
                     # Extract any successful results from earlier tool calls in this step
                     successful_outputs = [
@@ -1036,7 +1118,7 @@ Provide a natural, conversational response that directly answers the user's ques
             step_num=step.step_num,
             status=status,
             tool_calls_made=context.tool_calls_made,
-            llm_messages=llm_messages_to_add,
+            llm_messages=[],
             accumulated_data=context.accumulated_data,
             final_response=final_response_content,
             error=error_message,
@@ -1055,12 +1137,10 @@ Provide a natural, conversational response that directly answers the user's ques
     def _execute_tool_calls_parallel(
         self,
         tool_calls: List[ToolCall],
-        response: LLMResponse,
         step: PlanStep,
         context: StepContext,
-        messages_with_guidance: List[Message],
-        llm_messages_to_add: List[Message],
-        trace: ExecutionTrace
+        trace: ExecutionTrace,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None
     ):
         """
         Execute a batch of read-only tool calls in parallel.
@@ -1110,6 +1190,21 @@ Provide a natural, conversational response that directly answers the user's ques
             context.add_tool_result(tool_call.name, result)
             self._emit_step_callback(step.step_num, record)
 
+            # Log the tool execution result
+            self._log_tool_execution(
+                step_num=step.step_num,
+                objective=step.objective,
+                tool_name=tool_call.name,
+                tool_args=tool_call.arguments,
+                result=result,
+                duration_ms=result.duration_ms,
+                phase=step.phase.value,
+                manifest=execution_discoveries
+            )
+
+            # Extract discovery from tool result (safe - won't crash on failure)
+            self._safe_extract_discovery(tool_call.name, result, execution_discoveries, step.step_num)
+
             trace.tool_calls += 1
             if not result.is_success:
                 trace.tool_failures += 1
@@ -1117,28 +1212,6 @@ Provide a natural, conversational response that directly answers the user's ques
                 last_success_output = result.output
                 if step.tool_hint and tool_call.name == step.tool_hint:
                     tool_hint_executed = True
-
-            # Create messages mirroring sequential execution order
-            assistant_msg = Message(
-                role=MessageRole.ASSISTANT,
-                content=response.content or "",
-                tool_calls=[{
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {"name": tool_call.name, "arguments": json.dumps(tool_call.arguments)}
-                }]
-            )
-            tool_msg = Message(
-                role=MessageRole.TOOL,
-                content=str(result.output if result.is_success else f"Error: {result.error}")[:2000],
-                tool_call_id=tool_call.id,
-                name=tool_call.name
-            )
-
-            messages_with_guidance.append(assistant_msg)
-            messages_with_guidance.append(tool_msg)
-            llm_messages_to_add.append(assistant_msg)
-            llm_messages_to_add.append(tool_msg)
 
         # Success criteria check after all results applied
         criteria_met = False
@@ -1155,7 +1228,7 @@ Provide a natural, conversational response that directly answers the user's ques
                 if successful_outputs:
                     criteria_output = "\n".join(successful_outputs)
                 elif last_success_output is not None:
-                    criteria_output = str(last_success_output)
+                    criteria_output = self._clip_output(last_success_output)
                 else:
                     criteria_output = f"Completed: {step.objective}"
 
@@ -1165,7 +1238,8 @@ Provide a natural, conversational response that directly answers the user's ques
         self,
         step: PlanStep,
         context: Optional[StepContext] = None,
-        plan_status: Optional[Dict[int, Dict[str, Any]]] = None
+        plan_status: Optional[Dict[int, Dict[str, Any]]] = None,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None
     ) -> str:
         """Create system message to guide LLM for this specific step"""
         guidance = f"""You are currently executing Step {step.step_num} of a multi-step plan.
@@ -1176,9 +1250,57 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
 
 """
 
-        progress_block = self._render_progress_block(plan_status, step.step_num)
-        if progress_block:
-            guidance += f"{progress_block}\n\n"
+        # MICROLOOP: Show manifest of actual work done (when available)
+        if self._use_microloop and self._current_manifest:
+            manifest_guidance = self._current_manifest.to_step_guidance(step.step_num)
+            if manifest_guidance:
+                guidance += f"{manifest_guidance}\n\n"
+
+        # Show context from previous steps
+        if execution_discoveries:
+            # First, show completed step summaries
+            step_summaries = [
+                (key, disc) for key, disc in execution_discoveries.items()
+                if disc.type == DiscoveryType.STEP_SUMMARY and disc.step_num and disc.step_num < step.step_num
+            ]
+            if step_summaries:
+                guidance += "COMPLETED STEPS:\n"
+                for key, disc in sorted(step_summaries, key=lambda x: x[1].step_num or 0):
+                    status_icon = "✓" if disc.status == "completed" else "✗" if disc.status == "failed" else "~"
+                    tools_str = f" [tools: {', '.join(disc.tools_used)}]" if disc.tools_used else ""
+                    guidance += f"  {status_icon} Step {disc.step_num}: {disc.objective or 'unknown'}{tools_str}\n"
+                    if disc.result_summary:
+                        guidance += f"      Result: {disc.result_summary[:100]}...\n"
+                guidance += "\n"
+
+            # Then show relevant discoveries with previews
+            relevant = self._get_relevant_discoveries(step, execution_discoveries)
+            # Filter out step summaries - we already showed those
+            relevant = {k: v for k, v in relevant.items() if v.type != DiscoveryType.STEP_SUMMARY}
+            if relevant:
+                guidance += "AVAILABLE DATA FROM PREVIOUS STEPS:\n"
+                for key, disc in list(relevant.items())[:5]:  # Max 5 to keep guidance concise
+                    if disc.type == DiscoveryType.FILE_CONTENT:
+                        guidance += f"  - File: {disc.path} ({disc.size or 0} bytes)\n"
+                        if disc.preview:
+                            preview = disc.preview[:150].replace('\n', ' ')
+                            guidance += f"    Preview: {preview}...\n"
+                    elif disc.type == DiscoveryType.SEARCH_RESULT:
+                        guidance += f"  - Search '{disc.query}': {disc.total or 0} matches\n"
+                        if disc.matches:
+                            guidance += f"    Top matches: {', '.join(disc.matches[:3])}\n"
+                    elif disc.type == DiscoveryType.DIRECTORY_LISTING:
+                        guidance += f"  - Directory {disc.path}: {disc.total or 0} items\n"
+                        if disc.files:
+                            guidance += f"    Files: {', '.join(disc.files[:5])}\n"
+                    elif disc.type == DiscoveryType.COMMAND_OUTPUT:
+                        guidance += f"  - Command '{disc.command}':\n"
+                        if disc.output:
+                            output_preview = disc.output[:100].replace('\n', ' ')
+                            guidance += f"    Output: {output_preview}...\n"
+                    elif disc.type == DiscoveryType.ERROR:
+                        guidance += f"  - ERROR in {disc.tool}: {disc.message[:80] if disc.message else 'unknown'}\n"
+                guidance += "\n"
 
         # OPTIMIZATION: Show LLM what data we already have
         if context and context.accumulated_data:
@@ -1207,10 +1329,183 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
             if step.tool_args_hint:
                 guidance += f" with args: {json.dumps(step.tool_args_hint)}"
             guidance += f"\nAfter calling {step.tool_hint} successfully, provide your answer. Do NOT call additional tools.\n"
+        elif step.phase == PlanPhase.DISCOVERY:
+            # Discovery steps ALWAYS need tools even if planner forgot to specify
+            guidance += (
+                "DISCOVERY STEP: You MUST use tools (search_filesystem, file_read, list_files) to gather information. "
+                "Do NOT provide speculation - use tools to find actual data.\n"
+            )
+        elif self._objective_implies_tools(step.objective):
+            # Objective implies tool usage even without explicit hint
+            guidance += (
+                "This step's objective requires tool usage. Use appropriate tools to complete it. "
+                "Do NOT say you cannot use tools - you have full tool access.\n"
+            )
         else:
             guidance += "This step is reasoning/synthesis only - no tools needed. Provide your analysis.\n"
 
         return guidance
+
+    def _objective_implies_tools(self, objective: str) -> bool:
+        """
+        Detect if a step objective implies tool usage even without explicit tool_hint.
+
+        This catches cases where the planner creates discovery-like steps
+        but forgets to specify the tool.
+        """
+        objective_lower = objective.lower()
+
+        # Keywords that strongly imply file/search operations
+        tool_indicators = [
+            "locate", "find", "search", "look for", "discover",
+            "read", "open", "inspect", "examine", "check",
+            "list", "directory", "folder", "contents",
+            "execute", "run", "install", "create file", "write file",
+            "modify", "edit", "update file", "delete"
+        ]
+
+        return any(indicator in objective_lower for indicator in tool_indicators)
+
+    def _extract_and_store_discovery(
+        self,
+        tool_name: str,
+        result: ToolResult,
+        discoveries: Dict[str, Discovery],
+        step_num: Optional[int] = None
+    ) -> None:
+        """
+        Extract and store canonicalized discovery from tool result.
+        Rules-based, no LLM - fast and cheap.
+        """
+        ts = time.time()
+
+        if tool_name == "file_read" and result.is_success:
+            path = result.metadata.get("path", "unknown") if result.metadata else "unknown"
+            content = str(result.output) if result.output else ""
+            discoveries[f"file:{path}"] = Discovery(
+                type=DiscoveryType.FILE_CONTENT,
+                timestamp=ts,
+                path=path,
+                size=len(content),
+                preview=content[:500] if len(content) > 500 else content
+            )
+
+        elif tool_name == "file_write" and result.is_success:
+            # Invalidate cached file content
+            path = result.metadata.get("path", "") if result.metadata else ""
+            if path:
+                key_to_remove = f"file:{path}"
+                if key_to_remove in discoveries:
+                    del discoveries[key_to_remove]
+
+        elif tool_name == "search_filesystem" and result.is_success:
+            query = result.metadata.get("pattern", "unknown") if result.metadata else "unknown"
+            output = result.output or ""
+            matches = output.strip().split("\n") if isinstance(output, str) and output.strip() else []
+            discoveries[f"search:{query}"] = Discovery(
+                type=DiscoveryType.SEARCH_RESULT,
+                timestamp=ts,
+                query=query,
+                matches=matches[:10],
+                total=len(matches)
+            )
+
+        elif tool_name == "list_files" and result.is_success:
+            path = result.metadata.get("path", ".") if result.metadata else "."
+            output = result.output or ""
+            files = output.strip().split("\n") if isinstance(output, str) and output.strip() else []
+            discoveries[f"ls:{path}"] = Discovery(
+                type=DiscoveryType.DIRECTORY_LISTING,
+                timestamp=ts,
+                path=path,
+                files=files[:20],
+                total=len(files)
+            )
+
+        elif tool_name == "bash_execute" and result.is_success:
+            command = (result.metadata.get("command", "") if result.metadata else "")[:50]
+            output = str(result.output)[:300] if result.output else ""
+            if output and len(output) > 10:
+                discoveries[f"bash:{command}"] = Discovery(
+                    type=DiscoveryType.COMMAND_OUTPUT,
+                    timestamp=ts,
+                    command=command,
+                    output=output
+                )
+
+        elif result.status == ToolStatus.ERROR:
+            discoveries[f"error:{tool_name}:{step_num or 0}"] = Discovery(
+                type=DiscoveryType.ERROR,
+                timestamp=ts,
+                tool=tool_name,
+                message=str(result.error)[:200] if result.error else "Unknown error",
+                step_num=step_num
+            )
+
+    def _get_relevant_discoveries(
+        self,
+        step: PlanStep,
+        discoveries: Dict[str, Discovery]
+    ) -> Dict[str, Discovery]:
+        """
+        Select discoveries relevant to this step.
+        Simple heuristics - no LLM.
+        """
+        relevant = {}
+        step_text = step.objective + " " + str(step.tool_args_hint or "")
+
+        for key, disc in discoveries.items():
+            # Always include errors
+            if disc.type == DiscoveryType.ERROR:
+                relevant[key] = disc
+                continue
+
+            # Include file content if step mentions the path
+            if disc.type == DiscoveryType.FILE_CONTENT and disc.path:
+                if disc.path in step_text:
+                    relevant[key] = disc
+                continue
+
+            # Include search results if step is searching
+            if disc.type == DiscoveryType.SEARCH_RESULT and step.tool_hint == "search_filesystem":
+                relevant[key] = disc
+                continue
+
+            # Include directory listings if step is navigating filesystem
+            if disc.type == DiscoveryType.DIRECTORY_LISTING and step.tool_hint in ["list_files", "file_read"]:
+                relevant[key] = disc
+                continue
+
+        return relevant
+
+    def _record_step_summary(
+        self,
+        step: PlanStep,
+        step_result: StepResult,
+        discoveries: Dict[str, Discovery]
+    ) -> None:
+        """Record a summary of a completed step for future steps to reference."""
+        # Extract tools used from the step result
+        tools_used = []
+        if step_result.tool_calls_made:
+            tools_used = list(set(tc.tool_name for tc in step_result.tool_calls_made))
+
+        # Create a brief result summary
+        result_summary = None
+        if step_result.final_response:
+            result_summary = str(step_result.final_response)[:200]
+        elif step_result.accumulated_data:
+            result_summary = f"Collected: {', '.join(step_result.accumulated_data.keys())}"
+
+        discoveries[f"step:{step.step_num}"] = Discovery(
+            type=DiscoveryType.STEP_SUMMARY,
+            timestamp=time.time(),
+            step_num=step.step_num,
+            objective=step.objective[:100] if step.objective else None,
+            status=step_result.status.value if step_result.status else "unknown",
+            tools_used=tools_used,
+            result_summary=result_summary
+        )
 
     def _validate_step(self, step: PlanStep) -> ValidationResult:
         """Validate if step achieved its success criteria"""
@@ -1417,6 +1712,7 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
         trace: ExecutionTrace,
         serialized_context: Dict[str, Any],
         plan_status: Optional[Dict[int, Dict[str, Any]]] = None,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None,
         max_retries: int = 2,
         backoff_base: float = 0.3
     ) -> StepResult:
@@ -1440,7 +1736,7 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
 
         for attempt in range(max_retries + 1):
             try:
-                result = self._execute_step(step, tools, trace, serialized_context, plan_status)
+                result = self._execute_step(step, tools, trace, serialized_context, plan_status, execution_discoveries)
                 last_result = result
 
                 # Success conditions - return immediately
@@ -1479,7 +1775,8 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
         trace: ExecutionTrace,
         serialized_context: Dict[str, Any],
         plan: Plan,
-        plan_status: Optional[Dict[int, Dict[str, Any]]] = None
+        plan_status: Optional[Dict[int, Dict[str, Any]]] = None,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None
     ) -> List[StepResult]:
         """
         Execute all steps in a level concurrently using ThreadPoolExecutor.
@@ -1503,7 +1800,8 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
         # Single step - no need for thread pool overhead
         if len(level_steps) == 1:
             result = self._execute_step_with_retry(
-                level_steps[0], tools, trace, serialized_context, plan_status
+                level_steps[0], tools, trace, serialized_context, plan_status,
+                execution_discoveries
             )
             return [result]
 
@@ -1515,7 +1813,8 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
             future_to_idx = {
                 executor.submit(
                     self._execute_step_with_retry,
-                    step, tools, trace, serialized_context, plan_status
+                    step, tools, trace, serialized_context, plan_status,
+                    execution_discoveries
                 ): idx
                 for idx, step in enumerate(level_steps)
             }
@@ -1537,6 +1836,240 @@ SUCCESS CRITERIA: {step.success_criteria.description if step.success_criteria el
                     )
 
         return results
+
+    # =========================================================================
+    # MICROLOOP EXECUTION METHODS
+    # =========================================================================
+
+    def _execute_step_with_microloop(
+        self,
+        step: PlanStep,
+        tools: List[Any],
+        trace: ExecutionTrace,
+        serialized_context: Dict[str, Any],
+        plan_status: Optional[Dict[int, Dict[str, Any]]] = None,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None
+    ) -> StepResult:
+        """
+        Execute a step using the microloop state machine.
+
+        This provides:
+        1. Explicit state transitions (READY -> TOOL_PENDING -> REASONING -> etc)
+        2. Monotonic reasoning (COMMITs cannot be undone)
+        3. Adaptive recovery (retry with modifications, pivot to different tools)
+        4. Detailed artifact tracking via ExecutionManifest
+
+        Args:
+            step: The step to execute
+            tools: Available tools
+            trace: Execution trace (for LLM/tool call counting)
+            serialized_context: Context for LLM calls
+            plan_status: Mutable per-step status tracker
+            execution_discoveries: Discoveries from previous steps
+
+        Returns:
+            StepResult compatible with standard execution path
+        """
+        if not self._microloop or not self._current_manifest:
+            # Fallback to standard execution if microloop not available
+            return self._execute_step_with_retry(
+                step, tools, trace, serialized_context, plan_status, execution_discoveries
+            )
+
+        # Execute via microloop
+        result = self._microloop.execute(
+            step=step,
+            serialized_context=serialized_context,
+            manifest=self._current_manifest,
+            tools=tools,
+            existing_discoveries=execution_discoveries
+        )
+
+        # Update trace counts from microloop result
+        trace.tool_calls += result.manifest_entry.total_tool_calls
+        trace.tool_failures += result.manifest_entry.failed_tool_calls
+
+        # Log microloop completion
+        self._log_microloop_result(step, result)
+
+        return result.step_result
+
+    def _log_microloop_result(self, step: PlanStep, result: "MicroloopResult") -> None:
+        """Log microloop execution result for visibility."""
+        if not self._llm_call_logger:
+            return
+
+        try:
+            entry = result.manifest_entry
+
+            # Build summary of what happened
+            summary_parts = []
+            if entry.files_created:
+                summary_parts.append(f"Created: {', '.join(entry.files_created)}")
+            if entry.files_modified:
+                summary_parts.append(f"Modified: {', '.join(entry.files_modified)}")
+            if entry.failures:
+                summary_parts.append(f"Failures: {len(entry.failures)}")
+
+            summary = "; ".join(summary_parts) if summary_parts else "No artifacts"
+
+            self._llm_call_logger(
+                step.step_num,
+                step.objective,
+                f"[MICROLOOP RESULT]\nState: {entry.final_state.name}\nStatus: {entry.status.value}",
+                "",
+                summary,
+                [],
+                [{
+                    "tools_called": entry.tools_called,
+                    "total_tool_calls": entry.total_tool_calls,
+                    "successful": entry.successful_tool_calls,
+                    "failed": entry.failed_tool_calls,
+                    "reasoning_decisions": entry.reasoning_decisions,
+                    "commitments": entry.commitments,
+                }],
+                entry.duration_ms,
+                "microloop_result",
+                None
+            )
+        except Exception as e:
+            # ========== MAKE LOGGING ERRORS VISIBLE ==========
+            import sys
+            _trace(f"[EXECUTOR ERROR] _log_microloop_step_result failed: {type(e).__name__}: {str(e)[:200]}")
+
+    def _handle_microloop_log_event(self, event: str, data: Optional[Dict[str, Any]]) -> None:
+        """Relay microloop internal events through standard LLM log channel."""
+        if not self._llm_call_logger:
+            return
+
+        payload = data or {}
+        step_num = payload.get("step_num", 0)
+        objective = payload.get("objective") or f"Step {step_num}"
+        duration_ms = payload.get("duration_ms", 0.0)
+        tool_name = payload.get("tool")
+
+        # Prepare safe snapshot of payload for raw_response field
+        raw_payload = dict(payload)
+        raw_payload.pop("step_num", None)
+        raw_response = ""
+        if raw_payload:
+            try:
+                raw_response = json.dumps(raw_payload, default=str)[:1000]
+            except Exception:
+                raw_response = str(raw_payload)
+
+        tool_calls = []
+        tool_results = []
+
+        if tool_name and event == "tool_execute_start":
+            tool_calls.append({
+                "name": tool_name,
+                "arguments": payload.get("args", {})
+            })
+            tool_results.append({
+                "tool": tool_name,
+                "status": "started",
+                "success": None
+            })
+        elif tool_name and event == "tool_execute_end":
+            tool_results.append({
+                "tool": tool_name,
+                "status": "completed" if payload.get("success", True) else "failed",
+                "success": payload.get("success"),
+                "output": payload.get("output", "")
+            })
+        elif tool_name and event == "tool_failure":
+            tool_results.append({
+                "tool": tool_name,
+                "status": "failed",
+                "success": False,
+                "error": payload.get("error"),
+                "output": payload.get("result_preview", "")
+            })
+
+        try:
+            self._llm_call_logger(
+                step_num,
+                objective,
+                f"[MICROLOOP EVENT] {event}",
+                "",
+                raw_response,
+                tool_calls,
+                tool_results,
+                duration_ms,
+                f"microloop_{event}",
+                None
+            )
+        except Exception as e:
+            # ========== MAKE LOGGING ERRORS VISIBLE ==========
+            import sys
+            _trace(f"[EXECUTOR ERROR] _handle_microloop_log_event failed for event={event}: {type(e).__name__}: {str(e)[:200]}")
+
+    def _execute_level_parallel_microloop(
+        self,
+        level_steps: List[PlanStep],
+        tools: List[Any],
+        trace: ExecutionTrace,
+        serialized_context: Dict[str, Any],
+        plan: Plan,
+        plan_status: Optional[Dict[int, Dict[str, Any]]] = None,
+        execution_discoveries: Optional[Dict[str, Discovery]] = None
+    ) -> List[StepResult]:
+        """
+        Execute all steps in a level using microloop (parallel execution).
+
+        Same interface as _execute_level_parallel but uses microloop internally.
+        """
+        if not level_steps:
+            return []
+
+        # Single step - execute directly
+        if len(level_steps) == 1:
+            result = self._execute_step_with_microloop(
+                level_steps[0], tools, trace, serialized_context,
+                plan_status, execution_discoveries
+            )
+            return [result]
+
+        # Multiple steps - execute in parallel
+        max_workers = min(len(level_steps), 4)
+        results = [None] * len(level_steps)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {
+                executor.submit(
+                    self._execute_step_with_microloop,
+                    step, tools, trace, serialized_context,
+                    plan_status, execution_discoveries
+                ): idx
+                for idx, step in enumerate(level_steps)
+            }
+
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                step = level_steps[idx]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    results[idx] = StepResult(
+                        step_num=step.step_num,
+                        status=PlanStatus.FAILED,
+                        error=f"Microloop execution error: {str(e)}",
+                        duration_ms=0,
+                        phase=step.phase
+                    )
+
+        return results
+
+    def _create_manifest_for_plan(self, plan: Plan) -> "ExecutionManifest":
+        """Create a new ExecutionManifest for a plan."""
+        if not MICROLOOP_AVAILABLE:
+            return None
+
+        return ExecutionManifest(
+            plan_goal=plan.goal,
+            plan_id=str(uuid.uuid4())[:8]
+        )
 
     def _update_uncertainty(self, plan: Plan, step: PlanStep, step_result: StepResult):
         """

@@ -78,6 +78,41 @@ class PlanPhase(Enum):
     EXECUTION = "execution"
 
 
+class DiscoveryType(Enum):
+    """Type of discovery extracted from tool results"""
+    FILE_CONTENT = "file_content"
+    SEARCH_RESULT = "search_result"
+    DIRECTORY_LISTING = "directory_listing"
+    COMMAND_OUTPUT = "command_output"
+    ERROR = "error"
+    STEP_SUMMARY = "step_summary"  # Summary of a completed step
+
+
+@dataclass
+class Discovery:
+    """Canonicalized discovery entry from tool execution"""
+    type: DiscoveryType
+    timestamp: float
+    # Type-specific fields
+    path: Optional[str] = None           # For FILE_CONTENT, DIRECTORY_LISTING
+    size: Optional[int] = None           # For FILE_CONTENT (bytes)
+    preview: Optional[str] = None        # For FILE_CONTENT (truncated content)
+    query: Optional[str] = None          # For SEARCH_RESULT
+    matches: Optional[List[str]] = None  # For SEARCH_RESULT (top N matches)
+    total: Optional[int] = None          # For SEARCH_RESULT, DIRECTORY_LISTING (total count)
+    files: Optional[List[str]] = None    # For DIRECTORY_LISTING (top N files)
+    command: Optional[str] = None        # For COMMAND_OUTPUT
+    output: Optional[str] = None         # For COMMAND_OUTPUT (truncated)
+    tool: Optional[str] = None           # For ERROR
+    message: Optional[str] = None        # For ERROR
+    step_num: Optional[int] = None       # For ERROR, STEP_SUMMARY (which step)
+    # STEP_SUMMARY fields
+    objective: Optional[str] = None      # Step objective
+    status: Optional[str] = None         # Step completion status
+    tools_used: Optional[List[str]] = None  # Tools executed in this step
+    result_summary: Optional[str] = None    # Brief summary of what was accomplished
+
+
 @dataclass
 class SuccessCriteria:
     """Defines what success looks like for a step or plan"""

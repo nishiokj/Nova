@@ -113,6 +113,7 @@ class AgentHarness:
         # Core components sourced from runtime
         self.tool_registry = self.runtime.tool_registry
         self.agent = self.runtime.agent
+        self.graphd = getattr(self.runtime, "graphd", None)
 
         # Control interface state
         self._stop_requested = threading.Event()
@@ -186,18 +187,23 @@ class AgentHarness:
             # Step 1: Agent execution with progress updates
             self._set_state(HarnessState.AGENT_WORKING)
 
-            # Reset progress tracking and wire up callback
+            # Reset progress tracking and wire up callbacks
             self._last_progress_tool = None
-            progress_callback = self._create_progress_callback(request_id)
+            step_callback = self._create_progress_callback(request_id)
+            phase_callback = self._create_phase_callback(request_id)
 
-            # Get the agent for this tier and add progress callback
+            # Get the agent for this tier and add callbacks
             if hasattr(self.agent, "get_agent_for_tier"):
                 tier_agent = self.agent.get_agent_for_tier(tier)
             else:
                 tier_agent = self.agent
-            tier_agent.add_step_callback(progress_callback)
+            tier_agent.add_step_callback(step_callback)
+            if hasattr(tier_agent, "add_phase_callback"):
+                tier_agent.add_phase_callback(phase_callback)
 
             try:
+                if self.graphd:
+                    self.graphd.set_active(True)
                 with self.tool_registry.with_working_dir(call_dir):
                     with self._profile("harness.agent_run_ms"):
                         agent_response = self.agent.run(
@@ -207,8 +213,12 @@ class AgentHarness:
                             on_stream_chunk=on_stream_chunk
                         )
             finally:
+                if self.graphd:
+                    self.graphd.set_active(False)
                 if hasattr(tier_agent, "remove_step_callback"):
-                    tier_agent.remove_step_callback(progress_callback)
+                    tier_agent.remove_step_callback(step_callback)
+                if hasattr(tier_agent, "remove_phase_callback"):
+                    tier_agent.remove_phase_callback(phase_callback)
 
             # Step 2: Build response
             full_response = agent_response.content
@@ -277,6 +287,22 @@ class AgentHarness:
                             self.logger.error(f"Progress callback error: {e}", component="harness")
 
         return on_step
+
+    def _create_phase_callback(self, request_id: str) -> Callable[[str, Optional[str], int], None]:
+        """Create callback to forward agent phase progress to progress_callbacks.
+
+        This handles phase transitions (planning, execution, reflection) that don't
+        have tool names, complementing _create_progress_callback which handles tool steps.
+        """
+        def on_phase(message: str, tool_name: Optional[str], step_number: int):
+            # Forward to all progress callbacks
+            for callback in self._progress_callbacks:
+                try:
+                    callback(message, tool_name, step_number)
+                except Exception as e:
+                    self.logger.error(f"Phase progress callback error: {e}", component="harness")
+
+        return on_phase
 
     def _get_tool_progress_message(self, tool_name: str, step_number: int) -> Optional[str]:
         """

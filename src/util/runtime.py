@@ -14,6 +14,7 @@ from harness.agent.tool_registry import ToolRegistry
 from services.router import Router, TaskTier
 #from .service_rep import StreamingServiceRep
 from harness.agent.agent import TieredAgent
+from harness.agent.agent_logger import AgentLogger
 from .agent_execution_logger import AgentExecutionLogger
 
 
@@ -24,10 +25,12 @@ class HarnessRuntime:
     runtime_config: RuntimeConfig
     logger: StructuredLogger
     execution_logger: AgentExecutionLogger
+    agent_logger: AgentLogger
     tool_registry: ToolRegistry
     router: Router
     agent: TieredAgent
     profiler: Optional[Any] = None
+    graphd: Optional[Any] = None
 
     # def create_service_rep(self, speech_block_event, cancel_event=None) -> StreamingServiceRep:
     #     """
@@ -140,15 +143,43 @@ def create_runtime(
     runtime_config = RuntimeConfig(resolved_config)
     runtime_logger = logger or _build_logger(resolved_config, log_dir=resolved_log_dir)
     exec_logger = execution_logger or AgentExecutionLogger(log_dir=resolved_log_dir)
+    agent_log = AgentLogger(log_dir=resolved_log_dir, logger=runtime_logger)
 
-    tool_registry = ToolRegistry(resolved_config.tools, logger=runtime_logger)
+    graphd_manager = None
+    graphd_client = None
+    if resolved_config.graphd and resolved_config.graphd.enabled:
+        try:
+            from harness.graphd import GraphdClient, GraphdManager
+            graphd_manager = GraphdManager(resolved_config.graphd, logger=runtime_logger)
+            if graphd_manager.start():
+                graphd_client = GraphdClient(
+                    host=resolved_config.graphd.host,
+                    port=resolved_config.graphd.port,
+                    timeout_s=resolved_config.graphd.client_timeout_s,
+                    enabled=True
+                )
+            else:
+                graphd_manager = None
+        except Exception as exc:
+            runtime_logger.error(f"Graphd init failed: {exc}", component="runtime", error=exc)
+            graphd_manager = None
+
+    tool_registry = ToolRegistry(
+        resolved_config.tools,
+        logger=runtime_logger,
+        nano_banana_config=resolved_config.nano_banana,
+        graphd_client=graphd_client,
+        graphd_tools_enabled=bool(resolved_config.graphd and resolved_config.graphd.enable_tools),
+    )
     router = Router(resolved_config.router, logger=runtime_logger)
     agent = TieredAgent(
         config=resolved_config.agent,
         tool_registry=tool_registry,
         tier_configs=resolved_config.llm_configs,
         logger=runtime_logger,
-        execution_logger=exec_logger
+        execution_logger=exec_logger,
+        agent_logger=agent_log,
+        graphd_client=graphd_client
     )
 
     runtime = HarnessRuntime(
@@ -156,10 +187,12 @@ def create_runtime(
         runtime_config=runtime_config,
         logger=runtime_logger,
         execution_logger=exec_logger,
+        agent_logger=agent_log,
         tool_registry=tool_registry,
         router=router,
         agent=agent,
-        profiler=profiler
+        profiler=profiler,
+        graphd=graphd_manager
     )
     runtime.configure_router_tiers()
     runtime.prewarm_all_tiers()

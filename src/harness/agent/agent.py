@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, List, Generator, Callable, Tuple
 from enum import Enum
 
 from util.config import AgentConfig, LLMConfig, DEFAULT_TIER_TOOL_LIMITS, DEFAULT_TIER_MAX_TOKENS
+from communication.events import AgentProgressEvent, ToolProgressEvent, StreamingChunkEvent
 from util.llm_adapter import (
     LLMAdapter, create_adapter, Message, MessageRole,
     LLMResponse, ToolCall, ToolDefinition
@@ -198,7 +199,8 @@ class Agent:
         event_bus: Optional[Any] = None,
         logger: Optional[StructuredLogger] = None,
         execution_logger: Optional[AgentExecutionLogger] = None,
-        agent_logger: Optional[AgentLogger] = None
+        agent_logger: Optional[AgentLogger] = None,
+        graphd_client: Optional[Any] = None
     ):
         """
         Initialize Agent.
@@ -214,9 +216,11 @@ class Agent:
             logger: StructuredLogger for request/health logging (optional)
             execution_logger: AgentExecutionLogger for detailed traces (optional)
             agent_logger: AgentLogger for LLM request logging (optional)
+            graphd_client: Optional GraphdClient for graph-based code intelligence (optional)
         """
         self.config = config
         self.tool_registry = tool_registry
+        self._graphd_client = graphd_client
         # Use NullLogger fallbacks to avoid None checks everywhere
         # These do NOT create files or access global state
         self.logger = logger or NullLogger()
@@ -236,7 +240,7 @@ class Agent:
         self._reflector: Optional[Reflector] = None
         if self._llm:
             self._planner = Planner(self._llm, tool_registry)
-            self._executor = Executor(self._llm, tool_registry, config.max_tool_calls)
+            self._executor = Executor(self._llm, tool_registry, config.max_tool_calls, graphd_client=self._graphd_client)
             self._reflector = Reflector(self._llm, tool_registry)
             if self._executor:
                 self._executor.add_step_callback(self._handle_executor_step)
@@ -244,13 +248,17 @@ class Agent:
         # ========== CONTEXT MANAGER INTEGRATION ==========
         # Session-level persistent state
         # Create WorkingMemoryStore with working_dir, then pass to ContextState
+        working_dir = os.getcwd()
         working_memory = WorkingMemoryStore(
             max_entries=100,
-            working_dir=os.getcwd()
+            working_dir=working_dir
         )
+        # Load user rules from files (rules.md, repository.md) at session start
         self.context_state = ContextState(
             session_id=str(uuid.uuid4()),
-            working_memory=working_memory
+            working_memory=working_memory,
+            working_dir=working_dir,
+            load_rules=True,
         )
 
         # Token estimator for accurate token counting
@@ -282,10 +290,13 @@ class Agent:
         self._step_count = 0
         self._steps: List[AgentStep] = []
         self._file_operations: List[Dict[str, Any]] = []
+        self._current_request_id: Optional[str] = None
 
         # Callbacks
         self._step_callbacks: List[Callable[[AgentStep], None]] = []
         self._thought_callbacks: List[Callable[[str], None]] = []
+        # Phase progress callbacks: (message: str, tool_name: Optional[str], step_number: int) -> None
+        self._phase_callbacks: List[Callable[[str, Optional[str], int], None]] = []
 
         # ========== ASYNC LOGGING ==========
         # Note: self._agent_logger is injected via constructor, not created here
@@ -389,6 +400,13 @@ class Agent:
             return True
 
         return False
+
+    def _is_tool_read_only(self, tool_name: Optional[str]) -> bool:
+        """Check if a tool is marked read-only in the registry."""
+        if not tool_name:
+            return False
+        tool = self.tool_registry.get(tool_name) if hasattr(self.tool_registry, "get") else None
+        return bool(tool and getattr(tool, "read_only", False))
 
     def _shorten_text(self, text: Optional[str], max_length: int = 120) -> str:
         """Compact text for prompts without newlines or long rambles."""
@@ -599,6 +617,20 @@ class Agent:
                 simple_plan.steps[0].tool_args_hint):
 
                 step = simple_plan.steps[0]
+                if not self._is_tool_read_only(step.tool_hint):
+                    self.logger.info(
+                        f"Fast path blocked for write-capable tool '{step.tool_hint}'",
+                        component="agent"
+                    )
+                    return None
+
+                if self._budget and self._budget.get("max_tool_calls", 1) < 1:
+                    self.logger.info(
+                        "Fast path blocked by tool budget (0 allowed)",
+                        component="agent"
+                    )
+                    return None
+
                 tool_start = time.time()
                 result = self.tool_registry.execute(step.tool_hint, **step.tool_args_hint)
                 tool_duration = (time.time() - tool_start) * 1000
@@ -686,6 +718,13 @@ class Agent:
             self._record_file_operation(path, record.tool_name, action)
 
         self._record_step(agent_step)
+        preview = None
+        if record.result.is_success and record.result.output:
+            preview = str(record.result.output)
+        elif record.result.error:
+            preview = str(record.result.error)
+        status = "completed" if record.result.is_success else "failed"
+        self._publish_tool_progress(record.tool_name, status, plan_step_num, preview)
 
     def _record_file_operation(self, path: str, tool_name: str, action: str):
         """Track file operations requested by tools"""
@@ -705,6 +744,72 @@ class Agent:
             detail=f"tool={tool_name} action={action}",
             component="agent"
         )
+
+    def _publish_event(self, event: Any) -> None:
+        """Publish event to bus if available."""
+        if not self.event_bus:
+            return
+        publish = getattr(self.event_bus, "publish", None)
+        if not callable(publish):
+            return
+        try:
+            publish(event)
+        except Exception as exc:
+            self.logger.error(f"Event bus publish failed: {exc}", component="agent")
+
+    def _publish_agent_progress(self, message: str, tool_name: Optional[str] = None, step_number: int = 0) -> None:
+        """Publish AgentProgressEvent for listeners (TUI, telemetry, etc.).
+
+        This method:
+        1. Notifies phase callbacks (for Harness -> ServiceRep -> TUI flow)
+        2. Publishes to event bus if available (direct event publishing)
+        """
+        # Always notify phase callbacks (primary mechanism for progress)
+        self._notify_phase(message, tool_name, step_number)
+
+        # Also publish to event bus if available and we have a request ID
+        if self._current_request_id:
+            event = AgentProgressEvent(
+                request_id=self._current_request_id,
+                message=message,
+                tool_name=tool_name,
+                step_number=step_number
+            )
+            self._publish_event(event)
+
+    def _publish_tool_progress(
+        self,
+        tool_name: Optional[str],
+        status: str,
+        step_number: int,
+        result_preview: Optional[str] = None
+    ) -> None:
+        """Publish ToolProgressEvent for detailed instrumentation."""
+        if not self._current_request_id or not tool_name:
+            return
+        preview = (result_preview or "")[:200] if result_preview else None
+        event = ToolProgressEvent(
+            request_id=self._current_request_id,
+            tool_name=tool_name,
+            status=status,
+            step_num=step_number,
+            result_preview=preview
+        )
+        self._publish_event(event)
+
+    def _publish_stream_chunk(self, chunk: str, chunk_index: int, is_final: bool) -> None:
+        """Publish streaming chunk events for downstream consumers."""
+        if not self._current_request_id:
+            return
+        event = StreamingChunkEvent(
+            request_id=self._current_request_id,
+            chunk=chunk,
+            chunk_index=chunk_index,
+            is_final=is_final
+        )
+        self._publish_event(event)
+        if is_final:
+            self._publish_agent_progress("Streaming response complete", step_number=0)
 
     def _build_contract_checklist(
         self,
@@ -910,6 +1015,14 @@ class Agent:
         if context:
             full_input = f"{user_input}\n\nContext: {context}"
 
+        if self.logger.request_id is None:
+            req_id = self.logger.new_request()
+        else:
+            req_id = self.logger.request_id
+        exec_id = self.exec_logger.new_execution_id(req_id)
+        self._current_request_id = req_id
+        self._publish_agent_progress("Request received", step_number=0)
+
         # ========== FAST PATH FOR SIMPLE QUERIES ==========
         # Skip context building for queries that don't need filesystem/history context
         # This saves 150-500ms per request
@@ -918,7 +1031,9 @@ class Agent:
                 with self._perf_tracer.span("fast_path_execute"):
                     fast_response = self._execute_fast_path(user_input, context, start_time)
                 if fast_response is not None:
+                    self._publish_agent_progress("Responded via fast path", step_number=0)
                     self._perf_tracer.print_summary()
+                    self._current_request_id = None
                     return fast_response
 
         # ========== CONTEXT MANAGER WORKFLOW ==========
@@ -960,6 +1075,7 @@ class Agent:
                 f"Context serialization failed: {serialization_result.error}",
                 component="agent"
             )
+            self._current_request_id = None
             return AgentResponse(
                 content="Failed to prepare context for LLM",
                 success=False,
@@ -985,14 +1101,6 @@ class Agent:
         tool_definitions = self._get_tool_definitions()
 
         # ========== LOG FULL AGENT CONTEXT ==========
-        # Generate unique req_id for this run (if logger doesn't have one)
-        if self.logger.request_id is None:
-            req_id = self.logger.new_request()
-        else:
-            req_id = self.logger.request_id
-
-        exec_id = self.exec_logger.new_execution_id(req_id)
-
         # Extract tool names only (not full schemas)
         tool_names = [
             td.get("function", {}).get("name") if isinstance(td, dict) else getattr(td, "name", "unknown")
@@ -1015,6 +1123,7 @@ class Agent:
             # ========== PHASE 1: PLANNING ==========
             with self._perf_tracer.span("phase1_planning"):
                 self._current_state = AgentState.PLANNING
+                self._publish_agent_progress("Planning started", step_number=0)
                 self._emit_thought("Creating execution plan...")
 
                 with self._perf_tracer.span("planner_create_plan", tier=self.config.tier):
@@ -1034,6 +1143,7 @@ class Agent:
                 )
             if plan.assumptions:
                 self._emit_thought(f"Assumptions: {', '.join(plan.assumptions[:4])}")
+            self._publish_agent_progress(f"Plan ready ({len(plan.steps)} steps)", step_number=0)
 
             # STAGE 2: Log planning result
             self._log_stage_2_planning_result(
@@ -1041,6 +1151,23 @@ class Agent:
                 user_input=user_input,
                 tier=self.config.tier
             )
+
+            # LOG FULL PLANNER CALL - NO TRUNCATION
+            # This writes to full_execution.jsonl with complete prompts and responses
+            if self._agent_logger and self._planner:
+                try:
+                    parsed_plan_dict = plan.to_dict() if hasattr(plan, 'to_dict') else None
+                    self._agent_logger.log_planner_call(
+                        user_input=user_input,
+                        instructions=self._planner.last_call_instructions,
+                        input_str=self._planner.last_call_input,
+                        raw_response=self._planner.last_call_response,
+                        parsed_plan=parsed_plan_dict,
+                        tier=self.config.tier,
+                        duration_ms=self._planner.last_call_duration_ms
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to log planner call: {e}", component="agent")
 
             # ========== LOG PLANNING RESULT ==========
             self.exec_logger.log_planning_result(
@@ -1082,10 +1209,103 @@ class Agent:
             # Seed plan status tracker for execution guidance
             self._plan_status = self._initialize_plan_status(plan)
 
+            # Default to microloop execution when tools are required for better manifest-driven guidance
+            # if self._executor:
+            #     if plan.requires_tools:
+            #         self._executor.enable_microloop()
+            #     else:
+            #         self._executor.disable_microloop()
+
             # ========== PHASE 2: EXECUTION ==========
             with self._perf_tracer.span("phase2_execution", steps=len(plan.steps)):
                 self._current_state = AgentState.THINKING
+                self._publish_agent_progress("Executing plan", step_number=0)
                 self._emit_thought(f"Executing plan: {plan.goal[:50]}...")
+
+                # Set up executor LLM call logging callback
+                if self._executor:
+                    def _executor_log_callback(
+                        step_num: int,
+                        objective: str,
+                        instructions: str,
+                        input_str: str,
+                        raw_response: str,
+                        tool_calls: list,
+                        tool_results: list,
+                        duration_ms: float,
+                        phase: str,
+                        manifest: dict = None
+                    ):
+                        if self._agent_logger:
+                            try:
+                                # Convert tool calls to serializable format
+                                tc_dicts = []
+                                for tc in tool_calls:
+                                    if hasattr(tc, 'name'):
+                                        tc_dicts.append({
+                                            'name': tc.name,
+                                            'arguments': tc.arguments if hasattr(tc, 'arguments') else {}
+                                        })
+                                    elif isinstance(tc, dict):
+                                        tc_dicts.append(tc)
+
+                                # Convert tool results to serializable format
+                                tr_dicts = []
+                                for tr in tool_results:
+                                    if hasattr(tr, 'tool_name'):
+                                        tr_dicts.append({
+                                            'tool': tr.tool_name,
+                                            'output': str(tr.result.output)[:2000] if hasattr(tr, 'result') and tr.result else '',
+                                            'success': tr.result.is_success if hasattr(tr, 'result') and tr.result else False
+                                        })
+                                    elif isinstance(tr, dict):
+                                        tr_dicts.append(tr)
+
+                                self._agent_logger.log_executor_call(
+                                    step_num=step_num,
+                                    objective=objective,
+                                    instructions=instructions,
+                                    input_str=input_str,
+                                    raw_response=raw_response,
+                                    tool_calls=tc_dicts,
+                                    tool_results=tr_dicts,
+                                    tier=self.config.tier,
+                                    duration_ms=duration_ms,
+                                    phase=phase,
+                                    manifest=manifest
+                                )
+                            except Exception as e:
+                                self.logger.error(f"Failed to log executor call: {e}", component="agent")
+
+                        if tool_results:
+                            for entry in tool_results:
+                                tool_name = None
+                                status_label = None
+                                preview = None
+                                success = None
+                                if hasattr(entry, "tool_name"):
+                                    tool_name = getattr(entry, "tool_name", None)
+                                    success = getattr(entry, "success", None)
+                                    preview = getattr(entry, "output", None)
+                                elif isinstance(entry, dict):
+                                    tool_name = entry.get("tool") or entry.get("name")
+                                    success = entry.get("success")
+                                    preview = entry.get("output") or entry.get("error")
+                                    status_label = entry.get("status")
+
+                                if not tool_name:
+                                    continue
+                                if not status_label:
+                                    if success is True:
+                                        status_label = "completed"
+                                    elif success is False:
+                                        status_label = "failed"
+                                    else:
+                                        status_label = "started"
+
+                                self._publish_tool_progress(tool_name, status_label, step_num, preview)
+
+                    self._executor.set_llm_call_logger(_executor_log_callback)
 
                 with self._perf_tracer.span("executor_execute"):
                     execution_context = self._augment_context_with_plan(
@@ -1093,11 +1313,17 @@ class Agent:
                         plan,
                         self._plan_status
                     )
+                    stream_callback = on_stream_chunk
+                    if on_stream_chunk:
+                        def _stream_and_publish(chunk: str, chunk_index: int, is_final: bool):
+                            on_stream_chunk(chunk, chunk_index, is_final)
+                            self._publish_stream_chunk(chunk, chunk_index, is_final)
+                        stream_callback = _stream_and_publish
                     trace = self._executor.execute(
                         plan=plan,
                         serialized_context=execution_context,
                         tools=tool_definitions if plan.requires_tools else [],
-                        on_stream_chunk=on_stream_chunk,
+                        on_stream_chunk=stream_callback,
                         plan_status=self._plan_status
                     )
 
@@ -1109,6 +1335,7 @@ class Agent:
             # ========== PHASE 3: REFLECTION ==========
             with self._perf_tracer.span("phase3_reflection"):
                 self._current_state = AgentState.REFLECTING
+                self._publish_agent_progress("Reflecting on results", step_number=0)
 
                 # OPTIMIZATION: Skip LLM reflection for clearly successful simple executions
                 # This saves 500-1500ms per request
@@ -1152,6 +1379,10 @@ class Agent:
             )
             contract_checklist = self._build_contract_checklist(user_input, plan, trace, reflection)
             self.logger.info("contract_checklist", component="agent", data=contract_checklist)
+            if reflection.goal_achieved:
+                self._publish_agent_progress("Goal achieved", step_number=0)
+            else:
+                self._publish_agent_progress("Goal not fully achieved", step_number=0)
 
             # STAGE 3: Log episode summary
             total_duration = (time.time() - start_time) * 1000
@@ -1250,6 +1481,7 @@ class Agent:
                     if tool_call.tool_name not in tools_used:
                         tools_used.append(tool_call.tool_name)
 
+            self._publish_agent_progress("Response ready", step_number=0)
             return AgentResponse(
                 content=final_content,
                 structured_action=plan.goal,
@@ -1279,6 +1511,7 @@ class Agent:
         except Exception as e:
             self._current_state = AgentState.ERROR
             self.logger.error(f"Agent execution failed: {e}", component="agent")
+            self._publish_agent_progress(f"Execution failed: {e}", step_number=0)
 
             return AgentResponse(
                 content=f"I encountered an error: {str(e)}",
@@ -1288,6 +1521,8 @@ class Agent:
                 total_duration_ms=(time.time() - start_time) * 1000,
                 goal_achieved=False
             )
+        finally:
+            self._current_request_id = None
 
     def add_step_callback(self, callback: Callable[[AgentStep], None]):
         """Add callback for execution steps"""
@@ -1301,6 +1536,37 @@ class Agent:
     def add_thought_callback(self, callback: Callable[[str], None]):
         """Add callback for agent thoughts"""
         self._thought_callbacks.append(callback)
+
+    def add_phase_callback(self, callback: Callable[[str, Optional[str], int], None]):
+        """Add callback for phase progress updates.
+
+        Callback signature: (message: str, tool_name: Optional[str], step_number: int) -> None
+
+        Phase callbacks fire at key points during execution:
+        - Planning started/completed
+        - Execution started
+        - Tool executions (with tool_name)
+        - Reflection started/completed
+        - Goal achieved/not achieved
+        """
+        self._phase_callbacks.append(callback)
+
+    def remove_phase_callback(self, callback: Callable[[str, Optional[str], int], None]):
+        """Remove a previously registered phase callback"""
+        if callback in self._phase_callbacks:
+            self._phase_callbacks.remove(callback)
+
+    def _notify_phase(self, message: str, tool_name: Optional[str] = None, step_number: int = 0):
+        """Notify all phase callbacks of progress.
+
+        This is the primary mechanism for agents to report progress to listeners
+        (e.g., Harness -> ServiceRep -> TUI).
+        """
+        for callback in self._phase_callbacks:
+            try:
+                callback(message, tool_name, step_number)
+            except Exception as e:
+                self.logger.error(f"Phase callback error: {e}", component="agent")
 
     @property
     def state(self) -> AgentState:
@@ -1364,7 +1630,8 @@ class TieredAgent:
         event_bus: Optional[Any] = None,
         logger: Optional[StructuredLogger] = None,
         execution_logger: Optional[AgentExecutionLogger] = None,
-        agent_logger: Optional[AgentLogger] = None
+        agent_logger: Optional[AgentLogger] = None,
+        graphd_client: Optional[Any] = None
     ):
         """
         Initialize TieredAgent.
@@ -1377,11 +1644,13 @@ class TieredAgent:
             logger: StructuredLogger for request/health logging (optional)
             execution_logger: AgentExecutionLogger for detailed traces (optional)
             agent_logger: AgentLogger for LLM request logging (optional)
+            graphd_client: Optional GraphdClient for graph-based code intelligence (optional)
         """
         self.config = config
         self.tool_registry = tool_registry
         self.tier_configs = tier_configs
         self.event_bus = event_bus
+        self._graphd_client = graphd_client
         self._agents: Dict[str, Agent] = {}
         self._tier_runtimes: Dict[str, TierRuntime] = {}
         self._current_tier = config.tier
@@ -1487,7 +1756,8 @@ class TieredAgent:
                 self.event_bus,
                 logger=self.logger,
                 execution_logger=self.execution_logger,
-                agent_logger=self._agent_logger
+                agent_logger=self._agent_logger,
+                graphd_client=self._graphd_client
             )
         return self._agents[tier]
 

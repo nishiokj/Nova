@@ -12,6 +12,8 @@ import tempfile
 import threading
 import re
 import shutil
+import asyncio
+import base64
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Callable, Union, Tuple, Set
@@ -19,12 +21,14 @@ from enum import Enum
 import traceback
 import signal
 import io
+from datetime import datetime
+from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr, contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
-from util.config import ToolConfig
+from util.config import ToolConfig, NanoBananaConfig, LLMConfig
 from util.logger import StructuredLogger
-from util.llm_adapter import ToolDefinition
+from util.llm_adapter import ToolDefinition, create_adapter
 from util.resilience import ResilienceConfig, resilient_call
 
 
@@ -62,6 +66,380 @@ DEFAULT_EXCLUDE_EXTENSIONS: Set[str] = {
     ".exe",
     ".class",
 }
+
+
+# ========== NANO BANANA (GEMINI IMAGE GENERATION) ==========
+
+@dataclass
+class ImageGenerationResult:
+    """Result of an image generation request"""
+    success: bool
+    image_bytes: Optional[bytes] = None
+    file_path: Optional[str] = None
+    error: Optional[str] = None
+    thought_text: Optional[str] = None  # For multi-turn reasoning
+    duration_ms: float = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class GeminiImageClient:
+    """Async client for Gemini image generation (Nano Banana)"""
+
+    def __init__(
+        self,
+        api_key: str,
+        api_base: str = "https://generativelanguage.googleapis.com/v1beta",
+        model: str = "gemini-3-pro-image-preview",
+        timeout: int = 60,
+        max_retries: int = 3,
+        logger: Optional[StructuredLogger] = None
+    ):
+        self.api_key = api_key
+        self.api_base = api_base
+        self.model = model
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.logger = logger or StructuredLogger()
+        self._session = None
+
+    async def _ensure_session(self):
+        """Lazy session initialization"""
+        try:
+            import aiohttp
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=self.timeout)
+                )
+        except ImportError:
+            raise ImportError("aiohttp is required for async image generation. Install with: pip install aiohttp")
+
+    async def generate_image(
+        self,
+        prompt: str,
+        output_path: Optional[str] = None,
+        callback: Optional[Callable[[ImageGenerationResult], Any]] = None
+    ) -> ImageGenerationResult:
+        """
+        Generate an image from a prompt.
+
+        Args:
+            prompt: The image generation prompt
+            output_path: Where to save the image (optional)
+            callback: Optional callback for result notification
+
+        Returns:
+            ImageGenerationResult with success status and file path
+        """
+        import aiohttp
+        start_time = time.time()
+        await self._ensure_session()
+
+        url = f"{self.api_base}/models/{self.model}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key
+        }
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["image", "text"]
+            }
+        }
+
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                async with self._session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        last_error = f"API error {resp.status}: {error_text}"
+                        self.logger.warning(
+                            f"Gemini image API error (attempt {attempt + 1}): {last_error}",
+                            component="nano_banana"
+                        )
+                        continue
+
+                    data = await resp.json()
+                    return await self._process_response(
+                        data, output_path, callback, start_time
+                    )
+
+            except asyncio.TimeoutError:
+                last_error = f"Request timed out after {self.timeout}s"
+            except aiohttp.ClientError as e:
+                last_error = f"Network error: {str(e)}"
+            except Exception as e:
+                last_error = f"Unexpected error: {str(e)}"
+
+            # Exponential backoff
+            if attempt < self.max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+
+        result = ImageGenerationResult(
+            success=False,
+            error=last_error,
+            duration_ms=(time.time() - start_time) * 1000
+        )
+        if callback:
+            callback(result)
+        return result
+
+    async def _process_response(
+        self,
+        data: Dict[str, Any],
+        output_path: Optional[str],
+        callback: Optional[Callable],
+        start_time: float
+    ) -> ImageGenerationResult:
+        """Process API response and extract image"""
+        try:
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ImageGenerationResult(
+                    success=False,
+                    error="No candidates in response",
+                    duration_ms=(time.time() - start_time) * 1000
+                )
+
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+
+            image_bytes = None
+            thought_text = None
+
+            for part in parts:
+                if "text" in part:
+                    thought_text = part["text"]
+                elif "inlineData" in part:
+                    b64_data = part["inlineData"].get("data")
+                    if b64_data:
+                        image_bytes = base64.b64decode(b64_data)
+
+            if not image_bytes:
+                return ImageGenerationResult(
+                    success=False,
+                    error="No image data in response",
+                    thought_text=thought_text,
+                    duration_ms=(time.time() - start_time) * 1000
+                )
+
+            # Save to file if path provided
+            file_path = None
+            if output_path:
+                file_path = await self._save_image(image_bytes, output_path)
+
+            result = ImageGenerationResult(
+                success=True,
+                image_bytes=image_bytes,
+                file_path=file_path,
+                thought_text=thought_text,
+                duration_ms=(time.time() - start_time) * 1000,
+                metadata={"model": self.model, "size_bytes": len(image_bytes)}
+            )
+
+            if callback:
+                callback(result)
+
+            return result
+
+        except Exception as e:
+            return ImageGenerationResult(
+                success=False,
+                error=f"Response processing error: {str(e)}",
+                duration_ms=(time.time() - start_time) * 1000
+            )
+
+    async def _save_image(self, image_bytes: bytes, output_path: str) -> str:
+        """Save image bytes to file (async file I/O)"""
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Use asyncio for non-blocking write
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, path.write_bytes, image_bytes)
+
+        self.logger.file_operation("image_save", str(path.absolute()), status="success")
+        return str(path.absolute())
+
+    async def close(self):
+        """Close the session"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+
+# Prompt engineering system prompt for helper agent
+NANO_BANANA_HELPER_SYSTEM = """You are an expert image prompt engineer for AI image generation.
+
+Your task is to transform user requests into optimal prompts for Gemini's image generation model.
+
+CRITICAL RULES:
+1. PRESERVE the user's core intent - don't add unwanted elements
+2. ADD technical details that improve image quality (lighting, composition, style)
+3. EXTRACT any mentioned file path or location for saving the image
+4. If no path mentioned, return "DEFAULT" for output_path
+5. Keep prompts concise but descriptive (50-150 words ideal)
+
+For path extraction:
+- Look for patterns like "save to", "at", "in folder", "to file", etc.
+- Common patterns: ~/Desktop/image.png, ./output/pic.jpg, /tmp/test.png
+- File extensions: .png, .jpg, .jpeg, .webp
+
+Respond in this exact JSON format:
+{
+    "enhanced_prompt": "The improved image generation prompt",
+    "output_path": "extracted/path.png or DEFAULT",
+    "original_intent": "Brief description of what user wants",
+    "style_hints": "photorealistic|illustration|cartoon|abstract|etc or null",
+    "confidence": 0.0 to 1.0
+}"""
+
+
+@dataclass
+class PromptEngineeringResult:
+    """Result of prompt engineering"""
+    enhanced_prompt: str
+    output_path: str
+    original_intent: str
+    style_hints: Optional[str] = None
+    confidence: float = 1.0
+
+
+class NanoBananaHelperAgent:
+    """Helper agent for prompt engineering and path extraction"""
+
+    def __init__(
+        self,
+        config: Optional[NanoBananaConfig] = None,
+        logger: Optional[StructuredLogger] = None
+    ):
+        self.config = config or NanoBananaConfig()
+        self.logger = logger or StructuredLogger()
+        self._llm = None
+
+    def _get_llm(self):
+        """Lazy LLM initialization"""
+        if self._llm is None:
+            llm_config = LLMConfig(
+                provider=self.config.helper_llm_provider,
+                model=self.config.helper_llm_model,
+                max_tokens=self.config.helper_max_tokens,
+                temperature=0.3  # Lower for more consistent outputs
+            )
+            self._llm = create_adapter(llm_config, self.logger)
+        return self._llm
+
+    def process_request(self, user_request: str) -> PromptEngineeringResult:
+        """
+        Process user request through helper LLM.
+
+        Args:
+            user_request: Raw user request like "make me a cat picture"
+
+        Returns:
+            PromptEngineeringResult with enhanced prompt and output path
+        """
+        try:
+            llm = self._get_llm()
+
+            response = llm.respond(
+                input=f"User request: {user_request}",
+                instructions=NANO_BANANA_HELPER_SYSTEM
+            )
+
+            return self._parse_response(response.content or "", user_request)
+
+        except Exception as e:
+            self.logger.warning(
+                f"Helper agent failed, using fallback: {e}",
+                component="nano_banana.helper"
+            )
+            # Fallback: use original request and default path
+            return PromptEngineeringResult(
+                enhanced_prompt=self._basic_enhance(user_request),
+                output_path=self._generate_default_path(),
+                original_intent=user_request,
+                confidence=0.5
+            )
+
+    def _parse_response(
+        self,
+        content: str,
+        original_request: str
+    ) -> PromptEngineeringResult:
+        """Parse LLM response into structured result"""
+        try:
+            # Handle potential markdown code blocks
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+
+            data = json.loads(content.strip())
+
+            output_path = data.get("output_path", "DEFAULT")
+            if output_path == "DEFAULT" or not output_path:
+                output_path = self._generate_default_path()
+            else:
+                output_path = self._resolve_path(output_path)
+
+            return PromptEngineeringResult(
+                enhanced_prompt=data.get("enhanced_prompt", original_request),
+                output_path=output_path,
+                original_intent=data.get("original_intent", "Generate image"),
+                style_hints=data.get("style_hints"),
+                confidence=data.get("confidence", 0.8)
+            )
+
+        except (json.JSONDecodeError, KeyError, IndexError):
+            # Fallback: use original request and default path
+            return PromptEngineeringResult(
+                enhanced_prompt=self._basic_enhance(original_request),
+                output_path=self._generate_default_path(),
+                original_intent=original_request,
+                confidence=0.5
+            )
+
+    def _basic_enhance(self, prompt: str) -> str:
+        """Basic prompt enhancement without LLM"""
+        quality_terms = ["high quality", "detailed", "professional", "4k"]
+        has_quality = any(term in prompt.lower() for term in quality_terms)
+
+        if not has_quality:
+            return f"{prompt}, high quality, detailed"
+        return prompt
+
+    def _generate_default_path(self) -> str:
+        """Generate default output path with timestamp"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = self.config.default_filename_pattern.format(timestamp=timestamp)
+        return os.path.join(self.config.default_output_dir, filename)
+
+    def _resolve_path(self, path: str) -> str:
+        """Resolve and validate output path"""
+        # Expand ~ and environment variables
+        path = os.path.expanduser(path)
+        path = os.path.expandvars(path)
+
+        # Make absolute if relative
+        if not os.path.isabs(path):
+            path = os.path.join(self.config.default_output_dir, path)
+
+        # Ensure image extension
+        if not path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+            path = f"{path}.png"
+
+        return os.path.abspath(path)
+
+
+# Default callback for image generation - returns file path
+def default_image_callback(result: ImageGenerationResult) -> str:
+    """Default callback - returns file path string"""
+    if result.success and result.file_path:
+        return result.file_path
+    elif result.success:
+        return "Image generated successfully (not saved to disk)"
+    else:
+        return f"Image generation failed: {result.error}"
 
 
 class ToolStatus(Enum):
@@ -154,11 +532,13 @@ class Tool:
             result.duration_ms = (time.time() - start_time) * 1000
             return result
         except Exception as e:
+            tb = traceback.format_exc()
             return ToolResult(
                 status=ToolStatus.ERROR,
                 output=None,
                 error=str(e),
-                duration_ms=(time.time() - start_time) * 1000
+                duration_ms=(time.time() - start_time) * 1000,
+                metadata={"traceback": tb}
             )
 
 
@@ -172,7 +552,10 @@ class ToolRegistry:
         self,
         config: Optional[ToolConfig] = None,
         default_working_dir: Optional[str] = None,
-        logger: Optional[StructuredLogger] = None
+        logger: Optional[StructuredLogger] = None,
+        nano_banana_config: Optional[NanoBananaConfig] = None,
+        graphd_client: Optional[Any] = None,
+        graphd_tools_enabled: bool = False
     ):
         self.config = config or ToolConfig()
         self.logger = logger or StructuredLogger()
@@ -181,6 +564,10 @@ class ToolRegistry:
         self._default_working_dir = os.path.abspath(default_working_dir) if default_working_dir else os.getcwd()
         self._thread_local = threading.local()
         self._tool_circuit_state: Dict[str, Any] = {}
+        # Nano Banana (Gemini Image Generation) config
+        self._nano_banana_config = nano_banana_config or NanoBananaConfig()
+        self._graphd_client = graphd_client
+        self._graphd_tools_enabled = graphd_tools_enabled
 
         # ========== TOOL RESULT CACHING ==========
         # Cache for read-only, deterministic tool results
@@ -198,8 +585,27 @@ class ToolRegistry:
         # Track file writes to invalidate relevant caches
         self._cache_invalidation_paths: Dict[str, float] = {}
 
+        # Log config for debugging tool availability issues
+        self.logger.info(
+            f"ToolRegistry initialized with enabled_tools: {self.config.enabled_tools}",
+            component="tools"
+        )
+
         # Register built-in tools
         self._register_builtin_tools()
+
+        # Log summary of registered tools
+        enabled_tools = [t.name for t in self._tools.values() if t.enabled]
+        disabled_tools = [t.name for t in self._tools.values() if not t.enabled]
+        self.logger.info(
+            f"Tool registration complete: {len(enabled_tools)} enabled, {len(disabled_tools)} disabled",
+            component="tools"
+        )
+        if disabled_tools:
+            self.logger.debug(
+                f"Disabled tools: {disabled_tools}",
+                component="tools"
+            )
 
     def _get_current_working_dir(self) -> str:
         """Return the active working directory for this thread/tool call"""
@@ -234,14 +640,40 @@ class ToolRegistry:
         base = self._get_current_working_dir()
         return os.path.abspath(os.path.join(base, path))
 
+    def _summarize_kwargs(self, kwargs: Dict[str, Any], max_length: int = 200) -> Dict[str, str]:
+        """Compact kwargs for logging to avoid giant blobs or sensitive data."""
+        summary: Dict[str, str] = {}
+        for key, value in kwargs.items():
+            try:
+                text = str(value)
+            except Exception:
+                text = "<unserializable>"
+            summary[key] = text if len(text) <= max_length else text[:max_length] + "..."
+        return summary
+
+    def _truncate_text(self, text: Optional[str], max_length: int = 4000) -> Optional[str]:
+        if not text:
+            return None
+        return text if len(text) <= max_length else text[:max_length] + "..."
+
     def register(self, tool: Tool):
         """Register a tool"""
         with self._lock:
-            # Check if tool is in enabled list
-            if tool.name not in self.config.enabled_tools:
+            # Explicitly set enabled based on config
+            # Note: we explicitly set True/False rather than relying on defaults
+            # to avoid subtle bugs where tool.enabled might be set incorrectly
+            if tool.name in self.config.enabled_tools:
+                tool.enabled = True
+            elif self._graphd_tools_enabled and tool.name.startswith("graphd_"):
+                tool.enabled = True
+            else:
                 tool.enabled = False
+
             self._tools[tool.name] = tool
-            self.logger.debug(f"Registered tool: {tool.name}", component="tools")
+            self.logger.debug(
+                f"Registered tool: {tool.name} (enabled={tool.enabled}, in_config={tool.name in self.config.enabled_tools})",
+                component="tools"
+            )
 
     def unregister(self, name: str) -> bool:
         """Unregister a tool"""
@@ -388,8 +820,18 @@ class ToolRegistry:
         logger_getter=lambda self: self.logger,
         result_validator=lambda result: getattr(result, "is_success", True),
     )
-    def execute(self, name: str, **kwargs) -> ToolResult:
-        """Execute a tool by name with optional caching."""
+    def execute(self, name: str, timeout_override: Optional[float] = None, **kwargs) -> ToolResult:
+        """
+        Execute a tool by name with optional caching.
+
+        Args:
+            name: Tool name to execute
+            timeout_override: Optional timeout override in seconds (used by microloop)
+            **kwargs: Tool-specific arguments
+
+        Returns:
+            ToolResult with status, output, and error info
+        """
         tool = self.get(name)
         if not tool:
             return ToolResult(
@@ -397,6 +839,20 @@ class ToolRegistry:
                 output=None,
                 error=f"Tool '{name}' not found"
             )
+
+        # Apply timeout override if provided (microloop uses this)
+        if timeout_override is not None and "timeout" not in kwargs:
+            # Only inject timeout when the executor actually accepts it
+            try:
+                import inspect
+                sig = inspect.signature(tool.executor)
+                if "timeout" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    kwargs["timeout"] = int(timeout_override)
+            except Exception:
+                # Best effort – if we cannot inspect, don't inject
+                pass
 
         # ========== CACHE CHECK (read-only tools only) ==========
         is_cacheable = name in self._cacheable_tools and tool.read_only
@@ -417,6 +873,24 @@ class ToolRegistry:
 
         # ========== EXECUTE TOOL ==========
         result = tool.execute(**kwargs)
+
+        # Log detailed failure context for transparency
+        if not result.is_success:
+            trace = None
+            if isinstance(result.metadata, dict):
+                trace = result.metadata.get("traceback")
+            self.logger.error(
+                f"Tool '{name}' execution failed",
+                component="tools",
+                data={
+                    "tool": name,
+                    "status": result.status.value if hasattr(result, "status") else "unknown",
+                    "error": result.error,
+                    "duration_ms": result.duration_ms,
+                    "args": self._summarize_kwargs(kwargs),
+                    "traceback": self._truncate_text(trace),
+                }
+            )
 
         # ========== CACHE STORAGE (successful read-only results) ==========
         if is_cacheable and cache_key and result.is_success:
@@ -571,26 +1045,45 @@ class ToolRegistry:
             cost_hint="low"
         ))
 
-        # File Write Tool
+        # File Write Tool (supports full write, append, and targeted edit modes)
         self.register(Tool(
             name="file_write",
-            description="Write content to a file. Creates the file if it doesn't exist.",
+            description="""Write or edit a file. Supports three modes:
+1. FULL WRITE: Provide 'content' to replace entire file (creates if missing)
+2. APPEND: Provide 'content' + append=true to add to end of file
+3. TARGETED EDIT: Provide 'old_string' + 'new_string' to replace specific text (file must exist)
+
+For targeted edits, old_string must be unique in the file unless replace_all=true.
+All writes are atomic (crash-safe).""",
             parameters={
                 "path": {
                     "type": "string",
-                    "description": "Path to the file to write"
+                    "description": "Path to the file to write/edit"
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content to write to the file"
+                    "description": "Full content to write (for full write or append mode). Omit for targeted edit."
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "Whether to append to existing content (default: false)",
+                    "description": "If true, append content to existing file (default: false)",
+                    "default": False
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "For targeted edit: exact string to find and replace"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "For targeted edit: replacement string"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "For targeted edit: replace all occurrences (default: false, requires unique match)",
                     "default": False
                 }
             },
-            required_params=["path", "content"],
+            required_params=["path"],
             executor=self._file_write,
             timeout=10
         ))
@@ -709,6 +1202,144 @@ class ToolRegistry:
             parallelizable=True,
             cost_hint="low"
         ))
+
+        # Image Generation Tool (Gemini)
+        self.register(Tool(
+            name="generate_image",
+            description=(
+                "Generate an image from a text description. When you call this, lightly embellish the prompt with 1-2"
+                " concrete visual details (lighting, composition, style cues) and pass the enhanced text directly."
+                " Accepts natural language descriptions and optional output_path; otherwise uses a default save path."
+                " Returns the file path of the saved image."
+            ),
+            parameters={
+                "prompt": {
+                    "type": "string",
+                    "description": "Image description to send to the generator. Add 1-2 crisp details yourself before calling."
+                },
+                "style": {
+                    "type": "string",
+                    "description": "Optional style guidance such as 'photorealistic', 'watercolor', or 'pixel art'",
+                    "default": None
+                },
+                "width": {
+                    "type": "integer",
+                    "description": "Preferred image width in pixels (best-effort hint)",
+                    "default": None
+                },
+                "height": {
+                    "type": "integer",
+                    "description": "Preferred image height in pixels (best-effort hint)",
+                    "default": None
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "Optional explicit output path. If not provided, extracted from prompt or uses default.",
+                    "default": None
+                },
+                "skip_prompt_engineering": {
+                    "type": "boolean",
+                    "description": "Legacy flag; prompt is now passed through directly. Leave as true.",
+                    "default": True
+                }
+            },
+            required_params=["prompt"],
+            executor=self._generate_image,
+            timeout=70,  # Extra buffer for API call
+            read_only=False,  # Creates files
+            parallelizable=True,  # Can run concurrent image generations
+            cost_hint="high"  # API calls are expensive
+        ))
+
+        # Graphd tools (optional)
+        if self._graphd_client and self._graphd_tools_enabled:
+            self.register(Tool(
+                name="graphd_health",
+                description="Check graphd health and stats.",
+                parameters={},
+                required_params=[],
+                executor=self._graphd_health,
+                timeout=5,
+                read_only=True,
+                parallelizable=True,
+                cost_hint="low"
+            ))
+            self.register(Tool(
+                name="graphd_symbol",
+                description="Resolve nearest symbol definition for a file and line.",
+                parameters={
+                    "path": {"type": "string", "description": "File path relative to repo root"},
+                    "line": {"type": "integer", "description": "1-based line number"},
+                },
+                required_params=["path", "line"],
+                executor=self._graphd_symbol,
+                timeout=5,
+                read_only=True,
+                parallelizable=True,
+                cost_hint="low"
+            ))
+            self.register(Tool(
+                name="graphd_context",
+                description="Fetch graphd context for a symbol id.",
+                parameters={
+                    "symbol_id": {"type": "string", "description": "Graphd symbol id"},
+                    "depth": {"type": "integer", "description": "Neighbor depth", "default": 1},
+                },
+                required_params=["symbol_id"],
+                executor=self._graphd_context,
+                timeout=5,
+                read_only=True,
+                parallelizable=True,
+                cost_hint="low"
+            ))
+            self.register(Tool(
+                name="graphd_impact",
+                description="Get ranked impact candidates for a change.",
+                parameters={
+                    "entity_type": {"type": "string", "description": "file | symbol"},
+                    "path": {"type": "string", "description": "File path (for file or symbol lookup)"},
+                    "symbol_id": {"type": "string", "description": "Symbol id (optional)"},
+                    "line": {"type": "integer", "description": "Line for symbol lookup (optional)"},
+                    "change_type": {"type": "string", "description": "sig_change | rename | move | config_contract_change | logging_contract_change | unknown"},
+                    "diff_summary": {"type": "string", "description": "Optional diff summary"},
+                    "budget": {"type": "integer", "description": "Max candidates", "default": 20},
+                },
+                required_params=["entity_type", "change_type"],
+                executor=self._graphd_impact,
+                timeout=10,
+                read_only=True,
+                parallelizable=True,
+                cost_hint="low"
+            ))
+            self.register(Tool(
+                name="graphd_search",
+                description="Search the repo via graphd controlled search.",
+                parameters={
+                    "pattern": {"type": "string", "description": "Regex pattern to search"},
+                    "path": {"type": "string", "description": "Optional relative path scope"},
+                    "max_results": {"type": "integer", "description": "Max results", "default": 50},
+                },
+                required_params=["pattern"],
+                executor=self._graphd_search,
+                timeout=10,
+                read_only=True,
+                parallelizable=True,
+                cost_hint="low"
+            ))
+            self.register(Tool(
+                name="graphd_export",
+                description="Export graphd table as JSONL payload.",
+                parameters={
+                    "table": {"type": "string", "description": "files | symbols | module_edges | exports | run_artifacts"},
+                    "format": {"type": "string", "description": "jsonl", "default": "jsonl"},
+                },
+                required_params=["table"],
+                executor=self._graphd_export,
+                timeout=10,
+                read_only=True,
+                parallelizable=True,
+                cost_hint="low"
+            ))
 
     # Tool Executors
 
@@ -1002,48 +1633,167 @@ class ToolRegistry:
                 error=detail
             )
 
-    def _file_write(self, path: str, content: str, append: bool = False) -> ToolResult:
-        """Write content to file"""
+    def _file_write(
+        self,
+        path: str,
+        content: Optional[str] = None,
+        append: bool = False,
+        old_string: Optional[str] = None,
+        new_string: Optional[str] = None,
+        replace_all: bool = False
+    ) -> ToolResult:
+        """
+        Write or edit a file with atomic writes.
+
+        Modes:
+        1. FULL WRITE: content provided, old_string not provided
+        2. APPEND: content provided, append=True
+        3. TARGETED EDIT: old_string + new_string provided (content ignored)
+        """
         resolved_path = self._resolve_path(path)
+
+        # Determine mode
+        is_edit_mode = old_string is not None and new_string is not None
+
+        # Validate parameters
+        if is_edit_mode:
+            if not os.path.exists(resolved_path):
+                return ToolResult(
+                    status=ToolStatus.ERROR,
+                    output=None,
+                    error=f"File not found for edit: {resolved_path}. Use content param to create new files."
+                )
+        else:
+            if content is None:
+                return ToolResult(
+                    status=ToolStatus.ERROR,
+                    output=None,
+                    error="Must provide 'content' for write/append, or 'old_string'+'new_string' for edit"
+                )
+
         try:
+            action = "edit" if is_edit_mode else ("append" if append else "write")
             self.logger.file_operation(
                 "file_write",
                 resolved_path,
                 status="starting",
-                detail=f"append={append}"
+                detail=f"action={action}"
             )
 
-            # Create directory if needed
+            # Create directory if needed (for write/append mode only)
             dir_path = os.path.dirname(resolved_path)
             if dir_path and not os.path.exists(dir_path):
                 self.logger.file_operation("mkdir", dir_path, status="starting")
                 os.makedirs(dir_path, exist_ok=True)
                 self.logger.file_operation("mkdir", dir_path, status="success")
 
-            mode = "a" if append else "w"
-            with open(resolved_path, mode, encoding="utf-8") as f:
-                f.write(content)
+            # ========== TARGETED EDIT MODE ==========
+            if is_edit_mode:
+                with open(resolved_path, "r", encoding="utf-8") as f:
+                    original_content = f.read()
+
+                # Uniqueness check
+                occurrence_count = original_content.count(old_string)
+                if occurrence_count == 0:
+                    return ToolResult(
+                        status=ToolStatus.ERROR,
+                        output=None,
+                        error=f"old_string not found in {resolved_path}. Verify the exact text including whitespace.",
+                        metadata={"path": resolved_path, "action": "edit"}
+                    )
+                if occurrence_count > 1 and not replace_all:
+                    # Provide context to help user disambiguate
+                    first_idx = original_content.find(old_string)
+                    snippet_start = max(0, first_idx - 30)
+                    snippet_end = min(len(original_content), first_idx + len(old_string) + 30)
+                    context_snippet = original_content[snippet_start:snippet_end]
+                    return ToolResult(
+                        status=ToolStatus.ERROR,
+                        output=None,
+                        error=f"old_string found {occurrence_count} times - not unique. "
+                              f"Add surrounding context to make unique, or use replace_all=true. "
+                              f"First occurrence near: ...{context_snippet}...",
+                        metadata={"path": resolved_path, "action": "edit", "occurrences": occurrence_count}
+                    )
+
+                # Apply replacement
+                if replace_all:
+                    new_content = original_content.replace(old_string, new_string)
+                    replacements_made = occurrence_count
+                else:
+                    new_content = original_content.replace(old_string, new_string, 1)
+                    replacements_made = 1
+
+                bytes_written = len(new_content)
+                output_msg = f"Replaced {replacements_made} occurrence(s) in {resolved_path}"
+
+            # ========== APPEND MODE ==========
+            elif append:
+                # Append is safe without atomic write (just adding to end)
+                with open(resolved_path, "a", encoding="utf-8") as f:
+                    f.write(content)
+
+                self.logger.file_operation(
+                    "file_write",
+                    resolved_path,
+                    status="success",
+                    detail=f"bytes={len(content)} action=append"
+                )
+                return ToolResult(
+                    status=ToolStatus.SUCCESS,
+                    output=f"Successfully appended to {resolved_path}",
+                    metadata={
+                        "path": resolved_path,
+                        "bytes_written": len(content),
+                        "action": "append"
+                    }
+                )
+
+            # ========== FULL WRITE MODE ==========
+            else:
+                new_content = content
+                bytes_written = len(content)
+                output_msg = f"Successfully wrote {resolved_path}"
+
+            # ========== ATOMIC WRITE (for edit and full write) ==========
+            # Write to temp file, then atomic rename
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=dir_path or ".",
+                prefix=".tmp_write_",
+                suffix=".tmp"
+            )
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_f:
+                    tmp_f.write(new_content)
+                # Atomic rename (POSIX guarantees atomicity)
+                os.replace(tmp_path, resolved_path)
+            except Exception:
+                # Clean up temp file on failure
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
 
             self.logger.file_operation(
                 "file_write",
                 resolved_path,
                 status="success",
-                detail=f"bytes={len(content)} append={append}"
+                detail=f"bytes={bytes_written} action={action}"
             )
 
             return ToolResult(
                 status=ToolStatus.SUCCESS,
-                output=f"Successfully {'appended to' if append else 'wrote'} {resolved_path}",
+                output=output_msg,
                 metadata={
                     "path": resolved_path,
-                    "bytes_written": len(content),
-                    "append": append,
-                    "action": "append" if append else "write"
+                    "bytes_written": bytes_written,
+                    "action": action,
+                    "replacements": replacements_made if is_edit_mode else None,
+                    "atomic": True
                 }
             )
 
         except Exception as e:
-            detail = f"File write failed: {str(e)}"
+            detail = f"File {action} failed: {str(e)}"
             self.logger.file_operation("file_write", resolved_path, status="failed", detail=detail)
             return ToolResult(
                 status=ToolStatus.ERROR,
@@ -1596,6 +2346,246 @@ class ToolRegistry:
                 return f"{bytes:.1f}{unit}"
             bytes /= 1024.0
         return f"{bytes:.1f}TB"
+
+    # ========== NANO BANANA IMAGE GENERATION ==========
+
+    def _generate_image(
+        self,
+        prompt: str,
+        output_path: Optional[str] = None,
+        skip_prompt_engineering: bool = False,
+        style: Optional[str] = None,
+        width: Optional[Union[int, str]] = None,
+        height: Optional[Union[int, str]] = None,
+        callback: Optional[Callable[[ImageGenerationResult], Any]] = None,
+        **extra_kwargs
+    ) -> ToolResult:
+        """
+        Generate an image using Gemini's Nano Banana API.
+
+        Args:
+            prompt: User's image request (can be natural language)
+            output_path: Optional explicit output path (overrides extraction)
+            skip_prompt_engineering: If True, use prompt as-is
+            callback: Optional custom callback (default returns file path)
+
+        Returns:
+            ToolResult with status and file path output
+        """
+        start_time = time.time()
+        original_prompt = prompt
+
+        def _coerce_int(value: Optional[Union[int, str]]) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        width_hint = _coerce_int(width)
+        height_hint = _coerce_int(height)
+
+        # Blend style/size hints into the prompt so the backend can consider them even if not first-class params
+        prompt_suffix_parts = []
+        if style:
+            prompt_suffix_parts.append(f"Style: {style}")
+        if width_hint and height_hint:
+            prompt_suffix_parts.append(f"Preferred size: {width_hint}x{height_hint}")
+        elif width_hint or height_hint:
+            size_hint = width_hint or height_hint
+            prompt_suffix_parts.append(f"Preferred size: {size_hint}px")
+        if prompt_suffix_parts:
+            prompt = f"{prompt.rstrip()}\n" + "\n".join(prompt_suffix_parts)
+
+        # Get Nano Banana config
+        nano_config = getattr(self, '_nano_banana_config', None) or NanoBananaConfig()
+
+        # Check if API key is available
+        if not nano_config.api_key:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error="No Gemini API key configured. Set GOOGLE_API_KEY or GEMINI_API_KEY environment variable."
+            )
+
+        try:
+            # Step 1: Direct prompt pass-through (embellish in the calling LLM, not here)
+            enhanced_prompt = prompt
+            # Generate default path if not provided
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = nano_config.default_filename_pattern.format(timestamp=timestamp)
+            resolved_path = output_path or os.path.join(
+                nano_config.default_output_dir, filename
+            )
+
+            # Step 2: Resolve path against working directory
+            if resolved_path and not os.path.isabs(resolved_path):
+                resolved_path = self._resolve_path(resolved_path)
+
+            # Step 3: Call Gemini async API
+            client = GeminiImageClient(
+                api_key=nano_config.api_key,
+                api_base=nano_config.api_base,
+                model=nano_config.model,
+                timeout=nano_config.timeout,
+                max_retries=nano_config.max_retries,
+                logger=self.logger
+            )
+
+            # Run async in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                image_result = loop.run_until_complete(
+                    client.generate_image(
+                        prompt=enhanced_prompt,
+                        output_path=resolved_path,
+                        callback=callback
+                    )
+                )
+            finally:
+                loop.run_until_complete(client.close())
+                loop.close()
+
+            # Step 4: Process result through default callback
+            duration_ms = (time.time() - start_time) * 1000
+
+            if image_result.success:
+                output_message = default_image_callback(image_result)
+
+                self.logger.info(
+                    f"Image generated successfully: {image_result.file_path}",
+                    component="nano_banana"
+                )
+
+                return ToolResult(
+                    status=ToolStatus.SUCCESS,
+                    output=output_message,
+                    duration_ms=duration_ms,
+                    metadata={
+                        "file_path": image_result.file_path,
+                        "original_prompt": original_prompt,
+                        "applied_prompt": prompt,
+                        "enhanced_prompt": enhanced_prompt,
+                        "model": nano_config.model,
+                        "size_bytes": image_result.metadata.get("size_bytes") if image_result.metadata else None,
+                        "thought_text": image_result.thought_text,
+                        "style": style,
+                        "width": width_hint,
+                        "height": height_hint,
+                        "extra_kwargs": extra_kwargs or None
+                    }
+                )
+            else:
+                self.logger.warning(
+                    f"Image generation failed: {image_result.error}",
+                    component="nano_banana"
+                )
+                return ToolResult(
+                    status=ToolStatus.ERROR,
+                    output=None,
+                    error=image_result.error,
+                    duration_ms=duration_ms,
+                    metadata={
+                        "original_prompt": original_prompt,
+                        "applied_prompt": prompt,
+                        "enhanced_prompt": enhanced_prompt,
+                        "style": style,
+                        "width": width_hint,
+                        "height": height_hint,
+                        "extra_kwargs": extra_kwargs or None
+                    }
+                )
+
+        except ImportError as e:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Missing dependency: {str(e)}. Install with: pip install aiohttp",
+                duration_ms=(time.time() - start_time) * 1000
+            )
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.logger.error(
+                "Image generation error",
+                error=e,
+                component="nano_banana",
+                data={
+                    "prompt": prompt[:120],
+                    "output_path": locals().get("resolved_path") or output_path,
+                    "traceback": tb[:4000] if tb else None
+                }
+            )
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=str(e),
+                duration_ms=(time.time() - start_time) * 1000,
+                metadata={
+                    "original_prompt": original_prompt,
+                    "applied_prompt": prompt,
+                    "enhanced_prompt": locals().get("enhanced_prompt"),
+                    "style": style,
+                    "width": width_hint,
+                    "height": height_hint,
+                    "extra_kwargs": extra_kwargs or None,
+                    "traceback": tb
+                }
+            )
+
+    # ========== GRAPHD TOOL EXECUTORS ==========
+
+    def _graphd_health(self) -> ToolResult:
+        if not self._graphd_client:
+            return ToolResult(status=ToolStatus.ERROR, output=None, error="Graphd client not configured")
+        return ToolResult(status=ToolStatus.SUCCESS, output=self._graphd_client.health())
+
+    def _graphd_symbol(self, path: str, line: int) -> ToolResult:
+        if not self._graphd_client:
+            return ToolResult(status=ToolStatus.ERROR, output=None, error="Graphd client not configured")
+        return ToolResult(status=ToolStatus.SUCCESS, output=self._graphd_client.symbol(path, line))
+
+    def _graphd_context(self, symbol_id: str, depth: int = 1) -> ToolResult:
+        if not self._graphd_client:
+            return ToolResult(status=ToolStatus.ERROR, output=None, error="Graphd client not configured")
+        return ToolResult(status=ToolStatus.SUCCESS, output=self._graphd_client.context(symbol_id, depth))
+
+    def _graphd_impact(
+        self,
+        entity_type: str,
+        change_type: str,
+        path: Optional[str] = None,
+        symbol_id: Optional[str] = None,
+        line: Optional[int] = None,
+        diff_summary: Optional[str] = None,
+        budget: int = 20
+    ) -> ToolResult:
+        if not self._graphd_client:
+            return ToolResult(status=ToolStatus.ERROR, output=None, error="Graphd client not configured")
+        payload = {
+            "entity": {
+                "type": entity_type,
+                "path": path,
+                "symbol_id": symbol_id,
+                "line": line,
+            },
+            "change_type": change_type,
+            "diff_summary": diff_summary,
+            "budget": budget,
+        }
+        return ToolResult(status=ToolStatus.SUCCESS, output=self._graphd_client.impact(payload))
+
+    def _graphd_search(self, pattern: str, path: Optional[str] = None, max_results: int = 50) -> ToolResult:
+        if not self._graphd_client:
+            return ToolResult(status=ToolStatus.ERROR, output=None, error="Graphd client not configured")
+        payload = {"pattern": pattern, "path": path, "max_results": max_results}
+        return ToolResult(status=ToolStatus.SUCCESS, output=self._graphd_client.search(payload))
+
+    def _graphd_export(self, table: str, format: str = "jsonl") -> ToolResult:
+        if not self._graphd_client:
+            return ToolResult(status=ToolStatus.ERROR, output=None, error="Graphd client not configured")
+        return ToolResult(status=ToolStatus.SUCCESS, output=self._graphd_client.export(table, format))
 
 
 # Decorator for easy tool registration

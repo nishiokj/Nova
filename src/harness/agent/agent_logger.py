@@ -4,6 +4,11 @@ AgentLogger - Async logging infrastructure for agent execution.
 Extracted from agent.py to improve separation of concerns.
 Handles 3-stage logging: context, planning, and episode summary.
 
+NEW: Also logs FULL execution details to full_execution.jsonl including:
+- Complete planner prompts (instructions + input) and responses
+- Complete executor prompts (instructions + input) and responses
+- NO TRUNCATION - everything is logged in full
+
 IMPORTANT: This class requires a log_dir to be passed explicitly.
 It should NEVER construct its own logger or use hardcoded paths.
 The calling application (TUI, CLI, etc.) is responsible for:
@@ -11,6 +16,7 @@ The calling application (TUI, CLI, etc.) is responsible for:
 2. Passing the log_dir path to this class
 """
 
+import json
 import os
 import time
 import queue
@@ -50,6 +56,8 @@ class AgentLogger:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logger
         self._log_file = self.log_dir / "llm_requests.log"
+        # NEW: Full execution log file - JSONL format, NO TRUNCATION
+        self._full_execution_file = self.log_dir / "full_execution.jsonl"
 
         # ========== ASYNC LOGGING INFRASTRUCTURE ==========
         # Background thread for non-blocking file I/O
@@ -439,3 +447,223 @@ class AgentLogger:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to log stage 3: {e}", component="agent.logger")
+
+    # ==========================================================================
+    # FULL EXECUTION LOGGING - NO TRUNCATION
+    # Writes to full_execution.jsonl with complete prompts and responses
+    # ==========================================================================
+
+    def log_planner_call(
+        self,
+        user_input: str,
+        instructions: str,
+        input_str: str,
+        raw_response: str,
+        parsed_plan: Optional[Dict[str, Any]] = None,
+        tier: str = "",
+        duration_ms: float = 0.0
+    ):
+        """
+        Log the COMPLETE planner LLM call - prompt and response.
+        SYNCHRONOUS - writes immediately for visibility.
+        NO TRUNCATION - logs everything in full.
+
+        Args:
+            user_input: Original user request
+            instructions: System instructions sent to LLM (FULL)
+            input_str: Input/user content sent to LLM (FULL)
+            raw_response: Raw LLM response content (FULL)
+            parsed_plan: Parsed plan dict (if available)
+            tier: Execution tier
+            duration_ms: Time taken for LLM call
+        """
+        try:
+            entry = {
+                "type": "planner_call",
+                "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S'),
+                "timestamp_unix": time.time(),
+                "tier": tier,
+                "duration_ms": duration_ms,
+                "user_input": user_input,
+                "prompt": {
+                    "instructions": instructions,
+                    "input": input_str
+                },
+                "response": {
+                    "raw_content": raw_response,
+                    "parsed_plan": parsed_plan
+                }
+            }
+
+            # Write JSONL - one JSON object per line
+            with open(self._full_execution_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, indent=2, ensure_ascii=False))
+                f.write("\n\n")  # Double newline for readability
+
+            # Also print to stderr for immediate visibility
+            import sys
+            print(f"\n{'='*80}", file=sys.stderr)
+            print(f"[PLANNER CALL] {time.strftime('%H:%M:%S')} | tier={tier} | {duration_ms:.0f}ms", file=sys.stderr)
+            print(f"{'='*80}", file=sys.stderr)
+            print(f"USER INPUT: {user_input}", file=sys.stderr)
+            print(f"\n--- INSTRUCTIONS ({len(instructions)} chars) ---", file=sys.stderr)
+            print(instructions[:2000] + ("..." if len(instructions) > 2000 else ""), file=sys.stderr)
+            print(f"\n--- INPUT ({len(input_str)} chars) ---", file=sys.stderr)
+            print(input_str, file=sys.stderr)
+            print(f"\n--- RAW RESPONSE ({len(raw_response)} chars) ---", file=sys.stderr)
+            print(raw_response, file=sys.stderr)
+            print(f"{'='*80}\n", file=sys.stderr)
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to log planner call: {e}", component="agent.logger")
+            # Also print error to stderr
+            import sys
+            print(f"[ERROR] Failed to log planner call: {e}", file=sys.stderr)
+
+    def log_executor_call(
+        self,
+        step_num: int,
+        objective: str,
+        instructions: str,
+        input_str: str,
+        raw_response: str,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        tier: str = "",
+        duration_ms: float = 0.0,
+        phase: str = "",
+        manifest: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Log the COMPLETE executor LLM call - prompt and response.
+        SYNCHRONOUS - writes immediately for visibility.
+        NO TRUNCATION - logs everything in full.
+
+        Args:
+            step_num: Current step number
+            objective: Step objective
+            instructions: System instructions sent to LLM (FULL)
+            input_str: Input/user content sent to LLM (FULL)
+            raw_response: Raw LLM response content (FULL)
+            tool_calls: Tool calls made by LLM (if any)
+            tool_results: Results from tool execution (if any)
+            tier: Execution tier
+            duration_ms: Time taken for LLM call
+            phase: discovery or execution
+            manifest: Execution discoveries/manifest (canonicalized facts from tool executions)
+        """
+        try:
+            entry = {
+                "type": "executor_call",
+                "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S'),
+                "timestamp_unix": time.time(),
+                "tier": tier,
+                "step_num": step_num,
+                "phase": phase,
+                "objective": objective,
+                "duration_ms": duration_ms,
+                "prompt": {
+                    "instructions": instructions,
+                    "input": input_str
+                },
+                "response": {
+                    "raw_content": raw_response,
+                    "tool_calls": tool_calls or []
+                },
+                "tool_results": tool_results or [],
+                "manifest": manifest or {}
+            }
+
+            # Write JSONL - one JSON object per line
+            with open(self._full_execution_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, indent=2, ensure_ascii=False))
+                f.write("\n\n")  # Double newline for readability
+
+            # Also print to stderr for immediate visibility
+            import sys
+            print(f"\n{'='*80}", file=sys.stderr)
+            print(f"[EXECUTOR CALL] Step {step_num} | {phase} | {time.strftime('%H:%M:%S')} | {duration_ms:.0f}ms", file=sys.stderr)
+            print(f"OBJECTIVE: {objective}", file=sys.stderr)
+            print(f"{'='*80}", file=sys.stderr)
+            print(f"\n--- INSTRUCTIONS ({len(instructions)} chars) ---", file=sys.stderr)
+            print(instructions[:2000] + ("..." if len(instructions) > 2000 else ""), file=sys.stderr)
+            print(f"\n--- INPUT ({len(input_str)} chars) ---", file=sys.stderr)
+            print(input_str, file=sys.stderr)
+            print(f"\n--- RAW RESPONSE ({len(raw_response)} chars) ---", file=sys.stderr)
+            print(raw_response, file=sys.stderr)
+            if tool_calls:
+                print(f"\n--- TOOL CALLS ({len(tool_calls)}) ---", file=sys.stderr)
+                for tc in tool_calls:
+                    print(f"  {tc.get('name', 'unknown')}: {json.dumps(tc.get('arguments', {}))}", file=sys.stderr)
+            if tool_results:
+                print(f"\n--- TOOL RESULTS ({len(tool_results)}) ---", file=sys.stderr)
+                for tr in tool_results:
+                    result_preview = str(tr.get('output', ''))[:500]
+                    print(f"  {tr.get('tool', 'unknown')}: {result_preview}", file=sys.stderr)
+            if manifest:
+                print(f"\n--- MANIFEST ({len(manifest)} entries) ---", file=sys.stderr)
+                for key, disc in list(manifest.items())[:10]:  # Limit to 10 for stderr
+                    disc_type = disc.get('type', 'unknown') if isinstance(disc, dict) else 'unknown'
+                    print(f"  [{disc_type}] {key}", file=sys.stderr)
+            print(f"{'='*80}\n", file=sys.stderr)
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to log executor call: {e}", component="agent.logger")
+            # Also print error to stderr
+            import sys
+            print(f"[ERROR] Failed to log executor call: {e}", file=sys.stderr)
+
+    def log_synthesis_call(
+        self,
+        instructions: str,
+        input_str: str,
+        raw_response: str,
+        tier: str = "",
+        duration_ms: float = 0.0
+    ):
+        """
+        Log the COMPLETE synthesis LLM call - prompt and response.
+        SYNCHRONOUS - writes immediately for visibility.
+        NO TRUNCATION - logs everything in full.
+        """
+        try:
+            entry = {
+                "type": "synthesis_call",
+                "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S'),
+                "timestamp_unix": time.time(),
+                "tier": tier,
+                "duration_ms": duration_ms,
+                "prompt": {
+                    "instructions": instructions,
+                    "input": input_str
+                },
+                "response": {
+                    "raw_content": raw_response
+                }
+            }
+
+            # Write JSONL
+            with open(self._full_execution_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, indent=2, ensure_ascii=False))
+                f.write("\n\n")
+
+            # Print to stderr
+            import sys
+            print(f"\n{'='*80}", file=sys.stderr)
+            print(f"[SYNTHESIS CALL] {time.strftime('%H:%M:%S')} | {duration_ms:.0f}ms", file=sys.stderr)
+            print(f"{'='*80}", file=sys.stderr)
+            print(f"\n--- INSTRUCTIONS ({len(instructions)} chars) ---", file=sys.stderr)
+            print(instructions[:1000] + ("..." if len(instructions) > 1000 else ""), file=sys.stderr)
+            print(f"\n--- INPUT ({len(input_str)} chars) ---", file=sys.stderr)
+            print(input_str[:500] + ("..." if len(input_str) > 500 else ""), file=sys.stderr)
+            print(f"\n--- RAW RESPONSE ({len(raw_response)} chars) ---", file=sys.stderr)
+            print(raw_response, file=sys.stderr)
+            print(f"{'='*80}\n", file=sys.stderr)
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to log synthesis call: {e}", component="agent.logger")
+            import sys
+            print(f"[ERROR] Failed to log synthesis call: {e}", file=sys.stderr)

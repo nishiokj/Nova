@@ -30,7 +30,6 @@
   },
   "tools": {
       "enabled_tools": [
-        
         "bash_execute",
         "python_execute",
         "file_read",
@@ -39,13 +38,55 @@
         "calculator",
         "get_current_time",
         "get_working_directory",
-        "list_files"
+        "list_files",
+        "generate_image"
       ],
     "sandbox_bash": true,
     "sandbox_python": true,
     "max_output_length": 10000,
     "bash_timeout": 30,
     "python_timeout": 60
+  },
+  "graphd": {
+    "enabled": true,
+    "enable_tools": true,
+    "root_path": null,
+    "db_path": ".graphd/graphd.db",
+    "host": "127.0.0.1",
+    "port": 9444,
+    "client_timeout_s": 2,
+    "index_interval_s": 5.0,
+    "debounce_s": 0.25,
+    "max_file_size_bytes": 1000000,
+    "max_files_per_scan": 500,
+    "derived_ttl_s": 600,
+    "derived_max_entries": 1000,
+    "max_results": 200,
+    "enable_rg": true,
+    "rg_path": "rg",
+    "idle_refinement": true,
+    "refine_max_files": 3,
+    "refine_max_symbols": 5,
+    "backpressure_when_active": true,
+    "nice_level": null,
+    "max_memory_mb": null,
+    "allow_export": true,
+    "ignore_file": ".graphdignore",
+    "extra_ignore": [],
+    "vacuum_interval_cycles": 100,
+    "stats_log_interval_cycles": 20
+  },
+  "nano_banana": {
+    "enabled": true,
+    "model": "gemini-3-pro-image-preview",
+    "api_base": "https://generativelanguage.googleapis.com/v1beta",
+    "default_output_dir": ".",
+    "default_filename_pattern": "generated_{timestamp}.png",
+    "timeout": 60,
+    "max_retries": 3,
+    "helper_llm_provider": "openai",
+    "helper_llm_model": "gpt-5-mini",
+    "helper_max_tokens": 500
   },
   "logging": {
     "log_dir": "logs",

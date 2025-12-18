@@ -37,11 +37,28 @@ class Planner:
     The key insight: know what success looks like BEFORE you start.
     """
 
-    def __init__(self, llm: LLMAdapter, tool_registry: ToolRegistry):
+    def __init__(self, llm: LLMAdapter, tool_registry: ToolRegistry, enable_scouting: bool = True):
         self.llm = llm
         self.tool_registry = tool_registry
         self._tracer = get_tracer()
         # NO logger - Planner doesn't log, Agent does
+
+        # Store last LLM call details for logging by Agent
+        self.last_call_instructions: str = ""
+        self.last_call_input: str = ""
+        self.last_call_response: str = ""
+        self.last_call_duration_ms: float = 0.0
+
+        # Context scouting for grounded planning
+        self._enable_scouting = enable_scouting
+        self._scout = None
+        self._last_scout_snapshot = None
+        if enable_scouting:
+            try:
+                from .context_scout import ContextScout
+                self._scout = ContextScout(tool_registry)
+            except ImportError:
+                self._enable_scouting = False
 
     def create_plan(
         self,
@@ -56,6 +73,9 @@ class Planner:
         For simple requests, this is fast (pattern matching).
         For complex requests, uses LLM to decompose.
 
+        NEW: If context scouting is enabled, gathers minimal context
+        before planning to ground the plan in reality.
+
         IMPORTANT: If budget constraints are provided, the plan MUST fit within them.
         If the task cannot be completed within budget, we fail fast with a clear error.
 
@@ -66,6 +86,16 @@ class Planner:
             exec_id: Execution ID for logging
             budget: Budget constraints from router (max_tool_calls, max_tokens, max_steps)
         """
+        # PRE-PLANNING: Scout context if enabled and needed
+        if self._enable_scouting and self._scout:
+            from .context_scout import should_scout
+            if should_scout(user_input):
+                with self._tracer.span("context_scout"):
+                    self._last_scout_snapshot = self._scout.scout(user_input)
+                    if self._last_scout_snapshot.has_useful_context:
+                        scout_context = self._last_scout_snapshot.to_context_string()
+                        context = f"{context}\n\n{scout_context}" if context else scout_context
+
         # Fast path: detect simple patterns that don't need LLM planning
         with self._tracer.span("try_simple_plan"):
             simple_plan = self._try_simple_plan(user_input)
@@ -328,9 +358,33 @@ class Planner:
         is_code_question = any(input_lower.startswith(pattern) for pattern in code_question_patterns) and has_file_path
 
         if is_code_question and not is_creation_task:
-            import re
-            file_pattern = r'\.?/[\w/\-\.]+\.[\w]+'
-            mentioned_files = re.findall(file_pattern, user_input)
+            # USE SCOUT DISCOVERIES if available - scout already read the files!
+            mentioned_files = []
+
+            if self._last_scout_snapshot and self._last_scout_snapshot.files:
+                # Scout already verified and read these files
+                for path, file_ctx in self._last_scout_snapshot.files.items():
+                    if file_ctx.exists:
+                        mentioned_files.append(path)
+
+            if not mentioned_files:
+                # Fallback: extract paths ourselves (scout might not have run)
+                import re
+                # Pattern 1: @mentions like @tui/render_engine.py
+                at_mentions = re.findall(r'@([\w/\-\.]+\.[\w]+)', user_input)
+                mentioned_files.extend(at_mentions)
+                # Pattern 2: Explicit paths like ./file.py or /path/to/file.py
+                path_mentions = re.findall(r'\.?/([\w/\-\.]+\.[\w]+)', user_input)
+                mentioned_files.extend(path_mentions)
+                # Deduplicate
+                mentioned_files = list(dict.fromkeys(mentioned_files))
+
+            # If scout has full content for PRIMARY files, skip the read step entirely
+            has_full_content = False
+            if self._last_scout_snapshot:
+                primary_files = self._last_scout_snapshot.primary_files
+                if primary_files and any(f.content for f in primary_files):
+                    has_full_content = True
 
             plan = Plan(
                 goal=f"Explain: {user_input}",
@@ -339,8 +393,9 @@ class Planner:
                     PlanStep(
                         step_num=1,
                         objective=f"Read and explain the code",
-                        tool_hint="file_read" if mentioned_files else None,
-                        tool_args_hint={"path": mentioned_files[0]} if mentioned_files else None,
+                        # Skip tool hint if scout already has full content
+                        tool_hint="file_read" if mentioned_files and not has_full_content else None,
+                        tool_args_hint={"path": mentioned_files[0]} if mentioned_files and not has_full_content else None,
                         phase=PlanPhase.EXECUTION,
                         success_criteria=SuccessCriteria(
                             description="Provide clear explanation of how the code works"
@@ -351,7 +406,7 @@ class Planner:
                     description="Code behavior explained clearly"
                 ),
                 estimated_complexity="simple",
-                requires_tools=bool(mentioned_files),
+                requires_tools=bool(mentioned_files) and not has_full_content,
                 reasoning="Code explanation question - read file and explain",
                 discovery_required=False,
                 assumptions=["User wants to understand existing code, not modify it"]
@@ -400,16 +455,29 @@ class Planner:
 
             context_str = f"\nContext: {context}" if context else ""
 
-            prompt = format_prompt(
-                PLANNING_PROMPT,
-                tools=tool_descriptions,
-                user_input=user_input,
-                context=context_str
-            )
-            if not prompt:
-                prompt = f"User request: {user_input}{context_str}\n\nAvailable tools:\n{tool_descriptions}"
+            # Build system instructions (planning rules + available tools)
+            # NOTE: PLANNING_PROMPT contains JSON examples with braces that break str.format(),
+            # so we use manual string replacement instead of format_prompt().
+            prompt_template = PLANNING_PROMPT or ""
+            system_instructions = prompt_template
+            if system_instructions:
+                # Replace placeholders manually (format() fails due to JSON braces in template)
+                system_instructions = system_instructions.replace("{tools}", tool_descriptions)
+                system_instructions = system_instructions.replace("{user_input}", user_input)
+                system_instructions = system_instructions.replace("{context}", context_str)
+            else:
+                system_instructions = (
+                    "You are a planning assistant. Output valid JSON only.\n\n"
+                    f"Available tools:\n{tool_descriptions}"
+                )
 
-            self._tracer.add_metadata("prompt_len", len(prompt))
+            # Build user input (the actual request)
+            user_input_str = user_input
+            if context and "{context}" not in prompt_template:
+                user_input_str = f"{user_input}\n\nContext: {context}"
+
+            self._tracer.add_metadata("instructions_len", len(system_instructions))
+            self._tracer.add_metadata("input_len", len(user_input_str))
 
         try:
             with self._tracer.span("llm_respond_planning"):
@@ -434,44 +502,27 @@ class Planner:
                         "required": ["description", "required_outputs"],
                         "additionalProperties": False
                     }
+                    # Step schema - OpenAI requires ALL properties in required array
+                    # tool_args_hint is a JSON string to avoid nested object schema issues
                     step_schema = {
                         "type": "object",
                         "properties": {
                             "step_num": {"type": "integer"},
                             "objective": {"type": "string"},
                             "tool_hint": {"type": ["string", "null"]},
-                            "tool_args_hint": {
-                                "type": "array",
-                                "items": tool_args_kv_schema
-                            },
-                            "depends_on": {"type": "array", "items": {"type": "integer"}},
-                            "success_criteria": {
-                                "type": ["object", "null"],
-                                "properties": success_criteria_schema["properties"],
-                                "required": success_criteria_schema["required"],
-                                "additionalProperties": False
-                            },
-                            "uncertainties_targeted": {"type": "array", "items": {"type": "string"}},
-                            "expected_uncertainty_reduction": {"type": "number"},
-                            "preconditions": {"type": "array", "items": {"type": "string"}},
-                            "postconditions": {"type": "array", "items": {"type": "string"}},
-                            "verification_method": {"type": ["string", "null"]}
+                            "tool_args_hint": {"type": ["string", "null"]},  # JSON string, parsed later
+                            "depends_on": {"type": "array", "items": {"type": "integer"}}
                         },
                         "required": [
                             "step_num",
                             "objective",
                             "tool_hint",
                             "tool_args_hint",
-                            "depends_on",
-                            "success_criteria",
-                            "uncertainties_targeted",
-                            "expected_uncertainty_reduction",
-                            "preconditions",
-                            "postconditions",
-                            "verification_method"
+                            "depends_on"
                         ],
                         "additionalProperties": False
                     }
+                    # Plan schema - OpenAI requires additionalProperties: false
                     plan_schema = {
                         "type": "object",
                         "properties": {
@@ -481,15 +532,8 @@ class Planner:
                             "requires_tools": {"type": "boolean"},
                             "discovery_plan": {"type": "array", "items": step_schema},
                             "execution_plan": {"type": "array", "items": step_schema},
-                            "steps": {"type": "array", "items": step_schema},
                             "success_criteria": {"type": "string"},
-                            "reasoning": {"type": "string"},
-                            "assumptions": {"type": "array", "items": {"type": "string"}},
-                            "uncertainties": {"type": "array", "items": {"type": "string"}},
-                            "uncertainty_threshold": {"type": "number"},
-                            "preconditions": {"type": "array", "items": {"type": "string"}},
-                            "postconditions": {"type": "array", "items": {"type": "string"}},
-                            "discovery_required": {"type": "boolean"}
+                            "reasoning": {"type": "string"}
                         },
                         "required": [
                             "user_intent",
@@ -498,15 +542,8 @@ class Planner:
                             "requires_tools",
                             "discovery_plan",
                             "execution_plan",
-                            "steps",
                             "success_criteria",
-                            "reasoning",
-                            "assumptions",
-                            "uncertainties",
-                            "uncertainty_threshold",
-                            "preconditions",
-                            "postconditions",
-                            "discovery_required"
+                            "reasoning"
                         ],
                         "additionalProperties": False
                     }
@@ -519,11 +556,20 @@ class Planner:
                         }
                     }
 
+                # Store call details for logging by Agent
+                self.last_call_instructions = system_instructions
+                self.last_call_input = user_input_str
+
+                import time as _time
+                _call_start = _time.time()
                 response = self.llm.respond(
-                    input=prompt,
-                    instructions="You are a planning assistant. Output valid JSON only.",
+                    input=user_input_str,  # User's request (user role)
+                    instructions=system_instructions,  # Planning rules + tools (system role)
                     **response_kwargs
                 )
+                self.last_call_duration_ms = (_time.time() - _call_start) * 1000
+                self.last_call_response = response.content or ""
+
             self._tracer.add_metadata("response_len", len(response.content) if response.content else 0)
 
             with self._tracer.span("parse_plan_response"):
@@ -557,6 +603,15 @@ class Planner:
                 self._infer_discovery_requirement(plan_data.get("goal_type"), plan_data.get("requires_tools", False))
             )
 
+            # CRITICAL FIX: Infer requires_tools from actual step contents
+            # LLM often gets this wrong (says false when steps clearly need tools)
+            llm_requires_tools = plan_data.get("requires_tools", False)
+            inferred_requires_tools = any(
+                s.tool_hint for s in steps if hasattr(s, 'tool_hint')
+            )
+            # Trust the steps, not the LLM's top-level declaration
+            actual_requires_tools = llm_requires_tools or inferred_requires_tools
+
             plan = Plan(
                 goal=plan_data.get("goal", user_input),
                 goal_type=plan_data.get("goal_type", "task"),
@@ -565,7 +620,7 @@ class Planner:
                     description=plan_data.get("success_criteria", "Goal achieved")
                 ),
                 estimated_complexity=tier,
-                requires_tools=plan_data.get("requires_tools", False),
+                requires_tools=actual_requires_tools,
                 reasoning=plan_data.get("reasoning", "LLM-generated plan"),
                 discovery_required=discovery_required,
                 assumptions=plan_data.get("assumptions", []) or [],
@@ -582,23 +637,33 @@ class Planner:
 
         except Exception as e:
             # Executor can throw exceptions - Agent will handle them
-            # Return fallback plan
+            # Return fallback plan that's smarter about tool requirements
+
+            # CRITICAL: Detect if this is a creation/execution task
+            # If so, we MUST set requires_tools=True even in fallback
+            input_lower = user_input.lower()
+            is_creation_task = any(kw in input_lower for kw in [
+                "create", "make", "build", "scaffold", "generate", "write",
+                "install", "setup", "initialize", "init", "new folder", "new file"
+            ])
+
             fallback = Plan(
                 goal=user_input,
-                goal_type="task",
+                goal_type="creation" if is_creation_task else "task",
                 steps=[PlanStep(
                     step_num=1,
-                    objective="Handle user request",
+                    objective="Execute user request directly",
+                    tool_hint="bash_execute" if is_creation_task else None,
                     success_criteria=SuccessCriteria(description="Request processed"),
-                    phase=PlanPhase.DISCOVERY
+                    phase=PlanPhase.EXECUTION
                 )],
                 success_criteria=SuccessCriteria(description="Request handled"),
                 estimated_complexity=tier,
-                requires_tools=False,
+                requires_tools=is_creation_task,  # Infer from request keywords
                 reasoning=f"Fallback plan due to planning error: {str(e)}",
                 assumptions=[f"Planning failed: {str(e)}"]
             )
-            fallback.discovery_required = True
+            fallback.discovery_required = False  # Skip discovery in fallback
             return self._finalize_plan(fallback, user_input)
 
     def _parse_plan_response(self, content: str, user_input: str) -> Dict[str, Any]:

@@ -45,7 +45,11 @@
       "Bash(git -C /Users/jevinnishioka/Desktop/jesus/evals/results/multiturn_run_gpt-5-mini20251217_153600/artifacts/multiturn_code_dev_001_688994f1 show --stat e61448c)",
       "Bash(git -C /Users/jevinnishioka/Desktop/jesus/evals/results/multiturn_run_gpt-5-mini20251217_153600/artifacts/multiturn_code_dev_001_688994f1 log --oneline --stat)",
       "Bash(wc:*)",
-      "Bash(timeout 5 PYTHONPATH=src python3:*)"
+      "Bash(timeout 5 PYTHONPATH=src python3:*)",
+      "Bash(timeout 30 PYTHONPATH=src python3:*)",
+      "Bash(source .env)",
+      "WebSearch",
+      "WebFetch(domain:ai.google.dev)"
     ],
     "deny": []
   }

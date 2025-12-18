@@ -782,30 +782,35 @@ class SimpleTUI:
             tty.setraw(fd)
 
             while self.running:
-                # Use select with timeout to allow checking for transcription events
+                # ALWAYS check for transcription events first, before keyboard input
+                # This ensures transcription results are processed even if user presses Enter quickly
+                if self.transcription_mailbox:
+                    try:
+                        event = self.transcription_mailbox.receive(timeout=0.01)
+                        if event and isinstance(event, TranscriptionCompleteEvent):
+                            if event.request_id and event.request_id.startswith("ptt_"):
+                                if event.text:
+                                    # Put transcribed text into buffer
+                                    self.input_state.buffer = list(event.text)
+                                    self.input_state.cursor_pos = len(event.text)
+                                    self.input_state._update_autocomplete()
+                                    self.input_state._dirty = True
+                                    self.status = "Ready"
+                                    render_voice_box()
+                                else:
+                                    render_voice_box("[Voice unclear - try again]")
+                                    time.sleep(1.0)
+                                    render_voice_box()
+                            # Consume non-ptt events (e.g., "tui_" events from previous sends)
+                            # so they don't pile up in the mailbox
+                    except Empty:
+                        pass
+
+                # Use select with timeout to check for keyboard input
                 ready, _, _ = select.select([fd], [], [], 0.1)
 
                 if not ready:
-                    # No keyboard input - check for transcription events
-                    if self.transcription_mailbox:
-                        try:
-                            event = self.transcription_mailbox.receive(timeout=0.01)
-                            if event and isinstance(event, TranscriptionCompleteEvent):
-                                if event.request_id and event.request_id.startswith("ptt_"):
-                                    if event.text:
-                                        # Put transcribed text into buffer
-                                        self.input_state.buffer = list(event.text)
-                                        self.input_state.cursor_pos = len(event.text)
-                                        self.input_state._update_autocomplete()
-                                        self.input_state._dirty = True
-                                        self.status = "Ready"
-                                        render_voice_box()
-                                    else:
-                                        render_voice_box("[Voice unclear - try again]")
-                                        time.sleep(1.0)
-                                        render_voice_box()
-                        except Empty:
-                            pass
+                    # No keyboard input - just continue the loop
                     continue
 
                 char = sys.stdin.read(1)
@@ -1072,22 +1077,25 @@ class SimpleTUI:
 
     def _handle_transcription(self, event: TranscriptionCompleteEvent):
         """Handle transcription completion from voice input."""
-        # Pop the "Transcribing..." status
+        # Only process PTT transcriptions (request_id starts with "ptt_")
+        # Skip "tui_" events - those are our own messages sent via _send_message()
+        if not (event.request_id and event.request_id.startswith("ptt_")):
+            return
+
+        # Pop the "Transcribing..." status (only for actual PTT transcriptions)
         self._pop_status()
 
-        # Only process PTT transcriptions (request_id starts with "ptt_")
-        if event.request_id and event.request_id.startswith("ptt_"):
-            # Fill the input buffer for manual review instead of auto-sending
-            if event.text:
-                self.input_state.buffer = list(event.text)
-                self.input_state.cursor_pos = len(event.text)
-                self.input_state._update_autocomplete()
-                self.input_state._dirty = True
-                self.status = "Ready"
-                self._render_full_screen(show_input_box=True, status_message="Voice transcription ready")
-            else:
-                self._add_message("system", "[Voice input was empty or unclear]")
-                self.status = "Ready"
+        # Fill the input buffer for manual review instead of auto-sending
+        if event.text:
+            self.input_state.buffer = list(event.text)
+            self.input_state.cursor_pos = len(event.text)
+            self.input_state._update_autocomplete()
+            self.input_state._dirty = True
+            self.status = "Ready"
+            self._render_full_screen(show_input_box=True, status_message="Voice transcription ready")
+        else:
+            self._add_message("system", "[Voice input was empty or unclear]")
+            self.status = "Ready"
 
     def _monitor_events(self):
         """Background thread to monitor events."""
@@ -1364,19 +1372,19 @@ class SimpleTUI:
             )
         )
 
-    def _wait_for_response(self, timeout_seconds: float = 120.0):
+    def _wait_for_response(self, timeout_seconds: float = 0):
         """Wait for agent response, re-rendering during streaming or new messages.
 
         Args:
-            timeout_seconds: Maximum time to wait for response (default: 120 seconds)
+            timeout_seconds: Maximum time to wait for response (0 = no timeout)
         """
         last_streaming_len = 0
         last_conversation_len = len(self._conversation)
         start_time = time.time()
 
         while self.running:
-            # Check for timeout
-            if time.time() - start_time > timeout_seconds:
+            # Check for timeout (0 = disabled)
+            if timeout_seconds > 0 and time.time() - start_time > timeout_seconds:
                 self._add_message("system", "[Error: Response timeout after {:.0f}s]".format(timeout_seconds))
                 self.status = "Timeout"
                 break
@@ -1409,10 +1417,14 @@ class SimpleTUI:
 
             time.sleep(0.05)
 
-        # After response (or timeout), reset input and show a fresh box
+        # After response (or timeout), reset input state
+        # The next _get_input() call will handle rendering appropriately for text/voice mode
         if self.running:
             self.input_state.reset()
-            self._render_full_screen(show_input_box=True, status_message=self.status)
+            # In voice mode, _get_voice_input() handles its own rendering
+            # In text mode, _get_input() will render the input box
+            if not self.voice_mode:
+                self._render_full_screen(show_input_box=True, status_message=self.status)
 
     def _refresh_file_cache_loop(self):
         """Background thread to refresh file cache."""

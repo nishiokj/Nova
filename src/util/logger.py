@@ -492,13 +492,23 @@ class StructuredLogger:
         self,
         message: str,
         error: Optional[Exception] = None,
-        component: Optional[str] = None
+        component: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None
     ):
         """Log error - goes to both request and health logs"""
-        detail = {}
+        detail: Dict[str, Any] = {}
         if error:
             detail["error"] = str(error)
             detail["type"] = type(error).__name__
+            tb = None
+            try:
+                tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            except Exception:
+                tb = None
+            if tb:
+                detail["stack"] = tb[:4000]
+        if data:
+            detail.update(data)
 
         # Log to request file if in request context
         if self._current_request_id:
@@ -518,7 +528,7 @@ class StructuredLogger:
         self._log_health(
             evt=message[:200],
             svc=component or "system",
-            data={"error": str(error)} if error else None
+            data=detail or {"error": str(error)} if error else None
         )
 
         self.console_logger.error(f"❌ ERROR [{component or 'system'}]: {message}")
@@ -645,4 +655,3 @@ class StructuredLogger:
     def debug(self, message: str, component: Optional[str] = None, data: Optional[Dict] = None):
         """Generic debug - goes to health log"""
         self._log_health(evt=message[:200], svc=component or "system", data=data)
-

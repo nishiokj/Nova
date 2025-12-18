@@ -495,6 +495,7 @@ class ServiceRep:
         Callback for harness progress updates.
 
         Called by AgentHarness during execution.
+        Emits AgentProgressEvent to event bus for TUI/other listeners.
         """
         if not self.enabled:
             return
@@ -503,13 +504,21 @@ class ServiceRep:
         if not current_request_id:
             return
 
-        # Publish progress TTS
-        # self._publish_tts(
-        #     text=message,
-        #     response_type=ResponseType.PROGRESS,
-        #     priority=1,
-        #     request_id=current_request_id
-        # )
+        # Emit progress event for TUI and other listeners
+        if self.event_bus:
+            try:
+                progress_event = AgentProgressEvent(
+                    request_id=current_request_id,
+                    message=message,
+                    tool_name=tool_name,
+                    step_number=step_number
+                )
+                self.event_bus.publish(progress_event)
+            except Exception as e:
+                self.logger.error(
+                    f"[{current_request_id}] Failed to publish AgentProgressEvent: {e}",
+                    component="service_rep"
+                )
 
     def _handle_harness_response(self, request_id: str, harness_response):
         """
