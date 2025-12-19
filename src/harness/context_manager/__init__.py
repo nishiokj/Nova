@@ -22,6 +22,7 @@ Key classes:
 """
 
 from .state import ContextState, WorkingMemoryStore, WorkingMemoryEntry, MemorySource, UserRules, ConversationSummary, MemoryEntryStatus
+from .rules_loader import RulesLoader, load_rules_for_session
 from .build import ContextBuild, estimate_build_size
 from .plan import ContextPlan, SectionPlan, PlanExecutionResult
 from .sections import (
@@ -61,6 +62,10 @@ __all__ = [
     "MemoryEntryStatus",
     "UserRules",
     "ConversationSummary",
+
+    # Rules loading
+    "RulesLoader",
+    "load_rules_for_session",
 
     # Sections
     "ContextSection",

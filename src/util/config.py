@@ -120,9 +120,9 @@ class AgentConfig:
 class ToolConfig:
     """Configuration for the Tool Registry"""
     enabled_tools: List[str] = field(default_factory=lambda: [
-        "fast_answer",  # PREFERRED - single-hop search with parallel fetch
         "web_fetch", "bash_execute", "python_execute",
-        "file_read", "file_write", "search_filesystem", "calculator", "get_current_time"
+        "file_read", "file_write", "search_filesystem", "calculator", "get_current_time",
+        "generate_image"
     ])
     sandbox_bash: bool = True
     sandbox_python: bool = True
@@ -137,6 +137,59 @@ class ToolConfig:
     circuit_breaker_threshold: int = 5
     circuit_breaker_cooldown: float = 15.0
     circuit_breaker_half_open_successes: int = 1
+
+
+@dataclass
+class GraphdConfig:
+    """Configuration for Graphd repository graph daemon"""
+    enabled: bool = False
+    enable_tools: bool = False
+    root_path: Optional[str] = None
+    db_path: str = ".graphd/graphd.db"
+    host: str = "127.0.0.1"
+    port: int = 9444
+    client_timeout_s: int = 2
+    index_interval_s: float = 5.0
+    debounce_s: float = 0.25
+    max_file_size_bytes: int = 1_000_000
+    max_files_per_scan: int = 500
+    derived_ttl_s: int = 600
+    derived_max_entries: int = 1000  # Max entries in Tier B cache
+    max_results: int = 200
+    enable_rg: bool = True
+    rg_path: str = "rg"
+    idle_refinement: bool = True
+    refine_max_files: int = 3
+    refine_max_symbols: int = 5
+    backpressure_when_active: bool = True
+    nice_level: Optional[int] = None
+    max_memory_mb: Optional[int] = None
+    allow_export: bool = True
+    ignore_file: str = ".graphdignore"
+    extra_ignore: List[str] = field(default_factory=list)
+    vacuum_interval_cycles: int = 100  # Run VACUUM every N index cycles (0 = disabled)
+    stats_log_interval_cycles: int = 20  # Log stats every N index cycles (0 = disabled)
+
+
+@dataclass
+class NanoBananaConfig:
+    """Configuration for Nano Banana (Gemini Image Generation) tool"""
+    enabled: bool = True
+    model: str = "gemini-3-pro-image-preview"
+    api_key: Optional[str] = None  # Falls back to GOOGLE_API_KEY
+    api_base: str = "https://generativelanguage.googleapis.com/v1beta"
+    default_output_dir: str = "."  # Project root
+    default_filename_pattern: str = "generated_{timestamp}.png"
+    timeout: int = 60
+    max_retries: int = 3
+    # Helper agent config (for prompt engineering)
+    helper_llm_provider: str = "openai"
+    helper_llm_model: str = "gpt-5-mini"
+    helper_max_tokens: int = 500
+
+    def __post_init__(self):
+        if not self.api_key:
+            self.api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 
 @dataclass
@@ -158,7 +211,9 @@ class HarnessConfig:
     service_rep: ServiceRepConfig = field(default_factory=ServiceRepConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     tools: ToolConfig = field(default_factory=ToolConfig)
+    graphd: GraphdConfig = field(default_factory=GraphdConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    nano_banana: NanoBananaConfig = field(default_factory=NanoBananaConfig)
 
     # Default LLM configs for each tier
     llm_configs: Dict[str, LLMConfig] = field(default_factory=dict)
@@ -210,12 +265,16 @@ class HarnessConfig:
             if isinstance(llm_data, dict):
                 llm_configs[key] = LLMConfig(**llm_data)
 
+        graphd_data = data.get("graphd", {})
+
         return cls(
             router=RouterConfig(**router_data) if router_data else RouterConfig(),
             service_rep=ServiceRepConfig(**service_rep_data) if service_rep_data else ServiceRepConfig(),
             agent=AgentConfig(**agent_data) if agent_data else AgentConfig(),
             tools=ToolConfig(**data.get("tools", {})) if data.get("tools") else ToolConfig(),
+            graphd=GraphdConfig(**graphd_data) if graphd_data else GraphdConfig(),
             logging=LoggingConfig(**data.get("logging", {})) if data.get("logging") else LoggingConfig(),
+            nano_banana=NanoBananaConfig(**data.get("nano_banana", {})) if data.get("nano_banana") else NanoBananaConfig(),
             llm_configs=llm_configs
         )
 
@@ -362,12 +421,45 @@ def create_default_config() -> HarnessConfig:
 
 
 def load_or_create_config(path: str = "config/harness_config.json") -> HarnessConfig:
-    """Load config from file or create default"""
+    """Load config from file or create default.
+
+    Handles relative paths by checking:
+    1. The exact path (absolute or relative to cwd)
+    2. Relative to the project root (parent of src/)
+
+    This ensures config is found regardless of the working directory.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
     config_path = Path(path)
-    if config_path.exists():
-        return HarnessConfig.from_file(path)
+
+    # If path is absolute, use it directly
+    if config_path.is_absolute():
+        if config_path.exists():
+            logger.info(f"Loading config from absolute path: {config_path}")
+            return HarnessConfig.from_file(str(config_path))
     else:
-        config = create_default_config()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config.save(path)
-        return config
+        # Try relative to cwd first
+        if config_path.exists():
+            logger.info(f"Loading config from relative path: {config_path.absolute()}")
+            return HarnessConfig.from_file(path)
+
+        # Try relative to project root (parent of src/ directory)
+        # This handles cases where workers start with different cwd
+        src_dir = Path(__file__).parent  # util/
+        project_root = src_dir.parent.parent  # jesus/
+        project_relative = project_root / path
+        if project_relative.exists():
+            logger.info(f"Loading config from project-relative path: {project_relative}")
+            return HarnessConfig.from_file(str(project_relative))
+
+    # Config not found - create default
+    logger.warning(
+        f"Config not found at '{path}' or project root. Creating default config. "
+        f"cwd={Path.cwd()}, checked={config_path.absolute()}"
+    )
+    config = create_default_config()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config.save(path)
+    return config

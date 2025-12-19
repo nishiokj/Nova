@@ -11,12 +11,36 @@ Does NOT know about:
 - Application orchestration
 """
 
+import os
+import sys
 import time
 import logging
+import warnings
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional
 from .audio_service import AudioChunk
+
+
+def _suppress_output():
+    """Suppress stdout/stderr to prevent warnings leaking to TUI."""
+    saved = {
+        'stdout': os.dup(sys.stdout.fileno()),
+        'stderr': os.dup(sys.stderr.fileno()),
+    }
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, sys.stdout.fileno())
+    os.dup2(devnull, sys.stderr.fileno())
+    os.close(devnull)
+    return saved
+
+
+def _restore_output(saved):
+    """Restore stdout/stderr after suppression."""
+    os.dup2(saved['stdout'], sys.stdout.fileno())
+    os.dup2(saved['stderr'], sys.stderr.fileno())
+    os.close(saved['stdout'])
+    os.close(saved['stderr'])
 
 
 @dataclass
@@ -119,11 +143,18 @@ class STTService:
         resolved_device = self._detect_backend()
         resolved_compute_type = self._select_compute_type(resolved_device)
 
-        model = WhisperModel(
-            self.config.model_size,
-            device=resolved_device,
-            compute_type=resolved_compute_type
-        )
+        # Suppress stdout/stderr during model load to prevent warnings leaking
+        saved = _suppress_output()
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = WhisperModel(
+                    self.config.model_size,
+                    device=resolved_device,
+                    compute_type=resolved_compute_type
+                )
+        finally:
+            _restore_output(saved)
 
         load_time = (time.time() - start) * 1000
         self.logger.info(
@@ -247,12 +278,18 @@ class STTService:
                     min_silence_duration_ms=200,
                 )
 
-            segments, info = self._engine.transcribe(audio_np, **transcribe_kwargs)
-
-            # Collect all segments
-            text_parts = []
-            for segment in segments:
-                text_parts.append(segment.text.strip())
+            # Suppress warnings during transcription (Whisper can emit runtime warnings)
+            saved = _suppress_output()
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    segments, info = self._engine.transcribe(audio_np, **transcribe_kwargs)
+                    # Collect all segments (must iterate while output is suppressed)
+                    text_parts = []
+                    for segment in segments:
+                        text_parts.append(segment.text.strip())
+            finally:
+                _restore_output(saved)
 
             text = " ".join(text_parts).strip()
             duration = (time.time() - start) * 1000

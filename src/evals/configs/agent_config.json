@@ -12,7 +12,6 @@
     },
     "tool_config": {
       "enabled_tools": [
-        "fast_answer",
         "file_read",
         "file_write",
         "python_execute",

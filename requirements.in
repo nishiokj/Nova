@@ -25,6 +25,9 @@ html2text>=2020.1.16
 # Utilities
 typing_extensions==4.14.0
 
+# Async HTTP client (for Gemini image generation)
+aiohttp>=3.9.0
+
 # HTTP client (OpenAI’s SDK adds proxies to httpx calls; old httpx versions reject that keyword).
 httpx==0.27.2
 

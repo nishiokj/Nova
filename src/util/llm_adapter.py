@@ -181,18 +181,18 @@ class LLMAdapter(ABC):
         self._prewarmed = True
         return True
 
-    @abstractmethod
-    def complete(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> LLMResponse:
-        """
-        Synchronous completion.
-        Returns full response after completion.
-        """
-        pass
+    # @abstractmethod
+    # def complete(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> LLMResponse:
+    #     """
+    #     Synchronous completion.
+    #     Returns full response after completion.
+    #     """
+    #     pass
 
     @abstractmethod
     def respond(
@@ -216,38 +216,38 @@ class LLMAdapter(ABC):
         """
         pass
 
-    @abstractmethod
-    def stream(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> Generator[str, None, LLMResponse]:
-        """
-        Streaming completion.
-        Yields content chunks, returns full response at end.
-        """
-        pass
+    # @abstractmethod
+    # def stream(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> Generator[str, None, LLMResponse]:
+    #     """
+    #     Streaming completion.
+    #     Yields content chunks, returns full response at end.
+    #     """
+    #     pass
 
-    @abstractmethod
-    async def acomplete(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> LLMResponse:
-        """Async completion"""
-        pass
+    # @abstractmethod
+    # async def acomplete(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> LLMResponse:
+    #     """Async completion"""
+    #     pass
 
-    @abstractmethod
-    async def astream(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> AsyncGenerator[str, None]:
-        """Async streaming completion"""
-        pass
+    # @abstractmethod
+    # async def astream(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> AsyncGenerator[str, None]:
+    #     """Async streaming completion"""
+    #     pass
 
     def _log_request(self, messages: List[Message]):
         """Log LLM request"""
@@ -403,6 +403,12 @@ class OpenAIAdapter(LLMAdapter):
         parts: List[str] = []
         for item in output:
             item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+            if item_type in ("output_text", "text"):
+                text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+                if isinstance(text, str) and text:
+                    parts.append(text)
+                continue
+
             if item_type != "message":
                 continue
 
@@ -412,7 +418,7 @@ class OpenAIAdapter(LLMAdapter):
 
             for block in content:
                 block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-                if block_type != "output_text":
+                if block_type not in ("output_text", "text"):
                     continue
                 text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
                 if isinstance(text, str) and text:
@@ -524,7 +530,23 @@ class OpenAIAdapter(LLMAdapter):
                 params["max_tokens"] = max_tokens_value
 
         if tools:
-            params["tools"] = [t.to_openai_format() for t in tools]
+            # Convert ToolDefinition objects to dicts if needed
+            converted_tools = []
+            for t in tools:
+                if hasattr(t, 'to_openai_format'):
+                    converted_tools.append(t.to_openai_format())
+                elif isinstance(t, dict):
+                    converted_tools.append(t)
+                else:
+                    converted_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "parameters": getattr(t, 'parameters', {})
+                        }
+                    })
+            params["tools"] = converted_tools
             # For reasoning models that tend to ignore tools, force "required"
             default_choice = "required" if self._is_reasoning_model() else "auto"
             # Use explicitly passed tool_choice, or fall back to default
@@ -580,53 +602,53 @@ class OpenAIAdapter(LLMAdapter):
             raw_response=response
         )
 
-    @llm_resilience
-    def complete(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> LLMResponse:
-        """Synchronous completion"""
-        self._log_request(messages)
-        start_time = time.time()
+    # @llm_resilience
+    # def complete(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> LLMResponse:
+    #     """Synchronous completion"""
+    #     self._log_request(messages)
+    #     start_time = time.time()
 
-        try:
-            client = self._get_client()
-            params = self._prepare_request(messages, tools, **kwargs)
+    #     try:
+    #         client = self._get_client()
+    #         params = self._prepare_request(messages, tools, **kwargs)
 
-            # DIAGNOSTIC: Log exactly what we're sending
-            tool_names = [t.name for t in tools] if tools else []
-            self.logger.info(
-                f"API REQUEST: model={params.get('model')}, tools={tool_names}, "
-                f"tool_choice={params.get('tool_choice', 'none')}",
-                component="llm"
-            )
+    #         # DIAGNOSTIC: Log exactly what we're sending
+    #         tool_names = [t.name for t in tools] if tools else []
+    #         self.logger.info(
+    #             f"API REQUEST: model={params.get('model')}, tools={tool_names}, "
+    #             f"tool_choice={params.get('tool_choice', 'none')}",
+    #             component="llm"
+    #         )
 
-            tracer = get_tracer()
-            with tracer.span("openai_api_call", model=self.config.model):
-                response = client.chat.completions.create(**params)
+    #         tracer = get_tracer()
+    #         with tracer.span("openai_api_call", model=self.config.model):
+    #             response = client.chat.completions.create(**params)
 
-            with tracer.span("parse_openai_response"):
-                result = self._parse_response(response)
+    #         with tracer.span("parse_openai_response"):
+    #             result = self._parse_response(response)
 
-            tracer.add_metadata("input_tokens", result.usage.get("prompt_tokens", 0) if result.usage else 0)
-            tracer.add_metadata("output_tokens", result.usage.get("completion_tokens", 0) if result.usage else 0)
+    #         tracer.add_metadata("input_tokens", result.usage.get("prompt_tokens", 0) if result.usage else 0)
+    #         tracer.add_metadata("output_tokens", result.usage.get("completion_tokens", 0) if result.usage else 0)
 
-            # DIAGNOSTIC: Log what we got back
-            self.logger.info(
-                f"API RESPONSE: content_len={len(result.content) if result.content else 0}, "
-                f"tool_calls={len(result.tool_calls)}, finish={result.finish_reason}",
-                component="llm"
-            )
+    #         # DIAGNOSTIC: Log what we got back
+    #         self.logger.info(
+    #             f"API RESPONSE: content_len={len(result.content) if result.content else 0}, "
+    #             f"tool_calls={len(result.tool_calls)}, finish={result.finish_reason}",
+    #             component="llm"
+    #         )
 
-            duration_ms = (time.time() - start_time) * 1000
-            self._log_response(result, duration_ms)
-            return result
+    #         duration_ms = (time.time() - start_time) * 1000
+    #         self._log_response(result, duration_ms)
+    #         return result
 
-        except Exception as e:
-            self.logger.llm_error(self.provider, self.config.model, e)
-            raise
+    #     except Exception as e:
+    #         self.logger.llm_error(self.provider, self.config.model, e)
+    #         raise
 
     @llm_resilience
     def respond(
@@ -660,6 +682,7 @@ class OpenAIAdapter(LLMAdapter):
             temperature_value = kwargs.get("temperature", self.config.temperature)
             max_tool_calls_value = kwargs.get("max_tool_calls")
             parallel_tool_calls_value = kwargs.get("parallel_tool_calls")
+            text_value = kwargs.get("text")
 
             params = {
                 "model": self.config.model,
@@ -686,16 +709,40 @@ class OpenAIAdapter(LLMAdapter):
                 params["max_tool_calls"] = max_tool_calls_value
             if parallel_tool_calls_value is not None:
                 params["parallel_tool_calls"] = parallel_tool_calls_value
-
+            if text_value is not None:
+                params["text"] = text_value
             if tools:
-                params["tools"] = tools  # Already internally-tagged format
+                # Convert ToolDefinition objects to Responses API format
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_responses_format'):
+                        converted_tools.append(t.to_responses_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        # Fallback: Responses API format (flat, name at top level)
+                        converted_tools.append({
+                            "type": "function",
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "parameters": {
+                                "type": "object",
+                                "properties": getattr(t, 'parameters', {}),
+                                "required": getattr(t, 'required', [])
+                            }
+                        })
+                params["tools"] = converted_tools
                 # For reasoning models, force "required"
                 default_choice = "required" if self._is_reasoning_model() else "auto"
                 explicit_choice = kwargs.get("tool_choice")
                 params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
 
             # DIAGNOSTIC: Log what we're sending
-            tool_names = [t.get("name") for t in tools] if tools else []
+            # Handle both ToolDefinition objects and dicts
+            tool_names = [
+                t.name if hasattr(t, 'name') else t.get("name", "unknown")
+                for t in tools
+            ] if tools else []
             self.logger.info(
                 f"RESPONSES API REQUEST: model={params.get('model')}, tools={tool_names}, "
                 f"tool_choice={params.get('tool_choice', 'none')}",
@@ -742,68 +789,236 @@ class OpenAIAdapter(LLMAdapter):
 
     def stream(
         self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
-        """Streaming completion"""
-        self._log_request(messages)
+        """
+        Streaming response using OpenAI Responses API.
+
+        Args:
+            input: User input (string or context array)
+            instructions: System instructions
+            tools: Tool definitions (internally-tagged format)
+            **kwargs: Additional API parameters
+
+        Yields:
+            Text content chunks as they arrive
+
+        Returns:
+            LLMResponse with full output after stream completes
+        """
         start_time = time.time()
 
         try:
             client = self._get_client()
-            params = self._prepare_request(messages, tools, **kwargs)
-            params["stream"] = True
+
+            # Prepare request parameters for Responses API (same as respond())
+            max_output_tokens_value = kwargs.get("max_output_tokens")
+            if max_output_tokens_value is None:
+                max_output_tokens_value = kwargs.get("max_tokens", self.config.max_tokens)
+            temperature_value = kwargs.get("temperature", self.config.temperature)
+            max_tool_calls_value = kwargs.get("max_tool_calls")
+            parallel_tool_calls_value = kwargs.get("parallel_tool_calls")
+            text_value = kwargs.get("text")
+
+            params = {
+                "model": self.config.model,
+                "input": self._normalize_responses_input(input),
+                "stream": True,
+            }
+
+            if instructions:
+                params["instructions"] = instructions
+
+            # Temperature handling
+            if self._supports_sampling_params():
+                if temperature_value is not None:
+                    params["temperature"] = temperature_value
+                top_p_value = kwargs.get("top_p", self.config.top_p)
+                if top_p_value is not None:
+                    params["top_p"] = top_p_value
+
+            # Token limit parameter (Responses API)
+            if max_output_tokens_value is not None:
+                params["max_output_tokens"] = max_output_tokens_value
+
+            # Tool call limiting (Responses API)
+            if max_tool_calls_value is not None:
+                params["max_tool_calls"] = max_tool_calls_value
+            if parallel_tool_calls_value is not None:
+                params["parallel_tool_calls"] = parallel_tool_calls_value
+            if text_value is not None:
+                params["text"] = text_value
+            if tools:
+                # Convert ToolDefinition objects to Responses API format
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_responses_format'):
+                        converted_tools.append(t.to_responses_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        # Fallback: Responses API format (flat, name at top level)
+                        converted_tools.append({
+                            "type": "function",
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "parameters": {
+                                "type": "object",
+                                "properties": getattr(t, 'parameters', {}),
+                                "required": getattr(t, 'required', [])
+                            }
+                        })
+                params["tools"] = converted_tools
+                # For reasoning models, force "required"
+                default_choice = "required" if self._is_reasoning_model() else "auto"
+                explicit_choice = kwargs.get("tool_choice")
+                params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
+
+            # DIAGNOSTIC: Log what we're sending
+            # Handle both ToolDefinition objects and dicts
+            tool_names = [
+                t.name if hasattr(t, 'name') else t.get("name", "unknown")
+                for t in tools
+            ] if tools else []
+            self.logger.info(
+                f"RESPONSES API STREAM REQUEST: model={params.get('model')}, tools={tool_names}, "
+                f"tool_choice={params.get('tool_choice', 'none')}",
+                component="llm"
+            )
 
             full_content = ""
-            tool_calls = []
-            current_tool_call = None
+            tool_calls_data: Dict[str, Dict[str, Any]] = {}  # call_id -> {name, arguments}
+            usage_data = None
+            finish_reason = "stop"
+            response_obj = None
+            emitted_text = False
 
-            stream = client.chat.completions.create(**params)
+            def _extract_event_text(event: Any) -> str:
+                for attr in ("text", "output_text", "delta"):
+                    value = getattr(event, attr, None)
+                    if isinstance(value, str) and value:
+                        return value
+                return ""
 
-            for chunk in stream:
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
+            def _append_stream_text(text: str) -> Generator[str, None, None]:
+                nonlocal full_content, emitted_text
+                if not text:
+                    return
+                if full_content and text.startswith(full_content):
+                    if len(text) > len(full_content):
+                        extra = text[len(full_content):]
+                        full_content = text
+                        if extra:
+                            emitted_text = True
+                            yield extra
+                    return
+                if len(text) >= len(full_content):
+                    full_content = text
+                if not emitted_text:
+                    emitted_text = True
+                    yield text
 
-                    # Handle content
-                    if delta.content:
-                        full_content += delta.content
-                        yield delta.content
+            # Stream from Responses API
+            tracer = get_tracer()
+            with tracer.span("openai_responses_api_stream", model=self.config.model):
+                stream = client.responses.create(**params)
 
-                    # Handle tool calls
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            if tc.index is not None:
-                                while len(tool_calls) <= tc.index:
-                                    tool_calls.append({"id": "", "name": "", "arguments": ""})
-                                if tc.id:
-                                    tool_calls[tc.index]["id"] = tc.id
-                                if tc.function:
-                                    if tc.function.name:
-                                        tool_calls[tc.index]["name"] = tc.function.name
-                                    if tc.function.arguments:
-                                        tool_calls[tc.index]["arguments"] += tc.function.arguments
+                for event in stream:
+                    event_type = getattr(event, "type", None)
 
-            # Build final response
-            parsed_tool_calls = []
-            for tc in tool_calls:
-                if tc["name"]:
+                    # Handle text content deltas
+                    if event_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", "")
+                        if delta:
+                            full_content += delta
+                            emitted_text = True
+                            yield delta
+                    elif event_type in ("response.output_text.done", "response.output_text"):
+                        text = _extract_event_text(event)
+                        if text:
+                            yield from _append_stream_text(text)
+
+                    # Handle function call output item added (captures call_id and name)
+                    elif event_type == "response.output_item.added":
+                        item = getattr(event, "item", None)
+                        if item:
+                            item_type = getattr(item, "type", None)
+                            if item_type == "function_call":
+                                call_id = getattr(item, "call_id", None) or getattr(item, "id", "")
+                                name = getattr(item, "name", "")
+                                if call_id:
+                                    tool_calls_data[call_id] = {"name": name, "arguments": ""}
+
+                    # Handle function call arguments delta
+                    elif event_type == "response.function_call_arguments.delta":
+                        call_id = getattr(event, "call_id", None) or getattr(event, "item_id", "")
+                        delta = getattr(event, "delta", "")
+                        if call_id and call_id in tool_calls_data:
+                            tool_calls_data[call_id]["arguments"] += delta
+
+                    # Handle completion event for usage data
+                    elif event_type == "response.completed":
+                        response_obj = getattr(event, "response", None)
+                        if response_obj:
+                            usage = getattr(response_obj, "usage", None)
+                            if usage:
+                                usage_data = {
+                                    "prompt_tokens": getattr(usage, "input_tokens", None),
+                                    "completion_tokens": getattr(usage, "output_tokens", None),
+                                    "total_tokens": getattr(usage, "total_tokens", None)
+                                }
+                            finish_reason = getattr(response_obj, "status", None) or "stop"
+                            parsed_text = self._parse_responses_output_text(response_obj)
+                            if parsed_text:
+                                yield from _append_stream_text(parsed_text)
+
+            if response_obj and not full_content:
+                parsed_text = self._parse_responses_output_text(response_obj)
+                if parsed_text:
+                    full_content = parsed_text
+            if not emitted_text and full_content:
+                emitted_text = True
+                yield full_content
+
+            # Build final tool calls list
+            parsed_tool_calls: List[ToolCall] = []
+            seen_call_ids = set()
+            for call_id, tc_data in tool_calls_data.items():
+                if tc_data["name"]:
                     try:
-                        args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                        args = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
                     except json.JSONDecodeError:
                         args = {}
                     parsed_tool_calls.append(ToolCall(
-                        id=tc["id"],
-                        name=tc["name"],
+                        id=call_id,
+                        name=tc_data["name"],
                         arguments=args
                     ))
+                    seen_call_ids.add(call_id)
+            if response_obj:
+                for tool_call in self._parse_responses_tool_calls(response_obj):
+                    if tool_call.id and tool_call.id in seen_call_ids:
+                        continue
+                    if tool_call.name:
+                        parsed_tool_calls.append(tool_call)
 
             result = LLMResponse(
                 content=full_content,
                 role=MessageRole.ASSISTANT,
                 tool_calls=parsed_tool_calls,
-                finish_reason="stop",
+                finish_reason=finish_reason,
+                usage=usage_data,
                 model=self.config.model
+            )
+
+            # DIAGNOSTIC: Log what we got back
+            self.logger.info(
+                f"RESPONSES API STREAM COMPLETE: output_len={len(full_content)}, "
+                f"tool_calls={len(parsed_tool_calls)}, finish={finish_reason}",
+                component="llm"
             )
 
             duration_ms = (time.time() - start_time) * 1000
@@ -814,56 +1029,56 @@ class OpenAIAdapter(LLMAdapter):
             self.logger.llm_error(self.provider, self.config.model, e)
             raise
 
-    @llm_resilience
-    async def acomplete(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> LLMResponse:
-        """Async completion"""
-        self._log_request(messages)
-        start_time = time.time()
+    # @llm_resilience
+    # async def acomplete(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> LLMResponse:
+    #     """Async completion"""
+    #     self._log_request(messages)
+    #     start_time = time.time()
 
-        try:
-            client = self._get_async_client()
-            params = self._prepare_request(messages, tools, **kwargs)
-            response = await client.chat.completions.create(**params)
-            result = self._parse_response(response)
+    #     try:
+    #         client = self._get_async_client()
+    #         params = self._prepare_request(messages, tools, **kwargs)
+    #         response = await client.chat.completions.create(**params)
+    #         result = self._parse_response(response)
 
-            duration_ms = (time.time() - start_time) * 1000
-            self._log_response(result, duration_ms)
-            return result
+    #         duration_ms = (time.time() - start_time) * 1000
+    #         self._log_response(result, duration_ms)
+    #         return result
 
-        except Exception as e:
-            self.logger.llm_error(self.provider, self.config.model, e)
-            raise
+    #     except Exception as e:
+    #         self.logger.llm_error(self.provider, self.config.model, e)
+    #         raise
 
-    async def astream(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> AsyncGenerator[str, None]:
-        """Async streaming completion"""
-        self._log_request(messages)
+    # async def astream(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> AsyncGenerator[str, None]:
+    #     """Async streaming completion"""
+    #     self._log_request(messages)
 
-        try:
-            client = self._get_async_client()
-            params = self._prepare_request(messages, tools, **kwargs)
-            params["stream"] = True
+    #     try:
+    #         client = self._get_async_client()
+    #         params = self._prepare_request(messages, tools, **kwargs)
+    #         params["stream"] = True
 
-            stream = await client.chat.completions.create(**params)
+    #         stream = await client.chat.completions.create(**params)
 
-            async for chunk in stream:
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if delta.content:
-                        yield delta.content
+    #         async for chunk in stream:
+    #             if chunk.choices:
+    #                 delta = chunk.choices[0].delta
+    #                 if delta.content:
+    #                     yield delta.content
 
-        except Exception as e:
-            self.logger.llm_error(self.provider, self.config.model, e)
-            raise
+    #     except Exception as e:
+    #         self.logger.llm_error(self.provider, self.config.model, e)
+    #         raise
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -1006,7 +1221,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             tracer = get_tracer()
             with tracer.span("anthropic_api_call", model=self.config.model):
@@ -1028,11 +1256,92 @@ class AnthropicAdapter(LLMAdapter):
 
     def stream(
         self,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> Generator[str, None, LLMResponse]:
+        """
+        Streaming using Responses API format.
+        Anthropic doesn't have Responses API - convert to Messages API format internally.
+        """
+        def _extract_text(content: Any) -> str:
+            if content is None:
+                return ""
+            if isinstance(content, str):
+                return content
+            if isinstance(content, dict):
+                text = content.get("text")
+                return text if isinstance(text, str) else ""
+            if isinstance(content, list):
+                parts: List[str] = []
+                for block in content:
+                    if isinstance(block, str):
+                        parts.append(block)
+                        continue
+                    if isinstance(block, dict):
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+                        continue
+                    block_text = getattr(block, "text", None)
+                    if isinstance(block_text, str):
+                        parts.append(block_text)
+                return "".join(parts)
+            return str(content)
+
+        # Convert Responses API format to Messages API format
+        messages: List[Message] = []
+
+        if instructions:
+            messages.append(Message(MessageRole.SYSTEM, instructions))
+
+        if isinstance(input, str):
+            messages.append(Message(MessageRole.USER, input))
+        elif isinstance(input, list):
+            for item in input:
+                if not isinstance(item, dict):
+                    continue
+                if "role" not in item:
+                    item_type = item.get("type")
+                    if item_type in ("function_call_output", "tool_output"):
+                        messages.append(Message(
+                            role=MessageRole.TOOL,
+                            content=_extract_text(item.get("output", "")),
+                            name=item.get("name"),
+                            tool_call_id=item.get("call_id") or item.get("id")
+                        ))
+                    continue
+                role_value = item.get("role", "user")
+                try:
+                    role = MessageRole(role_value)
+                except Exception:
+                    role = MessageRole.USER
+                messages.append(Message(role, _extract_text(item.get("content", ""))))
+
+        # Convert internally-tagged tools to ToolDefinition format
+        tool_defs: Optional[List[ToolDefinition]] = None
+        if tools:
+            tool_defs = []
+            for tool in tools:
+                if tool.get("type") == "function":
+                    tool_defs.append(ToolDefinition(
+                        name=tool.get("name", ""),
+                        description=tool.get("description", ""),
+                        parameters=tool.get("parameters", {}).get("properties", {}),
+                        required=tool.get("parameters", {}).get("required", [])
+                    ))
+
+        # Call internal streaming implementation
+        return self._stream_messages(messages, tool_defs, **kwargs)
+
+    def _stream_messages(
+        self,
         messages: List[Message],
         tools: Optional[List[ToolDefinition]] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
-        """Streaming completion"""
+        """Internal streaming implementation using Messages API"""
         self._log_request(messages)
         start_time = time.time()
 
@@ -1062,7 +1371,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             full_content = ""
             tool_calls = []
@@ -1153,7 +1475,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             response = await client.messages.create(**params)
             result = self._parse_response(response)
@@ -1201,7 +1536,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             async with client.messages.stream(**params) as stream:
                 async for text in stream.text_stream:
@@ -1333,12 +1681,13 @@ class CustomAdapter(LLMAdapter):
 
     def stream(
         self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
-        """Streaming completion via custom endpoint"""
-        return self._get_adapter().stream(messages, tools, **kwargs)
+        """Streaming via custom endpoint using Responses API format"""
+        return self._get_adapter().stream(input, instructions, tools, **kwargs)
 
     async def acomplete(
         self,
@@ -1414,45 +1763,47 @@ class FailoverLLMAdapter(LLMAdapter):
         """Return the list of adapters to try, primary first."""
         return self._adapters or [self._primary]
 
-    def complete(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> LLMResponse:
-        last_exc: Optional[Exception] = None
+    # def complete(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> LLMResponse:
+    #     last_exc: Optional[Exception] = None
 
-        for idx, adapter in enumerate(self._iter_adapters()):
-            provider = adapter.provider
-            model = getattr(adapter, "config", self.config).model
+    #     for idx, adapter in enumerate(self._iter_adapters()):
+    #         provider = adapter.provider
+    #         model = getattr(adapter, "config", self.config).model
 
-            if idx > 0:
-                # Log failover attempt
-                self.logger.warning(
-                    f"LLM failover: primary failed, trying {provider}:{model}",
-                    component="llm"
-                )
+    #         if idx > 0:
+    #             # Log failover attempt
+    #             self.logger.warning(
+    #                 f"LLM failover: primary failed, trying {provider}:{model}",
+    #                 component="llm"
+    #             )
 
-            try:
-                return adapter.complete(messages, tools, **kwargs)
-            except Exception as e:
-                last_exc = e
-                # Underlying adapters should also log errors; this is a summary
-                self.logger.llm_error(provider, model, e)
-                continue
+    #         try:
+    #             return adapter.complete(messages, tools, **kwargs)
+    #         except Exception as e:
+    #             last_exc = e
+    #             # Underlying adapters should also log errors; this is a summary
+    #             self.logger.llm_error(provider, model, e)
+    #             continue
 
-        # All adapters failed; propagate the last exception
-        if last_exc:
-            raise last_exc
-        # Should not reach here, but guard just in case
-        raise RuntimeError("FailoverLLMAdapter: no adapters available for completion")
+    #     # All adapters failed; propagate the last exception
+    #     if last_exc:
+    #         raise last_exc
+    #     # Should not reach here, but guard just in case
+    #     raise RuntimeError("FailoverLLMAdapter: no adapters available for completion")
 
     def stream(
         self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
+        input: Union[str, List[Dict[str, Any]]],
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
+        """Streaming with failover support using Responses API format"""
         last_exc: Optional[Exception] = None
 
         for idx, adapter in enumerate(self._iter_adapters()):
@@ -1468,7 +1819,7 @@ class FailoverLLMAdapter(LLMAdapter):
                 )
 
             try:
-                stream = adapter.stream(messages, tools, **kwargs)
+                stream = adapter.stream(input, instructions, tools, **kwargs)
                 while True:
                     try:
                         chunk = next(stream)
@@ -1490,70 +1841,70 @@ class FailoverLLMAdapter(LLMAdapter):
             raise last_exc
         raise RuntimeError("FailoverLLMAdapter: no adapters available for streaming")
 
-    async def acomplete(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> LLMResponse:
-        last_exc: Optional[Exception] = None
+    # async def acomplete(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> LLMResponse:
+    #     last_exc: Optional[Exception] = None
 
-        for idx, adapter in enumerate(self._iter_adapters()):
-            provider = adapter.provider
-            model = getattr(adapter, "config", self.config).model
+    #     for idx, adapter in enumerate(self._iter_adapters()):
+    #         provider = adapter.provider
+    #         model = getattr(adapter, "config", self.config).model
 
-            if idx > 0:
-                self.logger.warning(
-                    f"LLM async failover: primary failed, trying {provider}:{model}",
-                    component="llm"
-                )
+    #         if idx > 0:
+    #             self.logger.warning(
+    #                 f"LLM async failover: primary failed, trying {provider}:{model}",
+    #                 component="llm"
+    #             )
 
-            try:
-                return await adapter.acomplete(messages, tools, **kwargs)
-            except Exception as e:
-                last_exc = e
-                self.logger.llm_error(provider, model, e)
-                continue
+    #         try:
+    #             return await adapter.acomplete(messages, tools, **kwargs)
+    #         except Exception as e:
+    #             last_exc = e
+    #             self.logger.llm_error(provider, model, e)
+    #             continue
 
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("FailoverLLMAdapter: no adapters available for async completion")
+    #     if last_exc:
+    #         raise last_exc
+    #     raise RuntimeError("FailoverLLMAdapter: no adapters available for async completion")
 
-    async def astream(
-        self,
-        messages: List[Message],
-        tools: Optional[List[ToolDefinition]] = None,
-        **kwargs
-    ) -> AsyncGenerator[str, None]:
-        last_exc: Optional[Exception] = None
+    # async def astream(
+    #     self,
+    #     messages: List[Message],
+    #     tools: Optional[List[ToolDefinition]] = None,
+    #     **kwargs
+    # ) -> AsyncGenerator[str, None]:
+    #     last_exc: Optional[Exception] = None
 
-        for idx, adapter in enumerate(self._iter_adapters()):
-            provider = adapter.provider
-            model = getattr(adapter, "config", self.config).model
+    #     for idx, adapter in enumerate(self._iter_adapters()):
+    #         provider = adapter.provider
+    #         model = getattr(adapter, "config", self.config).model
 
-            had_output = False
+    #         had_output = False
 
-            if idx > 0:
-                self.logger.warning(
-                    f"LLM async streaming failover: primary failed, trying {provider}:{model}",
-                    component="llm"
-                )
+    #         if idx > 0:
+    #             self.logger.warning(
+    #                 f"LLM async streaming failover: primary failed, trying {provider}:{model}",
+    #                 component="llm"
+    #             )
 
-            try:
-                async for chunk in adapter.astream(messages, tools, **kwargs):
-                    had_output = True
-                    yield chunk
-                return
-            except Exception as e:
-                last_exc = e
-                self.logger.llm_error(provider, model, e)
-                if had_output:
-                    raise
-                continue
+    #         try:
+    #             async for chunk in adapter.astream(messages, tools, **kwargs):
+    #                 had_output = True
+    #                 yield chunk
+    #             return
+    #         except Exception as e:
+    #             last_exc = e
+    #             self.logger.llm_error(provider, model, e)
+    #             if had_output:
+    #                 raise
+    #             continue
 
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("FailoverLLMAdapter: no adapters available for async streaming")
+    #     if last_exc:
+    #         raise last_exc
+    #     raise RuntimeError("FailoverLLMAdapter: no adapters available for async streaming")
 
     def respond(
         self,
@@ -1621,41 +1972,41 @@ def create_adapter(config: LLMConfig, logger: Optional[StructuredLogger] = None)
 
 # Convenience functions for simple usage
 
-def quick_complete(
-    prompt: str,
-    provider: str = "openai",
-    model: str = "gpt-4o-mini",
-    system_prompt: Optional[str] = None,
-    **kwargs
-) -> str:
-    """Quick one-off completion"""
-    config = LLMConfig(provider=provider, model=model, **kwargs)
-    adapter = create_adapter(config)
+# def quick_complete(
+#     prompt: str,
+#     provider: str = "openai",
+#     model: str = "gpt-4o-mini",
+#     system_prompt: Optional[str] = None,
+#     **kwargs
+# ) -> str:
+#     """Quick one-off completion"""
+#     config = LLMConfig(provider=provider, model=model, **kwargs)
+#     adapter = create_adapter(config)
 
-    messages = []
-    if system_prompt:
-        messages.append(Message(MessageRole.SYSTEM, system_prompt))
-    messages.append(Message(MessageRole.USER, prompt))
+#     messages = []
+#     if system_prompt:
+#         messages.append(Message(MessageRole.SYSTEM, system_prompt))
+#     messages.append(Message(MessageRole.USER, prompt))
 
-    response = adapter.complete(messages)
-    return response.content
+#     response = adapter.complete(messages)
+#     return response.content
 
 
-async def aquick_complete(
-    prompt: str,
-    provider: str = "openai",
-    model: str = "gpt-4o-mini",
-    system_prompt: Optional[str] = None,
-    **kwargs
-) -> str:
-    """Async quick one-off completion"""
-    config = LLMConfig(provider=provider, model=model, **kwargs)
-    adapter = create_adapter(config)
+# async def aquick_complete(
+#     prompt: str,
+#     provider: str = "openai",
+#     model: str = "gpt-4o-mini",
+#     system_prompt: Optional[str] = None,
+#     **kwargs
+# ) -> str:
+#     """Async quick one-off completion"""
+#     config = LLMConfig(provider=provider, model=model, **kwargs)
+#     adapter = create_adapter(config)
 
-    messages = []
-    if system_prompt:
-        messages.append(Message(MessageRole.SYSTEM, system_prompt))
-    messages.append(Message(MessageRole.USER, prompt))
+#     messages = []
+#     if system_prompt:
+#         messages.append(Message(MessageRole.SYSTEM, system_prompt))
+#     messages.append(Message(MessageRole.USER, prompt))
 
-    response = await adapter.acomplete(messages)
-    return response.content
+#     response = await adapter.acomplete(messages)
+#     return response.content

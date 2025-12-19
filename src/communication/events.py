@@ -21,6 +21,10 @@ class EventType(Enum):
     AGENT_PROGRESS = auto()
     AGENT_RESPONSE_COMPLETE = auto()
 
+    # Streaming pipeline
+    STREAMING_CHUNK = auto()      # Text chunk from LLM streaming
+    TOOL_PROGRESS = auto()        # Tool execution progress indicator
+
     # TTS pipeline
     TTS_REQUESTED = auto()
     TTS_COMPLETE = auto()
@@ -128,3 +132,26 @@ class ShutdownEvent(Event):
 
     def __post_init__(self):
         object.__setattr__(self, 'event_type', EventType.SHUTDOWN)
+
+
+@dataclass(frozen=True)
+class StreamingChunkEvent(Event):
+    """Event: Streaming text chunk from LLM response synthesis"""
+    chunk: str = ""
+    chunk_index: int = 0
+    is_final: bool = False  # True when this is the last chunk
+
+    def __post_init__(self):
+        object.__setattr__(self, 'event_type', EventType.STREAMING_CHUNK)
+
+
+@dataclass(frozen=True)
+class ToolProgressEvent(Event):
+    """Event: Tool execution progress indicator"""
+    tool_name: str = ""
+    status: str = "started"  # "started", "completed", "failed"
+    step_num: int = 0
+    result_preview: Optional[str] = None  # Short preview of result (for completed)
+
+    def __post_init__(self):
+        object.__setattr__(self, 'event_type', EventType.TOOL_PROGRESS)

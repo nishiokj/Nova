@@ -1,0 +1,25 @@
+{
+  "title": "Plan for 6 Incremental Improvements",
+  "steps": [
+    {"id": 1, "action": "Confirm scope & constraints: confirm what 6 incremental improvements target (product, process, codebase), success metrics, timeline, and available resources."},
+    {"id": 2, "action": "Identify & prioritize: list candidate improvements, estimate effort & impact, and select the six highest-priority items with owners and acceptance criteria."},
+    {"id": 3, "action": "Implement iteratively: for each improvement, run a short cycle (design -> implement -> test -> review), deploying or merging only after passing acceptance criteria; work on items in priority order or parallel within resource limits."},
+    {"id": 4, "action": "Measure & iterate: collect metrics vs baseline, validate improvement; if targets aren’t met, refine or roll back; obtain stakeholder sign-off and document outcomes."}
+  ],
+  "success_criteria": [
+    "All six improvements are documented with owners and acceptance criteria.",
+    "Each improvement has been implemented or prototyped and validated against its acceptance criteria.",
+    "Automated or manual tests for implemented items pass and any regressions are addressed.",
+    "Relevant metrics show measurable improvement (or a documented rationale for deviations) and stakeholders sign off."
+  ],
+  "required_inputs": [
+    "Clarification of target area(s) for improvements (product/process/codebase).",
+    "Baseline metrics or KPIs to measure impact.",
+    "Constraints: deadline, team capacity, tech constraints, and risk tolerances.",
+    "Stakeholders and owners for each improvement and access to necessary repositories/environments."
+  ],
+  "assumptions": [
+    "The user’s brief "6 Incremental Improvements" means they want a concrete execution plan to implement six prioritized improvements.",
+    "No additional constraints were provided; plan includes an initial clarification step to avoid incorrect assumptions."
+  ]
+}

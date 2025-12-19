@@ -29,9 +29,8 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from harness.agent.tool_registry import (
-    ToolRegistry, Tool, ToolResult, ToolStatus, tool
+    ToolRegistry, Tool, ToolResult, ToolStatus, ToolConfig, tool
 )
-from util.config import ToolConfig
 from util.llm_adapter import ToolDefinition
 from util.resilience import CircuitBreakerOpenError
 

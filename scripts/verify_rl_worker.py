@@ -89,8 +89,7 @@ def check_agent_integration():
     print("Checking Agent Integration...")
     print("=" * 60)
 
-    from harness.agent import TieredAgent
-    from util.config import AgentConfig
+    from harness.agent.agent import TieredAgent, AgentConfig
     from harness.agent.tool_registry import ToolRegistry
     from communication.event_bus import EventBus
     import inspect

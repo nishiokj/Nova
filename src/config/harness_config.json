@@ -30,7 +30,6 @@
   },
   "tools": {
       "enabled_tools": [
-        "fast_answer",
         "web_fetch",
         "bash_execute",
         "python_execute",
@@ -40,7 +39,8 @@
         "calculator",
         "get_current_time",
         "get_working_directory",
-        "list_files"
+        "list_files",
+        "generate_image"
       ],
     "sandbox_bash": true,
     "sandbox_python": true,

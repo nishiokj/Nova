@@ -40,7 +40,6 @@ class HarnessState(Enum):
     PAUSED = "paused"
     STOPPING = "stopping"
     ERROR = "error"
-[]
 
 @dataclass
 class HarnessResponse:
@@ -87,7 +86,8 @@ class AgentHarness:
         profiler: Optional[Any] = None,
         runtime: Optional[HarnessRuntime] = None,
         logger: Optional[StructuredLogger] = None,
-        execution_logger: Optional[AgentExecutionLogger] = None
+        execution_logger: Optional[AgentExecutionLogger] = None,
+        log_dir: Optional[str] = None
     ):
         if runtime and (config or config_path):
             raise ValueError("Provide either an existing runtime or configuration inputs, not both.")
@@ -97,7 +97,8 @@ class AgentHarness:
             config_path=config_path,
             profiler=profiler,
             logger=logger,
-            execution_logger=execution_logger
+            execution_logger=execution_logger,
+            log_dir=log_dir
         )
 
         # Instrumentation
@@ -112,6 +113,7 @@ class AgentHarness:
         # Core components sourced from runtime
         self.tool_registry = self.runtime.tool_registry
         self.agent = self.runtime.agent
+        self.graphd = getattr(self.runtime, "graphd", None)
 
         # Control interface state
         self._stop_requested = threading.Event()
@@ -148,7 +150,8 @@ class AgentHarness:
         speech_text: str,
         tier: str = "standard",
         context: Optional[str] = None,
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
     ) -> HarnessResponse:
         """
         Process request through the agent.
@@ -158,6 +161,8 @@ class AgentHarness:
             tier: Agent tier (determined by ServiceRep/Router)
             context: Optional additional context
             request_id: Request identifier
+            on_stream_chunk: Optional callback for streaming final response synthesis.
+                            Called with (chunk: str, chunk_index: int, is_final: bool)
 
         Returns:
             HarnessResponse with results
@@ -182,28 +187,38 @@ class AgentHarness:
             # Step 1: Agent execution with progress updates
             self._set_state(HarnessState.AGENT_WORKING)
 
-            # Reset progress tracking and wire up callback
+            # Reset progress tracking and wire up callbacks
             self._last_progress_tool = None
-            progress_callback = self._create_progress_callback(request_id)
+            step_callback = self._create_progress_callback(request_id)
+            phase_callback = self._create_phase_callback(request_id)
 
-            # Get the agent for this tier and add progress callback
+            # Get the agent for this tier and add callbacks
             if hasattr(self.agent, "get_agent_for_tier"):
                 tier_agent = self.agent.get_agent_for_tier(tier)
             else:
                 tier_agent = self.agent
-            tier_agent.add_step_callback(progress_callback)
+            tier_agent.add_step_callback(step_callback)
+            if hasattr(tier_agent, "add_phase_callback"):
+                tier_agent.add_phase_callback(phase_callback)
 
             try:
+                if self.graphd:
+                    self.graphd.set_active(True)
                 with self.tool_registry.with_working_dir(call_dir):
                     with self._profile("harness.agent_run_ms"):
                         agent_response = self.agent.run(
                             user_input=speech_text,
                             tier=tier,
-                            context=context
+                            context=context,
+                            on_stream_chunk=on_stream_chunk
                         )
             finally:
+                if self.graphd:
+                    self.graphd.set_active(False)
                 if hasattr(tier_agent, "remove_step_callback"):
-                    tier_agent.remove_step_callback(progress_callback)
+                    tier_agent.remove_step_callback(step_callback)
+                if hasattr(tier_agent, "remove_phase_callback"):
+                    tier_agent.remove_phase_callback(phase_callback)
 
             # Step 2: Build response
             full_response = agent_response.content
@@ -272,6 +287,22 @@ class AgentHarness:
                             self.logger.error(f"Progress callback error: {e}", component="harness")
 
         return on_step
+
+    def _create_phase_callback(self, request_id: str) -> Callable[[str, Optional[str], int], None]:
+        """Create callback to forward agent phase progress to progress_callbacks.
+
+        This handles phase transitions (planning, execution, reflection) that don't
+        have tool names, complementing _create_progress_callback which handles tool steps.
+        """
+        def on_phase(message: str, tool_name: Optional[str], step_number: int):
+            # Forward to all progress callbacks
+            for callback in self._progress_callbacks:
+                try:
+                    callback(message, tool_name, step_number)
+                except Exception as e:
+                    self.logger.error(f"Phase progress callback error: {e}", component="harness")
+
+        return on_phase
 
     def _get_tool_progress_message(self, tool_name: str, step_number: int) -> Optional[str]:
         """
@@ -440,7 +471,8 @@ def create_harness(
     default_tier: str = "standard",
     profiler: Optional[Any] = None,
     logger: Optional[StructuredLogger] = None,
-    execution_logger: Optional[AgentExecutionLogger] = None
+    execution_logger: Optional[AgentExecutionLogger] = None,
+    log_dir: Optional[str] = None
 ) -> AgentHarness:
     """
     Create and configure an AgentHarness instance.
@@ -451,6 +483,7 @@ def create_harness(
         profiler: Optional profiler for runtime metrics
         logger: Logger instance
         execution_logger: Execution logger
+        log_dir: Optional log directory override
 
     Returns:
         Configured AgentHarness instance
@@ -462,7 +495,8 @@ def create_harness(
         config=config,
         profiler=profiler,
         logger=logger,
-        execution_logger=execution_logger
+        execution_logger=execution_logger,
+        log_dir=log_dir
     )
 
     return AgentHarness(runtime=runtime)

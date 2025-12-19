@@ -389,22 +389,55 @@ Tools will be provided via the tools parameter in the API call.
 """
 
     def _render_user_rules(self, build: ContextBuild) -> str:
-        """Render user rules."""
-        if not build.state.user_rules or not (build.state.user_rules.rules or build.state.user_rules.preferences):
+        """Render user rules with OS info and source attribution."""
+        user_rules = build.state.user_rules
+        if not user_rules or not user_rules.has_rules:
             return ""
 
         lines = ["# User Rules and Preferences\n"]
 
-        if build.state.user_rules.rules:
-            lines.append("## Rules")
-            for rule in build.state.user_rules.rules:
-                lines.append(f"- {rule}")
+        # Render OS/Environment info
+        os_info = user_rules.os_info
+        if os_info:
+            lines.append("## Environment")
+            system = os_info.get("system_friendly", os_info.get("system", "Unknown"))
+            machine = os_info.get("machine", "")
+            if system and machine:
+                lines.append(f"- OS: {system} ({machine})")
+            elif system:
+                lines.append(f"- OS: {system}")
             lines.append("")
 
-        if build.state.user_rules.preferences:
-            lines.append("## Preferences")
-            for key, value in build.state.user_rules.preferences.items():
-                lines.append(f"- {key}: {value}")
+        # Render rules by category if available
+        rule_categories = user_rules.rule_categories
+        if rule_categories:
+            # Get source info for attribution
+            global_path = user_rules.global_rules_path
+            repo_path = user_rules.repo_rules_path
+
+            if global_path or repo_path:
+                lines.append("## Rules")
+                if global_path:
+                    lines.append(f"_From {global_path}_")
+                if repo_path:
+                    if global_path:
+                        lines.append(f"_Overrides from {repo_path}_")
+                    else:
+                        lines.append(f"_From {repo_path}_")
+                lines.append("")
+
+            for category, rules in rule_categories.items():
+                lines.append(f"### {category}")
+                for rule in rules:
+                    lines.append(f"- {rule}")
+                lines.append("")
+
+        elif user_rules.rules:
+            # Fallback: render flat rules list
+            lines.append("## Rules")
+            for rule in user_rules.rules:
+                lines.append(f"- {rule}")
+            lines.append("")
 
         return "\n".join(lines)
 

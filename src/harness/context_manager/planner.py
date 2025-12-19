@@ -199,8 +199,8 @@ class ContextPlanner:
         if build.state.working_memory and build.state.working_memory.entries:
             sections.append(ContextSection.WORKING_MEMORY)
 
-        # User rules (if has rules)
-        if build.state.user_rules and (build.state.user_rules.rules or build.state.user_rules.preferences):
+        # User rules (if has rules or OS info)
+        if build.state.user_rules and build.state.user_rules.has_rules:
             sections.append(ContextSection.USER_RULES)
 
         # Tool trace (if has turns)

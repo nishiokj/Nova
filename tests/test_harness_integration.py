@@ -35,7 +35,7 @@ from util.config import (
     HarnessConfig, AgentConfig, RouterConfig,
     ServiceRepConfig, ToolConfig, LoggingConfig, LLMConfig
 )
-from harness.agent import AgentResponse, TieredAgent
+from harness.agent.agent import AgentResponse, TieredAgent
 from services.router import TaskClassification, TaskTier
 from harness.agent.tool_registry import ToolRegistry, ToolResult, ToolStatus
 from util.llm_adapter import ToolCall

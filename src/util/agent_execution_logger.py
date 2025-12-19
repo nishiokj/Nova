@@ -176,14 +176,28 @@ class AgentExecutionLogger:
     """
     Dedicated logger for detailed agent execution tracking.
     Creates agent_execution.jsonl with full context, planning, and execution details.
+
+    IMPORTANT: log_dir is REQUIRED. This class does not use default paths.
+    The calling application should create the log directory.
     """
 
     def __init__(
         self,
-        log_dir: str = "logs",
+        log_dir: str,
         max_log_size: int = 50 * 1024 * 1024,  # 50MB - can be large
         backup_count: int = 10
     ):
+        """
+        Initialize AgentExecutionLogger.
+
+        Args:
+            log_dir: Directory where logs will be written. REQUIRED.
+            max_log_size: Maximum log file size before rotation (default: 50MB)
+            backup_count: Number of backup files to keep (default: 10)
+        """
+        if not log_dir:
+            raise ValueError("log_dir is required - AgentExecutionLogger does not use default paths")
+
         self.log_dir = Path(log_dir)
         self.max_log_size = max_log_size
         self.backup_count = backup_count

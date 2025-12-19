@@ -108,12 +108,14 @@ class StructuredLogger:
     - requests.jsonl: Clean request lifecycle (INFO) - readable JSON
     - health.jsonl: System diagnostics (DEBUG) - heartbeat, VAD, etc.
     - prompts.jsonl: Full prompts stored by prompt_id
+
+    log_dir defaults to "logs" if not provided.
     """
 
     def __init__(
         self,
+        log_dir: Optional[str] = None,
         name: str = "harness",
-        log_dir: str = "logs",
         log_level: str = "INFO",
         log_to_file: bool = True,
         log_to_console: bool = True,
@@ -121,6 +123,8 @@ class StructuredLogger:
         max_log_size: int = 10 * 1024 * 1024,
         backup_count: int = 5
     ):
+        if not log_dir:
+            log_dir = "logs"  # Default to logs directory for backward compatibility
         self.name = name
         self.log_dir = Path(log_dir)
         self.log_level = getattr(logging, log_level.upper(), logging.INFO)
@@ -488,13 +492,23 @@ class StructuredLogger:
         self,
         message: str,
         error: Optional[Exception] = None,
-        component: Optional[str] = None
+        component: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None
     ):
         """Log error - goes to both request and health logs"""
-        detail = {}
+        detail: Dict[str, Any] = {}
         if error:
             detail["error"] = str(error)
             detail["type"] = type(error).__name__
+            tb = None
+            try:
+                tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            except Exception:
+                tb = None
+            if tb:
+                detail["stack"] = tb[:4000]
+        if data:
+            detail.update(data)
 
         # Log to request file if in request context
         if self._current_request_id:
@@ -514,7 +528,7 @@ class StructuredLogger:
         self._log_health(
             evt=message[:200],
             svc=component or "system",
-            data={"error": str(error)} if error else None
+            data=detail or {"error": str(error)} if error else None
         )
 
         self.console_logger.error(f"❌ ERROR [{component or 'system'}]: {message}")
@@ -639,6 +653,11 @@ class StructuredLogger:
         self._log_health(evt=message[:200], svc=component or "system", data=data)
 
     def debug(self, message: str, component: Optional[str] = None, data: Optional[Dict] = None):
-        """Generic debug - goes to health log"""
-        self._log_health(evt=message[:200], svc=component or "system", data=data)
-
+        """Generic debug - goes to health log. Full content stored in data if long."""
+        if len(message) > 200:
+            # Store full content in data to preserve it
+            full_data = data or {}
+            full_data["full_message"] = message
+            self._log_health(evt=message[:200] + "...", svc=component or "system", data=full_data)
+        else:
+            self._log_health(evt=message, svc=component or "system", data=data)

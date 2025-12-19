@@ -556,20 +556,80 @@ class UserRules:
     """
     User-defined rules and preferences.
 
-    These are explicit constraints or preferences the user has provided.
+    These are explicit constraints or preferences the user has provided,
+    loaded from:
+    - Global rules.md (~/.config/jesus/rules.md)
+    - Repository-specific repository.md (project root)
+    - Automatic OS/environment detection
     """
     rules: List[str] = field(default_factory=list)
-    """List of user rules"""
+    """List of user rules (merged from all sources)"""
 
     preferences: Dict[str, Any] = field(default_factory=dict)
-    """User preferences dictionary"""
+    """User preferences dictionary (includes os_info, rule_categories)"""
+
+    global_rules_path: Optional[str] = None
+    """Path to loaded global rules.md (if found)"""
+
+    repo_rules_path: Optional[str] = None
+    """Path to loaded repository.md (if found)"""
+
+    @property
+    def os_info(self) -> Dict[str, str]:
+        """Get OS information from preferences."""
+        return self.preferences.get("os_info", {})
+
+    @property
+    def rule_categories(self) -> Dict[str, List[str]]:
+        """Get rules organized by category."""
+        return self.preferences.get("rule_categories", {})
+
+    @property
+    def has_rules(self) -> bool:
+        """Check if any rules are loaded."""
+        return bool(self.rules) or bool(self.os_info)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return {
+            "rules": self.rules,
+            "preferences": self.preferences,
+            "global_rules_path": self.global_rules_path,
+            "repo_rules_path": self.repo_rules_path,
+        }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "UserRules":
-        return cls(**data)
+        return cls(
+            rules=data.get("rules", []),
+            preferences=data.get("preferences", {}),
+            global_rules_path=data.get("global_rules_path"),
+            repo_rules_path=data.get("repo_rules_path"),
+        )
+
+    @classmethod
+    def load_from_working_dir(cls, working_dir: Optional[str] = None) -> "UserRules":
+        """
+        Load rules from files in the given working directory.
+
+        This is the primary factory method for creating UserRules
+        at session initialization.
+
+        Args:
+            working_dir: Working directory for repository.md discovery.
+                        Defaults to current working directory.
+
+        Returns:
+            UserRules populated with loaded rules and OS info.
+        """
+        from .rules_loader import load_rules_for_session
+
+        data = load_rules_for_session(working_dir=working_dir)
+        return cls(
+            rules=data["rules"],
+            preferences=data["preferences"],
+            global_rules_path=data.get("global_rules_path"),
+            repo_rules_path=data.get("repo_rules_path"),
+        )
 
 
 class ContextState:
@@ -591,14 +651,60 @@ class ContextState:
         session_id: str,
         working_memory: Optional[WorkingMemoryStore] = None,
         user_rules: Optional[UserRules] = None,
-        conversation_summary: Optional[ConversationSummary] = None
+        conversation_summary: Optional[ConversationSummary] = None,
+        working_dir: Optional[str] = None,
+        load_rules: bool = False,
     ):
+        """
+        Initialize context state.
+
+        Args:
+            session_id: Unique session identifier
+            working_memory: Pre-populated working memory (optional)
+            user_rules: Pre-loaded user rules (optional)
+            conversation_summary: Existing conversation summary (optional)
+            working_dir: Working directory for rules discovery (optional)
+            load_rules: If True and user_rules not provided, load from files
+        """
         self.session_id = session_id
         self.working_memory = working_memory or WorkingMemoryStore()
-        self.user_rules = user_rules or UserRules()
+
+        # Load rules from files if requested and not provided
+        if user_rules is not None:
+            self.user_rules = user_rules
+        elif load_rules:
+            self.user_rules = UserRules.load_from_working_dir(working_dir)
+        else:
+            self.user_rules = UserRules()
+
         self.conversation_summary = conversation_summary or ConversationSummary()
         self.created_at = time.time()
         self.last_modified = time.time()
+
+    @classmethod
+    def create_with_rules(
+        cls,
+        session_id: str,
+        working_dir: Optional[str] = None,
+    ) -> "ContextState":
+        """
+        Create a new session with rules loaded from files.
+
+        This is the recommended factory method for creating new sessions
+        that should have user rules loaded.
+
+        Args:
+            session_id: Unique session identifier
+            working_dir: Working directory for repository.md discovery
+
+        Returns:
+            ContextState with loaded user rules
+        """
+        user_rules = UserRules.load_from_working_dir(working_dir)
+        return cls(
+            session_id=session_id,
+            user_rules=user_rules,
+        )
 
     def save_checkpoint(self, checkpoint_dir: str = ".context_checkpoints") -> str:
         """
