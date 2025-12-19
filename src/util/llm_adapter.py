@@ -530,7 +530,23 @@ class OpenAIAdapter(LLMAdapter):
                 params["max_tokens"] = max_tokens_value
 
         if tools:
-            params["tools"] = [t.to_openai_format() for t in tools]
+            # Convert ToolDefinition objects to dicts if needed
+            converted_tools = []
+            for t in tools:
+                if hasattr(t, 'to_openai_format'):
+                    converted_tools.append(t.to_openai_format())
+                elif isinstance(t, dict):
+                    converted_tools.append(t)
+                else:
+                    converted_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "parameters": getattr(t, 'parameters', {})
+                        }
+                    })
+            params["tools"] = converted_tools
             # For reasoning models that tend to ignore tools, force "required"
             default_choice = "required" if self._is_reasoning_model() else "auto"
             # Use explicitly passed tool_choice, or fall back to default
@@ -696,14 +712,37 @@ class OpenAIAdapter(LLMAdapter):
             if text_value is not None:
                 params["text"] = text_value
             if tools:
-                params["tools"] = tools  # Already internally-tagged format
+                # Convert ToolDefinition objects to Responses API format
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_responses_format'):
+                        converted_tools.append(t.to_responses_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        # Fallback: Responses API format (flat, name at top level)
+                        converted_tools.append({
+                            "type": "function",
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "parameters": {
+                                "type": "object",
+                                "properties": getattr(t, 'parameters', {}),
+                                "required": getattr(t, 'required', [])
+                            }
+                        })
+                params["tools"] = converted_tools
                 # For reasoning models, force "required"
                 default_choice = "required" if self._is_reasoning_model() else "auto"
                 explicit_choice = kwargs.get("tool_choice")
                 params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
 
             # DIAGNOSTIC: Log what we're sending
-            tool_names = [t.get("name") for t in tools] if tools else []
+            # Handle both ToolDefinition objects and dicts
+            tool_names = [
+                t.name if hasattr(t, 'name') else t.get("name", "unknown")
+                for t in tools
+            ] if tools else []
             self.logger.info(
                 f"RESPONSES API REQUEST: model={params.get('model')}, tools={tool_names}, "
                 f"tool_choice={params.get('tool_choice', 'none')}",
@@ -813,14 +852,37 @@ class OpenAIAdapter(LLMAdapter):
             if text_value is not None:
                 params["text"] = text_value
             if tools:
-                params["tools"] = tools  # Already internally-tagged format
+                # Convert ToolDefinition objects to Responses API format
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_responses_format'):
+                        converted_tools.append(t.to_responses_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        # Fallback: Responses API format (flat, name at top level)
+                        converted_tools.append({
+                            "type": "function",
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "parameters": {
+                                "type": "object",
+                                "properties": getattr(t, 'parameters', {}),
+                                "required": getattr(t, 'required', [])
+                            }
+                        })
+                params["tools"] = converted_tools
                 # For reasoning models, force "required"
                 default_choice = "required" if self._is_reasoning_model() else "auto"
                 explicit_choice = kwargs.get("tool_choice")
                 params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
 
             # DIAGNOSTIC: Log what we're sending
-            tool_names = [t.get("name") for t in tools] if tools else []
+            # Handle both ToolDefinition objects and dicts
+            tool_names = [
+                t.name if hasattr(t, 'name') else t.get("name", "unknown")
+                for t in tools
+            ] if tools else []
             self.logger.info(
                 f"RESPONSES API STREAM REQUEST: model={params.get('model')}, tools={tool_names}, "
                 f"tool_choice={params.get('tool_choice', 'none')}",
@@ -1159,7 +1221,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             tracer = get_tracer()
             with tracer.span("anthropic_api_call", model=self.config.model):
@@ -1296,7 +1371,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             full_content = ""
             tool_calls = []
@@ -1387,7 +1475,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             response = await client.messages.create(**params)
             result = self._parse_response(response)
@@ -1435,7 +1536,20 @@ class AnthropicAdapter(LLMAdapter):
                 params["system"] = system_param
 
             if tools:
-                params["tools"] = [t.to_anthropic_format() for t in tools]
+                # Convert ToolDefinition objects to Anthropic format if needed
+                converted_tools = []
+                for t in tools:
+                    if hasattr(t, 'to_anthropic_format'):
+                        converted_tools.append(t.to_anthropic_format())
+                    elif isinstance(t, dict):
+                        converted_tools.append(t)
+                    else:
+                        converted_tools.append({
+                            "name": getattr(t, 'name', 'unknown'),
+                            "description": getattr(t, 'description', ''),
+                            "input_schema": getattr(t, 'parameters', {})
+                        })
+                params["tools"] = converted_tools
 
             async with client.messages.stream(**params) as stream:
                 async for text in stream.text_stream:

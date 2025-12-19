@@ -117,6 +117,10 @@ class RenderEngine:
         self._min_width = 40
         self._min_height = 10
 
+        # Pause mechanism for PTT recording
+        self._paused = False
+        self._pause_lock = threading.Lock()
+
     def start(self):
         """Start the render thread."""
         if self._thread is not None:
@@ -139,6 +143,23 @@ class RenderEngine:
             self._thread.join(timeout=1.0)
             self._thread = None
 
+    def pause(self):
+        """Pause rendering (used during PTT recording to avoid terminal interference)."""
+        with self._pause_lock:
+            self._paused = True
+
+    def resume(self):
+        """Resume rendering after pause."""
+        with self._pause_lock:
+            self._paused = False
+        # Trigger immediate re-render after resuming
+        self._state.render_event.set()
+
+    def is_paused(self) -> bool:
+        """Check if rendering is paused."""
+        with self._pause_lock:
+            return self._paused
+
     def _render_loop(self):
         """Main render loop - runs in dedicated thread."""
         while self._running:
@@ -148,6 +169,10 @@ class RenderEngine:
 
             if not self._running:
                 break
+
+            # Skip rendering when paused (during PTT recording)
+            if self.is_paused():
+                continue
 
             try:
                 # Take atomic snapshot

@@ -245,6 +245,18 @@ class Agent:
             if self._executor:
                 self._executor.add_step_callback(self._handle_executor_step)
 
+        # Wizard orchestration (feature-flagged)
+        self._use_wizard = os.getenv("AGENT_USE_WIZARD", "0") == "1"
+        self._wizard: Optional["Wizard"] = None
+        if self._use_wizard and self._llm:
+            from .wizard import Wizard, WizardConfig
+            self._wizard = Wizard(
+                tool_registry=self.tool_registry,
+                llm=self._llm,
+                config=WizardConfig(),
+                logger=self.logger,
+            )
+
         # ========== CONTEXT MANAGER INTEGRATION ==========
         # Session-level persistent state
         # Create WorkingMemoryStore with working_dir, then pass to ContextState
@@ -531,10 +543,26 @@ class Agent:
         if len(self.context_state.working_memory.entries) > 10:
             return False
 
-        # Fast path for simple questions
+        # Fast path for simple questions and knowledge requests
         simple_question_starters = [
-            "what is", "what's", "what does", "who is", "who's", "when did",
-            "where is", "how many", "how much", "define", "explain"
+            # Questions
+            "what is", "what's", "what does", "what are", "what was",
+            "who is", "who's", "who are", "who was",
+            "when did", "when was", "when is",
+            "where is", "where are", "where was",
+            "how many", "how much", "how do", "how does",
+            "why is", "why are", "why does",
+            # Definitions and explanations
+            "define", "explain", "describe",
+            # Direct knowledge requests
+            "tell me", "give me", "list", "name",
+            "recite", "quote", "say", "write",
+            # Translations and conversions
+            "translate", "convert",
+            # Comparisons
+            "compare", "difference between",
+            # Simple commands
+            "summarize", "simplify",
         ]
         is_simple_question = any(input_lower.startswith(q) for q in simple_question_starters)
 
@@ -617,6 +645,16 @@ class Agent:
                 simple_plan.steps[0].tool_args_hint):
 
                 step = simple_plan.steps[0]
+
+                # Block file_read from fast path - file contents need explanation, not dumping
+                NEEDS_EXPLANATION_TOOLS = {"file_read"}
+                if step.tool_hint in NEEDS_EXPLANATION_TOOLS:
+                    self.logger.debug(
+                        f"Fast path blocked for '{step.tool_hint}' (needs explanation)",
+                        component="agent"
+                    )
+                    return None
+
                 if not self._is_tool_read_only(step.tool_hint):
                     self.logger.info(
                         f"Fast path blocked for write-capable tool '{step.tool_hint}'",
@@ -1026,6 +1064,7 @@ class Agent:
         # ========== FAST PATH FOR SIMPLE QUERIES ==========
         # Skip context building for queries that don't need filesystem/history context
         # This saves 150-500ms per request
+        # IMPORTANT: Fast path runs BEFORE wizard to handle simple questions directly
         with self._perf_tracer.span("fast_path_check"):
             if self._is_fast_path_eligible(user_input, budget):
                 with self._perf_tracer.span("fast_path_execute"):
@@ -1035,6 +1074,34 @@ class Agent:
                     self._perf_tracer.print_summary()
                     self._current_request_id = None
                     return fast_response
+
+        # ========== WIZARD ORCHESTRATION PATH (feature-flagged) ==========
+        # Only invoked for tasks that need planning/execution, not simple questions
+        if self._use_wizard and self._wizard and self._planner:
+            from .wizard import convert_plan_to_wizard_plan
+            # Create plan using existing planner
+            plan = self._planner.create_plan(
+                user_input=user_input,
+                context=context,
+                tier=self.config.tier,
+                budget=budget
+            )
+            # Convert to WizardPlan format
+            wizard_plan = convert_plan_to_wizard_plan(plan)
+            result = self._wizard.orchestrate(
+                plan=wizard_plan,
+                budget=budget,
+                on_stream_chunk=on_stream_chunk
+            )
+            return AgentResponse(
+                content=result.final_response,
+                structured_action=result.plan_state.goal,
+                total_duration_ms=result.duration_ms,
+                success=result.success,
+                goal_achieved=result.goal_achieved,
+                reflection=result.to_reflection(),
+                metadata=result.to_dict().get("metadata", {}),
+            )
 
         # ========== CONTEXT MANAGER WORKFLOW ==========
         with self._perf_tracer.span("context_manager_workflow"):

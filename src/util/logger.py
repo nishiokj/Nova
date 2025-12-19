@@ -653,5 +653,11 @@ class StructuredLogger:
         self._log_health(evt=message[:200], svc=component or "system", data=data)
 
     def debug(self, message: str, component: Optional[str] = None, data: Optional[Dict] = None):
-        """Generic debug - goes to health log"""
-        self._log_health(evt=message[:200], svc=component or "system", data=data)
+        """Generic debug - goes to health log. Full content stored in data if long."""
+        if len(message) > 200:
+            # Store full content in data to preserve it
+            full_data = data or {}
+            full_data["full_message"] = message
+            self._log_health(evt=message[:200] + "...", svc=component or "system", data=full_data)
+        else:
+            self._log_health(evt=message, svc=component or "system", data=data)

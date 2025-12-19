@@ -597,3 +597,42 @@ def should_scout(user_input: str) -> bool:
     ])
 
     return has_path or creation_with_reference or location_request
+
+
+def extract_target_paths(user_input: str) -> List[str]:
+    """
+    Extract explicit file paths from user input.
+
+    Captures:
+    - @mentions: @src/foo/bar.py, @config.json
+    - Quoted paths: "src/foo/bar.py", 'config.json'
+    - Explicit paths: ./src/foo.py, /absolute/path.py
+
+    Returns full paths, not just leaf filenames.
+    Use this to get target_paths for Wizard.orchestrate().
+    """
+    paths: List[str] = []
+
+    # Pattern 1: @mentions - HIGHEST PRIORITY (user explicitly references)
+    # Captures: @src/harness/agent/wizard/types.py → src/harness/agent/wizard/types.py
+    at_mentions = re.findall(r'@([\w/\-\.]+)', user_input)
+    for mention in at_mentions:
+        # Only keep if it looks like a file path (has extension or is a dir path)
+        if '.' in mention or '/' in mention:
+            paths.append(mention)
+
+    # Pattern 2: Quoted paths
+    quoted = re.findall(r'["\']([^"\']+)["\']', user_input)
+    for q in quoted:
+        if '/' in q or q.endswith(('.py', '.ts', '.js', '.json', '.md', '.yaml', '.yml', '.txt')):
+            if q not in paths:
+                paths.append(q)
+
+    # Pattern 3: Explicit paths like ./foo/bar.py or /foo/bar.py
+    explicit = re.findall(r'(?:^|[\s,])([./][\w/\-\.]+\.[\w]+)', user_input)
+    for e in explicit:
+        e = e.strip()
+        if e and e not in paths:
+            paths.append(e)
+
+    return paths

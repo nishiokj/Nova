@@ -49,7 +49,11 @@
       "Bash(timeout 30 PYTHONPATH=src python3:*)",
       "Bash(source .env)",
       "WebSearch",
-      "WebFetch(domain:ai.google.dev)"
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(test:*)",
+      "Bash(source:*)",
+      "Bash(set -a)",
+      "Bash(set +a)"
     ],
     "deny": []
   }

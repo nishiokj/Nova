@@ -161,7 +161,7 @@ class RobustTUI:
 
         configure_tui_logging(
             log_dir=self._log_dir,
-            level=logging.WARNING,
+            level=logging.DEBUG,  # FULL LOGGING - capture all worker/wizard logs
             enable_console=False,
             enable_file=True,
         )
@@ -378,14 +378,80 @@ class RobustTUI:
                 return
 
             # Voice mode: space on empty buffer triggers recording
+            # Handle the ENTIRE recording flow here to avoid raw terminal mode issues
             if (
                 char == " "
                 and self.voice
                 and self.voice.is_active
                 and not self.state.has_input()
             ):
-                self.voice.begin_recording()
-                self.state.transition(TUIState.RECORDING)
+                # Pause rendering to prevent terminal interference during PTT
+                self.renderer.pause()
+
+                try:
+                    # Start recording and handle the full PTT flow in this context
+                    self.voice.begin_recording()
+                    self.state.transition(TUIState.RECORDING)
+
+                    # Show recording indicator immediately
+                    self._render_recording_indicator(recording=True)
+
+                    # === RECORDING LOOP: Stay in raw mode for key release detection ===
+                    # Key release detection has two phases:
+                    # 1. INITIAL PHASE: Wait for first key repeat (proves key is held)
+                    #    - macOS/Linux initial key repeat delay is 200-500ms
+                    #    - We wait up to 700ms for the first repeat
+                    #    - If no repeat arrives, assume very short press and end
+                    # 2. REPEAT PHASE: Once repeat confirmed, use short timeout
+                    #    - Key repeat fires every 30-50ms once started
+                    #    - 3x 50ms timeouts = 150ms of silence = released
+
+                    key_repeat_confirmed = False
+                    consecutive_timeouts = 0
+                    initial_timeout = 0.05  # 50ms poll during initial phase
+                    initial_max_wait = 14   # 14 * 50ms = 700ms max wait for first repeat
+                    repeat_timeout = 0.05   # 50ms poll during repeat phase
+                    release_threshold = 3   # 3 * 50ms = 150ms of silence = released
+
+                    while not self._shutdown_requested:
+                        timeout = repeat_timeout if key_repeat_confirmed else initial_timeout
+                        ready, _, _ = select.select([sys.stdin.fileno()], [], [], timeout)
+
+                        if ready:
+                            next_char = sys.stdin.read(1)
+                            if next_char == " ":
+                                # Space repeat detected - key is definitely held
+                                key_repeat_confirmed = True
+                                consecutive_timeouts = 0
+                                # Update recording indicator with elapsed time
+                                self._render_recording_indicator(recording=True)
+                            # Any other key is ignored during recording
+                        else:
+                            # Timeout - no key activity
+                            consecutive_timeouts += 1
+
+                            if key_repeat_confirmed:
+                                # In repeat phase: short silence means released
+                                if consecutive_timeouts >= release_threshold:
+                                    break
+                            else:
+                                # In initial phase: long silence means short press
+                                if consecutive_timeouts >= initial_max_wait:
+                                    # No repeat after 700ms - treat as short press
+                                    break
+
+                    # Clear recording indicator and show transcribing
+                    self._render_recording_indicator(recording=False)
+
+                    # End recording and transition to transcribing
+                    self.voice.end_recording()
+                    self._transcription_deadline = time.time() + 30.0
+                    self.state.transition(TUIState.TRANSCRIBING)
+
+                finally:
+                    # Resume rendering
+                    self.renderer.resume()
+
                 return
 
             # Enter: submit input
@@ -464,33 +530,18 @@ class RobustTUI:
             self.state.dismiss_autocomplete()
 
     def _handle_recording(self):
-        """RECORDING state: wait for PTT key release."""
+        """RECORDING state: fallback handler.
+
+        Note: Recording is now handled inline in _handle_idle() to maintain
+        the raw terminal context. This method serves as a fallback in case
+        the state machine somehow ends up in RECORDING without the inline flow.
+        """
         if not self.voice:
             self.state.transition(TUIState.IDLE)
             return
 
-        with RawTerminal() as term:
-            # Key release detection
-            consecutive_timeouts = 0
-            release_threshold = 3
-            poll_timeout = 0.04
-
-            while not self._shutdown_requested:
-                ready, _, _ = select.select([sys.stdin.fileno()], [], [], poll_timeout)
-
-                if ready:
-                    char = sys.stdin.read(1)
-                    if char == " ":
-                        # Space repeat - still held
-                        consecutive_timeouts = 0
-                    # Other keys ignored during recording
-                else:
-                    consecutive_timeouts += 1
-                    if consecutive_timeouts >= release_threshold:
-                        # Key released
-                        break
-
-        # End recording and wait for transcription
+        # If we somehow got here, just end recording and move on
+        self.logger.warning("_handle_recording called unexpectedly, ending recording")
         self.voice.end_recording()
         self._transcription_deadline = time.time() + 30.0
         self.state.transition(TUIState.TRANSCRIBING)
@@ -819,6 +870,43 @@ class RobustTUI:
         self.state.set_status("Ready")
         self._transcription_deadline = None
         self.state.transition(TUIState.IDLE)
+
+    def _render_recording_indicator(self, recording: bool):
+        """Render a simple recording indicator directly to terminal.
+
+        This bypasses the render engine to avoid interference with
+        raw terminal mode during PTT recording.
+        """
+        from tui.render_engine import ANSI, get_terminal_size
+
+        width, height = get_terminal_size()
+
+        # Position at bottom of screen (where status indicator would be)
+        status_row = height - 1
+
+        # Build the indicator line
+        if recording:
+            # Red pulsing recording indicator
+            indicator = f"\033[1;31m  🎤  RECORDING - Hold SPACE, release to send\033[0m"
+        else:
+            # Yellow transcribing indicator
+            indicator = f"\033[1;33m  ✍️   Transcribing...\033[0m"
+
+        # Pad to full width to clear previous content
+        # Note: emoji width is tricky, so we use generous padding
+        visible_len = 45 if recording else 20
+        padding = " " * max(0, width - visible_len)
+
+        # Write directly to stdout
+        output = (
+            ANSI.HIDE_CURSOR
+            + ANSI.move_to(status_row, 1)
+            + ANSI.CLEAR_LINE
+            + indicator
+            + padding
+        )
+        sys.stdout.write(output)
+        sys.stdout.flush()
 
     # ---------------------------------------------------------------- Event Monitor
 
