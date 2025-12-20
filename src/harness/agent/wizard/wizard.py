@@ -20,7 +20,14 @@ from .types import (
 from .plan_state import PlanState
 from .work_ledger import WorkLedger
 from .knowledge_store import KnowledgeStore, KnowledgeFact, FactSource
-from .context_window import ContextWindow, SystemPrompt
+from .context_window import (
+    BehavioralRules,
+    ContextWindow,
+    SessionContext,
+    SystemPrompt,
+    build_system_message,
+    filter_persistable_messages,
+)
 from .work_item import WorkItem, WorkBounds
 from .worker import Worker, WorkerConfig, WorkerOutcome, WorkerCacheParams
 from .plan_patch import PlanPatch
@@ -79,7 +86,7 @@ class WizardResult:
     steps_skipped: int = 0
     steps_failed: int = 0
 
-    # Session persistence - ContextWindow state for saving to graphd
+    # Session persistence - SessionContext state for saving to graphd
     # This is the merged/final context state after orchestration
     final_context_state: Optional[Dict[str, Any]] = None
 
@@ -137,7 +144,7 @@ class Wizard:
 
     RESPONSIBILITIES:
     1. Own single-writer state (PlanState, WorkLedger, KnowledgeStore)
-    2. Build ContextWindow for each iteration (with plan_version for optimistic concurrency)
+    2. Build ContextWindow for each iteration (read-only, from SessionContext)
     3. Select and dispatch WorkItems to Workers
     4. Ingest WorkerOutcomes: auto-append facts, apply patches via PolicyGate
     5. Detect stagnation and escalate
@@ -152,23 +159,18 @@ class Wizard:
         llm: Any,  # LLMAdapter
         config: Optional[WizardConfig] = None,
         logger: Optional[Logger] = None,
-        graphd_client: Optional[Any] = None,  # GraphdClient for code intelligence
     ):
         self.tool_registry = tool_registry
         self.llm = llm
         self.config = config or WizardConfig()
         self.logger = logger
-        self.graphd_client = graphd_client
 
         # Single-writer state (created per orchestration)
         self._plan_state: Optional[PlanState] = None
         self._ledger: Optional[WorkLedger] = None
         self._knowledge: Optional[KnowledgeStore] = None
-        self._read_files: set = set()  # Dedup guard: files already read this session
-
-        # Cache params for LLM calls - enables prompt caching across steps
-        self._session_cache_key: Optional[str] = None
-        self._last_response_id: Optional[str] = None  # Track for stateful continuation
+        self._session_context: Optional[SessionContext] = None
+        self._behavioral_rules = BehavioralRules.default()
 
         # Components
         self._policy_gate = PolicyGate()
@@ -192,44 +194,44 @@ class Wizard:
     def orchestrate(
         self,
         plan: WizardPlan,
+        user_input: str,
+        request_context: Optional[str] = None,
         budget: Optional[Dict[str, int]] = None,
         on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
         target_paths: Optional[List[str]] = None,
-        context_window: Optional[ContextWindow] = None,
+        session_context: Optional[SessionContext] = None,
     ) -> WizardResult:
         """
         Main orchestration loop.
 
         Args:
             plan: The WizardPlan to execute (caller creates this)
+            user_input: Original user message for this request
+            request_context: Optional extra context to append before user_input
             budget: Optional budget constraints
             on_stream_chunk: Optional callback for streaming responses
             target_paths: Explicit file paths from user (e.g. @mentions) - injected into ALL steps
-            context_window: Optional ContextWindow hydrated from session.
-                           If provided, this window is REUSED across all steps (stateful).
-                           If not provided, a fresh window is created.
+            session_context: Optional SessionContext hydrated from session snapshots.
 
         Returns:
             WizardResult with execution results
 
         The loop:
         1. Initialize state stores from plan
-        2. Use provided ContextWindow OR create fresh one
+        2. Use provided SessionContext OR create fresh one
         3. Loop until complete or stagnated:
            a. Handle failed steps (retry or skip)
            b. Select ready WorkItems
-           c. Update ContextWindow with current step context
+           c. Build read-only ContextWindow for current step
            d. Dispatch to Workers (with try/except/finally)
            e. Ingest outcomes
            f. Check stagnation (AFTER ingest)
            g. Apply patches (with lifecycle tracking)
-        4. Return result with final ContextWindow state for persistence
+        4. Return result with final SessionContext state for persistence
         """
         start_time = time.time()
         total_tool_calls = 0
         total_llm_calls = 0
-        chunk_index = 0
-
         # Collect all outcomes for synthesis
         collected_outcomes: List[WorkerOutcome] = []
 
@@ -237,33 +239,24 @@ class Wizard:
         self._plan_state = PlanState.from_wizard_plan(plan)
         self._ledger = WorkLedger()
         self._knowledge = KnowledgeStore()
-        self._read_files = set()  # Reset dedup guard for new orchestration
+        self._session_context = session_context or SessionContext()
 
-        # Initialize cache params for this session
-        # Use plan goal hash as stable cache key - same goal = same cache
-        goal_hash = hashlib.sha256(plan.goal.encode()).hexdigest()[:16]
-        self._session_cache_key = f"wizard:{goal_hash}"
-        self._last_response_id = None  # Reset for new orchestration
+        if not self._session_context.prompt_cache_id:
+            self._session_context.prompt_cache_id = f"wizard:{uuid.uuid4().hex[:8]}"
 
-        # ========== SINGLE CONTEXT WINDOW FOR ENTIRE ORCHESTRATION ==========
-        # If caller provides a hydrated ContextWindow, USE IT for all steps.
-        # This is the key to session statefulness - the window carries conversation history.
-        self._shared_context_window = context_window
+        if request_context:
+            self._session_context.add_message({
+                "role": "user",
+                "content": f"Context:\n{request_context}",
+            })
 
-        if context_window:
-            self._log("info", "Using provided ContextWindow (session-stateful mode)")
-            # Extract state from the provided window
-            self._read_files.update(context_window.all_read_files)
-            self._log("debug", context_window._turns)
-            if context_window._previous_response_id:
-                self._last_response_id = context_window._previous_response_id
-                self._log("debug", f"  Restored previous_response_id for continuation")
-            if context_window._prompt_cache_key:
-                self._session_cache_key = context_window._prompt_cache_key
-                self._log("debug", f"  Restored prompt_cache_key: {context_window._prompt_cache_key}")
-            self._log("debug", f"  Prior turns: {len(context_window._turns)}, read files: {len(self._read_files)}")
-        else:
-            self._log("info", "No ContextWindow provided - will create fresh window")
+        self._session_context.add_message({"role": "user", "content": user_input})
+
+        self._log(
+            "info",
+            f"Session context: messages={len(self._session_context.messages)}, "
+            f"read_files={len(self._session_context.read_files)}",
+        )
 
         # ========== INJECT TARGET PATHS INTO ALL STEPS ==========
         # If target_paths provided (e.g., from @mentions), inject them into every step
@@ -293,8 +286,6 @@ class Wizard:
         iteration = 0
         final_response: Optional[str] = None
         consecutive_no_ready = 0  # Deadlock detection counter
-        last_context_window: Optional[ContextWindow] = None  # Track for session persistence
-
         # ========== FULL PLAN LOGGING ==========
         self._log("info", f"Wizard starting: goal='{plan.goal[:80]}', steps={len(plan.steps)}")
         self._log("debug", f"=== FULL PLAN ===")
@@ -351,70 +342,56 @@ class Wizard:
 
             entry_id = self._ledger.record_dispatch(step.step_num, work_item, worker_id)
 
-            # ========== USE SHARED CONTEXT WINDOW OR CREATE FRESH ==========
-            # If we have a shared window (from session), UPDATE it for this step
-            # If not, create a fresh one (backwards compatible)
-            if self._shared_context_window:
-                # REUSE the shared window - just update step-specific context
-                step_context_window = self._shared_context_window
-                # Update the system prompt for the current step
-                step_context_window._system_prompt = SystemPrompt(
-                    goal=self._plan_state.goal,
-                    step_num=step.step_num,
-                    objective=work_item.objective,
-                    constraints=[
-                        f"Max tool calls: {work_item.bounds.max_tool_calls}",
-                        f"Max duration: {work_item.bounds.max_duration_ms}ms",
-                    ],
-                    tool_hint=work_item.tool_hint,
-                )
-                self._log("debug", f"Reusing shared ContextWindow for step {step.step_num} (turns: {len(step_context_window._turns)})")
-            else:
-                # Create fresh ContextWindow from stores (backwards compatible path)
-                step_context_window = ContextWindow.from_stores(
-                    plan_state=self._plan_state,
-                    knowledge=self._knowledge,
-                    ledger=self._ledger,
-                    step=step,
-                    work_item=work_item,
-                    token_budget=self.config.context_budget_tokens,
-                    already_read=self._read_files,
-                    graphd_client=self.graphd_client,
-                )
-
-            # Track last context window for session persistence
-            last_context_window = step_context_window
-
-            # Check compaction (ContextWindow tracks token usage)
-            if step_context_window.should_compact:
-                self._log("debug", f"Context window at {step_context_window.token_usage:.0%} budget, would compact")
-                # TODO: Implement compaction via ContextWindow
+            # ========== BUILD STEP CONTEXT WINDOW ==========
+            system_prompt = SystemPrompt(
+                goal=self._plan_state.goal,
+                step_num=step.step_num,
+                objective=work_item.objective,
+                constraints=[
+                    f"Max tool calls: {work_item.bounds.max_tool_calls}",
+                    f"Max duration: {work_item.bounds.max_duration_ms}ms",
+                ],
+                tool_hint=work_item.tool_hint,
+            )
+            system_message = build_system_message(system_prompt, self._behavioral_rules)
+            step_context_window = ContextWindow(
+                [system_message] + self._session_context.messages
+            )
 
             # Execute worker with try/except/finally to ensure cleanup
             self._log("debug", f"Dispatching step {step.step_num}: {step.objective[:60]}")
             outcome: Optional[WorkerOutcome] = None
             plan_version = self._plan_state.version
 
-            # Build cache params for this step
-            # Use session cache key + optional continuation from previous response
+            # Build cache params for this step (prompt caching only)
+            prompt_cache_key = None
+            if self._session_context.prompt_cache_id:
+                system_hash = hashlib.sha256(system_message["content"].encode()).hexdigest()[:16]
+                prompt_cache_key = f"{self._session_context.prompt_cache_id}:{system_hash}"
+
             cache_params = WorkerCacheParams(
-                prompt_cache_key=self._session_cache_key,
-                prompt_cache_retention="24h",  # Standard retention for prompt caching
-                previous_response_id=self._last_response_id,
+                prompt_cache_key=prompt_cache_key,
+                prompt_cache_retention="24h",
             )
 
             try:
-                outcome = self._worker.execute(step_context_window, work_item, plan_version, cache_params)
-                total_tool_calls += outcome.tool_calls_made
-                total_llm_calls += outcome.llm_calls_made
+                outcome = self._worker.execute(
+                    step_context_window,
+                    work_item,
+                    plan_version,
+                    cache_params,
+                    read_files=set(self._session_context.read_files),
+                )
+                total_tool_calls += outcome.metrics.tool_calls_made
+                total_llm_calls += outcome.metrics.llm_calls_made
 
-                # Update _read_files from ContextWindow's tracking
-                self._read_files = step_context_window.all_read_files
-
-                # Track response_id for potential stateful continuation
-                # Note: Currently only tracks within session, resets per orchestration
-                if hasattr(self._worker, "_last_response_id"):
-                    self._last_response_id = self._worker._last_response_id
+                # Merge context updates into session context
+                if outcome.context_messages:
+                    self._session_context.extend_messages(
+                        filter_persistable_messages(outcome.context_messages)
+                    )
+                if outcome.read_files:
+                    self._session_context.read_files.update(outcome.read_files)
             except Exception as exc:
                 # Create a failed outcome for the exception
                 outcome = WorkerOutcome(
@@ -443,7 +420,12 @@ class Wizard:
             # Log outcome
             if outcome:
                 status_str = "success" if outcome.success else "failed"
-                self._log("debug", f"Step {step.step_num} {status_str}: tools={outcome.tool_calls_made}, llm={outcome.llm_calls_made}")
+                self._log(
+                    "debug",
+                    f"Step {step.step_num} {status_str}: "
+                    f"tools={outcome.metrics.tool_calls_made}, "
+                    f"llm={outcome.metrics.llm_calls_made}",
+                )
 
             # Check stagnation AFTER ingest (correct timing)
             if outcome:
@@ -467,6 +449,11 @@ class Wizard:
             outcomes=collected_outcomes,
             on_stream=on_stream_chunk,
         )
+
+        if self._session_context and final_response:
+            last_msg = self._session_context.messages[-1] if self._session_context.messages else None
+            if not (last_msg and last_msg.get("role") == "assistant" and last_msg.get("content") == final_response):
+                self._session_context.add_message({"role": "assistant", "content": final_response})
 
         # Compute step counts
         steps_completed = sum(
@@ -493,15 +480,9 @@ class Wizard:
         )
 
         # Build final context state for session persistence
-        # This captures the full conversation history for the next request
         final_context_state = None
-        if last_context_window:
-            final_context_state = last_context_window.to_session_dict()
-            # Ensure we capture all read files (not just from last step)
-            final_context_state["already_read"] = list(self._read_files)
-            # Capture final cache state
-            final_context_state["prompt_cache_key"] = self._session_cache_key
-            final_context_state["previous_response_id"] = self._last_response_id
+        if self._session_context:
+            final_context_state = self._session_context.to_session_dict()
 
         return WizardResult(
             success=self._plan_state.goal_achieved(),
@@ -596,7 +577,7 @@ class Wizard:
             self._knowledge.upsert(fact)
 
         # 4. PATCHES: Apply via PolicyGate with version safety
-        # Note: File dedup tracking handled by ContextWindow (updated after execute)
+        # Note: File dedup tracking handled via SessionContext.read_files
         self._apply_patches(outcome)
 
     def _apply_patches(self, outcome: WorkerOutcome) -> None:

@@ -178,25 +178,14 @@ class AgentHarness:
 
         # Session management: touch session (creates if needed) and load context
         session_context_data = None  # Full context snapshot for hydration
-        session_context_str = ""  # Formatted string for legacy context merging
         if session_key and self.graphd:
             try:
                 self.graphd.session_touch(session_key, working_dir=call_dir)
 
-                # Load full context snapshot for ContextWindow hydration
+                # Load full context snapshot for SessionContext hydration
                 session_context_data = self.load_session_context(session_key)
-
-                # Also load conversation history as string for additional context
-                session_context_str = self._load_session_context_for_agent(session_key)
             except Exception as e:
                 self.logger.warning(f"Failed to load session context: {e}", component="harness")
-
-        # Merge session context string with provided context (legacy compatibility)
-        if session_context_str:
-            if context:
-                context = f"{session_context_str}\n\n{context}"
-            else:
-                context = session_context_str
 
         agent_response = None
         full_response = ""
@@ -440,48 +429,6 @@ class AgentHarness:
     # =============================================================================
     # SESSION MANAGEMENT
     # =============================================================================
-
-    def _load_session_context_for_agent(
-        self,
-        session_key: str,
-        max_messages: int = 10,
-    ) -> str:
-        """
-        Load recent conversation history and format as context for the agent.
-
-        Args:
-            session_key: Session key
-            max_messages: Maximum number of recent messages to include
-
-        Returns:
-            Formatted conversation context string (empty if no history)
-        """
-        if not self.graphd:
-            return ""
-
-        try:
-            result = self.graphd.messages_get(session_key, limit=max_messages)
-            messages = result.get("messages", [])
-
-            if not messages:
-                return ""
-
-            # Format as conversation context
-            lines = ["## Previous conversation in this session:"]
-            for msg in messages:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                # Truncate very long messages for context
-                if len(content) > 500:
-                    content = content[:500] + "..."
-                prefix = "User" if role == "user" else "Assistant"
-                lines.append(f"**{prefix}:** {content}")
-
-            return "\n".join(lines)
-
-        except Exception as e:
-            self.logger.warning(f"Failed to load conversation history: {e}", component="harness")
-            return ""
 
     def _persist_session_data(
         self,

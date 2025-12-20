@@ -2,10 +2,10 @@
 Agent - Main reasoning and tool execution agent.
 Handles user requests with tool usage and LLM reasoning.
 
-Architecture: Plan → Execute → Reflect
+Architecture: Plan → Wizard → Synthesis
 - Planner: Creates explicit execution plans with success criteria
-- Executor: Runs plans step-by-step with validation
-- Reflector: Evaluates if goal was actually achieved
+- Wizard: Orchestrates steps and workers over a single context window
+- Synthesizer: Produces the final response
 """
 
 import json
@@ -39,7 +39,7 @@ from .plan_models import (
     ToolCallRecord,
 )
 from .wizard import convert_plan_to_wizard_plan
-from .wizard.context_window import ContextWindow, SystemPrompt, BehavioralRules
+from .wizard.context_window import SessionContext
 from util.resilience import CircuitBreakerOpenError
 from harness.context_manager import (
     ContextState,
@@ -247,17 +247,15 @@ class Agent:
             if self._executor:
                 self._executor.add_step_callback(self._handle_executor_step)
 
-        # Wizard orchestration (feature-flagged)
-        self._use_wizard = os.getenv("AGENT_USE_WIZARD", "0") == "1"
+        # Wizard orchestration (single-writer global state)
         self._wizard: Optional["Wizard"] = None
-        if self._use_wizard and self._llm:
+        if self._llm:
             from .wizard import Wizard, WizardConfig
             self._wizard = Wizard(
                 tool_registry=self.tool_registry,
                 llm=self._llm,
                 config=WizardConfig(),
                 logger=self.logger,
-                graphd_client=self._graphd_client,
             )
 
         # ========== CONTEXT MANAGER INTEGRATION ==========
@@ -431,6 +429,45 @@ class Agent:
         if len(clean) <= max_length:
             return clean
         return clean[: max_length - 3] + "..."
+
+    def _serialize_messages_for_planner(self, messages: List[Dict[str, Any]]) -> str:
+        """Render persisted context messages into a readable planning transcript."""
+        lines: List[str] = []
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            content = msg.get("content")
+            if content:
+                lines.append(f"{role}: {content}")
+
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                lines.append(f"{role} TOOL_CALLS: {json.dumps(tool_calls)}")
+
+            tool_call_id = msg.get("tool_call_id")
+            if tool_call_id:
+                lines.append(f"{role} TOOL_CALL_ID: {tool_call_id}")
+
+        return "\n".join(lines).strip()
+
+    def _render_context_for_planner(
+        self,
+        session_state: Optional[SessionContext],
+        extra_context: Optional[str],
+    ) -> Optional[str]:
+        """Build a single planning context string from session messages + extra context."""
+        parts: List[str] = []
+        if session_state and session_state.messages:
+            serialized = self._serialize_messages_for_planner(session_state.messages)
+            if serialized:
+                parts.append(serialized)
+
+        if extra_context:
+            parts.append(f"Additional context:\n{extra_context}")
+
+        if not parts:
+            return None
+
+        return "\n\n".join(parts)
 
     def _status_symbol(self, status: Any) -> str:
         """Map PlanStatus to a compact symbol for plan summaries."""
@@ -1014,11 +1051,11 @@ class Agent:
         session_context: Optional[Dict[str, Any]] = None,
     ) -> AgentResponse:
         """
-        Run the agent using Plan → Execute → Reflect architecture.
+        Run the agent using Wizard orchestration.
 
         1. PLAN: Create explicit execution plan with success criteria
-        2. EXECUTE: Run the plan step by step
-        3. REFLECT: Evaluate if the goal was actually achieved
+        2. WIZARD: Execute plan via Wizard + Workers
+        3. SYNTHESIZE: Generate final response
 
         Args:
             user_input: The user's request
@@ -1028,7 +1065,7 @@ class Agent:
             on_stream_chunk: Optional callback for streaming final response synthesis.
                             Called with (chunk: str, chunk_index: int, is_final: bool)
             session_context: Optional context from graphd session for hydration.
-                            Contains previous turns, tool history, and cache state.
+                            Contains persisted messages, read_files, and cache state.
                             This enables multi-turn conversation continuity.
 
         Returns:
@@ -1055,11 +1092,6 @@ class Agent:
         self._plan_status = {}
         contract_checklist: Optional[Dict[str, str]] = None
 
-        # Add context if provided
-        full_input = user_input
-        if context:
-            full_input = f"{user_input}\n\nContext: {context}"
-
         if self.logger.request_id is None:
             req_id = self.logger.new_request()
         else:
@@ -1068,14 +1100,30 @@ class Agent:
         self._current_request_id = req_id
         self._publish_agent_progress("Request received", step_number=0)
 
+        # ========== SESSION CONTEXT HYDRATION ==========
+        session_state: Optional[SessionContext] = None
+        if session_context:
+            try:
+                session_state = SessionContext.from_session_dict(session_context)
+                self.logger.info(
+                    f"Hydrated SessionContext: {len(session_state.messages)} messages, "
+                    f"{len(session_state.read_files)} files read",
+                    component="agent",
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to hydrate SessionContext: {e}",
+                    component="agent",
+                )
+                session_state = None
+        planning_context = self._render_context_for_planner(session_state, context)
+
         # ========== FAST PATH FOR SIMPLE QUERIES ==========
-        # Skip context building for queries that don't need filesystem/history context
-        # This saves 150-500ms per request
-        # IMPORTANT: Fast path runs BEFORE wizard to handle simple questions directly
+        # Skip fast path when Wizard is enabled to keep Wizard as the single writer.
         with self._perf_tracer.span("fast_path_check"):
-            if self._is_fast_path_eligible(user_input, budget):
+            if not self._wizard and self._is_fast_path_eligible(user_input, budget):
                 with self._perf_tracer.span("fast_path_execute"):
-                    fast_response = self._execute_fast_path(user_input, context, start_time)
+                    fast_response = self._execute_fast_path(user_input, planning_context, start_time)
                 if fast_response is not None:
                     self._publish_agent_progress("Responded via fast path", step_number=0)
                     self._perf_tracer.print_summary()
@@ -1086,50 +1134,20 @@ class Agent:
         # Create plan using existing planner
         plan = self._planner.create_plan(
             user_input=user_input,
-            context=context,
+            context=planning_context,
             tier=self.config.tier,
             budget=budget
         )
         # Convert to WizardPlan format
         wizard_plan = convert_plan_to_wizard_plan(plan)
 
-        # ========== HYDRATE CONTEXT WINDOW FROM SESSION ==========
-        # If session_context dict is provided, parse it into an actual ContextWindow.
-        # This is THE key to session statefulness - the ContextWindow carries:
-        # - Previous conversation turns
-        # - Files already read (for dedup)
-        # - Tool history
-        # - Responses API state (previous_response_id, cache keys)
-        hydrated_context_window: Optional[ContextWindow] = None
-        if session_context:
-            try:
-                # Create a minimal system prompt - Wizard will update it per step
-                initial_system_prompt = SystemPrompt(
-                    goal=wizard_plan.goal,
-                    step_num=0,
-                    objective=user_input,
-                )
-                hydrated_context_window = ContextWindow.from_session_dict(
-                    data=session_context,
-                    system_prompt=initial_system_prompt,
-                )
-                self.logger.info(
-                    f"Hydrated ContextWindow from session: {len(session_context.get('turns', []))} turns, "
-                    f"{len(session_context.get('already_read', []))} files read",
-                    component="agent"
-                )
-            except Exception as e:
-                self.logger.warning(
-                    f"Failed to hydrate ContextWindow from session: {e}",
-                    component="agent"
-                )
-                hydrated_context_window = None
-
         result = self._wizard.orchestrate(
             plan=wizard_plan,
+            user_input=user_input,
+            request_context=context,
             budget=budget,
             on_stream_chunk=on_stream_chunk,
-            context_window=hydrated_context_window,
+            session_context=session_state,
         )
 
         # Build metadata including final context state for session persistence
@@ -1445,7 +1463,7 @@ class TieredAgent:
             on_stream_chunk: Optional callback for streaming final response synthesis.
                             Called with (chunk: str, chunk_index: int, is_final: bool)
             session_context: Optional context from graphd session for hydration.
-                            Contains previous turns, tool history, and cache state.
+                            Contains persisted messages, read_files, and cache state.
         """
         tier = tier or self._current_tier
 

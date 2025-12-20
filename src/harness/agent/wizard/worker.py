@@ -8,9 +8,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Set, Tuple
 
-from .types import StepStatus
 from .knowledge_store import KnowledgeFact, FactSource
 from .plan_patch import PlanPatch
 
@@ -54,7 +53,18 @@ class WorkerAction(Enum):
     NEED_CONTEXT = "need_context"  # Need more info, will request tools next
     CONTINUE = "continue"  # Keep going (internal reasoning)
 
-from .context_window import ContextWindow, ToolExchange
+@dataclass
+class ToolExchange:
+    """A tool invocation and its result (internal to Worker)."""
+
+    call_id: str
+    tool_name: str
+    arguments: Dict[str, Any]
+    result_content: str = ""
+    success: bool = True
+    error: Optional[str] = None
+
+from .context_window import ContextWindow, ContextDelta, build_files_message
 from .work_item import WorkItem
 
 
@@ -75,6 +85,7 @@ class WorkerOutcome:
 
     CRITICAL: Workers NEVER mutate global state.
     All state changes go through WorkerOutcome for Wizard to ingest.
+    Context updates are returned as message deltas.
 
     Version envelope for optimistic concurrency:
     - base_version: Plan version worker operated against
@@ -105,6 +116,10 @@ class WorkerOutcome:
     # Entity refs discovered (for audit trail)
     entity_refs: List[str] = field(default_factory=list)
 
+    # Context updates (Wizard merges these into session context)
+    context_messages: List[Dict[str, Any]] = field(default_factory=list)
+    read_files: Set[str] = field(default_factory=set)
+
     # Internal tracking (not for Wizard, but useful for debugging)
     termination_reason: str = ""
 
@@ -117,49 +132,6 @@ class WorkerOutcome:
             len(self.entity_refs) > 0
         )
 
-    # ========== BACKWARD COMPATIBILITY ==========
-    # These properties maintain compatibility with old code that reads these fields
-
-    @property
-    def tool_calls_made(self) -> int:
-        return self.metrics.tool_calls_made
-
-    @property
-    def tool_calls_succeeded(self) -> int:
-        return self.metrics.tool_calls_succeeded
-
-    @property
-    def tool_calls_failed(self) -> int:
-        return self.metrics.tool_calls_failed
-
-    @property
-    def llm_calls_made(self) -> int:
-        return self.metrics.llm_calls_made
-
-    @property
-    def duration_ms(self) -> float:
-        return self.metrics.duration_ms
-
-    @property
-    def observations(self) -> List[str]:
-        """Derived from facts for backward compatibility."""
-        return [f"{fact.key}: {fact.value}" for fact in self.facts[:10]]
-
-    @property
-    def suggested_facts(self) -> List[Dict[str, Any]]:
-        """Backward compat: convert facts to old dict format."""
-        return [
-            {"key": f.key, "value": f.value, "confidence": f.confidence}
-            for f in self.facts
-        ]
-
-    @property
-    def patch_hints(self) -> List[Dict[str, Any]]:
-        """Backward compat: convert patches to old hint format."""
-        return [
-            {"action": "add_step", "objective": p.operations[0].new_step.get("objective", "") if p.operations and p.operations[0].new_step else ""}
-            for p in self.patches
-        ]
 
 
 @dataclass
@@ -177,16 +149,14 @@ class WorkerConfig:
 @dataclass
 class WorkerCacheParams:
     """
-    Caching and stateful conversation parameters for Worker LLM calls.
+    Caching parameters for Worker LLM calls.
 
-    These parameters enable OpenAI Responses API optimizations:
+    These parameters enable OpenAI Responses API prompt caching:
     - prompt_cache_key: Stable key for caching the system prompt + tool definitions
     - prompt_cache_retention: How long to retain the cache (e.g., "24h")
-    - previous_response_id: Continue from a previous response (stateful mode)
     """
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[str] = None
-    previous_response_id: Optional[str] = None
 
 
 class Worker:
@@ -196,10 +166,10 @@ class Worker:
     CRITICAL INVARIANTS:
     - Worker NEVER mutates PlanState, Ledger, or Stores
     - All observations are returned in WorkerOutcome
-    - Worker receives ContextWindow + WorkItem, returns WorkerOutcome
+    - Worker receives a read-only ContextWindow + WorkItem, returns WorkerOutcome
 
     API:
-    - execute(context_window, work_item, plan_version) - Execute using ContextWindow
+    - execute(base_context, work_item, plan_version) - Execute using base context + local delta
     """
 
     def __init__(
@@ -213,8 +183,6 @@ class Worker:
         self.llm = llm
         self.config = config or WorkerConfig()
         self.logger = logger
-        # Track last response_id for stateful continuation within an execution
-        self._last_response_id: Optional[str] = None
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -226,19 +194,21 @@ class Worker:
 
     def execute(
         self,
-        context_window: ContextWindow,
+        base_context: ContextWindow,
         work_item: WorkItem,
         plan_version: int = 0,
         cache_params: Optional[WorkerCacheParams] = None,
+        read_files: Optional[Set[str]] = None,
     ) -> WorkerOutcome:
         """
-        Execute work item using ContextWindow.
+        Execute work item using a read-only ContextWindow and a local ContextDelta.
 
         Args:
-            context_window: The ContextWindow with full context (owned by Worker during execution)
+            base_context: Read-only ContextWindow with full context for this step
             work_item: Work item with objective and bounds
             plan_version: Plan version for optimistic concurrency
             cache_params: Optional caching/stateful params for LLM calls
+            read_files: Files already read in this session (dedup metadata)
 
         Returns:
             WorkerOutcome with results, facts, and metrics
@@ -247,7 +217,6 @@ class Worker:
         self._log("debug", f"Worker executing: step={work_item.step_num}, objective='{work_item.objective[:60]}'")
 
         # Reset response tracking for this execution
-        self._last_response_id = cache_params.previous_response_id if cache_params else None
         self._cache_params = cache_params or WorkerCacheParams()
 
         outcome = WorkerOutcome(
@@ -258,7 +227,9 @@ class Worker:
         )
 
         try:
-            self._execute_loop(context_window, work_item, outcome, start_time)
+            context_delta = ContextDelta()
+            read_files = read_files or set()
+            self._execute_loop(base_context, context_delta, read_files, work_item, outcome, start_time)
         except Exception as exc:
             self._log("error", f"Worker exception: {type(exc).__name__}: {str(exc)[:100]}")
             outcome.success = False
@@ -267,58 +238,59 @@ class Worker:
 
         outcome.metrics.duration_ms = (time.time() - start_time) * 1000
 
-        # Transfer entity_refs from context_window to outcome
-        for path in context_window.loaded_files:
-            if path not in outcome.entity_refs:
-                outcome.entity_refs.append(path)
-
+        # Merge context delta into outcome for Wizard ingestion
+        outcome.context_messages = context_delta.messages
+        outcome.read_files = context_delta.read_files
         return outcome
 
     def _execute_loop(
         self,
-        context_window: ContextWindow,
+        base_context: ContextWindow,
+        context_delta: ContextDelta,
+        read_files: Set[str],
         work_item: WorkItem,
         outcome: WorkerOutcome,
         start_time: float,
     ) -> None:
         """
-        Main execution loop using ContextWindow.
+        Main execution loop using read-only base context + local delta.
 
-        Uses ContextWindow for:
-        - Message serialization (to_messages())
-        - File deduplication (has_file(), add_file())
-        - Turn management (add_assistant_turn(), add_user_turn())
-        - Tool result tracking (add_tool_result_turn())
+        Uses ContextDelta for:
+        - Message accumulation (assistant/user/tool messages)
+        - File read tracking (dedup metadata for Wizard)
         """
         # ========== AUTO-READ TARGET FILES (PRE-LOOP) ==========
         if work_item.target_paths:
             self._log("debug", f"Auto-reading {len(work_item.target_paths)} target files")
 
+            files_read: List[Tuple[str, str]] = []
             for path in work_item.target_paths:
-                # Skip if already in context (dedup via ContextWindow)
-                if context_window.has_file(path):
-                    self._log("debug", f"  ⊘ Skipping {path} (already in context)")
+                if path in read_files or path in context_delta.read_files:
+                    self._log("debug", f"  ⊘ Skipping {path} (already read)")
                     continue
 
                 try:
                     result = self.tool_registry.execute("file_read", path=path)
                     outcome.metrics.tool_calls_made += 1
 
-                    if result.is_success and result.output:
+                    if result.is_success and result.output is not None:
                         content = str(result.output)
-                        # ContextWindow handles truncation in add_file()
-                        added = context_window.add_file(path, content)
-                        if added:
-                            outcome.metrics.tool_calls_succeeded += 1
-                            self._log("debug", f"  ✓ Read {path} ({len(content)} chars)")
-                        else:
-                            self._log("debug", f"  ⊘ {path} already in context")
+                        files_read.append((path, content))
+                        context_delta.read_files.add(path)
+                        if path not in outcome.entity_refs:
+                            outcome.entity_refs.append(path)
+                        outcome.metrics.tool_calls_succeeded += 1
+                        self._log("debug", f"  ✓ Read {path} ({len(content)} chars)")
                     else:
                         outcome.metrics.tool_calls_failed += 1
                         self._log("warning", f"  ✗ Failed to read {path}: {result.error}")
                 except Exception as e:
                     outcome.metrics.tool_calls_failed += 1
                     self._log("error", f"  ✗ Exception reading {path}: {e}")
+
+            files_message = build_files_message(files_read)
+            if files_message:
+                context_delta.add_message(files_message)
 
         iteration = 0
         final_content: Optional[str] = None
@@ -333,8 +305,8 @@ class Worker:
 
             iteration += 1
 
-            # Get messages from ContextWindow
-            messages = context_window.to_messages()
+            # Get messages from base context + local delta
+            messages = context_delta.merged_messages(base_context)
 
             # Call LLM with tools
             response = self._call_llm(messages, work_item, outcome)
@@ -351,12 +323,14 @@ class Worker:
                 consecutive_no_action = 0
 
                 # Process tool calls
-                tool_exchanges = self._process_tool_calls(response, outcome, work_item)
+                tool_exchanges = self._process_tool_calls(
+                    response,
+                    outcome,
+                    work_item,
+                    context_delta,
+                )
 
-                # Record tool exchanges in ContextWindow's tool history (for tracking/metrics)
-                context_window.add_tool_results_batch(tool_exchanges)
-
-                # Add assistant message with tool calls to ContextWindow
+                # Add assistant message with tool calls to local context
                 assistant_content = self._extract_content(response) or ""
                 tool_calls_for_msg = [
                     {
@@ -370,26 +344,33 @@ class Worker:
                     }
                     for ex in tool_exchanges
                 ]
-                context_window.add_assistant_turn(assistant_content, tool_calls_for_msg)
+                assistant_msg: Dict[str, Any] = {"role": "assistant"}
+                if assistant_content:
+                    assistant_msg["content"] = assistant_content
+                assistant_msg["tool_calls"] = tool_calls_for_msg
+                context_delta.add_message(assistant_msg)
 
-                # Add tool results to ContextWindow
+                # Add tool results to local context
                 for ex in tool_exchanges:
                     content = ex.result_content
                     if not ex.success and ex.error:
                         content = f"ERROR: {ex.error}\n{content}"
-                    context_window.add_tool_result_turn(ex.call_id, content)
+                    context_delta.add_message({
+                        "role": "tool",
+                        "tool_call_id": ex.call_id,
+                        "content": content,
+                    })
 
-                # Synthesis step: force model to digest tool outputs
-                # Mark as system injection so it's not persisted as user conversation
-                context_window.add_user_turn(
+                synthesis_suffix = (
                     "SYNTHESIS REQUIRED: Read the tool outputs above and do ONE of:\n"
                     "1) Explain findings + next action.\n"
                     "2) If objective is satisfied, output [FINAL] with a concise explanation.\n"
-                    "Do NOT call tools in this synthesis step.",
-                    is_system_injection=True,
+                    "Do NOT call tools in this synthesis step."
                 )
-
-                synth_messages = context_window.to_messages()
+                synth_messages = context_delta.merged_messages(
+                    base_context,
+                    system_suffix=synthesis_suffix,
+                )
                 synth = self._call_llm_no_tools(synth_messages, outcome)
                 outcome.metrics.llm_calls_made += 1
 
@@ -397,7 +378,7 @@ class Worker:
                 self._log("debug", content or "")
 
                 if content:
-                    context_window.add_assistant_turn(content)
+                    context_delta.add_message({"role": "assistant", "content": content})
 
                 # Check for action markers
                 action = self._extract_action(content)
@@ -442,7 +423,7 @@ class Worker:
                 self._log("debug", f"Text-only response (no tools): {len(content or '')} chars")
 
                 if content:
-                    context_window.add_assistant_turn(content)
+                    context_delta.add_message({"role": "assistant", "content": content})
 
                 action = self._extract_action(content)
                 if action == WorkerAction.FINAL:
@@ -485,7 +466,7 @@ class Worker:
         work_item: WorkItem,
         outcome: WorkerOutcome,
     ) -> Optional[Any]:
-        """Call LLM with tools using message list from ContextWindow."""
+        """Call LLM with tools using a merged message list."""
         try:
             tools = self.tool_registry.get_definitions(enabled_only=True)
 
@@ -495,19 +476,14 @@ class Worker:
                     tools=tools,
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
-                    previous_response_id=self._last_response_id,
                 )
-                # Track response_id for stateful continuation
-                if hasattr(response, "response_id") and response.response_id:
-                    self._last_response_id = response.response_id
                 return response
 
             # Fallback for LLMs without respond_with_messages
             if hasattr(self.llm, "respond"):
-                tail = messages[-8:]
                 packed = "\n".join(
                     f"{m.get('role', '?').upper()}: {m.get('content', '')}"
-                    for m in tail
+                    for m in messages
                     if m.get("content")
                 )
                 system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
@@ -517,10 +493,7 @@ class Worker:
                     tools=tools,
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
-                    previous_response_id=self._last_response_id,
                 )
-                if hasattr(response, "response_id") and response.response_id:
-                    self._last_response_id = response.response_id
                 return response
 
             outcome.error = "LLM adapter missing respond methods"
@@ -545,18 +518,13 @@ class Worker:
                     tools=[],
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
-                    previous_response_id=self._last_response_id,
                 )
-                # Track response_id for stateful continuation
-                if hasattr(response, "response_id") and response.response_id:
-                    self._last_response_id = response.response_id
                 return response
 
             if hasattr(self.llm, "respond"):
-                tail = messages[-10:]
                 packed = "\n".join(
                     f"{m.get('role', '?').upper()}: {m.get('content', '')}"
-                    for m in tail
+                    for m in messages
                     if m.get("content")
                 )
                 system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
@@ -566,10 +534,7 @@ class Worker:
                     tools=[],
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
-                    previous_response_id=self._last_response_id,
                 )
-                if hasattr(response, "response_id") and response.response_id:
-                    self._last_response_id = response.response_id
                 return response
 
             return None
@@ -584,6 +549,7 @@ class Worker:
         response: Any,
         outcome: WorkerOutcome,
         work_item: WorkItem,
+        context_delta: ContextDelta,
     ) -> List[ToolExchange]:
         """Execute tool calls and return ToolExchange records."""
         exchanges: List[ToolExchange] = []
@@ -592,7 +558,7 @@ class Worker:
         self._log("debug", f"=== PROCESSING {len(tool_calls)} TOOL CALLS ===")
 
         for tool_call in tool_calls:
-            if outcome.tool_calls_made >= work_item.bounds.max_tool_calls:
+            if outcome.metrics.tool_calls_made >= work_item.bounds.max_tool_calls:
                 self._log("warning", f"Hit tool call limit ({work_item.bounds.max_tool_calls}), skipping remaining")
                 break
 
@@ -619,13 +585,13 @@ class Worker:
                 if result.is_success:
                     outcome.metrics.tool_calls_succeeded += 1
                     exchange.success = True
-                    exchange.result_content = str(result.output)[:100000] if result.output else ""
+                    exchange.result_content = str(result.output) if result.output is not None else ""
                     self._log("debug", f"  result: SUCCESS")
 
                     # Record as KnowledgeFact
                     outcome.facts.append(KnowledgeFact(
                         key=f"tool:{tool_name}:result",
-                        value=str(result.output)[:10000] if result.output else "",
+                        value=str(result.output) if result.output is not None else "",
                         confidence=0.9,
                         source=FactSource.TOOL,
                         tool_name=tool_name,
@@ -636,11 +602,12 @@ class Worker:
                         path = result.metadata.get("path")
                         if path:
                             outcome.entity_refs.append(path)
+                            context_delta.read_files.add(path)
                 else:
                     outcome.metrics.tool_calls_failed += 1
                     exchange.success = False
                     exchange.error = result.error
-                    exchange.result_content = str(result.output)[:100000] if result.output else ""
+                    exchange.result_content = str(result.output) if result.output is not None else ""
                     self._log("warning", f"  result: FAILED - {result.error}")
 
             except Exception as exc:
@@ -689,11 +656,11 @@ class Worker:
         Check all resource bounds. Returns termination reason if exceeded.
         """
         # Check tool call limit
-        if outcome.tool_calls_made >= work_item.bounds.max_tool_calls:
+        if outcome.metrics.tool_calls_made >= work_item.bounds.max_tool_calls:
             return "max_tool_calls"
 
         # Check LLM call limit
-        if outcome.llm_calls_made >= work_item.bounds.max_llm_calls:
+        if outcome.metrics.llm_calls_made >= work_item.bounds.max_llm_calls:
             return "max_llm_calls"
 
         # Check duration limit

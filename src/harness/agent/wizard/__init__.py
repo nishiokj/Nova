@@ -17,8 +17,8 @@ All types are defined in .types module.
 Usage:
     from harness.agent.wizard import Wizard, WizardConfig, WizardPlan, WizardStep
 
-    wizard = Wizard(tool_registry, llm, planner, config=WizardConfig())
-    result = wizard.orchestrate(user_input, context)
+    wizard = Wizard(tool_registry, llm, config=WizardConfig())
+    result = wizard.orchestrate(plan, user_input, request_context=context)
     print(result.to_dict())
 """
 
@@ -53,17 +53,10 @@ from .work_item import WorkItem, WorkBounds, WorkItemCriteria
 # Context Window
 from .context_window import (
     ContextWindow,
+    ContextDelta,
+    SessionContext,
     SystemPrompt,
     BehavioralRules,
-    FileContent,
-    ToolExchange,
-    StreamBuffer,
-    # Phase 4: Responses API
-    ResponsesAPIInput,
-    # Phase 5: Advanced Context Management
-    ContextMetrics,
-    CompactionResult,
-    FileLoadStrategy,
 )
 
 # Worker
@@ -71,8 +64,6 @@ from .worker import (
     Worker,
     WorkerConfig,
     WorkerOutcome,
-  #  VerificationResult,
-   # SuccessLevel,
     WorkerAction,
 )
 
@@ -123,17 +114,10 @@ __all__ = [
     "WorkItemCriteria",
     # Context Window
     "ContextWindow",
+    "ContextDelta",
+    "SessionContext",
     "SystemPrompt",
     "BehavioralRules",
-    "FileContent",
-    "ToolExchange",
-    "StreamBuffer",
-    # Phase 4: Responses API
-    "ResponsesAPIInput",
-    # Phase 5: Advanced Context Management
-    "ContextMetrics",
-    "CompactionResult",
-    "FileLoadStrategy",
     # Worker
     "Worker",
     "WorkerConfig",
