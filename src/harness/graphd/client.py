@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 
 class GraphdClient:
-    def __init__(self, host: str, port: int, timeout_s: int = 2, enabled: bool = True):
+    def __init__(self, host: str, port: int, timeout_s: float = 0.5, enabled: bool = True):
         self.host = host
         self.port = port
         self.timeout_s = timeout_s

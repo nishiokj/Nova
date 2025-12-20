@@ -6,6 +6,7 @@ The Wizard does NOT create plans - it receives a WizardPlan and executes it.
 Planning is the caller's responsibility.
 """
 
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -19,10 +20,9 @@ from .types import (
 from .plan_state import PlanState
 from .work_ledger import WorkLedger
 from .knowledge_store import KnowledgeStore, KnowledgeFact, FactSource
-from .evidence_store import EvidenceStore, EvidenceRecord
-from .context_pack import ContextPackBuilder
+from .context_window import ContextWindow, SystemPrompt
 from .work_item import WorkItem, WorkBounds
-from .worker import Worker, WorkerConfig, WorkerOutcome
+from .worker import Worker, WorkerConfig, WorkerOutcome, WorkerCacheParams
 from .plan_patch import PlanPatch
 from .policy_gate import PolicyGate
 from .stagnation import StagnationDetector, StagnationSignal
@@ -54,7 +54,7 @@ class WizardConfig:
     max_workers: int = 1  # Parallel workers (start with 1)
     max_iterations: int = 50
     context_budget_tokens: int = 100_000
-    compaction_threshold: float = 0.5  # Compact when >50% budget
+    compaction_threshold: float = 0.6  # Compact when >60% budget
     max_retries_per_step: int = 3  # Max retries before skipping a failed step
     deadlock_threshold: int = 5  # Max consecutive iterations with no ready steps
 
@@ -78,6 +78,10 @@ class WizardResult:
     steps_completed: int = 0
     steps_skipped: int = 0
     steps_failed: int = 0
+
+    # Session persistence - ContextWindow state for saving to graphd
+    # This is the merged/final context state after orchestration
+    final_context_state: Optional[Dict[str, Any]] = None
 
     @property
     def is_terminated(self) -> bool:
@@ -132,12 +136,11 @@ class Wizard:
     Outer-loop orchestrator that owns global state.
 
     RESPONSIBILITIES:
-    1. Own single-writer state (PlanState, WorkLedger, KnowledgeStore, EvidenceStore)
-    2. Build ContextPack for each iteration
+    1. Own single-writer state (PlanState, WorkLedger, KnowledgeStore)
+    2. Build ContextWindow for each iteration (with plan_version for optimistic concurrency)
     3. Select and dispatch WorkItems to Workers
-    4. Ingest WorkerOutcomes into stores
-    5. Apply PlanPatches via PolicyGate
-    6. Detect stagnation and escalate
+    4. Ingest WorkerOutcomes: auto-append facts, apply patches via PolicyGate
+    5. Detect stagnation and escalate
 
     NOT RESPONSIBLE FOR:
     - Creating plans (caller provides WizardPlan)
@@ -149,22 +152,27 @@ class Wizard:
         llm: Any,  # LLMAdapter
         config: Optional[WizardConfig] = None,
         logger: Optional[Logger] = None,
+        graphd_client: Optional[Any] = None,  # GraphdClient for code intelligence
     ):
         self.tool_registry = tool_registry
         self.llm = llm
         self.config = config or WizardConfig()
         self.logger = logger
+        self.graphd_client = graphd_client
 
         # Single-writer state (created per orchestration)
         self._plan_state: Optional[PlanState] = None
         self._ledger: Optional[WorkLedger] = None
         self._knowledge: Optional[KnowledgeStore] = None
-        self._evidence: Optional[EvidenceStore] = None
+        self._read_files: set = set()  # Dedup guard: files already read this session
+
+        # Cache params for LLM calls - enables prompt caching across steps
+        self._session_cache_key: Optional[str] = None
+        self._last_response_id: Optional[str] = None  # Track for stateful continuation
 
         # Components
         self._policy_gate = PolicyGate()
         self._stagnation_detector = StagnationDetector()
-        self._context_builder: Optional[ContextPackBuilder] = None
 
         # Worker - allow_implicit_finals=True so Q&A without tools can succeed
         worker_config = WorkerConfig(allow_implicit_finals=True)
@@ -187,6 +195,7 @@ class Wizard:
         budget: Optional[Dict[str, int]] = None,
         on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
         target_paths: Optional[List[str]] = None,
+        context_window: Optional[ContextWindow] = None,
     ) -> WizardResult:
         """
         Main orchestration loop.
@@ -196,21 +205,25 @@ class Wizard:
             budget: Optional budget constraints
             on_stream_chunk: Optional callback for streaming responses
             target_paths: Explicit file paths from user (e.g. @mentions) - injected into ALL steps
+            context_window: Optional ContextWindow hydrated from session.
+                           If provided, this window is REUSED across all steps (stateful).
+                           If not provided, a fresh window is created.
 
         Returns:
             WizardResult with execution results
 
         The loop:
         1. Initialize state stores from plan
-        2. Loop until complete or stagnated:
+        2. Use provided ContextWindow OR create fresh one
+        3. Loop until complete or stagnated:
            a. Handle failed steps (retry or skip)
            b. Select ready WorkItems
-           c. Build ContextPacks
+           c. Update ContextWindow with current step context
            d. Dispatch to Workers (with try/except/finally)
            e. Ingest outcomes
            f. Check stagnation (AFTER ingest)
            g. Apply patches (with lifecycle tracking)
-        3. Return result
+        4. Return result with final ContextWindow state for persistence
         """
         start_time = time.time()
         total_tool_calls = 0
@@ -224,7 +237,33 @@ class Wizard:
         self._plan_state = PlanState.from_wizard_plan(plan)
         self._ledger = WorkLedger()
         self._knowledge = KnowledgeStore()
-        self._evidence = EvidenceStore()
+        self._read_files = set()  # Reset dedup guard for new orchestration
+
+        # Initialize cache params for this session
+        # Use plan goal hash as stable cache key - same goal = same cache
+        goal_hash = hashlib.sha256(plan.goal.encode()).hexdigest()[:16]
+        self._session_cache_key = f"wizard:{goal_hash}"
+        self._last_response_id = None  # Reset for new orchestration
+
+        # ========== SINGLE CONTEXT WINDOW FOR ENTIRE ORCHESTRATION ==========
+        # If caller provides a hydrated ContextWindow, USE IT for all steps.
+        # This is the key to session statefulness - the window carries conversation history.
+        self._shared_context_window = context_window
+
+        if context_window:
+            self._log("info", "Using provided ContextWindow (session-stateful mode)")
+            # Extract state from the provided window
+            self._read_files.update(context_window.all_read_files)
+            self._log("debug", context_window._turns)
+            if context_window._previous_response_id:
+                self._last_response_id = context_window._previous_response_id
+                self._log("debug", f"  Restored previous_response_id for continuation")
+            if context_window._prompt_cache_key:
+                self._session_cache_key = context_window._prompt_cache_key
+                self._log("debug", f"  Restored prompt_cache_key: {context_window._prompt_cache_key}")
+            self._log("debug", f"  Prior turns: {len(context_window._turns)}, read files: {len(self._read_files)}")
+        else:
+            self._log("info", "No ContextWindow provided - will create fresh window")
 
         # ========== INJECT TARGET PATHS INTO ALL STEPS ==========
         # If target_paths provided (e.g., from @mentions), inject them into every step
@@ -240,13 +279,6 @@ class Wizard:
                         existing.add(path)
             self._log("debug", f"  Target paths: {target_paths}")
 
-        self._context_builder = ContextPackBuilder(
-            plan_state=self._plan_state,
-            ledger=self._ledger,
-            knowledge=self._knowledge,
-            evidence=self._evidence,
-        )
-
         # Seed knowledge with goal
         self._knowledge.upsert(
             KnowledgeFact(
@@ -261,6 +293,7 @@ class Wizard:
         iteration = 0
         final_response: Optional[str] = None
         consecutive_no_ready = 0  # Deadlock detection counter
+        last_context_window: Optional[ContextWindow] = None  # Track for session persistence
 
         # ========== FULL PLAN LOGGING ==========
         self._log("info", f"Wizard starting: goal='{plan.goal[:80]}', steps={len(plan.steps)}")
@@ -269,6 +302,7 @@ class Wizard:
         self._log("debug", f"  goal_type: {plan.goal_type}")
         self._log("debug", f"  reasoning: {plan.reasoning[:200] if plan.reasoning else '(none)'}")
         self._log("debug", f"  requires_tools: {plan.requires_tools}")
+    #    self._log("debug", session_context.)
         for step in plan.steps:
             deps = f" (depends_on: {step.depends_on})" if step.depends_on else ""
             tool = f" [tool: {step.tool_hint}]" if step.tool_hint else ""
@@ -317,33 +351,77 @@ class Wizard:
 
             entry_id = self._ledger.record_dispatch(step.step_num, work_item, worker_id)
 
-            context_pack = self._context_builder.build(
-                step,
-                work_item,
-                budget_tokens=self.config.context_budget_tokens,
-                worker_id=worker_id,
-            )
+            # ========== USE SHARED CONTEXT WINDOW OR CREATE FRESH ==========
+            # If we have a shared window (from session), UPDATE it for this step
+            # If not, create a fresh one (backwards compatible)
+            if self._shared_context_window:
+                # REUSE the shared window - just update step-specific context
+                step_context_window = self._shared_context_window
+                # Update the system prompt for the current step
+                step_context_window._system_prompt = SystemPrompt(
+                    goal=self._plan_state.goal,
+                    step_num=step.step_num,
+                    objective=work_item.objective,
+                    constraints=[
+                        f"Max tool calls: {work_item.bounds.max_tool_calls}",
+                        f"Max duration: {work_item.bounds.max_duration_ms}ms",
+                    ],
+                    tool_hint=work_item.tool_hint,
+                )
+                self._log("debug", f"Reusing shared ContextWindow for step {step.step_num} (turns: {len(step_context_window._turns)})")
+            else:
+                # Create fresh ContextWindow from stores (backwards compatible path)
+                step_context_window = ContextWindow.from_stores(
+                    plan_state=self._plan_state,
+                    knowledge=self._knowledge,
+                    ledger=self._ledger,
+                    step=step,
+                    work_item=work_item,
+                    token_budget=self.config.context_budget_tokens,
+                    already_read=self._read_files,
+                    graphd_client=self.graphd_client,
+                )
 
-            if self._context_builder.should_compact(
-                context_pack.estimated_tokens, self.config.context_budget_tokens
-            ):
-                self._context_builder.compact()
+            # Track last context window for session persistence
+            last_context_window = step_context_window
+
+            # Check compaction (ContextWindow tracks token usage)
+            if step_context_window.should_compact:
+                self._log("debug", f"Context window at {step_context_window.token_usage:.0%} budget, would compact")
+                # TODO: Implement compaction via ContextWindow
 
             # Execute worker with try/except/finally to ensure cleanup
             self._log("debug", f"Dispatching step {step.step_num}: {step.objective[:60]}")
             outcome: Optional[WorkerOutcome] = None
+            plan_version = self._plan_state.version
+
+            # Build cache params for this step
+            # Use session cache key + optional continuation from previous response
+            cache_params = WorkerCacheParams(
+                prompt_cache_key=self._session_cache_key,
+                prompt_cache_retention="24h",  # Standard retention for prompt caching
+                previous_response_id=self._last_response_id,
+            )
+
             try:
-                outcome = self._worker.execute(context_pack, work_item)
+                outcome = self._worker.execute(step_context_window, work_item, plan_version, cache_params)
                 total_tool_calls += outcome.tool_calls_made
                 total_llm_calls += outcome.llm_calls_made
+
+                # Update _read_files from ContextWindow's tracking
+                self._read_files = step_context_window.all_read_files
+
+                # Track response_id for potential stateful continuation
+                # Note: Currently only tracks within session, resets per orchestration
+                if hasattr(self._worker, "_last_response_id"):
+                    self._last_response_id = self._worker._last_response_id
             except Exception as exc:
                 # Create a failed outcome for the exception
                 outcome = WorkerOutcome(
                     work_id=work_item.work_id,
-                    worker_id=worker_id,
                     step_num=step.step_num,
+                    base_version=plan_version,
                     success=False,
-                    status=StepStatus.FAILED,
                     error=f"Worker exception: {type(exc).__name__}: {str(exc)[:200]}",
                     termination_reason="exception",
                 )
@@ -355,10 +433,9 @@ class Wizard:
                     # Fallback: create minimal failed outcome
                     self._ledger.record_completion(entry_id, WorkerOutcome(
                         work_id=work_item.work_id,
-                        worker_id=worker_id,
                         step_num=step.step_num,
+                        base_version=plan_version,
                         success=False,
-                        status=StepStatus.FAILED,
                         error="Worker returned no outcome",
                     ))
                     self._plan_state.clear_in_progress(step.step_num)
@@ -373,9 +450,6 @@ class Wizard:
                 signal = self._stagnation_detector.check(step.step_num, self._ledger, outcome)
                 if signal.detected:
                     self._handle_stagnation(signal)
-
-                # Process patch hints from worker (with lifecycle tracking)
-                self._process_patch_hints(outcome)
 
                 # Collect successful outcomes for synthesis
                 if outcome.success:
@@ -417,6 +491,18 @@ class Wizard:
             f"skipped={steps_skipped}, failed={steps_failed}, "
             f"duration={duration_ms:.0f}ms"
         )
+
+        # Build final context state for session persistence
+        # This captures the full conversation history for the next request
+        final_context_state = None
+        if last_context_window:
+            final_context_state = last_context_window.to_session_dict()
+            # Ensure we capture all read files (not just from last step)
+            final_context_state["already_read"] = list(self._read_files)
+            # Capture final cache state
+            final_context_state["prompt_cache_key"] = self._session_cache_key
+            final_context_state["previous_response_id"] = self._last_response_id
+
         return WizardResult(
             success=self._plan_state.goal_achieved(),
             final_response=final_response or "Task processing complete.",
@@ -429,6 +515,7 @@ class Wizard:
             steps_completed=steps_completed,
             steps_skipped=steps_skipped,
             steps_failed=steps_failed,
+            final_context_state=final_context_state,
         )
 
     def _handle_failed_steps(self) -> None:
@@ -483,9 +570,19 @@ class Wizard:
             self._stagnation_detector.reset_step(signal.step_num)
 
     def _ingest_outcome(self, outcome: WorkerOutcome, entry_id: str) -> None:
-        """Ingest worker outcome into stores."""
+        """
+        Ingest worker outcome into stores.
+
+        Mutation order:
+        1. Ledger (audit) - always
+        2. PlanState (step status) - always
+        3. KnowledgeStore (facts) - auto-append all
+        4. PlanState (patches) - via PolicyGate, version-checked
+        """
+        # 1. LEDGER: Record completion (audit trail)
         self._ledger.record_completion(entry_id, outcome)
 
+        # 2. PLAN_STATE: Update step status
         if outcome.success:
             self._plan_state.mark_step_complete(
                 outcome.step_num, outcome.final_response or "Completed"
@@ -494,68 +591,71 @@ class Wizard:
         else:
             self._plan_state.mark_step_failed(outcome.step_num, outcome.error or "Unknown error")
 
-        for fact_data in outcome.suggested_facts:
-            fact = KnowledgeFact(
-                key=fact_data.get("key", f"fact:{time.time()}"),
-                value=fact_data.get("value"),
-                confidence=fact_data.get("confidence", 0.7),
-                source=FactSource.TOOL,
-            )
+        # 3. KNOWLEDGE: Auto-append all facts (no promotion logic)
+        for fact in outcome.facts:
             self._knowledge.upsert(fact)
 
-        for evidence_data in outcome.suggested_evidence:
-            evidence = EvidenceRecord(
-                evidence_id=str(uuid.uuid4())[:8],
-                step_num=outcome.step_num,
-                evidence_type=evidence_data.get("type", "tool_output"),
-                description=evidence_data.get("tool_name", "unknown"),
-                tool_name=evidence_data.get("tool_name"),
-                tool_output=evidence_data.get("output"),
-            )
-            self._evidence.record(evidence)
+        # 4. PATCHES: Apply via PolicyGate with version safety
+        # Note: File dedup tracking handled by ContextWindow (updated after execute)
+        self._apply_patches(outcome)
 
-    def _process_patch_hints(self, outcome: WorkerOutcome) -> None:
+    def _apply_patches(self, outcome: WorkerOutcome) -> None:
         """
-        Convert worker patch hints to patches and apply via PolicyGate.
-        Records full patch lifecycle: propose → decision → apply.
+        Apply patches from worker outcome with version safety.
+
+        Rejects patches where base_version != current plan version.
+        This handles the case where plan changed while worker was executing.
         """
-        for hint in outcome.patch_hints:
-            if hint.get("action") == "add_step":
-                patch = PlanPatch.create_insert(
-                    base_version=self._plan_state.version,
-                    objective=hint.get("objective", ""),
-                    tool_hint=hint.get("tool_hint"),
-                    justification=f"Worker hint: {hint.get('reason', '')}",
-                    worker_id=outcome.worker_id,
+        for patch in outcome.patches:
+            # VERSION CHECK: Reject stale patches
+            if patch.base_plan_version != self._plan_state.version:
+                self._log(
+                    "warning",
+                    f"Rejecting stale patch {patch.patch_id}: "
+                    f"base_version={patch.base_plan_version}, "
+                    f"current={self._plan_state.version}"
                 )
-
-                # Phase 1: Record proposal
                 self._ledger.record_patch_proposed(
                     patch_id=patch.patch_id,
                     source="worker",
-                    patch_type="insert",
-                    target_steps=[],  # INSERT doesn't target existing steps
+                    patch_type=patch.operations[0].type.value if patch.operations else "unknown",
+                    target_steps=[op.target_step for op in patch.operations],
                     justification=patch.justification,
                 )
-
-                # Phase 2: Get decision from PolicyGate
-                decision = self._policy_gate.evaluate(patch, self._plan_state)
-
-                # Record decision
                 self._ledger.record_patch_decision(
                     patch_id=patch.patch_id,
-                    approved=decision.approved,
-                    rejection_reason=decision.reason if not decision.approved else None,
+                    approved=False,
+                    rejection_reason="stale_version",
                 )
+                continue
 
-                # Phase 3: Apply if approved
-                if decision.approved:
-                    applied = self._plan_state.apply_patch(patch)
-                    if applied:
-                        self._ledger.record_patch_applied(
-                            patch_id=patch.patch_id,
-                            resulting_version=self._plan_state.version,
-                        )
+            # Record proposal
+            self._ledger.record_patch_proposed(
+                patch_id=patch.patch_id,
+                source="worker",
+                patch_type=patch.operations[0].type.value if patch.operations else "unknown",
+                target_steps=[op.target_step for op in patch.operations],
+                justification=patch.justification,
+            )
+
+            # Get decision from PolicyGate
+            decision = self._policy_gate.evaluate(patch, self._plan_state)
+
+            # Record decision
+            self._ledger.record_patch_decision(
+                patch_id=patch.patch_id,
+                approved=decision.approved,
+                rejection_reason=decision.reason if not decision.approved else None,
+            )
+
+            # Apply if approved
+            if decision.approved:
+                applied = self._plan_state.apply_patch(patch)
+                if applied:
+                    self._ledger.record_patch_applied(
+                        patch_id=patch.patch_id,
+                        resulting_version=self._plan_state.version,
+                    )
 
     def _synthesize_final_response(
         self,
@@ -592,12 +692,13 @@ class Wizard:
         partial_response = None
 
         for outcome in outcomes:
-            # Collect tool results
-            for tool_name, output in outcome.tool_results.items():
-                tool_outputs.append({
-                    "tool": tool_name,
-                    "output": str(output)[:1000]
-                })
+            # Collect tool results from facts
+            for fact in outcome.facts:
+                if fact.source == FactSource.TOOL and fact.tool_name:
+                    tool_outputs.append({
+                        "tool": fact.tool_name,
+                        "output": str(fact.value)[:10000]
+                    })
 
             # Use the last non-empty final response as partial
             if outcome.final_response:

@@ -110,8 +110,52 @@ class GraphStore:
                 CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
                 CREATE INDEX IF NOT EXISTS idx_edges_src ON module_edges(src_path);
                 CREATE INDEX IF NOT EXISTS idx_edges_dst ON module_edges(dst_path);
+
+                -- Session management tables (v2)
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_key TEXT PRIMARY KEY,
+                    client_type TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    last_accessed_at REAL NOT NULL,
+                    expires_at REAL,
+                    working_dir TEXT,
+                    status TEXT DEFAULT 'active',
+                    metadata_json TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_key TEXT NOT NULL,
+                    message_index INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    request_id TEXT,
+                    created_at REAL NOT NULL,
+                    metadata_json TEXT,
+                    FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS context_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_key TEXT NOT NULL,
+                    snapshot_version INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    context_json TEXT,
+                    FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
+                );
+
+                -- Session indexes
+                CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+                CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_conv_session ON conversation_messages(session_key);
+                CREATE INDEX IF NOT EXISTS idx_conv_session_idx ON conversation_messages(session_key, message_index);
+                CREATE INDEX IF NOT EXISTS idx_snapshot_session ON context_snapshots(session_key);
+                CREATE INDEX IF NOT EXISTS idx_snapshot_session_ver ON context_snapshots(session_key, snapshot_version DESC);
                 """
             )
+
+            # Enable foreign key enforcement (required for CASCADE)
+            self._conn.execute("PRAGMA foreign_keys = ON;")
 
             # Store schema version (upsert)
             self._conn.execute(
@@ -348,3 +392,481 @@ class GraphStore:
             # Safe: table name validated against whitelist above
             rows = self._conn.execute(f"SELECT * FROM {table};").fetchall()
             return [dict(r) for r in rows]
+
+    # =========================================================================
+    # Session Management Methods (v2)
+    # =========================================================================
+
+    def create_session(
+        self,
+        session_key: str,
+        client_type: str,
+        working_dir: Optional[str] = None,
+        expires_at: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Create a new session.
+
+        Args:
+            session_key: Unique session identifier (format: {client_type}_{timestamp}_{uuid8})
+            client_type: Type of client ('tui', 'voice', 'api')
+            working_dir: Working directory for this session
+            expires_at: Optional expiration timestamp (Unix time)
+            metadata: Optional metadata dict
+
+        Returns:
+            True if session was created, False if session_key already exists
+        """
+        import time
+        now = time.time()
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO sessions (session_key, client_type, created_at, last_accessed_at,
+                                         expires_at, working_dir, status, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?);
+                    """,
+                    (
+                        session_key,
+                        client_type,
+                        now,
+                        now,
+                        expires_at,
+                        working_dir,
+                        json.dumps(metadata) if metadata else None,
+                    ),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                # Session key already exists
+                return False
+
+    def get_session(self, session_key: str) -> Optional[Dict[str, Any]]:
+        """Get session by key.
+
+        Returns:
+            Session dict with parsed metadata, or None if not found
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sessions WHERE session_key = ?;",
+                (session_key,),
+            ).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            # Parse metadata JSON
+            if result.get("metadata_json"):
+                try:
+                    result["metadata"] = json.loads(result["metadata_json"])
+                except json.JSONDecodeError:
+                    result["metadata"] = None
+            else:
+                result["metadata"] = None
+            return result
+
+    def update_session_access(self, session_key: str) -> bool:
+        """Update last_accessed_at timestamp for a session.
+
+        Returns:
+            True if session was updated, False if not found
+        """
+        import time
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE sessions SET last_accessed_at = ? WHERE session_key = ? AND status = 'active';",
+                (time.time(), session_key),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def update_session_status(self, session_key: str, status: str) -> bool:
+        """Update session status.
+
+        Args:
+            session_key: Session to update
+            status: New status ('active', 'expired', 'closed')
+
+        Returns:
+            True if updated, False if not found
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE sessions SET status = ? WHERE session_key = ?;",
+                (status, session_key),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_session(self, session_key: str) -> bool:
+        """Delete a session and all associated data (cascades to messages and snapshots).
+
+        Returns:
+            True if deleted, False if not found
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM sessions WHERE session_key = ?;",
+                (session_key,),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def list_sessions(
+        self,
+        client_type: Optional[str] = None,
+        status: str = "active",
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List sessions with optional filtering.
+
+        Args:
+            client_type: Filter by client type (None for all)
+            status: Filter by status (default 'active')
+            limit: Maximum number of sessions to return
+
+        Returns:
+            List of session dicts ordered by last_accessed_at DESC
+        """
+        with self._lock:
+            if client_type:
+                rows = self._conn.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE client_type = ? AND status = ?
+                    ORDER BY last_accessed_at DESC
+                    LIMIT ?;
+                    """,
+                    (client_type, status, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE status = ?
+                    ORDER BY last_accessed_at DESC
+                    LIMIT ?;
+                    """,
+                    (status, limit),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def cleanup_expired_sessions(self) -> int:
+        """Delete sessions that have passed their expires_at timestamp.
+
+        Returns:
+            Number of sessions deleted
+        """
+        import time
+        with self._lock:
+            # First mark as expired
+            self._conn.execute(
+                """
+                UPDATE sessions SET status = 'expired'
+                WHERE expires_at IS NOT NULL AND expires_at < ? AND status = 'active';
+                """,
+                (time.time(),),
+            )
+            # Then delete expired sessions (CASCADE will clean up related data)
+            cursor = self._conn.execute(
+                "DELETE FROM sessions WHERE status = 'expired';",
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
+    # =========================================================================
+    # Conversation Message Methods
+    # =========================================================================
+
+    def add_message(
+        self,
+        session_key: str,
+        role: str,
+        content: str,
+        request_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Add a message to a session's conversation history.
+
+        Args:
+            session_key: Session to add message to
+            role: Message role ('user', 'assistant', 'system')
+            content: Message content
+            request_id: Optional request ID for tracing
+            metadata: Optional metadata (tools_used, duration_ms, etc.)
+
+        Returns:
+            The message_index of the new message
+
+        Raises:
+            ValueError: If session doesn't exist
+        """
+        import time
+        with self._lock:
+            # Get next message index for this session
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(message_index), -1) + 1 as next_idx FROM conversation_messages WHERE session_key = ?;",
+                (session_key,),
+            ).fetchone()
+            next_idx = row["next_idx"]
+
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO conversation_messages
+                    (session_key, message_index, role, content, request_id, created_at, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        session_key,
+                        next_idx,
+                        role,
+                        content,
+                        request_id,
+                        time.time(),
+                        json.dumps(metadata) if metadata else None,
+                    ),
+                )
+                self._conn.commit()
+                return next_idx
+            except sqlite3.IntegrityError as e:
+                raise ValueError(f"Session '{session_key}' does not exist") from e
+
+    def get_messages(
+        self,
+        session_key: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Get conversation messages for a session.
+
+        Args:
+            session_key: Session to get messages for
+            limit: Maximum messages to return
+            offset: Number of messages to skip (from the start)
+
+        Returns:
+            List of message dicts ordered by message_index ASC
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM conversation_messages
+                WHERE session_key = ?
+                ORDER BY message_index ASC
+                LIMIT ? OFFSET ?;
+                """,
+                (session_key, limit, offset),
+            ).fetchall()
+
+            results = []
+            for row in rows:
+                msg = dict(row)
+                if msg.get("metadata_json"):
+                    try:
+                        msg["metadata"] = json.loads(msg["metadata_json"])
+                    except json.JSONDecodeError:
+                        msg["metadata"] = None
+                else:
+                    msg["metadata"] = None
+                results.append(msg)
+            return results
+
+    def get_message_count(self, session_key: str) -> int:
+        """Get total number of messages in a session."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) as count FROM conversation_messages WHERE session_key = ?;",
+                (session_key,),
+            ).fetchone()
+            return row["count"]
+
+    def clear_messages(self, session_key: str) -> int:
+        """Delete all messages for a session.
+
+        Returns:
+            Number of messages deleted
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM conversation_messages WHERE session_key = ?;",
+                (session_key,),
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
+    # =========================================================================
+    # Context Snapshot Methods
+    # =========================================================================
+
+    def save_context_snapshot(
+        self,
+        session_key: str,
+        context_data: Dict[str, Any],
+    ) -> int:
+        """Save a context window snapshot for a session.
+
+        Creates a new version. Old versions are kept for history.
+
+        Args:
+            session_key: Session to save snapshot for
+            context_data: Context data to serialize
+
+        Returns:
+            The snapshot version number
+
+        Raises:
+            ValueError: If session doesn't exist
+        """
+        import time
+        with self._lock:
+            # Get next version number
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(snapshot_version), 0) + 1 as next_ver FROM context_snapshots WHERE session_key = ?;",
+                (session_key,),
+            ).fetchone()
+            next_ver = row["next_ver"]
+
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO context_snapshots
+                    (session_key, snapshot_version, created_at, context_json)
+                    VALUES (?, ?, ?, ?);
+                    """,
+                    (
+                        session_key,
+                        next_ver,
+                        time.time(),
+                        json.dumps(context_data),
+                    ),
+                )
+                self._conn.commit()
+                return next_ver
+            except sqlite3.IntegrityError as e:
+                raise ValueError(f"Session '{session_key}' does not exist") from e
+
+    def get_latest_context_snapshot(self, session_key: str) -> Optional[Dict[str, Any]]:
+        """Get the most recent context snapshot for a session.
+
+        Returns:
+            Dict with snapshot data and parsed context, or None if no snapshots exist
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM context_snapshots
+                WHERE session_key = ?
+                ORDER BY snapshot_version DESC
+                LIMIT 1;
+                """,
+                (session_key,),
+            ).fetchone()
+
+            if not row:
+                return None
+
+            result = dict(row)
+            if result.get("context_json"):
+                try:
+                    result["context"] = json.loads(result["context_json"])
+                except json.JSONDecodeError:
+                    result["context"] = None
+            else:
+                result["context"] = None
+            return result
+
+    def get_context_snapshot_by_version(
+        self,
+        session_key: str,
+        version: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Get a specific version of a context snapshot.
+
+        Returns:
+            Snapshot dict with parsed context, or None if not found
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM context_snapshots
+                WHERE session_key = ? AND snapshot_version = ?;
+                """,
+                (session_key, version),
+            ).fetchone()
+
+            if not row:
+                return None
+
+            result = dict(row)
+            if result.get("context_json"):
+                try:
+                    result["context"] = json.loads(result["context_json"])
+                except json.JSONDecodeError:
+                    result["context"] = None
+            else:
+                result["context"] = None
+            return result
+
+    def list_context_snapshots(
+        self,
+        session_key: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """List context snapshots for a session (most recent first).
+
+        Returns:
+            List of snapshot metadata (without full context_json for efficiency)
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, session_key, snapshot_version, created_at
+                FROM context_snapshots
+                WHERE session_key = ?
+                ORDER BY snapshot_version DESC
+                LIMIT ?;
+                """,
+                (session_key, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def cleanup_old_snapshots(self, session_key: str, keep_count: int = 5) -> int:
+        """Delete old snapshots, keeping only the most recent N.
+
+        Args:
+            session_key: Session to clean up
+            keep_count: Number of most recent snapshots to keep
+
+        Returns:
+            Number of snapshots deleted
+        """
+        with self._lock:
+            # Get IDs to keep
+            keep_ids = self._conn.execute(
+                """
+                SELECT id FROM context_snapshots
+                WHERE session_key = ?
+                ORDER BY snapshot_version DESC
+                LIMIT ?;
+                """,
+                (session_key, keep_count),
+            ).fetchall()
+
+            if not keep_ids:
+                return 0
+
+            keep_id_list = [r["id"] for r in keep_ids]
+            placeholders = ",".join("?" * len(keep_id_list))
+
+            cursor = self._conn.execute(
+                f"""
+                DELETE FROM context_snapshots
+                WHERE session_key = ? AND id NOT IN ({placeholders});
+                """,
+                [session_key] + keep_id_list,
+            )
+            self._conn.commit()
+            return cursor.rowcount

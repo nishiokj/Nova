@@ -118,6 +118,7 @@ class LLMResponse:
     usage: Optional[Dict[str, int]] = None
     model: Optional[str] = None
     raw_response: Optional[Any] = None
+    response_id: Optional[str] = None  # For stateful conversation continuation
 
     @property
     def has_tool_calls(self) -> bool:
@@ -200,6 +201,9 @@ class LLMAdapter(ABC):
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
         """
@@ -209,10 +213,19 @@ class LLMAdapter(ABC):
             input: User input (string or context array)
             instructions: System instructions (separated from input)
             tools: Tool definitions (internally-tagged format)
+            prompt_cache_key: Stable key for prompt caching (enables cache hits)
+            prompt_cache_retention: Cache retention policy (e.g., "24h")
+            previous_response_id: Continue from a previous response (stateful mode)
             **kwargs: Additional API parameters
 
         Returns:
             LLMResponse with output
+
+        Stateful Conversations:
+            When previous_response_id is provided, OpenAI continues from that
+            response's state. You only need to send NEW items in the input array,
+            not the full conversation history. This significantly reduces payload
+            size and latency.
         """
         pass
 
@@ -656,6 +669,9 @@ class OpenAIAdapter(LLMAdapter):
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
         """
@@ -665,10 +681,23 @@ class OpenAIAdapter(LLMAdapter):
             input: User input (string or context array)
             instructions: System instructions
             tools: Tool definitions (internally-tagged format)
+            prompt_cache_key: Stable key for prompt caching (enables cache hits on similar requests)
+            prompt_cache_retention: Cache retention policy (e.g., "24h" for extended caching)
+            previous_response_id: Continue from a previous response (stateful mode - send only deltas)
             **kwargs: Additional API parameters
 
         Returns:
             LLMResponse with output
+
+        Prompt Caching:
+            When prompt_cache_key is provided, OpenAI will cache the input prefix
+            for faster subsequent requests with the same key. This can significantly
+            reduce latency and costs for repeated similar requests.
+
+        Stateful Conversations:
+            When previous_response_id is provided, continue from that response.
+            Only send NEW items in input - OpenAI maintains the conversation state.
+            This dramatically reduces payload size and processing time.
         """
         start_time = time.time()
 
@@ -684,33 +713,22 @@ class OpenAIAdapter(LLMAdapter):
             parallel_tool_calls_value = kwargs.get("parallel_tool_calls")
             text_value = kwargs.get("text")
 
+            # =================================================================
+            # PROMPT CACHING OPTIMIZATION: Order matters for cache hits!
+            # Stable content (instructions, tools) should come BEFORE dynamic
+            # content (input) so the prefix can be cached across requests.
+            # Order: model → instructions → tools → config → input
+            # =================================================================
+
             params = {
                 "model": self.config.model,
-                "input": self._normalize_responses_input(input),
             }
 
+            # 1. Instructions (system prompt) - STABLE, cacheable prefix
             if instructions:
                 params["instructions"] = instructions
 
-            # Temperature handling
-            if self._supports_sampling_params():
-                if temperature_value is not None:
-                    params["temperature"] = temperature_value
-                top_p_value = kwargs.get("top_p", self.config.top_p)
-                if top_p_value is not None:
-                    params["top_p"] = top_p_value
-
-            # Token limit parameter (Responses API)
-            if max_output_tokens_value is not None:
-                params["max_output_tokens"] = max_output_tokens_value
-
-            # Tool call limiting (Responses API)
-            if max_tool_calls_value is not None:
-                params["max_tool_calls"] = max_tool_calls_value
-            if parallel_tool_calls_value is not None:
-                params["parallel_tool_calls"] = parallel_tool_calls_value
-            if text_value is not None:
-                params["text"] = text_value
+            # 2. Tools - STABLE, cacheable prefix
             if tools:
                 # Convert ToolDefinition objects to Responses API format
                 converted_tools = []
@@ -736,6 +754,37 @@ class OpenAIAdapter(LLMAdapter):
                 default_choice = "required" if self._is_reasoning_model() else "auto"
                 explicit_choice = kwargs.get("tool_choice")
                 params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
+
+            # 3. Prompt caching parameters - config for cache behavior
+            if prompt_cache_key:
+                params["prompt_cache_key"] = prompt_cache_key
+            if prompt_cache_retention:
+                params["prompt_cache_retention"] = prompt_cache_retention
+
+            # 4. Stateful conversation continuation
+            if previous_response_id:
+                params["previous_response_id"] = previous_response_id
+
+            # 5. Generation config - relatively stable
+            if self._supports_sampling_params():
+                if temperature_value is not None:
+                    params["temperature"] = temperature_value
+                top_p_value = kwargs.get("top_p", self.config.top_p)
+                if top_p_value is not None:
+                    params["top_p"] = top_p_value
+
+            if max_output_tokens_value is not None:
+                params["max_output_tokens"] = max_output_tokens_value
+
+            if max_tool_calls_value is not None:
+                params["max_tool_calls"] = max_tool_calls_value
+            if parallel_tool_calls_value is not None:
+                params["parallel_tool_calls"] = parallel_tool_calls_value
+            if text_value is not None:
+                params["text"] = text_value
+
+            # 6. Input (conversation) - DYNAMIC, comes LAST for cache efficiency
+            params["input"] = self._normalize_responses_input(input)
 
             # DIAGNOSTIC: Log what we're sending
             # Handle both ToolDefinition objects and dicts
@@ -769,7 +818,8 @@ class OpenAIAdapter(LLMAdapter):
                     "total_tokens": getattr(response.usage, "total_tokens", None)
                 } if hasattr(response, "usage") and response.usage else None,
                 model=getattr(response, "model", self.config.model),
-                raw_response=response
+                raw_response=response,
+                response_id=getattr(response, "id", None),  # Capture for stateful continuation
             )
 
             # DIAGNOSTIC: Log what we got back
@@ -792,6 +842,9 @@ class OpenAIAdapter(LLMAdapter):
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
         """
@@ -801,6 +854,9 @@ class OpenAIAdapter(LLMAdapter):
             input: User input (string or context array)
             instructions: System instructions
             tools: Tool definitions (internally-tagged format)
+            prompt_cache_key: Stable key for prompt caching
+            prompt_cache_retention: Cache retention policy (e.g., "24h")
+            previous_response_id: Continue from a previous response (stateful mode)
             **kwargs: Additional API parameters
 
         Yields:
@@ -823,34 +879,23 @@ class OpenAIAdapter(LLMAdapter):
             parallel_tool_calls_value = kwargs.get("parallel_tool_calls")
             text_value = kwargs.get("text")
 
+            # =================================================================
+            # PROMPT CACHING OPTIMIZATION: Order matters for cache hits!
+            # Stable content (instructions, tools) should come BEFORE dynamic
+            # content (input) so the prefix can be cached across requests.
+            # Order: model → instructions → tools → config → input
+            # =================================================================
+
             params = {
                 "model": self.config.model,
-                "input": self._normalize_responses_input(input),
                 "stream": True,
             }
 
+            # 1. Instructions (system prompt) - STABLE, cacheable prefix
             if instructions:
                 params["instructions"] = instructions
 
-            # Temperature handling
-            if self._supports_sampling_params():
-                if temperature_value is not None:
-                    params["temperature"] = temperature_value
-                top_p_value = kwargs.get("top_p", self.config.top_p)
-                if top_p_value is not None:
-                    params["top_p"] = top_p_value
-
-            # Token limit parameter (Responses API)
-            if max_output_tokens_value is not None:
-                params["max_output_tokens"] = max_output_tokens_value
-
-            # Tool call limiting (Responses API)
-            if max_tool_calls_value is not None:
-                params["max_tool_calls"] = max_tool_calls_value
-            if parallel_tool_calls_value is not None:
-                params["parallel_tool_calls"] = parallel_tool_calls_value
-            if text_value is not None:
-                params["text"] = text_value
+            # 2. Tools - STABLE, cacheable prefix
             if tools:
                 # Convert ToolDefinition objects to Responses API format
                 converted_tools = []
@@ -877,15 +922,47 @@ class OpenAIAdapter(LLMAdapter):
                 explicit_choice = kwargs.get("tool_choice")
                 params["tool_choice"] = explicit_choice if explicit_choice is not None else default_choice
 
+            # 3. Prompt caching parameters - config for cache behavior
+            if prompt_cache_key:
+                params["prompt_cache_key"] = prompt_cache_key
+            if prompt_cache_retention:
+                params["prompt_cache_retention"] = prompt_cache_retention
+
+            # 4. Stateful conversation continuation
+            if previous_response_id:
+                params["previous_response_id"] = previous_response_id
+
+            # 5. Generation config - relatively stable
+            if self._supports_sampling_params():
+                if temperature_value is not None:
+                    params["temperature"] = temperature_value
+                top_p_value = kwargs.get("top_p", self.config.top_p)
+                if top_p_value is not None:
+                    params["top_p"] = top_p_value
+
+            if max_output_tokens_value is not None:
+                params["max_output_tokens"] = max_output_tokens_value
+
+            if max_tool_calls_value is not None:
+                params["max_tool_calls"] = max_tool_calls_value
+            if parallel_tool_calls_value is not None:
+                params["parallel_tool_calls"] = parallel_tool_calls_value
+            if text_value is not None:
+                params["text"] = text_value
+
+            # 6. Input (conversation) - DYNAMIC, comes LAST for cache efficiency
+            params["input"] = self._normalize_responses_input(input)
+
             # DIAGNOSTIC: Log what we're sending
             # Handle both ToolDefinition objects and dicts
             tool_names = [
                 t.name if hasattr(t, 'name') else t.get("name", "unknown")
                 for t in tools
             ] if tools else []
+            is_delta = bool(previous_response_id)
             self.logger.info(
                 f"RESPONSES API STREAM REQUEST: model={params.get('model')}, tools={tool_names}, "
-                f"tool_choice={params.get('tool_choice', 'none')}",
+                f"tool_choice={params.get('tool_choice', 'none')}, delta_mode={is_delta}",
                 component="llm"
             )
 
@@ -894,6 +971,7 @@ class OpenAIAdapter(LLMAdapter):
             usage_data = None
             finish_reason = "stop"
             response_obj = None
+            response_id: Optional[str] = None  # Track response ID for stateful continuation
             emitted_text = False
 
             def _extract_event_text(event: Any) -> str:
@@ -963,6 +1041,8 @@ class OpenAIAdapter(LLMAdapter):
                     elif event_type == "response.completed":
                         response_obj = getattr(event, "response", None)
                         if response_obj:
+                            # Capture response ID for stateful continuation
+                            response_id = getattr(response_obj, "id", None)
                             usage = getattr(response_obj, "usage", None)
                             if usage:
                                 usage_data = {
@@ -1011,7 +1091,8 @@ class OpenAIAdapter(LLMAdapter):
                 tool_calls=parsed_tool_calls,
                 finish_reason=finish_reason,
                 usage=usage_data,
-                model=self.config.model
+                model=self.config.model,
+                response_id=response_id,  # For stateful continuation
             )
 
             # DIAGNOSTIC: Log what we got back
@@ -1029,56 +1110,116 @@ class OpenAIAdapter(LLMAdapter):
             self.logger.llm_error(self.provider, self.config.model, e)
             raise
 
-    # @llm_resilience
-    # async def acomplete(
-    #     self,
-    #     messages: List[Message],
-    #     tools: Optional[List[ToolDefinition]] = None,
-    #     **kwargs
-    # ) -> LLMResponse:
-    #     """Async completion"""
-    #     self._log_request(messages)
-    #     start_time = time.time()
+    def respond_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        Respond using pre-formatted message dicts (for Worker compatibility).
 
-    #     try:
-    #         client = self._get_async_client()
-    #         params = self._prepare_request(messages, tools, **kwargs)
-    #         response = await client.chat.completions.create(**params)
-    #         result = self._parse_response(response)
+        This method bridges the gap between Workers that build message arrays
+        and the Responses API which expects input + instructions format.
 
-    #         duration_ms = (time.time() - start_time) * 1000
-    #         self._log_response(result, duration_ms)
-    #         return result
+        Properly handles:
+        - System messages → instructions parameter
+        - User/assistant messages → input array
+        - Tool calls in assistant messages → preserved in input
+        - Tool results → function_call_output items
 
-    #     except Exception as e:
-    #         self.logger.llm_error(self.provider, self.config.model, e)
-    #         raise
+        Args:
+            messages: List of message dicts with role/content/tool_calls/tool_call_id
+            tools: Tool definitions (internally-tagged format)
+            prompt_cache_key: Stable key for prompt caching
+            prompt_cache_retention: Cache retention policy
+            previous_response_id: Continue from previous response (stateful mode)
+            **kwargs: Additional API parameters
 
-    # async def astream(
-    #     self,
-    #     messages: List[Message],
-    #     tools: Optional[List[ToolDefinition]] = None,
-    #     **kwargs
-    # ) -> AsyncGenerator[str, None]:
-    #     """Async streaming completion"""
-    #     self._log_request(messages)
+        Returns:
+            LLMResponse with output and response_id for continuation
+        """
+        # Extract system message as instructions
+        instructions: Optional[str] = None
+        input_items: List[Dict[str, Any]] = []
 
-    #     try:
-    #         client = self._get_async_client()
-    #         params = self._prepare_request(messages, tools, **kwargs)
-    #         params["stream"] = True
+        for msg in messages:
+            role = msg.get("role", "")
 
-    #         stream = await client.chat.completions.create(**params)
+            if role == "system":
+                # System message becomes instructions
+                instructions = msg.get("content", "")
 
-    #         async for chunk in stream:
-    #             if chunk.choices:
-    #                 delta = chunk.choices[0].delta
-    #                 if delta.content:
-    #                     yield delta.content
+            elif role == "assistant":
+                # Assistant message - may have tool_calls
+                assistant_item: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": msg.get("content", "") or "",
+                }
 
-    #     except Exception as e:
-    #         self.logger.llm_error(self.provider, self.config.model, e)
-    #         raise
+                # Preserve tool calls if present
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    # Convert to Responses API format (function_call items)
+                    for tc in tool_calls:
+                        tc_type = tc.get("type", "function")
+                        if tc_type == "function":
+                            func = tc.get("function", {})
+                            # Responses API requires arguments as JSON string, not dict
+                            raw_args = func.get("arguments", "{}")
+                            if isinstance(raw_args, dict):
+                                args_str = json.dumps(raw_args)
+                            elif isinstance(raw_args, str):
+                                args_str = raw_args
+                            else:
+                                args_str = "{}"
+                            input_items.append({
+                                "type": "function_call",
+                                "call_id": tc.get("id", ""),
+                                "name": func.get("name", ""),
+                                "arguments": args_str,
+                            })
+
+                # Only add assistant content if non-empty
+                if assistant_item["content"]:
+                    input_items.append(assistant_item)
+
+            elif role == "tool":
+                # Tool result → function_call_output
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": msg.get("content", ""),
+                })
+
+            elif role == "user":
+                # User message
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    input_items.append({
+                        "role": "user",
+                        "content": content,
+                    })
+                else:
+                    # Content blocks (e.g., multimodal)
+                    input_items.append({
+                        "role": "user",
+                        "content": content,
+                    })
+
+        # Call respond() with properly formatted input
+        return self.respond(
+            input=input_items if input_items else "",
+            instructions=instructions,
+            tools=tools,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+            previous_response_id=previous_response_id,
+            **kwargs
+        )
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -1259,11 +1400,18 @@ class AnthropicAdapter(LLMAdapter):
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
         """
         Streaming using Responses API format.
         Anthropic doesn't have Responses API - convert to Messages API format internally.
+
+        Note: prompt_cache_key, prompt_cache_retention, and previous_response_id
+        are accepted for interface compatibility but ignored (Anthropic uses
+        different caching and doesn't support stateful conversations this way).
         """
         def _extract_text(content: Any) -> str:
             if content is None:
@@ -1564,10 +1712,17 @@ class AnthropicAdapter(LLMAdapter):
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
         """
         Anthropic doesn't have Responses API - convert to Messages API format.
+
+        Note: prompt_cache_key, prompt_cache_retention, and previous_response_id
+        are accepted for interface compatibility but ignored (Anthropic uses
+        different caching and doesn't support stateful conversations this way).
         """
         def _extract_text(content: Any) -> str:
             if content is None:
@@ -1645,6 +1800,66 @@ class AnthropicAdapter(LLMAdapter):
         # Use existing complete() method
         return self.complete(messages, tool_defs, **kwargs)
 
+    def respond_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        Respond using pre-formatted message dicts (for Worker compatibility).
+
+        Note: prompt_cache_key, prompt_cache_retention, and previous_response_id
+        are accepted for interface compatibility but logged as warnings since
+        Anthropic uses different mechanisms for these features.
+        """
+        if prompt_cache_key or prompt_cache_retention:
+            self.logger.warning(
+                "Anthropic adapter: prompt_cache_key/retention ignored (use Anthropic-specific caching)",
+                component="llm"
+            )
+        if previous_response_id:
+            self.logger.warning(
+                "Anthropic adapter: previous_response_id ignored (Anthropic doesn't support stateful mode)",
+                component="llm"
+            )
+
+        # Extract system message as instructions
+        instructions: Optional[str] = None
+        input_items: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            role = msg.get("role", "")
+
+            if role == "system":
+                instructions = msg.get("content", "")
+
+            elif role == "tool":
+                # Tool result
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": msg.get("content", ""),
+                })
+
+            else:
+                # User or assistant message
+                input_items.append({
+                    "role": role,
+                    "content": msg.get("content", ""),
+                })
+
+        # Delegate to respond() which handles conversion to Messages API
+        return self.respond(
+            input=input_items if input_items else "",
+            instructions=instructions,
+            tools=tools,
+            **kwargs
+        )
+
 
 class CustomAdapter(LLMAdapter):
     """
@@ -1684,10 +1899,19 @@ class CustomAdapter(LLMAdapter):
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
         """Streaming via custom endpoint using Responses API format"""
-        return self._get_adapter().stream(input, instructions, tools, **kwargs)
+        return self._get_adapter().stream(
+            input, instructions, tools,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+            previous_response_id=previous_response_id,
+            **kwargs
+        )
 
     async def acomplete(
         self,
@@ -1713,10 +1937,37 @@ class CustomAdapter(LLMAdapter):
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
         """Delegate to underlying OpenAI adapter"""
-        return self._get_adapter().respond(input, instructions, tools, **kwargs)
+        return self._get_adapter().respond(
+            input, instructions, tools,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+            previous_response_id=previous_response_id,
+            **kwargs
+        )
+
+    def respond_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """Delegate to underlying OpenAI adapter"""
+        return self._get_adapter().respond_with_messages(
+            messages, tools,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+            previous_response_id=previous_response_id,
+            **kwargs
+        )
 
 
 class FailoverLLMAdapter(LLMAdapter):
@@ -1763,47 +2014,18 @@ class FailoverLLMAdapter(LLMAdapter):
         """Return the list of adapters to try, primary first."""
         return self._adapters or [self._primary]
 
-    # def complete(
-    #     self,
-    #     messages: List[Message],
-    #     tools: Optional[List[ToolDefinition]] = None,
-    #     **kwargs
-    # ) -> LLMResponse:
-    #     last_exc: Optional[Exception] = None
-
-    #     for idx, adapter in enumerate(self._iter_adapters()):
-    #         provider = adapter.provider
-    #         model = getattr(adapter, "config", self.config).model
-
-    #         if idx > 0:
-    #             # Log failover attempt
-    #             self.logger.warning(
-    #                 f"LLM failover: primary failed, trying {provider}:{model}",
-    #                 component="llm"
-    #             )
-
-    #         try:
-    #             return adapter.complete(messages, tools, **kwargs)
-    #         except Exception as e:
-    #             last_exc = e
-    #             # Underlying adapters should also log errors; this is a summary
-    #             self.logger.llm_error(provider, model, e)
-    #             continue
-
-    #     # All adapters failed; propagate the last exception
-    #     if last_exc:
-    #         raise last_exc
-    #     # Should not reach here, but guard just in case
-    #     raise RuntimeError("FailoverLLMAdapter: no adapters available for completion")
 
     def stream(
         self,
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> Generator[str, None, LLMResponse]:
-        """Streaming with failover support using Responses API format"""
+        """Streaming with failover support using Responses API format, passing through cache params"""
         last_exc: Optional[Exception] = None
 
         for idx, adapter in enumerate(self._iter_adapters()):
@@ -1819,7 +2041,13 @@ class FailoverLLMAdapter(LLMAdapter):
                 )
 
             try:
-                stream = adapter.stream(input, instructions, tools, **kwargs)
+                stream = adapter.stream(
+                    input, instructions, tools,
+                    prompt_cache_key=prompt_cache_key,
+                    prompt_cache_retention=prompt_cache_retention,
+                    previous_response_id=previous_response_id,
+                    **kwargs
+                )
                 while True:
                     try:
                         chunk = next(stream)
@@ -1841,79 +2069,18 @@ class FailoverLLMAdapter(LLMAdapter):
             raise last_exc
         raise RuntimeError("FailoverLLMAdapter: no adapters available for streaming")
 
-    # async def acomplete(
-    #     self,
-    #     messages: List[Message],
-    #     tools: Optional[List[ToolDefinition]] = None,
-    #     **kwargs
-    # ) -> LLMResponse:
-    #     last_exc: Optional[Exception] = None
-
-    #     for idx, adapter in enumerate(self._iter_adapters()):
-    #         provider = adapter.provider
-    #         model = getattr(adapter, "config", self.config).model
-
-    #         if idx > 0:
-    #             self.logger.warning(
-    #                 f"LLM async failover: primary failed, trying {provider}:{model}",
-    #                 component="llm"
-    #             )
-
-    #         try:
-    #             return await adapter.acomplete(messages, tools, **kwargs)
-    #         except Exception as e:
-    #             last_exc = e
-    #             self.logger.llm_error(provider, model, e)
-    #             continue
-
-    #     if last_exc:
-    #         raise last_exc
-    #     raise RuntimeError("FailoverLLMAdapter: no adapters available for async completion")
-
-    # async def astream(
-    #     self,
-    #     messages: List[Message],
-    #     tools: Optional[List[ToolDefinition]] = None,
-    #     **kwargs
-    # ) -> AsyncGenerator[str, None]:
-    #     last_exc: Optional[Exception] = None
-
-    #     for idx, adapter in enumerate(self._iter_adapters()):
-    #         provider = adapter.provider
-    #         model = getattr(adapter, "config", self.config).model
-
-    #         had_output = False
-
-    #         if idx > 0:
-    #             self.logger.warning(
-    #                 f"LLM async streaming failover: primary failed, trying {provider}:{model}",
-    #                 component="llm"
-    #             )
-
-    #         try:
-    #             async for chunk in adapter.astream(messages, tools, **kwargs):
-    #                 had_output = True
-    #                 yield chunk
-    #             return
-    #         except Exception as e:
-    #             last_exc = e
-    #             self.logger.llm_error(provider, model, e)
-    #             if had_output:
-    #                 raise
-    #             continue
-
-    #     if last_exc:
-    #         raise last_exc
-    #     raise RuntimeError("FailoverLLMAdapter: no adapters available for async streaming")
 
     def respond(
         self,
         input: Union[str, List[Dict[str, Any]]],
         instructions: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
-        """Respond with failover support"""
+        """Respond with failover support, passing through caching and stateful params"""
         last_exc: Optional[Exception] = None
 
         for idx, adapter in enumerate(self._iter_adapters()):
@@ -1927,7 +2094,13 @@ class FailoverLLMAdapter(LLMAdapter):
                 )
 
             try:
-                return adapter.respond(input, instructions, tools, **kwargs)
+                return adapter.respond(
+                    input, instructions, tools,
+                    prompt_cache_key=prompt_cache_key,
+                    prompt_cache_retention=prompt_cache_retention,
+                    previous_response_id=previous_response_id,
+                    **kwargs
+                )
             except Exception as e:
                 last_exc = e
                 self.logger.llm_error(provider, model, e)
@@ -1936,6 +2109,45 @@ class FailoverLLMAdapter(LLMAdapter):
         if last_exc:
             raise last_exc
         raise RuntimeError("FailoverLLMAdapter: no adapters available for respond")
+
+    def respond_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """Respond with messages with failover support, passing through caching and stateful params"""
+        last_exc: Optional[Exception] = None
+
+        for idx, adapter in enumerate(self._iter_adapters()):
+            provider = adapter.provider
+            model = getattr(adapter, "config", self.config).model
+
+            if idx > 0:
+                self.logger.warning(
+                    f"LLM respond_with_messages failover: primary failed, trying {provider}:{model}",
+                    component="llm"
+                )
+
+            try:
+                return adapter.respond_with_messages(
+                    messages, tools,
+                    prompt_cache_key=prompt_cache_key,
+                    prompt_cache_retention=prompt_cache_retention,
+                    previous_response_id=previous_response_id,
+                    **kwargs
+                )
+            except Exception as e:
+                last_exc = e
+                self.logger.llm_error(provider, model, e)
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("FailoverLLMAdapter: no adapters available for respond_with_messages")
 
 
 def create_adapter(config: LLMConfig, logger: Optional[StructuredLogger] = None) -> LLMAdapter:
@@ -1968,45 +2180,3 @@ def create_adapter(config: LLMConfig, logger: Optional[StructuredLogger] = None)
     # Wrap with failover adapter; if any failover config is itself configured
     # with failover_models, those will be respected by the nested adapter.
     return FailoverLLMAdapter(base_adapter, failover_models, logger=logger)
-
-
-# Convenience functions for simple usage
-
-# def quick_complete(
-#     prompt: str,
-#     provider: str = "openai",
-#     model: str = "gpt-4o-mini",
-#     system_prompt: Optional[str] = None,
-#     **kwargs
-# ) -> str:
-#     """Quick one-off completion"""
-#     config = LLMConfig(provider=provider, model=model, **kwargs)
-#     adapter = create_adapter(config)
-
-#     messages = []
-#     if system_prompt:
-#         messages.append(Message(MessageRole.SYSTEM, system_prompt))
-#     messages.append(Message(MessageRole.USER, prompt))
-
-#     response = adapter.complete(messages)
-#     return response.content
-
-
-# async def aquick_complete(
-#     prompt: str,
-#     provider: str = "openai",
-#     model: str = "gpt-4o-mini",
-#     system_prompt: Optional[str] = None,
-#     **kwargs
-# ) -> str:
-#     """Async quick one-off completion"""
-#     config = LLMConfig(provider=provider, model=model, **kwargs)
-#     adapter = create_adapter(config)
-
-#     messages = []
-#     if system_prompt:
-#         messages.append(Message(MessageRole.SYSTEM, system_prompt))
-#     messages.append(Message(MessageRole.USER, prompt))
-
-#     response = await adapter.acomplete(messages)
-#     return response.content

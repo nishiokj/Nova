@@ -1,346 +1,619 @@
-# Graphd Implementation Analysis
+# Wizard Patch Reasoning Overhaul - Implementation Plan
 
-## Executive Summary
+## Problem Analysis
 
-The graphd implementation is well-structured and follows the design document closely. However, there are **several critical bugs** and a few architectural concerns that should be addressed before enabling it in production.
+### Current State Issues
+
+1. **Workers have no formal mechanism to suggest patches**
+   - `WorkerOutcome.patches` exists but is always empty
+   - Workers receive no schema/instructions for suggesting patches
+   - `behavioral_rules.md` has no mention of plan modification capabilities
+   - The LLM isn't told it CAN suggest changes to the plan
+
+2. **Wizard blindly applies patches without reasoning**
+   - `_apply_patches()` only uses `PolicyGate` for mechanical checks:
+     - Version mismatch
+     - Modifying frozen steps
+     - Rate limiting
+     - Thrash detection
+   - No semantic reasoning: "Is this patch actually useful?"
+   - No duplicate step detection
+   - No validation of patch justification quality
+
+3. **Wizard cannot create patches itself**
+   - Wizard is purely reactive - executes plan, ingests outcomes
+   - No mechanism to dynamically adapt plan based on:
+     - Overall progress patterns
+     - Discovered information
+     - Stagnation signals beyond simple skip
+
+4. **Concurrent workers have no conflict reconciliation**
+   - Workers take snapshots and never mutate directly (good)
+   - But when multiple workers suggest conflicting patches, no resolution exists
+   - Version checking is there but coarse-grained (rejects all stale patches)
 
 ---
 
-## 1. Critical Bugs
+## Proposed Architecture
 
-### BUG 1: Dead Code in Indexer - Files Never Indexed (CRITICAL)
+### Core Principle: Patch Arbiter
 
-**Location:** `src/harness/graphd/indexer.py:128-168`
+Introduce a **PatchArbiter** that sits between workers/wizard and PlanState. All patches flow through it with semantic reasoning.
 
-The indexer's `scan_once()` has a logic error where most of the indexing code is unreachable:
+```
+Worker ─┐                                    ┌─> PlanState.apply_patch()
+        ├─> PatchProposal ─> PatchArbiter ─┼─> Rejected (with reason)
+Wizard ─┘                                    └─> Deferred (conflict)
+```
+
+### Key Components
+
+1. **PatchProposal** - Richer patch format with reasoning
+2. **PatchArbiter** - LLM-powered semantic validation
+3. **Worker Patch Instructions** - Formal schema in behavioral_rules.md
+4. **Wizard Self-Patching** - Wizard generates patches based on observations
+5. **Conflict Resolution** - Handle concurrent worker patches
+
+---
+
+## Implementation Plan
+
+### Phase 1: Worker Patch Suggestion Formalization
+
+**Goal:** Give workers a formal schema for suggesting patches and teach them when/how to do it.
+
+#### 1.1 Create `PatchProposal` dataclass
+
+**File:** `src/harness/agent/wizard/plan_patch.py`
 
 ```python
-try:
-    stat = os.stat(abs_path)
-except OSError:
-    continue
+@dataclass
+class PatchProposal:
+    """
+    A patch suggestion with full reasoning context.
+    Workers create these; PatchArbiter evaluates them.
+    """
+    patch: PlanPatch
 
-    mtime = stat.st_mtime  # DEAD CODE - after continue
-    existing = self._state.get(rel_path)
-    # ... all indexing logic is dead
+    # Reasoning (required for approval)
+    trigger: str  # What observation triggered this suggestion
+    reasoning: str  # Why this patch is necessary
+    evidence: List[str]  # Concrete evidence supporting the patch
+
+    # Context for validation
+    current_step_num: int  # Step the worker is executing
+    plan_snapshot: Dict[int, str]  # {step_num: status} at time of suggestion
+
+    # Risk assessment by worker
+    confidence: float  # 0.0-1.0 how confident worker is
+    alternatives_considered: List[str]  # Other approaches rejected
 ```
 
-The `continue` after `except OSError` means **everything after line 134 is unreachable**. Files are collected but never actually indexed. This is a catastrophic bug - the entire Tier A store will remain empty.
+#### 1.2 Update `behavioral_rules.md` with patch schema
 
-**Fix:** The `continue` should only be in the except block. The code from `mtime = stat.st_mtime` onward should be at the same indentation level as the try/except.
+Add a new section to behavioral_rules.md:
 
-### BUG 2: SQL Injection in `export_table()` (SECURITY)
+```markdown
+═══════════════════════════════════════════════════════════════════════════════
+                    PLAN ADAPTATION (USE SPARINGLY)
+═══════════════════════════════════════════════════════════════════════════════
 
-**Location:** `src/harness/graphd/store.py:264`
+You are executing ONE step of a larger plan. The Wizard manages the overall plan.
+However, you may SUGGEST plan modifications when your execution reveals:
+  - A blocking issue that requires a NEW step to resolve
+  - A step that is now UNNECESSARY based on what you discovered
+  - A better TOOL choice for a pending step
+
+WHEN TO SUGGEST A PATCH:
+  - You discovered a prerequisite that wasn't in the plan
+  - You completed work that makes a future step redundant
+  - You found that a tool_hint is wrong for a pending step
+
+WHEN NOT TO SUGGEST A PATCH:
+  - The plan is fine, you're just uncertain about your current step
+  - You want to change YOUR current step (you can't, just pivot)
+  - You're speculating about what MIGHT be needed
+
+PATCH FORMAT:
+  End your response with a [SUGGEST_PATCH] block:
+
+  [SUGGEST_PATCH]
+  type: INSERT | REMOVE | REPLACE_TOOL
+  target_step: <step_num or -1 for append>
+
+  trigger: <what you observed that prompted this>
+  reasoning: <why this change is necessary>
+  evidence: <specific facts supporting this>
+  confidence: <0.0-1.0>
+
+  # For INSERT:
+  new_objective: <objective for new step>
+  new_tool_hint: <optional tool hint>
+  insert_after: <step_num>
+
+  # For REMOVE:
+  remove_step: <step_num>
+
+  # For REPLACE_TOOL:
+  new_tool_hint: <corrected tool>
+  [/SUGGEST_PATCH]
+
+The Wizard will EVALUATE your suggestion. It may be:
+  - APPROVED - patch applied
+  - REJECTED - patch ignored with reason
+  - DEFERRED - considered later
+
+Do NOT assume your patch will be applied. Continue your current objective.
+```
+
+#### 1.3 Parse patches from worker responses
+
+**File:** `src/harness/agent/wizard/worker.py`
+
+Add `_extract_patch_proposals()` method:
 
 ```python
-def export_table(self, table: str) -> List[Dict[str, Any]]:
-    with self._lock:
-        rows = self._conn.execute(f"SELECT * FROM {table};").fetchall()
+def _extract_patch_proposals(
+    self,
+    content: str,
+    step_num: int,
+    plan_version: int,
+) -> List[PatchProposal]:
+    """Extract [SUGGEST_PATCH] blocks from worker response."""
+    # Parse structured blocks
+    # Validate required fields
+    # Create PatchProposal objects
+    # Return list (usually 0-1, max 2)
 ```
 
-Direct string interpolation of the `table` parameter allows SQL injection. While the manager validates table names against a whitelist in `handle_export()`, this method is public and could be called directly.
+Call this in `_execute_loop` after synthesis step and add to outcome.
 
-**Fix:** Validate table name against allowed set within `export_table()` itself.
+---
 
-### BUG 3: Resource Limits Applied in Wrong Thread
+### Phase 2: Patch Arbiter with LLM Reasoning
 
-**Location:** `src/harness/graphd/manager.py:233-246`
+**Goal:** Wizard reasons about patches before applying them.
 
-`_apply_resource_limits()` is called in the main thread during `start()`, but the index loop and HTTP server run in daemon threads. `os.nice()` and `resource.setrlimit()` only affect the **calling thread/process**, not child threads.
+#### 2.1 Create `PatchArbiter` class
 
-**Fix:** Move resource limit application to the beginning of `_index_loop()` and the server thread, or use per-thread resource limiting if needed.
-
-### BUG 4: Missing Thread Safety in Server Handler
-
-**Location:** `src/harness/graphd/server.py:30-31`
+**File:** `src/harness/agent/wizard/patch_arbiter.py` (new)
 
 ```python
-class GraphdRequestHandler(BaseHTTPRequestHandler):
-    manager = None  # Class attribute shared across all handler instances
+class PatchArbiter:
+    """
+    Semantic validation of patch proposals.
+    Uses LLM to reason about patch quality and necessity.
+    """
+
+    def __init__(self, llm: Any, plan_state: PlanState, knowledge: KnowledgeStore):
+        self.llm = llm
+        self.plan_state = plan_state
+        self.knowledge = knowledge
+
+    def evaluate(self, proposal: PatchProposal) -> ArbiterDecision:
+        """
+        Evaluate a patch proposal with semantic reasoning.
+
+        Checks:
+        1. Is the trigger/reasoning sound?
+        2. Is this a duplicate of existing/completed work?
+        3. Does this conflict with overall plan trajectory?
+        4. Is the worker's view of the plan stale/naive?
+
+        Returns:
+            ArbiterDecision with approved/rejected/deferred and reasoning
+        """
 ```
 
-The class attribute `manager` is set via `Handler.manager = manager` in `_handler_factory()`. While this works, `ThreadingHTTPServer` creates a new handler instance per request. The handler class attribute approach is fine, but the factory pattern creates a new class each time `_handler_factory()` is called (though it's only called once in `start()`).
-
-**Concern:** Not a bug per se, but the pattern is fragile. If `_handler_factory()` were called multiple times, each would create a different Handler class.
-
-### BUG 5: TTL Check Race Condition
-
-**Location:** `src/harness/graphd/derived.py:28-37`
-
-The cache's `get()` method reads and potentially deletes entries inside the lock, but `set()` overwrites without checking if the entry was just expired. This is minor but could cause stale data to persist:
+#### 2.2 Define evaluation criteria
 
 ```python
-def get(self, src: str, kind: str) -> List[DerivedEdge]:
-    now = time.time()
-    with self._lock:
-        items = self._edges.get((src, kind), [])
-        fresh = [e for e in items if e.expires_at > now]
-        if fresh:
-            self._edges[(src, kind)] = fresh  # Modifies in place
-        else:
-            self._edges.pop((src, kind), None)
-        return fresh
+class RejectionReason(Enum):
+    DUPLICATE_STEP = "duplicate_step"  # Step already exists or completed
+    ALREADY_ACCOMPLISHED = "already_accomplished"  # Work already done
+    NAIVE_VIEW = "naive_view"  # Worker doesn't see full context
+    WEAK_REASONING = "weak_reasoning"  # Justification unconvincing
+    CONFLICTS_WITH_PLAN = "conflicts_with_plan"  # Contradicts goal trajectory
+    LOW_CONFIDENCE = "low_confidence"  # Worker itself is uncertain
+    STALE_CONTEXT = "stale_context"  # Plan changed since snapshot
 ```
 
-Not critical, but the mutation during read is unusual.
-
----
-
-## 2. Separation of Concerns
-
-### Well Separated
-
-- **store.py**: Pure SQLite persistence, no business logic
-- **types.py**: Data structures only, no behavior
-- **derived.py**: Tier B cache and search, isolated from Tier A
-- **client.py**: HTTP client, no knowledge of server internals
-- **languages.py**: Plugin architecture for language-specific parsing
-- **utils.py/constants.py**: Shared utilities, no cross-dependencies
-
-### Concerns
-
-- **manager.py**: Acts as both orchestrator AND request handler logic. The `handle_*` methods should potentially move to a separate `handlers.py` for cleaner separation.
-- **indexer.py** couples file walking with symbol extraction. Could benefit from separating the file discovery from the processing.
-
-### Architecture Alignment
-
-The implementation follows the design document's two-tier architecture:
-- Tier A (SQLite): files, symbols, module_edges, exports, run_artifacts
-- Tier B (in-memory): DerivedEdgeCache with TTL
-
-Good: The separation allows Tier A to remain stable while Tier B can be rebuilt on demand.
-
----
-
-## 3. Resource Usage
-
-### CPU
-
-- Index loop runs every `index_interval_s` (default 5s)
-- Processes up to `max_files_per_scan` (default 500) per cycle
-- `nice_level` can deprioritize (but bug above means it doesn't work)
-- ripgrep search has 10s timeout
-
-### Memory
-
-- `max_memory_mb` via `RLIMIT_AS` (but bug means it's not applied to daemon threads)
-- Derived cache grows unbounded (no max size) - only TTL eviction
-- SQLite uses WAL mode (good for concurrent reads)
-- All symbol definitions for all files loaded into symbols table
-
-### Disk
-
-- SQLite database at `.graphd/graphd.db`
-- WAL mode means `.graphd/graphd.db-wal` and `.graphd/graphd.db-shm` files
-- No size limit on database
-
-### Network
-
-- HTTP server binds to `127.0.0.1:9444` (localhost only - good)
-- Client timeout is 2s default
-
-### Design Doc Compliance
-
-The design specifies:
-- nice/ionice ✓ (but not applied correctly)
-- CPU quota ✗ (not implemented)
-- max RAM ✓ (but not applied correctly)
-- debounce ✓
-- idle-only refinement ✓
-- never spawn LSP unless opted in ✓ (no LSP support at all yet)
-
----
-
-## 4. Hot Path Analysis
-
-### Agent Execution Hot Path
-
-```
-AgentHarness.process()
-    -> graphd.set_active(True)      # Signal to graphd
-    -> agent.run()
-        -> tool_registry.execute()  # Tools MAY call graphd
-    -> graphd.set_active(False)
-```
-
-**Graphd on the hot path:**
-
-1. **set_active()** - O(1), just sets a flag
-2. **Graphd tools** (if enabled) - HTTP calls with 2s timeout
-
-**Graphd off the hot path:**
-
-1. **Index loop** - Runs in background thread, skips when agent is active (backpressure)
-2. **HTTP server** - Runs in background thread
-3. **Idle refinement** - Only runs when agent is NOT active
-
-**Impact Assessment:**
-
-- When `backpressure_when_active=True` (default), graphd does nothing during agent execution except respond to queries
-- If graphd tools are enabled and called, adds 1-10ms per call plus HTTP overhead
-- The daemon doesn't block the hot path - it yields via `set_active()`
-
----
-
-## 5. Integration Points
-
-### Runtime Startup (`runtime.py:148-165`)
+#### 2.3 LLM evaluation prompt
 
 ```python
-if resolved_config.graphd and resolved_config.graphd.enabled:
-    graphd_manager = GraphdManager(resolved_config.graphd, logger)
-    if graphd_manager.start():
-        graphd_client = GraphdClient(...)
+ARBITER_PROMPT = """
+You are evaluating a plan modification suggestion from a Worker.
+
+CURRENT PLAN:
+{plan_summary}
+
+COMPLETED STEPS:
+{completed_steps}
+
+PENDING STEPS:
+{pending_steps}
+
+WORKER'S PROPOSAL:
+Type: {patch_type}
+Trigger: {trigger}
+Reasoning: {reasoning}
+Evidence: {evidence}
+Confidence: {confidence}
+
+EVALUATION CRITERIA:
+1. DUPLICATE CHECK: Does this step duplicate existing or completed work?
+2. ACCOMPLISHMENT CHECK: Has this already been accomplished by another step?
+3. NAIVETY CHECK: Is the worker missing context that invalidates this suggestion?
+4. REASONING CHECK: Is the justification concrete and evidence-based?
+5. TRAJECTORY CHECK: Does this align with the overall goal?
+
+RESPOND WITH:
+decision: APPROVE | REJECT | DEFER
+reason: <concise explanation>
+confidence: <0.0-1.0>
+"""
 ```
 
-Good: Fails gracefully if graphd startup fails.
+#### 2.4 Integrate into Wizard
 
-### Harness Backpressure (`harness.py:202-214`)
+**File:** `src/harness/agent/wizard/wizard.py`
+
+Replace simple `_apply_patches()` with:
 
 ```python
-try:
-    if self.graphd:
-        self.graphd.set_active(True)
-    # ... agent execution ...
-finally:
-    if self.graphd:
-        self.graphd.set_active(False)
+def _evaluate_and_apply_patches(self, outcome: WorkerOutcome) -> None:
+    """
+    Evaluate patches through PatchArbiter before application.
+    """
+    arbiter = PatchArbiter(self.llm, self._plan_state, self._knowledge)
+
+    for proposal in outcome.patch_proposals:
+        # Fast-path rejections (PolicyGate)
+        policy_decision = self._policy_gate.evaluate(proposal.patch, self._plan_state)
+        if not policy_decision.approved:
+            self._ledger.record_patch_rejected(proposal, policy_decision.reason)
+            continue
+
+        # Semantic evaluation (LLM)
+        arbiter_decision = arbiter.evaluate(proposal)
+
+        self._ledger.record_patch_decision(
+            proposal.patch.patch_id,
+            approved=arbiter_decision.approved,
+            rejection_reason=arbiter_decision.reason,
+            arbiter_reasoning=arbiter_decision.reasoning,
+        )
+
+        if arbiter_decision.approved:
+            applied = self._plan_state.apply_patch(proposal.patch)
+            if applied:
+                self._ledger.record_patch_applied(...)
 ```
 
-Good: Uses try/finally to ensure active flag is always cleared.
+---
 
-### Tool Registry (`tool_registry.py:1191-1278`)
+### Phase 3: Wizard Self-Patching
 
-Registers 6 graphd tools when client is available and `enable_tools=True`:
-- `graphd_health`
-- `graphd_symbol`
-- `graphd_context`
-- `graphd_impact`
-- `graphd_search`
-- `graphd_export`
+**Goal:** Wizard proactively creates patches based on observations.
 
-Good: Tools are gated behind both `graphd_client` existence AND `graphd_tools_enabled` flag.
+#### 3.1 Define Wizard observation triggers
 
-### Missing Integration
+```python
+class WizardObservation(Enum):
+    """Events that may trigger Wizard-generated patches."""
+    STAGNATION = "stagnation"  # Same step failing repeatedly
+    DISCOVERY = "discovery"  # Important fact discovered
+    DEPENDENCY_SATISFIED = "dependency_satisfied"  # Enables optimization
+    GOAL_CLARIFIED = "goal_clarified"  # Better understanding of goal
+    REDUNDANCY_DETECTED = "redundancy_detected"  # Steps overlap
+```
 
-1. **No artifact recording integration** - The agent doesn't call `record_artifact()` after test failures or typecheck errors
-2. **No microloop integration** - The design mentions microloop invariant checkers calling `/impact`, but no microloop code uses graphd yet
+#### 3.2 Add `_consider_self_patches()` to Wizard
+
+```python
+def _consider_self_patches(self) -> List[PlanPatch]:
+    """
+    Wizard evaluates whether to modify the plan itself.
+    Called after each iteration when there's capacity.
+
+    Triggers:
+    - 3+ failed attempts on a step -> consider removing/replacing
+    - Discovery of blocking fact -> consider inserting prerequisite
+    - Completion reveals redundancy -> consider removing pending step
+    """
+    patches = []
+
+    # Check stagnation patterns
+    for step in self._plan_state.steps.values():
+        if step.attempt_count >= 3 and step.status == StepStatus.FAILED:
+            patches.append(self._create_stagnation_patch(step))
+
+    # Check knowledge for actionable facts
+    blocking_facts = self._knowledge.get_facts_by_key_prefix("blocking:")
+    for fact in blocking_facts:
+        patch = self._create_discovery_patch(fact)
+        if patch:
+            patches.append(patch)
+
+    return patches
+```
+
+#### 3.3 Self-patch evaluation (same arbiter)
+
+Wizard-generated patches also go through PatchArbiter for consistency:
+
+```python
+def _apply_wizard_patches(self) -> None:
+    """Apply Wizard-generated patches through the same arbiter."""
+    patches = self._consider_self_patches()
+
+    for patch in patches:
+        # Create proposal with Wizard as source
+        proposal = PatchProposal(
+            patch=patch,
+            trigger="wizard_observation",
+            reasoning=patch.justification,
+            evidence=[self._ledger.summarize_tail()],
+            current_step_num=-1,  # Wizard, not worker
+            plan_snapshot=self._get_plan_snapshot(),
+            confidence=0.8,
+            alternatives_considered=[],
+        )
+
+        decision = self._arbiter.evaluate(proposal)
+        if decision.approved:
+            self._plan_state.apply_patch(patch)
+```
 
 ---
 
-## 6. Maintenance Considerations
+### Phase 4: Concurrent Worker Conflict Resolution
 
-### Schema Versioning
+**Goal:** Handle patches from concurrent workers gracefully.
 
-`GRAPH_D_SCHEMA_VERSION = "v1"` exists but is:
-- Not stored in the database
-- Not checked on startup
-- No migration path
+#### 4.1 Patch queue with deduplication
 
-**Risk:** Schema changes will require manual database deletion.
+```python
+@dataclass
+class PatchQueue:
+    """
+    Ordered queue of patch proposals awaiting evaluation.
+    Handles concurrent submissions with deduplication.
+    """
+    pending: List[PatchProposal] = field(default_factory=list)
 
-### Database Lifecycle
+    def submit(self, proposal: PatchProposal) -> bool:
+        """
+        Submit a proposal to the queue.
+        Returns False if duplicate detected.
+        """
+        # Check for semantic duplicates
+        for existing in self.pending:
+            if self._is_duplicate(existing, proposal):
+                return False
+        self.pending.append(proposal)
+        return True
 
-- Database created at first startup
-- No automatic cleanup of stale data
-- No compaction/vacuum scheduled
-- `remove_file()` cleans up individual files, but orphaned edges could accumulate
+    def _is_duplicate(self, a: PatchProposal, b: PatchProposal) -> bool:
+        """Check if two proposals are semantically equivalent."""
+        if a.patch.operations[0].type != b.patch.operations[0].type:
+            return False
+        # For INSERT: check if objectives are similar
+        # For REMOVE: check if targeting same step
+        # etc.
+```
 
-### Symbol ID Stability
+#### 4.2 Conflict detection
 
-Symbol IDs are hashes of `path:kind:name:span_start:span_end`. This means:
-- Adding a line above a function changes its ID
-- Renaming changes the ID
-- Moving to another file changes the ID
+```python
+class ConflictType(Enum):
+    SAME_TARGET = "same_target"  # Both modifying same step
+    CONTRADICTORY = "contradictory"  # One inserts what other removes
+    ORDERING = "ordering"  # Both trying to insert at same position
 
-This is intentional (design says "stable ids for symbols") but means:
-- Cached derived edges become orphaned when functions move
-- Client code holding symbol IDs must refresh after edits
+def detect_conflicts(proposals: List[PatchProposal]) -> List[Tuple[PatchProposal, PatchProposal, ConflictType]]:
+    """Identify conflicting proposals in the queue."""
+```
 
----
+#### 4.3 Resolution strategy
 
-## 7. Writing/Updating
+```python
+def resolve_conflict(
+    a: PatchProposal,
+    b: PatchProposal,
+    conflict: ConflictType
+) -> PatchProposal:
+    """
+    Resolve conflict between two proposals.
 
-### Read-Only Guarantee
-
-Design specifies graphd is "read-only with respect to the repo". Implementation:
-- No file writes (only `.graphd/` directory)
-- No environment mutation
-- ripgrep runs with `capture_output=True` (no stdout pollution)
-
-### Database Writes
-
-Writes happen:
-1. `upsert_file()` - on file mtime change
-2. `replace_symbols()` - on file content change
-3. `replace_module_edges()` - on file content change
-4. `replace_exports()` - on file content change
-5. `upsert_bundle()` - atomic version of above
-6. `remove_file()` - when file deleted
-7. `record_run_artifact()` - when test/lint results recorded
-
-All writes are:
-- Inside `with self._lock:` (thread-safe)
-- Using `self._conn.commit()` (durable)
-- WAL mode (concurrent read-safe)
-
----
-
-## 8. Configuration & Logging
-
-### Configuration
-
-`GraphdConfig` dataclass with sensible defaults:
-- `enabled: bool = False` - Off by default
-- `enable_tools: bool = False` - Tools off by default
-- All timeouts configurable
-- Backpressure enabled by default
-
-### Logging
-
-Uses project's `StructuredLogger`:
-- `system_init("graphd", "ready", ...)` on startup
-- `error(...)` on failures
-- No debug logging for index cycles (could be noisy)
-
-**Missing:**
-- No metrics emission
-- No health check logging
-- No periodic stats logging
+    Strategies:
+    - SAME_TARGET: Prefer higher confidence, or more recent
+    - CONTRADICTORY: Evaluate both through arbiter, pick winner
+    - ORDERING: Merge if compatible, else pick first
+    """
+```
 
 ---
 
-## 9. Recommendations
+### Phase 5: Enhanced Ledger Tracking
 
-### Must Fix (Critical)
+**Goal:** Full auditability of patch lifecycle.
 
-1. **Fix the indexer dead code bug** - Files are not being indexed at all
-2. **Fix resource limits thread issue** - Move to daemon threads
-3. **Add table name validation in `export_table()`**
+#### 5.1 Extended `PatchRecord`
 
-### Should Fix (Important)
+```python
+@dataclass
+class PatchRecord:
+    # Existing fields...
 
-4. Store schema version in database and check on startup
-5. Add cache size limit to DerivedEdgeCache
-6. Add periodic stats logging for observability
-7. Add `vacuum` command or scheduled compaction
+    # New: Arbiter evaluation
+    arbiter_evaluated: bool = False
+    arbiter_decision: Optional[str] = None  # APPROVE/REJECT/DEFER
+    arbiter_reasoning: Optional[str] = None
+    arbiter_confidence: Optional[float] = None
 
-### Nice to Have
+    # New: Conflict resolution
+    had_conflicts: bool = False
+    conflict_resolution: Optional[str] = None
+    superseded_by: Optional[str] = None  # patch_id that won conflict
+```
 
-8. Move `handle_*` methods to separate handlers module
-9. Add LSP integration hook (as per design)
-10. Integrate artifact recording with test runner
-11. Add graceful shutdown (wait for in-flight requests)
+#### 5.2 New ledger methods
+
+```python
+def record_arbiter_evaluation(
+    self,
+    patch_id: str,
+    decision: str,
+    reasoning: str,
+    confidence: float,
+) -> None:
+    """Record arbiter's semantic evaluation."""
+
+def record_conflict_resolution(
+    self,
+    winner_id: str,
+    loser_id: str,
+    conflict_type: str,
+    resolution_reason: str,
+) -> None:
+    """Record conflict resolution between proposals."""
+```
 
 ---
 
-## 10. Verdict
+## File Changes Summary
 
-**The implementation is architecturally sound but has a critical bug that prevents it from functioning.** The indexer's dead code means Tier A will never be populated, making the entire system useless until fixed.
+### New Files
+1. `src/harness/agent/wizard/patch_arbiter.py` - Semantic patch evaluation
+2. `src/harness/agent/wizard/patch_queue.py` - Concurrent submission handling
 
-Once the critical bugs are fixed:
-- Safe to enable with `backpressure_when_active=True`
-- Tools should remain disabled until proven stable
-- Monitor database size growth
-- Consider enabling only for large codebases where impact analysis provides value
+### Modified Files
+1. `src/harness/agent/wizard/plan_patch.py`
+   - Add `PatchProposal` dataclass
+   - Add `RejectionReason` enum
+
+2. `src/harness/agent/wizard/behavioral_rules.md`
+   - Add PLAN ADAPTATION section with schema
+
+3. `src/harness/agent/wizard/worker.py`
+   - Add `_extract_patch_proposals()` method
+   - Update `WorkerOutcome` to include `patch_proposals: List[PatchProposal]`
+   - Call extraction in `_execute_loop`
+
+4. `src/harness/agent/wizard/wizard.py`
+   - Replace `_apply_patches()` with `_evaluate_and_apply_patches()`
+   - Add `_consider_self_patches()` for proactive patching
+   - Add `_apply_wizard_patches()` call in orchestration loop
+   - Integrate `PatchArbiter`
+
+5. `src/harness/agent/wizard/work_ledger.py`
+   - Extend `PatchRecord` with arbiter fields
+   - Add `record_arbiter_evaluation()` method
+   - Add `record_conflict_resolution()` method
+
+6. `src/harness/agent/wizard/policy_gate.py`
+   - Keep as fast-path mechanical checks
+   - PolicyGate runs BEFORE arbiter (cheap rejection)
+
+---
+
+## Implementation Order
+
+1. **Phase 1.1-1.3**: Worker patch suggestion (behavioral rules + parsing)
+2. **Phase 2.1-2.3**: PatchArbiter class with LLM evaluation
+3. **Phase 2.4**: Integrate arbiter into Wizard
+4. **Phase 3**: Wizard self-patching
+5. **Phase 4**: Concurrent conflict resolution
+6. **Phase 5**: Enhanced ledger tracking
+
+Each phase is independently testable. Phase 1 can be deployed with simple pass-through (no arbiter) to gather data on worker suggestions before adding LLM evaluation.
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+- `test_patch_proposal_parsing.py` - Extract patches from LLM responses
+- `test_patch_arbiter.py` - Semantic evaluation logic (mock LLM)
+- `test_patch_queue.py` - Deduplication and conflict detection
+
+### Integration Tests
+- End-to-end with mock LLM: worker suggests -> arbiter evaluates -> applied/rejected
+- Concurrent workers submitting conflicting patches
+- Wizard self-patching on stagnation
+
+### Manual Testing
+- Run TUI with verbose logging on patch lifecycle
+- Verify patches appear in ledger with full reasoning
+
+---
+
+## Configuration
+
+Add to `WizardConfig`:
+
+```python
+@dataclass
+class WizardConfig:
+    # Existing...
+
+    # Patch Arbiter
+    enable_patch_arbiter: bool = True  # Use LLM for semantic evaluation
+    arbiter_model: str = "gpt-4o-mini"  # Cheaper model for evaluation
+    max_patches_per_step: int = 2  # Max patches a worker can suggest
+
+    # Wizard Self-Patching
+    enable_self_patching: bool = True
+    self_patch_after_failures: int = 3  # Attempts before self-patch
+```
+
+---
+
+## Risks and Mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| LLM arbiter adds latency | Use cheap model (gpt-4o-mini), batch evaluations |
+| Workers spam patches | Max 2 per step, rate limiting in PolicyGate |
+| Arbiter hallucinates approvals | Require concrete evidence field, log for review |
+| Conflict resolution wrong | Conservative: reject both on conflict, log for analysis |
+| Wizard self-patches aggressively | High threshold (3+ failures), confidence checks |
+
+---
+
+## Answers to Your Questions
+
+### 1. How do workers even suggest patches formally?
+
+**Currently:** They don't. The `WorkerOutcome.patches` field exists but workers have no instructions on how to populate it. The `behavioral_rules.md` only covers action markers and tool usage, not plan modification.
+
+**After this plan:** Workers will use a structured `[SUGGEST_PATCH]` block in their responses. The worker's `_extract_patch_proposals()` method parses this into `PatchProposal` objects with full reasoning context.
+
+### 2. Should patches always be applied?
+
+**Currently:** Yes, as long as they pass PolicyGate's mechanical checks (version, frozen steps, rate limit, thrash).
+
+**After this plan:** No. The `PatchArbiter` will evaluate each patch proposal with semantic reasoning:
+- Is the worker naive about the overall plan?
+- Is this duplicating existing work?
+- Is the step already accomplished?
+- Does the reasoning justify the change?
+
+### 3. Should Wizard create patches itself?
+
+**After this plan:** Yes. `_consider_self_patches()` will generate patches based on:
+- Stagnation patterns (3+ failures on a step)
+- Discovered blocking facts
+- Detected redundancy
+
+These go through the same arbiter for consistency.
+
+### 4. How do we handle concurrent worker patches?
+
+**Currently:** Version checking rejects all stale patches, which is coarse.
+
+**After this plan:** The `PatchQueue` handles:
+- Deduplication (semantically equivalent patches merged)
+- Conflict detection (same target, contradictory, ordering)
+- Resolution strategies (prefer higher confidence, evaluate both, merge)

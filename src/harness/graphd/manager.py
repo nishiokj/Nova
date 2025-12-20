@@ -349,3 +349,271 @@ class GraphdManager:
                     f"Unexpected error applying memory limit: {exc}",
                     component="graphd"
                 )
+
+    # =========================================================================
+    # Session Management Methods (v2)
+    # =========================================================================
+
+    def session_create(
+        self,
+        session_key: str,
+        client_type: str,
+        working_dir: Optional[str] = None,
+        expires_at: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a new session.
+
+        Args:
+            session_key: Unique session identifier
+            client_type: Type of client ('tui', 'voice', 'api')
+            working_dir: Working directory for this session
+            expires_at: Optional expiration timestamp
+            metadata: Optional metadata dict
+
+        Returns:
+            Dict with 'success' bool and 'session_key' or 'error'
+        """
+        try:
+            created = self.store.create_session(
+                session_key=session_key,
+                client_type=client_type,
+                working_dir=working_dir,
+                expires_at=expires_at,
+                metadata=metadata,
+            )
+            if created:
+                return {"success": True, "session_key": session_key}
+            else:
+                return {"success": False, "error": "session_key_exists"}
+        except Exception as exc:
+            self.logger.warning(f"Session create failed: {exc}", component="graphd")
+            return {"success": False, "error": str(exc)}
+
+    def session_get(self, session_key: str) -> Dict[str, Any]:
+        """Get session by key.
+
+        Returns:
+            Session data dict or {"error": "..."} if not found
+        """
+        try:
+            session = self.store.get_session(session_key)
+            if session:
+                return {"session": session}
+            else:
+                return {"error": "session_not_found", "session_key": session_key}
+        except Exception as exc:
+            self.logger.warning(f"Session get failed: {exc}", component="graphd")
+            return {"error": str(exc)}
+
+    def session_touch(self, session_key: str, working_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Update last_accessed_at timestamp for a session, creating it if needed.
+
+        This is an upsert operation: if the session doesn't exist, it will be created.
+
+        Args:
+            session_key: Session key (format: {client_type}_{timestamp}_{uuid8})
+            working_dir: Working directory for new sessions
+
+        Returns:
+            Dict with 'success' bool and 'created' bool if new session was created
+        """
+        try:
+            updated = self.store.update_session_access(session_key)
+            if updated:
+                return {"success": True, "created": False}
+
+            # Session doesn't exist - create it
+            # Extract client_type from session_key (e.g., "tui_1766172870_abc123" -> "tui")
+            parts = session_key.split("_")
+            client_type = parts[0] if parts else "unknown"
+
+            created = self.store.create_session(
+                session_key=session_key,
+                client_type=client_type,
+                working_dir=working_dir,
+            )
+            if created:
+                self.logger.info(f"Auto-created session: {session_key}", component="graphd")
+                return {"success": True, "created": True}
+            else:
+                # Race condition: session was created by another process
+                return {"success": True, "created": False}
+
+        except Exception as exc:
+            self.logger.warning(f"Session touch failed: {exc}", component="graphd")
+            return {"success": False, "error": str(exc)}
+
+    def session_close(self, session_key: str) -> Dict[str, Any]:
+        """Mark a session as closed.
+
+        Returns:
+            Dict with 'success' bool
+        """
+        try:
+            updated = self.store.update_session_status(session_key, "closed")
+            return {"success": updated}
+        except Exception as exc:
+            self.logger.warning(f"Session close failed: {exc}", component="graphd")
+            return {"success": False, "error": str(exc)}
+
+    def session_delete(self, session_key: str) -> Dict[str, Any]:
+        """Delete a session and all associated data.
+
+        Returns:
+            Dict with 'success' bool
+        """
+        try:
+            deleted = self.store.delete_session(session_key)
+            return {"success": deleted}
+        except Exception as exc:
+            self.logger.warning(f"Session delete failed: {exc}", component="graphd")
+            return {"success": False, "error": str(exc)}
+
+    def sessions_list(
+        self,
+        client_type: Optional[str] = None,
+        status: str = "active",
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """List sessions with optional filtering.
+
+        Returns:
+            Dict with 'sessions' list
+        """
+        try:
+            sessions = self.store.list_sessions(client_type, status, limit)
+            return {"sessions": sessions}
+        except Exception as exc:
+            self.logger.warning(f"Sessions list failed: {exc}", component="graphd")
+            return {"sessions": [], "error": str(exc)}
+
+    def sessions_cleanup(self) -> Dict[str, Any]:
+        """Delete expired sessions.
+
+        Returns:
+            Dict with 'deleted_count' int
+        """
+        try:
+            count = self.store.cleanup_expired_sessions()
+            return {"deleted_count": count}
+        except Exception as exc:
+            self.logger.warning(f"Sessions cleanup failed: {exc}", component="graphd")
+            return {"deleted_count": 0, "error": str(exc)}
+
+    # =========================================================================
+    # Conversation Message Methods
+    # =========================================================================
+
+    def message_add(
+        self,
+        session_key: str,
+        role: str,
+        content: str,
+        request_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Add a message to a session's conversation history.
+
+        Returns:
+            Dict with 'message_index' or 'error'
+        """
+        try:
+            message_index = self.store.add_message(
+                session_key=session_key,
+                role=role,
+                content=content,
+                request_id=request_id,
+                metadata=metadata,
+            )
+            return {"success": True, "message_index": message_index}
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        except Exception as exc:
+            self.logger.warning(f"Message add failed: {exc}", component="graphd")
+            return {"success": False, "error": str(exc)}
+
+    def messages_get(
+        self,
+        session_key: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Get conversation messages for a session.
+
+        Returns:
+            Dict with 'messages' list
+        """
+        try:
+            messages = self.store.get_messages(session_key, limit, offset)
+            return {"messages": messages}
+        except Exception as exc:
+            self.logger.warning(f"Messages get failed: {exc}", component="graphd")
+            return {"messages": [], "error": str(exc)}
+
+    def messages_clear(self, session_key: str) -> Dict[str, Any]:
+        """Clear all messages for a session.
+
+        Returns:
+            Dict with 'deleted_count'
+        """
+        try:
+            count = self.store.clear_messages(session_key)
+            return {"deleted_count": count}
+        except Exception as exc:
+            self.logger.warning(f"Messages clear failed: {exc}", component="graphd")
+            return {"deleted_count": 0, "error": str(exc)}
+
+    # =========================================================================
+    # Context Snapshot Methods
+    # =========================================================================
+
+    def context_save(
+        self,
+        session_key: str,
+        context_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Save a context window snapshot for a session.
+
+        Returns:
+            Dict with 'snapshot_version' or 'error'
+        """
+        try:
+            version = self.store.save_context_snapshot(session_key, context_data)
+            # Cleanup old snapshots to prevent unbounded growth
+            self.store.cleanup_old_snapshots(session_key, keep_count=5)
+            return {"success": True, "snapshot_version": version}
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        except Exception as exc:
+            self.logger.warning(f"Context save failed: {exc}", component="graphd")
+            return {"success": False, "error": str(exc)}
+
+    def context_get(self, session_key: str) -> Dict[str, Any]:
+        """Get the latest context snapshot for a session.
+
+        Returns:
+            Dict with 'snapshot' or 'error'
+        """
+        try:
+            snapshot = self.store.get_latest_context_snapshot(session_key)
+            if snapshot:
+                return {"snapshot": snapshot}
+            else:
+                return {"snapshot": None}
+        except Exception as exc:
+            self.logger.warning(f"Context get failed: {exc}", component="graphd")
+            return {"snapshot": None, "error": str(exc)}
+
+    def context_list(self, session_key: str, limit: int = 10) -> Dict[str, Any]:
+        """List context snapshots for a session.
+
+        Returns:
+            Dict with 'snapshots' list (metadata only, no full context)
+        """
+        try:
+            snapshots = self.store.list_context_snapshots(session_key, limit)
+            return {"snapshots": snapshots}
+        except Exception as exc:
+            self.logger.warning(f"Context list failed: {exc}", component="graphd")
+            return {"snapshots": [], "error": str(exc)}

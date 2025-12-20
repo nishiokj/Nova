@@ -45,21 +45,34 @@ from .work_ledger import WorkLedger, LedgerEntry, EntryStatus, PatchRecord, Patc
 
 # Stores
 from .knowledge_store import KnowledgeStore, KnowledgeFact, FactSource
-from .evidence_store import EvidenceStore, EvidenceRecord
 
 # Work items
 from .work_item import WorkItem, WorkBounds, WorkItemCriteria
 
-# Context
-from .context_pack import ContextPack, ContextPackBuilder
+
+# Context Window
+from .context_window import (
+    ContextWindow,
+    SystemPrompt,
+    BehavioralRules,
+    FileContent,
+    ToolExchange,
+    StreamBuffer,
+    # Phase 4: Responses API
+    ResponsesAPIInput,
+    # Phase 5: Advanced Context Management
+    ContextMetrics,
+    CompactionResult,
+    FileLoadStrategy,
+)
 
 # Worker
 from .worker import (
     Worker,
     WorkerConfig,
     WorkerOutcome,
-    VerificationResult,
-    SuccessLevel,
+  #  VerificationResult,
+   # SuccessLevel,
     WorkerAction,
 )
 
@@ -104,22 +117,27 @@ __all__ = [
     "KnowledgeStore",
     "KnowledgeFact",
     "FactSource",
-    # Evidence store
-    "EvidenceStore",
-    "EvidenceRecord",
     # Work items
     "WorkItem",
     "WorkBounds",
     "WorkItemCriteria",
-    # Context
-    "ContextPack",
-    "ContextPackBuilder",
+    # Context Window
+    "ContextWindow",
+    "SystemPrompt",
+    "BehavioralRules",
+    "FileContent",
+    "ToolExchange",
+    "StreamBuffer",
+    # Phase 4: Responses API
+    "ResponsesAPIInput",
+    # Phase 5: Advanced Context Management
+    "ContextMetrics",
+    "CompactionResult",
+    "FileLoadStrategy",
     # Worker
     "Worker",
     "WorkerConfig",
     "WorkerOutcome",
-    "VerificationResult",
-    "SuccessLevel",
     "WorkerAction",
     # Plan patches
     "PlanPatch",

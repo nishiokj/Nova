@@ -127,7 +127,8 @@ class ServiceRep:
         self.harness.add_progress_callback(self._on_harness_progress)
 
         # Thread/queue management for asynchronous execution
-        self._task_queue: "queue.Queue[Optional[tuple[str, str, str]]]" = queue.Queue()
+        # Queue items are: (request_id, text, tier, session_key)
+        self._task_queue: "queue.Queue[Optional[tuple[str, str, str, Optional[str]]]]" = queue.Queue()
         self._worker_threads: List[threading.Thread] = []
         self._shutdown_event = threading.Event()
         self._state_lock = threading.Lock()
@@ -205,23 +206,23 @@ class ServiceRep:
                 self._task_queue.task_done()
                 break
 
-            request_id, text, tier = task
+            request_id, text, tier, session_key = task
             with self._pending_lock:
                 if self._pending_requests > 0:
                     self._pending_requests -= 1
 
             try:
-                self._process_agent_task(request_id, text, tier)
+                self._process_agent_task(request_id, text, tier, session_key)
             finally:
                 self._task_queue.task_done()
 
-    def _enqueue_agent_task(self, request_id: str, text: str, tier: str):
+    def _enqueue_agent_task(self, request_id: str, text: str, tier: str, session_key: Optional[str] = None):
         """Add a normal request to the worker queue"""
         with self._pending_lock:
             self._pending_requests += 1
-        self._task_queue.put((request_id, text, tier))
+        self._task_queue.put((request_id, text, tier, session_key))
 
-    def _process_agent_task(self, request_id: str, text: str, tier: str):
+    def _process_agent_task(self, request_id: str, text: str, tier: str, session_key: Optional[str] = None):
         """Execute a queued agent task (runs inside worker thread)"""
         self._set_active_request(request_id, text)
         try:
@@ -255,6 +256,7 @@ class ServiceRep:
                 tier=tier,
                 context=None,
                 request_id=request_id,
+                session_key=session_key,
                 on_stream_chunk=on_stream_chunk
             )
             self._handle_harness_response(request_id, harness_response)
@@ -345,6 +347,7 @@ class ServiceRep:
             return
 
         request_id = event.request_id or self.logger.new_request()
+        session_key = getattr(event, 'session_key', None)  # Extract session_key from event
         self.logger.request_received(text)
 
         # Fast path: greetings / small-talk should bypass the harness entirely
@@ -372,9 +375,9 @@ class ServiceRep:
             self._handle_status_question(request_id, text)
 
         else:  # NORMAL_REQUEST
-            self._handle_normal_request(request_id, text)
+            self._handle_normal_request(request_id, text, session_key)
 
-    def _handle_normal_request(self, request_id: str, text: str):
+    def _handle_normal_request(self, request_id: str, text: str, session_key: Optional[str] = None):
         """Handle normal agent request - spawns background thread for agent"""
         # Route to determine tier
         classification, tier_config = self.router.route(text, context=None)
@@ -388,7 +391,7 @@ class ServiceRep:
             f"[{request_id}] Routed to tier={classification.tier_name}, queued={self._get_pending_request_count() + 1}",
             component="service_rep"
         )
-        self._enqueue_agent_task(request_id, text, classification.tier_name)
+        self._enqueue_agent_task(request_id, text, classification.tier_name, session_key)
 
 
     def _handle_stop_intent(self, request_id: str, text: str):

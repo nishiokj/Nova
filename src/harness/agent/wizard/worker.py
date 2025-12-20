@@ -11,6 +11,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol
 
 from .types import StepStatus
+from .knowledge_store import KnowledgeFact, FactSource
+from .plan_patch import PlanPatch
 
 
 class ToolResult(Protocol):
@@ -36,21 +38,6 @@ class Logger(Protocol):
     def error(self, msg: str, **kwargs) -> None: ...
 
 
-class SuccessLevel(Enum):
-    """
-    Three-level success classification.
-
-    COMPLETED/FAILED is too binary. This allows Wizard to make nuanced decisions:
-    - SUCCESS: Objective verifiably achieved with evidence
-    - PARTIAL: Some progress made (tools succeeded, facts discovered) but objective not confirmed
-    - FAILED: No progress, all tools failed, or explicit failure
-    """
-
-    SUCCESS = "success"
-    PARTIAL = "partial"
-    FAILED = "failed"
-
-
 class WorkerAction(Enum):
     """
     Explicit action requested by LLM.
@@ -67,98 +54,112 @@ class WorkerAction(Enum):
     NEED_CONTEXT = "need_context"  # Need more info, will request tools next
     CONTINUE = "continue"  # Keep going (internal reasoning)
 
-from .context_pack import ContextPack
+from .context_window import ContextWindow, ToolExchange
 from .work_item import WorkItem
 
 
 @dataclass
-class ToolCallRecord:
-    """Record of a single tool call and its result."""
-
-    call_id: str
-    tool_name: str
-    arguments: Dict[str, Any]
-    result: Optional[ToolResult] = None
-    success: bool = False
-    error: Optional[str] = None
-
-
-@dataclass
-class VerificationResult:
-    """
-    Result of verifying work completion against success criteria.
-
-    Captures what was checked, what passed, and what failed.
-    This is crucial for debugging why the Wizard marks steps as failed.
-    """
-
-    passed: bool
-    criteria_checked: List[str] = field(default_factory=list)
-    criteria_passed: List[str] = field(default_factory=list)
-    criteria_failed: List[str] = field(default_factory=list)
-    evidence_found: List[str] = field(default_factory=list)
-    verification_method: str = ""  # "explicit_criteria", "evidence_heuristic", "none"
-    notes: str = ""
-
-
-@dataclass
-class WorkerOutcome:
-    """
-    Result returned by Worker.
-    CRITICAL: Workers NEVER mutate global state.
-    All observations go into WorkerOutcome for Wizard to ingest.
-    """
-
-    work_id: str
-    worker_id: str
-    step_num: int
-
-    # Completion status (binary for backward compat, but use success_level for nuance)
-    success: bool
-    status: StepStatus
-
-    # Three-level success classification for nuanced Wizard decisions
-    success_level: SuccessLevel = SuccessLevel.FAILED
-
-    # Completion claim and evidence (the core verification contract)
-    completion_claim: bool = False  # Worker claims objective is complete
-    completion_evidence: List[str] = field(default_factory=list)  # Evidence IDs/refs supporting claim
-    verification_notes: str = ""  # Human-readable explanation of verification
-
-    # Content
-    final_response: Optional[str] = None
-    error: Optional[str] = None
-
-    # Observations for ingestion
-    observations: List[str] = field(default_factory=list)
-    reasoning_trace_summary: str = ""
-
-    # Entity references discovered
-    entity_refs: List[str] = field(default_factory=list)
-
-    # Suggested knowledge (not applied directly!)
-    suggested_facts: List[Dict[str, Any]] = field(default_factory=list)
-    suggested_evidence: List[Dict[str, Any]] = field(default_factory=list)
-
-    # Plan modification hints (NOT patches - just hints for Wizard)
-    patch_hints: List[Dict[str, Any]] = field(default_factory=list)
-
-    # Progress indicator (separate from success)
-    # True if tools succeeded or facts discovered, even if objective not satisfied
-    made_progress: bool = False
-    tool_results: Dict[str, Any] = field(default_factory=dict)
-    # Metrics
+class WorkerMetrics:
+    """Compact metrics bundle for audit trail."""
     tool_calls_made: int = 0
     tool_calls_succeeded: int = 0
     tool_calls_failed: int = 0
     llm_calls_made: int = 0
     duration_ms: float = 0
 
-    # Termination reason
+
+@dataclass
+class WorkerOutcome:
+    """
+    Canonical output from Worker.
+
+    CRITICAL: Workers NEVER mutate global state.
+    All state changes go through WorkerOutcome for Wizard to ingest.
+
+    Version envelope for optimistic concurrency:
+    - base_version: Plan version worker operated against
+    - Patches with stale base_version are rejected by Wizard
+    """
+
+    # Identity
+    work_id: str
+    step_num: int
+
+    # Version envelope (for optimistic concurrency)
+    base_version: int
+
+    # Core result
+    success: bool
+    final_response: Optional[str] = None
+    error: Optional[str] = None
+
+    # Knowledge to auto-append (replaces suggested_facts + suggested_evidence)
+    facts: List[KnowledgeFact] = field(default_factory=list)
+
+    # Plan mutations (replaces patch_hints)
+    patches: List[PlanPatch] = field(default_factory=list)
+
+    # Metrics (for WorkLedger audit)
+    metrics: WorkerMetrics = field(default_factory=WorkerMetrics)
+
+    # Entity refs discovered (for audit trail)
+    entity_refs: List[str] = field(default_factory=list)
+
+    # Internal tracking (not for Wizard, but useful for debugging)
     termination_reason: str = ""
 
-    # Verification result (detailed breakdown for debugging)
-    verification_result: Optional[VerificationResult] = None
+    @property
+    def made_progress(self) -> bool:
+        """Derived: True if tools succeeded or facts discovered."""
+        return (
+            self.metrics.tool_calls_succeeded > 0 or
+            len(self.facts) > 0 or
+            len(self.entity_refs) > 0
+        )
+
+    # ========== BACKWARD COMPATIBILITY ==========
+    # These properties maintain compatibility with old code that reads these fields
+
+    @property
+    def tool_calls_made(self) -> int:
+        return self.metrics.tool_calls_made
+
+    @property
+    def tool_calls_succeeded(self) -> int:
+        return self.metrics.tool_calls_succeeded
+
+    @property
+    def tool_calls_failed(self) -> int:
+        return self.metrics.tool_calls_failed
+
+    @property
+    def llm_calls_made(self) -> int:
+        return self.metrics.llm_calls_made
+
+    @property
+    def duration_ms(self) -> float:
+        return self.metrics.duration_ms
+
+    @property
+    def observations(self) -> List[str]:
+        """Derived from facts for backward compatibility."""
+        return [f"{fact.key}: {fact.value}" for fact in self.facts[:10]]
+
+    @property
+    def suggested_facts(self) -> List[Dict[str, Any]]:
+        """Backward compat: convert facts to old dict format."""
+        return [
+            {"key": f.key, "value": f.value, "confidence": f.confidence}
+            for f in self.facts
+        ]
+
+    @property
+    def patch_hints(self) -> List[Dict[str, Any]]:
+        """Backward compat: convert patches to old hint format."""
+        return [
+            {"action": "add_step", "objective": p.operations[0].new_step.get("objective", "") if p.operations and p.operations[0].new_step else ""}
+            for p in self.patches
+        ]
 
 
 @dataclass
@@ -173,6 +174,21 @@ class WorkerConfig:
     allow_implicit_finals: bool = False
 
 
+@dataclass
+class WorkerCacheParams:
+    """
+    Caching and stateful conversation parameters for Worker LLM calls.
+
+    These parameters enable OpenAI Responses API optimizations:
+    - prompt_cache_key: Stable key for caching the system prompt + tool definitions
+    - prompt_cache_retention: How long to retain the cache (e.g., "24h")
+    - previous_response_id: Continue from a previous response (stateful mode)
+    """
+    prompt_cache_key: Optional[str] = None
+    prompt_cache_retention: Optional[str] = None
+    previous_response_id: Optional[str] = None
+
+
 class Worker:
     """
     Stateless inner-loop executor.
@@ -180,7 +196,10 @@ class Worker:
     CRITICAL INVARIANTS:
     - Worker NEVER mutates PlanState, Ledger, or Stores
     - All observations are returned in WorkerOutcome
-    - Worker receives ContextPack + WorkItem, returns WorkerOutcome
+    - Worker receives ContextWindow + WorkItem, returns WorkerOutcome
+
+    API:
+    - execute(context_window, work_item, plan_version) - Execute using ContextWindow
     """
 
     def __init__(
@@ -194,11 +213,8 @@ class Worker:
         self.llm = llm
         self.config = config or WorkerConfig()
         self.logger = logger
-        try:
-            from context_scout import ContextScout
-            self.scout = ContextScout(self.tool_registry)
-        except Exception:
-            self.scout = None  # Scout is optional
+        # Track last response_id for stateful continuation within an execution
+        self._last_response_id: Optional[str] = None
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -208,149 +224,121 @@ class Worker:
         if log_fn:
             log_fn(msg, component="worker", **kwargs)
 
-    def execute(self, context_pack: ContextPack, work_item: WorkItem) -> WorkerOutcome:
+    def execute(
+        self,
+        context_window: ContextWindow,
+        work_item: WorkItem,
+        plan_version: int = 0,
+        cache_params: Optional[WorkerCacheParams] = None,
+    ) -> WorkerOutcome:
         """
-        Execute work item within bounds.
+        Execute work item using ContextWindow.
 
-        CRITICAL: Worker NEVER mutates context_pack or global state.
-        All observations go into WorkerOutcome.
+        Args:
+            context_window: The ContextWindow with full context (owned by Worker during execution)
+            work_item: Work item with objective and bounds
+            plan_version: Plan version for optimistic concurrency
+            cache_params: Optional caching/stateful params for LLM calls
 
-        Bounds enforced:
-        - max_tool_calls: Maximum number of tool invocations
-        - max_llm_calls: Maximum number of LLM requests
-        - max_duration_ms: Maximum wall-clock time
-        - max_iterations: Maximum loop iterations (from config)
+        Returns:
+            WorkerOutcome with results, facts, and metrics
         """
         start_time = time.time()
         self._log("debug", f"Worker executing: step={work_item.step_num}, objective='{work_item.objective[:60]}'")
 
+        # Reset response tracking for this execution
+        self._last_response_id = cache_params.previous_response_id if cache_params else None
+        self._cache_params = cache_params or WorkerCacheParams()
+
         outcome = WorkerOutcome(
             work_id=work_item.work_id,
-            worker_id=context_pack.worker_id,
             step_num=work_item.step_num,
+            base_version=plan_version,
             success=False,
-            status=StepStatus.IN_PROGRESS,
         )
 
         try:
-            self._execute_loop(context_pack, work_item, outcome, start_time)
+            self._execute_loop(context_window, work_item, outcome, start_time)
         except Exception as exc:
             self._log("error", f"Worker exception: {type(exc).__name__}: {str(exc)[:100]}")
             outcome.success = False
-            outcome.status = StepStatus.FAILED
             outcome.error = str(exc)
             outcome.termination_reason = f"exception: {type(exc).__name__}"
 
-        outcome.duration_ms = (time.time() - start_time) * 1000
+        outcome.metrics.duration_ms = (time.time() - start_time) * 1000
+
+        # Transfer entity_refs from context_window to outcome
+        for path in context_window.loaded_files:
+            if path not in outcome.entity_refs:
+                outcome.entity_refs.append(path)
+
         return outcome
 
     def _execute_loop(
         self,
-        context_pack: ContextPack,
+        context_window: ContextWindow,
         work_item: WorkItem,
         outcome: WorkerOutcome,
         start_time: float,
     ) -> None:
         """
-        Main execution loop with explicit action markers.
+        Main execution loop using ContextWindow.
 
-        CRITICAL: We don't auto-terminate on "no tool calls".
-        The LLM must explicitly indicate its intent via action markers.
-
-        Action types:
-        - TOOL: Execute tool calls
-        - FINAL: Done, this is the final answer
-        - NEED_CONTEXT: Need more info (will request tools next iteration)
-        - CONTINUE: Internal reasoning, continue loop
+        Uses ContextWindow for:
+        - Message serialization (to_messages())
+        - File deduplication (has_file(), add_file())
+        - Turn management (add_assistant_turn(), add_user_turn())
+        - Tool result tracking (add_tool_result_turn())
         """
-        llm_context = context_pack.to_llm_context()
-
-        # Build initial message history
-        messages: List[Dict[str, Any]] = self._build_initial_messages(
-            llm_context, work_item
-        )
-
-        # ========== AUTO-READ TARGET FILES ==========
-        # If target_paths specified, read them automatically so model has context
+        # ========== AUTO-READ TARGET FILES (PRE-LOOP) ==========
         if work_item.target_paths:
             self._log("debug", f"Auto-reading {len(work_item.target_paths)} target files")
-            file_contents = []
 
             for path in work_item.target_paths:
+                # Skip if already in context (dedup via ContextWindow)
+                if context_window.has_file(path):
+                    self._log("debug", f"  ⊘ Skipping {path} (already in context)")
+                    continue
+
                 try:
                     result = self.tool_registry.execute("file_read", path=path)
-                    outcome.tool_calls_made += 1
+                    outcome.metrics.tool_calls_made += 1
 
                     if result.is_success and result.output:
                         content = str(result.output)
-                        # Truncate very large files but keep enough for context
-                        if len(content) > 10000:
-                            content = content[:10000] + f"\n... [truncated, {len(result.output)} total chars]"
-                        file_contents.append(f"### {path}\n```\n{content}\n```")
-                        outcome.tool_calls_succeeded += 1
-                        outcome.entity_refs.append(path)
-                        self._log("debug", f"  ✓ Read {path} ({len(result.output)} chars)")
+                        # ContextWindow handles truncation in add_file()
+                        added = context_window.add_file(path, content)
+                        if added:
+                            outcome.metrics.tool_calls_succeeded += 1
+                            self._log("debug", f"  ✓ Read {path} ({len(content)} chars)")
+                        else:
+                            self._log("debug", f"  ⊘ {path} already in context")
                     else:
-                        file_contents.append(f"### {path}\n[ERROR: Could not read - {result.error}]")
-                        outcome.tool_calls_failed += 1
+                        outcome.metrics.tool_calls_failed += 1
                         self._log("warning", f"  ✗ Failed to read {path}: {result.error}")
                 except Exception as e:
-                    file_contents.append(f"### {path}\n[ERROR: {str(e)[:100]}]")
-                    outcome.tool_calls_failed += 1
+                    outcome.metrics.tool_calls_failed += 1
                     self._log("error", f"  ✗ Exception reading {path}: {e}")
-
-            # Inject file contents as authoritative context
-            if file_contents:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "═══════════════════════════════════════════════════════════════\n"
-                        "TARGET FILES (pre-loaded, authoritative - do NOT re-read or search):\n"
-                        "═══════════════════════════════════════════════════════════════\n\n" +
-                        "\n\n".join(file_contents) +
-                        "\n\n═══════════════════════════════════════════════════════════════\n"
-                        "You have the file content above. Use it directly. DO NOT call file_read on these paths.\n"
-                        "═══════════════════════════════════════════════════════════════"
-                    )
-                })
-
 
         iteration = 0
         final_content: Optional[str] = None
-        consecutive_no_action = 0  # Prevent infinite loops without explicit action
-
-        # ========== DELTA REASONING ENFORCEMENT ==========
-        # Track tool call signatures (name + args hash) to detect non-improving repeats
-        # Key: signature, Value: (result_hash, iteration)
-        tool_call_history: Dict[str, tuple] = {}
-
-        # Track delta violations - hard terminate after 2
-        delta_violations = 0
-        MAX_DELTA_VIOLATIONS = 2
-
-        # Track search→read sequence enforcement
-        pending_file_read = False  # True if search_filesystem was called but file_read hasn't been
-        search_tools = {"search_filesystem", "search", "find_files", "grep", "glob"}
-        read_tools = {"file_read", "read_file", "read", "cat"}
-
-        # Track recent tool names for simple loop detection
-        recent_tool_calls: List[str] = []
-        MAX_REPEATED_TOOL_CALLS = 2
+        consecutive_no_action = 0
 
         while True:
             # Check all bounds before proceeding
-            termination = self._check_bounds(
-                outcome, work_item, start_time, iteration
-            )
+            termination = self._check_bounds(outcome, work_item, start_time, iteration)
             if termination:
                 outcome.termination_reason = termination
                 break
 
             iteration += 1
 
-            # Call LLM with accumulated message history
+            # Get messages from ContextWindow
+            messages = context_window.to_messages()
+
+            # Call LLM with tools
             response = self._call_llm(messages, work_item, outcome)
-            outcome.llm_calls_made += 1
+            outcome.metrics.llm_calls_made += 1
 
             if not response:
                 outcome.termination_reason = "llm_error"
@@ -358,196 +346,312 @@ class Worker:
                     outcome.error = "LLM returned no response"
                 break
 
-            # Check if LLM wants to call tools (highest priority action)
+            # Check if LLM wants to call tools
             if self._has_tool_calls(response):
                 consecutive_no_action = 0
 
-                # Process tool calls and accumulate results
-                tool_records = self._process_tool_calls(response, outcome, work_item)
+                # Process tool calls
+                tool_exchanges = self._process_tool_calls(response, outcome, work_item)
 
-                # Feed tool results back to LLM via message history
-                self._append_tool_messages(messages, response, tool_records)
+                # Record tool exchanges in ContextWindow's tool history (for tracking/metrics)
+                context_window.add_tool_results_batch(tool_exchanges)
 
-                # Record observations
-                for record in tool_records:
-                    status_str = "success" if record.success else "failed"
-                    outcome.observations.append(
-                        f"Tool {record.tool_name}: {status_str}"
-                    )
-                    outcome.tool_results[record.tool_name]=status_str
-                # Force the model to digest tool outputs and decide next step (no tools allowed).
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "SYNTHESIS REQUIRED: Read the tool outputs above and do ONE of:\n"
-                        "1) Explain findings + next action.\n"
-                        "2) If objective is satisfied, output [FINAL] with a concise explanation.\n"
-                        "Do NOT call tools in this synthesis step."
-                    )
-                })
+                # Add assistant message with tool calls to ContextWindow
+                assistant_content = self._extract_content(response) or ""
+                tool_calls_for_msg = [
+                    {
+                        "id": ex.call_id,
+                        "type": "function",
+                        # Responses API requires arguments as JSON string, not dict
+                        "function": {
+                            "name": ex.tool_name,
+                            "arguments": json.dumps(ex.arguments) if isinstance(ex.arguments, dict) else ex.arguments,
+                        },
+                    }
+                    for ex in tool_exchanges
+                ]
+                context_window.add_assistant_turn(assistant_content, tool_calls_for_msg)
 
-                synth = self._call_llm_no_tools(messages, work_item, outcome)
-                outcome.llm_calls_made += 1
+                # Add tool results to ContextWindow
+                for ex in tool_exchanges:
+                    content = ex.result_content
+                    if not ex.success and ex.error:
+                        content = f"ERROR: {ex.error}\n{content}"
+                    context_window.add_tool_result_turn(ex.call_id, content)
+
+                # Synthesis step: force model to digest tool outputs
+                # Mark as system injection so it's not persisted as user conversation
+                context_window.add_user_turn(
+                    "SYNTHESIS REQUIRED: Read the tool outputs above and do ONE of:\n"
+                    "1) Explain findings + next action.\n"
+                    "2) If objective is satisfied, output [FINAL] with a concise explanation.\n"
+                    "Do NOT call tools in this synthesis step.",
+                    is_system_injection=True,
+                )
+
+                synth_messages = context_window.to_messages()
+                synth = self._call_llm_no_tools(synth_messages, outcome)
+                outcome.metrics.llm_calls_made += 1
 
                 content = self._extract_content(synth) if synth else None
                 self._log("debug", content or "")
-                if content:
-                    messages.append({"role": "assistant", "content": content})
 
-                # If it finalized, stop.
+                if content:
+                    context_window.add_assistant_turn(content)
+
+                # Check for action markers
                 action = self._extract_action(content)
                 if action == WorkerAction.FINAL:
                     final_content = self._strip_action_marker(content)
                     outcome.termination_reason = "completed"
                     break
-        
+
                 elif action == WorkerAction.NEED_CONTEXT:
-                    # LLM says it needs more context but didn't call tools
-                    # Give it one more chance, then fail
                     consecutive_no_action += 1
                     if consecutive_no_action >= 3:
                         outcome.termination_reason = "need_context_no_tools"
                         outcome.error = "LLM requested context but didn't call tools"
                         break
-                    # Add the response to history and continue
-                    messages.append({"role": "assistant", "content": content})
                     continue
 
                 elif action == WorkerAction.CONTINUE:
-                    # LLM wants to continue reasoning
                     consecutive_no_action += 1
                     if consecutive_no_action >= 3:
-                        # Too many continues without action - force termination
                         outcome.termination_reason = "max_continues"
                         outcome.error = "LLM continued reasoning without taking action"
                         break
-                    messages.append({"role": "assistant", "content": content})
                     continue
 
                 else:
                     # No explicit action marker - use heuristics
-                    # IMPORTANT: This is the fallback for LLMs that don't use markers
                     if content and len(content) > 50:
-                        # Substantive response without tools - treat as final
                         final_content = content
                         outcome.termination_reason = "implicit_final"
                         break
                     else:
-                        # Short/empty response without tools - probably incomplete
                         consecutive_no_action += 1
                         if consecutive_no_action >= 2:
                             outcome.termination_reason = "no_action"
                             outcome.error = "LLM returned content without action or tools"
                             break
-                        messages.append({"role": "assistant", "content": content or ""})
                         continue
 
-                # # ========== DELTA REASONING ENFORCEMENT ==========
-                # # Check each tool call for non-improving repeats and search→read sequence
-                # for record in tool_records:
-                #     tool_lower = record.tool_name.lower()
+            else:
+                # TEXT-ONLY RESPONSE (no tool calls)
+                content = self._extract_content(response)
+                self._log("debug", f"Text-only response (no tools): {len(content or '')} chars")
 
-                #     # ===== SEARCH→READ SEQUENCE ENFORCEMENT =====
-                #     if tool_lower in search_tools or any(s in tool_lower for s in search_tools):
-                #         if pending_file_read:
-                #             # VIOLATION: Called search again without reading results
-                #             self._log("error", f"SEQUENCE VIOLATION: Called '{record.tool_name}' but file_read is pending")
-                #             delta_violations += 1
-                #             outcome.observations.append(f"SEQUENCE_VIOLATION: search called without file_read")
+                if content:
+                    context_window.add_assistant_turn(content)
 
-                #             violation_msg = (
-                #                 f"\n\n🚫 SEQUENCE VIOLATION: You called '{record.tool_name}' but you haven't read any "
-                #                 f"files yet from your previous search. You MUST call file_read on a specific path "
-                #                 f"from your search results BEFORE searching again.\n\n"
-                #                 f"Your next action MUST be: file_read(path=<a specific path from search results>)"
-                #             )
-                #             messages.append({"role": "user", "content": violation_msg})
-                #         else:
-                #             # Mark that file_read is now required
-                #             pending_file_read = True
-                #             self._log("debug", f"Search tool called, file_read now pending")
+                action = self._extract_action(content)
+                if action == WorkerAction.FINAL:
+                    final_content = self._strip_action_marker(content)
+                    outcome.termination_reason = "completed"
+                    break
+                elif action == WorkerAction.NEED_CONTEXT:
+                    consecutive_no_action += 1
+                    if consecutive_no_action >= 3:
+                        outcome.termination_reason = "need_context_no_tools"
+                        outcome.error = "LLM requested context but didn't call tools"
+                        break
+                    continue
+                elif action == WorkerAction.CONTINUE:
+                    consecutive_no_action += 1
+                    if consecutive_no_action >= 3:
+                        outcome.termination_reason = "max_continues"
+                        outcome.error = "LLM continued reasoning without taking action"
+                        break
+                    continue
+                elif content and len(content) > 50:
+                    final_content = content
+                    outcome.termination_reason = "implicit_final"
+                    self._log("debug", f"Implicit final detected: {len(content)} chars")
+                    break
+                else:
+                    consecutive_no_action += 1
+                    if consecutive_no_action >= 2:
+                        outcome.termination_reason = "no_action"
+                        outcome.error = "LLM returned short response without action or tools"
+                        break
+                    continue
 
-                #     elif tool_lower in read_tools or any(r in tool_lower for r in read_tools):
-                #         # File read called - clear the pending flag
-                #         pending_file_read = False
-                #         self._log("debug", f"File read called, clearing pending flag")
-
-                #     # ===== SIGNATURE-BASED DELTA ENFORCEMENT =====
-                #     signature = self._compute_tool_signature(record.tool_name, record.arguments)
-                #     result_hash = self._compute_result_hash(record.result)
-
-                #     if signature in tool_call_history:
-                #         prev_result_hash, prev_iteration = tool_call_history[signature]
-
-                #         # Same tool+args called again - check if result changed
-                #         if result_hash == prev_result_hash:
-                #             # VIOLATION: Repeated call with no new evidence
-                #             delta_violations += 1
-                #             self._log("error", f"DELTA VIOLATION #{delta_violations}: Tool '{record.tool_name}' same args, same result")
-                #             self._log("error", f"  Previous call: iteration {prev_iteration}")
-
-                #             outcome.observations.append(f"DELTA_VIOLATION: {record.tool_name} repeated without new info")
-
-                #             if delta_violations >= MAX_DELTA_VIOLATIONS:
-                #                 # HARD TERMINATION after too many violations
-                #                 outcome.termination_reason = f"max_delta_violations:{record.tool_name}"
-                #                 outcome.error = (
-                #                     f"TERMINATED: {delta_violations} delta violations. Model is stuck repeating "
-                #                     f"'{record.tool_name}' without making progress. Unable to pivot."
-                #                 )
-                #                 self._log("error", f"HARD TERMINATION: {delta_violations} delta violations")
-                #                 break
-                #             else:
-                #                 # Inject pivot instruction
-                #                 pivot_msg = (
-                #                     f"\n\n⚠️ DELTA VIOLATION #{delta_violations}/{MAX_DELTA_VIOLATIONS}: "
-                #                     f"You called '{record.tool_name}' with the same arguments and got the same result.\n\n"
-                #                     f"MANDATORY PIVOT - You MUST now do ONE of:\n"
-                #                     f"1. file_read(path=<specific path>) - read actual file content\n"
-                #                     f"2. A COMPLETELY different tool with different purpose\n"
-                #                     f"3. [NEED_CONTEXT] with specific missing info\n\n"
-                #                     f"⚠️ ONE MORE VIOLATION = TERMINATION"
-                #                 )
-                #                 messages.append({"role": "user", "content": pivot_msg})
-                #         else:
-                #             # Same args but different result - that's fine, update history
-                #             tool_call_history[signature] = (result_hash, iteration)
-                #             self._log("debug", f"Tool '{record.tool_name}' same args but NEW result (delta detected)")
-                #     else:
-                #         # New tool call signature - record it
-                #         tool_call_history[signature] = (result_hash, iteration)
-
-                #     recent_tool_calls.append(record.tool_name)
-
-                # # Check if we should break due to delta violations
-                # if delta_violations >= MAX_DELTA_VIOLATIONS:
-                #     break
-
-                # # Keep only last N calls for simple loop detection
-                # if len(recent_tool_calls) > MAX_REPEATED_TOOL_CALLS * 2:
-                #     recent_tool_calls = recent_tool_calls[-MAX_REPEATED_TOOL_CALLS * 2:]
-
-                # # Check if same tool called repeatedly (simple name-based detection)
-                # if len(recent_tool_calls) >= MAX_REPEATED_TOOL_CALLS:
-                #     last_n = recent_tool_calls[-MAX_REPEATED_TOOL_CALLS:]
-                #     if len(set(last_n)) == 1:
-                #         stuck_tool = last_n[0]
-                #         self._log("warning", f"LOOP DETECTED: Tool '{stuck_tool}' called {MAX_REPEATED_TOOL_CALLS} times in a row")
-                #         outcome.termination_reason = f"tool_loop:{stuck_tool}"
-                #         outcome.error = (
-                #             f"Model stuck calling '{stuck_tool}' repeatedly. "
-                #             f"You must PIVOT: use file_read after search, or use [NEED_CONTEXT]."
-                #         )
-                #         break
-
-                # continue
-            # No tool calls - check for explicit action marker in content
-           # content = self._extract_content(response)
-        #    action = self._extract_action(content)
-
-            
-        # Determine success based on verifiable criteria
+        # Determine success
         self._determine_success(outcome, final_content, work_item)
+
+    def _call_llm(
+        self,
+        messages: List[Dict[str, Any]],
+        work_item: WorkItem,
+        outcome: WorkerOutcome,
+    ) -> Optional[Any]:
+        """Call LLM with tools using message list from ContextWindow."""
+        try:
+            tools = self.tool_registry.get_definitions(enabled_only=True)
+
+            if hasattr(self.llm, "respond_with_messages"):
+                response = self.llm.respond_with_messages(
+                    messages=messages,
+                    tools=tools,
+                    prompt_cache_key=self._cache_params.prompt_cache_key,
+                    prompt_cache_retention=self._cache_params.prompt_cache_retention,
+                    previous_response_id=self._last_response_id,
+                )
+                # Track response_id for stateful continuation
+                if hasattr(response, "response_id") and response.response_id:
+                    self._last_response_id = response.response_id
+                return response
+
+            # Fallback for LLMs without respond_with_messages
+            if hasattr(self.llm, "respond"):
+                tail = messages[-8:]
+                packed = "\n".join(
+                    f"{m.get('role', '?').upper()}: {m.get('content', '')}"
+                    for m in tail
+                    if m.get("content")
+                )
+                system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+                response = self.llm.respond(
+                    input=packed,
+                    instructions=system_msg,
+                    tools=tools,
+                    prompt_cache_key=self._cache_params.prompt_cache_key,
+                    prompt_cache_retention=self._cache_params.prompt_cache_retention,
+                    previous_response_id=self._last_response_id,
+                )
+                if hasattr(response, "response_id") and response.response_id:
+                    self._last_response_id = response.response_id
+                return response
+
+            outcome.error = "LLM adapter missing respond methods"
+            return None
+
+        except Exception as exc:
+            error_msg = f"LLM call failed: {type(exc).__name__}: {str(exc)[:200]}"
+            outcome.error = error_msg
+            self._log("error", error_msg)
+            return None
+
+    def _call_llm_no_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        outcome: WorkerOutcome,
+    ) -> Optional[Any]:
+        """Call LLM without tools (synthesis step)."""
+        try:
+            if hasattr(self.llm, "respond_with_messages"):
+                response = self.llm.respond_with_messages(
+                    messages=messages,
+                    tools=[],
+                    prompt_cache_key=self._cache_params.prompt_cache_key,
+                    prompt_cache_retention=self._cache_params.prompt_cache_retention,
+                    previous_response_id=self._last_response_id,
+                )
+                # Track response_id for stateful continuation
+                if hasattr(response, "response_id") and response.response_id:
+                    self._last_response_id = response.response_id
+                return response
+
+            if hasattr(self.llm, "respond"):
+                tail = messages[-10:]
+                packed = "\n".join(
+                    f"{m.get('role', '?').upper()}: {m.get('content', '')}"
+                    for m in tail
+                    if m.get("content")
+                )
+                system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+                response = self.llm.respond(
+                    input=packed,
+                    instructions=system_msg,
+                    tools=[],
+                    prompt_cache_key=self._cache_params.prompt_cache_key,
+                    prompt_cache_retention=self._cache_params.prompt_cache_retention,
+                    previous_response_id=self._last_response_id,
+                )
+                if hasattr(response, "response_id") and response.response_id:
+                    self._last_response_id = response.response_id
+                return response
+
+            return None
+        except Exception as exc:
+            error_msg = f"LLM(no-tools) failed: {type(exc).__name__}: {str(exc)[:200]}"
+            outcome.error = error_msg
+            self._log("error", error_msg)
+            return None
+
+    def _process_tool_calls(
+        self,
+        response: Any,
+        outcome: WorkerOutcome,
+        work_item: WorkItem,
+    ) -> List[ToolExchange]:
+        """Execute tool calls and return ToolExchange records."""
+        exchanges: List[ToolExchange] = []
+        tool_calls = getattr(response, "tool_calls", []) or []
+
+        self._log("debug", f"=== PROCESSING {len(tool_calls)} TOOL CALLS ===")
+
+        for tool_call in tool_calls:
+            if outcome.tool_calls_made >= work_item.bounds.max_tool_calls:
+                self._log("warning", f"Hit tool call limit ({work_item.bounds.max_tool_calls}), skipping remaining")
+                break
+
+            raw_args = getattr(tool_call, "arguments", {})
+            parsed_args = self._parse_tool_arguments(raw_args)
+
+            call_id = getattr(tool_call, "id", str(uuid.uuid4())[:8])
+            tool_name = getattr(tool_call, "name", "unknown")
+
+            self._log("debug", f"--- Executing Tool: {tool_name} ---")
+            self._log("debug", f"  call_id: {call_id}")
+            self._log("debug", f"  arguments: {json.dumps(parsed_args, default=str)[:500]}")
+
+            exchange = ToolExchange(
+                call_id=call_id,
+                tool_name=tool_name,
+                arguments=parsed_args,
+            )
+
+            try:
+                result = self.tool_registry.execute(tool_name, **parsed_args)
+                outcome.metrics.tool_calls_made += 1
+
+                if result.is_success:
+                    outcome.metrics.tool_calls_succeeded += 1
+                    exchange.success = True
+                    exchange.result_content = str(result.output)[:100000] if result.output else ""
+                    self._log("debug", f"  result: SUCCESS")
+
+                    # Record as KnowledgeFact
+                    outcome.facts.append(KnowledgeFact(
+                        key=f"tool:{tool_name}:result",
+                        value=str(result.output)[:10000] if result.output else "",
+                        confidence=0.9,
+                        source=FactSource.TOOL,
+                        tool_name=tool_name,
+                    ))
+
+                    # Track entity refs
+                    if result.metadata:
+                        path = result.metadata.get("path")
+                        if path:
+                            outcome.entity_refs.append(path)
+                else:
+                    outcome.metrics.tool_calls_failed += 1
+                    exchange.success = False
+                    exchange.error = result.error
+                    exchange.result_content = str(result.output)[:100000] if result.output else ""
+                    self._log("warning", f"  result: FAILED - {result.error}")
+
+            except Exception as exc:
+                outcome.metrics.tool_calls_made += 1
+                outcome.metrics.tool_calls_failed += 1
+                exchange.success = False
+                exchange.error = str(exc)
+
+            exchanges.append(exchange)
+
+        return exchanges
 
     def _extract_action(self, content: Optional[str]) -> Optional[WorkerAction]:
         if not content:
@@ -573,126 +677,6 @@ class Worker:
         # Remove ACTION: MARKER style
         content = re.sub(r'ACTION:\s*(?:FINAL|NEED_CONTEXT|CONTINUE)', '', content, flags=re.IGNORECASE)
         return content.strip()
-
-    def _build_initial_messages(
-        self, llm_context: Dict[str, Any], work_item: WorkItem
-    ) -> List[Dict[str, Any]]:
-        """Build initial message history for LLM."""
-        messages: List[Dict[str, Any]] = []
-
-        # System message with instructions
-        system_content = llm_context.get("instructions", "")
-
-        # Add action marker instructions with EXPLICIT PIVOT RULES
-        action_instructions = """
-
-═══════════════════════════════════════════════════════════════════════════════
-                    PROGRESS & PIVOT RULES (MANDATORY)
-═══════════════════════════════════════════════════════════════════════════════
-
-A tool call ONLY counts as progress if it changes your next action.
-
-After EVERY tool call, you must internally decide ONE of:
-  • "This result enables a NEW concrete action" → state it, then do it
-  • "This result shows the approach is WRONG" → PIVOT immediately
-  • "This result is INSUFFICIENT" → request a DIFFERENT tool
-
-═══════════════════════════════════════════════════════════════════════════════
-                         FORBIDDEN BEHAVIOR
-═══════════════════════════════════════════════════════════════════════════════
-
-🚫 Calling the same tool with the same arguments after it already returned results
-🚫 Repeating a tool call that did not enable a new step
-🚫 Calling search_filesystem multiple times without calling file_read in between
-🚫 "Exploring" or "investigating" without a concrete next action
-
-If a tool returns information you ALREADY HAD, you MUST pivot.
-If you cannot pivot, use [NEED_CONTEXT] and explicitly state:
-  - What SPECIFIC information is missing
-  - Which DIFFERENT tool will be called next and WHY
-
-═══════════════════════════════════════════════════════════════════════════════
-                    FILE ACCESS RULES (CRITICAL)
-═══════════════════════════════════════════════════════════════════════════════
-
-To READ code, you MUST call file_read with an EXPLICIT path.
-  • search_filesystem only LOCATES candidates (gives paths, not content)
-  • After search_filesystem, your NEXT action MUST be file_read OR a pivot
-
-CORRECT SEQUENCE:
-  1. search_filesystem → get list of paths
-  2. file_read(path=<specific path from step 1>) → get actual content
-  3. Now you can reason about the code
-
-WRONG (WILL LOOP):
-  1. search_filesystem → get list of paths
-  2. search_filesystem again with different query → FORBIDDEN
-  3. search_filesystem again... → INFINITE LOOP
-
-═══════════════════════════════════════════════════════════════════════════════
-                         DELTA REQUIREMENT
-═══════════════════════════════════════════════════════════════════════════════
-
-Before EVERY tool call, you must state in one line:
-  Tool Intent: <what NEW information this will provide>
-  Delta: <how this will change my next action>
-
-If you cannot state a clear delta, DO NOT make the tool call.
-
-═══════════════════════════════════════════════════════════════════════════════
-                      ACTION MARKERS (REQUIRED)
-═══════════════════════════════════════════════════════════════════════════════
-
-When NOT calling tools, you MUST use one of:
-
-[FINAL]
-  • You have completed the objective
-  • You MUST cite concrete evidence (file paths read, outputs received, artifacts created)
-  • If you cannot cite evidence, do NOT use [FINAL]
-
-[NEED_CONTEXT]
-  • You need information you cannot obtain with available tools
-  • You MUST specify: what is missing AND which different tool you will try next
-  • This is NOT an excuse to stall - it requires a pivot plan
-
-[CONTINUE]
-  • RARE - only for complex multi-step reasoning
-  • You MUST specify the IMMEDIATE next action
-  • If used more than once, you will be terminated
-
-═══════════════════════════════════════════════════════════════════════════════
-                       VALID RESPONSE TYPES
-═══════════════════════════════════════════════════════════════════════════════
-
-1. TOOL CALL - Preferred when it will produce NEW information
-2. [FINAL] + evidence - When objective is verifiably complete
-3. [NEED_CONTEXT] + pivot plan - When stuck but have a different approach
-4. [CONTINUE] + next action - RARE, for complex reasoning chains
-
-═══════════════════════════════════════════════════════════════════════════════
-                         OUTPUT QUALITY
-═══════════════════════════════════════════════════════════════════════════════
-
-• Be TERSE. No narration. State decision → act.
-• If uncertain, make the smallest tool call to reduce uncertainty.
-• If stuck, PIVOT immediately. Do not repeat failing approaches.
-"""
-
-        system_content += action_instructions
-
-        if llm_context.get("known_facts"):
-            system_content += f"\n\nKNOWN FACTS:\n{llm_context['known_facts']}"
-        if llm_context.get("work_summary"):
-            system_content += f"\n\nRECENT WORK:\n{llm_context['work_summary']}"
-
-        messages.append({"role": "system", "content": system_content})
-
-        # User message with objective
-        messages.append(
-            {"role": "user", "content": llm_context.get("objective", work_item.objective)}
-        )
-
-        return messages
 
     def _check_bounds(
         self,
@@ -722,151 +706,6 @@ When NOT calling tools, you MUST use one of:
             return "max_iterations"
 
         return None
-    
-    def _call_llm_no_tools(
-        self, messages: List[Dict[str, Any]], work_item: WorkItem, outcome: WorkerOutcome
-    ) -> Optional[Any]:
-        """
-        Force a synthesis step (no tool calls allowed) so the model must read tool outputs
-        and produce a decision / explanation.
-        """
-        try:
-            if hasattr(self.llm, "respond_with_messages"):
-                # Pass tools=[] so the model can't tool-call.
-                return self.llm.respond_with_messages(messages=messages, tools=[])
-            if hasattr(self.llm, "respond"):
-                # Same idea: omit tools entirely
-                tail = messages[-10:]
-                packed = "\n".join(
-                    f"{m.get('role','?').upper()}: {m.get('content','')}"
-                    for m in tail
-                    if m.get("content")
-                )
-                system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
-                return self.llm.respond(input=packed, instructions=system_msg, tools=[])
-            return None
-        except Exception as exc:
-            error_msg = f"LLM(no-tools) failed: {type(exc).__name__}: {str(exc)[:200]}"
-            outcome.observations.append(error_msg)
-            outcome.error = error_msg
-            self._log("error", error_msg)
-            return None
-
-
-    def _call_llm(self, messages: List[Dict[str, Any]], work_item: WorkItem, outcome: WorkerOutcome) -> Optional[Any]:
-        """
-        Call LLM with FULL message history so it can reason over tool outputs.
-        """
-        try:
-            tools = self.tool_registry.get_definitions(enabled_only=True)
-
-            # Preferred: message-based API (keeps full context window)
-            if hasattr(self.llm, "respond_with_messages"):
-                return self.llm.respond_with_messages(messages=messages, tools=tools)
-
-            # Fallback: if only respond() exists, at least pack history into input.
-            if hasattr(self.llm, "respond"):
-                # Keep this simple but NOT brain-dead: include recent tool outputs too.
-                # (Last ~8 messages is usually enough.)
-                tail = messages[-8:]
-                packed = "\n".join(
-                    f"{m.get('role','?').upper()}: {m.get('content','')}"
-                    for m in tail
-                    if m.get("content")
-                )
-
-                system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
-                return self.llm.respond(input=packed, instructions=system_msg, tools=tools)
-
-            outcome.observations.append("LLM adapter missing respond methods")
-            outcome.error = "LLM adapter missing respond methods"
-            return None
-
-        except Exception as exc:
-            error_msg = f"LLM call failed: {type(exc).__name__}: {str(exc)[:200]}"
-            outcome.observations.append(error_msg)
-            outcome.error = error_msg
-            self._log("error", error_msg)
-            return None
-
-    # def _cll_llm(
-    #     self, messages: List[Dict[str, Any]], work_item: WorkItem, outcome: WorkerOutcome
-    # ) -> Optional[Any]:
-    #     """
-    #     Call LLM with message history.
-    #     Records errors in outcome for debugging instead of silently swallowing.
-    #     FULL LOGGING of prompts and responses for debugging.
-    #     """
-    #     # ========== FULL LOGGING: LOG MESSAGES SENT ==========
-    #     self._log("debug", f"LLM call starting for step {work_item.step_num}")
-    #     self._log("debug", f"=== LLM REQUEST ({len(messages)} messages) ===")
-    #     for i, msg in enumerate(messages):
-    #         role = msg.get("role", "unknown")
-    #         content = msg.get("content", "")
-    #         tool_calls = msg.get("tool_calls", [])
-    #         # Log full content for debugging
-    #         content_preview = content[:500] if content else "(empty)"
-    #         self._log("debug", f"  [{i}] {role.upper()}: {content_preview}")
-    #         if tool_calls:
-    #             self._log("debug", f"      tool_calls: {len(tool_calls)} calls")
-    #             for tc in tool_calls:
-    #                 tc_name = tc.get("function", {}).get("name", "unknown") if isinstance(tc, dict) else "unknown"
-    #                 self._log("debug", f"        - {tc_name}")
-
-    #     try:
-    #         response = None
-    #         # # Try message-based API first (preferred)
-    #         # if hasattr(self.llm, "respond_with_messages"):
-    #         #     # response = self.llm.respond_with_messages(
-    #         #     #     messages=messages,
-    #         #     #     tools=self.tool_registry.get_definitions(enabled_only=True),
-    #         #     # )
-    #         #     i = 0
-    #         # # Fall back to simple respond API
-    #         # elif hasattr(self.llm, "respond"):
-    #         #     # Extract last user message for simple API
-    #         user_msg = next(
-    #             (m["content"] for m in reversed(messages) if m["role"] == "user"),
-    #             work_item.objective,
-    #         )
-    #         system_msg = next(
-    #             (m["content"] for m in messages if m["role"] == "system"), ""
-    #         )
-    #         response = self.llm.respond(
-    #             input=user_msg,
-    #             instructions=system_msg,
-    #             tools=self.tool_registry.get_definitions(enabled_only=True),
-    #             )
-    #      ##   else:
-    #         # outcome.observations.append("LLM adapter missing respond methods")
-    #         # self._log("error", "LLM adapter missing respond methods")
-    #         # return None
-
-    #         # ========== FULL LOGGING: LOG RESPONSE RECEIVED ==========
-    #         if response:
-    #             response_content = getattr(response, "content", None) or ""
-    #             response_tool_calls = getattr(response, "tool_calls", []) or []
-    #             has_tools = len(response_tool_calls) > 0
-
-    #             self._log("debug", f"=== LLM RESPONSE ===")
-    #             self._log("debug", f"  content ({len(response_content)} chars): {response_content[:500] if response_content else '(empty)'}")
-    #             self._log("debug", f"  has_tool_calls: {has_tools}")
-    #             if has_tools:
-    #                 for tc in response_tool_calls:
-    #                     tc_name = getattr(tc, "name", "unknown")
-    #                     tc_args = getattr(tc, "arguments", {})
-    #                     self._log("debug", f"    TOOL CALL: {tc_name}")
-    #                     self._log("debug", f"      args: {tc_args}")
-
-    #         return response
-
-    #     except Exception as exc:
-    #         # Record the error for debugging instead of silently swallowing
-    #         error_msg = f"LLM call failed: {type(exc).__name__}: {str(exc)[:200]}"
-    #         outcome.observations.append(error_msg)
-    #         outcome.error = error_msg
-    #         self._log("error", error_msg)
-    #         return None
 
     def _has_tool_calls(self, response: Any) -> bool:
         """Check if LLM response contains tool calls."""
@@ -883,30 +722,6 @@ When NOT calling tools, you MUST use one of:
         if isinstance(response, dict):
             return response.get("content")
         return str(response) if response else None
-
-    def _compute_tool_signature(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """
-        Compute a stable signature for a tool call (name + args).
-        Used to detect repeated calls with same arguments.
-        """
-        import hashlib
-        # Sort args for stable ordering
-        sorted_args = json.dumps(arguments, sort_keys=True, default=str)
-        sig_str = f"{tool_name}:{sorted_args}"
-        return hashlib.md5(sig_str.encode()).hexdigest()
-
-    def _compute_result_hash(self, result: Optional[ToolResult]) -> str:
-        """
-        Compute a hash of tool result to detect if repeated call gave same result.
-        """
-        import hashlib
-        if result is None:
-            return "none"
-        # Hash the output content
-        output_str = str(result.output) if result.output else ""
-        error_str = str(result.error) if result.error else ""
-        combined = f"{result.is_success}:{output_str[:1000]}:{error_str}"
-        return hashlib.md5(combined.encode()).hexdigest()
 
     def _parse_tool_arguments(self, raw_args: Any) -> Dict[str, Any]:
         """
@@ -941,259 +756,48 @@ When NOT calling tools, you MUST use one of:
         # Unknown type - try to convert
         return {"value": raw_args}
 
-    def _process_tool_calls(
-        self, response: Any, outcome: WorkerOutcome, work_item: WorkItem
-    ) -> List[ToolCallRecord]:
-        """Execute tool calls and return records. FULL LOGGING for debugging."""
-        records: List[ToolCallRecord] = []
-
-        tool_calls = getattr(response, "tool_calls", []) or []
-
-        self._log("debug", f"=== PROCESSING {len(tool_calls)} TOOL CALLS ===")
-
-        for tool_call in tool_calls:
-            # Check if we've hit tool limit mid-batch
-            if outcome.tool_calls_made >= work_item.bounds.max_tool_calls:
-                self._log("warning", f"Hit tool call limit ({work_item.bounds.max_tool_calls}), skipping remaining")
-                break
-
-            # Robustly parse arguments (handles JSON string case)
-            raw_args = getattr(tool_call, "arguments", {})
-            parsed_args = self._parse_tool_arguments(raw_args)
-
-            record = ToolCallRecord(
-                call_id=getattr(tool_call, "id", str(uuid.uuid4())[:8]),
-                tool_name=getattr(tool_call, "name", "unknown"),
-                arguments=parsed_args,
-            )
-
-            # ========== FULL LOGGING: TOOL CALL DETAILS ==========
-            self._log("debug", f"--- Executing Tool: {record.tool_name} ---")
-            self._log("debug", f"  call_id: {record.call_id}")
-            self._log("debug", f"  arguments: {json.dumps(parsed_args, default=str)[:500]}")
-
-            try:
-                result = self.tool_registry.execute(
-                    record.tool_name, **record.arguments
-                )
-                record.result = result
-                record.success = result.is_success
-
-                outcome.tool_calls_made += 1
-                if record.success:
-                    outcome.tool_calls_succeeded += 1
-                    output_preview = str(result.output)[:5000] if result.output else "(no output)"
-                    self._log("debug", f"  result: SUCCESS")
-                    self._log("debug", f"  output: {output_preview}")
-                else:
-                    outcome.tool_calls_failed += 1
-                    self._log("warning", f"  result: FAILED - {result.error}")
-
-                # Extract entity references from metadata
-                if result.metadata:
-                    path = result.metadata.get("path")
-                    if path:
-                        outcome.entity_refs.append(path)
-
-                # Record evidence suggestion
-                outcome.suggested_evidence.append(
-                    {
-                        "type": "tool_output",
-                        "tool_name": record.tool_name,
-                        "output": str(result.output)[:5000] if result.output else None,
-                        "success": record.success,
-                    }
-                )
-
-            except Exception as exc:
-                record.success = False
-                record.error = str(exc)
-                outcome.tool_calls_made += 1
-                outcome.tool_calls_failed += 1
-
-            records.append(record)
-
-        return records
-
-    def _append_tool_messages(
-        self,
-        messages: List[Dict[str, Any]],
-        response: Any,
-        tool_records: List[ToolCallRecord],
-    ) -> None:
-        """
-        Append assistant's tool call request and tool results to message history.
-        This is critical for the LLM to see tool results on subsequent calls.
-        """
-        # Add assistant message with tool calls
-        assistant_msg: Dict[str, Any] = {"role": "assistant"}
-
-        # Include any text content from assistant
-        if hasattr(response, "content") and response.content:
-            assistant_msg["content"] = response.content
-
-        # Include tool calls in format the LLM expects
-        assistant_msg["tool_calls"] = [
-            {
-                "id": record.call_id,
-                "type": "function",
-                "function": {
-                    "name": record.tool_name,
-                    "arguments": record.arguments,
-                },
-            }
-            for record in tool_records
-        ]
-        messages.append(assistant_msg)
-
-        # Add tool result messages
-        for record in tool_records:
-            if record.result:
-                content = str(record.result.output)[:5000] if record.result.output else ""
-                if not record.success and record.result.error:
-                    content = f"ERROR: {record.result.error}\n{content}"
-            elif record.error:
-                content = f"ERROR: {record.error}"
-            else:
-                content = "No output"
-
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": record.call_id,
-                    "content": content,
-                }
-            )
-
     def _determine_success(
         self, outcome: WorkerOutcome, final_content: Optional[str], work_item: WorkItem
     ) -> None:
         """
-        Determine success using completion_claim + evidence pattern.
+        Determine success based on completion claim and evidence.
 
-        SEMANTICS:
-        - success = True means "objective verifiably satisfied"
-        - made_progress = True means "tools succeeded or facts discovered"
-        - success_level provides 3-level granularity (SUCCESS/PARTIAL/FAILED)
+        Simplified logic:
+        - SUCCESS: explicit [FINAL] marker + evidence (facts or entity_refs)
+        - SUCCESS: Q&A case - substantive response without needing tools
+        - FAILED: otherwise
 
-        RULES:
-        - SUCCESS: explicit [FINAL] + evidence → success=True, made_progress=True, status=COMPLETED
-        - PARTIAL: progress made but no completion claim → success=False, made_progress=True, status=FAILED
-        - FAILED: no progress → success=False, made_progress=False, status=FAILED
-
-        completion_claim requires explicit [FINAL] marker by default.
-        Set config.allow_implicit_finals=True to accept substantive responses without [FINAL].
+        The Wizard uses outcome.made_progress (property) for nuanced retry decisions.
         """
         outcome.final_response = final_content
 
-        # Step 1: Collect completion evidence from successful tool outputs
-        completion_evidence: List[str] = []
+        # Collect evidence
+        has_evidence = len(outcome.entity_refs) > 0 or len(outcome.facts) > 0
 
-        # Entity refs are strong evidence (files touched, paths accessed)
-        completion_evidence.extend(outcome.entity_refs)
-
-        # Successful tool outputs are evidence
-        for ev in outcome.suggested_evidence:
-            if ev.get("success"):
-                tool_name = ev.get("tool_name", "")
-                evidence_id = f"{tool_name}:success"
-                if evidence_id not in completion_evidence:
-                    completion_evidence.append(evidence_id)
-
-        outcome.completion_evidence = completion_evidence
-
-        # Step 2: Determine completion_claim
-        # By default, only explicit [FINAL] marker counts as a completion claim
-      #  explicit_final = outcome.termination_reason == "completed"  # Had [FINAL] marker
+        # Determine if worker claimed completion
         explicit_final = outcome.termination_reason in ("completed", "implicit_final")
         has_final_response = bool(final_content and len(final_content) > 30)
 
+        completion_claim = explicit_final
         if self.config.allow_implicit_finals:
-            # Allow substantive responses without [FINAL] to count as claims
-            outcome.completion_claim = explicit_final or has_final_response
-        else:
-            # Strict mode: only [FINAL] marker counts
-            outcome.completion_claim = explicit_final
+            completion_claim = explicit_final or has_final_response
 
-        # Step 3: Determine made_progress (separate from success)
-        outcome.made_progress = (
-            outcome.tool_calls_succeeded > 0 or
-            len(outcome.suggested_facts) > 0 or
-            len(completion_evidence) > 0
-        )
-
-        # Step 4: Apply rules to determine success_level and success
-        # success = True ONLY for SUCCESS (objective verified satisfied)
-        # PARTIAL/FAILED → success = False
-
-        if outcome.completion_claim and len(completion_evidence) > 0:
+        # Determine success
+        if completion_claim and has_evidence:
             # SUCCESS: Claimed completion with evidence
-            outcome.success_level = SuccessLevel.SUCCESS
             outcome.success = True
-            outcome.verification_notes = f"Completion claimed with {len(completion_evidence)} evidence items"
 
-        elif outcome.completion_claim and has_final_response and outcome.tool_calls_made == 0:
+        elif completion_claim and has_final_response and outcome.metrics.tool_calls_made == 0:
             # SUCCESS for Q&A: Substantive response without needing tools
-            # This handles knowledge questions where no tool calls are required
-            outcome.success_level = SuccessLevel.SUCCESS
             outcome.success = True
-            outcome.made_progress = True
-            outcome.verification_notes = "Substantive response provided (no tools required)"
-
-        elif outcome.made_progress:
-            # PARTIAL: Made progress but didn't claim completion (or claim without evidence)
-            outcome.success_level = SuccessLevel.PARTIAL
-            outcome.success = False  # Objective NOT satisfied
-            notes_parts = [
-                f"{outcome.tool_calls_succeeded} tools succeeded",
-                f"{len(outcome.suggested_facts)} facts discovered",
-            ]
-            outcome.verification_notes = f"Partial progress: {', '.join(notes_parts)}"
-
-            if outcome.completion_claim and len(completion_evidence) == 0:
-                outcome.verification_notes += " (claimed completion but no evidence)"
-                outcome.error = "Claimed completion but no verifiable evidence"
-            elif not outcome.completion_claim:
-                outcome.verification_notes += " (no explicit [FINAL] marker)"
 
         else:
-            # FAILED: No progress
-            outcome.success_level = SuccessLevel.FAILED
+            # FAILED: No completion claim or no evidence
             outcome.success = False
-            if outcome.tool_calls_failed > 0:
-                outcome.verification_notes = f"All {outcome.tool_calls_failed} tool calls failed"
-                outcome.error = f"All {outcome.tool_calls_failed} tool calls failed"
-            elif outcome.tool_calls_made == 0 and not has_final_response:
-                outcome.verification_notes = "No tools called and no substantive response"
-                outcome.error = "No progress made"
-            else:
-                outcome.verification_notes = "Failed to complete objective"
-                outcome.error = outcome.error or "Failed to complete objective"
-
-        # Step 5: Create detailed VerificationResult for debugging
-        outcome.verification_result = VerificationResult(
-            passed=outcome.success,
-            evidence_found=completion_evidence[:10],
-            verification_method="completion_claim_evidence",
-            notes=outcome.verification_notes,
-            criteria_checked=["completion_claim", "completion_evidence"],
-            criteria_passed=(
-                ["completion_claim"] if outcome.completion_claim else []
-            ) + (
-                ["completion_evidence"] if len(completion_evidence) > 0 else []
-            ),
-            criteria_failed=(
-                [] if outcome.completion_claim else ["completion_claim"]
-            ) + (
-                [] if len(completion_evidence) > 0 else ["completion_evidence"]
-            ),
-        )
-
-        # Step 6: Map to StepStatus
-        # Only SUCCESS → COMPLETED, everything else → FAILED
-        if outcome.success_level == SuccessLevel.SUCCESS:
-            outcome.status = StepStatus.COMPLETED
-        else:
-            # PARTIAL and FAILED both map to FAILED status
-            # Wizard uses success_level and made_progress for nuanced decisions
-            outcome.status = StepStatus.FAILED
+            if not outcome.error:
+                if outcome.metrics.tool_calls_failed > 0 and outcome.metrics.tool_calls_succeeded == 0:
+                    outcome.error = f"All {outcome.metrics.tool_calls_failed} tool calls failed"
+                elif outcome.metrics.tool_calls_made == 0 and not has_final_response:
+                    outcome.error = "No tools called and no substantive response"
+                elif not completion_claim:
+                    outcome.error = "No explicit completion claim ([FINAL] marker)"

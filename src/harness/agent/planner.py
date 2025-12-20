@@ -37,10 +37,17 @@ class Planner:
     The key insight: know what success looks like BEFORE you start.
     """
 
-    def __init__(self, llm: LLMAdapter, tool_registry: ToolRegistry, enable_scouting: bool = True):
+    def __init__(
+        self,
+        llm: LLMAdapter,
+        tool_registry: ToolRegistry,
+        enable_scouting: bool = True,
+        graphd_client: Optional[Any] = None,
+    ):
         self.llm = llm
         self.tool_registry = tool_registry
         self._tracer = get_tracer()
+        self._graphd_client = graphd_client
         # NO logger - Planner doesn't log, Agent does
 
         # Store last LLM call details for logging by Agent
@@ -57,6 +64,9 @@ class Planner:
             try:
                 from .context_scout import ContextScout
                 self._scout = ContextScout(tool_registry)
+                # Wire up GraphDB if available
+                if self._graphd_client and self._scout:
+                    self._scout.set_graph_db(self._graphd_client)
             except ImportError:
                 self._enable_scouting = False
 

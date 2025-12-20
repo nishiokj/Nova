@@ -33,14 +33,18 @@ Selective Context Injection:
 - Future: GraphDB summaries, file relations
 """
 
+import logging
 import re
 import time
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from .tool_registry import ToolRegistry, ToolResult
+
+logger = logging.getLogger(__name__)
 
 
 class FileImportance(Enum):
@@ -112,6 +116,11 @@ class ContextSnapshot:
             lines.append("=" * 60)
             for fc in primary_files:
                 lines.append(f"\n### {fc.path} ({fc.size} bytes)")
+                # Include GraphDB metadata if available
+                if fc.summary:
+                    lines.append(f"Summary: {fc.summary}")
+                if fc.relations:
+                    lines.append(f"Relations: {', '.join(fc.relations[:5])}")
                 if fc.content:
                     lines.append("```")
                     lines.append(fc.content)
@@ -123,6 +132,10 @@ class ContextSnapshot:
             lines.append("\nSECONDARY FILES (extended preview):")
             for fc in secondary_files:
                 lines.append(f"  ✓ {fc.path} ({fc.size} bytes)")
+                if fc.summary:
+                    lines.append(f"    Summary: {fc.summary}")
+                if fc.relations:
+                    lines.append(f"    Relations: {', '.join(fc.relations[:3])}")
                 if fc.preview:
                     lines.append(f"    Preview: {fc.preview[:300]}...")
 
@@ -469,11 +482,9 @@ class ContextScout:
                         preview=content[:200] if content else None
                     )
 
-                # Future: Add GraphDB metadata
+                # GraphDB metadata enrichment
                 if self._graph_db:
-                    # file_ctx.summary = self._graph_db.get_file_summary(path)
-                    # file_ctx.relations = self._graph_db.get_file_relations(path)
-                    pass
+                    self._enrich_file_context_from_graphdb(file_ctx)
 
                 snapshot.files[path] = file_ctx
 
@@ -572,6 +583,85 @@ class ContextScout:
 
         except Exception as e:
             snapshot.errors.append(f"Error searching for {term}: {str(e)[:50]}")
+
+    def _enrich_file_context_from_graphdb(self, file_ctx: FileContext) -> None:
+        """
+        Enrich file context with GraphDB metadata.
+
+        Queries GraphDB for:
+        - File relations (imports/importers) via impact analysis
+        - Symbol summary (what's defined in this file)
+
+        Updates file_ctx.summary and file_ctx.relations in place.
+        """
+        if not self._graph_db:
+            return
+
+        path = file_ctx.path
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+        # Query impact to get imports/importers
+        # Use "modify" as change_type - it's a valid type that returns useful import data
+        try:
+            impact_result = self._graph_db.impact({
+                "entity": {"type": "file", "path": path},
+                "change_type": "modify",
+                "budget": 5,
+            })
+
+            if impact_result and "error" in impact_result:
+                logger.warning(
+                    "[%s] Scout GraphDB impact error for %s: %s",
+                    timestamp, path, impact_result["error"]
+                )
+            elif impact_result:
+                impact_items = impact_result.get("impact_items", [])
+                if impact_items:
+                    # Extract relations
+                    relations = []
+                    for item in impact_items:
+                        kind = item.get("kind", "")
+                        target = item.get("target", "")
+                        if target:
+                            relations.append(f"{kind}: {target}")
+                    if relations:
+                        file_ctx.relations = relations[:10]
+                        logger.info(
+                            "[%s] Scout injecting GraphDB relations for %s: %s",
+                            timestamp, path, relations[:10]
+                        )
+        except Exception as e:
+            logger.warning(
+                "[%s] Scout GraphDB impact exception for %s: %s",
+                timestamp, path, str(e)[:100]
+            )
+
+        # Try to get symbol info for summary
+        # Query symbol at line 1 to get file-level info
+        try:
+            symbol_result = self._graph_db.symbol(path, 1)
+            if symbol_result and "error" in symbol_result:
+                logger.warning(
+                    "[%s] Scout GraphDB symbol error for %s: %s",
+                    timestamp, path, symbol_result["error"]
+                )
+            elif symbol_result:
+                symbol = symbol_result.get("symbol")
+                if symbol:
+                    name = symbol.get("name", "")
+                    kind = symbol.get("kind", "")
+                    sig = symbol.get("sig", "")
+                    if name:
+                        file_ctx.summary = f"{kind}: {name}" + (f" - {sig[:50]}" if sig else "")
+                        logger.info(
+                            "[%s] Scout injecting GraphDB summary for %s: %s",
+                            timestamp, path, file_ctx.summary
+                        )
+        except Exception as e:
+            logger.warning(
+                "[%s] Scout GraphDB symbol exception for %s: %s",
+                timestamp, path, str(e)[:100]
+            )
 
 
 def should_scout(user_input: str) -> bool:

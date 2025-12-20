@@ -35,9 +35,11 @@ from .plan_models import (
     ExecutionTrace,
     Reflection,
     PlanStatus,
-    PlanPhase,
+#    PlanPhase,
     ToolCallRecord,
 )
+from .wizard import convert_plan_to_wizard_plan
+from .wizard.context_window import ContextWindow, SystemPrompt, BehavioralRules
 from util.resilience import CircuitBreakerOpenError
 from harness.context_manager import (
     ContextState,
@@ -239,7 +241,7 @@ class Agent:
         self._executor: Optional[Executor] = None
         self._reflector: Optional[Reflector] = None
         if self._llm:
-            self._planner = Planner(self._llm, tool_registry)
+            self._planner = Planner(self._llm, tool_registry, graphd_client=self._graphd_client)
             self._executor = Executor(self._llm, tool_registry, config.max_tool_calls, graphd_client=self._graphd_client)
             self._reflector = Reflector(self._llm, tool_registry)
             if self._executor:
@@ -255,6 +257,7 @@ class Agent:
                 llm=self._llm,
                 config=WizardConfig(),
                 logger=self.logger,
+                graphd_client=self._graphd_client,
             )
 
         # ========== CONTEXT MANAGER INTEGRATION ==========
@@ -1007,7 +1010,8 @@ class Agent:
         context: Optional[str] = None,
         budget: Optional[Dict[str, int]] = None,
         classification: Optional[Any] = None,
-        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+        session_context: Optional[Dict[str, Any]] = None,
     ) -> AgentResponse:
         """
         Run the agent using Plan → Execute → Reflect architecture.
@@ -1023,6 +1027,9 @@ class Agent:
             classification: Full TaskClassification for logging
             on_stream_chunk: Optional callback for streaming final response synthesis.
                             Called with (chunk: str, chunk_index: int, is_final: bool)
+            session_context: Optional context from graphd session for hydration.
+                            Contains previous turns, tool history, and cache state.
+                            This enables multi-turn conversation continuity.
 
         Returns:
             AgentResponse with content, plan, and reflection
@@ -1075,521 +1082,71 @@ class Agent:
                     self._current_request_id = None
                     return fast_response
 
-        # ========== WIZARD ORCHESTRATION PATH (feature-flagged) ==========
-        # Only invoked for tasks that need planning/execution, not simple questions
-        if self._use_wizard and self._wizard and self._planner:
-            from .wizard import convert_plan_to_wizard_plan
-            # Create plan using existing planner
-            plan = self._planner.create_plan(
-                user_input=user_input,
-                context=context,
-                tier=self.config.tier,
-                budget=budget
-            )
-            # Convert to WizardPlan format
-            wizard_plan = convert_plan_to_wizard_plan(plan)
-            result = self._wizard.orchestrate(
-                plan=wizard_plan,
-                budget=budget,
-                on_stream_chunk=on_stream_chunk
-            )
-            return AgentResponse(
-                content=result.final_response,
-                structured_action=result.plan_state.goal,
-                total_duration_ms=result.duration_ms,
-                success=result.success,
-                goal_achieved=result.goal_achieved,
-                reflection=result.to_reflection(),
-                metadata=result.to_dict().get("metadata", {}),
-            )
-
-        # ========== CONTEXT MANAGER WORKFLOW ==========
-        with self._perf_tracer.span("context_manager_workflow"):
-            # 1. Build context for request
-            with self._perf_tracer.span("context_build"):
-                context_build = ContextBuild.from_request(
-                    state=self.context_state,
-                    request_id=self.logger.request_id or str(uuid.uuid4()),
-                    user_request=full_input,
-                    tier=self.config.tier,
-                    tool_trace=self.tool_trace,
-                    artifacts=self.artifacts,
-                    recent_file_operations=list(self._file_operations),
-                    working_dir=os.getcwd(),
-                    token_estimator=self.token_estimator
-                )
-
-            # 2. Plan context (allocate budgets, decide caching)
-            with self._perf_tracer.span("context_plan"):
-                total_budget = 180_000  # Claude's context window
-                context_plan = self.context_planner.plan(
-                    build=context_build,
-                    total_budget=total_budget,
-                    cache_strategy=CacheStrategy.CONSERVATIVE
-                )
-
-            # 3. Serialize to API format
-            with self._perf_tracer.span("context_serialize"):
-                serialization_result = self.context_serializer.serialize(
-                    plan=context_plan,
-                    build=context_build,
-                    provider=self._llm_config.provider if self._llm_config else "anthropic",
-                    use_responses_api=True  # Enable Responses API format for OpenAI
-                )
-
-        if not serialization_result.success:
-            self.logger.error(
-                f"Context serialization failed: {serialization_result.error}",
-                component="agent"
-            )
-            self._current_request_id = None
-            return AgentResponse(
-                content="Failed to prepare context for LLM",
-                success=False,
-                error=serialization_result.error
-            )
-
-        # 4. STAGE 1: Log agent context (THICK LOGGING)
-        self._log_stage_1_agent_context(
-            serialization_result=serialization_result,
-            user_input=full_input,
+        # ========== WIZARD ORCHESTRATION PATH ==========
+        # Create plan using existing planner
+        plan = self._planner.create_plan(
+            user_input=user_input,
+            context=context,
             tier=self.config.tier,
-            context_plan=context_plan
+            budget=budget
+        )
+        # Convert to WizardPlan format
+        wizard_plan = convert_plan_to_wizard_plan(plan)
+
+        # ========== HYDRATE CONTEXT WINDOW FROM SESSION ==========
+        # If session_context dict is provided, parse it into an actual ContextWindow.
+        # This is THE key to session statefulness - the ContextWindow carries:
+        # - Previous conversation turns
+        # - Files already read (for dedup)
+        # - Tool history
+        # - Responses API state (previous_response_id, cache keys)
+        hydrated_context_window: Optional[ContextWindow] = None
+        if session_context:
+            try:
+                # Create a minimal system prompt - Wizard will update it per step
+                initial_system_prompt = SystemPrompt(
+                    goal=wizard_plan.goal,
+                    step_num=0,
+                    objective=user_input,
+                )
+                hydrated_context_window = ContextWindow.from_session_dict(
+                    data=session_context,
+                    system_prompt=initial_system_prompt,
+                )
+                self.logger.info(
+                    f"Hydrated ContextWindow from session: {len(session_context.get('turns', []))} turns, "
+                    f"{len(session_context.get('already_read', []))} files read",
+                    component="agent"
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to hydrate ContextWindow from session: {e}",
+                    component="agent"
+                )
+                hydrated_context_window = None
+
+        result = self._wizard.orchestrate(
+            plan=wizard_plan,
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
+            context_window=hydrated_context_window,
         )
 
-        # Build legacy messages for compatibility with executor
-        # (Will be replaced with ContextManager in executor later)
-        # system_prompt = self._build_system_prompt()
-        # messages = [Message(MessageRole.SYSTEM, system_prompt)]
-        # messages.extend(self._conversation)
-        # messages.append(Message(MessageRole.USER, full_input))
+        # Build metadata including final context state for session persistence
+        response_metadata = result.to_dict().get("metadata", {})
+        if result.final_context_state:
+            response_metadata["final_context_state"] = result.final_context_state
 
-        # Get tool definitions
-        tool_definitions = self._get_tool_definitions()
-
-        # ========== LOG FULL AGENT CONTEXT ==========
-        # Extract tool names only (not full schemas)
-        tool_names = [
-            td.get("function", {}).get("name") if isinstance(td, dict) else getattr(td, "name", "unknown")
-            for td in tool_definitions
-        ]
-
-        self.exec_logger.log_agent_context(
-            req_id=req_id,
-            exec_id=exec_id,
-            user_input=full_input,
-            tier=self.config.tier,
-            system_prompt_id=f"tier_{self.config.tier}_v1",
-            tool_manifest_id="default_tools_v1",
-            conversation_history=[],  # No longer tracking conversation history
-            tool_names=tool_names,
-            additional_context={"context_provided": context} if context else None
+        return AgentResponse(
+            content=result.final_response,
+            structured_action=result.plan_state.goal,
+            total_duration_ms=result.duration_ms,
+            success=result.success,
+            goal_achieved=result.goal_achieved,
+            reflection=result.to_reflection(),
+            metadata=response_metadata,
         )
 
-        try:
-            # ========== PHASE 1: PLANNING ==========
-            with self._perf_tracer.span("phase1_planning"):
-                self._current_state = AgentState.PLANNING
-                self._publish_agent_progress("Planning started", step_number=0)
-                self._emit_thought("Creating execution plan...")
-
-                with self._perf_tracer.span("planner_create_plan", tier=self.config.tier):
-                    plan = self._planner.create_plan(
-                        user_input=user_input,
-                        context=context,
-                        tier=self.config.tier,
-                        budget=self._budget  # Pass budget constraints from router
-                    )
-
-                self._perf_tracer.add_metadata("plan_steps", len(plan.steps))
-                self._perf_tracer.add_metadata("plan_type", plan.goal_type)
-
-                self.logger.plan_created(
-                    f"Plan: {plan.goal_type} - {plan.goal[:60]}",
-                    tools=[s.tool_hint for s in plan.steps if s.tool_hint]
-                )
-            if plan.assumptions:
-                self._emit_thought(f"Assumptions: {', '.join(plan.assumptions[:4])}")
-            self._publish_agent_progress(f"Plan ready ({len(plan.steps)} steps)", step_number=0)
-
-            # STAGE 2: Log planning result
-            self._log_stage_2_planning_result(
-                plan=plan,
-                user_input=user_input,
-                tier=self.config.tier
-            )
-
-            # LOG FULL PLANNER CALL - NO TRUNCATION
-            # This writes to full_execution.jsonl with complete prompts and responses
-            if self._agent_logger and self._planner:
-                try:
-                    parsed_plan_dict = plan.to_dict() if hasattr(plan, 'to_dict') else None
-                    self._agent_logger.log_planner_call(
-                        user_input=user_input,
-                        instructions=self._planner.last_call_instructions,
-                        input_str=self._planner.last_call_input,
-                        raw_response=self._planner.last_call_response,
-                        parsed_plan=parsed_plan_dict,
-                        tier=self.config.tier,
-                        duration_ms=self._planner.last_call_duration_ms
-                    )
-                except Exception as e:
-                    self.logger.error(f"Failed to log planner call: {e}", component="agent")
-
-            # ========== LOG PLANNING RESULT ==========
-            self.exec_logger.log_planning_result(
-                req_id=req_id,
-                exec_id=exec_id,
-                goal=plan.goal,
-                goal_type=plan.goal_type,
-                requires_tools=plan.requires_tools,
-                steps=[
-                    {
-                        "step_num": s.step_num,
-                        "objective": s.objective,
-                        "tool_hint": s.tool_hint,
-                        "tool_args_hint": s.tool_args_hint,
-                        "success_criteria": s.success_criteria.description if s.success_criteria else None,
-                        "depends_on": s.depends_on,
-                        "status": s.status.value,
-                        "phase": s.phase.value
-                    }
-                    for s in plan.steps
-                ],
-                success_criteria=plan.success_criteria.description,
-                estimated_complexity=plan.estimated_complexity,
-                reasoning=plan.reasoning,
-                plan_status=plan.status.value,
-                discovery_required=plan.discovery_required,
-                assumptions=plan.assumptions
-            )
-
-            # Record planning step
-            planning_step = AgentStep(
-                step_number=self._step_count,
-                state=AgentState.PLANNING,
-                thought=f"Plan: {plan.goal} ({len(plan.steps)} steps)"
-            )
-            self._step_count += 1
-            self._record_step(planning_step)
-
-            # Seed plan status tracker for execution guidance
-            self._plan_status = self._initialize_plan_status(plan)
-
-            # Default to microloop execution when tools are required for better manifest-driven guidance
-            # if self._executor:
-            #     if plan.requires_tools:
-            #         self._executor.enable_microloop()
-            #     else:
-            #         self._executor.disable_microloop()
-
-            # ========== PHASE 2: EXECUTION ==========
-            with self._perf_tracer.span("phase2_execution", steps=len(plan.steps)):
-                self._current_state = AgentState.THINKING
-                self._publish_agent_progress("Executing plan", step_number=0)
-                self._emit_thought(f"Executing plan: {plan.goal[:50]}...")
-
-                # Set up executor LLM call logging callback
-                if self._executor:
-                    def _executor_log_callback(
-                        step_num: int,
-                        objective: str,
-                        instructions: str,
-                        input_str: str,
-                        raw_response: str,
-                        tool_calls: list,
-                        tool_results: list,
-                        duration_ms: float,
-                        phase: str,
-                        manifest: dict = None
-                    ):
-                        if self._agent_logger:
-                            try:
-                                # Convert tool calls to serializable format
-                                tc_dicts = []
-                                for tc in tool_calls:
-                                    if hasattr(tc, 'name'):
-                                        tc_dicts.append({
-                                            'name': tc.name,
-                                            'arguments': tc.arguments if hasattr(tc, 'arguments') else {}
-                                        })
-                                    elif isinstance(tc, dict):
-                                        tc_dicts.append(tc)
-
-                                # Convert tool results to serializable format
-                                tr_dicts = []
-                                for tr in tool_results:
-                                    if hasattr(tr, 'tool_name'):
-                                        tr_dicts.append({
-                                            'tool': tr.tool_name,
-                                            'output': str(tr.result.output)[:2000] if hasattr(tr, 'result') and tr.result else '',
-                                            'success': tr.result.is_success if hasattr(tr, 'result') and tr.result else False
-                                        })
-                                    elif isinstance(tr, dict):
-                                        tr_dicts.append(tr)
-
-                                self._agent_logger.log_executor_call(
-                                    step_num=step_num,
-                                    objective=objective,
-                                    instructions=instructions,
-                                    input_str=input_str,
-                                    raw_response=raw_response,
-                                    tool_calls=tc_dicts,
-                                    tool_results=tr_dicts,
-                                    tier=self.config.tier,
-                                    duration_ms=duration_ms,
-                                    phase=phase,
-                                    manifest=manifest
-                                )
-                            except Exception as e:
-                                self.logger.error(f"Failed to log executor call: {e}", component="agent")
-
-                        if tool_results:
-                            for entry in tool_results:
-                                tool_name = None
-                                status_label = None
-                                preview = None
-                                success = None
-                                if hasattr(entry, "tool_name"):
-                                    tool_name = getattr(entry, "tool_name", None)
-                                    success = getattr(entry, "success", None)
-                                    preview = getattr(entry, "output", None)
-                                elif isinstance(entry, dict):
-                                    tool_name = entry.get("tool") or entry.get("name")
-                                    success = entry.get("success")
-                                    preview = entry.get("output") or entry.get("error")
-                                    status_label = entry.get("status")
-
-                                if not tool_name:
-                                    continue
-                                if not status_label:
-                                    if success is True:
-                                        status_label = "completed"
-                                    elif success is False:
-                                        status_label = "failed"
-                                    else:
-                                        status_label = "started"
-
-                                self._publish_tool_progress(tool_name, status_label, step_num, preview)
-
-                    self._executor.set_llm_call_logger(_executor_log_callback)
-
-                with self._perf_tracer.span("executor_execute"):
-                    execution_context = self._augment_context_with_plan(
-                        serialization_result.serialized_messages,
-                        plan,
-                        self._plan_status
-                    )
-                    stream_callback = on_stream_chunk
-                    if on_stream_chunk:
-                        def _stream_and_publish(chunk: str, chunk_index: int, is_final: bool):
-                            on_stream_chunk(chunk, chunk_index, is_final)
-                            self._publish_stream_chunk(chunk, chunk_index, is_final)
-                        stream_callback = _stream_and_publish
-                    trace = self._executor.execute(
-                        plan=plan,
-                        serialized_context=execution_context,
-                        tools=tool_definitions if plan.requires_tools else [],
-                        on_stream_chunk=stream_callback,
-                        plan_status=self._plan_status
-                    )
-
-                self._perf_tracer.add_metadata("tool_calls", trace.tool_calls)
-                self._perf_tracer.add_metadata("llm_calls", trace.llm_calls)
-
-                final_content = trace.final_response or "I apologize, I couldn't generate a response."
-
-            # ========== PHASE 3: REFLECTION ==========
-            with self._perf_tracer.span("phase3_reflection"):
-                self._current_state = AgentState.REFLECTING
-                self._publish_agent_progress("Reflecting on results", step_number=0)
-
-                # OPTIMIZATION: Skip LLM reflection for clearly successful simple executions
-                # This saves 500-1500ms per request
-                if (trace.all_steps_succeeded and
-                    trace.tool_failures == 0 and
-                    len(plan.steps) <= 2 and
-                    plan.goal_type in ("question", "search")):
-                    # Fast path: deterministic reflection without LLM call
-                    with self._perf_tracer.span("reflection_fast_path"):
-                        reflection = Reflection(
-                            plan_goal=plan.goal,
-                            goal_achieved=True,
-                            confidence=0.95,
-                            evidence=["All steps completed without errors", f"Executed {trace.tool_calls} tool(s) successfully"],
-                            gaps=[],
-                            suggestions=[],
-                            had_tool_failures=False,
-                            reward=1.0,
-                            plan_quality=0.9,
-                            execution_quality=1.0,
-                            response_quality=0.9
-                        )
-                    self.logger.debug("Skipped LLM reflection (fast path)", component="agent")
-                else:
-                    with self._perf_tracer.span("reflector_reflect_llm"):
-                        reflection = self._reflector.reflect(
-                            plan=plan,
-                            trace=trace,
-                            file_operations=list(self._file_operations)
-                        )
-
-            # Log reflection result
-            status = "completed" if reflection.goal_achieved else "failed"
-            if trace.had_failures and reflection.goal_achieved:
-                status = "partial"
-
-            self.logger.reflection(
-                goal_achieved=reflection.goal_achieved,
-                confidence=reflection.confidence,
-                gaps=reflection.gaps
-            )
-            contract_checklist = self._build_contract_checklist(user_input, plan, trace, reflection)
-            self.logger.info("contract_checklist", component="agent", data=contract_checklist)
-            if reflection.goal_achieved:
-                self._publish_agent_progress("Goal achieved", step_number=0)
-            else:
-                self._publish_agent_progress("Goal not fully achieved", step_number=0)
-
-            # STAGE 3: Log episode summary
-            total_duration = (time.time() - start_time) * 1000
-            self._log_stage_3_episode_summary(
-                plan=plan,
-                trace=trace,
-                reflection=reflection,
-                user_input=user_input,
-                tier=self.config.tier,
-                total_duration_ms=total_duration
-            )
-
-            # ========== LOG EPISODE SUMMARY WITH RL LABELS ==========
-            total_duration = (time.time() - start_time) * 1000
-            self.exec_logger.log_episode_summary(
-                req_id=req_id,
-                exec_id=exec_id,
-                tier=self.config.tier,
-                system_prompt_id=f"tier_{self.config.tier}_v1",
-                tool_manifest_id="default_tools_v1",
-                user_input=user_input,
-                goal=plan.goal,
-                goal_type=plan.goal_type,
-                total_duration_ms=total_duration,
-                tool_calls=trace.tool_calls,
-                tool_failures=trace.tool_failures,
-                max_tool_calls_allowed=self.config.max_tool_calls,
-                rl_labels=reflection.to_rl_labels()
-            )
-
-            # ========== EMIT EPISODE COMPLETE EVENT FOR RL TRAINING ==========
-            if self.event_bus:
-                try:
-                    episode_data = {
-                        "req_id": req_id,
-                        "exec_id": exec_id,
-                        "plan": {
-                            "goal": plan.goal,
-                            "goal_type": plan.goal_type,
-                            "steps": [
-                                {
-                                    "step_num": s.step_num,
-                                    "objective": s.objective,
-                                    "tool_hint": s.tool_hint,
-                                    "status": s.status.value
-                                }
-                                for s in plan.steps
-                            ]
-                        },
-                        "trace": {
-                            "steps_executed": [
-                                {
-                                    "step_id": f"{exec_id}-step-{s.step_num}",
-                                    "step_num": s.step_num,
-                                    "objective": s.objective,
-                                    "tool_hint": s.tool_hint,
-                                    "status": s.status.value,
-                                    "result": s.result,
-                                    "error": s.error,
-                                    "duration_ms": s.duration_ms
-                                }
-                                for s in trace.steps_executed
-                            ],
-                            "tool_calls": trace.tool_calls,
-                            "tool_failures": trace.tool_failures,
-                            "llm_calls": trace.llm_calls,
-                            "had_failures": trace.had_failures
-                        },
-                        "reflection": {
-                            "goal_achieved": reflection.goal_achieved,
-                            "confidence": reflection.confidence,
-                            "gaps": reflection.gaps,
-                            "evidence": reflection.evidence
-                        }
-                    }
-                    self.event_bus.emit_episode_complete(episode_data)
-                    self.logger.debug(f"Emitted episode complete event for {req_id}")
-                except Exception as e:
-                    self.logger.error(f"Failed to emit episode complete event: {e}")
-
-            # ========== BUILD RESPONSE ==========
-            self._current_state = AgentState.COMPLETE
-            total_duration = (time.time() - start_time) * 1000
-
-            # Print performance trace summary if enabled
-            self._perf_tracer.print_summary()
-
-            # Determine success based on reflection
-            actual_success = reflection.goal_achieved
-            failure_reason = None if actual_success else "; ".join(reflection.gaps) if reflection.gaps else "Goal not achieved"
-
-            # Extract tools used from step results
-            tools_used = []
-            for step_result in trace.steps_executed:
-                for tool_call in step_result.tool_calls_made:
-                    if tool_call.tool_name not in tools_used:
-                        tools_used.append(tool_call.tool_name)
-
-            self._publish_agent_progress("Response ready", step_number=0)
-            return AgentResponse(
-                content=final_content,
-                structured_action=plan.goal,
-                steps=self._steps,
-                total_duration_ms=total_duration,
-                tools_used=tools_used,
-                success=actual_success,
-                error=failure_reason,
-                plan=plan,
-                reflection=reflection,
-                goal_achieved=reflection.goal_achieved,
-                metadata={
-                    "model": self._llm_config.model if self._llm_config else None,
-                    "tool_calls": trace.tool_calls,
-                    "tool_failures": trace.tool_failures,
-                    "llm_calls": trace.llm_calls,
-                    "max_tool_calls": self.config.max_tool_calls,
-                    "file_operations": list(self._file_operations),
-                    "had_tool_failures": trace.had_failures,
-                    "status": status,
-                    "plan_type": plan.goal_type,
-                    "reflection_confidence": reflection.confidence,
-                    "contract_checklist": contract_checklist
-                }
-            )
-
-        except Exception as e:
-            self._current_state = AgentState.ERROR
-            self.logger.error(f"Agent execution failed: {e}", component="agent")
-            self._publish_agent_progress(f"Execution failed: {e}", step_number=0)
-
-            return AgentResponse(
-                content=f"I encountered an error: {str(e)}",
-                success=False,
-                error=str(e),
-                steps=self._steps,
-                total_duration_ms=(time.time() - start_time) * 1000,
-                goal_achieved=False
-            )
-        finally:
-            self._current_request_id = None
 
     def add_step_callback(self, callback: Callable[[AgentStep], None]):
         """Add callback for execution steps"""
@@ -1873,7 +1430,8 @@ class TieredAgent:
         context: Optional[str] = None,
         budget: Optional[Dict[str, int]] = None,
         classification: Optional[Any] = None,
-        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+        session_context: Optional[Dict[str, Any]] = None,
     ) -> AgentResponse:
         """
         Run with specified tier and tier-appropriate behavior.
@@ -1886,6 +1444,8 @@ class TieredAgent:
             classification: Full TaskClassification from router (for logging/debugging)
             on_stream_chunk: Optional callback for streaming final response synthesis.
                             Called with (chunk: str, chunk_index: int, is_final: bool)
+            session_context: Optional context from graphd session for hydration.
+                            Contains previous turns, tool history, and cache state.
         """
         tier = tier or self._current_tier
 
@@ -1911,12 +1471,13 @@ class TieredAgent:
 
         agent = self._get_agent(tier)
 
-        # Pass budget and streaming callback to agent
+        # Pass budget, streaming callback, and session context to agent
         return agent.run(
             user_input, context,
             budget=budget,
             classification=classification,
-            on_stream_chunk=on_stream_chunk
+            on_stream_chunk=on_stream_chunk,
+            session_context=session_context,
         )
 
     def _run_simple_tier_fast_path(

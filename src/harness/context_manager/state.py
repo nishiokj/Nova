@@ -773,3 +773,62 @@ class ContextState:
             self.working_memory.add(entry, allow_overwrite=False)
 
         self.last_modified = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize ContextState to dictionary for storage (e.g., GraphDB).
+
+        Returns:
+            Dictionary representation of the full context state
+        """
+        return {
+            "session_id": self.session_id,
+            "working_memory": self.working_memory.to_dict(),
+            "user_rules": self.user_rules.to_dict(),
+            "conversation_summary": self.conversation_summary.to_dict(),
+            "created_at": self.created_at,
+            "last_modified": self.last_modified,
+            "version": "1.0",
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], working_dir: Optional[str] = None) -> "ContextState":
+        """
+        Deserialize ContextState from dictionary (e.g., from GraphDB).
+
+        Args:
+            data: Dictionary representation of context state
+            working_dir: Working directory for WorkingMemoryStore (optional)
+
+        Returns:
+            Restored ContextState instance
+        """
+        session_id = data.get("session_id", "unknown")
+
+        # Restore working memory
+        working_memory_data = data.get("working_memory", {})
+        working_memory = WorkingMemoryStore.from_dict(working_memory_data)
+        if working_dir:
+            working_memory.working_dir = working_dir
+
+        # Restore user rules
+        user_rules_data = data.get("user_rules", {})
+        user_rules = UserRules.from_dict(user_rules_data)
+
+        # Restore conversation summary
+        conv_summary_data = data.get("conversation_summary", {})
+        conversation_summary = ConversationSummary.from_dict(conv_summary_data)
+
+        # Create instance
+        state = cls(
+            session_id=session_id,
+            working_memory=working_memory,
+            user_rules=user_rules,
+            conversation_summary=conversation_summary,
+        )
+
+        # Restore timestamps
+        state.created_at = data.get("created_at", time.time())
+        state.last_modified = data.get("last_modified", time.time())
+
+        return state

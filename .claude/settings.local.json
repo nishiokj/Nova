@@ -53,7 +53,8 @@
       "Bash(test:*)",
       "Bash(source:*)",
       "Bash(set -a)",
-      "Bash(set +a)"
+      "Bash(set +a)",
+      "Bash(sqlite3:*)"
     ],
     "deny": []
   }

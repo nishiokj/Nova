@@ -47,6 +47,9 @@ from tui.render_engine import RenderEngine, get_terminal_size
 from tui.tui_state import TUIState, TUIStateManager
 from tui.voice_service import VoiceInputHandler, VoiceService
 
+# Session management
+from harness.graphd import generate_session_key
+
 
 class RawTerminal:
     """Context manager for raw terminal mode with non-blocking reads."""
@@ -136,6 +139,9 @@ class RobustTUI:
         # Transcription timeout handling
         self._transcription_deadline: Optional[float] = None
 
+        # Session management
+        self._session_key: Optional[str] = None
+
     # ---------------------------------------------------------------- Lifecycle
 
     def run(self):
@@ -174,6 +180,54 @@ class RobustTUI:
             ):
                 logging.root.removeHandler(handler)
 
+    def _initialize_session(self):
+        """Initialize or resume session for conversation persistence.
+
+        Session key is stored in .session_key file in log directory.
+        If file exists and session is valid, resume it.
+        Otherwise, generate a new session key.
+        """
+        if not self._log_dir:
+            # No log directory, generate ephemeral session key
+            self._session_key = generate_session_key("tui")
+            self.state.add_message("system", f"Session: {self._session_key[:20]}...")
+            return
+
+        session_file = os.path.join(self._log_dir, ".session_key")
+
+        # Try to load existing session
+        if os.path.exists(session_file):
+            try:
+                with open(session_file, "r") as f:
+                    existing_key = f.read().strip()
+                if existing_key:
+                    self._session_key = existing_key
+                    self.state.add_message(
+                        "system",
+                        f"Resumed session: {self._session_key[:20]}...",
+                    )
+                    self.logger.info(f"Resumed session: {self._session_key}")
+                    return
+            except Exception as e:
+                self.logger.warning(f"Failed to load session file: {e}")
+
+        # Generate new session
+        self._session_key = generate_session_key("tui")
+
+        # Save to file for future resume
+        try:
+            os.makedirs(self._log_dir, exist_ok=True)
+            with open(session_file, "w") as f:
+                f.write(self._session_key)
+            self.state.add_message(
+                "system",
+                f"New session: {self._session_key[:20]}...",
+            )
+            self.logger.info(f"Created new session: {self._session_key}")
+        except Exception as e:
+            self.logger.warning(f"Failed to save session file: {e}")
+            self.state.add_message("system", "Session active (not persisted)")
+
     def _setup(self):
         """Initialize all components."""
         # Welcome message
@@ -189,6 +243,9 @@ class RobustTUI:
         self.state.add_message("system", "Connecting to backend...")
         self.renderer.render_once()
         self._setup_event_bus()
+
+        # Initialize session
+        self._initialize_session()
 
         # Start backend workers (suppress stdout during startup)
         self._start_backend_workers()
@@ -616,6 +673,7 @@ class RobustTUI:
                     text=text,
                     confidence=None,
                     duration_ms=0.0,
+                    session_key=self._session_key,
                 )
             )
 
