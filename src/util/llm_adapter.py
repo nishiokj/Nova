@@ -378,7 +378,7 @@ class OpenAIAdapter(LLMAdapter):
 
         - If input is a plain string, keep it as-is.
         - If input is a list of message dicts with string "content", convert to:
-            {"role": "...", "content": [{"type": "input_text", "text": "..."}]}
+            {"role": "...", "content": [{"type": "input_text" | "output_text", "text": "..."}]}
         - Leave non-message items (e.g. function_call_output) untouched.
         """
         if not isinstance(input, list):
@@ -396,10 +396,27 @@ class OpenAIAdapter(LLMAdapter):
 
             content = item.get("content", "")
             if isinstance(content, str):
-                normalized.append({**item, "content": [{"type": "input_text", "text": content}]})
+                role = item.get("role", "")
+                content_type = "output_text" if role == "assistant" else "input_text"
+                normalized.append({**item, "content": [{"type": content_type, "text": content}]})
             else:
-                # Already content blocks (or something else) - pass through.
-                normalized.append(item)
+                role = item.get("role", "")
+                content_type = "output_text" if role == "assistant" else "input_text"
+                if isinstance(content, list):
+                    blocks: List[Dict[str, Any]] = []
+                    for block in content:
+                        if not isinstance(block, dict):
+                            blocks.append(block)
+                            continue
+                        block_type = block.get("type")
+                        if block_type in ("input", "text"):
+                            blocks.append({**block, "type": content_type})
+                        else:
+                            blocks.append(block)
+                    normalized.append({**item, "content": blocks})
+                else:
+                    # Already content blocks (or something else) - pass through.
+                    normalized.append(item)
 
         return normalized
 
