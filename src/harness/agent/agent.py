@@ -13,17 +13,16 @@ import time
 import uuid
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Generator, Callable, Tuple
+from typing import Dict, Any, Optional, List, Callable
 from enum import Enum
 
 from util.config import AgentConfig, LLMConfig, DEFAULT_TIER_TOOL_LIMITS, DEFAULT_TIER_MAX_TOKENS
 from communication.events import AgentProgressEvent, ToolProgressEvent, StreamingChunkEvent
 from util.llm_adapter import (
-    LLMAdapter, create_adapter, Message, MessageRole,
-    LLMResponse, ToolCall, ToolDefinition
+    LLMAdapter, create_adapter, ToolDefinition
 )
 from util.perf_trace import PerfTracer
-from .tool_registry import ToolRegistry, ToolResult, ToolStatus
+from .tool_registry import ToolRegistry
 from util.logger import StructuredLogger
 from util.agent_execution_logger import AgentExecutionLogger
 from .planner import Planner
@@ -369,58 +368,6 @@ class Agent:
         # Just return it directly without adding extra verbose instructions
         return self.config.system_prompt
 
-    def _needs_realtime_data(self, user_input: str) -> bool:
-        """
-        Detect if the query requires real-time data (weather, stocks, news, etc.)
-        These queries MUST use tools - the model cannot answer from memory.
-        """
-        input_lower = user_input.lower()
-
-        # Keywords that indicate real-time data is needed
-        realtime_keywords = [
-            "weather", "temperature", "forecast", "rain", "sunny", "cloudy",
-            "stock", "price", "market", "trading", "shares",
-            "news", "today", "current", "right now", "latest",
-            "score", "game", "match", "playing",
-            "traffic", "flight", "status",
-            "bitcoin", "crypto", "btc", "eth",
-            "exchange rate", "currency"
-        ]
-
-        return any(keyword in input_lower for keyword in realtime_keywords)
-
-    def _needs_file_tools(self, user_input: str) -> bool:
-        """
-        Detect if the query clearly requires file system operations.
-        """
-        input_lower = user_input.lower()
-
-        trigger_phrases = [
-            "create file", "write file", "append file", "new file",
-            "add file", "make file", "generate file", "remove file",
-            "delete file", "edit file", "save file", "open file",
-            "create folder", "create directory", "write script",
-            "save script", "create test", "generate script"
-        ]
-
-        if any(phrase in input_lower for phrase in trigger_phrases):
-            return True
-
-        verbs = ["create", "write", "append", "add", "save", "edit", "update", "delete", "remove", "generate"]
-        nouns = ["file", "folder", "directory", "script", "code", "config", "project"]
-
-        if any(verb in input_lower for verb in verbs) and any(noun in input_lower for noun in nouns):
-            return True
-
-        return False
-
-    def _is_tool_read_only(self, tool_name: Optional[str]) -> bool:
-        """Check if a tool is marked read-only in the registry."""
-        if not tool_name:
-            return False
-        tool = self.tool_registry.get(tool_name) if hasattr(self.tool_registry, "get") else None
-        return bool(tool and getattr(tool, "read_only", False))
-
     def _shorten_text(self, text: Optional[str], max_length: int = 120) -> str:
         """Compact text for prompts without newlines or long rambles."""
         if not text:
@@ -561,197 +508,6 @@ class Agent:
         updated_context = dict(serialized_context)
         updated_context["instructions"] = combined_instructions
         return updated_context
-
-    def _is_fast_path_eligible(self, user_input: str, budget: Optional[Dict[str, int]] = None) -> bool:
-        """
-        Determine if a query can skip the full context building workflow.
-
-        Fast path criteria:
-        - Simple question that doesn't need file context
-        - Single-tool lookup (weather, search) with known args
-        - No dependencies on working memory or filesystem context
-
-        This saves 150-500ms of context building overhead.
-        """
-        input_lower = user_input.lower().strip()
-
-        # Skip fast path if context is explicitly needed
-        if self._needs_file_tools(user_input):
-            return False
-
-        # Skip fast path if we have significant working memory
-        if len(self.context_state.working_memory.entries) > 10:
-            return False
-
-        # Fast path for simple questions and knowledge requests
-        simple_question_starters = [
-            # Questions
-            "what is", "what's", "what does", "what are", "what was",
-            "who is", "who's", "who are", "who was",
-            "when did", "when was", "when is",
-            "where is", "where are", "where was",
-            "how many", "how much", "how do", "how does",
-            "why is", "why are", "why does",
-            # Definitions and explanations
-            "define", "explain", "describe",
-            # Direct knowledge requests
-            "tell me", "give me", "list", "name",
-            "recite", "quote", "say", "write",
-            # Translations and conversions
-            "translate", "convert",
-            # Comparisons
-            "compare", "difference between",
-            # Simple commands
-            "summarize", "simplify",
-        ]
-        is_simple_question = any(input_lower.startswith(q) for q in simple_question_starters)
-
-        # Fast path for weather/search (single tool, known pattern)
-        is_realtime_lookup = self._needs_realtime_data(user_input)
-
-        # Fast path eligible if simple question OR simple realtime lookup
-        if is_simple_question and len(input_lower) < 200:
-            return True
-
-        if is_realtime_lookup and len(input_lower) < 100:
-            return True
-
-        return False
-
-    def _execute_fast_path(
-        self,
-        user_input: str,
-        context: Optional[str],
-        start_time: float
-    ) -> Optional[AgentResponse]:
-        """
-        Execute fast path with minimal overhead.
-
-        Skips:
-        - Full context building
-        - Token estimation
-        - Cache planning
-        - Working memory serialization
-
-        Returns None if fast path cannot complete (falls back to normal path).
-        """
-        try:
-            # Use the simple planner for pattern matching
-            simple_plan = self._planner._try_simple_plan(user_input)
-
-            if simple_plan is None:
-                # Pattern not recognized, fall back to normal path
-                return None
-
-            # For questions that don't need tools, just answer directly
-            if not simple_plan.requires_tools:
-                prompt_input = user_input
-                if context:
-                    prompt_input = f"{user_input}\n\nContext: {context}"
-
-                response = self._llm.respond(
-                    input=prompt_input,
-                    instructions=self._build_system_prompt()
-                )
-                duration_ms = (time.time() - start_time) * 1000
-
-                self.logger.debug(f"Fast path completed in {duration_ms:.0f}ms (no tools)", component="agent")
-
-                return AgentResponse(
-                    content=response.content or "",
-                    total_duration_ms=duration_ms,
-                    tools_used=[],
-                    success=True,
-                    goal_achieved=True,
-                    plan=simple_plan,
-                    reflection=Reflection(
-                        plan_goal=simple_plan.goal,
-                        goal_achieved=True,
-                        confidence=0.95,
-                        evidence=["Fast path execution"],
-                        gaps=[],
-                        suggestions=[]
-                    ),
-                    metadata={
-                        "fast_path": True,
-                        "tier": self.config.tier,
-                        "model": self._llm_config.model if self._llm_config else None
-                    }
-                )
-
-            # For single-tool queries with known args (e.g., search), execute directly
-            if (len(simple_plan.steps) == 1 and
-                simple_plan.steps[0].tool_hint and
-                simple_plan.steps[0].tool_args_hint):
-
-                step = simple_plan.steps[0]
-
-                # Block file_read from fast path - file contents need explanation, not dumping
-                NEEDS_EXPLANATION_TOOLS = {"file_read"}
-                if step.tool_hint in NEEDS_EXPLANATION_TOOLS:
-                    self.logger.debug(
-                        f"Fast path blocked for '{step.tool_hint}' (needs explanation)",
-                        component="agent"
-                    )
-                    return None
-
-                if not self._is_tool_read_only(step.tool_hint):
-                    self.logger.info(
-                        f"Fast path blocked for write-capable tool '{step.tool_hint}'",
-                        component="agent"
-                    )
-                    return None
-
-                if self._budget and self._budget.get("max_tool_calls", 1) < 1:
-                    self.logger.info(
-                        "Fast path blocked by tool budget (0 allowed)",
-                        component="agent"
-                    )
-                    return None
-
-                tool_start = time.time()
-                result = self.tool_registry.execute(step.tool_hint, **step.tool_args_hint)
-                tool_duration = (time.time() - tool_start) * 1000
-                duration_ms = (time.time() - start_time) * 1000
-
-                if result.is_success:
-                    self.logger.debug(
-                        f"Fast path completed in {duration_ms:.0f}ms (direct tool: {step.tool_hint})",
-                        component="agent"
-                    )
-
-                    return AgentResponse(
-                        content=str(result.output)[:2000],
-                        total_duration_ms=duration_ms,
-                        tools_used=[step.tool_hint],
-                        success=True,
-                        goal_achieved=True,
-                        plan=simple_plan,
-                        reflection=Reflection(
-                            plan_goal=simple_plan.goal,
-                            goal_achieved=True,
-                            confidence=0.95,
-                            evidence=[f"Direct tool execution: {step.tool_hint}"],
-                            gaps=[],
-                            suggestions=[]
-                        ),
-                        metadata={
-                            "fast_path": True,
-                            "direct_tool": step.tool_hint,
-                            "tool_duration_ms": tool_duration,
-                            "tier": self.config.tier
-                        }
-                    )
-                else:
-                    # Tool failed, fall back to normal path for error handling
-                    return None
-
-            # Pattern matched but execution path unclear, fall back
-            return None
-
-        except Exception as e:
-            self.logger.warning(f"Fast path failed, falling back: {e}", component="agent")
-            return None
 
     def _get_tool_definitions(self) -> List[ToolDefinition]:
         """Get tool definitions for LLM"""
@@ -975,67 +731,6 @@ class Agent:
             except Exception as e:
                 self.logger.error(f"Thought callback error: {e}", component="agent")
 
-    def run_simple_response(
-        self,
-        user_input: str,
-        context: Optional[str] = None
-    ) -> AgentResponse:
-        """
-        Simple-tier fast path: single LLM call with minimal context.
-        """
-        if not self._llm:
-            return AgentResponse(
-                content="Agent not configured with an LLM backend.",
-                success=False,
-                error="No LLM configured"
-            )
-
-        start_time = time.time()
-        prompt_input = user_input
-        if context:
-            prompt_input = f"{user_input}\n\nContext: {context}"
-
-        try:
-            response = self._llm.respond(
-                input=prompt_input,
-                instructions=self._build_system_prompt()
-            )
-            duration_ms = (time.time() - start_time) * 1000
-            content = response.content or ""
-
-            if response.has_tool_calls:
-                self.logger.warning(
-                    "Simple tier response ignored tool calls",
-                    component="agent"
-                )
-
-            return AgentResponse(
-                content=content,
-                total_duration_ms=duration_ms,
-                tools_used=[],
-                success=True,
-                metadata={
-                    "tier": self.config.tier,
-                    "fast_path": "simple",
-                    "model": self._llm_config.model if self._llm_config else None
-                }
-            )
-
-        except Exception as exc:
-            duration_ms = (time.time() - start_time) * 1000
-            self.logger.error(f"Simple tier completion failed: {exc}", component="agent")
-            return AgentResponse(
-                content="I ran into an error answering that.",
-                success=False,
-                error=str(exc),
-                total_duration_ms=duration_ms,
-                metadata={
-                    "tier": self.config.tier,
-                    "fast_path": "simple",
-                    "model": self._llm_config.model if self._llm_config else None
-                }
-            )
-
     def stop(self):
         """Request the agent to stop execution at next checkpoint"""
         self._stop_requested = True
@@ -1117,18 +812,6 @@ class Agent:
                 )
                 session_state = None
         planning_context = self._render_context_for_planner(session_state, context)
-
-        # ========== FAST PATH FOR SIMPLE QUERIES ==========
-        # Skip fast path when Wizard is enabled to keep Wizard as the single writer.
-        with self._perf_tracer.span("fast_path_check"):
-            if not self._wizard and self._is_fast_path_eligible(user_input, budget):
-                with self._perf_tracer.span("fast_path_execute"):
-                    fast_response = self._execute_fast_path(user_input, planning_context, start_time)
-                if fast_response is not None:
-                    self._publish_agent_progress("Responded via fast path", step_number=0)
-                    self._perf_tracer.print_summary()
-                    self._current_request_id = None
-                    return fast_response
 
         # ========== WIZARD ORCHESTRATION PATH ==========
         # Create plan using existing planner
@@ -1483,10 +1166,6 @@ class TieredAgent:
             component="agent"
         )
 
-        if tier == "simple":
-            self.logger.info("Using simple tier fast path", component="agent")
-            return self._run_simple_tier_fast_path(user_input, tier, context)
-
         agent = self._get_agent(tier)
 
         # Pass budget, streaming callback, and session context to agent
@@ -1497,16 +1176,6 @@ class TieredAgent:
             on_stream_chunk=on_stream_chunk,
             session_context=session_context,
         )
-
-    def _run_simple_tier_fast_path(
-        self,
-        user_input: str,
-        tier: str,
-        context: Optional[str] = None
-    ) -> AgentResponse:
-        """Bypass the plan/execution pipeline for simple tier requests."""
-        agent = self._get_agent(tier)
-        return agent.run_simple_response(user_input, context)
 
     def set_tier(self, tier: str):
         """Set default tier"""
