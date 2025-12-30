@@ -369,6 +369,17 @@ class OpenAIAdapter(LLMAdapter):
         model = (self.config.model or "").lower()
         return model.startswith(("gpt-5", "o1", "o3"))
 
+    def _supports_prompt_cache_retention(self) -> bool:
+        """
+        Check if the model supports prompt_cache_retention parameter.
+        Some smaller models (e.g., gpt-5-nano) don't support this feature.
+        """
+        model = (self.config.model or "").lower()
+        # gpt-5-nano doesn't support prompt_cache_retention
+        if "nano" in model:
+            return False
+        return True
+
     def _normalize_responses_input(
         self,
         input: Union[str, List[Dict[str, Any]]]
@@ -775,7 +786,8 @@ class OpenAIAdapter(LLMAdapter):
             # 3. Prompt caching parameters - config for cache behavior
             if prompt_cache_key:
                 params["prompt_cache_key"] = prompt_cache_key
-            if prompt_cache_retention:
+            # Only add prompt_cache_retention for models that support it
+            if prompt_cache_retention and self._supports_prompt_cache_retention():
                 params["prompt_cache_retention"] = prompt_cache_retention
 
             # 4. Stateful conversation continuation
@@ -942,7 +954,8 @@ class OpenAIAdapter(LLMAdapter):
             # 3. Prompt caching parameters - config for cache behavior
             if prompt_cache_key:
                 params["prompt_cache_key"] = prompt_cache_key
-            if prompt_cache_retention:
+            # Only add prompt_cache_retention for models that support it
+            if prompt_cache_retention and self._supports_prompt_cache_retention():
                 params["prompt_cache_retention"] = prompt_cache_retention
 
             # 4. Stateful conversation continuation

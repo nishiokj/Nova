@@ -25,3 +25,5 @@ logs/*.jsonl
 */*.jsonl
 evals/results/*
 evals/results/*/*/*
+.pyc_cache
+.pycache

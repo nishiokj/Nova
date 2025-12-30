@@ -27,7 +27,7 @@ from contextlib import nullcontext
 from util.config import HarnessConfig, RuntimeConfig, load_or_create_config
 from util.logger import StructuredLogger
 from .agent.tool_registry import ToolRegistry
-from .agent.agent import Agent, AgentResponse, AgentStep, TieredAgent
+from .agent.agent import Agent, AgentResponse, TieredAgent
 from util.runtime import HarnessRuntime, create_runtime
 from util.agent_execution_logger import AgentExecutionLogger
 
@@ -202,7 +202,6 @@ class AgentHarness:
 
             # Reset progress tracking and wire up callbacks
             self._last_progress_tool = None
-            step_callback = self._create_progress_callback(request_id)
             phase_callback = self._create_phase_callback(request_id)
 
             # Get the agent for this tier and add callbacks
@@ -210,7 +209,6 @@ class AgentHarness:
                 tier_agent = self.agent.get_agent_for_tier(tier)
             else:
                 tier_agent = self.agent
-            tier_agent.add_step_callback(step_callback)
             if hasattr(tier_agent, "add_phase_callback"):
                 tier_agent.add_phase_callback(phase_callback)
 
@@ -229,8 +227,6 @@ class AgentHarness:
             finally:
                 if self.graphd:
                     self.graphd.set_active(False)
-                if hasattr(tier_agent, "remove_step_callback"):
-                    tier_agent.remove_step_callback(step_callback)
                 if hasattr(tier_agent, "remove_phase_callback"):
                     tier_agent.remove_phase_callback(phase_callback)
 
@@ -307,27 +303,10 @@ class AgentHarness:
                 metadata={"error": str(e), "request_id": request_id}
             )
 
-    def _create_progress_callback(self, request_id: str) -> Callable[[AgentStep], None]:
-        """Create callback to notify progress during agent execution"""
-        def on_step(step: AgentStep):
-            # Only report progress for tool executions
-            if step.tool_name:
-                progress_msg = self._get_tool_progress_message(step.tool_name, step.step_number)
-                if progress_msg:
-                    # Notify all progress callbacks
-                    for callback in self._progress_callbacks:
-                        try:
-                            callback(progress_msg, step.tool_name, step.step_number)
-                        except Exception as e:
-                            self.logger.error(f"Progress callback error: {e}", component="harness")
-
-        return on_step
-
     def _create_phase_callback(self, request_id: str) -> Callable[[str, Optional[str], int], None]:
         """Create callback to forward agent phase progress to progress_callbacks.
 
-        This handles phase transitions (planning, execution, reflection) that don't
-        have tool names, complementing _create_progress_callback which handles tool steps.
+        This handles phase transitions during agent execution.
         """
         def on_phase(message: str, tool_name: Optional[str], step_number: int):
             # Forward to all progress callbacks

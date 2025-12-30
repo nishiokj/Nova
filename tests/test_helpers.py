@@ -149,6 +149,36 @@ class MockLLMAdapter(LLMAdapter):
         for word in response.content.split():
             yield word + " "
 
+    def respond(
+        self,
+        input,
+        instructions: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        prompt_cache_key: Optional[str] = None,
+        prompt_cache_retention: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """Mock respond method for Responses API format"""
+        self.call_history.append({
+            "method": "respond",
+            "input": input,
+            "instructions": instructions,
+            "tools": tools,
+            "kwargs": kwargs
+        })
+
+        response_text, tool_calls = self.behavior.get_next_response()
+
+        return LLMResponse(
+            content=response_text,
+            role=MessageRole.ASSISTANT,
+            tool_calls=tool_calls,
+            finish_reason="stop" if not tool_calls else "tool_calls",
+            usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            model="mock-model"
+        )
+
 
 # =============================================================================
 # HELPER FUNCTIONS

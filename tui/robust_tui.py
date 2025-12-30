@@ -181,52 +181,13 @@ class RobustTUI:
                 logging.root.removeHandler(handler)
 
     def _initialize_session(self):
-        """Initialize or resume session for conversation persistence.
+        """Initialize a new session for this TUI instance.
 
-        Session key is stored in .session_key file in log directory.
-        If file exists and session is valid, resume it.
-        Otherwise, generate a new session key.
+        Each TUI instance gets a fresh session key. Session recovery
+        across restarts may be added as an opt-in feature later.
         """
-        if not self._log_dir:
-            # No log directory, generate ephemeral session key
-            self._session_key = generate_session_key("tui")
-            self.state.add_message("system", f"Session: {self._session_key[:20]}...")
-            return
-
-        session_file = os.path.join(self._log_dir, ".session_key")
-
-        # Try to load existing session
-        if os.path.exists(session_file):
-            try:
-                with open(session_file, "r") as f:
-                    existing_key = f.read().strip()
-                if existing_key:
-                    self._session_key = existing_key
-                    self.state.add_message(
-                        "system",
-                        f"Resumed session: {self._session_key[:20]}...",
-                    )
-                    self.logger.info(f"Resumed session: {self._session_key}")
-                    return
-            except Exception as e:
-                self.logger.warning(f"Failed to load session file: {e}")
-
-        # Generate new session
         self._session_key = generate_session_key("tui")
-
-        # Save to file for future resume
-        try:
-            os.makedirs(self._log_dir, exist_ok=True)
-            with open(session_file, "w") as f:
-                f.write(self._session_key)
-            self.state.add_message(
-                "system",
-                f"New session: {self._session_key[:20]}...",
-            )
-            self.logger.info(f"Created new session: {self._session_key}")
-        except Exception as e:
-            self.logger.warning(f"Failed to save session file: {e}")
-            self.state.add_message("system", "Session active (not persisted)")
+        self.logger.info(f"New session: {self._session_key}")
 
     def _setup(self):
         """Initialize all components."""

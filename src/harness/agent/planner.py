@@ -1,8 +1,5 @@
 """
-Planner/Executor/Reflector architecture for structured agent execution.
-
-This module is a compatibility facade that re-exports the plan models,
-planner prompts, and the Planner/Executor/Reflector components.
+Planner - Creates explicit execution plans for agent requests.
 """
 
 import json
@@ -11,22 +8,14 @@ from typing import Any, Dict, List, Optional
 from util.llm_adapter import LLMAdapter
 from util.perf_trace import get_tracer
 
-from .executor import Executor
 from .plan_models import (
-    ExecutionTrace,
     Plan,
     PlanPhase,
     PlanStatus,
     PlanStep,
-    Reflection,
-    StepContext,
-    StepResult,
     SuccessCriteria,
-    ToolCallRecord,
-    ValidationResult,
 )
-from .prompts import PLANNING_PROMPT, REFLECTION_PROMPT, format_prompt
-from .reflector import Reflector
+from .prompts import PLANNING_PROMPT
 from .tool_registry import ToolRegistry
 
 
@@ -1088,19 +1077,10 @@ class Planner:
 
 __all__ = [
     "Planner",
-    "Executor",
-    "Reflector",
     "Plan",
     "PlanStep",
     "SuccessCriteria",
-    "StepContext",
     "PlanStatus",
     "PlanPhase",
-    "ToolCallRecord",
-    "ValidationResult",
-    "StepResult",
-    "ExecutionTrace",
-    "Reflection",
     "PLANNING_PROMPT",
-    "REFLECTION_PROMPT",
 ]

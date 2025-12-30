@@ -1,0 +1,23 @@
+# Audio dependencies for rex voice agent
+# Requires system dependencies:
+# - macOS: brew install portaudio
+# - Ubuntu: sudo apt-get install portaudio19-dev python3-pyaudio
+# - Windows: pip install pipwin && pipwin install pyaudio
+
+# Include core dependencies
+-r requirements.in
+
+# Audio I/O
+PyAudio==0.2.14
+pydub==0.25.1
+webrtcvad==2.0.10
+
+# Speech Recognition
+SpeechRecognition==3.14.3
+
+# Local Speech-to-Text (FAST - replaces Google API)
+faster-whisper>=1.0.0
+
+# Text-to-Speech
+# Note: pyttsx3 pulls in pyobjc on macOS (100+ packages)
+pyttsx3>=2.90

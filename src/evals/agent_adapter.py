@@ -1,13 +1,10 @@
 """
 Real agent execution adapter for evaluation.
 
-Integrates with:
-- src/harness/agent/planner.py
-- src/harness/agent/executor.py
-- src/harness/agent/reflector.py
+NOTE: This module needs refactoring to work with the Wizard architecture.
+The old Executor/Reflector components have been replaced by Wizard/Worker.
 
-Captures EXACT prompts and responses via LLM instrumentation.
-Logs to simple, human-readable format.
+TODO: Refactor to use wizard.orchestrate() instead of separate execute/reflect calls.
 """
 
 import time
@@ -16,8 +13,25 @@ from dataclasses import asdict
 import json
 
 from harness.agent.agent import Agent, TieredAgent
-from harness.agent.plan_models import Plan, ExecutionTrace, Reflection, PlanStep
+from harness.agent.plan_models import Plan, PlanStep, PlanStatus
 from util.perf_trace import PerfTracer, get_tracer, reset_tracer
+
+# Stub types for backwards compatibility during transition
+# TODO: Remove after refactoring evals to use wizard
+class ExecutionTrace:
+    """Stub for backwards compatibility."""
+    def __init__(self):
+        self.step_results = []
+        self.steps = []
+        self.final_response = None
+
+class Reflection:
+    """Stub for backwards compatibility."""
+    def __init__(self):
+        self.goal_achieved = False
+        self.confidence = 0.0
+        self.evidence = []
+        self.gaps = []
 
 from .execution_recorder import ExecutionRecorder, _make_json_serializable
 from util.llm_adapter import LLMAdapter
@@ -399,7 +413,12 @@ class AgentExecutionAdapter:
             }
 
     def _execute_execution(self, plan: Any, user_prompt: str) -> Dict[str, Any]:
-        """Execute execution phase and record."""
+        """Execute execution phase and record.
+
+        NOTE: This method is deprecated. The old Executor has been replaced by Wizard.
+        This stub implementation returns a minimal trace for compatibility.
+        TODO: Refactor evals to use wizard.orchestrate() directly.
+        """
         start_time = time.time()
 
         # Set capture phase for real prompt attribution
@@ -407,20 +426,13 @@ class AgentExecutionAdapter:
             self._llm_capture.set_phase('execution')
 
         try:
-            # Use the agent's existing executor instance
-            executor = getattr(self.agent, '_executor', None)
-
-            if executor is None:
-                # Fallback: create executor with agent's LLM and tool registry
-                from harness.agent.executor import Executor
-                if hasattr(self.agent, '_llm') and self.agent._llm and hasattr(self.agent, 'tool_registry'):
-                    executor = Executor(
-                        llm=self.agent._llm,
-                        tool_registry=self.agent.tool_registry,
-                        max_tool_calls=getattr(self.agent.config, 'max_tool_calls', 5) if hasattr(self.agent, 'config') else 5
-                    )
-                else:
-                    raise RuntimeError("Agent has no executor and cannot create one (missing LLM or tool_registry)")
+            # The old Executor has been removed - use wizard flow instead via agent.run()
+            # For now, return a stub trace
+            raise NotImplementedError(
+                "The Executor component has been removed. "
+                "Evals should use agent.run() which uses Wizard orchestration. "
+                "This adapter needs refactoring to work with the new architecture."
+            )
 
             # Execute the plan - build serialized context (Responses API format)
             system_prompt = ""

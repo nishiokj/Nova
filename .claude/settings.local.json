@@ -54,7 +54,8 @@
       "Bash(source:*)",
       "Bash(set -a)",
       "Bash(set +a)",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(pip-compile:*)"
     ],
     "deny": []
   }

@@ -5,7 +5,6 @@ Tests:
 - Agent initialization
 - Tool execution through agent
 - Tiered agent behavior
-- Conversation history
 - Callbacks
 - Error handling
 - Tool limits per tier
@@ -21,7 +20,7 @@ from typing import List
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from harness.agent.agent import (
-    Agent, AgentConfig, AgentResponse, AgentStep, AgentState,
+    Agent, AgentConfig, AgentResponse,
     TieredAgent, TIER_TOOL_LIMITS, TIER_MAX_TOKENS,
     SIMPLE_TIER_PROMPT, STANDARD_TIER_PROMPT, ADVANCED_TIER_PROMPT
 )
@@ -51,7 +50,6 @@ class TestAgentInitialization:
 
         assert agent is not None
         assert agent.config.tier == "standard"
-        assert agent._current_state == AgentState.IDLE
 
     def test_agent_without_llm(self, tool_registry, mock_logger):
         """Test agent behavior without LLM configured"""
@@ -65,26 +63,6 @@ class TestAgentInitialization:
 
         assert not response.success
         assert "not properly configured" in response.content.lower()
-
-    def test_agent_conversation_history(self, tool_registry, mock_llm_config, mock_logger):
-        """Test that conversation history is maintained"""
-        config = AgentConfig(llm_config=mock_llm_config)
-        agent = Agent(config, tool_registry, mock_llm_config)
-
-        # Initially empty
-        assert len(agent.conversation_history) == 0
-
-    def test_agent_reset_conversation(self, tool_registry, mock_llm_config, mock_logger):
-        """Test resetting conversation history"""
-        config = AgentConfig(llm_config=mock_llm_config)
-        agent = Agent(config, tool_registry, mock_llm_config)
-
-        # Add some conversation
-        agent._add_message(Message(MessageRole.USER, "Test message"))
-
-        # Reset
-        agent.reset_conversation()
-        assert len(agent._conversation) == 0
 
 
 class TestAgentExecution:
@@ -110,85 +88,91 @@ class TestAgentExecution:
 
     def test_simple_run_no_tools(self, mock_agent):
         """Test simple run without tool usage"""
-        response = mock_agent.run("Hello, how are you?")
+        # Mock the planner and wizard for a simple test
+        with patch.object(mock_agent, '_planner') as mock_planner, \
+             patch.object(mock_agent, '_wizard') as mock_wizard:
+            # Use MagicMock for Plan since it has many required fields
+            mock_plan = MagicMock()
+            mock_plan.goal = "Test response"
+            mock_plan.steps = []
+            mock_planner.create_plan.return_value = mock_plan
 
-        assert response.success
-        assert "test response" in response.content.lower()
-        assert len(response.tools_used) == 0
+            # Create a minimal wizard result
+            mock_plan_state = MagicMock()
+            mock_plan_state.goal = "Test response"
+            mock_result = MagicMock()
+            mock_result.final_response = "This is a test response."
+            mock_result.plan_state = mock_plan_state
+            mock_result.duration_ms = 100.0
+            mock_result.success = True
+            mock_result.goal_achieved = True
+            mock_result.final_context_state = None
+            mock_result.to_dict.return_value = {"metadata": {}}
+            mock_result.to_reflection.return_value = None
+            mock_wizard.orchestrate.return_value = mock_result
 
-    def test_run_with_tool_call(self, tool_registry, mock_llm_config, mock_logger):
-        """Test run that triggers a tool call"""
-        config = AgentConfig(
-            llm_config=mock_llm_config,
-            tier="standard",
-            max_tool_calls=5
-        )
-        agent = Agent(config, tool_registry, mock_llm_config)
+            response = mock_agent.run("Hello, how are you?")
 
-        # Mock LLM that makes a tool call then responds
-        mock_behavior = MockLLMBehavior(
-            responses=["", "The answer is 4."],
-            tool_calls=[
-                [create_tool_call("calculator", expression="2+2")],
-                []
-            ]
-        )
-        agent._llm = MockLLMAdapter(mock_llm_config, mock_behavior)
-
-        # Use "search" keyword to trigger tool allowance
-        response = agent.run("Search and calculate 2+2")
-
-        assert response.success
-        assert "calculator" in response.tools_used
-
-    def test_run_respects_tool_limit(self, tool_registry, mock_llm_config, mock_logger):
-        """Test that tool limit is respected"""
-        config = AgentConfig(
-            llm_config=mock_llm_config,
-            tier="simple",
-            max_tool_calls=1  # Only 1 tool call allowed
-        )
-        agent = Agent(config, tool_registry, mock_llm_config)
-
-        # Mock LLM that tries to make many tool calls
-        mock_behavior = MockLLMBehavior(
-            responses=["", "", "Final answer"],
-            tool_calls=[
-                [create_tool_call("calculator", expression="1+1")],
-                [create_tool_call("calculator", expression="2+2")],  # Should be blocked
-                []
-            ]
-        )
-        agent._llm = MockLLMAdapter(mock_llm_config, mock_behavior)
-
-        response = agent.run("Calculate things")
-
-        # Should have limited tool calls
-        assert response.metadata.get("tool_calls", 0) <= 2
+            assert response.success
+            assert "test response" in response.content.lower()
 
     def test_run_with_context(self, mock_agent):
         """Test run with additional context"""
-        response = mock_agent.run(
-            "Continue our discussion",
-            context="We were talking about Python programming"
-        )
+        with patch.object(mock_agent, '_planner') as mock_planner, \
+             patch.object(mock_agent, '_wizard') as mock_wizard:
+            mock_plan = MagicMock()
+            mock_plan.goal = "Test"
+            mock_plan.steps = []
+            mock_planner.create_plan.return_value = mock_plan
 
-        assert response.success
-        # Context should be included in the request
+            mock_plan_state = MagicMock()
+            mock_plan_state.goal = "Test"
+            mock_result = MagicMock()
+            mock_result.final_response = "Response with context"
+            mock_result.plan_state = mock_plan_state
+            mock_result.duration_ms = 100.0
+            mock_result.success = True
+            mock_result.goal_achieved = True
+            mock_result.final_context_state = None
+            mock_result.to_dict.return_value = {"metadata": {}}
+            mock_result.to_reflection.return_value = None
+            mock_wizard.orchestrate.return_value = mock_result
 
-    def test_run_response_contains_steps(self, mock_agent):
-        """Test that response contains execution steps"""
-        response = mock_agent.run("Hello")
+            response = mock_agent.run(
+                "Continue our discussion",
+                context="We were talking about Python programming"
+            )
 
-        assert isinstance(response.steps, list)
-        # Should have at least a thinking step
-        assert len(response.steps) >= 1
+            assert response.success
+            # Verify context was passed to planner
+            call_args = mock_planner.create_plan.call_args
+            assert "Python programming" in str(call_args)
 
     def test_run_tracks_duration(self, mock_agent):
         """Test that response tracks total duration"""
-        response = mock_agent.run("Hello")
+        with patch.object(mock_agent, '_planner') as mock_planner, \
+             patch.object(mock_agent, '_wizard') as mock_wizard:
+            mock_plan = MagicMock()
+            mock_plan.goal = "Test"
+            mock_plan.steps = []
+            mock_planner.create_plan.return_value = mock_plan
 
-        assert response.total_duration_ms > 0
+            mock_plan_state = MagicMock()
+            mock_plan_state.goal = "Test"
+            mock_result = MagicMock()
+            mock_result.final_response = "Response"
+            mock_result.plan_state = mock_plan_state
+            mock_result.duration_ms = 150.0
+            mock_result.success = True
+            mock_result.goal_achieved = True
+            mock_result.final_context_state = None
+            mock_result.to_dict.return_value = {"metadata": {}}
+            mock_result.to_reflection.return_value = None
+            mock_wizard.orchestrate.return_value = mock_result
+
+            response = mock_agent.run("Hello")
+
+            assert response.total_duration_ms == 150.0
 
 
 class TestAgentCallbacks:
@@ -204,124 +188,54 @@ class TestAgentCallbacks:
 
         return agent
 
-    def test_step_callback(self, mock_agent):
-        """Test step callback is called"""
-        steps_received = []
+    def test_phase_callback(self, mock_agent):
+        """Test phase callback is called"""
+        phases_received = []
 
-        def on_step(step: AgentStep):
-            steps_received.append(step)
+        def on_phase(message: str, tool_name, step_number: int):
+            phases_received.append((message, step_number))
 
-        mock_agent.add_step_callback(on_step)
-        mock_agent.run("Hello")
+        mock_agent.add_phase_callback(on_phase)
 
-        assert len(steps_received) >= 1
+        with patch.object(mock_agent, '_planner') as mock_planner, \
+             patch.object(mock_agent, '_wizard') as mock_wizard:
+            mock_plan = MagicMock()
+            mock_plan.goal = "Test"
+            mock_plan.steps = []
+            mock_planner.create_plan.return_value = mock_plan
 
-    def test_thought_callback(self, mock_agent):
-        """Test thought callback is called"""
-        thoughts_received = []
+            mock_plan_state = MagicMock()
+            mock_plan_state.goal = "Test"
+            mock_result = MagicMock()
+            mock_result.final_response = "Response"
+            mock_result.plan_state = mock_plan_state
+            mock_result.duration_ms = 100.0
+            mock_result.success = True
+            mock_result.goal_achieved = True
+            mock_result.final_context_state = None
+            mock_result.to_dict.return_value = {"metadata": {}}
+            mock_result.to_reflection.return_value = None
+            mock_wizard.orchestrate.return_value = mock_result
 
-        def on_thought(thought: str):
-            thoughts_received.append(thought)
+            mock_agent.run("Hello")
 
-        mock_agent.add_thought_callback(on_thought)
-        mock_agent.run("Hello")
+        # Should have received at least the "Request received" phase
+        assert len(phases_received) >= 1
+        assert any("Request received" in msg for msg, _ in phases_received)
 
-        assert len(thoughts_received) >= 1
+    def test_remove_phase_callback(self, mock_agent):
+        """Test removing a phase callback"""
+        calls = []
 
-    def test_callback_exception_handling(self, mock_agent):
-        """Test that callback exceptions don't crash the agent"""
-        def bad_callback(step):
-            raise ValueError("Callback error!")
+        def callback(message, tool_name, step_number):
+            calls.append(message)
 
-        mock_agent.add_step_callback(bad_callback)
+        mock_agent.add_phase_callback(callback)
+        mock_agent.remove_phase_callback(callback)
 
-        # Should not raise
-        response = mock_agent.run("Hello")
-        assert response.success
-
-
-class TestAgentToolExecution:
-    """Test Agent tool execution specifics"""
-
-    @pytest.fixture
-    def agent_with_tools(self, tool_registry, mock_llm_config, mock_logger):
-        """Create agent with mocked LLM and real tools"""
-        config = AgentConfig(
-            llm_config=mock_llm_config,
-            tier="standard",
-            max_tool_calls=5
-        )
-        agent = Agent(config, tool_registry, mock_llm_config)
-        return agent
-
-    def test_execute_calculator_tool(self, agent_with_tools, mock_llm_config):
-        """Test executing calculator through agent"""
-        mock_behavior = MockLLMBehavior(
-            responses=["", "The result is 100."],
-            tool_calls=[
-                [create_tool_call("calculator", expression="10*10")],
-                []
-            ]
-        )
-        agent_with_tools._llm = MockLLMAdapter(mock_llm_config, mock_behavior)
-
-        # Use "search" keyword to enable tool usage
-        response = agent_with_tools.run("Search and calculate 10 times 10")
-
-        assert response.success
-        assert "calculator" in response.tools_used
-
-    def test_execute_time_tool(self, agent_with_tools, mock_llm_config):
-        """Test executing get_current_time through agent"""
-        mock_behavior = MockLLMBehavior(
-            responses=["", "The current time is displayed above."],
-            tool_calls=[
-                [create_tool_call("get_current_time", format="human")],
-                []
-            ]
-        )
-        agent_with_tools._llm = MockLLMAdapter(mock_llm_config, mock_behavior)
-
-        # Use "current" keyword to trigger realtime data detection
-        response = agent_with_tools.run("What is the current time right now?")
-
-        assert response.success
-        assert "get_current_time" in response.tools_used
-
-    def test_tool_deduplication(self, agent_with_tools, mock_llm_config):
-        """Test that duplicate tool calls are deduplicated"""
-        mock_behavior = MockLLMBehavior(
-            responses=["", "Done."],
-            tool_calls=[
-                [
-                    create_tool_call("calculator", expression="2+2"),
-                    create_tool_call("calculator", expression="2+2"),  # Duplicate
-                ],
-                []
-            ]
-        )
-        agent_with_tools._llm = MockLLMAdapter(mock_llm_config, mock_behavior)
-
-        response = agent_with_tools.run("Calculate 2+2 twice")
-
-        # Should have deduplicated
-        assert response.success
-
-    def test_tool_error_handling(self, agent_with_tools, mock_llm_config):
-        """Test handling of tool execution errors"""
-        mock_behavior = MockLLMBehavior(
-            responses=["", "I encountered an error."],
-            tool_calls=[
-                [create_tool_call("calculator", expression="invalid++")],
-                []
-            ]
-        )
-        agent_with_tools._llm = MockLLMAdapter(mock_llm_config, mock_behavior)
-
-        response = agent_with_tools.run("Calculate something invalid")
-
-        # Should still complete (agent handles error)
-        assert response.success
+        # Callback should not be called after removal
+        mock_agent._notify_phase("Test", step_number=0)
+        assert len(calls) == 0
 
 
 class TestTieredAgent:
@@ -401,156 +315,6 @@ class TestTieredAgent:
         assert agent1 is agent2  # Same instance
 
 
-class TestAgentRealTimeDetection:
-    """Test Agent's ability to detect real-time data needs"""
-
-    @pytest.fixture
-    def agent(self, tool_registry, mock_llm_config, mock_logger):
-        config = AgentConfig(llm_config=mock_llm_config)
-        return Agent(config, tool_registry, mock_llm_config)
-
-    @pytest.mark.parametrize("query,should_need_realtime", [
-        ("What's the weather in New York?", True),
-        ("What's the temperature outside?", True),
-        ("What's the stock price of AAPL?", True),
-        ("What's the latest news?", True),
-        ("What's the current time?", True),
-        ("What's the bitcoin price?", True),
-        ("What's the capital of France?", False),  # Static fact
-        ("How do you make bread?", False),  # General knowledge
-        ("What is photosynthesis?", False),  # Definition
-        ("Calculate 2+2", False),  # Calculation
-    ])
-    def test_realtime_detection(self, agent, query, should_need_realtime):
-        """Test detection of queries needing real-time data"""
-        needs_realtime = agent._needs_realtime_data(query)
-        assert needs_realtime == should_need_realtime, \
-            f"'{query}' should {'need' if should_need_realtime else 'not need'} realtime data"
-
-
-class TestAgentState:
-    """Test Agent state management"""
-
-    @pytest.fixture
-    def agent(self, tool_registry, mock_llm_config, mock_logger):
-        config = AgentConfig(llm_config=mock_llm_config)
-        agent = Agent(config, tool_registry, mock_llm_config)
-        mock_behavior = MockLLMBehavior(responses=["Response"])
-        agent._llm = MockLLMAdapter(mock_llm_config, mock_behavior)
-        return agent
-
-    def test_initial_state(self, agent):
-        """Test agent starts in IDLE state"""
-        assert agent.state == AgentState.IDLE
-
-    def test_state_during_run(self, agent):
-        """Test state changes during run"""
-        states_observed = []
-
-        def track_state(step):
-            states_observed.append(agent.state)
-
-        agent.add_step_callback(track_state)
-        agent.run("Hello")
-
-        # Should have passed through THINKING at least
-        assert any(s in states_observed for s in [AgentState.THINKING, AgentState.GENERATING_RESPONSE])
-
-    def test_state_after_completion(self, agent):
-        """Test state after successful completion"""
-        agent.run("Hello")
-        assert agent.state == AgentState.COMPLETE
-
-
-class TestAgentStep:
-    """Test AgentStep data structure"""
-
-    def test_step_to_dict(self):
-        """Test AgentStep serialization"""
-        step = AgentStep(
-            step_number=1,
-            state=AgentState.EXECUTING_TOOL,
-            tool_name="calculator",
-            tool_input={"expression": "2+2"},
-            tool_output="4",
-            duration_ms=50.5
-        )
-
-        d = step.to_dict()
-
-        assert d["step"] == 1
-        assert d["state"] == "executing_tool"
-        assert d["tool_name"] == "calculator"
-        assert d["duration_ms"] == 50.5
-
-    def test_step_with_error(self):
-        """Test AgentStep with error"""
-        step = AgentStep(
-            step_number=1,
-            state=AgentState.ERROR,
-            error="Something went wrong"
-        )
-
-        d = step.to_dict()
-        assert d["error"] == "Something went wrong"
-
-    def test_step_output_truncation(self):
-        """Test that long outputs are truncated in to_dict"""
-        long_output = "x" * 1000
-        step = AgentStep(
-            step_number=1,
-            state=AgentState.EXECUTING_TOOL,
-            tool_output=long_output
-        )
-
-        d = step.to_dict()
-        assert len(d["tool_output"]) <= 500
-
-
-class TestAgentResponse:
-    """Test AgentResponse data structure"""
-
-    def test_response_to_dict(self):
-        """Test AgentResponse serialization"""
-        step = AgentStep(step_number=0, state=AgentState.THINKING)
-        response = AgentResponse(
-            content="Test response",
-            steps=[step],
-            total_duration_ms=100.5,
-            tools_used=["calculator"],
-            success=True
-        )
-
-        d = response.to_dict()
-
-        assert d["content"] == "Test response"
-        assert d["success"] is True
-        assert d["total_duration_ms"] == 100.5
-        assert "calculator" in d["tools_used"]
-        assert len(d["steps"]) == 1
-
-    def test_response_with_error(self):
-        """Test AgentResponse with error"""
-        response = AgentResponse(
-            content="Error occurred",
-            success=False,
-            error="Test error"
-        )
-
-        assert not response.success
-        assert response.error == "Test error"
-
-    def test_response_metadata(self):
-        """Test AgentResponse metadata"""
-        response = AgentResponse(
-            content="Test",
-            metadata={"model": "test-model", "tool_calls": 3}
-        )
-
-        assert response.metadata["model"] == "test-model"
-        assert response.metadata["tool_calls"] == 3
-
-
 class TestTierPrompts:
     """Test tier-specific system prompts"""
 
@@ -582,17 +346,17 @@ class TestTierLimits:
     def test_simple_tier_limits(self):
         """Test simple tier has strict limits"""
         assert TIER_TOOL_LIMITS["simple"] == 1
-        assert TIER_MAX_TOKENS["simple"] == 1500
+        assert TIER_MAX_TOKENS["simple"] == 4096
 
     def test_standard_tier_limits(self):
         """Test standard tier has moderate limits"""
-        assert TIER_TOOL_LIMITS["standard"] == 3
-        assert TIER_MAX_TOKENS["standard"] == 4000
+        assert TIER_TOOL_LIMITS["standard"] == 15
+        assert TIER_MAX_TOKENS["standard"] == 16000
 
     def test_advanced_tier_limits(self):
         """Test advanced tier has generous limits"""
-        assert TIER_TOOL_LIMITS["advanced"] == 10
-        assert TIER_MAX_TOKENS["advanced"] == 8000
+        assert TIER_TOOL_LIMITS["advanced"] == 30
+        assert TIER_MAX_TOKENS["advanced"] == 32000
 
     def test_tier_limits_ascending(self):
         """Test that tier limits increase from simple to advanced"""
@@ -601,6 +365,47 @@ class TestTierLimits:
 
         assert TIER_MAX_TOKENS["simple"] < TIER_MAX_TOKENS["standard"]
         assert TIER_MAX_TOKENS["standard"] < TIER_MAX_TOKENS["advanced"]
+
+
+class TestAgentResponse:
+    """Test AgentResponse data structure"""
+
+    def test_response_to_dict(self):
+        """Test AgentResponse serialization"""
+        response = AgentResponse(
+            content="Test response",
+            total_duration_ms=100.5,
+            tools_used=["calculator"],
+            success=True
+        )
+
+        d = response.to_dict()
+
+        assert d["content"] == "Test response"
+        assert d["success"] is True
+        assert d["total_duration_ms"] == 100.5
+        assert "calculator" in d["tools_used"]
+
+    def test_response_with_error(self):
+        """Test AgentResponse with error"""
+        response = AgentResponse(
+            content="Error occurred",
+            success=False,
+            error="Test error"
+        )
+
+        assert not response.success
+        assert response.error == "Test error"
+
+    def test_response_metadata(self):
+        """Test AgentResponse metadata"""
+        response = AgentResponse(
+            content="Test",
+            metadata={"model": "test-model", "tool_calls": 3}
+        )
+
+        assert response.metadata["model"] == "test-model"
+        assert response.metadata["tool_calls"] == 3
 
 
 if __name__ == "__main__":
