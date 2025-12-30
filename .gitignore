@@ -27,3 +27,6 @@ evals/results/*
 evals/results/*/*/*
 .pyc_cache
 .pycache
+
+# Graphd database (local cache, not shared)
+.graphd/
