@@ -4,11 +4,16 @@ Workers NEVER mutate global state - all results go through WorkerOutcome.
 """
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, Set, Tuple
+
+# Environment variable to enable full context debug logging
+# Set AGENT_DEBUG_CONTEXT=1 to see the complete context sent to LLM
+_DEBUG_CONTEXT = os.getenv("AGENT_DEBUG_CONTEXT", "0") == "1"
 
 from .knowledge_store import KnowledgeFact, FactSource
 from .plan_patch import PlanPatch
@@ -64,7 +69,7 @@ class ToolExchange:
     success: bool = True
     error: Optional[str] = None
 
-from .context_window import ContextWindow, ContextDelta, build_files_message
+from .context_window import ContextWindow, ContextDelta, build_files_message, format_context_for_debug
 from .work_item import WorkItem
 
 
@@ -191,6 +196,40 @@ class Worker:
         log_fn = getattr(self.logger, level, None)
         if log_fn:
             log_fn(msg, component="worker", **kwargs)
+
+    def _log_context(self, event_type: str, full_context: str, step_num: int) -> None:
+        """
+        Log full LLM context to health.jsonl without truncation.
+
+        The full context is stored in data.full_context field.
+        This is only called when AGENT_DEBUG_CONTEXT=1.
+
+        Args:
+            event_type: Event identifier (e.g., "LLM_CONTEXT", "LLM_CONTEXT_SYNTHESIS")
+            full_context: The formatted context string (no truncation)
+            step_num: Current step number for correlation
+        """
+        if self.logger is None:
+            return
+
+        # Use _log_health directly if available (StructuredLogger)
+        # This stores full content in data field without truncation
+        log_health_fn = getattr(self.logger, "_log_health", None)
+        if callable(log_health_fn):
+            log_health_fn(
+                evt=f"{event_type}:step_{step_num}",
+                svc="worker",
+                data={"full_context": full_context, "step_num": step_num}
+            )
+        else:
+            # Fallback: use debug() which may truncate, but stores full in data
+            debug_fn = getattr(self.logger, "debug", None)
+            if callable(debug_fn):
+                debug_fn(
+                    f"{event_type}:step_{step_num}",
+                    component="worker",
+                    data={"full_context": full_context, "step_num": step_num}
+                )
 
     def execute(
         self,
@@ -467,6 +506,12 @@ class Worker:
         outcome: WorkerOutcome,
     ) -> Optional[Any]:
         """Call LLM with tools using a merged message list."""
+        # Debug logging: show full context when AGENT_DEBUG_CONTEXT=1
+        # Full context is stored in data.full_context, written to logs/health.jsonl
+        if _DEBUG_CONTEXT:
+            formatted_context = format_context_for_debug(messages)
+            self._log_context("LLM_CONTEXT", formatted_context, work_item.step_num)
+
         try:
             tools = self.tool_registry.get_definitions(enabled_only=True)
 
@@ -511,6 +556,12 @@ class Worker:
         outcome: WorkerOutcome,
     ) -> Optional[Any]:
         """Call LLM without tools (synthesis step)."""
+        # Debug logging: show full context when AGENT_DEBUG_CONTEXT=1
+        # Full context is stored in data.full_context, written to logs/health.jsonl
+        if _DEBUG_CONTEXT:
+            formatted_context = format_context_for_debug(messages)
+            self._log_context("LLM_CONTEXT_SYNTHESIS", formatted_context, outcome.step_num)
+
         try:
             if hasattr(self.llm, "respond_with_messages"):
                 response = self.llm.respond_with_messages(

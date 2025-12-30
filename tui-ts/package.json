@@ -1,0 +1,21 @@
+{
+  "name": "tui-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run index.tsx",
+    "start": "bun run index.tsx",
+    "build": "bun build index.tsx --outdir dist --target node",
+    "lint": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "ink": "^4.4.1",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.0",
+    "typescript": "^5.3.3"
+  }
+}
