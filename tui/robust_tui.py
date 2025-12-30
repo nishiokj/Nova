@@ -47,6 +47,9 @@ from tui.render_engine import RenderEngine, get_terminal_size
 from tui.tui_state import TUIState, TUIStateManager
 from tui.voice_service import VoiceInputHandler, VoiceService
 
+# Session management
+from harness.graphd import generate_session_key
+
 
 class RawTerminal:
     """Context manager for raw terminal mode with non-blocking reads."""
@@ -136,6 +139,9 @@ class RobustTUI:
         # Transcription timeout handling
         self._transcription_deadline: Optional[float] = None
 
+        # Session management
+        self._session_key: Optional[str] = None
+
     # ---------------------------------------------------------------- Lifecycle
 
     def run(self):
@@ -174,6 +180,15 @@ class RobustTUI:
             ):
                 logging.root.removeHandler(handler)
 
+    def _initialize_session(self):
+        """Initialize a new session for this TUI instance.
+
+        Each TUI instance gets a fresh session key. Session recovery
+        across restarts may be added as an opt-in feature later.
+        """
+        self._session_key = generate_session_key("tui")
+        self.logger.info(f"New session: {self._session_key}")
+
     def _setup(self):
         """Initialize all components."""
         # Welcome message
@@ -189,6 +204,9 @@ class RobustTUI:
         self.state.add_message("system", "Connecting to backend...")
         self.renderer.render_once()
         self._setup_event_bus()
+
+        # Initialize session
+        self._initialize_session()
 
         # Start backend workers (suppress stdout during startup)
         self._start_backend_workers()
@@ -616,6 +634,7 @@ class RobustTUI:
                     text=text,
                     confidence=None,
                     duration_ms=0.0,
+                    session_key=self._session_key,
                 )
             )
 

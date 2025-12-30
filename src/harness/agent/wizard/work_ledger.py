@@ -168,11 +168,13 @@ class WorkLedger:
         entry.outcome_summary = (
             outcome.final_response[:200] if outcome.final_response else None
         )
-        entry.observations = list(outcome.observations)
+        entry.observations = [
+            f"{fact.key}: {fact.value}" for fact in outcome.facts[:10]
+        ]
         entry.entity_refs = list(outcome.entity_refs)
-        entry.tool_calls_made = outcome.tool_calls_made
-        entry.llm_calls_made = outcome.llm_calls_made
-        entry.duration_ms = outcome.duration_ms
+        entry.tool_calls_made = outcome.metrics.tool_calls_made
+        entry.llm_calls_made = outcome.metrics.llm_calls_made
+        entry.duration_ms = outcome.metrics.duration_ms
 
     def get_step_history(self, step_num: int) -> List[LedgerEntry]:
         """Get all entries for a step in chronological order."""

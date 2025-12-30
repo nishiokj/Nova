@@ -16,6 +16,7 @@ class FactSource(Enum):
     INFERENCE = "inference"
     USER = "user"
     COMPACTION = "compaction"
+    GRAPHDB = "graphdb"  # Static analysis from GraphDB (imports, callers, symbols)
 
 
 @dataclass

@@ -90,6 +90,25 @@ class SynthesisInput:
                         "output": str(output)[:1000]
                     })
 
+            if hasattr(result, 'facts'):
+                # WorkerOutcome facts (prefer explicit tool facts)
+                for fact in result.facts:
+                    if isinstance(fact, dict):
+                        source = fact.get("source")
+                        tool_name = fact.get("tool_name")
+                        value = fact.get("value")
+                    else:
+                        source = getattr(fact, "source", None)
+                        tool_name = getattr(fact, "tool_name", None)
+                        value = getattr(fact, "value", None)
+
+                    source_value = getattr(source, "value", source)
+                    if source_value == "tool" and tool_name:
+                        tool_outputs.append({
+                            "tool": tool_name,
+                            "output": str(value)[:1000]
+                        })
+
             # Capture any final response from steps
             if hasattr(result, 'final_response') and result.final_response:
                 if partial_response is None:

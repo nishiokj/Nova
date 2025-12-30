@@ -61,6 +61,7 @@ class TranscriptionCompleteEvent(Event):
     text: str = ""
     confidence: Optional[float] = None
     duration_ms: float = 0.0
+    session_key: Optional[str] = None  # Session key for conversation persistence
 
     def __post_init__(self):
         object.__setattr__(self, 'event_type', EventType.TRANSCRIPTION_COMPLETE)
@@ -73,6 +74,7 @@ class AgentRequestSubmittedEvent(Event):
     tier: str = "standard"
     context: Optional[str] = None
     conversation_history: List[Dict[str, str]] = field(default_factory=list)
+    session_key: Optional[str] = None  # Session key for conversation persistence
 
     def __post_init__(self):
         object.__setattr__(self, 'event_type', EventType.AGENT_REQUEST_SUBMITTED)

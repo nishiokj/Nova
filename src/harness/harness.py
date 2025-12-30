@@ -27,7 +27,7 @@ from contextlib import nullcontext
 from util.config import HarnessConfig, RuntimeConfig, load_or_create_config
 from util.logger import StructuredLogger
 from .agent.tool_registry import ToolRegistry
-from .agent.agent import Agent, AgentResponse, AgentStep, TieredAgent
+from .agent.agent import Agent, AgentResponse, TieredAgent
 from util.runtime import HarnessRuntime, create_runtime
 from util.agent_execution_logger import AgentExecutionLogger
 
@@ -151,6 +151,7 @@ class AgentHarness:
         tier: str = "standard",
         context: Optional[str] = None,
         request_id: Optional[str] = None,
+        session_key: Optional[str] = None,
         on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
     ) -> HarnessResponse:
         """
@@ -161,6 +162,7 @@ class AgentHarness:
             tier: Agent tier (determined by ServiceRep/Router)
             context: Optional additional context
             request_id: Request identifier
+            session_key: Session key for conversation persistence
             on_stream_chunk: Optional callback for streaming final response synthesis.
                             Called with (chunk: str, chunk_index: int, is_final: bool)
 
@@ -173,6 +175,17 @@ class AgentHarness:
         self.logger.request_received(speech_text)
         call_dir = os.getcwd()
         self._set_state(HarnessState.PROCESSING)
+
+        # Session management: touch session (creates if needed) and load context
+        session_context_data = None  # Full context snapshot for hydration
+        if session_key and self.graphd:
+            try:
+                self.graphd.session_touch(session_key, working_dir=call_dir)
+
+                # Load full context snapshot for SessionContext hydration
+                session_context_data = self.load_session_context(session_key)
+            except Exception as e:
+                self.logger.warning(f"Failed to load session context: {e}", component="harness")
 
         agent_response = None
         full_response = ""
@@ -189,7 +202,6 @@ class AgentHarness:
 
             # Reset progress tracking and wire up callbacks
             self._last_progress_tool = None
-            step_callback = self._create_progress_callback(request_id)
             phase_callback = self._create_phase_callback(request_id)
 
             # Get the agent for this tier and add callbacks
@@ -197,7 +209,6 @@ class AgentHarness:
                 tier_agent = self.agent.get_agent_for_tier(tier)
             else:
                 tier_agent = self.agent
-            tier_agent.add_step_callback(step_callback)
             if hasattr(tier_agent, "add_phase_callback"):
                 tier_agent.add_phase_callback(phase_callback)
 
@@ -210,13 +221,12 @@ class AgentHarness:
                             user_input=speech_text,
                             tier=tier,
                             context=context,
-                            on_stream_chunk=on_stream_chunk
+                            on_stream_chunk=on_stream_chunk,
+                            session_context=session_context_data,
                         )
             finally:
                 if self.graphd:
                     self.graphd.set_active(False)
-                if hasattr(tier_agent, "remove_step_callback"):
-                    tier_agent.remove_step_callback(step_callback)
                 if hasattr(tier_agent, "remove_phase_callback"):
                     tier_agent.remove_phase_callback(phase_callback)
 
@@ -246,9 +256,30 @@ class AgentHarness:
                 metadata={
                     "request_id": request_id,
                     "tier": tier,
-                    "tools_used": agent_response.tools_used if agent_response else []
+                    "tools_used": agent_response.tools_used if agent_response else [],
+                    "session_key": session_key,
                 }
             )
+
+            # Session management: persist conversation messages and context state
+            if session_key and self.graphd:
+                self._persist_session_data(
+                    session_key=session_key,
+                    request_id=request_id,
+                    user_input=speech_text,
+                    assistant_response=full_response,
+                    tools_used=agent_response.tools_used if agent_response else [],
+                    duration_ms=duration_ms,
+                )
+
+                # Persist final context state for next request hydration
+                final_context = agent_response.metadata.get("final_context_state") if agent_response else None
+                if final_context:
+                    self.save_session_context(session_key, final_context)
+                    self.logger.debug(
+                        f"Persisted context state for session {session_key}",
+                        component="harness",
+                    )
 
             # Notify callbacks
             for callback in self._response_callbacks:
@@ -272,27 +303,10 @@ class AgentHarness:
                 metadata={"error": str(e), "request_id": request_id}
             )
 
-    def _create_progress_callback(self, request_id: str) -> Callable[[AgentStep], None]:
-        """Create callback to notify progress during agent execution"""
-        def on_step(step: AgentStep):
-            # Only report progress for tool executions
-            if step.tool_name:
-                progress_msg = self._get_tool_progress_message(step.tool_name, step.step_number)
-                if progress_msg:
-                    # Notify all progress callbacks
-                    for callback in self._progress_callbacks:
-                        try:
-                            callback(progress_msg, step.tool_name, step.step_number)
-                        except Exception as e:
-                            self.logger.error(f"Progress callback error: {e}", component="harness")
-
-        return on_step
-
     def _create_phase_callback(self, request_id: str) -> Callable[[str, Optional[str], int], None]:
         """Create callback to forward agent phase progress to progress_callbacks.
 
-        This handles phase transitions (planning, execution, reflection) that don't
-        have tool names, complementing _create_progress_callback which handles tool steps.
+        This handles phase transitions during agent execution.
         """
         def on_phase(message: str, tool_name: Optional[str], step_number: int):
             # Forward to all progress callbacks
@@ -390,6 +404,148 @@ class AgentHarness:
             return self._injected_context.get_nowait()
         except queue.Empty:
             return None
+
+    # =============================================================================
+    # SESSION MANAGEMENT
+    # =============================================================================
+
+    def _persist_session_data(
+        self,
+        session_key: str,
+        request_id: str,
+        user_input: str,
+        assistant_response: str,
+        tools_used: List[str],
+        duration_ms: float,
+    ):
+        """
+        Persist conversation data to GraphDB for the session.
+
+        This is called after each successful request to store:
+        - User message
+        - Assistant response with metadata
+
+        Args:
+            session_key: Session key for persistence
+            request_id: Request ID for tracing
+            user_input: User's message
+            assistant_response: Agent's response
+            tools_used: List of tools used
+            duration_ms: Request duration in milliseconds
+        """
+        if not self.graphd:
+            return
+
+        try:
+            # Store user message
+            self.graphd.message_add(
+                session_key=session_key,
+                role="user",
+                content=user_input,
+                request_id=request_id,
+            )
+
+            # Store assistant response with metadata
+            self.graphd.message_add(
+                session_key=session_key,
+                role="assistant",
+                content=assistant_response,
+                request_id=request_id,
+                metadata={
+                    "tools_used": tools_used,
+                    "duration_ms": duration_ms,
+                },
+            )
+
+            self.logger.debug(
+                f"Session data persisted for {session_key}",
+                component="harness",
+            )
+
+        except Exception as e:
+            # Log but don't fail the request - session persistence is best-effort
+            self.logger.warning(
+                f"Failed to persist session data: {e}",
+                component="harness",
+            )
+
+    def save_session_context(self, session_key: str, context_data: Dict[str, Any]) -> bool:
+        """
+        Save context snapshot for a session.
+
+        This can be called explicitly to persist the current context state.
+
+        Args:
+            session_key: Session key
+            context_data: Context data to save (e.g., from ContextState.to_dict())
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        if not self.graphd:
+            return False
+
+        try:
+            result = self.graphd.context_save(session_key, context_data)
+            if result.get("success"):
+                self.logger.debug(
+                    f"Context snapshot saved for {session_key} (v{result.get('snapshot_version')})",
+                    component="harness",
+                )
+                return True
+            else:
+                self.logger.warning(
+                    f"Failed to save context snapshot: {result.get('error')}",
+                    component="harness",
+                )
+                return False
+        except Exception as e:
+            self.logger.warning(f"Failed to save context snapshot: {e}", component="harness")
+            return False
+
+    def load_session_context(self, session_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Load the latest context snapshot for a session.
+
+        Args:
+            session_key: Session key
+
+        Returns:
+            Context data dict or None if not found
+        """
+        if not self.graphd:
+            return None
+
+        try:
+            result = self.graphd.context_get(session_key)
+            snapshot = result.get("snapshot")
+            if snapshot and snapshot.get("context"):
+                return snapshot["context"]
+            return None
+        except Exception as e:
+            self.logger.warning(f"Failed to load context snapshot: {e}", component="harness")
+            return None
+
+    def get_session_messages(self, session_key: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get conversation history for a session.
+
+        Args:
+            session_key: Session key
+            limit: Maximum messages to return
+
+        Returns:
+            List of message dicts
+        """
+        if not self.graphd:
+            return []
+
+        try:
+            result = self.graphd.messages_get(session_key, limit=limit)
+            return result.get("messages", [])
+        except Exception as e:
+            self.logger.warning(f"Failed to get session messages: {e}", component="harness")
+            return []
 
     # =============================================================================
     # CONFIGURATION & STATE

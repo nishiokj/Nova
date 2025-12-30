@@ -17,8 +17,8 @@ All types are defined in .types module.
 Usage:
     from harness.agent.wizard import Wizard, WizardConfig, WizardPlan, WizardStep
 
-    wizard = Wizard(tool_registry, llm, planner, config=WizardConfig())
-    result = wizard.orchestrate(user_input, context)
+    wizard = Wizard(tool_registry, llm, config=WizardConfig())
+    result = wizard.orchestrate(plan, user_input, request_context=context)
     print(result.to_dict())
 """
 
@@ -45,21 +45,25 @@ from .work_ledger import WorkLedger, LedgerEntry, EntryStatus, PatchRecord, Patc
 
 # Stores
 from .knowledge_store import KnowledgeStore, KnowledgeFact, FactSource
-from .evidence_store import EvidenceStore, EvidenceRecord
 
 # Work items
 from .work_item import WorkItem, WorkBounds, WorkItemCriteria
 
-# Context
-from .context_pack import ContextPack, ContextPackBuilder
+
+# Context Window
+from .context_window import (
+    ContextWindow,
+    ContextDelta,
+    SessionContext,
+    SystemPrompt,
+    BehavioralRules,
+)
 
 # Worker
 from .worker import (
     Worker,
     WorkerConfig,
     WorkerOutcome,
-    VerificationResult,
-    SuccessLevel,
     WorkerAction,
 )
 
@@ -104,22 +108,20 @@ __all__ = [
     "KnowledgeStore",
     "KnowledgeFact",
     "FactSource",
-    # Evidence store
-    "EvidenceStore",
-    "EvidenceRecord",
     # Work items
     "WorkItem",
     "WorkBounds",
     "WorkItemCriteria",
-    # Context
-    "ContextPack",
-    "ContextPackBuilder",
+    # Context Window
+    "ContextWindow",
+    "ContextDelta",
+    "SessionContext",
+    "SystemPrompt",
+    "BehavioralRules",
     # Worker
     "Worker",
     "WorkerConfig",
     "WorkerOutcome",
-    "VerificationResult",
-    "SuccessLevel",
     "WorkerAction",
     # Plan patches
     "PlanPatch",

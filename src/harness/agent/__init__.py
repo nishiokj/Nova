@@ -5,8 +5,6 @@ Convenience exports for the agent subsystem.
 from .agent import (
     Agent,
     AgentResponse,
-    AgentState,
-    AgentStep,
     TieredAgent,
     TIER_TOOL_LIMITS,
     TIER_MAX_TOKENS,
@@ -17,24 +15,14 @@ from .agent import (
 )
 from .prompts import (
     PLANNING_PROMPT,
-    EXECUTION_STEP_PROMPT,
-    SYNTHESIS_PROMPT,
-    REFLECTION_PROMPT,
     format_prompt,
 )
 from .planner import Planner
-from .executor import Executor
-from .reflector import Reflector
 from .plan_models import (
     Plan,
     PlanStep,
     SuccessCriteria,
-    StepContext,
     PlanStatus,
-    ToolCallRecord,
-    ValidationResult,
-    ExecutionTrace,
-    Reflection,
 )
 from .tool_registry import (
     ToolRegistry,
@@ -43,12 +31,18 @@ from .tool_registry import (
     ToolStatus,
     tool,
 )
+from .wizard import (
+    Wizard,
+    WizardConfig,
+    WizardResult,
+    WizardPlan,
+    convert_plan_to_wizard_plan,
+)
 
 __all__ = [
+    # Agent
     "Agent",
     "AgentResponse",
-    "AgentState",
-    "AgentStep",
     "TieredAgent",
     "TIER_TOOL_LIMITS",
     "TIER_MAX_TOKENS",
@@ -56,23 +50,21 @@ __all__ = [
     "STANDARD_TIER_PROMPT",
     "ADVANCED_TIER_PROMPT",
     "_TIER_PROMPTS",
-    "PLANNING_PROMPT",
-    "EXECUTION_STEP_PROMPT",
-    "SYNTHESIS_PROMPT",
-    "REFLECTION_PROMPT",
-    "format_prompt",
+    # Planner
     "Planner",
+    "PLANNING_PROMPT",
+    "format_prompt",
     "Plan",
     "PlanStep",
     "SuccessCriteria",
-    "StepContext",
     "PlanStatus",
-    "ToolCallRecord",
-    "ValidationResult",
-    "Executor",
-    "Reflector",
-    "ExecutionTrace",
-    "Reflection",
+    # Wizard
+    "Wizard",
+    "WizardConfig",
+    "WizardResult",
+    "WizardPlan",
+    "convert_plan_to_wizard_plan",
+    # Tools
     "ToolRegistry",
     "Tool",
     "ToolResult",

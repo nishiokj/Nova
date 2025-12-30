@@ -1,8 +1,5 @@
 """
-Planner/Executor/Reflector architecture for structured agent execution.
-
-This module is a compatibility facade that re-exports the plan models,
-planner prompts, and the Planner/Executor/Reflector components.
+Planner - Creates explicit execution plans for agent requests.
 """
 
 import json
@@ -11,22 +8,14 @@ from typing import Any, Dict, List, Optional
 from util.llm_adapter import LLMAdapter
 from util.perf_trace import get_tracer
 
-from .executor import Executor
 from .plan_models import (
-    ExecutionTrace,
     Plan,
     PlanPhase,
     PlanStatus,
     PlanStep,
-    Reflection,
-    StepContext,
-    StepResult,
     SuccessCriteria,
-    ToolCallRecord,
-    ValidationResult,
 )
-from .prompts import PLANNING_PROMPT, REFLECTION_PROMPT, format_prompt
-from .reflector import Reflector
+from .prompts import PLANNING_PROMPT
 from .tool_registry import ToolRegistry
 
 
@@ -37,10 +26,17 @@ class Planner:
     The key insight: know what success looks like BEFORE you start.
     """
 
-    def __init__(self, llm: LLMAdapter, tool_registry: ToolRegistry, enable_scouting: bool = True):
+    def __init__(
+        self,
+        llm: LLMAdapter,
+        tool_registry: ToolRegistry,
+        enable_scouting: bool = True,
+        graphd_client: Optional[Any] = None,
+    ):
         self.llm = llm
         self.tool_registry = tool_registry
         self._tracer = get_tracer()
+        self._graphd_client = graphd_client
         # NO logger - Planner doesn't log, Agent does
 
         # Store last LLM call details for logging by Agent
@@ -57,6 +53,9 @@ class Planner:
             try:
                 from .context_scout import ContextScout
                 self._scout = ContextScout(tool_registry)
+                # Wire up GraphDB if available
+                if self._graphd_client and self._scout:
+                    self._scout.set_graph_db(self._graphd_client)
             except ImportError:
                 self._enable_scouting = False
 
@@ -1078,19 +1077,10 @@ class Planner:
 
 __all__ = [
     "Planner",
-    "Executor",
-    "Reflector",
     "Plan",
     "PlanStep",
     "SuccessCriteria",
-    "StepContext",
     "PlanStatus",
     "PlanPhase",
-    "ToolCallRecord",
-    "ValidationResult",
-    "StepResult",
-    "ExecutionTrace",
-    "Reflection",
     "PLANNING_PROMPT",
-    "REFLECTION_PROMPT",
 ]
