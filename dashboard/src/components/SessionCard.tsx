@@ -1,4 +1,3 @@
-import React from 'react'
 import type { Session } from '../domain/models'
 import { StatusBadge } from './StatusBadge'
 import { CollapsibleSection } from './CollapsibleSection'

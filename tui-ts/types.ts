@@ -6,6 +6,17 @@ export type BridgeCommandType =
   | "get_config"
   | "get_models"
   | "get_status"
+  | "skills_list"
+  | "skills_get"
+  | "skills_create"
+  | "skills_update"
+  | "skills_delete"
+  | "skills_run"
+  | "hooks_list"
+  | "hooks_get"
+  | "hooks_create"
+  | "hooks_update"
+  | "hooks_delete"
   | "shutdown";
 
 export type BridgeEventType =
@@ -36,6 +47,9 @@ export type TUIState =
   | "error";
 
 export type Role = "user" | "agent" | "system" | "status";
+
+export type UIMode = "chat" | "skills" | "hooks" | "wizard";
+export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {
   id: string;
@@ -95,6 +109,6 @@ export interface TranscriptionData {
 
 export interface ErrorData {
   message?: string;
-  detail?: string;
+  detail?: unknown;
   fatal?: boolean;
 }

@@ -64,7 +64,9 @@
       "Bash(~/.bun/bin/bun build:*)",
       "Bash(timeout 10 python3:*)",
       "Bash(du:*)",
-      "Bash(~/.bun/bin/bun tsc:*)"
+      "Bash(~/.bun/bin/bun tsc:*)",
+      "Bash(~/.bun/bin/bun add:*)",
+      "Bash(~/.bun/bin/bun run build:*)"
     ],
     "deny": []
   }

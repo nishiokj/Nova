@@ -39,7 +39,14 @@ from communication.process_manager import ProcessManager
 from harness.graphd import generate_session_key
 from tui.logging_config import configure_tui_logging
 from tui.voice_service import VoiceService
-from util.config import ServiceRepConfig
+from util.config import ServiceRepConfig, load_or_create_config
+from util.logger import StructuredLogger
+from harness.agent.tool_registry import ToolRegistry
+from skills.store import SkillStore, StoreError as SkillStoreError
+from hooks.store import HookStore, StoreError as HookStoreError
+from hooks.manager import HookManager
+from hooks.models import InvocationContext
+from skills.runner import SkillRunner
 from workers.console_tts_worker import ConsoleTTSWorker
 from workers.service_rep_worker import ServiceRepWorker
 
@@ -76,6 +83,12 @@ class JSONLBridge:
         self.event_thread: Optional[threading.Thread] = None
         self.config: Optional[AppConfig] = None
         self.log_dir: Optional[str] = None
+        self.harness_config = None
+        self.skill_store: Optional[SkillStore] = None
+        self.hook_store: Optional[HookStore] = None
+        self.hook_manager: Optional[HookManager] = None
+        self.tool_registry: Optional[ToolRegistry] = None
+        self.skill_runner: Optional[SkillRunner] = None
 
     def run(self) -> None:
         try:
@@ -118,6 +131,17 @@ class JSONLBridge:
             "get_config": self._handle_get_config,
             "get_models": self._handle_get_models,
             "get_status": self._handle_get_status,
+            "skills_list": self._handle_skills_list,
+            "skills_get": self._handle_skills_get,
+            "skills_create": self._handle_skills_create,
+            "skills_update": self._handle_skills_update,
+            "skills_delete": self._handle_skills_delete,
+            "skills_run": self._handle_skills_run,
+            "hooks_list": self._handle_hooks_list,
+            "hooks_get": self._handle_hooks_get,
+            "hooks_create": self._handle_hooks_create,
+            "hooks_update": self._handle_hooks_update,
+            "hooks_delete": self._handle_hooks_delete,
             "shutdown": self._handle_shutdown,
         }.get(cmd_type)
 
@@ -160,6 +184,8 @@ class JSONLBridge:
 
             if enable_voice:
                 self._setup_voice()
+
+            self._setup_skills_hooks()
 
             self._initialized = True
             self._set_state("idle", "Ready")
@@ -238,6 +264,30 @@ class JSONLBridge:
 
         def on_voice_error(message: str) -> None:
             self._send_error(message)
+
+    def _setup_skills_hooks(self) -> None:
+        if not self.config:
+            return
+        try:
+            self.harness_config = load_or_create_config(self.config.harness.config_path)
+            structured_logger = StructuredLogger(
+                log_dir=self.log_dir or "logs",
+                log_to_file=False,
+                log_to_console=False,
+                log_level="INFO",
+            )
+            self.skill_store = SkillStore(self.harness_config.skills.skills_dir, logger=structured_logger)
+            self.hook_store = HookStore(self.harness_config.hooks.hooks_dir, logger=structured_logger)
+            self.hook_manager = HookManager(self.hook_store, self.harness_config.hooks, logger=structured_logger)
+            self.tool_registry = ToolRegistry(
+                self.harness_config.tools,
+                default_working_dir=PROJECT_ROOT,
+                logger=structured_logger,
+                hook_manager=self.hook_manager,
+            )
+            self.skill_runner = SkillRunner(self.tool_registry, logger=structured_logger)
+        except Exception as exc:
+            self.logger.warning(f"Skill/hook setup failed: {exc}")
             self._set_state("error", message)
 
         self.voice_service.on_error = on_voice_error
@@ -306,6 +356,235 @@ class JSONLBridge:
         text, meta = format_status_summary(self)
         self._send_response(kind="status", content=text, metadata=meta)
 
+    def _handle_skills_list(self, data: Dict[str, Any]) -> None:
+        if not self.skill_store:
+            self._send_error("Skills not initialized")
+            return
+        result = self.skill_store.list()
+        items = [skill.model_dump() for skill in result.items]
+        content = format_skill_list(items, result.errors)
+        payload = {"action": "list", "items": items, "errors": result.errors}
+        self._send_response(kind="skills", content=content, payload=payload)
+
+    def _handle_skills_get(self, data: Dict[str, Any]) -> None:
+        if not self.skill_store:
+            self._send_error("Skills not initialized")
+            return
+        skill_id = data.get("id")
+        if not isinstance(skill_id, str) or not skill_id:
+            self._send_error("Skill id required")
+            return
+        try:
+            skill = self.skill_store.get(skill_id)
+        except SkillStoreError as exc:
+            self._send_error("Skill lookup failed", detail=json.dumps(exc.details, ensure_ascii=True))
+            return
+        payload = {"action": "get", "item": skill.model_dump()}
+        self._send_response(kind="skills", content=f"Loaded skill {skill.id}", payload=payload)
+
+    def _handle_skills_create(self, data: Dict[str, Any]) -> None:
+        if not self.skill_store:
+            self._send_error("Skills not initialized")
+            return
+        definition = data.get("definition")
+        if not isinstance(definition, dict):
+            self._send_error("Skill definition missing or invalid")
+            return
+        try:
+            skill = self.skill_store.create(definition)
+        except SkillStoreError as exc:
+            self._send_error("Skill create failed", detail=json.dumps(exc.details, ensure_ascii=True))
+            return
+        payload = {"action": "create", "item": skill.model_dump()}
+        self._send_response(kind="skills", content=f"Skill created: {skill.id}", payload=payload)
+
+    def _handle_skills_update(self, data: Dict[str, Any]) -> None:
+        if not self.skill_store:
+            self._send_error("Skills not initialized")
+            return
+        skill_id = data.get("id")
+        definition = data.get("definition")
+        if not isinstance(skill_id, str) or not skill_id:
+            self._send_error("Skill id required")
+            return
+        if not isinstance(definition, dict):
+            self._send_error("Skill definition missing or invalid")
+            return
+        try:
+            skill = self.skill_store.update(skill_id, definition)
+        except SkillStoreError as exc:
+            self._send_error("Skill update failed", detail=json.dumps(exc.details, ensure_ascii=True))
+            return
+        payload = {"action": "update", "item": skill.model_dump()}
+        self._send_response(kind="skills", content=f"Skill updated: {skill.id}", payload=payload)
+
+    def _handle_skills_delete(self, data: Dict[str, Any]) -> None:
+        if not self.skill_store:
+            self._send_error("Skills not initialized")
+            return
+        skill_id = data.get("id")
+        if not isinstance(skill_id, str) or not skill_id:
+            self._send_error("Skill id required")
+            return
+        deleted = self.skill_store.delete(skill_id)
+        if not deleted:
+            self._send_error("Skill delete failed", detail=f"Skill '{skill_id}' not found")
+            return
+        payload = {"action": "delete", "id": skill_id, "deleted": True}
+        self._send_response(kind="skills", content=f"Skill deleted: {skill_id}", payload=payload)
+
+    def _handle_skills_run(self, data: Dict[str, Any]) -> None:
+        if not self.skill_store or not self.skill_runner or not self.tool_registry:
+            self._send_error("Skills not initialized")
+            return
+        skill_id = data.get("id")
+        if not isinstance(skill_id, str) or not skill_id:
+            self._send_error("Skill id required")
+            return
+        try:
+            skill = self.skill_store.get(skill_id)
+        except SkillStoreError as exc:
+            self._send_error("Skill lookup failed", detail=json.dumps(exc.details, ensure_ascii=True))
+            return
+
+        input_payload = data.get("input")
+        input_data = {}
+        if isinstance(input_payload, dict):
+            input_data = input_payload
+        elif isinstance(input_payload, str):
+            try:
+                parsed = json.loads(input_payload)
+                if isinstance(parsed, dict):
+                    input_data = parsed
+                else:
+                    input_data = {"text": input_payload}
+            except Exception:
+                input_data = {"text": input_payload}
+
+        request_id = f"skills_run_{int(time.time() * 1000)}"
+        user_input = ""
+        if isinstance(input_data, dict):
+            user_input = str(input_data.get("text") or "")
+        invocation_context = InvocationContext(
+            request_id=request_id,
+            session_key=None,
+            user_input=user_input,
+            tier="standard",
+        )
+
+        with self.tool_registry.with_invocation_context(invocation_context):
+            result = self.skill_runner.run(skill, input_data)
+
+        tool_calls = []
+        for call in result.tool_calls:
+            tool_calls.append(
+                {
+                    "name": call.name,
+                    "args": call.args,
+                    "status": call.result.status.value if call.result else None,
+                    "output": call.result.output if call.result else None,
+                    "error": call.result.error if call.result else None,
+                }
+            )
+
+        if result.success:
+            if isinstance(result.output, str):
+                content = result.output
+            else:
+                content = json.dumps(result.output, indent=2, ensure_ascii=True)
+        else:
+            content = result.error or "Skill execution failed"
+
+        payload = {
+            "action": "run",
+            "id": skill.id,
+            "result": {
+                "success": result.success,
+                "output": result.output,
+                "error": result.error,
+                "duration_ms": result.duration_ms,
+                "tool_calls": tool_calls,
+            },
+        }
+        self._send_response(kind="skills", content=content, payload=payload)
+
+    def _handle_hooks_list(self, data: Dict[str, Any]) -> None:
+        if not self.hook_store:
+            self._send_error("Hooks not initialized")
+            return
+        result = self.hook_store.list()
+        items = [hook.model_dump() for hook in result.items]
+        content = format_hook_list(items, result.errors)
+        payload = {"action": "list", "items": items, "errors": result.errors}
+        self._send_response(kind="hooks", content=content, payload=payload)
+
+    def _handle_hooks_get(self, data: Dict[str, Any]) -> None:
+        if not self.hook_store:
+            self._send_error("Hooks not initialized")
+            return
+        hook_id = data.get("id")
+        if not isinstance(hook_id, str) or not hook_id:
+            self._send_error("Hook id required")
+            return
+        try:
+            hook = self.hook_store.get(hook_id)
+        except HookStoreError as exc:
+            self._send_error("Hook lookup failed", detail=json.dumps(exc.details, ensure_ascii=True))
+            return
+        payload = {"action": "get", "item": hook.model_dump()}
+        self._send_response(kind="hooks", content=f"Loaded hook {hook.id}", payload=payload)
+
+    def _handle_hooks_create(self, data: Dict[str, Any]) -> None:
+        if not self.hook_store:
+            self._send_error("Hooks not initialized")
+            return
+        definition = data.get("definition")
+        if not isinstance(definition, dict):
+            self._send_error("Hook definition missing or invalid")
+            return
+        try:
+            hook = self.hook_store.create(definition)
+        except HookStoreError as exc:
+            self._send_error("Hook create failed", detail=json.dumps(exc.details, ensure_ascii=True))
+            return
+        payload = {"action": "create", "item": hook.model_dump()}
+        self._send_response(kind="hooks", content=f"Hook created: {hook.id}", payload=payload)
+
+    def _handle_hooks_update(self, data: Dict[str, Any]) -> None:
+        if not self.hook_store:
+            self._send_error("Hooks not initialized")
+            return
+        hook_id = data.get("id")
+        definition = data.get("definition")
+        if not isinstance(hook_id, str) or not hook_id:
+            self._send_error("Hook id required")
+            return
+        if not isinstance(definition, dict):
+            self._send_error("Hook definition missing or invalid")
+            return
+        try:
+            hook = self.hook_store.update(hook_id, definition)
+        except HookStoreError as exc:
+            self._send_error("Hook update failed", detail=json.dumps(exc.details, ensure_ascii=True))
+            return
+        payload = {"action": "update", "item": hook.model_dump()}
+        self._send_response(kind="hooks", content=f"Hook updated: {hook.id}", payload=payload)
+
+    def _handle_hooks_delete(self, data: Dict[str, Any]) -> None:
+        if not self.hook_store:
+            self._send_error("Hooks not initialized")
+            return
+        hook_id = data.get("id")
+        if not isinstance(hook_id, str) or not hook_id:
+            self._send_error("Hook id required")
+            return
+        deleted = self.hook_store.delete(hook_id)
+        if not deleted:
+            self._send_error("Hook delete failed", detail=f"Hook '{hook_id}' not found")
+            return
+        payload = {"action": "delete", "id": hook_id, "deleted": True}
+        self._send_response(kind="hooks", content=f"Hook deleted: {hook_id}", payload=payload)
+
     def _handle_shutdown(self, data: Dict[str, Any]) -> None:
         self.shutdown()
         raise SystemExit(0)
@@ -330,9 +609,12 @@ class JSONLBridge:
         self,
         kind: str,
         content: str,
+        payload: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         meta = {"kind": kind}
+        if payload is not None:
+            meta["payload"] = payload
         if metadata:
             meta.update(metadata)
         self._send_event(
@@ -493,6 +775,40 @@ class JSONLBridge:
                 self._writer_thread.join(timeout=1.0)
         except Exception:
             pass
+
+
+def format_skill_list(items: list[dict[str, Any]], errors: list[dict[str, Any]]) -> str:
+    if not items:
+        lines = ["No skills found."]
+    else:
+        lines = ["Skills:"]
+        for skill in items:
+            enabled = "enabled" if skill.get("enabled", False) else "disabled"
+            name = skill.get("name", "")
+            lines.append(f"- {skill.get('id')} [{enabled}] {name}")
+    if errors:
+        lines.append("")
+        lines.append("Errors:")
+        for err in errors:
+            lines.append(f"- {err.get('path')}: {err.get('message')}")
+    return "\n".join(lines)
+
+
+def format_hook_list(items: list[dict[str, Any]], errors: list[dict[str, Any]]) -> str:
+    if not items:
+        lines = ["No hooks found."]
+    else:
+        lines = ["Hooks:"]
+        for hook in items:
+            enabled = "enabled" if hook.get("enabled", False) else "disabled"
+            name = hook.get("name", "")
+            lines.append(f"- {hook.get('id')} [{enabled}] {name}")
+    if errors:
+        lines.append("")
+        lines.append("Errors:")
+        for err in errors:
+            lines.append(f"- {err.get('path')}: {err.get('message')}")
+    return "\n".join(lines)
 
 
 def format_config_summary(config: AppConfig, log_dir: Optional[str]) -> str:

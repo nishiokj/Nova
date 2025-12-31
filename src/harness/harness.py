@@ -18,6 +18,7 @@ import os
 import time
 import threading
 import queue
+import json
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Callable
 from enum import Enum
@@ -30,6 +31,7 @@ from .agent.tool_registry import ToolRegistry
 from .agent.agent import Agent, AgentResponse, TieredAgent
 from util.runtime import HarnessRuntime, create_runtime
 from util.agent_execution_logger import AgentExecutionLogger
+from hooks.models import InvocationContext
 
 
 class HarnessState(Enum):
@@ -114,6 +116,10 @@ class AgentHarness:
         self.tool_registry = self.runtime.tool_registry
         self.agent = self.runtime.agent
         self.graphd = getattr(self.runtime, "graphd", None)
+        self.skill_registry = getattr(self.runtime, "skill_registry", None)
+        self.skill_router = getattr(self.runtime, "skill_router", None)
+        self.skill_runner = getattr(self.runtime, "skill_runner", None)
+        self.hook_manager = getattr(self.runtime, "hook_manager", None)
 
         # Control interface state
         self._stop_requested = threading.Event()
@@ -197,41 +203,114 @@ class AgentHarness:
             self._injected_context.get_nowait()
 
         try:
-            # Step 1: Agent execution with progress updates
-            self._set_state(HarnessState.AGENT_WORKING)
+            invocation_context = InvocationContext(
+                request_id=request_id,
+                session_key=session_key,
+                user_input=speech_text,
+                tier=tier,
+                metadata={"context": context} if context else {},
+            )
 
-            # Reset progress tracking and wire up callbacks
-            self._last_progress_tool = None
-            phase_callback = self._create_phase_callback(request_id)
+            hook_blocked = False
+            ran_invocation_after = False
 
-            # Get the agent for this tier and add callbacks
-            if hasattr(self.agent, "get_agent_for_tier"):
-                tier_agent = self.agent.get_agent_for_tier(tier)
-            else:
-                tier_agent = self.agent
-            if hasattr(tier_agent, "add_phase_callback"):
-                tier_agent.add_phase_callback(phase_callback)
+            if self.hook_manager:
+                hook_result = self.hook_manager.run("invocation.before", invocation_context)
+                if hook_result.blocked:
+                    blocked_msg = hook_result.message or "Request blocked by hook"
+                    agent_response = AgentResponse(
+                        content=blocked_msg,
+                        success=False,
+                        error=blocked_msg,
+                        metadata={"hook_blocked": True},
+                    )
+                    full_response = blocked_msg
+                    hook_blocked = True
 
-            try:
-                if self.graphd:
-                    self.graphd.set_active(True)
-                with self.tool_registry.with_working_dir(call_dir):
-                    with self._profile("harness.agent_run_ms"):
-                        agent_response = self.agent.run(
-                            user_input=speech_text,
-                            tier=tier,
-                            context=context,
-                            on_stream_chunk=on_stream_chunk,
-                            session_context=session_context_data,
-                        )
-            finally:
-                if self.graphd:
-                    self.graphd.set_active(False)
-                if hasattr(tier_agent, "remove_phase_callback"):
-                    tier_agent.remove_phase_callback(phase_callback)
+            if not hook_blocked:
+                speech_text = invocation_context.user_input
+                tier = invocation_context.tier
+
+                skill_match = None
+                if self.skill_router and self.skill_runner:
+                    skill_match = self.skill_router.route(speech_text, tier, session_key)
+
+                if skill_match:
+                    self._set_state(HarnessState.AGENT_WORKING)
+                    input_data = self._build_skill_input(
+                        speech_text=speech_text,
+                        tier=tier,
+                        request_id=request_id,
+                        session_key=session_key,
+                        context=context,
+                    )
+                    with self.tool_registry.with_working_dir(call_dir):
+                        with self.tool_registry.with_invocation_context(invocation_context):
+                            skill_result = self.skill_runner.run(skill_match.skill, input_data)
+
+                    if self.hook_manager:
+                        self.hook_manager.run("invocation.after", invocation_context)
+                    ran_invocation_after = True
+
+                    if not skill_result.success:
+                        full_response = skill_result.error or "Skill execution failed"
+                    elif isinstance(skill_result.output, str):
+                        full_response = skill_result.output
+                    else:
+                        full_response = json.dumps(skill_result.output, indent=2, ensure_ascii=True)
+
+                    agent_response = AgentResponse(
+                        content=full_response,
+                        success=skill_result.success,
+                        error=skill_result.error,
+                        tools_used=[call.name for call in skill_result.tool_calls],
+                        metadata={
+                            "skill_id": skill_match.skill.id,
+                            "skill_trigger": skill_match.trigger_type,
+                            "skill_duration_ms": skill_result.duration_ms,
+                        },
+                    )
+                else:
+                    # Step 1: Agent execution with progress updates
+                    self._set_state(HarnessState.AGENT_WORKING)
+
+                    # Reset progress tracking and wire up callbacks
+                    self._last_progress_tool = None
+                    phase_callback = self._create_phase_callback(request_id)
+
+                    # Get the agent for this tier and add callbacks
+                    if hasattr(self.agent, "get_agent_for_tier"):
+                        tier_agent = self.agent.get_agent_for_tier(tier)
+                    else:
+                        tier_agent = self.agent
+                    if hasattr(tier_agent, "add_phase_callback"):
+                        tier_agent.add_phase_callback(phase_callback)
+
+                    try:
+                        if self.graphd:
+                            self.graphd.set_active(True)
+                        with self.tool_registry.with_working_dir(call_dir):
+                            with self.tool_registry.with_invocation_context(invocation_context):
+                                with self._profile("harness.agent_run_ms"):
+                                    agent_response = self.agent.run(
+                                        user_input=speech_text,
+                                        tier=tier,
+                                        context=context,
+                                        on_stream_chunk=on_stream_chunk,
+                                        session_context=session_context_data,
+                                    )
+                    finally:
+                        if self.graphd:
+                            self.graphd.set_active(False)
+                        if hasattr(tier_agent, "remove_phase_callback"):
+                            tier_agent.remove_phase_callback(phase_callback)
+
+                if self.hook_manager and not ran_invocation_after:
+                    self.hook_manager.run("invocation.after", invocation_context)
 
             # Step 2: Build response
-            full_response = agent_response.content
+            if agent_response and not full_response:
+                full_response = agent_response.content
             file_ops = agent_response.metadata.get("file_operations", []) if agent_response.metadata else []
 
             for op in file_ops:
@@ -317,6 +396,32 @@ class AgentHarness:
                     self.logger.error(f"Phase progress callback error: {e}", component="harness")
 
         return on_phase
+
+    def _build_skill_input(
+        self,
+        speech_text: str,
+        tier: str,
+        request_id: str,
+        session_key: Optional[str],
+        context: Optional[str],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        try:
+            parsed = json.loads(speech_text)
+            if isinstance(parsed, dict):
+                payload.update(parsed)
+        except Exception:
+            pass
+
+        payload.setdefault("text", speech_text)
+        payload.setdefault("tier", tier)
+        payload.setdefault("request_id", request_id)
+        if session_key:
+            payload.setdefault("session_key", session_key)
+        if context:
+            payload.setdefault("context", context)
+
+        return payload
 
     def _get_tool_progress_message(self, tool_name: str, step_number: int) -> Optional[str]:
         """

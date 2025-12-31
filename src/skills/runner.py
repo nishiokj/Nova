@@ -72,9 +72,24 @@ class SkillRunner:
 
     def run(self, skill: SkillDefinition, input_data: Dict[str, Any]) -> SkillRunResult:
         start_time = time.time()
+        tool_calls: List[SkillToolCall] = []
+
+        def log_result(success: bool, error: Optional[str] = None) -> None:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.info(
+                f"Skill '{skill.id}' executed",
+                component="skills",
+                data={
+                    "duration_ms": duration_ms,
+                    "tools_used": [c.name for c in tool_calls],
+                    "success": success,
+                    "error": error,
+                },
+            )
 
         validation_error = _validate_input_schema(skill.input_schema, input_data)
         if validation_error:
+            log_result(False, f"input validation failed: {validation_error}")
             return SkillRunResult(
                 success=False,
                 error=f"input validation failed: {validation_error}",
@@ -92,33 +107,38 @@ class SkillRunner:
         else:
             steps = skill.tool_chain or []
 
-        tool_calls: List[SkillToolCall] = []
         context = {"input": input_data}
 
         for step in steps:
             if (time.time() - start_time) * 1000 > skill.timeout_ms:
+                error = f"skill timed out after {skill.timeout_ms} ms"
+                log_result(False, error)
                 return SkillRunResult(
                     success=False,
                     tool_calls=tool_calls,
-                    error=f"skill timed out after {skill.timeout_ms} ms",
+                    error=error,
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
             if step.tool not in allowed_tools:
+                error = f"tool '{step.tool}' not allowed for skill '{skill.id}'"
+                log_result(False, error)
                 return SkillRunResult(
                     success=False,
                     tool_calls=tool_calls,
-                    error=f"tool '{step.tool}' not allowed for skill '{skill.id}'",
+                    error=error,
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
             try:
                 args = _render_template(step.args, context)
             except KeyError as exc:
+                error = f"template error: {exc}"
+                log_result(False, error)
                 return SkillRunResult(
                     success=False,
                     tool_calls=tool_calls,
-                    error=f"template error: {exc}",
+                    error=error,
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
@@ -128,10 +148,12 @@ class SkillRunner:
             tool_call.result = result
 
             if not result.is_success:
+                error = result.error or "tool execution failed"
+                log_result(False, error)
                 return SkillRunResult(
                     success=False,
                     tool_calls=tool_calls,
-                    error=result.error or "tool execution failed",
+                    error=error,
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
@@ -140,11 +162,7 @@ class SkillRunner:
         output = context.get("last_output")
         duration_ms = (time.time() - start_time) * 1000
 
-        self.logger.info(
-            f"Skill '{skill.id}' executed",
-            component="skills",
-            data={"duration_ms": duration_ms, "tools_used": [c.name for c in tool_calls]},
-        )
+        log_result(True)
 
         return SkillRunResult(
             success=True,

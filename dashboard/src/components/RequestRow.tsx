@@ -1,4 +1,3 @@
-import React from 'react'
 import type { Request } from '../domain/models'
 import { StatusBadge } from './StatusBadge'
 import { MetadataGrid } from './MetadataGrid'
