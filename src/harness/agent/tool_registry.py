@@ -928,7 +928,8 @@ class ToolRegistry:
                         error=hook_result.message or "Tool blocked by hook"
                     )
 
-            kwargs = invocation_context.tool_args or kwargs
+            if invocation_context.tool_args is not None:
+                kwargs = invocation_context.tool_args
             exec_context.env_overrides = invocation_context.env_overrides
             exec_context.workdir_override = invocation_context.workdir_override
             exec_context.tool_policy = invocation_context.tool_policy
@@ -981,7 +982,8 @@ class ToolRegistry:
                     output=None,
                     error=hook_result.message or "Tool blocked by hook"
                 )
-            result = invocation_context.tool_result or result
+            if invocation_context.tool_result is not None:
+                result = invocation_context.tool_result
 
         # Log detailed failure context for transparency
         if not result.is_success:
@@ -1957,7 +1959,6 @@ All writes are atomic (crash-safe).""",
         """Get current time"""
         try:
             from datetime import datetime
-            import time as time_module
 
             if timezone == "local":
                 now = datetime.now()
@@ -2469,7 +2470,7 @@ All writes are atomic (crash-safe).""",
         self,
         prompt: str,
         output_path: Optional[str] = None,
-        skip_prompt_engineering: bool = False,
+        _skip_prompt_engineering: bool = False,
         style: Optional[str] = None,
         width: Optional[Union[int, str]] = None,
         height: Optional[Union[int, str]] = None,

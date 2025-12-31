@@ -427,7 +427,7 @@ class MultiTurnEvalRunner:
     def run_task_suite(
         self,
         tasks: List[MultiTurnTask],
-        parallel: bool = False
+        _parallel: bool = False
     ) -> List[EvaluationResult]:
         """
         Run multiple tasks.
