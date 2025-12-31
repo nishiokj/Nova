@@ -6,6 +6,7 @@ logging helpers, LLM adapters, runtime builders, and supporting utilities.
 __all__ = [
     "agent_execution_logger",
     "config",
+    "exceptions",
     "llm_adapter",
     "logger",
     "manifest_store",

@@ -24,7 +24,7 @@ import io
 from datetime import datetime
 from pathlib import Path
 from contextlib import redirect_stdout, redirect_stderr, contextmanager
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from util.config import ToolConfig, NanoBananaConfig, LLMConfig
 from util.logger import StructuredLogger
@@ -1841,7 +1841,6 @@ All writes are atomic (crash-safe).""",
         """Get current time"""
         try:
             from datetime import datetime
-            import time as time_module
 
             if timezone == "local":
                 now = datetime.now()
@@ -2353,7 +2352,7 @@ All writes are atomic (crash-safe).""",
         self,
         prompt: str,
         output_path: Optional[str] = None,
-        skip_prompt_engineering: bool = False,
+        _skip_prompt_engineering: bool = False,
         style: Optional[str] = None,
         width: Optional[Union[int, str]] = None,
         height: Optional[Union[int, str]] = None,

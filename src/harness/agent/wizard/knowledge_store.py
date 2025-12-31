@@ -141,7 +141,7 @@ class KnowledgeStore:
         for key in to_remove:
             del self._facts[key]
 
-    def compact(self, budget_tokens: int) -> str:
+    def compact(self, _budget_tokens: int) -> str:
         """
         Compact store to fit within token budget.
         Returns summary of compacted facts.

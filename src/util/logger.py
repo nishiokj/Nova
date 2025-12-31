@@ -13,6 +13,7 @@ import json
 import logging
 import threading
 import hashlib
+import contextvars
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Union
@@ -20,6 +21,36 @@ from enum import Enum
 from pathlib import Path
 import traceback
 import uuid
+
+
+# === Correlation ID Support ===
+# Context variable for request tracing across async boundaries and threads
+
+_correlation_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "correlation_id", default=""
+)
+
+
+def set_correlation_id(cid: str) -> None:
+    """Set the correlation ID for the current context."""
+    _correlation_id.set(cid)
+
+
+def get_correlation_id() -> str:
+    """
+    Get the correlation ID for the current context.
+    Generates a new one if not set.
+    """
+    cid = _correlation_id.get()
+    if not cid:
+        cid = str(uuid.uuid4())[:8]
+        _correlation_id.set(cid)
+    return cid
+
+
+def clear_correlation_id() -> None:
+    """Clear the correlation ID for the current context."""
+    _correlation_id.set("")
 
 
 class LogLevel(Enum):
@@ -56,6 +87,7 @@ class RequestLog:
     req_id: str           # request_id
     span: str             # stage/span name
     evt: str              # event description
+    cid: str = ""         # correlation_id for cross-process tracing
     detail: Optional[Dict[str, Any]] = None  # event-specific details
 
     def to_dict(self) -> Dict[str, Any]:
@@ -67,6 +99,8 @@ class RequestLog:
             "span": self.span,
             "evt": self.evt
         }
+        if self.cid:
+            result["cid"] = self.cid
         if self.detail:
             result["detail"] = self.detail
         return result
@@ -272,6 +306,7 @@ class StructuredLogger:
             req_id=self._current_request_id or "no-req",
             span=span,
             evt=evt,
+            cid=get_correlation_id(),
             detail=detail
         )
 
@@ -519,6 +554,7 @@ class StructuredLogger:
                 req_id=self._current_request_id,
                 span="error",
                 evt=message[:100],
+                cid=get_correlation_id(),
                 detail=detail if detail else None
             )
             if self.log_to_file and hasattr(self, 'request_logger'):
@@ -548,6 +584,7 @@ class StructuredLogger:
                 req_id=self._current_request_id,
                 span="warning",
                 evt=message[:100],
+                cid=get_correlation_id(),
                 detail=data
             )
             if self.log_to_file and hasattr(self, 'request_logger'):
@@ -562,7 +599,7 @@ class StructuredLogger:
         """Legacy: maps to request_received"""
         self.request_received(text, metadata)
 
-    def router_classification(self, input_text: str, tier: str, confidence: float = 1.0):
+    def router_classification(self, _input_text: str, tier: str, confidence: float = 1.0):
         """Legacy: maps to input_parsed"""
         self.input_parsed(tier, confidence)
 

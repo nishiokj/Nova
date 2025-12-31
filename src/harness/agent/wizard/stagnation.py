@@ -72,7 +72,8 @@ class StagnationDetector:
             )
 
         if outcome and outcome.final_response:
-            output_hash = hashlib.md5(outcome.final_response.encode()).hexdigest()[:8]
+            # MD5 used for output fingerprinting to detect stagnation, not security
+            output_hash = hashlib.md5(outcome.final_response.encode(), usedforsecurity=False).hexdigest()[:8]
             self._output_hashes.setdefault(step_num, []).append(output_hash)
             hashes = self._output_hashes[step_num]
             if len(hashes) >= self.max_identical_outputs:

@@ -1,6 +1,28 @@
-# Voice Agent System
+# rex
+
+[![PyPI version](https://badge.fury.io/py/rex.svg)](https://badge.fury.io/py/rex)
+[![CI](https://github.com/nishiokj/rex/actions/workflows/ci.yml/badge.svg)](https://github.com/nishiokj/rex/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/nishiokj/rex/branch/main/graph/badge.svg)](https://codecov.io/gh/nishiokj/rex)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A production-ready multi-process voice agent system with STT, agent harness, TTS, and RL worker components.
+
+## Installation
+
+```bash
+# Basic installation (no audio dependencies)
+pip install rex
+
+# With audio support (macOS/Linux)
+pip install rex[audio]
+
+# Development dependencies
+pip install rex[dev]
+
+# Everything
+pip install rex[all]
+```
 
 ## Features
 
