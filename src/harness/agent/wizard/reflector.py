@@ -12,6 +12,7 @@ Design Principles:
 """
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol
@@ -42,6 +43,8 @@ class ReflectorConfig:
     # Quality thresholds
     min_accept_quality: float = 0.6      # Below this, consider REDO
     excellence_threshold: float = 0.85    # Above this, don't scaffold
+    redo_quality_threshold: float = 0.4   # Below this, trigger REDO
+    abort_quality_threshold: float = 0.2  # Below this after retries, abort
 
     # Behavior tuning
     max_redo_attempts: int = 2           # Max REDOs before escalating
@@ -55,6 +58,7 @@ class ReflectorConfig:
     # LLM settings
     reflection_model: Optional[str] = None  # Override model for reflection
     max_reflection_tokens: int = 2000
+    reflection_timeout_ms: int = 10_000
 
 
 class WizardReflector:

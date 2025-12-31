@@ -76,6 +76,9 @@ from .policy_gate import PolicyGate, PolicyDecision, PolicyViolation
 # Stagnation detection
 from .stagnation import StagnationDetector, StagnationSignal
 
+# Events
+from .events import WizardEventType, WizardEvent
+
 # Core orchestrator
 from .wizard import Wizard, WizardConfig, WizardResult
 
@@ -134,4 +137,7 @@ __all__ = [
     # Stagnation detection
     "StagnationDetector",
     "StagnationSignal",
+    # Events
+    "WizardEventType",
+    "WizardEvent",
 ]
