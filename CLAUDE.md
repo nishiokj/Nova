@@ -146,6 +146,18 @@ Configured in `src/util/config.py` via `LLMConfig`:
 - **Type hints** throughout the codebase
 - Line length: 100 characters
 
+### .gitignore Hygiene
+
+**Always add generated/dependency directories to `.gitignore` when creating them:**
+- `node_modules/` - Node.js dependencies
+- `venv/`, `.venv/` - Python virtual environments
+- `dist/`, `build/` - Build output directories
+- `*.lock`, `bun.lockb`, `package-lock.json`, `yarn.lock` - Lock files (optional, but typically ignored in applications)
+- `__pycache__/`, `*.pyc` - Python bytecode
+- `.env` - Environment files with secrets
+
+Before committing, run `git status` to verify no dependency directories or generated files are staged.
+
 ## Feature Flags
 
 - `AGENT_USE_WIZARD=1`: Enable Wizard orchestration (experimental)

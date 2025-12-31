@@ -5,6 +5,8 @@ Utilities for running ProcessWorker instances in subprocesses.
 from typing import Type
 from multiprocessing import Queue
 import logging
+import os
+import sys
 
 from communication.mailbox import Mailbox
 from communication.process_worker import ProcessWorker
@@ -35,6 +37,9 @@ def run_worker_process(
         datefmt='%H:%M:%S'
     )
     logger = logging.getLogger(worker_id)
+
+    if os.getenv("TUI_REDIRECT_WORKER_STDOUT") == "1":
+        sys.stdout = sys.stderr
 
     # Create mailbox from shared queue
     mailbox = Mailbox(worker_id=worker_id, queue_impl=mailbox_queue)

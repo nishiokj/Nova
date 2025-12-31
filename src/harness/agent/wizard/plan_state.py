@@ -53,6 +53,16 @@ class StepState:
     attempt_count: int = 0
     last_error: Optional[str] = None
 
+    # Clarification tracking
+    clarification_request_id: Optional[str] = None
+
+    # Redo overrides (objective remains immutable)
+    override_objective: Optional[str] = None
+
+    # Scaffolding metadata
+    scaffolded_from: Optional[int] = None
+    scaffold_depth: int = 0
+
     # Ordering: explicit position for correct execution order
     position: float = 0.0  # Lower = earlier in execution order
 
@@ -78,6 +88,7 @@ class StepState:
             target_paths=list(step.target_paths) if step.target_paths else [],
             position=float(step.step_num),  # Initial position from step_num
             required=step.required,
+            scaffold_depth=0,
         )
 
 
@@ -244,9 +255,13 @@ class PlanState:
             self.freeze_step(step_num)
             self._bump_version()
 
-    def reset_step_for_retry(self, step_num: int) -> bool:
+    def reset_step_for_retry(
+        self,
+        step_num: int,
+        last_error: Optional[str] = None,
+    ) -> bool:
         """
-        Reset a FAILED step back to PENDING for retry.
+        Reset a FAILED/IN_PROGRESS/AWAITING_USER step back to PENDING for retry.
         Returns True if reset was successful.
         """
         step = self.steps.get(step_num)
@@ -254,13 +269,34 @@ class PlanState:
             return False
         if step.is_frozen:
             return False
-        if step.status != StepStatus.FAILED:
+        if step.status not in (StepStatus.FAILED, StepStatus.IN_PROGRESS, StepStatus.AWAITING_USER):
             return False
 
         step.status = StepStatus.PENDING
         step.worker_id = None
         step.started_at = None
         step.outcome_summary = None
+        step.clarification_request_id = None
+        if last_error is not None:
+            step.last_error = last_error
+        self._bump_version()
+        return True
+
+    def set_override_objective(self, step_num: int, objective: Optional[str]) -> bool:
+        """Set or clear a redo override objective for a step."""
+        step = self.steps.get(step_num)
+        if step is None or step.is_frozen:
+            return False
+        step.override_objective = objective
+        self._bump_version()
+        return True
+
+    def set_step_tool_hint(self, step_num: int, tool_hint: Optional[str]) -> bool:
+        """Update a step's tool hint."""
+        step = self.steps.get(step_num)
+        if step is None or step.is_frozen:
+            return False
+        step.tool_hint = tool_hint
         self._bump_version()
         return True
 
@@ -355,6 +391,8 @@ class PlanState:
                 typed_deps=typed_deps,
                 position=next_position,
                 required=op.new_step.get("required", False),
+                scaffolded_from=op.new_step.get("scaffolded_from"),
+                scaffold_depth=op.new_step.get("scaffold_depth", 0),
             )
             self.steps[next_num] = new_state
 

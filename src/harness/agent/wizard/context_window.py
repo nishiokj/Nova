@@ -229,3 +229,112 @@ def _apply_system_suffix(
         return [updated] + messages[1:]
 
     return [{"role": "system", "content": suffix}] + messages
+
+
+def format_context_for_debug(
+    messages: List[Dict[str, Any]],
+    include_tool_calls: bool = True,
+    max_content_preview: int = 0,  # 0 = no limit (full content)
+) -> str:
+    """
+    Format context messages for human-readable debug output.
+
+    This produces a nicely formatted string showing the full context
+    being sent to the LLM, without truncation by default.
+
+    Args:
+        messages: List of message dicts (role, content, tool_calls, etc.)
+        include_tool_calls: Include tool call details in output
+        max_content_preview: Max chars per content block (0 = unlimited)
+
+    Returns:
+        Formatted string for debug logging
+    """
+    import json
+
+    lines: List[str] = []
+    lines.append("=" * 80)
+    lines.append("  FULL LLM CONTEXT  ".center(80, "="))
+    lines.append("=" * 80)
+    lines.append(f"Total messages: {len(messages)}")
+    lines.append("")
+
+    for idx, msg in enumerate(messages):
+        role = msg.get("role", "unknown").upper()
+        content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls", [])
+        tool_call_id = msg.get("tool_call_id")
+
+        # Message header
+        lines.append("-" * 80)
+        header = f"[{idx}] {role}"
+        if tool_call_id:
+            header += f" (tool_call_id: {tool_call_id})"
+        lines.append(header)
+        lines.append("-" * 80)
+
+        # Content
+        if content:
+            display_content = content
+            if max_content_preview > 0 and len(content) > max_content_preview:
+                display_content = content[:max_content_preview] + f"\n... [truncated, {len(content)} total chars]"
+
+            # Format based on role for readability
+            if role == "SYSTEM":
+                lines.append("SYSTEM PROMPT:")
+                lines.append("")
+                for line in display_content.split("\n"):
+                    lines.append(f"  {line}")
+            elif role == "TOOL":
+                lines.append("TOOL RESULT:")
+                lines.append("")
+                # Try to pretty-print JSON tool results
+                try:
+                    parsed = json.loads(display_content)
+                    formatted = json.dumps(parsed, indent=2)
+                    for line in formatted.split("\n"):
+                        lines.append(f"  {line}")
+                except (json.JSONDecodeError, TypeError):
+                    for line in display_content.split("\n"):
+                        lines.append(f"  {line}")
+            else:
+                for line in display_content.split("\n"):
+                    lines.append(f"  {line}")
+        else:
+            lines.append("  (no content)")
+
+        # Tool calls (for assistant messages)
+        if include_tool_calls and tool_calls:
+            lines.append("")
+            lines.append("  TOOL CALLS:")
+            for tc in tool_calls:
+                tc_id = tc.get("id", "?")
+                tc_type = tc.get("type", "?")
+                func = tc.get("function", {})
+                func_name = func.get("name", "?")
+                func_args = func.get("arguments", "{}")
+
+                lines.append(f"    ├─ ID: {tc_id}")
+                lines.append(f"    ├─ Type: {tc_type}")
+                lines.append(f"    ├─ Function: {func_name}")
+                lines.append(f"    └─ Arguments:")
+
+                # Pretty-print arguments
+                try:
+                    if isinstance(func_args, str):
+                        args_dict = json.loads(func_args)
+                    else:
+                        args_dict = func_args
+                    formatted_args = json.dumps(args_dict, indent=2)
+                    for line in formatted_args.split("\n"):
+                        lines.append(f"         {line}")
+                except (json.JSONDecodeError, TypeError):
+                    lines.append(f"         {func_args}")
+
+        lines.append("")
+
+    lines.append("=" * 80)
+    lines.append("  END CONTEXT  ".center(80, "="))
+    lines.append("=" * 80)
+
+    return "\n".join(lines)

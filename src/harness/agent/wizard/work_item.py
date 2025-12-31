@@ -61,11 +61,11 @@ class WorkItem:
         return cls(
             work_id=str(uuid.uuid4())[:8],
             step_num=step.step_num,
-            objective=step.objective,
+            objective=step.override_objective or step.objective,
             tool_hint=step.tool_hint,
             target_paths=step.target_paths,
             bounds=bounds or WorkBounds(),
             success_criteria=WorkItemCriteria(
-                description=f"Complete: {step.objective}"
+                description=f"Complete: {step.override_objective or step.objective}"
             ),
         )
