@@ -1,6 +1,7 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
 import type { MessageEntry, Role, TUIState } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
+import { SLASH_COMMANDS } from "./commands.js";
 
 export interface AutocompleteState {
   active: boolean;
@@ -295,49 +296,81 @@ export class Store {
 
   insertInput(text: string): void {
     this.inputBuffer.insertText(text);
+    this.emit();
   }
 
   replaceInput(text: string): void {
     this.inputBuffer.setText(text);
+    this.emit();
   }
 
   clearInput(): void {
     this.inputBuffer.clear();
     this.clearAutocomplete();
     this.inputScrollOffset = 0;
+    this.emit();
   }
 
   backspace(): void {
     this.inputBuffer.backspace();
+    this.emit();
   }
 
   deleteForward(): void {
     this.inputBuffer.deleteForward();
+    this.emit();
   }
 
   moveCursor(delta: number): void {
     this.inputBuffer.moveCursor(delta);
+    this.emit();
   }
 
   moveCursorTo(position: number): void {
     this.inputBuffer.moveCursorTo(position);
+    this.emit();
   }
 
   moveCursorUp(width: number, prompt: string): void {
     this.inputBuffer.moveCursorUp(width, prompt);
+    this.emit();
   }
 
   moveCursorDown(width: number, prompt: string): void {
     this.inputBuffer.moveCursorDown(width, prompt);
+    this.emit();
   }
 
   deleteWordBack(): void {
     this.inputBuffer.deleteWordBack();
+    this.emit();
   }
 
   updateAutocomplete(fileCache: { getFiles: () => string[] }): void {
     const text = this.inputBuffer.getText();
     const cursor = this.inputBuffer.getCursor();
+
+    // Check for slash command autocomplete first
+    const slashTrigger = findSlashCommandTrigger(text, cursor);
+    if (slashTrigger) {
+      const { startIndex, query } = slashTrigger;
+      const lowerQuery = query.toLowerCase();
+      const suggestions = SLASH_COMMANDS.filter((cmd) =>
+        cmd.toLowerCase().startsWith(lowerQuery)
+      );
+      if (suggestions.length > 0) {
+        this.autocomplete = {
+          active: true,
+          suggestions,
+          selected: Math.min(this.autocomplete.selected, suggestions.length - 1),
+          startIndex,
+        };
+        this.emit();
+        return;
+      }
+    }
+
+    // Check for file autocomplete (@)
     const trigger = findAutocompleteTrigger(text, cursor);
 
     if (!trigger) {
@@ -346,7 +379,7 @@ export class Store {
     }
 
     const { startIndex, query } = trigger;
-    if (!query || query.includes(" ") || query.includes("\n")) {
+    if (!query || /\s/.test(query)) {
       this.clearAutocomplete();
       return;
     }
@@ -363,6 +396,7 @@ export class Store {
       selected: Math.min(this.autocomplete.selected, suggestions.length - 1),
       startIndex,
     };
+    this.emit();
   }
 
   selectAutocomplete(delta: number): void {
@@ -375,6 +409,7 @@ export class Store {
     }
     const next = (this.autocomplete.selected + delta + count) % count;
     this.autocomplete.selected = next;
+    this.emit();
   }
 
   acceptAutocomplete(): boolean {
@@ -389,9 +424,11 @@ export class Store {
 
     const startIndex = this.autocomplete.startIndex;
     const cursor = this.inputBuffer.getCursor();
-    const replacement = `@${suggestion}`;
+    // Slash commands already include the "/" prefix, file paths need "@" prefix
+    const replacement = suggestion.startsWith("/") ? suggestion : `@${suggestion}`;
     this.inputBuffer.replaceRange(startIndex, cursor, replacement);
     this.clearAutocomplete();
+    this.emit();
     return true;
   }
 
@@ -402,10 +439,16 @@ export class Store {
       selected: 0,
       startIndex: -1,
     };
+    this.emit();
   }
 
   ensureInputCursorVisible(width: number, prompt: string, maxLines: number): void {
-    const layout = computeInputLayout(this.inputBuffer["buffer" as "buffer"], this.inputBuffer.getCursor(), width, prompt);
+    const layout = computeInputLayout(
+      this.inputBuffer.getRawBuffer(),
+      this.inputBuffer.getCursor(),
+      width,
+      prompt,
+    );
     const totalLines = layout.lines.length;
     let offset = this.inputScrollOffset;
 
@@ -418,7 +461,10 @@ export class Store {
     const maxOffset = Math.max(0, totalLines - maxLines);
     offset = Math.max(0, Math.min(offset, maxOffset));
 
-    this.inputScrollOffset = offset;
+    if (offset !== this.inputScrollOffset) {
+      this.inputScrollOffset = offset;
+      this.emit();
+    }
   }
 
   getHistoryLines(width: number, compact: boolean, streamCursor: string): HistoryLine[] {
@@ -482,6 +528,30 @@ function findAutocompleteTrigger(text: string, cursor: number): { startIndex: nu
 
   const query = text.slice(tokenStart + 1, cursor);
   return { startIndex: tokenStart, query };
+}
+
+function findSlashCommandTrigger(text: string, cursor: number): { startIndex: number; query: string } | null {
+  if (cursor <= 0) {
+    return null;
+  }
+
+  // Only trigger slash commands at the start of input (after optional whitespace)
+  const beforeCursor = text.slice(0, cursor);
+  const trimmedBefore = beforeCursor.trimStart();
+
+  // Must start with "/" and be at the beginning of input
+  if (!trimmedBefore.startsWith("/")) {
+    return null;
+  }
+
+  // Check that there's no whitespace in the command (still typing the command name)
+  if (/\s/.test(trimmedBefore)) {
+    return null;
+  }
+
+  const startIndex = beforeCursor.length - trimmedBefore.length;
+  const query = trimmedBefore; // includes the "/"
+  return { startIndex, query };
 }
 
 function isWhitespace(ch: string): boolean {

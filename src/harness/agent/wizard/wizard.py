@@ -7,6 +7,8 @@ Planning is the caller's responsibility.
 """
 
 import hashlib
+import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,8 +16,30 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from .types import (
     StepStatus,
+    StepPhase,
     WizardPlan,
     WizardReflection,
+    ReflectionVerdict,
+    GoalType,
+)
+from .reflector import WizardReflector, ReflectorConfig
+from .reflection_types import (
+    ReflectionContext,
+    StepContext,
+    WizardReflectionInput,
+    WizardReflectionOutput,
+    ClarificationRequest,
+    ClarificationResponse,
+    ScaffoldedStep,
+    OnClarificationNeeded,
+    ClarificationHandler,
+)
+from .events import (
+    WizardEvent,
+    WizardEventType,
+    ClarificationRequestedData,
+    QualityIssueData,
+    StepCompletedData,
 )
 from .plan_state import PlanState
 from .work_ledger import WorkLedger
@@ -65,6 +89,26 @@ class WizardConfig:
     max_retries_per_step: int = 3  # Max retries before skipping a failed step
     deadlock_threshold: int = 5  # Max consecutive iterations with no ready steps
 
+    # Reflection configuration
+    reflection_enabled: bool = True
+    reflection_model: Optional[str] = None
+    reflection_timeout_ms: int = 10_000
+
+    # Quality thresholds
+    min_accept_quality: float = 0.6
+    excellence_threshold: float = 0.85
+
+    # Scaffolding limits
+    max_scaffolded_per_step: int = 3
+    max_total_scaffolded: int = 10
+    max_plan_size: int = 20
+    max_scaffold_depth: int = 3
+
+    # Clarification policy
+    clarification_timeout_seconds: int = 60
+    require_default_assumption: bool = True
+    max_clarification_options: int = 4
+
 
 @dataclass
 class WizardResult:
@@ -89,6 +133,9 @@ class WizardResult:
     # Session persistence - SessionContext state for saving to graphd
     # This is the merged/final context state after orchestration
     final_context_state: Optional[Dict[str, Any]] = None
+
+    # Observability
+    events: List[WizardEvent] = field(default_factory=list)
 
     @property
     def is_terminated(self) -> bool:
@@ -183,6 +230,41 @@ class Wizard:
         # Synthesizer for final response generation
         self._synthesizer = ResponseSynthesizer(llm=llm)
 
+        # NEW: Reflector component for post-step reasoning
+        reflector_config = ReflectorConfig(
+            min_accept_quality=self.config.min_accept_quality,
+            excellence_threshold=self.config.excellence_threshold,
+            max_redo_attempts=self.config.max_retries_per_step,
+            reflection_model=self.config.reflection_model,
+            default_clarification_timeout=self.config.clarification_timeout_seconds,
+            max_clarification_options=self.config.max_clarification_options,
+            require_default_assumption=self.config.require_default_assumption,
+            reflection_timeout_ms=self.config.reflection_timeout_ms,
+        )
+        self._reflector = WizardReflector(llm, reflector_config, logger=logger)
+
+        # NEW: Clarification handling state
+        self._pending_clarifications: Dict[str, ClarificationRequest] = {}
+        self._clarification_responses: Dict[str, ClarificationResponse] = {}
+        self._on_clarification_needed: Optional[OnClarificationNeeded] = None
+        self._clarification_handler: Optional[ClarificationHandler] = None
+        self._clarification_condition = threading.Condition()
+
+        # NEW: Step error history for reflection context
+        self._step_errors: Dict[int, List[str]] = {}
+
+        # NEW: Goal abort tracking
+        self._goal_aborted: bool = False
+        self._goal_abort_reason: Optional[str] = None
+
+        # NEW: Scaffolding tracking
+        self._scaffolded_total: int = 0
+        self._scaffolded_by_step: Dict[int, int] = {}
+
+        # NEW: Event handlers + event buffer
+        self._event_handlers: List[Callable[[WizardEvent], None]] = []
+        self._events: List[WizardEvent] = []
+
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
         if self.logger is None:
@@ -190,6 +272,30 @@ class Wizard:
         log_fn = getattr(self.logger, level, None)
         if log_fn:
             log_fn(msg, component="wizard", **kwargs)
+
+    def add_event_handler(self, handler: Callable[[WizardEvent], None]) -> None:
+        """Register an event handler for Wizard events."""
+        self._event_handlers.append(handler)
+
+    def remove_event_handler(self, handler: Callable[[WizardEvent], None]) -> None:
+        """Unregister an event handler."""
+        if handler in self._event_handlers:
+            self._event_handlers.remove(handler)
+
+    def drain_events(self) -> List[WizardEvent]:
+        """Return and clear accumulated events."""
+        events = list(self._events)
+        self._events.clear()
+        return events
+
+    def _emit_event(self, event: WizardEvent) -> None:
+        """Emit event to registered handlers and store in buffer."""
+        self._events.append(event)
+        for handler in list(self._event_handlers):
+            try:
+                handler(event)
+            except Exception as exc:
+                self._log("warning", f"Event handler error: {exc}")
 
     def orchestrate(
         self,
@@ -200,6 +306,8 @@ class Wizard:
         on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
         target_paths: Optional[List[str]] = None,
         session_context: Optional[SessionContext] = None,
+        on_clarification_needed: Optional[OnClarificationNeeded] = None,
+        clarification_handler: Optional[ClarificationHandler] = None,
     ) -> WizardResult:
         """
         Main orchestration loop.
@@ -234,6 +342,18 @@ class Wizard:
         total_llm_calls = 0
         # Collect all outcomes for synthesis
         collected_outcomes: List[WorkerOutcome] = []
+
+        # Initialize clarification callback and reset state
+        self._on_clarification_needed = on_clarification_needed
+        self._clarification_handler = clarification_handler
+        self._pending_clarifications.clear()
+        self._clarification_responses.clear()
+        self._step_errors.clear()
+        self._goal_aborted = False
+        self._goal_abort_reason = None
+        self._scaffolded_total = 0
+        self._scaffolded_by_step.clear()
+        self._events.clear()
 
         # Initialize state stores directly from the provided plan
         self._plan_state = PlanState.from_wizard_plan(plan)
@@ -303,9 +423,19 @@ class Wizard:
         while iteration < self.config.max_iterations:
             iteration += 1
 
-            # Check if all steps have reached terminal state
-            # if self._plan_state.is_terminated():
-            #     break
+            # ========== CHECK FOR GOAL ABORT ==========
+            if self._goal_aborted:
+                self._log("info", f"Goal aborted: {self._goal_abort_reason}")
+                break
+
+            # ========== CHECK FOR CLARIFICATION RESPONSES ==========
+            self._process_clarification_responses()
+
+            # ========== CHECK FOR STEPS AWAITING USER ==========
+            if self._has_steps_awaiting_user():
+                # Block until clarification resolved or timeout applied
+                self._wait_for_clarification()
+                continue
 
             # Handle failed steps: retry or skip (uses step.attempt_count)
             self._handle_failed_steps()
@@ -341,6 +471,17 @@ class Wizard:
             self._plan_state.mark_step_in_progress(step.step_num, worker_id)
 
             entry_id = self._ledger.record_dispatch(step.step_num, work_item, worker_id)
+
+            self._emit_event(
+                WizardEvent(
+                    event_type=WizardEventType.STEP_STARTED,
+                    step_num=step.step_num,
+                    data={
+                        "objective": step.objective,
+                        "worker_id": worker_id,
+                    },
+                )
+            )
 
             # ========== BUILD STEP CONTEXT WINDOW ==========
             system_prompt = SystemPrompt(
@@ -402,40 +543,78 @@ class Wizard:
                     error=f"Worker exception: {type(exc).__name__}: {str(exc)[:200]}",
                     termination_reason="exception",
                 )
-            finally:
-                # ALWAYS record completion and clear IN_PROGRESS
-                if outcome:
-                    self._ingest_outcome(outcome, entry_id)
-                else:
-                    # Fallback: create minimal failed outcome
-                    self._ledger.record_completion(entry_id, WorkerOutcome(
-                        work_id=work_item.work_id,
-                        step_num=step.step_num,
-                        base_version=plan_version,
-                        success=False,
-                        error="Worker returned no outcome",
-                    ))
-                    self._plan_state.clear_in_progress(step.step_num)
 
-            # Log outcome
-            if outcome:
-                status_str = "success" if outcome.success else "failed"
-                self._log(
-                    "debug",
-                    f"Step {step.step_num} {status_str}: "
-                    f"tools={outcome.metrics.tool_calls_made}, "
-                    f"llm={outcome.metrics.llm_calls_made}",
+            # Ensure we have an outcome
+            if outcome is None:
+                outcome = WorkerOutcome(
+                    work_id=work_item.work_id,
+                    step_num=step.step_num,
+                    base_version=plan_version,
+                    success=False,
+                    error="Worker returned no outcome",
+                    termination_reason="no_outcome",
                 )
 
-            # Check stagnation AFTER ingest (correct timing)
-            if outcome:
-                signal = self._stagnation_detector.check(step.step_num, self._ledger, outcome)
-                if signal.detected:
-                    self._handle_stagnation(signal)
+            # Log outcome
+            status_str = "success" if outcome.success else "failed"
+            self._log(
+                "debug",
+                f"Step {step.step_num} {status_str}: "
+                f"tools={outcome.metrics.tool_calls_made}, "
+                f"llm={outcome.metrics.llm_calls_made}",
+            )
 
-                # Collect successful outcomes for synthesis
-                if outcome.success:
-                    collected_outcomes.append(outcome)
+            # Record completion in ledger (audit trail)
+            self._ledger.record_completion(entry_id, outcome)
+
+            # ════════════════════════════════════════════════════════════════
+            # NEW: WIZARD REFLECTION STAGE
+            # ════════════════════════════════════════════════════════════════
+            if self.config.reflection_enabled:
+                self._emit_event(
+                    WizardEvent(
+                        event_type=WizardEventType.REFLECTION_STARTED,
+                        step_num=step.step_num,
+                        data={
+                            "success": outcome.success,
+                            "termination_reason": outcome.termination_reason,
+                        },
+                    )
+                )
+                reflection_output = self._reflect_on_outcome(
+                    plan, step, outcome, collected_outcomes, iteration
+                )
+
+                self._emit_event(
+                    WizardEvent(
+                        event_type=WizardEventType.REFLECTION_COMPLETED,
+                        step_num=step.step_num,
+                        data={
+                            "verdict": reflection_output.verdict.value,
+                            "confidence": reflection_output.confidence,
+                            "quality_score": reflection_output.quality.overall_score,
+                        },
+                    )
+                )
+            else:
+                reflection_output = self._fallback_reflection_output(step, outcome)
+
+            # ════════════════════════════════════════════════════════════════
+            # ACT ON REFLECTION VERDICT
+            # ════════════════════════════════════════════════════════════════
+            self._apply_reflection_verdict(
+                step,
+                outcome,
+                reflection_output,
+                collected_outcomes,
+                on_stream_chunk,
+            )
+
+            # ========== STAGNATION CHECK ==========
+            # (After reflection, not before)
+            signal = self._stagnation_detector.check(step.step_num, self._ledger, outcome)
+            if signal.detected:
+                self._handle_stagnation(signal)
 
         duration_ms = (time.time() - start_time) * 1000
 
@@ -707,3 +886,647 @@ class Wizard:
         )
 
         return result.content
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # REFLECTION STAGE METHODS
+    # ════════════════════════════════════════════════════════════════════════════
+
+    def _reflect_on_outcome(
+        self,
+        plan: WizardPlan,
+        step: Any,  # StepState
+        outcome: WorkerOutcome,
+        previous_outcomes: List[WorkerOutcome],
+        iteration: int,
+    ) -> WizardReflectionOutput:
+        """
+        Build reflection input and invoke reflector.
+        """
+        # Convert GoalType if needed
+        goal_type = plan.goal_type
+        if isinstance(goal_type, str):
+            try:
+                goal_type = GoalType(goal_type.lower())
+            except ValueError:
+                goal_type = GoalType.TASK
+
+        # Build global context
+        global_context = ReflectionContext(
+            goal=plan.goal,
+            goal_type=goal_type,
+            total_steps=len(self._plan_state.steps),
+            completed_steps=sum(
+                1 for s in self._plan_state.steps.values()
+                if s.status == StepStatus.COMPLETED
+            ),
+            failed_steps=sum(
+                1 for s in self._plan_state.steps.values()
+                if s.status == StepStatus.FAILED
+            ),
+            remaining_steps=sum(
+                1 for s in self._plan_state.steps.values()
+                if s.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS)
+            ),
+            key_facts=self._get_top_facts_as_dicts(10),
+            total_iterations=iteration,
+            total_tool_calls=sum(o.metrics.tool_calls_made for o in previous_outcomes),
+        )
+
+        # Build step context
+        step_context = StepContext(
+            step_num=step.step_num,
+            objective=step.objective,
+            tool_hint=step.tool_hint,
+            phase=step.phase.value if hasattr(step.phase, 'value') else str(step.phase),
+            attempt_count=step.attempt_count,
+            depends_on=step.depends_on,
+            is_required=step.required,
+            previous_errors=self._get_step_errors(step.step_num),
+        )
+
+        # Convert outcome to dict for reflection input
+        outcome_dict = {
+            "success": outcome.success,
+            "final_response": outcome.final_response,
+            "error": outcome.error,
+            "termination_reason": outcome.termination_reason,
+            "facts": [
+                {
+                    "key": f.key,
+                    "value": f.value,
+                    "tool_name": f.tool_name,
+                }
+                for f in outcome.facts
+            ],
+        }
+
+        # Convert all steps to dicts
+        all_steps_dicts = [
+            {
+                "step_num": s.step_num,
+                "objective": s.objective,
+                "status": s.status,
+            }
+            for s in self._plan_state.steps.values()
+        ]
+
+        # Build reflection input
+        reflection_input = WizardReflectionInput(
+            global_context=global_context,
+            step_context=step_context,
+            outcome=outcome_dict,
+            all_steps=all_steps_dicts,
+            recent_outcomes=[
+                {
+                    "success": o.success,
+                    "final_response": o.final_response,
+                    "error": o.error,
+                }
+                for o in previous_outcomes[-5:]
+            ],
+        )
+
+        # Invoke reflector
+        self._log("debug", f"Reflecting on step {step.step_num} outcome...")
+        return self._reflector.reflect(reflection_input)
+
+    def _apply_reflection_verdict(
+        self,
+        step: Any,  # StepState
+        outcome: WorkerOutcome,
+        reflection: WizardReflectionOutput,
+        collected_outcomes: List[WorkerOutcome],
+        on_stream: Optional[Callable[[str, int, bool], None]],
+    ) -> None:
+        """
+        Apply the reflection verdict to update state.
+        """
+        self._log(
+            "debug",
+            f"Reflection verdict: {reflection.verdict.value} "
+            f"(confidence={reflection.confidence:.2f})"
+        )
+
+        if reflection.verdict == ReflectionVerdict.ACCEPT:
+            self._handle_accept(step, outcome, reflection, collected_outcomes)
+
+        elif reflection.verdict == ReflectionVerdict.ACCEPT_AND_EXTEND:
+            self._handle_accept_extend(step, outcome, reflection, collected_outcomes)
+
+        elif reflection.verdict == ReflectionVerdict.REDO:
+            self._handle_redo(step, outcome, reflection)
+
+        elif reflection.verdict == ReflectionVerdict.CLARIFY_USER:
+            self._handle_clarify_user(step, reflection)
+
+        elif reflection.verdict == ReflectionVerdict.ABORT_STEP:
+            self._handle_abort_step(step, reflection)
+
+        elif reflection.verdict == ReflectionVerdict.ABORT_GOAL:
+            self._handle_abort_goal(reflection)
+
+        # Stream user message if provided
+        if reflection.user_message and on_stream:
+            self._stream_content(reflection.user_message, on_stream)
+
+        # Log quality issues
+        if reflection.quality.issues:
+            self._log("warning", f"Quality issues: {reflection.quality.issues}")
+            self._emit_event(
+                WizardEvent(
+                    event_type=WizardEventType.QUALITY_ISSUE_DETECTED,
+                    step_num=step.step_num,
+                    data=QualityIssueData(
+                        step_num=step.step_num,
+                        issues=reflection.quality.issues,
+                        errors=[],
+                        severity="medium",
+                    ).__dict__,
+                )
+            )
+        if reflection.quality.errors:
+            self._log("warning", f"Detected errors: {reflection.quality.errors}")
+            self._emit_event(
+                WizardEvent(
+                    event_type=WizardEventType.ERROR_DETECTED,
+                    step_num=step.step_num,
+                    data=QualityIssueData(
+                        step_num=step.step_num,
+                        issues=[],
+                        errors=reflection.quality.errors,
+                        severity="high",
+                    ).__dict__,
+                )
+            )
+
+    def _handle_accept(
+        self,
+        step: Any,
+        outcome: WorkerOutcome,
+        reflection: WizardReflectionOutput,
+        collected_outcomes: List[WorkerOutcome],
+    ) -> None:
+        """Handle ACCEPT verdict."""
+        self._plan_state.mark_step_complete(
+            step.step_num,
+            outcome.final_response or "Completed"
+        )
+        self._ingest_outcome_data(outcome)
+        collected_outcomes.append(outcome)
+        self._stagnation_detector.reset_step(step.step_num)
+
+        self._log("info", f"Step {step.step_num} ACCEPTED")
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.STEP_COMPLETED,
+                step_num=step.step_num,
+                data=StepCompletedData(
+                    step_num=step.step_num,
+                    objective=step.override_objective or step.objective,
+                    outcome_summary=outcome.final_response or "Completed",
+                    quality_score=reflection.quality.overall_score,
+                    verdict=reflection.verdict.value,
+                    scaffolded_count=0,
+                ).__dict__,
+            )
+        )
+
+    def _handle_accept_extend(
+        self,
+        step: Any,
+        outcome: WorkerOutcome,
+        reflection: WizardReflectionOutput,
+        collected_outcomes: List[WorkerOutcome],
+    ) -> None:
+        """Handle ACCEPT_AND_EXTEND verdict."""
+        # First, accept the current step
+        self._plan_state.mark_step_complete(
+            step.step_num,
+            outcome.final_response or "Completed"
+        )
+        self._ingest_outcome_data(outcome)
+        collected_outcomes.append(outcome)
+
+        # Then, scaffold new steps
+        scaffolded_steps = self._filter_scaffolded_steps(step, reflection.scaffolded_steps)
+        for scaffolded in scaffolded_steps:
+            if self._scaffold_new_step(scaffolded, after_step=step.step_num):
+                self._scaffolded_total += 1
+                self._scaffolded_by_step[step.step_num] = (
+                    self._scaffolded_by_step.get(step.step_num, 0) + 1
+                )
+
+        self._log(
+            "info",
+            f"Step {step.step_num} ACCEPTED, scaffolded "
+            f"{len(scaffolded_steps)} new steps"
+        )
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.STEPS_SCAFFOLDED,
+                step_num=step.step_num,
+                data={
+                    "count": len(scaffolded_steps),
+                    "total_scaffolded": self._scaffolded_total,
+                },
+            )
+        )
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.STEP_COMPLETED,
+                step_num=step.step_num,
+                data=StepCompletedData(
+                    step_num=step.step_num,
+                    objective=step.override_objective or step.objective,
+                    outcome_summary=outcome.final_response or "Completed",
+                    quality_score=reflection.quality.overall_score,
+                    verdict=reflection.verdict.value,
+                    scaffolded_count=len(scaffolded_steps),
+                ).__dict__,
+            )
+        )
+
+    def _handle_redo(
+        self,
+        step: Any,
+        outcome: WorkerOutcome,
+        reflection: WizardReflectionOutput,
+    ) -> None:
+        """Handle REDO verdict."""
+        mods = reflection.redo_modifications
+
+        if mods:
+            # Apply modifications
+            if mods.new_objective:
+                self._plan_state.set_override_objective(step.step_num, mods.new_objective)
+            if mods.new_tool_hint:
+                self._plan_state.set_step_tool_hint(step.step_num, mods.new_tool_hint)
+            if mods.injected_context:
+                self._session_context.add_message({
+                    "role": "system",
+                    "content": f"Additional guidance: {mods.injected_context}"
+                })
+            if mods.avoid_patterns:
+                # Add as system message constraint
+                constraints = "\n".join(f"- DO NOT: {p}" for p in mods.avoid_patterns)
+                self._session_context.add_message({
+                    "role": "system",
+                    "content": f"Constraints for step {step.step_num}:\n{constraints}"
+                })
+
+        # Record the error for future attempts
+        self._record_step_error(step.step_num, outcome.error or "Redo requested")
+
+        # Reset for retry
+        self._plan_state.reset_step_for_retry(
+            step.step_num,
+            last_error=outcome.error or "Redo requested",
+        )
+
+        self._log(
+            "info",
+            f"Step {step.step_num} marked for REDO "
+            f"(attempt {step.attempt_count + 1})"
+        )
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.STEP_FAILED,
+                step_num=step.step_num,
+                data={
+                    "reason": outcome.error or "Redo requested",
+                    "verdict": reflection.verdict.value,
+                },
+            )
+        )
+
+    def _handle_clarify_user(
+        self,
+        step: Any,
+        reflection: WizardReflectionOutput,
+    ) -> None:
+        """Handle CLARIFY_USER verdict."""
+        clarification = reflection.clarification
+        if not clarification:
+            self._log("error", "CLARIFY_USER without clarification request")
+            # Fallback to REDO
+            self._plan_state.reset_step_for_retry(step.step_num, last_error="Missing clarification")
+            return
+
+        is_valid, rejection_reason = self._validate_clarification_request(clarification)
+        if not is_valid:
+            self._log("warning", f"Clarification rejected: {rejection_reason}")
+            self._plan_state.reset_step_for_retry(
+                step.step_num,
+                last_error=rejection_reason or "Invalid clarification",
+            )
+            # Inject a default assumption so the Worker proceeds
+            self._session_context.add_message({
+                "role": "system",
+                "content": "Proceed with reasonable assumptions; do not ask the user again.",
+            })
+            return
+
+        # Generate request ID
+        clarification.request_id = f"clarify_{uuid.uuid4().hex[:8]}"
+        clarification.step_num = step.step_num
+        if clarification.timeout_seconds <= 0:
+            clarification.timeout_seconds = self.config.clarification_timeout_seconds
+
+        # Store pending clarification
+        self._pending_clarifications[clarification.request_id] = clarification
+
+        # Update step status
+        step.status = StepStatus.AWAITING_USER
+        step.clarification_request_id = clarification.request_id
+
+        # Emit event to caller
+        if self._on_clarification_needed:
+            self._on_clarification_needed(clarification)
+        if self._clarification_handler:
+            self._clarification_handler.request_clarification(clarification)
+
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.CLARIFICATION_REQUESTED,
+                step_num=step.step_num,
+                data=ClarificationRequestedData(
+                    request_id=clarification.request_id,
+                    step_num=step.step_num,
+                    question=clarification.question,
+                    options=clarification.options,
+                    default_assumption=clarification.default_assumption,
+                    timeout_seconds=clarification.timeout_seconds,
+                ).__dict__,
+            )
+        )
+
+        self._log(
+            "info",
+            f"Step {step.step_num} AWAITING_USER: {clarification.question[:50]}..."
+        )
+
+    def _handle_abort_step(
+        self,
+        step: Any,
+        reflection: WizardReflectionOutput,
+    ) -> None:
+        """Handle ABORT_STEP verdict."""
+        self._plan_state.mark_step_skipped(
+            step.step_num,
+            f"Wizard decision: {reflection.abort_reason or 'Not achievable'}"
+        )
+        self._stagnation_detector.reset_step(step.step_num)
+
+        self._log(
+            "info",
+            f"Step {step.step_num} ABORTED: {reflection.abort_reason}"
+        )
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.STEP_SKIPPED,
+                step_num=step.step_num,
+                data={"reason": reflection.abort_reason or "Not achievable"},
+            )
+        )
+
+    def _handle_abort_goal(
+        self,
+        reflection: WizardReflectionOutput,
+    ) -> None:
+        """Handle ABORT_GOAL verdict."""
+        self._log(
+            "error",
+            f"GOAL ABORTED: {reflection.abort_reason}"
+        )
+
+        # Mark all pending steps as skipped
+        for step in self._plan_state.steps.values():
+            if step.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
+                self._plan_state.mark_step_skipped(
+                    step.step_num,
+                    "Goal aborted"
+                )
+
+        # This will cause the loop to terminate
+        self._goal_aborted = True
+        self._goal_abort_reason = reflection.abort_reason
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.GOAL_ABORTED,
+                data={"reason": reflection.abort_reason or "Aborted"},
+            )
+        )
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # PLAN SCAFFOLDING METHODS
+    # ════════════════════════════════════════════════════════════════════════════
+
+    def _scaffold_new_step(
+        self,
+        scaffolded: ScaffoldedStep,
+        after_step: int,
+    ) -> bool:
+        """Insert a new scaffolded step into the plan."""
+        # Create patch to insert
+        patch = PlanPatch.create_insert(
+            objective=scaffolded.objective,
+            tool_hint=scaffolded.tool_hint,
+            insert_after=after_step,
+            base_plan_version=self._plan_state.version,
+            justification=scaffolded.rationale,
+        )
+        if patch.operations and patch.operations[0].new_step is not None:
+            patch.operations[0].new_step["phase"] = scaffolded.phase
+            patch.operations[0].new_step["depends_on"] = (
+                scaffolded.depends_on or [after_step]
+            )
+            patch.operations[0].new_step["required"] = scaffolded.required
+            patch.operations[0].new_step["scaffolded_from"] = after_step
+            parent_depth = getattr(
+                self._plan_state.steps.get(after_step), "scaffold_depth", 0
+            )
+            patch.operations[0].new_step["scaffold_depth"] = parent_depth + 1
+
+        # Apply patch
+        applied = self._plan_state.apply_patch(patch)
+        if applied:
+            self._log(
+                "debug",
+                f"Scaffolded new step after {after_step}: {scaffolded.objective[:50]}..."
+            )
+            return True
+
+        self._log(
+            "warning",
+            f"Failed to scaffold step: {scaffolded.objective[:50]}..."
+        )
+        return False
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # CLARIFICATION HANDLING METHODS
+    # ════════════════════════════════════════════════════════════════════════════
+
+    def _has_steps_awaiting_user(self) -> bool:
+        """Check if any steps are awaiting user clarification."""
+        return any(
+            s.status == StepStatus.AWAITING_USER
+            for s in self._plan_state.steps.values()
+        )
+
+    def _process_clarification_responses(self) -> None:
+        """Process any received clarification responses."""
+        # This is called each iteration to check for responses
+        # In a real implementation, this would check a response queue
+        pass
+
+    def _check_clarification_timeout(self) -> bool:
+        """
+        Check for timed-out clarifications and apply defaults.
+
+        Returns True if any clarifications were resolved.
+        """
+        current_time = time.time()
+        resolved = False
+
+        for step in self._plan_state.steps.values():
+            if step.status != StepStatus.AWAITING_USER:
+                continue
+
+            # Find the pending clarification for this step
+            request = None
+            for req in self._pending_clarifications.values():
+                if req.step_num == step.step_num:
+                    request = req
+                    break
+
+            if not request:
+                continue
+
+            # Check for response
+            if request.request_id in self._clarification_responses:
+                response = self._clarification_responses.pop(request.request_id)
+                self._apply_clarification_response(step, request, response)
+                resolved = True
+                continue
+
+            # Check for timeout
+            elapsed = current_time - request.created_at
+            if elapsed > request.timeout_seconds:
+                # Apply default assumption
+                self._apply_default_assumption(step, request)
+                resolved = True
+
+        return resolved
+
+    def _apply_clarification_response(
+        self,
+        step: Any,
+        request: ClarificationRequest,
+        response: ClarificationResponse,
+    ) -> None:
+        """Apply user's clarification response and resume step."""
+        # Inject answer into context
+        answer = response.answer or request.default_assumption
+        self._session_context.add_message({
+            "role": "user",
+            "content": f"Clarification for '{request.question}':\n{answer}"
+        })
+
+        # Reset step to pending
+        step.status = StepStatus.PENDING
+
+        # Remove from pending
+        self._pending_clarifications.pop(request.request_id, None)
+
+        self._log(
+            "info",
+            f"Step {step.step_num} resumed with clarification: {answer[:50]}..."
+        )
+
+    def _apply_default_assumption(
+        self,
+        step: Any,
+        request: ClarificationRequest,
+    ) -> None:
+        """Apply default assumption after timeout."""
+        self._session_context.add_message({
+            "role": "system",
+            "content": f"Assumption (user did not respond): {request.default_assumption}"
+        })
+
+        # Reset step to pending
+        step.status = StepStatus.PENDING
+
+        # Remove from pending
+        self._pending_clarifications.pop(request.request_id, None)
+
+        self._log(
+            "info",
+            f"Step {step.step_num} resumed with default: {request.default_assumption[:50]}..."
+        )
+
+    def receive_clarification_response(self, response: ClarificationResponse) -> None:
+        """
+        Receive a clarification response from the TUI.
+
+        This method can be called externally to provide user responses.
+        """
+        self._clarification_responses[response.request_id] = response
+        self._log(
+            "debug",
+            f"Received clarification response for {response.request_id}"
+        )
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # HELPER METHODS
+    # ════════════════════════════════════════════════════════════════════════════
+
+    def _get_step_errors(self, step_num: int) -> List[str]:
+        """Get previous errors for a step."""
+        return self._step_errors.get(step_num, [])
+
+    def _record_step_error(self, step_num: int, error: str) -> None:
+        """Record an error for a step."""
+        if step_num not in self._step_errors:
+            self._step_errors[step_num] = []
+        self._step_errors[step_num].append(error)
+
+    def _get_top_facts_as_dicts(self, limit: int) -> List[Dict[str, Any]]:
+        """Get top knowledge facts as dictionaries."""
+        if not self._knowledge:
+            return []
+
+        facts = self._knowledge.get_top_facts(limit)
+        return [
+            {
+                "key": f.key,
+                "value": f.value,
+                "confidence": f.confidence,
+            }
+            for f in facts
+        ]
+
+    def _ingest_outcome_data(self, outcome: WorkerOutcome) -> None:
+        """
+        Ingest outcome data into knowledge store and apply patches.
+        This is the data ingestion part, separate from step status updates.
+        """
+        # Ingest knowledge facts
+        for fact in outcome.facts:
+            self._knowledge.upsert(fact)
+
+        # Apply patches via PolicyGate
+        self._apply_patches(outcome)
+
+    def _stream_content(
+        self,
+        content: str,
+        on_stream: Callable[[str, int, bool], None],
+    ) -> None:
+        """Stream content to callback."""
+        # Stream in chunks
+        chunk_size = 50
+        for i in range(0, len(content), chunk_size):
+            chunk = content[i:i + chunk_size]
+            is_final = (i + chunk_size >= len(content))
+            on_stream(chunk, i, is_final)

@@ -19,15 +19,17 @@ class StepStatus(Enum):
         PENDING -> IN_PROGRESS -> COMPLETED
                               -> FAILED -> PENDING (retry)
                                        -> SKIPPED (give up)
+                              -> AWAITING_USER -> PENDING (after response)
         PENDING -> SKIPPED (removed by patch)
 
     Terminal states: COMPLETED, SKIPPED
     """
-    PENDING = "pending"        # Not yet started
-    IN_PROGRESS = "in_progress"  # Worker executing
-    COMPLETED = "completed"    # Successfully finished (frozen)
-    FAILED = "failed"          # Failed, can retry
-    SKIPPED = "skipped"        # Permanently skipped (frozen)
+    PENDING = "pending"              # Not yet started
+    IN_PROGRESS = "in_progress"      # Worker executing
+    COMPLETED = "completed"          # Successfully finished (frozen)
+    FAILED = "failed"                # Failed, can retry
+    SKIPPED = "skipped"              # Permanently skipped (frozen)
+    AWAITING_USER = "awaiting_user"  # Blocked on user clarification
 
 
 class StepPhase(Enum):
@@ -47,6 +49,37 @@ class GoalType(Enum):
     QUESTION = "question"      # Answer a question
     EXPLORATION = "exploration"  # Explore/understand something
     MODIFICATION = "modification"  # Modify existing code/files
+
+
+class ReflectionVerdict(Enum):
+    """
+    Wizard's verdict after reflecting on a step outcome.
+
+    Ordered by preference - higher options should be more common.
+    """
+    ACCEPT = "accept"                    # Quality sufficient, proceed
+    ACCEPT_AND_EXTEND = "accept_extend"  # Good, scaffold more for excellence
+    REDO = "redo"                        # Redo with modifications
+    CLARIFY_USER = "clarify_user"        # Need user input (rare)
+    ABORT_STEP = "abort_step"            # Skip this step
+    ABORT_GOAL = "abort_goal"            # Cannot achieve goal (very rare)
+
+
+class ClarificationUrgency(Enum):
+    """Urgency level for user clarification requests."""
+    LOW = "low"           # Can proceed with default after short timeout
+    MEDIUM = "medium"     # Should wait for user, but has reasonable default
+    HIGH = "high"         # Genuinely needs user input, no good default
+    BLOCKING = "blocking"  # Cannot proceed without user input
+
+
+class FailureCategory(Enum):
+    """Category of step failure for triage."""
+    INFRASTRUCTURE = "infrastructure"  # Network, API, timeout errors
+    SEMANTIC = "semantic"              # Wrong approach, misunderstanding
+    CONTEXT = "context"                # Missing information
+    CAPABILITY = "capability"          # Task beyond current abilities
+    USER_INPUT = "user_input"          # Needs user decision
 
 
 class DependencyType:

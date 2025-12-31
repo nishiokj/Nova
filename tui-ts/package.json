@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "bun run index.tsx",
     "start": "bun run index.tsx",
-    "build": "bun build index.tsx --outdir dist --target node",
+    "build": "bun build index.tsx --outdir dist --target node && cp node_modules/yoga-wasm-web/dist/yoga.wasm dist/yoga.wasm",
     "lint": "bun tsc --noEmit"
   },
   "dependencies": {
@@ -16,6 +16,7 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.0",
+    "react-devtools-core": "^7.0.1",
     "typescript": "^5.3.3"
   }
 }

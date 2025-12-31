@@ -63,11 +63,10 @@ export class JSONLClient extends EventEmitter {
         return;
       }
 
-      const ok = this.child.stdin.write(next, "utf8", () => {
+      const ok = this.child.stdin.write(next, "utf8");
+      if (ok) {
         setImmediate(writeNext);
-      });
-
-      if (!ok) {
+      } else {
         this.child.stdin.once("drain", () => setImmediate(writeNext));
       }
     };

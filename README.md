@@ -108,6 +108,51 @@ voice-agent --debug
 voice-agent --rl
 ```
 
+## Ink TUI (TypeScript)
+
+The Ink-based TUI lives in `tui-ts/` and uses a Python bridge for JSONL
+communication with the existing EventBus and workers.
+
+Build artifacts are expected under `tui-ts/dist/`. The `run_tui.py` entrypoint
+will prefer the Ink TUI when `bun` and the build output are available, and will
+fallback to the Python robust TUI otherwise.
+
+Build and run:
+```bash
+cd tui-ts
+bun install
+bun run build
+python ../run_tui.py
+```
+
+### JSONL Protocol (UI <-> Bridge)
+
+All messages are JSON Lines with `{ "type": "...", "data": { ... } }`. Bridge
+stdout is reserved strictly for JSONL.
+
+UI -> Bridge commands:
+- `init`: `config_path?`, `log_dir?`, `enable_voice`, `client_version`, `log_transcripts?`
+- `send_text`: `text`, `client_request_id?`
+- `voice_start`: starts PTT recording (voice enabled + input empty)
+- `voice_stop`: stops recording and begins transcription
+- `get_config`: returns config summary for `/config`
+- `get_models`: returns API key status for `/models`
+- `get_status`: returns runtime status (workers, state, session key)
+- `shutdown`: stops workers and exits cleanly
+
+Bridge -> UI events:
+- `ready`: `session_key`, `log_dir`, `capabilities`, `config_summary`
+- `status`: `state` (`idle|recording|transcribing|sending|streaming|error`), `message`
+- `progress`: `request_id`, `message`, `tool_name?`, `step_number?`
+- `stream`: `request_id`, `chunk`, `chunk_index`, `is_final`
+- `response`: `request_id`, `success`, `content`, `spoken_response?`, `tools_used?`,
+  `duration_ms`, `error?`, `metadata?`
+- `transcription`: `text`, `request_id`, `duration_ms`
+- `error`: `message`, `detail?`, `fatal?`
+
+Responses to `/config`, `/models`, and `/status` are sent as `response` events
+with `metadata.kind` set to `config`, `models`, or `status`.
+
 ## Configuration
 
 ### Environment Variables

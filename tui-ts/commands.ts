@@ -3,6 +3,24 @@ export interface ParsedCommand {
   arg?: string;
 }
 
+export const SLASH_COMMANDS = [
+  "/help",
+  "/config",
+  "/models",
+  "/status",
+  "/compact",
+  "/voice",
+  "/up",
+  "/down",
+  "/pageup",
+  "/pagedown",
+  "/top",
+  "/bottom",
+  "/clear",
+  "/quit",
+  "/exit",
+];
+
 export function parseSlashCommand(text: string): ParsedCommand | null {
   const trimmed = text.trim();
   if (!trimmed.startsWith("/")) {

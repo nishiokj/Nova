@@ -153,7 +153,8 @@ export function computeInputLayout(
   let lineStart = 0;
 
   const safeWidth = Math.max(1, width);
-  let maxWidth = Math.max(1, safeWidth - prompt.length);
+  const lineWidth = Math.max(1, safeWidth - prompt.length);
+  let maxWidth = lineWidth;
 
   for (let i = 0; i < buffer.length; i += 1) {
     positions[i] = { line, col };
@@ -167,7 +168,7 @@ export function computeInputLayout(
       line += 1;
       col = 0;
       lineStart = i + 1;
-      maxWidth = safeWidth;
+      maxWidth = lineWidth;
       continue;
     }
 
@@ -179,7 +180,7 @@ export function computeInputLayout(
       line += 1;
       col = 0;
       lineStart = i;
-      maxWidth = safeWidth;
+      maxWidth = lineWidth;
     }
 
     current += ch;

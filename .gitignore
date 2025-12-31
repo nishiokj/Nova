@@ -30,3 +30,18 @@ evals/results/*/*/*
 
 # Graphd database (local cache, not shared)
 .graphd/
+
+# Node.js / TypeScript
+node_modules/
+*.lock
+bun.lockb
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# TypeScript TUI build artifacts
+tui-ts/dist/
+
+# OS files
+.DS_Store
+*.DS_Store

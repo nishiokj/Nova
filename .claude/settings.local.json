@@ -55,7 +55,13 @@
       "Bash(set -a)",
       "Bash(set +a)",
       "Bash(sqlite3:*)",
-      "Bash(pip-compile:*)"
+      "Bash(pip-compile:*)",
+      "Bash(git rm:*)",
+      "Bash(bun tsc:*)",
+      "Bash(npx tsc:*)",
+      "Bash(node -e:*)",
+      "Bash(npm run build:*)",
+      "Bash(~/.bun/bin/bun build:*)"
     ],
     "deny": []
   }

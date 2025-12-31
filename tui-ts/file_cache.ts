@@ -38,24 +38,35 @@ export class FileCache {
   private rootDir: string;
   private files: string[] = [];
   private lastUpdate = 0;
+  private refreshing = false;
 
   constructor(rootDir: string) {
     this.rootDir = path.resolve(rootDir);
   }
 
   async buildInitial(): Promise<void> {
-    this.files = await this.scanFiles();
-    this.lastUpdate = Date.now();
+    this.refreshing = true;
+    try {
+      this.files = await this.scanFiles();
+      this.lastUpdate = Date.now();
+    } finally {
+      this.refreshing = false;
+    }
   }
 
   async refreshIfNeeded(minIntervalMs = 5000): Promise<void> {
     const now = Date.now();
-    if (now - this.lastUpdate < minIntervalMs) {
+    if (this.refreshing || now - this.lastUpdate < minIntervalMs) {
       return;
     }
 
-    this.files = await this.scanFiles();
-    this.lastUpdate = now;
+    this.refreshing = true;
+    try {
+      this.files = await this.scanFiles();
+      this.lastUpdate = now;
+    } finally {
+      this.refreshing = false;
+    }
   }
 
   getFiles(): string[] {
@@ -111,7 +122,7 @@ export function fuzzyMatch(query: string, candidates: string[], limit = 10): str
   const scored: Array<{ path: string; score: number }> = [];
 
   for (const candidate of candidates) {
-    const filename = path.basename(candidate).toLowerCase();
+    const filename = path.posix.basename(candidate).toLowerCase();
     const pathLower = candidate.toLowerCase();
 
     if (filename.startsWith(q)) {
