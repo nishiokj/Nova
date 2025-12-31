@@ -23,6 +23,7 @@ import {
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
+import { useMouse } from "./useMouse.js";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR = "|";
@@ -199,6 +200,16 @@ function App({ options }: { options: AppOptions }) {
     store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
   }, [width, snapshot.inputText, snapshot.cursor, store]);
 
+  // Mouse wheel scrolling
+  const scrollAmount = 3; // lines to scroll per wheel tick
+  useMouse({
+    onScrollUp: () => {
+      store.scrollBy(scrollAmount, maxScrollRef.current);
+    },
+    onScrollDown: () => {
+      store.scrollBy(-scrollAmount, maxScrollRef.current);
+    },
+  });
 
   const handleBridgeEvent = (event: BridgeEvent) => {
     switch (event.type) {
@@ -614,7 +625,10 @@ function App({ options }: { options: AppOptions }) {
     // Only insert printable characters (filter out control chars that weren't handled above)
     if (input && !key.ctrl && !key.meta) {
       // Filter out control characters (ASCII 0-31 and 127)
-      const printable = input.replace(/[\x00-\x1f\x7f]/g, "");
+      // Also filter out mouse escape sequence fragments like "[<0;29;36M" or "[<64;10;5m"
+      const printable = input
+        .replace(/[\x00-\x1f\x7f]/g, "")
+        .replace(/\[?<\d+;\d+;\d+[Mm]/g, "");
       if (printable) {
         store.insertInput(printable);
         refreshAutocomplete();
@@ -655,26 +669,6 @@ function App({ options }: { options: AppOptions }) {
             ? "Voice mode enabled. Hold SPACE to record, press SPACE or Esc to stop."
             : "Voice mode disabled.",
         );
-        return;
-      }
-      case "/up": {
-        const delta = arg && Number.isFinite(Number(arg)) ? Number(arg) : 10;
-        store.scrollBy(delta, maxScrollRef.current);
-        return;
-      }
-      case "/down": {
-        const delta = arg && Number.isFinite(Number(arg)) ? Number(arg) : 10;
-        store.scrollBy(-delta, maxScrollRef.current);
-        return;
-      }
-      case "/pageup": {
-        const page = Math.max(1, historyHeightRef.current - 2);
-        store.scrollBy(page, maxScrollRef.current);
-        return;
-      }
-      case "/pagedown": {
-        const page = Math.max(1, historyHeightRef.current - 2);
-        store.scrollBy(-page, maxScrollRef.current);
         return;
       }
       case "/top":

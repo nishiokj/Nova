@@ -61,7 +61,10 @@
       "Bash(npx tsc:*)",
       "Bash(node -e:*)",
       "Bash(npm run build:*)",
-      "Bash(~/.bun/bin/bun build:*)"
+      "Bash(~/.bun/bin/bun build:*)",
+      "Bash(timeout 10 python3:*)",
+      "Bash(du:*)",
+      "Bash(~/.bun/bin/bun tsc:*)"
     ],
     "deny": []
   }

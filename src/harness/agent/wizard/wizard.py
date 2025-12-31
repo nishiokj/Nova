@@ -8,7 +8,6 @@ Planning is the caller's responsibility.
 
 import hashlib
 import re
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -16,7 +15,6 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from .types import (
     StepStatus,
-    StepPhase,
     WizardPlan,
     WizardReflection,
     ReflectionVerdict,
@@ -137,6 +135,10 @@ class WizardResult:
     # Observability
     events: List[WizardEvent] = field(default_factory=list)
 
+    # Pause state
+    paused: bool = False
+    pending_clarifications: List[ClarificationRequest] = field(default_factory=list)
+
     @property
     def is_terminated(self) -> bool:
         """True if all steps reached terminal state (COMPLETED or SKIPPED)."""
@@ -161,12 +163,27 @@ class WizardResult:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization or interop."""
+        pending_clarifications = [
+            {
+                "request_id": c.request_id,
+                "step_num": c.step_num,
+                "question": c.question,
+                "options": list(c.options),
+                "default_assumption": c.default_assumption,
+                "urgency": c.urgency.value if hasattr(c.urgency, "value") else str(c.urgency),
+                "timeout_seconds": c.timeout_seconds,
+                "context": c.context,
+                "created_at": c.created_at,
+            }
+            for c in self.pending_clarifications
+        ]
+        error = None if (self.success or self.paused) else "Wizard orchestration failed"
         return {
             "content": self.final_response,
             "structured_action": self.plan_state.goal,
             "total_duration_ms": self.duration_ms,
             "success": self.success,
-            "error": None if self.success else "Wizard orchestration failed",
+            "error": error,
             "goal_achieved": self.success,
             "reflection": {
                 "plan_goal": self.plan_state.goal,
@@ -175,6 +192,8 @@ class WizardResult:
                 "evidence": [self.ledger.summarize_tail()],
             },
             "events": [event.to_dict() for event in self.events],
+            "paused": self.paused,
+            "pending_clarifications": pending_clarifications,
             "metadata": {
                 "wizard": True,
                 "iterations": self.total_iterations,
@@ -182,6 +201,8 @@ class WizardResult:
                 "steps_completed": self.steps_completed,
                 "steps_skipped": self.steps_skipped,
                 "steps_failed": self.steps_failed,
+                "paused": self.paused,
+                "pending_clarifications": pending_clarifications,
             },
         }
 
@@ -249,7 +270,6 @@ class Wizard:
         self._clarification_responses: Dict[str, ClarificationResponse] = {}
         self._on_clarification_needed: Optional[OnClarificationNeeded] = None
         self._clarification_handler: Optional[ClarificationHandler] = None
-        self._clarification_condition = threading.Condition()
 
         # NEW: Step error history for reflection context
         self._step_errors: Dict[int, List[str]] = {}
@@ -266,6 +286,13 @@ class Wizard:
         # NEW: Event handlers + event buffer
         self._event_handlers: List[Callable[[WizardEvent], None]] = []
         self._events: List[WizardEvent] = []
+
+        # NEW: Resume-capable execution state
+        self._current_plan: Optional[WizardPlan] = None
+        self._collected_outcomes: List[WorkerOutcome] = []
+        self._iteration_count: int = 0
+        self._total_tool_calls: int = 0
+        self._total_llm_calls: int = 0
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -298,6 +325,7 @@ class Wizard:
                 handler(event)
             except Exception as exc:
                 self._log("warning", f"Event handler error: {exc}")
+        self._log("debug", f"Event: {event.event_type.value}", data=event.data)
 
     def orchestrate(
         self,
@@ -322,6 +350,7 @@ class Wizard:
             on_stream_chunk: Optional callback for streaming responses
             target_paths: Explicit file paths from user (e.g. @mentions) - injected into ALL steps
             session_context: Optional SessionContext hydrated from session snapshots.
+            clarification_handler: Optional handler for emitting clarification requests.
 
         Returns:
             WizardResult with execution results
@@ -338,13 +367,18 @@ class Wizard:
            f. Check stagnation (AFTER ingest)
            g. Apply patches (with lifecycle tracking)
         4. Return result with final SessionContext state for persistence
+
+        Note:
+        - Orchestration pauses and returns when awaiting user clarification.
+        - Call resume() after providing responses via receive_clarification_response().
         """
-        start_time = time.time()
-        self._start_time = start_time
-        total_tool_calls = 0
-        total_llm_calls = 0
+        self._start_time = time.time()
+        self._current_plan = plan
+        self._iteration_count = 0
+        self._total_tool_calls = 0
+        self._total_llm_calls = 0
         # Collect all outcomes for synthesis
-        collected_outcomes: List[WorkerOutcome] = []
+        self._collected_outcomes = []
 
         # Initialize clarification callback and reset state
         self._on_clarification_needed = on_clarification_needed
@@ -406,9 +440,7 @@ class Wizard:
             )
         )
 
-        iteration = 0
-        final_response: Optional[str] = None
-        consecutive_no_ready = 0  # Deadlock detection counter
+
         # ========== FULL PLAN LOGGING ==========
         self._log("info", f"Wizard starting: goal='{plan.goal[:80]}', steps={len(plan.steps)}")
         self._log("debug", f"=== FULL PLAN ===")
@@ -416,12 +448,63 @@ class Wizard:
         self._log("debug", f"  goal_type: {plan.goal_type}")
         self._log("debug", f"  reasoning: {plan.reasoning[:200] if plan.reasoning else '(none)'}")
         self._log("debug", f"  requires_tools: {plan.requires_tools}")
-    #    self._log("debug", session_context.)
+        #    self._log("debug", session_context.)
         for step in plan.steps:
             deps = f" (depends_on: {step.depends_on})" if step.depends_on else ""
             tool = f" [tool: {step.tool_hint}]" if step.tool_hint else ""
             required = " REQUIRED" if step.required else ""
             self._log("debug", f"  Step {step.step_num}: {step.objective[:80]}{tool}{deps}{required}")
+
+        return self._run_orchestration_loop(
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
+        )
+
+    def resume(
+        self,
+        budget: Optional[Dict[str, int]] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+        on_clarification_needed: Optional[OnClarificationNeeded] = None,
+        clarification_handler: Optional[ClarificationHandler] = None,
+    ) -> WizardResult:
+        """
+        Resume orchestration after a pause awaiting user input.
+
+        This continues with the existing PlanState, ledger, and context.
+        """
+        if not self._plan_state or not self._current_plan:
+            raise RuntimeError("No active plan to resume.")
+
+        if on_clarification_needed is not None:
+            self._on_clarification_needed = on_clarification_needed
+        if clarification_handler is not None:
+            self._clarification_handler = clarification_handler
+
+        self._events.clear()
+        if self._start_time <= 0:
+            self._start_time = time.time()
+
+        return self._run_orchestration_loop(
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
+        )
+
+    def _run_orchestration_loop(
+        self,
+        budget: Optional[Dict[str, int]] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+    ) -> WizardResult:
+        """Run the orchestration loop using existing state."""
+        if not self._plan_state or not self._current_plan:
+            raise RuntimeError("Wizard has no active plan to run.")
+
+        plan = self._current_plan
+        iteration = self._iteration_count
+        total_tool_calls = self._total_tool_calls
+        total_llm_calls = self._total_llm_calls
+        collected_outcomes = self._collected_outcomes
+        consecutive_no_ready = 0  # Deadlock detection counter
+        paused_for_user = False
 
         while iteration < self.config.max_iterations:
             iteration += 1
@@ -436,9 +519,8 @@ class Wizard:
 
             # ========== CHECK FOR STEPS AWAITING USER ==========
             if self._has_steps_awaiting_user():
-                # Block until clarification resolved or timeout applied
-                self._wait_for_clarification()
-                continue
+                paused_for_user = True
+                break
 
             # Handle failed steps: retry or skip (uses step.attempt_count)
             self._handle_failed_steps()
@@ -570,9 +652,9 @@ class Wizard:
             # Record completion in ledger (audit trail)
             self._ledger.record_completion(entry_id, outcome)
 
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             # NEW: WIZARD REFLECTION STAGE
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             if self.config.reflection_enabled:
                 self._emit_event(
                     WizardEvent(
@@ -602,9 +684,9 @@ class Wizard:
             else:
                 reflection_output = self._fallback_reflection_output(step, outcome)
 
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             # ACT ON REFLECTION VERDICT
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             self._apply_reflection_verdict(
                 step,
                 outcome,
@@ -619,20 +701,27 @@ class Wizard:
             if signal.detected:
                 self._handle_stagnation(signal)
 
-        duration_ms = (time.time() - start_time) * 1000
+        self._iteration_count = iteration
+        self._total_tool_calls = total_tool_calls
+        self._total_llm_calls = total_llm_calls
 
-        # Cleanup
-        self._stagnation_detector.cleanup_all()
+        duration_ms = (time.time() - self._start_time) * 1000
+
+        if not paused_for_user:
+            # Cleanup only after completion; preserve state for resume if paused.
+            self._stagnation_detector.cleanup_all()
 
         # ========== FINAL RESPONSE SYNTHESIS ==========
-        # Use the synthesizer to generate a proper final response
-        final_response = self._synthesize_final_response(
-            plan=plan,
-            outcomes=collected_outcomes,
-            on_stream=on_stream_chunk,
-        )
+        if paused_for_user:
+            final_response = self._build_pause_response()
+        else:
+            final_response = self._synthesize_final_response(
+                plan=plan,
+                outcomes=collected_outcomes,
+                on_stream=on_stream_chunk,
+            )
 
-        if self._session_context and final_response:
+        if self._session_context and final_response and not paused_for_user:
             last_msg = self._session_context.messages[-1] if self._session_context.messages else None
             if not (last_msg and last_msg.get("role") == "assistant" and last_msg.get("content") == final_response):
                 self._session_context.add_message({"role": "assistant", "content": final_response})
@@ -653,13 +742,19 @@ class Wizard:
 
         # Use goal_achieved() for success (not just is_terminated)
         goal_achieved = self._plan_state.goal_achieved()
-        self._log(
-            "info",
-            f"Wizard complete: goal_achieved={goal_achieved}, "
-            f"iterations={iteration}, completed={steps_completed}, "
-            f"skipped={steps_skipped}, failed={steps_failed}, "
-            f"duration={duration_ms:.0f}ms"
-        )
+        if paused_for_user:
+            self._log(
+                "info",
+                "Wizard paused awaiting user clarification.",
+            )
+        else:
+            self._log(
+                "info",
+                f"Wizard complete: goal_achieved={goal_achieved}, "
+                f"iterations={iteration}, completed={steps_completed}, "
+                f"skipped={steps_skipped}, failed={steps_failed}, "
+                f"duration={duration_ms:.0f}ms"
+            )
 
         if goal_achieved:
             self._emit_event(
@@ -692,6 +787,8 @@ class Wizard:
             steps_failed=steps_failed,
             final_context_state=final_context_state,
             events=list(self._events),
+            paused=paused_for_user,
+            pending_clarifications=self._get_pending_clarifications(),
         )
 
     def _handle_failed_steps(self) -> None:
@@ -947,9 +1044,26 @@ class Wizard:
 
         return "\n".join(lines)
 
-    # ════════════════════════════════════════════════════════════════════════════
+    def _build_pause_response(self) -> str:
+        """Build a response indicating the wizard is awaiting user clarification."""
+        if not self._pending_clarifications:
+            return "Paused awaiting user clarification."
+
+        request = min(
+            self._pending_clarifications.values(),
+            key=lambda r: r.created_at,
+        )
+        lines = [
+            f"Awaiting clarification for step {request.step_num}:",
+            request.question,
+        ]
+        if request.options:
+            lines.append(f"Options: {', '.join(request.options)}")
+        return "\n".join(lines)
+
+    # ======================================================================
     # REFLECTION STAGE METHODS
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
 
     def _fallback_reflection_output(
         self,
@@ -994,6 +1108,10 @@ class Wizard:
         global_context = ReflectionContext(
             goal=plan.goal,
             goal_type=goal_type,
+            goal_success_criteria=(
+                plan.success_criteria.description
+                if plan.success_criteria else None
+            ),
             total_steps=len(self._plan_state.steps),
             completed_steps=sum(
                 1 for s in self._plan_state.steps.values()
@@ -1002,6 +1120,10 @@ class Wizard:
             failed_steps=sum(
                 1 for s in self._plan_state.steps.values()
                 if s.status == StepStatus.FAILED
+            ),
+            skipped_steps=sum(
+                1 for s in self._plan_state.steps.values()
+                if s.status == StepStatus.SKIPPED
             ),
             remaining_steps=sum(
                 1 for s in self._plan_state.steps.values()
@@ -1017,7 +1139,7 @@ class Wizard:
         # Build step context
         step_context = StepContext(
             step_num=step.step_num,
-            objective=step.objective,
+            objective=step.override_objective or step.objective,
             tool_hint=step.tool_hint,
             phase=step.phase.value if hasattr(step.phase, 'value') else str(step.phase),
             attempt_count=step.attempt_count,
@@ -1190,9 +1312,12 @@ class Wizard:
         collected_outcomes.append(outcome)
 
         # Then, scaffold new steps
+        self._stagnation_detector.reset_step(step.step_num)
         scaffolded_steps = self._filter_scaffolded_steps(step, reflection.scaffolded_steps)
+        inserted_count = 0
         for scaffolded in scaffolded_steps:
             if self._scaffold_new_step(scaffolded, after_step=step.step_num):
+                inserted_count += 1
                 self._scaffolded_total += 1
                 self._scaffolded_by_step[step.step_num] = (
                     self._scaffolded_by_step.get(step.step_num, 0) + 1
@@ -1201,14 +1326,14 @@ class Wizard:
         self._log(
             "info",
             f"Step {step.step_num} ACCEPTED, scaffolded "
-            f"{len(scaffolded_steps)} new steps"
+            f"{inserted_count} new steps"
         )
         self._emit_event(
             WizardEvent(
                 event_type=WizardEventType.STEPS_SCAFFOLDED,
                 step_num=step.step_num,
                 data={
-                    "count": len(scaffolded_steps),
+                    "count": inserted_count,
                     "total_scaffolded": self._scaffolded_total,
                 },
             )
@@ -1223,7 +1348,7 @@ class Wizard:
                     outcome_summary=outcome.final_response or "Completed",
                     quality_score=reflection.quality.overall_score,
                     verdict=reflection.verdict.value,
-                    scaffolded_count=len(scaffolded_steps),
+                    scaffolded_count=inserted_count,
                 ).__dict__,
             )
         )
@@ -1398,9 +1523,9 @@ class Wizard:
             )
         )
 
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
     # PLAN SCAFFOLDING METHODS
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
 
     def _scaffold_new_step(
         self,
@@ -1470,9 +1595,9 @@ class Wizard:
 
         return filtered
 
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
     # CLARIFICATION HANDLING METHODS
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
 
     def _has_steps_awaiting_user(self) -> bool:
         """Check if any steps are awaiting user clarification."""
@@ -1483,94 +1608,24 @@ class Wizard:
 
     def _process_clarification_responses(self) -> None:
         """Process any received clarification responses."""
-        self._check_clarification_timeout()
+        if not self._plan_state:
+            return
 
-    def _wait_for_clarification(self) -> None:
-        """
-        Block until a clarification is resolved or timeout applied.
-        """
-        while self._has_steps_awaiting_user():
-            if self._check_clarification_timeout():
-                return
-
-            request = None
-            if self._pending_clarifications:
-                request = min(
-                    self._pending_clarifications.values(),
-                    key=lambda r: r.created_at,
-                )
-
-            if request and self._clarification_handler:
-                remaining_ms = max(
-                    0,
-                    int((request.timeout_seconds - (time.time() - request.created_at)) * 1000),
-                )
-                response = self._clarification_handler.get_response(
-                    request_id=request.request_id,
-                    timeout_ms=remaining_ms,
-                )
-                if response:
-                    step = self._plan_state.steps.get(request.step_num)
-                    if step:
-                        self._apply_clarification_response(step, request, response)
-                    return
-                # If timed out, apply default
-                if (time.time() - request.created_at) > request.timeout_seconds:
-                    step = self._plan_state.steps.get(request.step_num)
-                    if step:
-                        self._apply_default_assumption(step, request)
-                    return
-            else:
-                timeout = self._next_clarification_timeout_seconds()
-                if timeout is None:
-                    return
-                with self._clarification_condition:
-                    self._clarification_condition.wait(timeout=timeout)
-
-    def _check_clarification_timeout(self) -> bool:
-        """
-        Check for timed-out clarifications and apply defaults.
-
-        Returns True if any clarifications were resolved.
-        """
-        current_time = time.time()
-        resolved = False
-
-        for step in self._plan_state.steps.values():
+        for step in list(self._plan_state.steps.values()):
             if step.status != StepStatus.AWAITING_USER:
                 continue
 
             request_id = step.clarification_request_id
             if not request_id:
                 continue
+
             request = self._pending_clarifications.get(request_id)
             if request is None:
                 continue
 
-            # Check for response
-            if request_id in self._clarification_responses:
-                response = self._clarification_responses.pop(request_id)
+            response = self._clarification_responses.pop(request_id, None)
+            if response:
                 self._apply_clarification_response(step, request, response)
-                resolved = True
-                continue
-            if self._clarification_handler:
-                response = self._clarification_handler.get_response(
-                    request_id=request_id,
-                    timeout_ms=0,
-                )
-                if response:
-                    self._apply_clarification_response(step, request, response)
-                    resolved = True
-                    continue
-
-            # Check for timeout
-            elapsed = current_time - request.created_at
-            if elapsed > request.timeout_seconds:
-                # Apply default assumption
-                self._apply_default_assumption(step, request)
-                resolved = True
-
-        return resolved
 
     def _apply_clarification_response(
         self,
@@ -1580,6 +1635,8 @@ class Wizard:
     ) -> None:
         """Apply user's clarification response and resume step."""
         # Inject answer into context
+        if not response.answer:
+            response.used_default = True
         answer = response.answer or request.default_assumption
         if response.response_time_ms <= 0:
             response.response_time_ms = (time.time() - request.created_at) * 1000
@@ -1606,51 +1663,6 @@ class Wizard:
                     "request_id": request.request_id,
                     "answer": answer,
                     "response_time_ms": response.response_time_ms,
-                },
-            )
-        )
-
-    def _next_clarification_timeout_seconds(self) -> Optional[float]:
-        """Get time until next clarification timeout (seconds)."""
-        if not self._pending_clarifications:
-            return None
-
-        now = time.time()
-        remaining = []
-        for request in self._pending_clarifications.values():
-            timeout_at = request.created_at + request.timeout_seconds
-            remaining.append(max(0.0, timeout_at - now))
-
-        return min(remaining) if remaining else None
-
-    def _apply_default_assumption(
-        self,
-        step: Any,
-        request: ClarificationRequest,
-    ) -> None:
-        """Apply default assumption after timeout."""
-        self._session_context.add_message({
-            "role": "system",
-            "content": f"Assumption (user did not respond): {request.default_assumption}"
-        })
-
-        # Reset step to pending
-        self._plan_state.reset_step_for_retry(step.step_num)
-
-        # Remove from pending
-        self._pending_clarifications.pop(request.request_id, None)
-
-        self._log(
-            "info",
-            f"Step {step.step_num} resumed with default: {request.default_assumption[:50]}..."
-        )
-        self._emit_event(
-            WizardEvent(
-                event_type=WizardEventType.CLARIFICATION_TIMEOUT,
-                step_num=step.step_num,
-                data={
-                    "request_id": request.request_id,
-                    "default_assumption": request.default_assumption,
                 },
             )
         )
@@ -1686,23 +1698,29 @@ class Wizard:
         """
         Receive a clarification response from the TUI.
 
-        This method can be called externally to provide user responses.
+        This method can be called externally to provide user responses,
+        then resume() continues execution.
         """
-        with self._clarification_condition:
-            self._clarification_responses[response.request_id] = response
-            self._clarification_condition.notify_all()
+        self._clarification_responses[response.request_id] = response
         self._log(
             "debug",
             f"Received clarification response for {response.request_id}"
         )
 
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
     # HELPER METHODS
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
 
     def _get_step_errors(self, step_num: int) -> List[str]:
         """Get previous errors for a step."""
         return self._step_errors.get(step_num, [])
+
+    def _get_pending_clarifications(self) -> List[ClarificationRequest]:
+        """Get pending clarifications in chronological order."""
+        return sorted(
+            self._pending_clarifications.values(),
+            key=lambda r: r.created_at,
+        )
 
     def _record_step_error(self, step_num: int, error: str) -> None:
         """Record an error for a step."""
@@ -1715,7 +1733,7 @@ class Wizard:
         if not self._knowledge:
             return []
 
-        facts = self._knowledge.get_top_facts(limit)
+        facts = self._knowledge.get_recent_facts(limit)
         return [
             {
                 "key": f.key,

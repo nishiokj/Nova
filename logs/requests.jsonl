@@ -1,0 +1,17 @@
+{
+  "ts": "2025-12-31T18:22:58.615Z",
+  "lvl": "INFO",
+  "svc": "llm",
+  "req_id": "no-req",
+  "span": "response_received",
+  "evt": "received from gpt-5.2",
+  "detail": {
+    "model": "gpt-5.2",
+    "ms": 15505,
+    "tokens": {
+      "prompt_tokens": 1893,
+      "completion_tokens": 700,
+      "total_tokens": 2593
+    }
+  }
+}

@@ -18,12 +18,13 @@ from typing import Any, Dict, Optional
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
-TUI_DIR = os.path.join(PROJECT_ROOT, "tui")
 
+# Add PROJECT_ROOT so we can import 'tui' as a package
+# Add SRC_DIR so we can import src modules directly
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
-if TUI_DIR not in sys.path:
-    sys.path.insert(0, TUI_DIR)
 
 from app_config import load_app_config, AppConfig
 from communication import EventBus, Mailbox

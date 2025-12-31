@@ -61,6 +61,74 @@ class ReflectorConfig:
     reflection_timeout_ms: int = 10_000
 
 
+ERROR_PATTERNS = {
+    "syntax_error": [
+        r"SyntaxError:",
+        r"IndentationError:",
+        r"unexpected token",
+    ],
+    "runtime_error": [
+        r"TypeError:",
+        r"AttributeError:",
+        r"NameError:",
+        r"KeyError:",
+    ],
+    "incomplete_code": [
+        r"# TODO",
+        r"pass\s*$",
+        r"raise NotImplementedError",
+        r"\.\.\.",
+    ],
+    "hardcoded_values": [
+        r"localhost",
+        r"127\.0\.0\.1",
+        r"password\s*=\s*['\"]",
+        r"api_key\s*=\s*['\"]",
+    ],
+}
+
+ASSUMABLE_QUESTION_PATTERNS = [
+    r"which (framework|library|tool)",
+    r"what (language|version)",
+    r"(should|would) (i|you|we) use",
+    r"prefer(red)?",
+]
+
+REFLECTION_CACHE_PATTERNS = {
+    (True, "completed"): ReflectionVerdict.ACCEPT,
+    (True, "implicit_final"): ReflectionVerdict.ACCEPT,
+    (False, "exception"): ReflectionVerdict.REDO,
+}
+
+RECOVERY_MATRIX = {
+    "exception": {
+        1: "retry",
+        2: "retry",
+        3: "abort_step",
+    },
+    "llm_error": {
+        1: "retry",
+        2: "retry",
+        3: "abort_step",
+    },
+    "need_context_no_tools": {
+        1: "redo_with_hints",
+        2: "scaffold_discovery",
+        3: "clarify_or_abort",
+    },
+    "max_continues": {
+        1: "redo_simplified",
+        2: "scaffold_substeps",
+        3: "abort_step",
+    },
+    "no_action": {
+        1: "redo_explicit",
+        2: "redo_explicit",
+        3: "abort_step",
+    },
+}
+
+
 class WizardReflector:
     """
     The reasoning core of the Wizard.
@@ -99,6 +167,11 @@ class WizardReflector:
         """
         start_time = time.time()
 
+        cached = self._check_reflection_cache(input)
+        if cached:
+            cached.reflection_duration_ms = (time.time() - start_time) * 1000
+            return cached
+
         # Build the reflection prompt
         prompt = self._build_reflection_prompt(input)
 
@@ -110,15 +183,23 @@ class WizardReflector:
             ]
 
             # Call LLM with JSON response format
+            llm_kwargs = {
+                "max_tokens": self.config.max_reflection_tokens,
+            }
+            if self.config.reflection_model:
+                llm_kwargs["model"] = self.config.reflection_model
+            if self.config.reflection_timeout_ms > 0:
+                llm_kwargs["timeout"] = self.config.reflection_timeout_ms / 1000
+
             response = self.llm.respond(
                 messages,
-                response_format={"type": "json_object"},
-                max_tokens=self.config.max_reflection_tokens,
+                **llm_kwargs,
             )
 
             # Extract content from response
             content = self._extract_llm_content(response)
             output = self._parse_response(content, input)
+            output = self._enforce_quality_and_policy(input, output)
 
         except Exception as e:
             # Fallback: accept with low confidence
@@ -168,26 +249,35 @@ class WizardReflector:
             input.step_context.previous_errors
         )
 
-        return f"""You are the Wizard - the orchestrating intelligence ensuring maximum user utility.
+        goal_type_value = (
+            input.global_context.goal_type.value
+            if hasattr(input.global_context.goal_type, "value")
+            else str(input.global_context.goal_type)
+        )
+
+        base_prompt = f"""You are the Wizard - the orchestrating intelligence ensuring maximum user utility.
 
 A Worker just completed execution. Analyze the outcome and decide the next action.
 
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 GLOBAL CONTEXT
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 
 **User's Goal:** {input.global_context.goal}
-**Goal Type:** {input.global_context.goal_type.value}
+**Goal Type:** {goal_type_value}
+**Goal Success Criteria:** {input.global_context.goal_success_criteria or "(none)"}
 
 **Plan Progress:**
 - Total Steps: {input.global_context.total_steps}
 - Completed: {input.global_context.completed_steps}
 - Failed: {input.global_context.failed_steps}
+- Skipped: {input.global_context.skipped_steps}
 - Remaining: {input.global_context.remaining_steps}
 
 **Execution Metrics:**
 - Iterations: {input.global_context.total_iterations}
 - Tool Calls: {input.global_context.total_tool_calls}
+- LLM Calls: {input.global_context.total_llm_calls}
 - Elapsed: {input.global_context.elapsed_ms:.0f}ms
 
 **Key Facts Accumulated:**
@@ -196,9 +286,9 @@ GLOBAL CONTEXT
 **Step Status:**
 {step_summary}
 
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 CURRENT STEP OUTCOME
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 
 **Step {input.step_context.step_num}:** {input.step_context.objective}
 **Phase:** {input.step_context.phase}
@@ -215,9 +305,9 @@ CURRENT STEP OUTCOME
 **Worker Output:**
 {worker_output}
 
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 YOUR TASK
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 
 Analyze this outcome and decide the next action. Consider:
 
@@ -227,9 +317,9 @@ Analyze this outcome and decide the next action. Consider:
 4. **PROGRESS**: Are we making progress toward the goal?
 5. **BLOCKERS**: Is there something fundamentally blocking progress?
 
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 DECISION OPTIONS (in order of preference)
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 
 **ACCEPT** - The work is sufficient. Proceed to next step.
   Use when: Output addresses objective, quality is acceptable.
@@ -237,10 +327,10 @@ DECISION OPTIONS (in order of preference)
 **ACCEPT_EXTEND** - Work is good, but scaffold additional steps for excellence.
   Use when: Core work done, but obvious improvements possible.
   Examples:
-  - Code written → add tests
-  - Function added → add documentation
-  - Feature implemented → add error handling
-  - Question answered → add examples
+  - Code written -> add tests
+  - Function added -> add documentation
+  - Feature implemented -> add error handling
+  - Question answered -> add examples
 
 **REDO** - Output is insufficient. Retry with modifications.
   Use when: Wrong approach, misunderstood objective, fixable errors.
@@ -258,9 +348,9 @@ DECISION OPTIONS (in order of preference)
   Use when: Missing required access, contradictory requirements.
   This is VERY RARE. Prefer scaffolding more steps.
 
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 ANTI-PATTERNS TO AVOID
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 
 DO NOT CLARIFY for assumable things (frameworks, libraries, approaches)
 DO NOT ABORT because something is hard - scaffold more steps instead
@@ -268,9 +358,9 @@ DO NOT ACCEPT half-baked work - REDO or EXTEND for quality
 DO NOT let "I need more info" be acceptable - Workers should gather info
 DO NOT repeat the same REDO without modifications
 
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 RESPONSE FORMAT
-═══════════════════════════════════════════════════════════════════════════════
+======================================================================
 
 Respond with JSON:
 {{
@@ -283,6 +373,9 @@ Respond with JSON:
         "completeness": 0.0-1.0,
         "correctness": 0.0-1.0,
         "clarity": 0.0-1.0,
+        "maintainability": 0.0-1.0,
+        "actionability": 0.0-1.0,
+        "relevance": 0.0-1.0,
         "issues": ["List of issues detected"],
         "errors": ["List of errors detected"],
         "improvement_suggestions": ["Suggestions for improvement"]
@@ -320,6 +413,7 @@ Respond with JSON:
     "user_message": "A well-formatted message to show the user about progress"
 }}
 """
+        return self._adjust_prompt_for_context(base_prompt, input)
 
     def _format_step_summary(self, steps: List[Dict[str, Any]]) -> str:
         """Format step status for the prompt."""
@@ -328,12 +422,12 @@ Respond with JSON:
 
         lines = []
         status_icons = {
-            "pending": "○",
-            "in_progress": "◐",
-            "completed": "●",
-            "failed": "✗",
-            "skipped": "⊘",
-            "awaiting_user": "?"
+            "pending": "[ ]",
+            "in_progress": "[~]",
+            "completed": "[x]",
+            "failed": "[!]",
+            "skipped": "[-]",
+            "awaiting_user": "[?]",
         }
 
         for step in steps:
@@ -392,6 +486,75 @@ Respond with JSON:
             lines.append(f"  Attempt {i}: {error[:200]}")
         return "\n".join(lines)
 
+    def _check_reflection_cache(
+        self,
+        input: WizardReflectionInput,
+    ) -> Optional[WizardReflectionOutput]:
+        """Check if we can use cached reflection for common patterns."""
+        key = (
+            bool(input.outcome.get("success", False)),
+            input.outcome.get("termination_reason"),
+        )
+        if key in REFLECTION_CACHE_PATTERNS:
+            cached_verdict = REFLECTION_CACHE_PATTERNS[key]
+            if cached_verdict == ReflectionVerdict.ACCEPT and input.outcome.get("success"):
+                return WizardReflectionOutput(
+                    verdict=cached_verdict,
+                    reasoning="Fast path: successful completion",
+                    confidence=0.8,
+                    user_message=input.outcome.get("final_response") or "Step completed.",
+                )
+            if cached_verdict == ReflectionVerdict.REDO and input.step_context.attempt_count <= 1:
+                return WizardReflectionOutput(
+                    verdict=cached_verdict,
+                    reasoning="Fast path: retryable failure",
+                    confidence=0.6,
+                    redo_modifications=RedoModifications(
+                        injected_context="Retry after exception with a simpler approach."
+                    ),
+                    user_message="Retrying step due to infrastructure error.",
+                )
+
+        return None
+
+    def _adjust_prompt_for_context(
+        self,
+        base_prompt: str,
+        input: WizardReflectionInput,
+    ) -> str:
+        """Adjust prompt based on context."""
+        adjustments = []
+
+        if input.step_context.attempt_count > 1:
+            adjustments.append(
+                "This step has been attempted before. "
+                "If choosing REDO, ensure modifications are DIFFERENT from previous attempts."
+            )
+
+        if input.global_context.total_steps:
+            completion_pct = (
+                input.global_context.completed_steps /
+                input.global_context.total_steps
+            )
+            if completion_pct > 0.8:
+                adjustments.append(
+                    "We are near completion. Bias toward ACCEPT unless quality is clearly insufficient."
+                )
+
+        if input.global_context.failed_steps > 2:
+            adjustments.append(
+                "Several steps have failed. Consider if the goal is achievable. "
+                "Be pragmatic about what can be accomplished."
+            )
+
+        if adjustments:
+            adjustment_text = "\n\n**CONTEXTUAL GUIDANCE:**\n" + "\n".join(
+                f"- {a}" for a in adjustments
+            )
+            return base_prompt + adjustment_text
+
+        return base_prompt
+
     def _parse_response(
         self,
         response: str,
@@ -414,6 +577,9 @@ Respond with JSON:
             completeness=quality_data.get("completeness", 0.5),
             correctness=quality_data.get("correctness", 0.5),
             clarity=quality_data.get("clarity", 0.5),
+            maintainability=quality_data.get("maintainability", 0.5),
+            actionability=quality_data.get("actionability", 0.5),
+            relevance=quality_data.get("relevance", 0.5),
             issues=quality_data.get("issues", []),
             errors=quality_data.get("errors", []),
             improvement_suggestions=quality_data.get("improvement_suggestions", []),
@@ -472,6 +638,16 @@ Respond with JSON:
                     context=clarification_data.get("context", ""),
                     step_num=input.step_context.step_num,
                 )
+                if clarification.timeout_seconds <= 0:
+                    clarification.timeout_seconds = self.config.default_clarification_timeout
+                is_valid, reason = self._validate_clarification_request(clarification)
+                if not is_valid:
+                    self._log("warning", f"Clarification rejected: {reason}")
+                    verdict = ReflectionVerdict.REDO
+                    redo_modifications = RedoModifications(
+                        injected_context="Make a reasonable assumption and proceed."
+                    )
+                    clarification = None
 
         # Parse abort category if present
         abort_category = None
@@ -509,6 +685,27 @@ Respond with JSON:
         }
         return mapping.get(verdict_str.lower(), ReflectionVerdict.ACCEPT)
 
+    def _validate_clarification_request(
+        self,
+        request: ClarificationRequest,
+    ) -> tuple[bool, Optional[str]]:
+        """Validate a clarification request."""
+        if not request.question or len(request.question) < 10:
+            return False, "Question too short or missing"
+
+        if self.config.require_default_assumption and not request.default_assumption:
+            return False, "Missing default assumption"
+
+        if len(request.options) > self.config.max_clarification_options:
+            return False, f"Too many options (max {self.config.max_clarification_options})"
+
+        question_lower = request.question.lower()
+        for pattern in ASSUMABLE_QUESTION_PATTERNS:
+            if re.search(pattern, question_lower):
+                return False, f"This can be assumed: {request.default_assumption}"
+
+        return True, None
+
     def _create_fallback_output(
         self,
         input: WizardReflectionInput,
@@ -520,8 +717,12 @@ Respond with JSON:
             verdict = ReflectionVerdict.ACCEPT
             user_message = input.outcome.get("final_response") or "Step completed."
         else:
-            verdict = ReflectionVerdict.REDO
-            user_message = "Retrying step due to reflection error."
+            if input.step_context.attempt_count < self.config.max_redo_attempts:
+                verdict = ReflectionVerdict.REDO
+                user_message = "Retrying step due to reflection error."
+            else:
+                verdict = ReflectionVerdict.ABORT_STEP
+                user_message = "Step failed repeatedly; aborting."
 
         return WizardReflectionOutput(
             verdict=verdict,
@@ -530,6 +731,257 @@ Respond with JSON:
             quality=QualityAssessment(overall_score=0.5),
             user_message=user_message,
         )
+
+    def _enforce_quality_and_policy(
+        self,
+        input: WizardReflectionInput,
+        output: WizardReflectionOutput,
+    ) -> WizardReflectionOutput:
+        """Apply quality enforcement and recovery policy overrides."""
+        output.quality = self._merge_quality_assessment(input, output.quality)
+        output = self._apply_quality_to_verdict(input, output)
+        output = self._apply_recovery_policy(input, output)
+        output.user_message = self._ensure_user_message(input, output)
+        return output
+
+    def _merge_quality_assessment(
+        self,
+        input: WizardReflectionInput,
+        quality: QualityAssessment,
+    ) -> QualityAssessment:
+        """Augment quality assessment with heuristic checks."""
+        issues, errors, suggestions, flags = self._detect_quality_issues(input)
+
+        quality.issues.extend([i for i in issues if i not in quality.issues])
+        quality.errors.extend([e for e in errors if e not in quality.errors])
+        quality.improvement_suggestions.extend(
+            [s for s in suggestions if s not in quality.improvement_suggestions]
+        )
+
+        if errors:
+            quality.correctness = min(quality.correctness, 0.3)
+        if issues:
+            quality.completeness = min(quality.completeness, 0.5)
+        if flags.get("missing_tests"):
+            quality.maintainability = min(quality.maintainability, 0.4)
+        if flags.get("missing_docs"):
+            quality.clarity = min(quality.clarity, 0.5)
+        if flags.get("missing_verification"):
+            quality.correctness = min(quality.correctness, 0.6)
+
+        scores = [
+            quality.completeness,
+            quality.correctness,
+            quality.clarity,
+            quality.maintainability,
+            quality.actionability,
+            quality.relevance,
+        ]
+        quality.overall_score = max(0.0, min(1.0, sum(scores) / len(scores)))
+        return quality
+
+    def _detect_quality_issues(
+        self,
+        input: WizardReflectionInput,
+    ) -> tuple[list[str], list[str], list[str], dict[str, bool]]:
+        """Detect quality issues from the outcome text."""
+        text = "\n".join(
+            str(v) for v in [
+                input.outcome.get("final_response"),
+                input.outcome.get("error"),
+            ]
+            if v
+        )
+
+        issues: list[str] = []
+        errors: list[str] = []
+        suggestions: list[str] = []
+        flags = {
+            "missing_tests": False,
+            "missing_docs": False,
+            "missing_verification": False,
+        }
+
+        for category, patterns in ERROR_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, text):
+                    if category in ("syntax_error", "runtime_error"):
+                        errors.append(f"Detected {category.replace('_', ' ')}")
+                    else:
+                        issues.append(f"Detected {category.replace('_', ' ')}")
+                    break
+
+        has_code = bool(re.search(r"\b(def|class)\b|```", text))
+        has_tests = bool(re.search(r"\btest(s)?\b|pytest|unittest|jest", text, re.IGNORECASE))
+        if has_code and not has_tests:
+            issues.append("Missing tests for implemented code")
+            suggestions.append("Add tests to validate the implementation")
+            flags["missing_tests"] = True
+
+        has_docs = bool(re.search(r"\bdocstring\b|README|documentation", text, re.IGNORECASE))
+        if has_code and not has_docs:
+            issues.append("Missing documentation for new code")
+            suggestions.append("Add docstrings or README updates")
+            flags["missing_docs"] = True
+
+        if input.outcome.get("success") and not re.search(r"\bverify|validated|tested\b", text, re.IGNORECASE):
+            flags["missing_verification"] = True
+
+        return issues, errors, suggestions, flags
+
+    def _apply_quality_to_verdict(
+        self,
+        input: WizardReflectionInput,
+        output: WizardReflectionOutput,
+    ) -> WizardReflectionOutput:
+        """Adjust verdict based on quality signals."""
+        if (
+            output.quality.overall_score < self.config.abort_quality_threshold and
+            input.step_context.attempt_count >= self.config.max_redo_attempts
+        ):
+            output.verdict = ReflectionVerdict.ABORT_STEP
+            output.abort_reason = "Quality too low after repeated attempts."
+            return output
+
+        if output.verdict in (ReflectionVerdict.ACCEPT, ReflectionVerdict.ACCEPT_AND_EXTEND):
+            if output.quality.overall_score < self.config.redo_quality_threshold:
+                output.verdict = ReflectionVerdict.REDO
+                output.redo_modifications = output.redo_modifications or RedoModifications(
+                    injected_context="Quality far below threshold; take a different approach."
+                )
+                return output
+            if output.quality.overall_score < self.config.min_accept_quality:
+                output.verdict = ReflectionVerdict.REDO
+                output.redo_modifications = output.redo_modifications or RedoModifications(
+                    injected_context="Quality below threshold; improve completeness and correctness."
+                )
+                return output
+
+        scaffold_steps = self._scaffold_steps_from_quality(input)
+        if scaffold_steps:
+            if output.verdict == ReflectionVerdict.ACCEPT:
+                output.verdict = ReflectionVerdict.ACCEPT_AND_EXTEND
+            if output.verdict == ReflectionVerdict.ACCEPT_AND_EXTEND:
+                output.scaffolded_steps.extend(scaffold_steps)
+
+        if output.quality.overall_score >= self.config.excellence_threshold:
+            if output.verdict == ReflectionVerdict.ACCEPT_AND_EXTEND and not scaffold_steps:
+                output.verdict = ReflectionVerdict.ACCEPT
+                output.scaffolded_steps = []
+
+        return output
+
+    def _scaffold_steps_from_quality(
+        self,
+        input: WizardReflectionInput,
+    ) -> list[ScaffoldedStep]:
+        """Generate scaffold steps for common quality gaps."""
+        steps: list[ScaffoldedStep] = []
+        text = str(input.outcome.get("final_response") or "")
+        has_code = bool(re.search(r"\b(def|class)\b|```", text))
+        has_tests = bool(re.search(r"\btest(s)?\b|pytest|unittest|jest", text, re.IGNORECASE))
+        has_docs = bool(re.search(r"\bdocstring\b|README|documentation", text, re.IGNORECASE))
+
+        if has_code and not has_tests:
+            steps.append(ScaffoldedStep(
+                objective="Write tests for the new/updated code",
+                tool_hint="file_write",
+                phase="verification",
+                rationale="Code changes should include tests for reliability",
+            ))
+
+        if has_code and not has_docs:
+            steps.append(ScaffoldedStep(
+                objective="Add documentation or docstrings for the new code",
+                tool_hint="file_write",
+                phase="execution",
+                rationale="Documentation improves maintainability",
+            ))
+
+        if input.outcome.get("success") and not re.search(r"\bverify|validated|tested\b", text, re.IGNORECASE):
+            steps.append(ScaffoldedStep(
+                objective="Verify the implementation and report results",
+                tool_hint="bash_execute",
+                phase="verification",
+                rationale="Verification ensures correctness",
+            ))
+
+        return steps
+
+    def _apply_recovery_policy(
+        self,
+        input: WizardReflectionInput,
+        output: WizardReflectionOutput,
+    ) -> WizardReflectionOutput:
+        """Override verdicts based on termination reason and attempts."""
+        if output.verdict in (ReflectionVerdict.ABORT_STEP, ReflectionVerdict.ABORT_GOAL):
+            return output
+
+        reason = input.outcome.get("termination_reason")
+        attempt = input.step_context.attempt_count
+        actions = RECOVERY_MATRIX.get(reason, {})
+        action = actions.get(attempt)
+        if action is None and actions:
+            action = actions.get(max(actions.keys()))
+        if not action:
+            return output
+
+        if action in ("retry", "redo_with_hints", "redo_explicit", "redo_simplified"):
+            output.verdict = ReflectionVerdict.REDO
+            injected = {
+                "retry": "Retry with a simpler approach.",
+                "redo_with_hints": "Use tools to gather missing context before acting.",
+                "redo_explicit": "Follow the objective explicitly and avoid questions.",
+                "redo_simplified": "Simplify the approach and focus on core requirements.",
+            }[action]
+            output.redo_modifications = RedoModifications(injected_context=injected)
+            return output
+
+        if action in ("scaffold_discovery", "scaffold_substeps"):
+            output.verdict = ReflectionVerdict.REDO
+            injected = "Break the work into smaller steps and gather missing context with tools."
+            output.redo_modifications = RedoModifications(injected_context=injected)
+            return output
+
+        if action == "clarify_or_abort":
+            output.verdict = ReflectionVerdict.CLARIFY_USER
+            output.clarification = ClarificationRequest(
+                question=f"Please clarify the missing details for: {input.step_context.objective}",
+                default_assumption="Proceed with reasonable defaults based on the goal.",
+                timeout_seconds=self.config.default_clarification_timeout,
+                urgency=ClarificationUrgency.MEDIUM,
+                step_num=input.step_context.step_num,
+            )
+            return output
+
+        if action == "abort_step":
+            output.verdict = ReflectionVerdict.ABORT_STEP
+            output.abort_reason = "Step failed repeatedly; aborting this step."
+            return output
+
+        return output
+
+    def _ensure_user_message(
+        self,
+        input: WizardReflectionInput,
+        output: WizardReflectionOutput,
+    ) -> str:
+        """Ensure a user-facing message is always present."""
+        if output.user_message:
+            return output.user_message
+
+        if output.verdict in (ReflectionVerdict.ACCEPT, ReflectionVerdict.ACCEPT_AND_EXTEND):
+            return input.outcome.get("final_response") or "Step completed."
+        if output.verdict == ReflectionVerdict.REDO:
+            return "Retrying the step with adjustments."
+        if output.verdict == ReflectionVerdict.CLARIFY_USER and output.clarification:
+            return f"Need clarification: {output.clarification.question}"
+        if output.verdict == ReflectionVerdict.ABORT_STEP:
+            return output.abort_reason or "Step aborted."
+        if output.verdict == ReflectionVerdict.ABORT_GOAL:
+            return output.abort_reason or "Goal aborted."
+
+        return "Continuing."
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger."""
