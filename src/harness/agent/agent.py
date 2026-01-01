@@ -67,6 +67,9 @@ class AgentResponse:
     metadata: Dict[str, Any] = field(default_factory=dict)
     goal_achieved: bool = True
     reflection: Optional[Any] = None  # WizardReflection from wizard result
+    # Pause state for user clarification
+    paused: bool = False
+    user_prompt: Optional[Dict[str, Any]] = None  # {question, options, context}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -79,6 +82,8 @@ class AgentResponse:
             "error": self.error,
             "metadata": self.metadata,
             "goal_achieved": self.goal_achieved,
+            "paused": self.paused,
+            "user_prompt": self.user_prompt,
         }
 
 
@@ -178,8 +183,57 @@ class Agent:
             if serialized:
                 parts.append(serialized)
         if extra_context:
-            parts.append(f"Additional context:\n{extra_context}")
+                parts.append(f"Additional context:\n{extra_context}")
         return "\n\n".join(parts) if parts else None
+
+    def _run_simple_tier(
+        self,
+        user_input: str,
+        context: Optional[str],
+        session_state: Optional[SessionContext],
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+    ) -> AgentResponse:
+        """Single LLM call path for simple-tier requests."""
+        start_time = time.time()
+        instructions = (
+            self.config.system_prompt
+            or SIMPLE_TIER_PROMPT
+            or "You are a fast assistant. Answer directly and briefly."
+        )
+
+        if context:
+            content = f"{user_input}\n\nAdditional context:\n{context}"
+        else:
+            content = user_input
+
+        if session_state is None:
+            session_state = SessionContext()
+
+        if session_state.messages:
+            messages = list(session_state.messages)
+            messages.append({"role": "user", "content": content})
+            response = self._llm.respond(input=messages, instructions=instructions, tools=[])
+        else:
+            response = self._llm.respond(input=content, instructions=instructions, tools=[])
+
+        final_content = response.content or ""
+
+        session_state.add_message({"role": "user", "content": content})
+        if final_content:
+            session_state.add_message({"role": "assistant", "content": final_content})
+
+        if on_stream_chunk:
+            on_stream_chunk(final_content, 0, True)
+
+        return AgentResponse(
+            content=final_content,
+            structured_action=f"Answer: {user_input}",
+            total_duration_ms=(time.time() - start_time) * 1000,
+            success=True,
+            goal_achieved=True,
+            metadata={"final_context_state": session_state.to_session_dict()},
+        )
+
 
     def _notify_phase(self, message: str, tool_name: Optional[str] = None, step_number: int = 0):
         """Notify phase callbacks of progress."""
@@ -246,6 +300,10 @@ class Agent:
                 self.logger.warning(f"Failed to hydrate SessionContext: {e}", component="agent")
                 session_state = None
 
+        if self.config.tier == "simple":
+            self._notify_phase("Simple tier: direct answer", step_number=0)
+            return self._run_simple_tier(user_input, context, session_state, on_stream_chunk)
+
         planning_context = self._render_context_for_planner(session_state, context)
 
         # Create and execute plan via Wizard
@@ -270,6 +328,19 @@ class Agent:
         response_metadata = result.to_dict().get("metadata", {})
         if result.final_context_state:
             response_metadata["final_context_state"] = result.final_context_state
+        if result.plan_state:
+            response_metadata["plan_steps"] = [
+                {
+                    "step_num": step.step_num,
+                    "objective": step.objective,
+                    "tool_hint": step.tool_hint,
+                    "status": step.status.value,
+                    "phase": step.phase.value,
+                    "depends_on": list(step.depends_on),
+                    "required": step.required,
+                }
+                for step in sorted(result.plan_state.steps.values(), key=lambda s: s.step_num)
+            ]
 
         return AgentResponse(
             content=result.final_response,
@@ -279,6 +350,8 @@ class Agent:
             goal_achieved=result.goal_achieved,
             reflection=result.to_reflection(),
             metadata=response_metadata,
+            paused=result.paused,
+            user_prompt=result.user_prompt,
         )
 
     def add_phase_callback(self, callback: Callable[[str, Optional[str], int], None]):
@@ -289,6 +362,45 @@ class Agent:
         """Remove a previously registered phase callback."""
         if callback in self._phase_callbacks:
             self._phase_callbacks.remove(callback)
+
+    def resume_with_answer(
+        self,
+        answer: str,
+        budget: Optional[Dict[str, int]] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+    ) -> AgentResponse:
+        """
+        Resume execution after user provides an answer to ask_user prompt.
+
+        Args:
+            answer: The user's response to the question
+            budget: Optional budget constraints
+            on_stream_chunk: Optional streaming callback
+
+        Returns:
+            AgentResponse with continued execution results
+        """
+        result = self._wizard.resume_with_answer(
+            answer=answer,
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
+        )
+
+        response_metadata = result.to_dict().get("metadata", {})
+        if result.final_context_state:
+            response_metadata["final_context_state"] = result.final_context_state
+
+        return AgentResponse(
+            content=result.final_response,
+            structured_action=result.plan_state.goal,
+            total_duration_ms=result.duration_ms,
+            success=result.success,
+            goal_achieved=result.goal_achieved,
+            reflection=result.to_reflection(),
+            metadata=response_metadata,
+            paused=result.paused,
+            user_prompt=result.user_prompt,
+        )
 
     @property
     def is_stop_requested(self) -> bool:

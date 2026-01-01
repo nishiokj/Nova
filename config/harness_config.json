@@ -47,6 +47,21 @@
     "bash_timeout": 30,
     "python_timeout": 60
   },
+  "skills": {
+    "enabled": true,
+    "skills_dir": "config/skills",
+    "semantic_enabled": true,
+    "semantic_min_confidence": 0.82,
+    "semantic_llm_config": null,
+    "max_candidates": 8,
+    "match_policy": "best_score"
+  },
+  "hooks": {
+    "enabled": true,
+    "hooks_dir": "config/hooks",
+    "default_fail_open": true,
+    "max_exec_ms": 200
+  },
   "graphd": {
     "enabled": true,
     "enable_tools": true,

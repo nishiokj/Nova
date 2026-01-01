@@ -62,6 +62,7 @@ class TranscriptionCompleteEvent(Event):
     confidence: Optional[float] = None
     duration_ms: float = 0.0
     session_key: Optional[str] = None  # Session key for conversation persistence
+    metadata: Optional[Dict[str, Any]] = None  # Additional metadata (e.g., for ask_user responses)
 
     def __post_init__(self):
         object.__setattr__(self, 'event_type', EventType.TRANSCRIPTION_COMPLETE)

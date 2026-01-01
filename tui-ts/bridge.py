@@ -18,12 +18,13 @@ from typing import Any, Dict, Optional
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
-TUI_DIR = os.path.join(PROJECT_ROOT, "tui")
 
+# Add PROJECT_ROOT so we can import 'tui' as a package
+# Add SRC_DIR so we can import src modules directly
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
-if TUI_DIR not in sys.path:
-    sys.path.insert(0, TUI_DIR)
 
 from app_config import load_app_config, AppConfig
 from communication import EventBus, Mailbox
@@ -38,7 +39,10 @@ from communication.process_manager import ProcessManager
 from harness.graphd import generate_session_key
 from tui.logging_config import configure_tui_logging
 from tui.voice_service import VoiceService
-from util.config import ServiceRepConfig
+from util.config import ServiceRepConfig, load_or_create_config
+from util.logger import StructuredLogger
+from skills.store import SkillStore, StoreError as SkillStoreError
+from hooks.store import HookStore, StoreError as HookStoreError
 from workers.console_tts_worker import ConsoleTTSWorker
 from workers.service_rep_worker import ServiceRepWorker
 
@@ -75,6 +79,12 @@ class JSONLBridge:
         self.event_thread: Optional[threading.Thread] = None
         self.config: Optional[AppConfig] = None
         self.log_dir: Optional[str] = None
+        self.harness_config = None
+        self.skill_store: Optional[SkillStore] = None
+        self.hook_store: Optional[HookStore] = None
+        self.hook_manager = None
+        self.tool_registry = None
+        self.skill_runner = None
 
     def run(self) -> None:
         try:
@@ -109,14 +119,18 @@ class JSONLBridge:
             self._send_error("Bridge not initialized", detail="Send init first")
             return
 
+        # Skills and hooks are read-only in TUI. Create/update/delete via agent file_write.
         handler = {
             "init": self._handle_init,
             "send_text": self._handle_send_text,
+            "user_prompt_response": self._handle_user_prompt_response,
             "voice_start": self._handle_voice_start,
             "voice_stop": self._handle_voice_stop,
             "get_config": self._handle_get_config,
             "get_models": self._handle_get_models,
             "get_status": self._handle_get_status,
+            "skills_list": self._handle_skills_list,
+            "hooks_list": self._handle_hooks_list,
             "shutdown": self._handle_shutdown,
         }.get(cmd_type)
 
@@ -159,6 +173,8 @@ class JSONLBridge:
 
             if enable_voice:
                 self._setup_voice()
+
+            self._setup_skills_hooks()
 
             self._initialized = True
             self._set_state("idle", "Ready")
@@ -237,13 +253,31 @@ class JSONLBridge:
 
         def on_voice_error(message: str) -> None:
             self._send_error(message)
-            self._set_state("error", message)
 
         self.voice_service.on_error = on_voice_error
         started = self.voice_service.start()
         if not started:
             self.voice_service = None
             self.voice_mailbox = None
+
+    def _setup_skills_hooks(self) -> None:
+        if not self.config:
+            return
+        try:
+            self.harness_config = load_or_create_config(self.config.harness.config_path)
+            structured_logger = StructuredLogger(
+                log_dir=self.log_dir or "logs",
+                log_to_file=False,
+                log_to_console=False,
+                log_level="INFO",
+            )
+            self.skill_store = SkillStore(self.harness_config.skills.skills_dir, logger=structured_logger)
+            self.hook_store = HookStore(self.harness_config.hooks.hooks_dir, logger=structured_logger)
+            self.hook_manager = None
+            self.tool_registry = None
+            self.skill_runner = None
+        except Exception as exc:
+            self.logger.warning(f"Skill/hook setup failed: {exc}")
 
     def _handle_send_text(self, data: Dict[str, Any]) -> None:
         if not self.event_bus:
@@ -270,6 +304,30 @@ class JSONLBridge:
             confidence=None,
             duration_ms=0.0,
             session_key=self._session_key,
+        )
+        self.event_bus.publish(event)
+
+    def _handle_user_prompt_response(self, data: Dict[str, Any]) -> None:
+        """Handle user's response to an ask_user prompt."""
+        answer = data.get("answer")
+        if not isinstance(answer, str):
+            self._send_error("Answer required for user_prompt_response")
+            return
+
+        request_id = data.get("request_id", f"prompt_response_{int(time.time() * 1000)}")
+
+        self._set_state("processing", "Processing response...")
+
+        # The answer will be forwarded to the service_rep_worker
+        # which will call harness.resume_with_answer()
+        # For now, we send it as a special transcription event
+        event = TranscriptionCompleteEvent(
+            request_id=request_id,
+            text=f"[USER_PROMPT_RESPONSE] {answer}",
+            confidence=None,
+            duration_ms=0.0,
+            session_key=self._session_key,
+            metadata={"is_prompt_response": True, "answer": answer},
         )
         self.event_bus.publish(event)
 
@@ -305,6 +363,28 @@ class JSONLBridge:
         text, meta = format_status_summary(self)
         self._send_response(kind="status", content=text, metadata=meta)
 
+    def _handle_skills_list(self, data: Dict[str, Any]) -> None:
+        """List skills (read-only). To create/edit, use the agent with file_write."""
+        if not self.skill_store:
+            self._send_error("Skills not initialized")
+            return
+        result = self.skill_store.list()
+        items = [skill.model_dump() for skill in result.items]
+        content = format_skill_list(items, result.errors)
+        payload = {"action": "list", "items": items, "errors": result.errors}
+        self._send_response(kind="skills", content=content, payload=payload)
+
+    def _handle_hooks_list(self, data: Dict[str, Any]) -> None:
+        """List hooks (read-only). To create/edit, use the agent with file_write."""
+        if not self.hook_store:
+            self._send_error("Hooks not initialized")
+            return
+        result = self.hook_store.list()
+        items = [hook.model_dump() for hook in result.items]
+        content = format_hook_list(items, result.errors)
+        payload = {"action": "list", "items": items, "errors": result.errors}
+        self._send_response(kind="hooks", content=content, payload=payload)
+
     def _handle_shutdown(self, data: Dict[str, Any]) -> None:
         self.shutdown()
         raise SystemExit(0)
@@ -329,9 +409,12 @@ class JSONLBridge:
         self,
         kind: str,
         content: str,
+        payload: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         meta = {"kind": kind}
+        if payload is not None:
+            meta["payload"] = payload
         if metadata:
             meta.update(metadata)
         self._send_event(
@@ -398,8 +481,26 @@ class JSONLBridge:
         )
 
     def _handle_agent_response(self, event: AgentResponseCompleteEvent) -> None:
-        self._set_state("idle", "Ready")
         safe_metadata = ensure_jsonable(event.metadata)
+
+        # Check if this is a paused response awaiting user input
+        is_paused = safe_metadata.get("paused", False)
+        user_prompt = safe_metadata.get("user_prompt")
+
+        if is_paused and user_prompt:
+            self._set_state("awaiting_input", "Waiting for your response...")
+            self._send_event(
+                "user_prompt",
+                {
+                    "request_id": event.request_id,
+                    "question": user_prompt.get("question", ""),
+                    "options": user_prompt.get("options", []),
+                    "context": user_prompt.get("context", ""),
+                },
+            )
+        else:
+            self._set_state("idle", "Ready")
+
         self._send_event(
             "response",
             {
@@ -411,6 +512,8 @@ class JSONLBridge:
                 "duration_ms": event.duration_ms,
                 "error": event.error,
                 "metadata": safe_metadata,
+                "paused": is_paused,
+                "user_prompt": user_prompt,
             },
         )
 
@@ -492,6 +595,40 @@ class JSONLBridge:
                 self._writer_thread.join(timeout=1.0)
         except Exception:
             pass
+
+
+def format_skill_list(items: list[dict[str, Any]], errors: list[dict[str, Any]]) -> str:
+    if not items:
+        lines = ["No skills found."]
+    else:
+        lines = ["Skills:"]
+        for skill in items:
+            enabled = "enabled" if skill.get("enabled", False) else "disabled"
+            name = skill.get("name", "")
+            lines.append(f"- {skill.get('id')} [{enabled}] {name}")
+    if errors:
+        lines.append("")
+        lines.append("Errors:")
+        for err in errors:
+            lines.append(f"- {err.get('path')}: {err.get('message')}")
+    return "\n".join(lines)
+
+
+def format_hook_list(items: list[dict[str, Any]], errors: list[dict[str, Any]]) -> str:
+    if not items:
+        lines = ["No hooks found."]
+    else:
+        lines = ["Hooks:"]
+        for hook in items:
+            enabled = "enabled" if hook.get("enabled", False) else "disabled"
+            name = hook.get("name", "")
+            lines.append(f"- {hook.get('id')} [{enabled}] {name}")
+    if errors:
+        lines.append("")
+        lines.append("Errors:")
+        for err in errors:
+            lines.append(f"- {err.get('path')}: {err.get('message')}")
+    return "\n".join(lines)
 
 
 def format_config_summary(config: AppConfig, log_dir: Optional[str]) -> str:

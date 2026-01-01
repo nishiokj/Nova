@@ -10,7 +10,6 @@ import json
 import logging
 import argparse
 import threading
-import multiprocessing
 from multiprocessing import Queue, Process
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
@@ -128,9 +127,8 @@ class AudioDeviceManager:
         """Suppress ALSA error messages during device detection"""
         try:
             # Try to redirect ALSA errors to null
-            import ctypes
             import os
-            
+
             # Redirect stderr to null temporarily
             self._original_stderr = os.dup(2)
             devnull = os.open(os.devnull, os.O_WRONLY)

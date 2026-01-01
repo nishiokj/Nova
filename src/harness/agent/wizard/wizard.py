@@ -8,7 +8,6 @@ Planning is the caller's responsibility.
 
 import hashlib
 import re
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -16,7 +15,6 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from .types import (
     StepStatus,
-    StepPhase,
     WizardPlan,
     WizardReflection,
     ReflectionVerdict,
@@ -28,16 +26,11 @@ from .reflection_types import (
     StepContext,
     WizardReflectionInput,
     WizardReflectionOutput,
-    ClarificationRequest,
-    ClarificationResponse,
     ScaffoldedStep,
-    OnClarificationNeeded,
-    ClarificationHandler,
 )
 from .events import (
     WizardEvent,
     WizardEventType,
-    ClarificationRequestedData,
     QualityIssueData,
     StepCompletedData,
 )
@@ -53,7 +46,7 @@ from .context_window import (
     filter_persistable_messages,
 )
 from .work_item import WorkItem, WorkBounds
-from .worker import Worker, WorkerConfig, WorkerOutcome, WorkerCacheParams
+from .worker import Worker, WorkerConfig, WorkerOutcome, WorkerCacheParams, PatchSuggestion
 from .plan_patch import PlanPatch
 from .policy_gate import PolicyGate
 from .stagnation import StagnationDetector, StagnationSignal
@@ -137,6 +130,10 @@ class WizardResult:
     # Observability
     events: List[WizardEvent] = field(default_factory=list)
 
+    # Pause state (for user clarification)
+    paused: bool = False
+    user_prompt: Optional[Dict[str, Any]] = None  # {question, options, context}
+
     @property
     def is_terminated(self) -> bool:
         """True if all steps reached terminal state (COMPLETED or SKIPPED)."""
@@ -161,12 +158,13 @@ class WizardResult:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization or interop."""
+        error = None if (self.success or self.paused) else "Wizard orchestration failed"
         return {
             "content": self.final_response,
             "structured_action": self.plan_state.goal,
             "total_duration_ms": self.duration_ms,
             "success": self.success,
-            "error": None if self.success else "Wizard orchestration failed",
+            "error": error,
             "goal_achieved": self.success,
             "reflection": {
                 "plan_goal": self.plan_state.goal,
@@ -174,6 +172,9 @@ class WizardResult:
                 "confidence": 0.8 if self.success else 0.3,
                 "evidence": [self.ledger.summarize_tail()],
             },
+            "events": [event.to_dict() for event in self.events],
+            "paused": self.paused,
+            "user_prompt": self.user_prompt,
             "metadata": {
                 "wizard": True,
                 "iterations": self.total_iterations,
@@ -181,6 +182,8 @@ class WizardResult:
                 "steps_completed": self.steps_completed,
                 "steps_skipped": self.steps_skipped,
                 "steps_failed": self.steps_failed,
+                "paused": self.paused,
+                "user_prompt": self.user_prompt,
             },
         }
 
@@ -193,7 +196,7 @@ class Wizard:
     1. Own single-writer state (PlanState, WorkLedger, KnowledgeStore)
     2. Build ContextWindow for each iteration (read-only, from SessionContext)
     3. Select and dispatch WorkItems to Workers
-    4. Ingest WorkerOutcomes: auto-append facts, apply patches via PolicyGate
+    4. Ingest WorkerOutcomes: auto-append facts, apply Wizard-approved suggestions via PolicyGate
     5. Detect stagnation and escalate
 
     NOT RESPONSIBLE FOR:
@@ -223,8 +226,8 @@ class Wizard:
         self._policy_gate = PolicyGate()
         self._stagnation_detector = StagnationDetector()
 
-        # Worker - allow_implicit_finals=True so Q&A without tools can succeed
-        worker_config = WorkerConfig(allow_implicit_finals=True)
+        # Worker - require explicit [FINAL] marker for completion
+        worker_config = WorkerConfig(allow_implicit_finals=False)
         self._worker = Worker(tool_registry, llm, worker_config, logger=logger)
 
         # Synthesizer for final response generation
@@ -243,12 +246,9 @@ class Wizard:
         )
         self._reflector = WizardReflector(llm, reflector_config, logger=logger)
 
-        # NEW: Clarification handling state
-        self._pending_clarifications: Dict[str, ClarificationRequest] = {}
-        self._clarification_responses: Dict[str, ClarificationResponse] = {}
-        self._on_clarification_needed: Optional[OnClarificationNeeded] = None
-        self._clarification_handler: Optional[ClarificationHandler] = None
-        self._clarification_condition = threading.Condition()
+        # User input request state (tool-driven, replaces callback-based clarification)
+        self._pending_user_prompt: Optional[Dict[str, Any]] = None
+        self._paused_step_num: Optional[int] = None
 
         # NEW: Step error history for reflection context
         self._step_errors: Dict[int, List[str]] = {}
@@ -256,6 +256,7 @@ class Wizard:
         # NEW: Goal abort tracking
         self._goal_aborted: bool = False
         self._goal_abort_reason: Optional[str] = None
+        self._start_time: float = 0.0
 
         # NEW: Scaffolding tracking
         self._scaffolded_total: int = 0
@@ -264,6 +265,13 @@ class Wizard:
         # NEW: Event handlers + event buffer
         self._event_handlers: List[Callable[[WizardEvent], None]] = []
         self._events: List[WizardEvent] = []
+
+        # NEW: Resume-capable execution state
+        self._current_plan: Optional[WizardPlan] = None
+        self._collected_outcomes: List[WorkerOutcome] = []
+        self._iteration_count: int = 0
+        self._total_tool_calls: int = 0
+        self._total_llm_calls: int = 0
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -296,6 +304,7 @@ class Wizard:
                 handler(event)
             except Exception as exc:
                 self._log("warning", f"Event handler error: {exc}")
+        self._log("debug", f"Event: {event.event_type.value}", data=event.data)
 
     def orchestrate(
         self,
@@ -306,8 +315,6 @@ class Wizard:
         on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
         target_paths: Optional[List[str]] = None,
         session_context: Optional[SessionContext] = None,
-        on_clarification_needed: Optional[OnClarificationNeeded] = None,
-        clarification_handler: Optional[ClarificationHandler] = None,
     ) -> WizardResult:
         """
         Main orchestration loop.
@@ -336,18 +343,22 @@ class Wizard:
            f. Check stagnation (AFTER ingest)
            g. Apply patches (with lifecycle tracking)
         4. Return result with final SessionContext state for persistence
-        """
-        start_time = time.time()
-        total_tool_calls = 0
-        total_llm_calls = 0
-        # Collect all outcomes for synthesis
-        collected_outcomes: List[WorkerOutcome] = []
 
-        # Initialize clarification callback and reset state
-        self._on_clarification_needed = on_clarification_needed
-        self._clarification_handler = clarification_handler
-        self._pending_clarifications.clear()
-        self._clarification_responses.clear()
+        Note:
+        - If a user clarification is needed, orchestration pauses with user_prompt in result.
+        - Call resume_with_answer(answer) to continue execution.
+        """
+        self._start_time = time.time()
+        self._current_plan = plan
+        self._iteration_count = 0
+        self._total_tool_calls = 0
+        self._total_llm_calls = 0
+        # Collect all outcomes for synthesis
+        self._collected_outcomes = []
+
+        # Reset state
+        self._pending_user_prompt = None
+        self._paused_step_num = None
         self._step_errors.clear()
         self._goal_aborted = False
         self._goal_abort_reason = None
@@ -403,9 +414,7 @@ class Wizard:
             )
         )
 
-        iteration = 0
-        final_response: Optional[str] = None
-        consecutive_no_ready = 0  # Deadlock detection counter
+
         # ========== FULL PLAN LOGGING ==========
         self._log("info", f"Wizard starting: goal='{plan.goal[:80]}', steps={len(plan.steps)}")
         self._log("debug", f"=== FULL PLAN ===")
@@ -413,12 +422,113 @@ class Wizard:
         self._log("debug", f"  goal_type: {plan.goal_type}")
         self._log("debug", f"  reasoning: {plan.reasoning[:200] if plan.reasoning else '(none)'}")
         self._log("debug", f"  requires_tools: {plan.requires_tools}")
-    #    self._log("debug", session_context.)
+        #    self._log("debug", session_context.)
         for step in plan.steps:
             deps = f" (depends_on: {step.depends_on})" if step.depends_on else ""
             tool = f" [tool: {step.tool_hint}]" if step.tool_hint else ""
             required = " REQUIRED" if step.required else ""
             self._log("debug", f"  Step {step.step_num}: {step.objective[:80]}{tool}{deps}{required}")
+
+        return self._run_orchestration_loop(
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
+        )
+
+    def resume_with_answer(
+        self,
+        answer: str,
+        budget: Optional[Dict[str, int]] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+    ) -> WizardResult:
+        """
+        Resume orchestration after user provides an answer to a clarification prompt.
+
+        Args:
+            answer: The user's response to the question
+            budget: Optional budget constraints
+            on_stream_chunk: Optional streaming callback
+
+        Returns:
+            WizardResult with continued execution results
+        """
+        if not self._plan_state or not self._current_plan:
+            raise RuntimeError("No active plan to resume.")
+
+        if not self._pending_user_prompt:
+            raise RuntimeError("No pending user prompt to answer.")
+
+        # Inject the user's answer into the session context
+        question = self._pending_user_prompt.get("question", "")
+        self._session_context.add_message({
+            "role": "user",
+            "content": f"User response to '{question}':\n{answer}"
+        })
+
+        # Emit event
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.USER_INPUT_RECEIVED,
+                step_num=self._paused_step_num,
+                data={"answer": answer},
+            )
+        )
+
+        # Reset paused step back to PENDING now that we have the answer
+        if self._paused_step_num is not None:
+            self._plan_state.reset_step_for_retry(self._paused_step_num)
+
+        # Clear the pending prompt
+        self._pending_user_prompt = None
+        self._paused_step_num = None
+
+        self._events.clear()
+        if self._start_time <= 0:
+            self._start_time = time.time()
+
+        return self._run_orchestration_loop(
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
+        )
+
+    def resume(
+        self,
+        budget: Optional[Dict[str, int]] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+    ) -> WizardResult:
+        """
+        Resume orchestration after a pause.
+
+        This continues with the existing PlanState, ledger, and context.
+        For resuming after a clarification, use resume_with_answer() instead.
+        """
+        if not self._plan_state or not self._current_plan:
+            raise RuntimeError("No active plan to resume.")
+
+        self._events.clear()
+        if self._start_time <= 0:
+            self._start_time = time.time()
+
+        return self._run_orchestration_loop(
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
+        )
+
+    def _run_orchestration_loop(
+        self,
+        budget: Optional[Dict[str, int]] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+    ) -> WizardResult:
+        """Run the orchestration loop using existing state."""
+        if not self._plan_state or not self._current_plan:
+            raise RuntimeError("Wizard has no active plan to run.")
+
+        plan = self._current_plan
+        iteration = self._iteration_count
+        total_tool_calls = self._total_tool_calls
+        total_llm_calls = self._total_llm_calls
+        collected_outcomes = self._collected_outcomes
+        consecutive_no_ready = 0  # Deadlock detection counter
+        paused_for_user = False
 
         while iteration < self.config.max_iterations:
             iteration += 1
@@ -427,15 +537,6 @@ class Wizard:
             if self._goal_aborted:
                 self._log("info", f"Goal aborted: {self._goal_abort_reason}")
                 break
-
-            # ========== CHECK FOR CLARIFICATION RESPONSES ==========
-            self._process_clarification_responses()
-
-            # ========== CHECK FOR STEPS AWAITING USER ==========
-            if self._has_steps_awaiting_user():
-                # Block until clarification resolved or timeout applied
-                self._wait_for_clarification()
-                continue
 
             # Handle failed steps: retry or skip (uses step.attempt_count)
             self._handle_failed_steps()
@@ -491,6 +592,7 @@ class Wizard:
                 constraints=[
                     f"Max tool calls: {work_item.bounds.max_tool_calls}",
                     f"Max duration: {work_item.bounds.max_duration_ms}ms",
+                    "Do NOT call ask_user; request user input via [NEED_CONTEXT] with JSON.",
                 ],
                 tool_hint=work_item.tool_hint,
             )
@@ -564,12 +666,43 @@ class Wizard:
                 f"llm={outcome.metrics.llm_calls_made}",
             )
 
+            # ==================================================================
+            # CHECK FOR USER INPUT REQUEST (Wizard-owned clarification)
+            # ==================================================================
+            if outcome.needs_user_input:
+                self._log("info", f"Step {step.step_num} requested user input")
+                request_id = f"user_prompt:{uuid.uuid4().hex[:8]}"
+                if outcome.user_prompt is None:
+                    outcome.user_prompt = {"question": "", "options": [], "context": ""}
+                outcome.user_prompt["request_id"] = request_id
+                self._pending_user_prompt = outcome.user_prompt
+                self._paused_step_num = step.step_num
+                paused_for_user = True
+                self._plan_state.mark_step_awaiting_user(step.step_num, request_id)
+
+                self._emit_event(
+                    WizardEvent(
+                        event_type=WizardEventType.USER_INPUT_REQUESTED,
+                        step_num=step.step_num,
+                        data={
+                            "question": outcome.user_prompt.get("question", "") if outcome.user_prompt else "",
+                            "options": outcome.user_prompt.get("options", []) if outcome.user_prompt else [],
+                            "context": outcome.user_prompt.get("context", "") if outcome.user_prompt else "",
+                            "request_id": request_id,
+                        },
+                    )
+                )
+                # Treat as non-failure in the ledger to avoid retry penalties
+                outcome.success = True
+                self._ledger.record_completion(entry_id, outcome)
+                break
+
             # Record completion in ledger (audit trail)
             self._ledger.record_completion(entry_id, outcome)
 
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             # NEW: WIZARD REFLECTION STAGE
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             if self.config.reflection_enabled:
                 self._emit_event(
                     WizardEvent(
@@ -599,9 +732,9 @@ class Wizard:
             else:
                 reflection_output = self._fallback_reflection_output(step, outcome)
 
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             # ACT ON REFLECTION VERDICT
-            # ════════════════════════════════════════════════════════════════
+            # ==================================================================
             self._apply_reflection_verdict(
                 step,
                 outcome,
@@ -616,20 +749,27 @@ class Wizard:
             if signal.detected:
                 self._handle_stagnation(signal)
 
-        duration_ms = (time.time() - start_time) * 1000
+        self._iteration_count = iteration
+        self._total_tool_calls = total_tool_calls
+        self._total_llm_calls = total_llm_calls
 
-        # Cleanup
-        self._stagnation_detector.cleanup_all()
+        duration_ms = (time.time() - self._start_time) * 1000
+
+        if not paused_for_user:
+            # Cleanup only after completion; preserve state for resume if paused.
+            self._stagnation_detector.cleanup_all()
 
         # ========== FINAL RESPONSE SYNTHESIS ==========
-        # Use the synthesizer to generate a proper final response
-        final_response = self._synthesize_final_response(
-            plan=plan,
-            outcomes=collected_outcomes,
-            on_stream=on_stream_chunk,
-        )
+        if paused_for_user:
+            final_response = self._build_pause_response()
+        else:
+            final_response = self._synthesize_final_response(
+                plan=plan,
+                outcomes=collected_outcomes,
+                on_stream=on_stream_chunk,
+            )
 
-        if self._session_context and final_response:
+        if self._session_context and final_response and not paused_for_user:
             last_msg = self._session_context.messages[-1] if self._session_context.messages else None
             if not (last_msg and last_msg.get("role") == "assistant" and last_msg.get("content") == final_response):
                 self._session_context.add_message({"role": "assistant", "content": final_response})
@@ -650,13 +790,31 @@ class Wizard:
 
         # Use goal_achieved() for success (not just is_terminated)
         goal_achieved = self._plan_state.goal_achieved()
-        self._log(
-            "info",
-            f"Wizard complete: goal_achieved={goal_achieved}, "
-            f"iterations={iteration}, completed={steps_completed}, "
-            f"skipped={steps_skipped}, failed={steps_failed}, "
-            f"duration={duration_ms:.0f}ms"
-        )
+        if paused_for_user:
+            self._log(
+                "info",
+                "Wizard paused awaiting user clarification.",
+            )
+        else:
+            self._log(
+                "info",
+                f"Wizard complete: goal_achieved={goal_achieved}, "
+                f"iterations={iteration}, completed={steps_completed}, "
+                f"skipped={steps_skipped}, failed={steps_failed}, "
+                f"duration={duration_ms:.0f}ms"
+            )
+
+        if goal_achieved:
+            self._emit_event(
+                WizardEvent(
+                    event_type=WizardEventType.GOAL_ACHIEVED,
+                    data={
+                        "goal": self._plan_state.goal,
+                        "completed": steps_completed,
+                        "skipped": steps_skipped,
+                    },
+                )
+            )
 
         # Build final context state for session persistence
         final_context_state = None
@@ -676,6 +834,9 @@ class Wizard:
             steps_skipped=steps_skipped,
             steps_failed=steps_failed,
             final_context_state=final_context_state,
+            events=list(self._events),
+            paused=paused_for_user,
+            user_prompt=self._pending_user_prompt,
         )
 
     def _handle_failed_steps(self) -> None:
@@ -698,6 +859,13 @@ class Wizard:
                     f"Max retries ({self.config.max_retries_per_step}) exceeded after {step.attempt_count} attempts. Last error: {step.last_error or 'unknown'}"
                 )
                 self._stagnation_detector.reset_step(step.step_num)
+                self._emit_event(
+                    WizardEvent(
+                        event_type=WizardEventType.STEP_SKIPPED,
+                        step_num=step.step_num,
+                        data={"reason": "max_retries_exceeded"},
+                    )
+                )
 
     def _has_recoverable_steps(self) -> bool:
         """Check if there are any steps that can still make progress."""
@@ -728,6 +896,13 @@ class Wizard:
                 f"Stagnation detected: {signal.reason}"
             )
             self._stagnation_detector.reset_step(signal.step_num)
+            self._emit_event(
+                WizardEvent(
+                    event_type=WizardEventType.STEP_SKIPPED,
+                    step_num=signal.step_num,
+                    data={"reason": "stagnation"},
+                )
+            )
 
     def _ingest_outcome(self, outcome: WorkerOutcome, entry_id: str) -> None:
         """
@@ -760,13 +935,21 @@ class Wizard:
         self._apply_patches(outcome)
 
     def _apply_patches(self, outcome: WorkerOutcome) -> None:
+        """Ignore direct worker patches; Wizard owns plan mutations."""
+        if outcome.patches:
+            self._log(
+                "warning",
+                f"Ignoring {len(outcome.patches)} direct worker patches; use PATCH_SUGGESTION blocks instead.",
+            )
+
+    def _apply_patch_list(self, patches: List[PlanPatch], source: str) -> None:
         """
-        Apply patches from worker outcome with version safety.
+        Apply patches with version safety and lifecycle tracking.
 
         Rejects patches where base_version != current plan version.
         This handles the case where plan changed while worker was executing.
         """
-        for patch in outcome.patches:
+        for patch in patches:
             # VERSION CHECK: Reject stale patches
             if patch.base_plan_version != self._plan_state.version:
                 self._log(
@@ -777,7 +960,7 @@ class Wizard:
                 )
                 self._ledger.record_patch_proposed(
                     patch_id=patch.patch_id,
-                    source="worker",
+                    source=source,
                     patch_type=patch.operations[0].type.value if patch.operations else "unknown",
                     target_steps=[op.target_step for op in patch.operations],
                     justification=patch.justification,
@@ -792,7 +975,7 @@ class Wizard:
             # Record proposal
             self._ledger.record_patch_proposed(
                 patch_id=patch.patch_id,
-                source="worker",
+                source=source,
                 patch_type=patch.operations[0].type.value if patch.operations else "unknown",
                 target_steps=[op.target_step for op in patch.operations],
                 justification=patch.justification,
@@ -816,6 +999,102 @@ class Wizard:
                         patch_id=patch.patch_id,
                         resulting_version=self._plan_state.version,
                     )
+
+    def _apply_patch_suggestions(
+        self,
+        suggestions: List[PatchSuggestion],
+        source_step: int,
+    ) -> None:
+        """Convert worker suggestions into Wizard-owned patches and apply."""
+        if not suggestions:
+            return
+
+        for suggestion in suggestions:
+            patch = self._build_patch_from_suggestion(suggestion, source_step)
+            if patch:
+                self._apply_patch_list([patch], source="worker_suggestion")
+
+    def _build_patch_from_suggestion(
+        self,
+        suggestion: PatchSuggestion,
+        source_step: int,
+    ) -> Optional[PlanPatch]:
+        """Build a PlanPatch from a worker suggestion (Wizard controls application)."""
+        patch_type = (suggestion.patch_type or "").lower()
+
+        if patch_type == "insert":
+            objective = (
+                str(suggestion.objective).strip() if suggestion.objective is not None else ""
+            )
+            if not objective:
+                return None
+            if len(self._plan_state.steps) >= self.config.max_plan_size:
+                self._log("warning", "Skipping suggested insert: plan at max size")
+                return None
+            insert_after = suggestion.insert_after or source_step
+            if not isinstance(insert_after, int):
+                try:
+                    insert_after = int(insert_after)
+                except (TypeError, ValueError):
+                    return None
+            if insert_after not in self._plan_state.steps:
+                return None
+            patch = PlanPatch.create_insert(
+                base_version=self._plan_state.version,
+                objective=objective,
+                tool_hint=suggestion.tool_hint,
+                insert_after=insert_after,
+                justification=suggestion.rationale,
+            )
+            if patch.operations and patch.operations[0].new_step is not None:
+                phase = suggestion.phase or "execution"
+                if phase not in ("discovery", "execution", "verification"):
+                    phase = "execution"
+                patch.operations[0].new_step["phase"] = phase
+                depends_on = suggestion.depends_on if isinstance(suggestion.depends_on, list) else []
+                depends_on = [d for d in depends_on if isinstance(d, int)]
+                patch.operations[0].new_step["depends_on"] = depends_on or [insert_after]
+                patch.operations[0].new_step["required"] = suggestion.required
+            return patch
+
+        if patch_type == "replace":
+            target_step = suggestion.target_step
+            if target_step is None:
+                return None
+            if not isinstance(target_step, int):
+                try:
+                    target_step = int(target_step)
+                except (TypeError, ValueError):
+                    return None
+            if target_step not in self._plan_state.steps:
+                return None
+            if suggestion.tool_hint is None:
+                return None
+            return PlanPatch.create_replace(
+                base_version=self._plan_state.version,
+                step_num=target_step,
+                new_tool_hint=suggestion.tool_hint,
+                justification=suggestion.rationale,
+            )
+
+        if patch_type == "remove":
+            target_step = suggestion.target_step
+            if target_step is None:
+                return None
+            if not isinstance(target_step, int):
+                try:
+                    target_step = int(target_step)
+                except (TypeError, ValueError):
+                    return None
+            if target_step not in self._plan_state.steps:
+                return None
+            return PlanPatch.create_remove(
+                base_version=self._plan_state.version,
+                step_num=target_step,
+                justification=suggestion.rationale,
+            )
+
+        return None
 
     def _synthesize_final_response(
         self,
@@ -841,7 +1120,7 @@ class Wizard:
         """
         # If no outcomes, provide fallback
         if not outcomes:
-            fallback = f"Completed processing: {plan.goal}"
+            fallback = self._build_no_outcomes_response(plan)
             if on_stream:
                 self._synthesizer.stream_content(fallback, on_stream)
             return fallback
@@ -887,9 +1166,72 @@ class Wizard:
 
         return result.content
 
-    # ════════════════════════════════════════════════════════════════════════════
+    def _build_no_outcomes_response(self, plan: WizardPlan) -> str:
+        """Build a non-silent fallback response when no outcomes were accepted."""
+        if self._goal_aborted:
+            reason = self._goal_abort_reason or "Goal aborted due to unrecoverable issues."
+            return f"Unable to complete the goal: {reason}"
+
+        steps_failed = [
+            s for s in self._plan_state.steps.values()
+            if s.status == StepStatus.FAILED
+        ]
+        steps_skipped = [
+            s for s in self._plan_state.steps.values()
+            if s.status == StepStatus.SKIPPED
+        ]
+
+        lines = [
+            f"Unable to complete the goal: {plan.goal}",
+            f"Steps failed: {len(steps_failed)}, skipped: {len(steps_skipped)}.",
+        ]
+
+        error_details = []
+        for step in steps_failed[:3]:
+            if step.last_error:
+                error_details.append(f"Step {step.step_num}: {step.last_error}")
+        if error_details:
+            lines.append("Recent errors:")
+            lines.extend(error_details)
+
+        return "\n".join(lines)
+
+    def _build_pause_response(self) -> str:
+        """Build a response indicating the wizard is awaiting user input."""
+        if not self._pending_user_prompt:
+            return "Paused awaiting user input."
+
+        question = self._pending_user_prompt.get("question", "")
+        options = self._pending_user_prompt.get("options", [])
+
+        lines = [f"Question: {question}"]
+        if options:
+            lines.append(f"Options: {', '.join(options)}")
+        return "\n".join(lines)
+
+    # ======================================================================
     # REFLECTION STAGE METHODS
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
+
+    def _fallback_reflection_output(
+        self,
+        step: Any,
+        outcome: WorkerOutcome,
+    ) -> WizardReflectionOutput:
+        """Create a minimal reflection output when reflection is disabled."""
+        if outcome.success:
+            verdict = ReflectionVerdict.ACCEPT
+            user_message = outcome.final_response or "Step completed."
+        else:
+            verdict = ReflectionVerdict.REDO
+            user_message = outcome.error or "Step failed; retrying."
+
+        return WizardReflectionOutput(
+            verdict=verdict,
+            reasoning="Reflection disabled",
+            confidence=0.2,
+            user_message=user_message,
+        )
 
     def _reflect_on_outcome(
         self,
@@ -914,6 +1256,10 @@ class Wizard:
         global_context = ReflectionContext(
             goal=plan.goal,
             goal_type=goal_type,
+            goal_success_criteria=(
+                plan.success_criteria.description
+                if plan.success_criteria else None
+            ),
             total_steps=len(self._plan_state.steps),
             completed_steps=sum(
                 1 for s in self._plan_state.steps.values()
@@ -923,6 +1269,10 @@ class Wizard:
                 1 for s in self._plan_state.steps.values()
                 if s.status == StepStatus.FAILED
             ),
+            skipped_steps=sum(
+                1 for s in self._plan_state.steps.values()
+                if s.status == StepStatus.SKIPPED
+            ),
             remaining_steps=sum(
                 1 for s in self._plan_state.steps.values()
                 if s.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS)
@@ -930,12 +1280,14 @@ class Wizard:
             key_facts=self._get_top_facts_as_dicts(10),
             total_iterations=iteration,
             total_tool_calls=sum(o.metrics.tool_calls_made for o in previous_outcomes),
+            total_llm_calls=sum(o.metrics.llm_calls_made for o in previous_outcomes),
+            elapsed_ms=(time.time() - self._start_time) * 1000,
         )
 
         # Build step context
         step_context = StepContext(
             step_num=step.step_num,
-            objective=step.objective,
+            objective=step.override_objective or step.objective,
             tool_hint=step.tool_hint,
             phase=step.phase.value if hasattr(step.phase, 'value') else str(step.phase),
             attempt_count=step.attempt_count,
@@ -1016,9 +1368,6 @@ class Wizard:
         elif reflection.verdict == ReflectionVerdict.REDO:
             self._handle_redo(step, outcome, reflection)
 
-        elif reflection.verdict == ReflectionVerdict.CLARIFY_USER:
-            self._handle_clarify_user(step, reflection)
-
         elif reflection.verdict == ReflectionVerdict.ABORT_STEP:
             self._handle_abort_step(step, reflection)
 
@@ -1058,6 +1407,10 @@ class Wizard:
                     ).__dict__,
                 )
             )
+
+        # Apply any worker-suggested patch proposals (Wizard decides + applies)
+        if outcome.patch_suggestions and not self._goal_aborted:
+            self._apply_patch_suggestions(outcome.patch_suggestions, step.step_num)
 
     def _handle_accept(
         self,
@@ -1099,18 +1452,31 @@ class Wizard:
         collected_outcomes: List[WorkerOutcome],
     ) -> None:
         """Handle ACCEPT_AND_EXTEND verdict."""
-        # First, accept the current step
-        self._plan_state.mark_step_complete(
-            step.step_num,
-            outcome.final_response or "Completed"
-        )
-        self._ingest_outcome_data(outcome)
-        collected_outcomes.append(outcome)
+        # Check if this was a refusal - if so, SKIP the step instead of completing it
+        # The scaffolded steps will do the actual work
+        if getattr(outcome, 'is_refusal', False):
+            self._log("info", f"Step {step.step_num} was a refusal - marking SKIPPED, scaffolding decomposed work")
+            self._plan_state.mark_step_skipped(
+                step.step_num,
+                "Task decomposed into smaller steps"
+            )
+            # Don't collect the refusal outcome - it has no useful content
+        else:
+            # Normal case: actual work was done, mark as complete
+            self._plan_state.mark_step_complete(
+                step.step_num,
+                outcome.final_response or "Completed"
+            )
+            self._ingest_outcome_data(outcome)
+            collected_outcomes.append(outcome)
 
         # Then, scaffold new steps
+        self._stagnation_detector.reset_step(step.step_num)
         scaffolded_steps = self._filter_scaffolded_steps(step, reflection.scaffolded_steps)
+        inserted_count = 0
         for scaffolded in scaffolded_steps:
             if self._scaffold_new_step(scaffolded, after_step=step.step_num):
+                inserted_count += 1
                 self._scaffolded_total += 1
                 self._scaffolded_by_step[step.step_num] = (
                     self._scaffolded_by_step.get(step.step_num, 0) + 1
@@ -1119,14 +1485,14 @@ class Wizard:
         self._log(
             "info",
             f"Step {step.step_num} ACCEPTED, scaffolded "
-            f"{len(scaffolded_steps)} new steps"
+            f"{inserted_count} new steps"
         )
         self._emit_event(
             WizardEvent(
                 event_type=WizardEventType.STEPS_SCAFFOLDED,
                 step_num=step.step_num,
                 data={
-                    "count": len(scaffolded_steps),
+                    "count": inserted_count,
                     "total_scaffolded": self._scaffolded_total,
                 },
             )
@@ -1141,7 +1507,7 @@ class Wizard:
                     outcome_summary=outcome.final_response or "Completed",
                     quality_score=reflection.quality.overall_score,
                     verdict=reflection.verdict.value,
-                    scaffolded_count=len(scaffolded_steps),
+                    scaffolded_count=inserted_count,
                 ).__dict__,
             )
         )
@@ -1199,72 +1565,6 @@ class Wizard:
             )
         )
 
-    def _handle_clarify_user(
-        self,
-        step: Any,
-        reflection: WizardReflectionOutput,
-    ) -> None:
-        """Handle CLARIFY_USER verdict."""
-        clarification = reflection.clarification
-        if not clarification:
-            self._log("error", "CLARIFY_USER without clarification request")
-            # Fallback to REDO
-            self._plan_state.reset_step_for_retry(step.step_num, last_error="Missing clarification")
-            return
-
-        is_valid, rejection_reason = self._validate_clarification_request(clarification)
-        if not is_valid:
-            self._log("warning", f"Clarification rejected: {rejection_reason}")
-            self._plan_state.reset_step_for_retry(
-                step.step_num,
-                last_error=rejection_reason or "Invalid clarification",
-            )
-            # Inject a default assumption so the Worker proceeds
-            self._session_context.add_message({
-                "role": "system",
-                "content": "Proceed with reasonable assumptions; do not ask the user again.",
-            })
-            return
-
-        # Generate request ID
-        clarification.request_id = f"clarify_{uuid.uuid4().hex[:8]}"
-        clarification.step_num = step.step_num
-        if clarification.timeout_seconds <= 0:
-            clarification.timeout_seconds = self.config.clarification_timeout_seconds
-
-        # Store pending clarification
-        self._pending_clarifications[clarification.request_id] = clarification
-
-        # Update step status
-        step.status = StepStatus.AWAITING_USER
-        step.clarification_request_id = clarification.request_id
-
-        # Emit event to caller
-        if self._on_clarification_needed:
-            self._on_clarification_needed(clarification)
-        if self._clarification_handler:
-            self._clarification_handler.request_clarification(clarification)
-
-        self._emit_event(
-            WizardEvent(
-                event_type=WizardEventType.CLARIFICATION_REQUESTED,
-                step_num=step.step_num,
-                data=ClarificationRequestedData(
-                    request_id=clarification.request_id,
-                    step_num=step.step_num,
-                    question=clarification.question,
-                    options=clarification.options,
-                    default_assumption=clarification.default_assumption,
-                    timeout_seconds=clarification.timeout_seconds,
-                ).__dict__,
-            )
-        )
-
-        self._log(
-            "info",
-            f"Step {step.step_num} AWAITING_USER: {clarification.question[:50]}..."
-        )
-
     def _handle_abort_step(
         self,
         step: Any,
@@ -1317,9 +1617,9 @@ class Wizard:
             )
         )
 
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
     # PLAN SCAFFOLDING METHODS
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
 
     def _scaffold_new_step(
         self,
@@ -1329,10 +1629,10 @@ class Wizard:
         """Insert a new scaffolded step into the plan."""
         # Create patch to insert
         patch = PlanPatch.create_insert(
+            base_version=self._plan_state.version,
             objective=scaffolded.objective,
             tool_hint=scaffolded.tool_hint,
             insert_after=after_step,
-            base_plan_version=self._plan_state.version,
             justification=scaffolded.rationale,
         )
         if patch.operations and patch.operations[0].new_step is not None:
@@ -1362,124 +1662,36 @@ class Wizard:
         )
         return False
 
-    # ════════════════════════════════════════════════════════════════════════════
-    # CLARIFICATION HANDLING METHODS
-    # ════════════════════════════════════════════════════════════════════════════
-
-    def _has_steps_awaiting_user(self) -> bool:
-        """Check if any steps are awaiting user clarification."""
-        return any(
-            s.status == StepStatus.AWAITING_USER
-            for s in self._plan_state.steps.values()
-        )
-
-    def _process_clarification_responses(self) -> None:
-        """Process any received clarification responses."""
-        # This is called each iteration to check for responses
-        # In a real implementation, this would check a response queue
-        pass
-
-    def _check_clarification_timeout(self) -> bool:
-        """
-        Check for timed-out clarifications and apply defaults.
-
-        Returns True if any clarifications were resolved.
-        """
-        current_time = time.time()
-        resolved = False
-
-        for step in self._plan_state.steps.values():
-            if step.status != StepStatus.AWAITING_USER:
-                continue
-
-            # Find the pending clarification for this step
-            request = None
-            for req in self._pending_clarifications.values():
-                if req.step_num == step.step_num:
-                    request = req
-                    break
-
-            if not request:
-                continue
-
-            # Check for response
-            if request.request_id in self._clarification_responses:
-                response = self._clarification_responses.pop(request.request_id)
-                self._apply_clarification_response(step, request, response)
-                resolved = True
-                continue
-
-            # Check for timeout
-            elapsed = current_time - request.created_at
-            if elapsed > request.timeout_seconds:
-                # Apply default assumption
-                self._apply_default_assumption(step, request)
-                resolved = True
-
-        return resolved
-
-    def _apply_clarification_response(
+    def _filter_scaffolded_steps(
         self,
-        step: Any,
-        request: ClarificationRequest,
-        response: ClarificationResponse,
-    ) -> None:
-        """Apply user's clarification response and resume step."""
-        # Inject answer into context
-        answer = response.answer or request.default_assumption
-        self._session_context.add_message({
-            "role": "user",
-            "content": f"Clarification for '{request.question}':\n{answer}"
-        })
+        parent_step: Any,
+        scaffolded_steps: List[ScaffoldedStep],
+    ) -> List[ScaffoldedStep]:
+        """Apply scaffolding limits and depth checks."""
+        if not scaffolded_steps:
+            return []
 
-        # Reset step to pending
-        step.status = StepStatus.PENDING
+        per_step_limit = max(0, self.config.max_scaffolded_per_step)
+        total_left = max(0, self.config.max_total_scaffolded - self._scaffolded_total)
+        plan_slots = max(0, self.config.max_plan_size - len(self._plan_state.steps))
+        allowed = min(per_step_limit, total_left, plan_slots)
+        if allowed <= 0:
+            return []
 
-        # Remove from pending
-        self._pending_clarifications.pop(request.request_id, None)
+        parent_depth = getattr(parent_step, "scaffold_depth", 0)
+        filtered: List[ScaffoldedStep] = []
+        for scaffolded in scaffolded_steps:
+            if parent_depth + 1 > self.config.max_scaffold_depth:
+                continue
+            filtered.append(scaffolded)
+            if len(filtered) >= allowed:
+                break
 
-        self._log(
-            "info",
-            f"Step {step.step_num} resumed with clarification: {answer[:50]}..."
-        )
+        return filtered
 
-    def _apply_default_assumption(
-        self,
-        step: Any,
-        request: ClarificationRequest,
-    ) -> None:
-        """Apply default assumption after timeout."""
-        self._session_context.add_message({
-            "role": "system",
-            "content": f"Assumption (user did not respond): {request.default_assumption}"
-        })
-
-        # Reset step to pending
-        step.status = StepStatus.PENDING
-
-        # Remove from pending
-        self._pending_clarifications.pop(request.request_id, None)
-
-        self._log(
-            "info",
-            f"Step {step.step_num} resumed with default: {request.default_assumption[:50]}..."
-        )
-
-    def receive_clarification_response(self, response: ClarificationResponse) -> None:
-        """
-        Receive a clarification response from the TUI.
-
-        This method can be called externally to provide user responses.
-        """
-        self._clarification_responses[response.request_id] = response
-        self._log(
-            "debug",
-            f"Received clarification response for {response.request_id}"
-        )
-
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
     # HELPER METHODS
-    # ════════════════════════════════════════════════════════════════════════════
+    # ======================================================================
 
     def _get_step_errors(self, step_num: int) -> List[str]:
         """Get previous errors for a step."""
@@ -1496,7 +1708,7 @@ class Wizard:
         if not self._knowledge:
             return []
 
-        facts = self._knowledge.get_top_facts(limit)
+        facts = self._knowledge.get_recent_facts(limit)
         return [
             {
                 "key": f.key,

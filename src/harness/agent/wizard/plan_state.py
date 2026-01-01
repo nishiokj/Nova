@@ -255,6 +255,14 @@ class PlanState:
             self.freeze_step(step_num)
             self._bump_version()
 
+    def mark_step_awaiting_user(self, step_num: int, request_id: str) -> None:
+        """Mark step as AWAITING_USER with clarification request ID."""
+        step = self.steps.get(step_num)
+        if step and not step.is_frozen:
+            step.status = StepStatus.AWAITING_USER
+            step.clarification_request_id = request_id
+            self._bump_version()
+
     def reset_step_for_retry(
         self,
         step_num: int,

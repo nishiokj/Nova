@@ -11,6 +11,11 @@ from typing import Optional, Any
 from .config import HarnessConfig, RuntimeConfig, load_or_create_config
 from .logger import StructuredLogger
 from harness.agent.tool_registry import ToolRegistry
+from skills.store import SkillStore
+from skills.registry import SkillRegistry
+from skills.router import SkillRouter
+from hooks.store import HookStore
+from hooks.manager import HookManager
 from services.router import Router, TaskTier
 #from .service_rep import StreamingServiceRep
 from harness.agent.agent import TieredAgent
@@ -27,6 +32,11 @@ class HarnessRuntime:
     execution_logger: AgentExecutionLogger
     agent_logger: AgentLogger
     tool_registry: ToolRegistry
+    skill_store: SkillStore
+    skill_registry: SkillRegistry
+    skill_router: SkillRouter
+    hook_store: HookStore
+    hook_manager: HookManager
     router: Router
     agent: TieredAgent
     profiler: Optional[Any] = None
@@ -164,12 +174,30 @@ def create_runtime(
             runtime_logger.error(f"Graphd init failed: {exc}", component="runtime", error=exc)
             graphd_manager = None
 
+    hook_store = HookStore(resolved_config.hooks.hooks_dir, logger=runtime_logger)
+    hook_manager = HookManager(
+        hook_store,
+        resolved_config.hooks,
+        logger=runtime_logger,
+        graphd_client=graphd_client,
+    )
+
     tool_registry = ToolRegistry(
         resolved_config.tools,
         logger=runtime_logger,
         nano_banana_config=resolved_config.nano_banana,
         graphd_client=graphd_client,
         graphd_tools_enabled=bool(resolved_config.graphd and resolved_config.graphd.enable_tools),
+        hook_manager=hook_manager,
+    )
+
+    skill_store = SkillStore(resolved_config.skills.skills_dir, logger=runtime_logger)
+    skill_registry = SkillRegistry(skill_store, logger=runtime_logger)
+    skill_router = SkillRouter(
+        skill_registry,
+        resolved_config.skills,
+        logger=runtime_logger,
+        semantic_llm_config=resolved_config.skills.semantic_llm_config,
     )
     router = Router(resolved_config.router, logger=runtime_logger)
     agent = TieredAgent(
@@ -189,6 +217,11 @@ def create_runtime(
         execution_logger=exec_logger,
         agent_logger=agent_log,
         tool_registry=tool_registry,
+        skill_store=skill_store,
+        skill_registry=skill_registry,
+        skill_router=skill_router,
+        hook_store=hook_store,
+        hook_manager=hook_manager,
         router=router,
         agent=agent,
         profiler=profiler,

@@ -235,7 +235,7 @@ class HTMLExporter:
             </div>
         </section>"""
 
-    def _generate_prompt_html(self, prompt: Optional[Dict], phase_name: str) -> str:
+    def _generate_prompt_html(self, prompt: Optional[Dict], _phase_name: str) -> str:
         """Generate HTML for a full prompt."""
         if not prompt:
             return '<p><em>No prompt recorded</em></p>'

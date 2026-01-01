@@ -140,6 +140,27 @@ class ToolConfig:
 
 
 @dataclass
+class SkillsConfig:
+    """Configuration for Skills"""
+    enabled: bool = True
+    skills_dir: str = "config/skills"
+    semantic_enabled: bool = True
+    semantic_min_confidence: float = 0.82
+    semantic_llm_config: Optional[LLMConfig] = None  # defaults to service_rep llm
+    max_candidates: int = 8
+    match_policy: str = "best_score"  # "best_score" | "first_match"
+
+
+@dataclass
+class HooksConfig:
+    """Configuration for Hooks"""
+    enabled: bool = True
+    hooks_dir: str = "config/hooks"
+    default_fail_open: bool = True
+    max_exec_ms: int = 200
+
+
+@dataclass
 class GraphdConfig:
     """Configuration for Graphd repository graph daemon"""
     enabled: bool = False
@@ -211,6 +232,8 @@ class HarnessConfig:
     service_rep: ServiceRepConfig = field(default_factory=ServiceRepConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     tools: ToolConfig = field(default_factory=ToolConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
     graphd: GraphdConfig = field(default_factory=GraphdConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     nano_banana: NanoBananaConfig = field(default_factory=NanoBananaConfig)
@@ -236,6 +259,8 @@ class HarnessConfig:
             self.service_rep.llm_config = self.llm_configs.get("service_rep")
         if self.agent.llm_config is None:
             self.agent.llm_config = self.llm_configs.get(self.agent.tier, self.llm_configs.get("standard"))
+        if self.skills.semantic_llm_config is None:
+            self.skills.semantic_llm_config = self.service_rep.llm_config
 
     @classmethod
     def from_file(cls, path: str) -> "HarnessConfig":
@@ -260,6 +285,12 @@ class HarnessConfig:
         if "llm_config" in agent_data and isinstance(agent_data["llm_config"], dict):
             agent_data["llm_config"] = LLMConfig(**agent_data["llm_config"])
 
+        skills_data = data.get("skills", {})
+        if "semantic_llm_config" in skills_data and isinstance(skills_data["semantic_llm_config"], dict):
+            skills_data["semantic_llm_config"] = LLMConfig(**skills_data["semantic_llm_config"])
+
+        hooks_data = data.get("hooks", {})
+
         llm_configs = {}
         for key, llm_data in data.get("llm_configs", {}).items():
             if isinstance(llm_data, dict):
@@ -272,6 +303,8 @@ class HarnessConfig:
             service_rep=ServiceRepConfig(**service_rep_data) if service_rep_data else ServiceRepConfig(),
             agent=AgentConfig(**agent_data) if agent_data else AgentConfig(),
             tools=ToolConfig(**data.get("tools", {})) if data.get("tools") else ToolConfig(),
+            skills=SkillsConfig(**skills_data) if skills_data else SkillsConfig(),
+            hooks=HooksConfig(**hooks_data) if hooks_data else HooksConfig(),
             graphd=GraphdConfig(**graphd_data) if graphd_data else GraphdConfig(),
             logging=LoggingConfig(**data.get("logging", {})) if data.get("logging") else LoggingConfig(),
             nano_banana=NanoBananaConfig(**data.get("nano_banana", {})) if data.get("nano_banana") else NanoBananaConfig(),

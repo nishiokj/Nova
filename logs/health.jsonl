@@ -233,3 +233,62 @@
 {"ts": "2025-12-30T19:39:19.763Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable", "data": {"error": "The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable", "type": "OpenAIError", "stack": "Traceback (most recent call last):\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/llm_adapter.py\", line 722, in respond\n    client = self._get_client()\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/llm_adapter.py\", line 322, in _get_client\n    self._client = OpenAI(\n  File \"/Users/jevinnishioka/Desktop/jesus/.venv/lib/python3.10/site-packages/openai/_client.py\", line 137, in __init__\n    raise OpenAIError(\nopenai.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable\n"}}
 {"ts": "2025-12-30T19:39:21.944Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable", "data": {"error": "The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable", "type": "OpenAIError", "stack": "Traceback (most recent call last):\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/llm_adapter.py\", line 722, in respond\n    client = self._get_client()\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/llm_adapter.py\", line 322, in _get_client\n    self._client = OpenAI(\n  File \"/Users/jevinnishioka/Desktop/jesus/.venv/lib/python3.10/site-packages/openai/_client.py\", line 137, in __init__\n    raise OpenAIError(\nopenai.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable\n"}}
 {"ts": "2025-12-30T19:39:21.945Z", "lvl": "DEBUG", "svc": "llm", "evt": "LLM error from gemini-2.5-pro: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable", "data": {"error": "The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable", "type": "OpenAIError", "stack": "Traceback (most recent call last):\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/llm_adapter.py\", line 2114, in respond\n    return adapter.respond(\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/resilience.py\", line 164, in sync_wrapper\n    return _execute_sync(\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/resilience.py\", line 300, in _execute_sync\n    result = func(instance, *args, **kwargs)\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/llm_adapter.py\", line 722, in respond\n    client = self._get_client()\n  File \"/Users/jevinnishioka/Desktop/jesus/src/util/llm_adapter.py\", line 322, in _get_client\n    self._client = OpenAI(\n  File \"/Users/jevinnishioka/Desktop/jesus/.venv/lib/python3.10/site-packages/openai/_client.py\", line 137, in __init__\n    raise OpenAIError(\nopenai.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable\n"}}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "ToolRegistry initialized with enabled_tools: ['web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'generate_image']"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_working_directory (enabled=False, in_config=False)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: list_files (enabled=False, in_config=False)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: generate_image (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Tool registration complete: 8 enabled, 2 disabled"}
+{"ts": "2025-12-31T18:17:34.856Z", "lvl": "DEBUG", "svc": "tools", "evt": "Disabled tools: ['get_working_directory', 'list_files']"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "ToolRegistry initialized with enabled_tools: ['web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'generate_image']"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_working_directory (enabled=False, in_config=False)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: list_files (enabled=False, in_config=False)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: generate_image (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Tool registration complete: 8 enabled, 2 disabled"}
+{"ts": "2025-12-31T18:17:55.261Z", "lvl": "DEBUG", "svc": "tools", "evt": "Disabled tools: ['get_working_directory', 'list_files']"}
+{"ts": "2025-12-31T18:19:27.353Z", "lvl": "DEBUG", "svc": "tools", "evt": "Tool 'file_write' execution failed"}
+{"ts": "2025-12-31T18:20:05.345Z", "lvl": "DEBUG", "svc": "tools", "evt": "Tool 'file_write' execution failed"}
+{"ts": "2025-12-31T18:20:52.499Z", "lvl": "DEBUG", "svc": "tools", "evt": "Tool 'file_write' execution failed"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "ToolRegistry initialized with enabled_tools: ['web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'generate_image']"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_working_directory (enabled=False, in_config=False)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: list_files (enabled=False, in_config=False)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: generate_image (enabled=True, in_config=True)"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Tool registration complete: 8 enabled, 2 disabled"}
+{"ts": "2025-12-31T18:22:43.109Z", "lvl": "DEBUG", "svc": "tools", "evt": "Disabled tools: ['get_working_directory', 'list_files']"}
+{"ts": "2025-12-31T18:22:43.119Z", "lvl": "DEBUG", "svc": "llm", "evt": "RESPONSES API REQUEST: model=gpt-5.2, tools=[], tool_choice=none"}
+{"ts": "2025-12-31T18:22:58.614Z", "lvl": "DEBUG", "svc": "llm", "evt": "RESPONSES API RESPONSE: output_len=2705, tool_calls=0, finish=completed"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "ToolRegistry initialized with enabled_tools: ['web_fetch', 'bash_execute', 'python_execute', 'file_read', 'file_write', 'search_filesystem', 'calculator', 'get_current_time', 'generate_image']"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: bash_execute (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: python_execute (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_read (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: file_write (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: search_filesystem (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: calculator (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_current_time (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: get_working_directory (enabled=False, in_config=False)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: list_files (enabled=False, in_config=False)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Registered tool: generate_image (enabled=True, in_config=True)"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Tool registration complete: 8 enabled, 2 disabled"}
+{"ts": "2026-01-01T00:31:54.252Z", "lvl": "DEBUG", "svc": "tools", "evt": "Disabled tools: ['get_working_directory', 'list_files']"}
+{"ts": "2026-01-01T00:46:01.080Z", "lvl": "DEBUG", "svc": "skills", "evt": "Skill 'templated' executed", "data": {"duration_ms": 0.07605552673339844, "tools_used": ["calculator"], "success": true, "error": null}}
+{"ts": "2026-01-01T00:46:01.080Z", "lvl": "DEBUG", "svc": "skills", "evt": "Skill 'templated' executed", "data": {"duration_ms": 0.0030994415283203125, "tools_used": [], "success": false, "error": "tool 'calculator' not allowed for skill 'templated'"}}

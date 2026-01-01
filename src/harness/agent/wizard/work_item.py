@@ -10,11 +10,19 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class WorkBounds:
-    """Resource bounds for a work unit."""
+    """
+    Resource bounds for a work unit.
 
-    max_tool_calls: int = 5
-    max_duration_ms: float = 60_000
-    max_llm_calls: int = 3
+    These defaults are per-step limits. The Wizard can allocate different
+    budgets per step, but these are sensible defaults for most work.
+
+    NOTE: Previous defaults (5 tool calls, 60s, 3 LLM calls) were too restrictive
+    and caused the LLM to refuse work instead of making progress.
+    """
+
+    max_tool_calls: int = 15   # Enough for discovery + execution + verification
+    max_duration_ms: float = 120_000  # 2 minutes per step
+    max_llm_calls: int = 8     # Enough for reasoning + tool calls + synthesis
 
 
 @dataclass

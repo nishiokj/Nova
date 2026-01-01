@@ -27,10 +27,9 @@ class WizardEventType(Enum):
     # Scaffolding events
     STEPS_SCAFFOLDED = "steps_scaffolded"
 
-    # Clarification events
-    CLARIFICATION_REQUESTED = "clarification_requested"
-    CLARIFICATION_RECEIVED = "clarification_received"
-    CLARIFICATION_TIMEOUT = "clarification_timeout"
+    # User input events (tool-driven, replaces callback-based clarification)
+    USER_INPUT_REQUESTED = "user_input_requested"
+    USER_INPUT_RECEIVED = "user_input_received"
 
     # Quality events
     QUALITY_ISSUE_DETECTED = "quality_issue_detected"
@@ -70,13 +69,12 @@ class StepCompletedData:
 
 
 @dataclass
-class ClarificationRequestedData:
-    request_id: str
+class UserInputRequestedData:
+    """Data for USER_INPUT_REQUESTED event."""
     step_num: int
     question: str
     options: List[str]
-    default_assumption: str
-    timeout_seconds: int
+    context: str
 
 
 @dataclass

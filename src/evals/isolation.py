@@ -95,7 +95,7 @@ class IsolatedEnvironment:
 
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         """Clean up isolated environment."""
         # Restore original working directory
         if self.original_cwd:

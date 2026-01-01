@@ -61,7 +61,17 @@
       "Bash(npx tsc:*)",
       "Bash(node -e:*)",
       "Bash(npm run build:*)",
-      "Bash(~/.bun/bin/bun build:*)"
+      "Bash(~/.bun/bin/bun build:*)",
+      "Bash(timeout 10 python3:*)",
+      "Bash(du:*)",
+      "Bash(~/.bun/bin/bun tsc:*)",
+      "Bash(~/.bun/bin/bun add:*)",
+      "Bash(~/.bun/bin/bun run build:*)",
+      "Bash(xargs -I {} sh -c '[ -f \"\"\"\"/Users/jevinnishioka/Desktop/refactor-prod-readiness/{}\"\"\"\" ] && echo \"\"\"\"{}\"\"\"\"')",
+      "Bash(rm:*)",
+      "Bash(vulture:*)",
+      "Bash(bandit:*)",
+      "Bash(twine check:*)"
     ],
     "deny": []
   }

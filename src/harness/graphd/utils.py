@@ -34,16 +34,19 @@ def denormalize_path(path: str, root: str) -> str:
 
 
 def sha1_text(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+    # SHA1 used for content fingerprinting, not security
+    return hashlib.sha1(text.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def sha1_bytes(data: bytes) -> str:
-    return hashlib.sha1(data).hexdigest()
+    # SHA1 used for content fingerprinting, not security
+    return hashlib.sha1(data, usedforsecurity=False).hexdigest()
 
 
 def make_symbol_id(path: str, kind: str, name: str, span_start: int, span_end: int) -> str:
+    # SHA1 used for ID generation, not security
     base = f"{path}:{kind}:{name}:{span_start}:{span_end}"
-    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(base.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def guess_language(path: str) -> str:

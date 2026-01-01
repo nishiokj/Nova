@@ -23,13 +23,15 @@ import signal
 import io
 from datetime import datetime
 from pathlib import Path
-from contextlib import redirect_stdout, redirect_stderr, contextmanager
+from contextlib import redirect_stdout, redirect_stderr, contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from util.config import ToolConfig, NanoBananaConfig, LLMConfig
 from util.logger import StructuredLogger
 from util.llm_adapter import ToolDefinition, create_adapter
 from util.resilience import ResilienceConfig, resilient_call
+from hooks.manager import HookManager
+from hooks.models import InvocationContext, ToolPolicy
 
 
 # ========== FILESYSTEM SEARCH EXCLUSIONS ==========
@@ -448,6 +450,7 @@ class ToolStatus(Enum):
     ERROR = "error"
     TIMEOUT = "timeout"
     PERMISSION_DENIED = "permission_denied"
+    AWAITING_USER = "awaiting_user"  # Tool needs user input to proceed
 
 
 @dataclass
@@ -480,10 +483,21 @@ class ToolResult:
     def is_success(self) -> bool:
         return self.status == ToolStatus.SUCCESS
 
+    @property
+    def is_awaiting_user(self) -> bool:
+        return self.status == ToolStatus.AWAITING_USER
+
     def __str__(self) -> str:
         if self.is_success:
             return str(self.output)
         return f"Error: {self.error}"
+
+
+@dataclass
+class ToolExecutionContext:
+    env_overrides: Dict[str, str] = field(default_factory=dict)
+    workdir_override: Optional[str] = None
+    tool_policy: Optional[ToolPolicy] = None
 
 
 @dataclass
@@ -555,7 +569,8 @@ class ToolRegistry:
         logger: Optional[StructuredLogger] = None,
         nano_banana_config: Optional[NanoBananaConfig] = None,
         graphd_client: Optional[Any] = None,
-        graphd_tools_enabled: bool = False
+        graphd_tools_enabled: bool = False,
+        hook_manager: Optional[HookManager] = None
     ):
         self.config = config or ToolConfig()
         self.logger = logger or StructuredLogger()
@@ -568,6 +583,7 @@ class ToolRegistry:
         self._nano_banana_config = nano_banana_config or NanoBananaConfig()
         self._graphd_client = graphd_client
         self._graphd_tools_enabled = graphd_tools_enabled
+        self._hook_manager = hook_manager
 
         # ========== TOOL RESULT CACHING ==========
         # Cache for read-only, deterministic tool results
@@ -631,6 +647,82 @@ class ToolRegistry:
                     self._thread_local.__dict__.pop("workdir", None)
                 else:
                     self._thread_local.workdir = previous
+
+    @contextmanager
+    def with_execution_context(self, context: Optional[ToolExecutionContext]):
+        previous = getattr(self._thread_local, "exec_context", None)
+        if context is not None:
+            self._thread_local.exec_context = context
+        try:
+            yield
+        finally:
+            if previous is None:
+                self._thread_local.__dict__.pop("exec_context", None)
+            else:
+                self._thread_local.exec_context = previous
+
+    @contextmanager
+    def with_invocation_context(self, context: Optional[InvocationContext]):
+        previous = getattr(self._thread_local, "invocation_context", None)
+        if context is not None:
+            self._thread_local.invocation_context = context
+        try:
+            yield
+        finally:
+            if previous is None:
+                self._thread_local.__dict__.pop("invocation_context", None)
+            else:
+                self._thread_local.invocation_context = previous
+
+    @contextmanager
+    def with_allowed_tools(self, allowed_tools: List[str]):
+        """Context manager that temporarily restricts which tools can be executed.
+
+        Args:
+            allowed_tools: List of allowed tool names. Use ["*"] for all tools.
+        """
+        if not allowed_tools or "*" in allowed_tools:
+            # No restriction
+            yield
+            return
+
+        previous = getattr(self._thread_local, "allowed_tools", None)
+        self._thread_local.allowed_tools = set(allowed_tools)
+        try:
+            yield
+        finally:
+            if previous is None:
+                self._thread_local.__dict__.pop("allowed_tools", None)
+            else:
+                self._thread_local.allowed_tools = previous
+
+    def _is_tool_allowed(self, tool_name: str) -> bool:
+        """Check if a tool is allowed in the current context."""
+        allowed = getattr(self._thread_local, "allowed_tools", None)
+        if allowed is None:
+            return True  # No restriction
+        return tool_name in allowed
+
+    def set_hook_manager(self, hook_manager: Optional[HookManager]) -> None:
+        self._hook_manager = hook_manager
+
+    @contextmanager
+    def _with_env_overrides(self, overrides: Dict[str, str]):
+        if not overrides:
+            yield
+            return
+        original: Dict[str, Optional[str]] = {}
+        for key, value in overrides.items():
+            original[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            yield
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def _resolve_path(self, path: str) -> str:
         """Resolve a user-provided path against the active working directory"""
@@ -854,15 +946,53 @@ class ToolRegistry:
                 # Best effort – if we cannot inspect, don't inject
                 pass
 
+        invocation_context = getattr(self._thread_local, "invocation_context", None)
+        exec_context = getattr(self._thread_local, "exec_context", None) or ToolExecutionContext()
+
+        if invocation_context:
+            invocation_context.tool_name = name
+            invocation_context.tool_args = dict(kwargs)
+
+            if self._hook_manager:
+                hook_result = self._hook_manager.run("tool.before", invocation_context)
+                if hook_result.blocked:
+                    return ToolResult(
+                        status=ToolStatus.PERMISSION_DENIED,
+                        output=None,
+                        error=hook_result.message or "Tool blocked by hook"
+                    )
+
+            if invocation_context.tool_args is not None:
+                kwargs = invocation_context.tool_args
+            exec_context.env_overrides = invocation_context.env_overrides
+            exec_context.workdir_override = invocation_context.workdir_override
+            exec_context.tool_policy = invocation_context.tool_policy
+
+        # Check skill-based allowed tools restriction
+        if not self._is_tool_allowed(name):
+            return ToolResult(
+                status=ToolStatus.PERMISSION_DENIED,
+                output=None,
+                error=f"Tool '{name}' not allowed by active skill"
+            )
+
+        if exec_context.tool_policy and not exec_context.tool_policy.is_allowed(name):
+            return ToolResult(
+                status=ToolStatus.PERMISSION_DENIED,
+                output=None,
+                error=f"Tool '{name}' blocked by invocation policy"
+            )
+
         # ========== CACHE CHECK (read-only tools only) ==========
         is_cacheable = name in self._cacheable_tools and tool.read_only
+        if exec_context.env_overrides or exec_context.workdir_override:
+            is_cacheable = False
         cache_key = None
 
         if is_cacheable:
             cache_key = self._generate_cache_key(name, kwargs)
             cached_result = self._get_cached_result(cache_key)
             if cached_result is not None:
-                # Cache hit - add metadata and return
                 cached_result.metadata["cache_hit"] = True
                 self.logger.debug(
                     f"Cache hit for {name}",
@@ -872,7 +1002,30 @@ class ToolRegistry:
                 return cached_result
 
         # ========== EXECUTE TOOL ==========
-        result = tool.execute(**kwargs)
+        env_overrides = exec_context.env_overrides
+        if name == "bash_execute" and env_overrides and "env" not in kwargs:
+            env = os.environ.copy()
+            env.update(env_overrides)
+            kwargs["env"] = env
+        if name == "bash_execute" and exec_context.workdir_override and "working_dir" not in kwargs:
+            kwargs["working_dir"] = exec_context.workdir_override
+
+        workdir_ctx = self.with_working_dir(exec_context.workdir_override) if exec_context.workdir_override else nullcontext()
+        with workdir_ctx:
+            with self._with_env_overrides(env_overrides):
+                result = tool.execute(**kwargs)
+
+        if invocation_context and self._hook_manager:
+            invocation_context.tool_result = result
+            hook_result = self._hook_manager.run("tool.after", invocation_context)
+            if hook_result.blocked:
+                return ToolResult(
+                    status=ToolStatus.PERMISSION_DENIED,
+                    output=None,
+                    error=hook_result.message or "Tool blocked by hook"
+                )
+            if invocation_context.tool_result is not None:
+                result = invocation_context.tool_result
 
         # Log detailed failure context for transparency
         if not result.is_success:
@@ -1203,6 +1356,36 @@ All writes are atomic (crash-safe).""",
             cost_hint="low"
         ))
 
+        # Ask User Tool - for interactive workflows
+        self.register(Tool(
+            name="ask_user",
+            description=(
+                "Ask the user a question and pause execution until they respond. "
+                "Use this for interactive workflows where you need user input, preferences, or decisions. "
+                "Provide clear options when possible to make it easy for the user to respond."
+            ),
+            parameters={
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask the user"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of choices to present to the user",
+                    "default": []
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Additional context or explanation to help the user answer",
+                    "default": ""
+                }
+            },
+            required_params=["question"],
+            executor=self._ask_user,
+            timeout=5  # Tool itself returns quickly; the pause happens at orchestration level
+        ))
+
         # Image Generation Tool (Gemini)
         self.register(Tool(
             name="generate_image",
@@ -1409,7 +1592,13 @@ All writes are atomic (crash-safe).""",
                 error=f"Fetch failed: {str(e)}"
             )
 
-    def _bash_execute(self, command: str, timeout: int = 30, working_dir: Optional[str] = None) -> ToolResult:
+    def _bash_execute(
+        self,
+        command: str,
+        timeout: int = 30,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> ToolResult:
         """Execute bash command"""
         # Security check - block dangerous commands
         dangerous_patterns = [
@@ -1442,7 +1631,8 @@ All writes are atomic (crash-safe).""",
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=resolved_cwd
+                cwd=resolved_cwd,
+                env=env or os.environ.copy(),
             )
 
             output = result.stdout
@@ -1841,7 +2031,6 @@ All writes are atomic (crash-safe).""",
         """Get current time"""
         try:
             from datetime import datetime
-            import time as time_module
 
             if timezone == "local":
                 now = datetime.now()
@@ -1876,6 +2065,30 @@ All writes are atomic (crash-safe).""",
                 output=None,
                 error=f"Failed to get time: {str(e)}"
             )
+
+    def _ask_user(
+        self,
+        question: str,
+        options: Optional[List[str]] = None,
+        context: Optional[str] = None,
+    ) -> ToolResult:
+        """
+        Ask the user a question and signal that execution should pause.
+
+        Returns a special AWAITING_USER status that the orchestration layer
+        (Worker/Wizard) will intercept to pause and request user input.
+        """
+        prompt_data = {
+            "question": question,
+            "options": options or [],
+            "context": context or "",
+        }
+
+        return ToolResult(
+            status=ToolStatus.AWAITING_USER,
+            output=json.dumps(prompt_data),
+            metadata={"prompt_type": "ask_user"}
+        )
 
     # ========== FILESYSTEM SEARCH HELPERS ==========
 
@@ -2353,7 +2566,7 @@ All writes are atomic (crash-safe).""",
         self,
         prompt: str,
         output_path: Optional[str] = None,
-        skip_prompt_engineering: bool = False,
+        _skip_prompt_engineering: bool = False,
         style: Optional[str] = None,
         width: Optional[Union[int, str]] = None,
         height: Optional[Union[int, str]] = None,

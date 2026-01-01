@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
@@ -32,6 +32,15 @@ export interface StoreSnapshot {
   voiceMode: boolean;
   helpVisible: boolean;
   sessionKey: string | null;
+  uiMode: UIMode;
+  wizardType: WizardType | null;
+  wizardStepIndex: number;
+  wizardData: Record<string, unknown>;
+  wizardErrors: string[];
+  skillsList: Record<string, unknown>[];
+  hooksList: Record<string, unknown>[];
+  skillsErrors: string[];
+  hooksErrors: string[];
   capabilities: {
     voiceAvailable: boolean;
     streamingSupported: boolean;
@@ -64,6 +73,15 @@ export class Store {
   private voiceMode = false;
   private helpVisible = false;
   private sessionKey: string | null = null;
+  private uiMode: UIMode = "chat";
+  private wizardType: WizardType | null = null;
+  private wizardStepIndex = 0;
+  private wizardData: Record<string, unknown> = {};
+  private wizardErrors: string[] = [];
+  private skillsList: Record<string, unknown>[] = [];
+  private hooksList: Record<string, unknown>[] = [];
+  private skillsErrors: string[] = [];
+  private hooksErrors: string[] = [];
   private capabilities = { voiceAvailable: false, streamingSupported: true };
   private requestCount = 0;
   private historyVersion = 0;
@@ -106,6 +124,15 @@ export class Store {
       voiceMode: this.voiceMode,
       helpVisible: this.helpVisible,
       sessionKey: this.sessionKey,
+      uiMode: this.uiMode,
+      wizardType: this.wizardType,
+      wizardStepIndex: this.wizardStepIndex,
+      wizardData: { ...this.wizardData },
+      wizardErrors: [...this.wizardErrors],
+      skillsList: [...this.skillsList],
+      hooksList: [...this.hooksList],
+      skillsErrors: [...this.skillsErrors],
+      hooksErrors: [...this.hooksErrors],
       capabilities: { ...this.capabilities },
       requestCount: this.requestCount,
       historyVersion: this.historyVersion,
@@ -120,6 +147,55 @@ export class Store {
 
   setSessionKey(key: string | null): void {
     this.sessionKey = key;
+    this.emit();
+  }
+
+  setUIMode(mode: UIMode): void {
+    this.uiMode = mode;
+    this.emit();
+  }
+
+  startWizard(type: WizardType, data: Record<string, unknown>): void {
+    this.uiMode = "wizard";
+    this.wizardType = type;
+    this.wizardStepIndex = 0;
+    this.wizardData = { ...data };
+    this.wizardErrors = [];
+    this.emit();
+  }
+
+  updateWizard(data: Record<string, unknown>, stepIndex?: number): void {
+    this.wizardData = { ...data };
+    if (stepIndex !== undefined) {
+      this.wizardStepIndex = stepIndex;
+    }
+    this.wizardErrors = [];
+    this.emit();
+  }
+
+  setWizardErrors(errors: string[]): void {
+    this.wizardErrors = [...errors];
+    this.emit();
+  }
+
+  exitWizard(): void {
+    this.uiMode = "chat";
+    this.wizardType = null;
+    this.wizardStepIndex = 0;
+    this.wizardData = {};
+    this.wizardErrors = [];
+    this.emit();
+  }
+
+  setSkillsList(items: Record<string, unknown>[], errors?: string[]): void {
+    this.skillsList = [...items];
+    this.skillsErrors = errors ? [...errors] : [];
+    this.emit();
+  }
+
+  setHooksList(items: Record<string, unknown>[], errors?: string[]): void {
+    this.hooksList = [...items];
+    this.hooksErrors = errors ? [...errors] : [];
     this.emit();
   }
 

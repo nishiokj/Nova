@@ -23,6 +23,7 @@ import {
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
+import { useMouse } from "./useMouse.js";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR = "|";
@@ -48,6 +49,9 @@ interface AppOptions {
   redactLogs: boolean;
   logTranscripts: boolean;
 }
+
+// Skills and hooks are read-only in the TUI.
+// To create/edit skills, use the agent with file_write to create SKILL.md files in config/skills/
 
 function useTerminalSize() {
   const { stdout } = useStdout();
@@ -199,6 +203,16 @@ function App({ options }: { options: AppOptions }) {
     store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
   }, [width, snapshot.inputText, snapshot.cursor, store]);
 
+  // Mouse wheel scrolling
+  const scrollAmount = 3; // lines to scroll per wheel tick
+  useMouse({
+    onScrollUp: () => {
+      store.scrollBy(scrollAmount, maxScrollRef.current);
+    },
+    onScrollDown: () => {
+      store.scrollBy(-scrollAmount, maxScrollRef.current);
+    },
+  });
 
   const handleBridgeEvent = (event: BridgeEvent) => {
     switch (event.type) {
@@ -234,7 +248,11 @@ function App({ options }: { options: AppOptions }) {
       store.setSessionKey(data.session_key);
     }
     if (data?.capabilities) {
-      store.setCapabilities(data.capabilities);
+      // Convert snake_case from bridge to camelCase for store
+      store.setCapabilities({
+        voiceAvailable: data.capabilities.voice_available,
+        streamingSupported: data.capabilities.streaming_supported,
+      });
       if (data.capabilities.voice_available === false) {
         store.setVoiceMode(false);
       }
@@ -290,6 +308,46 @@ function App({ options }: { options: AppOptions }) {
     }
   };
 
+  const handleSkillsPayload = (payload: Record<string, unknown> | undefined, content: string) => {
+    const action = typeof payload?.action === "string" ? payload.action : "";
+    const errors = Array.isArray(payload?.errors)
+      ? (payload?.errors as Record<string, unknown>[]).map(
+          (err) => `${String(err.path ?? "unknown")}: ${String(err.message ?? "invalid")}`,
+        )
+      : [];
+    if (action === "list") {
+      const items = Array.isArray(payload?.items) ? (payload?.items as Record<string, unknown>[]) : [];
+      store.setSkillsList(items, errors);
+      store.setUIMode("skills");
+      store.scrollToBottom();
+      return;
+    }
+    // Skills are read-only in TUI. To create/edit, use the agent with file_write.
+    if (content) {
+      store.addMessage("system", content);
+    }
+  };
+
+  const handleHooksPayload = (payload: Record<string, unknown> | undefined, content: string) => {
+    const action = typeof payload?.action === "string" ? payload.action : "";
+    const errors = Array.isArray(payload?.errors)
+      ? (payload?.errors as Record<string, unknown>[]).map(
+          (err) => `${String(err.path ?? "unknown")}: ${String(err.message ?? "invalid")}`,
+        )
+      : [];
+    if (action === "list") {
+      const items = Array.isArray(payload?.items) ? (payload?.items as Record<string, unknown>[]) : [];
+      store.setHooksList(items, errors);
+      store.setUIMode("hooks");
+      store.scrollToBottom();
+      return;
+    }
+    // Hooks are read-only in TUI. To create/edit, use the agent with file_write.
+    if (content) {
+      store.addMessage("system", content);
+    }
+  };
+
   const handleResponse = (data?: ResponseData) => {
     if (!data) {
       return;
@@ -302,6 +360,20 @@ function App({ options }: { options: AppOptions }) {
       if (content) {
         store.addMessage("system", content);
       }
+      return;
+    }
+    if (kind === "skills") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      handleSkillsPayload(payload, content);
+      store.clearProgress();
+      store.setState("idle");
+      return;
+    }
+    if (kind === "hooks") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      handleHooksPayload(payload, content);
+      store.clearProgress();
+      store.setState("idle");
       return;
     }
 
@@ -341,7 +413,7 @@ function App({ options }: { options: AppOptions }) {
       return;
     }
     loggerRef.current?.transcript("voice", data.text);
-    store.insertInput(data.text);
+    store.replaceInput(data.text);
     const cache = fileCacheRef.current;
     if (cache) {
       store.updateAutocomplete(cache);
@@ -353,7 +425,13 @@ function App({ options }: { options: AppOptions }) {
     if (!data?.message) {
       return;
     }
-    const detail = data.detail ? `\n${data.detail}` : "";
+    const detailText =
+      data.detail === undefined
+        ? ""
+        : typeof data.detail === "string"
+          ? data.detail
+          : JSON.stringify(data.detail, null, 2);
+    const detail = detailText ? `\n${detailText}` : "";
     store.addMessage("system", `${data.message}${detail}`);
     store.setError(data.message);
     if (data.fatal) {
@@ -383,6 +461,29 @@ function App({ options }: { options: AppOptions }) {
     exit();
   };
 
+  // Skills and hooks commands - read-only listing
+  const handleSkillsCommand = (arg?: string) => {
+    const parts = (arg ?? "").trim().split(/\s+/).filter(Boolean);
+    const sub = parts[0]?.toLowerCase();
+    if (!sub || sub === "list") {
+      store.setUIMode("skills");
+      sendCommand("skills_list");
+      return;
+    }
+    store.addMessage("system", "Skills are read-only in TUI. Use /skills to list. To create/edit, ask the agent.");
+  };
+
+  const handleHooksCommand = (arg?: string) => {
+    const parts = (arg ?? "").trim().split(/\s+/).filter(Boolean);
+    const sub = parts[0]?.toLowerCase();
+    if (!sub || sub === "list") {
+      store.setUIMode("hooks");
+      sendCommand("hooks_list");
+      return;
+    }
+    store.addMessage("system", "Hooks are read-only in TUI. Use /hooks to list. To create/edit, ask the agent.");
+  };
+
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       handleQuit();
@@ -399,6 +500,14 @@ function App({ options }: { options: AppOptions }) {
     if (key.f1 || (key.ctrl && input === "k")) {
       store.toggleHelp();
       return;
+    }
+
+    // Skills/hooks list modes - escape to return to chat
+    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks") {
+      if (key.escape) {
+        store.setUIMode("chat");
+        return;
+      }
     }
 
     // Debug: log key events early to catch everything
@@ -419,7 +528,7 @@ function App({ options }: { options: AppOptions }) {
       return;
     }
 
-    if (handleVoiceKeys(input, key)) {
+    if (snapshot.uiMode === "chat" && handleVoiceKeys(input, key)) {
       return;
     }
 
@@ -507,6 +616,9 @@ function App({ options }: { options: AppOptions }) {
       }
 
       const requestId = `ink_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+      if (snapshot.uiMode !== "chat") {
+        store.setUIMode("chat");
+      }
       store.addMessage("user", text);
       store.clearInput();
       store.incrementRequestCount();
@@ -614,7 +726,10 @@ function App({ options }: { options: AppOptions }) {
     // Only insert printable characters (filter out control chars that weren't handled above)
     if (input && !key.ctrl && !key.meta) {
       // Filter out control characters (ASCII 0-31 and 127)
-      const printable = input.replace(/[\x00-\x1f\x7f]/g, "");
+      // Also filter out mouse escape sequence fragments like "[<0;29;36M" or "[<64;10;5m"
+      const printable = input
+        .replace(/[\x00-\x1f\x7f]/g, "")
+        .replace(/\[?<\d+;\d+;\d+[Mm]/g, "");
       if (printable) {
         store.insertInput(printable);
         refreshAutocomplete();
@@ -637,6 +752,12 @@ function App({ options }: { options: AppOptions }) {
       case "/status":
         sendCommand("get_status");
         return;
+      case "/skills":
+        handleSkillsCommand(arg);
+        return;
+      case "/hooks":
+        handleHooksCommand(arg);
+        return;
       case "/compact": {
         const enabled = store.toggleCompact();
         store.addMessage("system", `Compact mode ${enabled ? "enabled" : "disabled"}.`);
@@ -655,26 +776,6 @@ function App({ options }: { options: AppOptions }) {
             ? "Voice mode enabled. Hold SPACE to record, press SPACE or Esc to stop."
             : "Voice mode disabled.",
         );
-        return;
-      }
-      case "/up": {
-        const delta = arg && Number.isFinite(Number(arg)) ? Number(arg) : 10;
-        store.scrollBy(delta, maxScrollRef.current);
-        return;
-      }
-      case "/down": {
-        const delta = arg && Number.isFinite(Number(arg)) ? Number(arg) : 10;
-        store.scrollBy(-delta, maxScrollRef.current);
-        return;
-      }
-      case "/pageup": {
-        const page = Math.max(1, historyHeightRef.current - 2);
-        store.scrollBy(page, maxScrollRef.current);
-        return;
-      }
-      case "/pagedown": {
-        const page = Math.max(1, historyHeightRef.current - 2);
-        store.scrollBy(-page, maxScrollRef.current);
         return;
       }
       case "/top":
@@ -795,7 +896,7 @@ function App({ options }: { options: AppOptions }) {
 
   const headerLines = [
     `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}`,
-    `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"}`,
+    `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}`,
     `Status: ${statusLine}`,
     `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`,
     "-".repeat(width),
@@ -814,7 +915,45 @@ function App({ options }: { options: AppOptions }) {
 
   historyHeightRef.current = historyHeight;
 
-  const historyLines = store.getHistoryLines(width, snapshot.compact, STREAM_CURSOR);
+  const buildListLines = (
+    title: string,
+    items: Record<string, unknown>[],
+    errors: string[],
+    isSkills: boolean = false,
+  ): { text: string; role?: Role }[] => {
+    const lines: { text: string; role?: Role }[] = [];
+    lines.push({ text: `${title} (${items.length}) - Read Only`, role: "system" });
+    if (items.length === 0) {
+      lines.push({ text: "No items found.", role: "system" });
+    } else {
+      for (const item of items) {
+        const enabled = item.enabled === true ? "enabled" : "disabled";
+        const name = typeof item.name === "string" ? item.name : "";
+        const id = typeof item.id === "string" ? item.id : "";
+        lines.push({ text: `- ${id} [${enabled}] ${name}`, role: "system" });
+      }
+    }
+    if (errors.length > 0) {
+      lines.push({ text: "", role: "system" });
+      lines.push({ text: "Errors:", role: "system" });
+      for (const err of errors) {
+        lines.push({ text: `- ${err}`, role: "system" });
+      }
+    }
+    lines.push({ text: "", role: "system" });
+    lines.push({ text: "-".repeat(40), role: "system" });
+    const itemType = isSkills ? "skills" : "hooks";
+    lines.push({ text: `To create/edit ${itemType}, ask the agent to write ${itemType.toUpperCase().slice(0, -1)}.md files.`, role: "system" });
+    lines.push({ text: "Press Esc to return to chat.", role: "system" });
+    return lines;
+  };
+
+  let historyLines = store.getHistoryLines(width, snapshot.compact, STREAM_CURSOR);
+  if (snapshot.uiMode === "skills") {
+    historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors, true);
+  } else if (snapshot.uiMode === "hooks") {
+    historyLines = buildListLines("Hooks", snapshot.hooksList, snapshot.hooksErrors, false);
+  }
   const totalHistoryLines = historyLines.length;
   const maxScroll = Math.max(0, totalHistoryLines - historyHeight);
   maxScrollRef.current = maxScroll;

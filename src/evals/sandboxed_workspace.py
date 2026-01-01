@@ -86,7 +86,7 @@ class SandboxedWorkspace:
         self._create_workspace()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         """Exit context: cleanup workspace."""
         if self.config.cleanup_on_exit:
             self._cleanup_workspace()

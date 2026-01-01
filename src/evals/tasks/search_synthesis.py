@@ -10,7 +10,7 @@ These tasks test the agent's ability to:
 """
 
 from evals.eval_task import EvalTask
-from evals.rubrics.category_rubrics import SEARCH_SYNTHESIS_RUBRIC, SIMPLE_QA_RUBRIC
+from evals.rubrics.category_rubrics import SEARCH_SYNTHESIS_RUBRIC
 
 
 # Task 1: Current information lookup

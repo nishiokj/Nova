@@ -526,8 +526,9 @@ class OpenAIAdapter(LLMAdapter):
         )
         temperature_value = kwargs.get("temperature", self.config.temperature)
 
+        model_override = kwargs.get("model")
         params = {
-            "model": self.config.model,
+            "model": model_override or self.config.model,
             "messages": [m.to_dict() for m in messages],
         }
 
@@ -748,8 +749,9 @@ class OpenAIAdapter(LLMAdapter):
             # Order: model → instructions → tools → config → input
             # =================================================================
 
+            model_override = kwargs.get("model")
             params = {
-                "model": self.config.model,
+                "model": model_override or self.config.model,
             }
 
             # 1. Instructions (system prompt) - STABLE, cacheable prefix
@@ -811,6 +813,10 @@ class OpenAIAdapter(LLMAdapter):
                 params["parallel_tool_calls"] = parallel_tool_calls_value
             if text_value is not None:
                 params["text"] = text_value
+
+            timeout_override = kwargs.get("timeout")
+            if timeout_override is not None:
+                params["timeout"] = timeout_override
 
             # 6. Input (conversation) - DYNAMIC, comes LAST for cache efficiency
             params["input"] = self._normalize_responses_input(input)
@@ -915,8 +921,9 @@ class OpenAIAdapter(LLMAdapter):
             # Order: model → instructions → tools → config → input
             # =================================================================
 
+            model_override = kwargs.get("model")
             params = {
-                "model": self.config.model,
+                "model": model_override or self.config.model,
                 "stream": True,
             }
 
@@ -979,6 +986,10 @@ class OpenAIAdapter(LLMAdapter):
                 params["parallel_tool_calls"] = parallel_tool_calls_value
             if text_value is not None:
                 params["text"] = text_value
+
+            timeout_override = kwargs.get("timeout")
+            if timeout_override is not None:
+                params["timeout"] = timeout_override
 
             # 6. Input (conversation) - DYNAMIC, comes LAST for cache efficiency
             params["input"] = self._normalize_responses_input(input)
@@ -1381,8 +1392,9 @@ class AnthropicAdapter(LLMAdapter):
                 system_message, chat_messages = self._prepare_messages(messages)
                 system_param = system_message if system_message else None
 
+            model_override = kwargs.get("model")
             params = {
-                "model": self.config.model,
+                "model": model_override or self.config.model,
                 "messages": chat_messages,
                 "max_output_tokens": kwargs.get("max_tokens", self.config.max_tokens),
                 "temperature": kwargs.get("temperature", self.config.temperature),

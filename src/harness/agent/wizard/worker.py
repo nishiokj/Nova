@@ -5,6 +5,7 @@ Workers NEVER mutate global state - all results go through WorkerOutcome.
 
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -84,6 +85,62 @@ class WorkerMetrics:
 
 
 @dataclass
+class PatchSuggestion:
+    """Worker-suggested plan change for Wizard review."""
+    patch_type: str
+    objective: Optional[str] = None
+    tool_hint: Optional[str] = None
+    target_step: Optional[int] = None
+    insert_after: Optional[int] = None
+    phase: Optional[str] = None
+    depends_on: List[int] = field(default_factory=list)
+    required: bool = False
+    rationale: str = ""
+
+
+# Patterns that indicate the LLM is REFUSING to work rather than completing
+REFUSAL_PATTERNS = [
+    r"cannot be completed",
+    r"can't be completed",
+    r"cannot complete",
+    r"can't complete",
+    r"unable to complete",
+    r"unable to accomplish",
+    r"exceeds? (?:the )?(?:budget|limit|constraint)",
+    r"beyond (?:the )?(?:scope|budget|limit)",
+    r"too (?:complex|large|big) (?:for|to)",
+    r"not (?:possible|achievable|feasible)",
+    r"would require (?:more|additional|exceeding)",
+    r"insufficient (?:budget|resources|time)",
+    r"task (?:is )?too (?:large|complex|broad)",
+]
+
+def _is_refusal_response(content: str) -> bool:
+    """
+    Detect if the LLM's response is a REFUSAL to work rather than an actual answer.
+
+    This is critical because refusals should NOT be treated as successful Q&A responses.
+    """
+    if not content:
+        return False
+
+    import re
+    content_lower = content.lower()
+
+    for pattern in REFUSAL_PATTERNS:
+        if re.search(pattern, content_lower):
+            return True
+
+    return False
+
+
+PATCH_SUGGESTION_BLOCK = re.compile(
+    r"\[PATCH_SUGGESTION\](.*?)\[/PATCH_SUGGESTION\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass
 class WorkerOutcome:
     """
     Canonical output from Worker.
@@ -109,11 +166,16 @@ class WorkerOutcome:
     final_response: Optional[str] = None
     error: Optional[str] = None
 
+    # Flag: True if LLM refused to attempt work (detected via REFUSAL_PATTERNS)
+    is_refusal: bool = False
+
     # Knowledge to auto-append (replaces suggested_facts + suggested_evidence)
     facts: List[KnowledgeFact] = field(default_factory=list)
 
     # Plan mutations (replaces patch_hints)
     patches: List[PlanPatch] = field(default_factory=list)
+    # Worker-suggested plan changes (Wizard decides to apply)
+    patch_suggestions: List[PatchSuggestion] = field(default_factory=list)
 
     # Metrics (for WorkLedger audit)
     metrics: WorkerMetrics = field(default_factory=WorkerMetrics)
@@ -124,6 +186,10 @@ class WorkerOutcome:
     # Context updates (Wizard merges these into session context)
     context_messages: List[Dict[str, Any]] = field(default_factory=list)
     read_files: Set[str] = field(default_factory=set)
+
+    # User input request (tool-driven pause)
+    needs_user_input: bool = False
+    user_prompt: Optional[Dict[str, Any]] = None  # {question, options, context}
 
     # Internal tracking (not for Wizard, but useful for debugging)
     termination_reason: str = ""
@@ -149,6 +215,8 @@ class WorkerConfig:
     # If False (default), only explicit [FINAL] markers count as completion claims
     # If True, substantive responses without tools also count as implicit finals
     allow_implicit_finals: bool = False
+    # Tools the Worker must never call (Wizard owns user interaction)
+    disallowed_tools: Set[str] = field(default_factory=lambda: {"ask_user"})
 
 
 @dataclass
@@ -188,6 +256,7 @@ class Worker:
         self.llm = llm
         self.config = config or WorkerConfig()
         self.logger = logger
+        self._disallowed_tools = set(self.config.disallowed_tools)
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -347,8 +416,12 @@ class Worker:
             # Get messages from base context + local delta
             messages = context_delta.merged_messages(base_context)
 
-            # Call LLM with tools
-            response = self._call_llm(messages, work_item, outcome)
+            tools_allowed = work_item.bounds.max_tool_calls > 0
+            response = (
+                self._call_llm(messages, work_item, outcome)
+                if tools_allowed
+                else self._call_llm_no_tools(messages, outcome)
+            )
             outcome.metrics.llm_calls_made += 1
 
             if not response:
@@ -368,6 +441,13 @@ class Worker:
                     work_item,
                     context_delta,
                 )
+
+                # Check if a tool requested user input (e.g., ask_user)
+                if outcome.needs_user_input:
+                    self._log("info", "Worker pausing for user input")
+                    break
+                if outcome.termination_reason == "tool_requested_user":
+                    break
 
                 # Add assistant message with tool calls to local context
                 assistant_content = self._extract_content(response) or ""
@@ -427,12 +507,16 @@ class Worker:
                     break
 
                 elif action == WorkerAction.NEED_CONTEXT:
-                    consecutive_no_action += 1
-                    if consecutive_no_action >= 3:
-                        outcome.termination_reason = "need_context_no_tools"
-                        outcome.error = "LLM requested context but didn't call tools"
+                    prompt = self._extract_user_prompt(content)
+                    if prompt:
+                        outcome.needs_user_input = True
+                        outcome.user_prompt = prompt
+                        outcome.termination_reason = "awaiting_user"
+                        final_content = None
                         break
-                    continue
+                    outcome.termination_reason = "need_context_no_prompt"
+                    outcome.error = "NEED_CONTEXT missing structured prompt"
+                    break
 
                 elif action == WorkerAction.CONTINUE:
                     consecutive_no_action += 1
@@ -470,12 +554,16 @@ class Worker:
                     outcome.termination_reason = "completed"
                     break
                 elif action == WorkerAction.NEED_CONTEXT:
-                    consecutive_no_action += 1
-                    if consecutive_no_action >= 3:
-                        outcome.termination_reason = "need_context_no_tools"
-                        outcome.error = "LLM requested context but didn't call tools"
+                    prompt = self._extract_user_prompt(content)
+                    if prompt:
+                        outcome.needs_user_input = True
+                        outcome.user_prompt = prompt
+                        outcome.termination_reason = "awaiting_user"
+                        final_content = None
                         break
-                    continue
+                    outcome.termination_reason = "need_context_no_prompt"
+                    outcome.error = "NEED_CONTEXT missing structured prompt"
+                    break
                 elif action == WorkerAction.CONTINUE:
                     consecutive_no_action += 1
                     if consecutive_no_action >= 3:
@@ -496,8 +584,14 @@ class Worker:
                         break
                     continue
 
-        # Determine success
-        self._determine_success(outcome, final_content, work_item)
+        if final_content:
+            suggestions, cleaned = self._extract_patch_suggestions(final_content)
+            outcome.patch_suggestions = suggestions
+            final_content = cleaned
+
+        if not outcome.needs_user_input:
+            # Determine success
+            self._determine_success(outcome, final_content, work_item)
 
     def _call_llm(
         self,
@@ -514,6 +608,8 @@ class Worker:
 
         try:
             tools = self.tool_registry.get_definitions(enabled_only=True)
+            if self._disallowed_tools:
+                tools = [t for t in tools if t.name not in self._disallowed_tools]
 
             if hasattr(self.llm, "respond_with_messages"):
                 response = self.llm.respond_with_messages(
@@ -630,8 +726,31 @@ class Worker:
             )
 
             try:
+                if tool_name in self._disallowed_tools:
+                    outcome.metrics.tool_calls_made += 1
+                    outcome.metrics.tool_calls_failed += 1
+                    exchange.success = False
+                    exchange.error = f"Tool '{tool_name}' is not allowed in Worker"
+                    exchange.result_content = "ERROR: Tool not allowed"
+                    outcome.error = exchange.error
+                    outcome.termination_reason = "tool_requested_user"
+                    self._log("warning", f"Blocked tool call to {tool_name}")
+                    exchanges.append(exchange)
+                    continue
+
                 result = self.tool_registry.execute(tool_name, **parsed_args)
                 outcome.metrics.tool_calls_made += 1
+
+                if result.is_awaiting_user:
+                    outcome.metrics.tool_calls_failed += 1
+                    exchange.success = False
+                    exchange.error = "Tool requested user input; Worker must not call ask_user"
+                    exchange.result_content = "ERROR: User prompt must be handled by Wizard"
+                    outcome.error = exchange.error
+                    outcome.termination_reason = "tool_requested_user"
+                    self._log("warning", f"Tool {tool_name} requested user input; blocked")
+                    exchanges.append(exchange)
+                    return exchanges
 
                 if result.is_success:
                     outcome.metrics.tool_calls_succeeded += 1
@@ -687,6 +806,87 @@ class Worker:
 
         return None
 
+    def _extract_user_prompt(self, content: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Extract a structured user prompt from a [NEED_CONTEXT] response."""
+        if not content:
+            return None
+
+        marker = re.search(r"\[?\s*NEED_CONTEXT\s*\]?", content, re.IGNORECASE)
+        if not marker:
+            return None
+
+        json_start = content.find("{", marker.end())
+        if json_start < 0:
+            return None
+
+        decoder = json.JSONDecoder()
+        try:
+            parsed, _ = decoder.raw_decode(content[json_start:])
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        question = parsed.get("question")
+        if not isinstance(question, str) or not question.strip():
+            return None
+
+        options = parsed.get("options", [])
+        if not isinstance(options, list):
+            options = []
+        options = [str(opt) for opt in options if str(opt).strip()]
+
+        context = parsed.get("context", "")
+        if context is None:
+            context = ""
+        return {
+            "question": question.strip(),
+            "options": options,
+            "context": str(context).strip(),
+        }
+
+    def _extract_patch_suggestions(
+        self,
+        content: str,
+    ) -> Tuple[List[PatchSuggestion], str]:
+        """Parse PATCH_SUGGESTION blocks and return suggestions + cleaned content."""
+        suggestions: List[PatchSuggestion] = []
+        if not content:
+            return suggestions, content
+
+        for match in PATCH_SUGGESTION_BLOCK.finditer(content):
+            raw = match.group(1).strip()
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            parsed_items = parsed if isinstance(parsed, list) else [parsed]
+            for item in parsed_items:
+                if not isinstance(item, dict):
+                    continue
+                patch_type = str(item.get("type", "")).strip().lower()
+                if patch_type not in ("insert", "replace", "remove"):
+                    continue
+                suggestion = PatchSuggestion(
+                    patch_type=patch_type,
+                    objective=item.get("objective"),
+                    tool_hint=item.get("tool_hint"),
+                    target_step=item.get("target_step"),
+                    insert_after=item.get("after_step"),
+                    phase=item.get("phase"),
+                    depends_on=item.get("depends_on") or [],
+                    required=bool(item.get("required", False)),
+                    rationale=str(item.get("rationale") or item.get("reason") or ""),
+                )
+                suggestions.append(suggestion)
+
+        cleaned = PATCH_SUGGESTION_BLOCK.sub("", content).strip()
+        return suggestions, cleaned
+
     def _strip_action_marker(self, content: str) -> str:
         """Remove action markers from content."""
         import re
@@ -707,7 +907,7 @@ class Worker:
         Check all resource bounds. Returns termination reason if exceeded.
         """
         # Check tool call limit
-        if outcome.metrics.tool_calls_made >= work_item.bounds.max_tool_calls:
+        if work_item.bounds.max_tool_calls > 0 and outcome.metrics.tool_calls_made >= work_item.bounds.max_tool_calls:
             return "max_tool_calls"
 
         # Check LLM call limit
@@ -781,24 +981,35 @@ class Worker:
         Determine success based on completion claim and evidence.
 
         Simplified logic:
+        - REFUSAL: If LLM says "I can't do this" → FAILED, is_refusal=True
         - SUCCESS: explicit [FINAL] marker + evidence (facts or entity_refs)
-        - SUCCESS: Q&A case - substantive response without needing tools
+        - SUCCESS: Q&A case - substantive response without needing tools (but NOT a refusal)
         - FAILED: otherwise
 
         The Wizard uses outcome.made_progress (property) for nuanced retry decisions.
         """
         outcome.final_response = final_content
 
+        # CRITICAL: Check for refusal FIRST - refusals are NEVER success
+        if final_content and _is_refusal_response(final_content):
+            outcome.is_refusal = True
+            outcome.success = False
+            outcome.termination_reason = "refusal"
+            outcome.error = "LLM refused to attempt work - task may need decomposition"
+            self._log("warning", f"Detected refusal response: {final_content[:100]}...")
+            return
+
         # Collect evidence
         has_evidence = len(outcome.entity_refs) > 0 or len(outcome.facts) > 0
 
         # Determine if worker claimed completion
-        explicit_final = outcome.termination_reason in ("completed", "implicit_final")
+        explicit_final = outcome.termination_reason == "completed"
+        implicit_final = outcome.termination_reason == "implicit_final"
         has_final_response = bool(final_content and len(final_content) > 30)
 
         completion_claim = explicit_final
         if self.config.allow_implicit_finals:
-            completion_claim = explicit_final or has_final_response
+            completion_claim = completion_claim or implicit_final or has_final_response
 
         # Determine success
         if completion_claim and has_evidence:
