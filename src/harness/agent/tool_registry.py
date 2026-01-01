@@ -450,6 +450,7 @@ class ToolStatus(Enum):
     ERROR = "error"
     TIMEOUT = "timeout"
     PERMISSION_DENIED = "permission_denied"
+    AWAITING_USER = "awaiting_user"  # Tool needs user input to proceed
 
 
 @dataclass
@@ -481,6 +482,10 @@ class ToolResult:
     @property
     def is_success(self) -> bool:
         return self.status == ToolStatus.SUCCESS
+
+    @property
+    def is_awaiting_user(self) -> bool:
+        return self.status == ToolStatus.AWAITING_USER
 
     def __str__(self) -> str:
         if self.is_success:
@@ -668,6 +673,35 @@ class ToolRegistry:
                 self._thread_local.__dict__.pop("invocation_context", None)
             else:
                 self._thread_local.invocation_context = previous
+
+    @contextmanager
+    def with_allowed_tools(self, allowed_tools: List[str]):
+        """Context manager that temporarily restricts which tools can be executed.
+
+        Args:
+            allowed_tools: List of allowed tool names. Use ["*"] for all tools.
+        """
+        if not allowed_tools or "*" in allowed_tools:
+            # No restriction
+            yield
+            return
+
+        previous = getattr(self._thread_local, "allowed_tools", None)
+        self._thread_local.allowed_tools = set(allowed_tools)
+        try:
+            yield
+        finally:
+            if previous is None:
+                self._thread_local.__dict__.pop("allowed_tools", None)
+            else:
+                self._thread_local.allowed_tools = previous
+
+    def _is_tool_allowed(self, tool_name: str) -> bool:
+        """Check if a tool is allowed in the current context."""
+        allowed = getattr(self._thread_local, "allowed_tools", None)
+        if allowed is None:
+            return True  # No restriction
+        return tool_name in allowed
 
     def set_hook_manager(self, hook_manager: Optional[HookManager]) -> None:
         self._hook_manager = hook_manager
@@ -933,6 +967,14 @@ class ToolRegistry:
             exec_context.env_overrides = invocation_context.env_overrides
             exec_context.workdir_override = invocation_context.workdir_override
             exec_context.tool_policy = invocation_context.tool_policy
+
+        # Check skill-based allowed tools restriction
+        if not self._is_tool_allowed(name):
+            return ToolResult(
+                status=ToolStatus.PERMISSION_DENIED,
+                output=None,
+                error=f"Tool '{name}' not allowed by active skill"
+            )
 
         if exec_context.tool_policy and not exec_context.tool_policy.is_allowed(name):
             return ToolResult(
@@ -1312,6 +1354,36 @@ All writes are atomic (crash-safe).""",
             read_only=True,
             parallelizable=True,
             cost_hint="low"
+        ))
+
+        # Ask User Tool - for interactive workflows
+        self.register(Tool(
+            name="ask_user",
+            description=(
+                "Ask the user a question and pause execution until they respond. "
+                "Use this for interactive workflows where you need user input, preferences, or decisions. "
+                "Provide clear options when possible to make it easy for the user to respond."
+            ),
+            parameters={
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask the user"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of choices to present to the user",
+                    "default": []
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Additional context or explanation to help the user answer",
+                    "default": ""
+                }
+            },
+            required_params=["question"],
+            executor=self._ask_user,
+            timeout=5  # Tool itself returns quickly; the pause happens at orchestration level
         ))
 
         # Image Generation Tool (Gemini)
@@ -1993,6 +2065,30 @@ All writes are atomic (crash-safe).""",
                 output=None,
                 error=f"Failed to get time: {str(e)}"
             )
+
+    def _ask_user(
+        self,
+        question: str,
+        options: Optional[List[str]] = None,
+        context: Optional[str] = None,
+    ) -> ToolResult:
+        """
+        Ask the user a question and signal that execution should pause.
+
+        Returns a special AWAITING_USER status that the orchestration layer
+        (Worker/Wizard) will intercept to pause and request user input.
+        """
+        prompt_data = {
+            "question": question,
+            "options": options or [],
+            "context": context or "",
+        }
+
+        return ToolResult(
+            status=ToolStatus.AWAITING_USER,
+            output=json.dumps(prompt_data),
+            metadata={"prompt_type": "ask_user"}
+        )
 
     # ========== FILESYSTEM SEARCH HELPERS ==========
 

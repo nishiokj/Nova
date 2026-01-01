@@ -51,6 +51,8 @@ class MutationOp(BaseModel):
         "transform_tool_args",
         "transform_tool_result",
         "annotate_context",
+        # Code review operations (task.completed trigger)
+        "trigger_code_review",
     ]
     key: Optional[str] = None
     value: Optional[Any] = None
@@ -98,7 +100,13 @@ class HookDefinition(BaseModel):
     name: str
     description: str
     enabled: bool = True
-    trigger: Literal["invocation.before", "invocation.after", "tool.before", "tool.after"]
+    trigger: Literal[
+        "invocation.before",
+        "invocation.after",
+        "tool.before",
+        "tool.after",
+        "task.completed",  # After full task completion - for code review
+    ]
     priority: int = 0
     timeout_ms: int = 100
     fail_open: bool = True
@@ -130,6 +138,37 @@ class ToolPolicy:
 
 
 @dataclass
+class TaskCompletionData:
+    """Data captured on task completion for code review hooks."""
+    success: bool = True
+    goal_achieved: bool = True
+    goal: str = ""
+
+    # File operations
+    files_written: List[str] = field(default_factory=list)
+    files_read: List[str] = field(default_factory=list)
+
+    # Tool usage
+    tools_used: List[str] = field(default_factory=list)
+    tool_call_count: int = 0
+
+    # Execution metrics
+    steps_completed: int = 0
+    steps_failed: int = 0
+    steps_skipped: int = 0
+    duration_ms: float = 0
+
+    # For second-order effect analysis via graphd
+    symbols_modified: List[str] = field(default_factory=list)
+
+    # Plan details for scope understanding
+    plan_steps: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Final response (for review)
+    final_response: str = ""
+
+
+@dataclass
 class InvocationContext:
     request_id: str
     session_key: Optional[str]
@@ -143,6 +182,9 @@ class InvocationContext:
     tool_policy: Optional[ToolPolicy] = None
     annotations: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Task completion context (populated for task.completed trigger)
+    task_completion: Optional[TaskCompletionData] = None
 
 
 @dataclass

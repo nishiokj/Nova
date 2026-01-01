@@ -14,7 +14,6 @@ from harness.agent.tool_registry import ToolRegistry
 from skills.store import SkillStore
 from skills.registry import SkillRegistry
 from skills.router import SkillRouter
-from skills.runner import SkillRunner
 from hooks.store import HookStore
 from hooks.manager import HookManager
 from services.router import Router, TaskTier
@@ -36,7 +35,6 @@ class HarnessRuntime:
     skill_store: SkillStore
     skill_registry: SkillRegistry
     skill_router: SkillRouter
-    skill_runner: SkillRunner
     hook_store: HookStore
     hook_manager: HookManager
     router: Router
@@ -177,7 +175,12 @@ def create_runtime(
             graphd_manager = None
 
     hook_store = HookStore(resolved_config.hooks.hooks_dir, logger=runtime_logger)
-    hook_manager = HookManager(hook_store, resolved_config.hooks, logger=runtime_logger)
+    hook_manager = HookManager(
+        hook_store,
+        resolved_config.hooks,
+        logger=runtime_logger,
+        graphd_client=graphd_client,
+    )
 
     tool_registry = ToolRegistry(
         resolved_config.tools,
@@ -196,7 +199,6 @@ def create_runtime(
         logger=runtime_logger,
         semantic_llm_config=resolved_config.skills.semantic_llm_config,
     )
-    skill_runner = SkillRunner(tool_registry, logger=runtime_logger)
     router = Router(resolved_config.router, logger=runtime_logger)
     agent = TieredAgent(
         config=resolved_config.agent,
@@ -218,7 +220,6 @@ def create_runtime(
         skill_store=skill_store,
         skill_registry=skill_registry,
         skill_router=skill_router,
-        skill_runner=skill_runner,
         hook_store=hook_store,
         hook_manager=hook_manager,
         router=router,

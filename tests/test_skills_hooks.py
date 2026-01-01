@@ -9,7 +9,6 @@ import pytest
 from skills.store import SkillStore, StoreError as SkillStoreError
 from skills.registry import SkillRegistry
 from skills.router import SkillRouter
-from skills.runner import SkillRunner
 from hooks.store import HookStore, StoreError as HookStoreError
 from hooks.engine import HookEngine
 from hooks.manager import HookManager
@@ -29,11 +28,10 @@ def _skill_def(skill_id: str, trigger: dict) -> dict:
         "name": f"Skill {skill_id}",
         "description": "Test skill",
         "version": "v1",
-        "type": "workflow",
+        "type": "instructions",
         "triggers": [trigger],
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-        "steps": [{"name": "calc", "tool": "calculator", "args": {"expression": "2+2"}}],
-        "allowed_tools": ["calculator"],
+        "instructions": "Follow the instructions.",
+        "allowed_tools": ["*"],
         "timeout_ms": 1000,
         "enabled": True,
         "tags": [],
@@ -97,7 +95,7 @@ def test_skill_router_regex_and_keyword(temp_dir, mock_logger):
     store.create(_skill_def("beta", {"type": "keyword", "keywords": ["beta", "b"]}))
 
     registry = SkillRegistry(store, logger=mock_logger)
-    router = SkillRouter(registry, SkillsConfig(semantic_enabled=False), logger=mock_logger)
+    router = SkillRouter(registry, SkillsConfig(), logger=mock_logger)
 
     match = router.route("alpha test", "standard", None)
     assert match is not None
@@ -108,42 +106,24 @@ def test_skill_router_regex_and_keyword(temp_dir, mock_logger):
     assert match.skill.id == "beta"
 
 
-def test_skill_runner_template_and_allowlist(tool_registry):
-    runner = SkillRunner(tool_registry)
-    ts = _now_rfc3339()
-    definition = {
-        "id": "templated",
-        "name": "Templated",
-        "description": "Template test",
-        "version": "v1",
-        "type": "workflow",
-        "triggers": [{"type": "regex", "pattern": "^temp"}],
-        "input_schema": {
-            "type": "object",
-            "properties": {"expression": {"type": "string"}},
-            "required": ["expression"],
-        },
-        "steps": [{"name": "calc", "tool": "calculator", "args": {"expression": "{{input.expression}}"}}],
-        "allowed_tools": ["calculator"],
-        "timeout_ms": 1000,
-        "enabled": True,
-        "tags": [],
-        "created_at": ts,
-        "updated_at": ts,
-    }
+def test_skill_router_semantic_match(temp_dir, mock_logger):
+    store = SkillStore(temp_dir, logger=mock_logger)
+    store.create(_skill_def("semantic_skill", {"type": "semantic", "description": "Handle semantic intent"}))
+    registry = SkillRegistry(store, logger=mock_logger)
 
-    from skills.models import SkillDefinition
+    router = SkillRouter(registry, SkillsConfig(), logger=mock_logger)
 
-    skill = SkillDefinition.model_validate(definition)
-    result = runner.run(skill, {"expression": "2+5"})
-    assert result.success
-    assert result.output == 7
+    class FakeAdapter:
+        def complete(self, messages, temperature=0.0, max_tokens=20):
+            class Response:
+                content = "semantic_skill"
 
-    definition["allowed_tools"] = ["file_read"]
-    skill = SkillDefinition.model_validate(definition)
-    result = runner.run(skill, {"expression": "2+5"})
-    assert not result.success
-    assert "not allowed" in (result.error or "")
+            return Response()
+
+    router._semantic_adapter = FakeAdapter()
+    match = router.route("do the semantic thing", "standard", None)
+    assert match is not None
+    assert match.skill.id == "semantic_skill"
 
 
 def test_hook_engine_filter(mock_logger):

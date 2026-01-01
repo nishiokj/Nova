@@ -23,7 +23,8 @@ class SkillRegistry:
 
     def _scan_files(self) -> Dict[str, float]:
         snapshot: Dict[str, float] = {}
-        for path in self.store.base_dir.glob("*.json"):
+        # Scan SKILL.md files in subdirectories (Claude Code format)
+        for path in self.store.base_dir.glob("*/SKILL.md"):
             try:
                 snapshot[str(path)] = path.stat().st_mtime
             except OSError:

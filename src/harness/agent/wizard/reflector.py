@@ -17,14 +17,13 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol
 
-from .types import ReflectionVerdict, ClarificationUrgency, FailureCategory
+from .types import ReflectionVerdict, FailureCategory
 from .reflection_types import (
     WizardReflectionInput,
     WizardReflectionOutput,
     QualityAssessment,
     ScaffoldedStep,
     RedoModifications,
-    ClarificationRequest,
 )
 
 
@@ -50,15 +49,15 @@ class ReflectorConfig:
     max_redo_attempts: int = 2           # Max REDOs before escalating
     scaffold_aggressiveness: float = 0.5  # 0=minimal, 1=aggressive scaffolding
 
-    # Clarification policy
-    require_default_assumption: bool = True
-    max_clarification_options: int = 4
-    default_clarification_timeout: int = 60
-
     # LLM settings
     reflection_model: Optional[str] = None  # Override model for reflection
     max_reflection_tokens: int = 2000
     reflection_timeout_ms: int = 10_000
+
+    # Clarification policy (passed through from WizardConfig)
+    default_clarification_timeout: int = 60
+    max_clarification_options: int = 4
+    require_default_assumption: bool = True
 
 
 ERROR_PATTERNS = {
@@ -95,8 +94,11 @@ ASSUMABLE_QUESTION_PATTERNS = [
 ]
 
 REFLECTION_CACHE_PATTERNS = {
+    # NOTE: We intentionally DO NOT cache implicit_final!
+    # The fast-path was causing refusals to be accepted as success.
+    # Only explicit [FINAL] markers with success=True should be fast-pathed.
     (True, "completed"): ReflectionVerdict.ACCEPT,
-    (True, "implicit_final"): ReflectionVerdict.ACCEPT,
+    # (True, "implicit_final"): REMOVED - must be evaluated by full reflection
     (False, "exception"): ReflectionVerdict.REDO,
 }
 
@@ -116,6 +118,16 @@ RECOVERY_MATRIX = {
         2: "scaffold_discovery",
         3: "clarify_or_abort",
     },
+    "need_context_no_prompt": {
+        1: "redo_explicit",
+        2: "redo_with_hints",
+        3: "abort_step",
+    },
+    "tool_requested_user": {
+        1: "redo_explicit",
+        2: "redo_with_hints",
+        3: "abort_step",
+    },
     "max_continues": {
         1: "redo_simplified",
         2: "scaffold_substeps",
@@ -124,6 +136,19 @@ RECOVERY_MATRIX = {
     "no_action": {
         1: "redo_explicit",
         2: "redo_explicit",
+        3: "abort_step",
+    },
+    # NEW: Handle refusals - LLM said "I can't do this"
+    # This is THE critical case that triggers scaffolding
+    "refusal": {
+        1: "scaffold_decompose",  # First attempt: decompose into sub-steps
+        2: "scaffold_decompose",  # Second attempt: try again with different decomposition
+        3: "abort_step",          # Give up after 3 attempts
+    },
+    # NEW: Handle implicit_final without evidence - likely incomplete work
+    "implicit_final": {
+        1: "redo_with_hints",
+        2: "scaffold_substeps",
         3: "abort_step",
     },
 }
@@ -326,37 +351,59 @@ DECISION OPTIONS (in order of preference)
 
 **ACCEPT_EXTEND** - Work is good, but scaffold additional steps for excellence.
   Use when: Core work done, but obvious improvements possible.
+  CRITICAL: This is the PRIMARY strategy for complex tasks!
   Examples:
   - Code written -> add tests
   - Function added -> add documentation
   - Feature implemented -> add error handling
   - Question answered -> add examples
+  - Task partially done -> scaffold remaining work
+  - Worker made progress but didn't finish -> scaffold continuation
 
 **REDO** - Output is insufficient. Retry with modifications.
   Use when: Wrong approach, misunderstood objective, fixable errors.
   Provide: New objective, tool hint, or context to inject.
 
-**CLARIFY_USER** - Genuinely need user input to proceed.
-  Use when: Information is truly unknowable (user preferences, secrets, business decisions).
-  MUST provide: default_assumption (what you'll do if user doesn't respond).
-  DO NOT use for: Framework choices, library preferences, implementation approaches.
-
 **ABORT_STEP** - This step is not achievable. Skip it.
   Use when: Step is genuinely impossible, not just difficult.
+  RARELY USE THIS - prefer ACCEPT_EXTEND to scaffold smaller steps.
 
 **ABORT_GOAL** - Fundamental blocker prevents achieving the goal.
   Use when: Missing required access, contradictory requirements.
   This is VERY RARE. Prefer scaffolding more steps.
 
 ======================================================================
+SCAFFOLDING IS YOUR PRIMARY TOOL
+======================================================================
+
+When a task seems too large or complex, your FIRST instinct should be
+to scaffold it into smaller steps using ACCEPT_EXTEND.
+
+NEVER accept a refusal like "task too complex" or "exceeds budget".
+Instead, scaffold the task into smaller, achievable steps:
+
+1. Discovery step: Understand current state
+2. Planning step: Identify specific changes needed
+3. Implementation steps: One concrete change each
+4. Verification step: Ensure changes work
+
+Example: "Improve the dashboard significantly" should become:
+  Step 1: Read current dashboard implementation
+  Step 2: Identify data sources and hydration points
+  Step 3: Implement first improvement (e.g., connect to sessions DB)
+  Step 4: Implement second improvement (e.g., better styling)
+  Step 5: Verify all changes work together
+
+======================================================================
 ANTI-PATTERNS TO AVOID
 ======================================================================
 
-DO NOT CLARIFY for assumable things (frameworks, libraries, approaches)
 DO NOT ABORT because something is hard - scaffold more steps instead
 DO NOT ACCEPT half-baked work - REDO or EXTEND for quality
 DO NOT let "I need more info" be acceptable - Workers should gather info
 DO NOT repeat the same REDO without modifications
+DO NOT accept "task too complex/big" - ALWAYS scaffold into sub-steps
+DO NOT accept refusals - decompose and scaffold instead
 
 ======================================================================
 RESPONSE FORMAT
@@ -364,7 +411,7 @@ RESPONSE FORMAT
 
 Respond with JSON:
 {{
-    "verdict": "accept" | "accept_extend" | "redo" | "clarify_user" | "abort_step" | "abort_goal",
+    "verdict": "accept" | "accept_extend" | "redo" | "abort_step" | "abort_goal",
     "reasoning": "Your detailed reasoning for this decision",
     "confidence": 0.0-1.0,
 
@@ -397,15 +444,6 @@ Respond with JSON:
         "new_tool_hint": "Different tool to try (optional)",
         "injected_context": "Additional context to provide (optional)",
         "avoid_patterns": ["Things the Worker should NOT do this time"]
-    }},
-
-    "clarification": {{
-        // For CLARIFY_USER only
-        "question": "The question to ask the user",
-        "options": ["Option 1", "Option 2"],
-        "default_assumption": "REQUIRED - what we do if no response",
-        "urgency": "low" | "medium" | "high" | "blocking",
-        "context": "Additional context for the user"
     }},
 
     "abort_reason": "For ABORT_STEP/ABORT_GOAL - why we're giving up",
@@ -606,49 +644,6 @@ Respond with JSON:
                 avoid_patterns=redo_data.get("avoid_patterns", []),
             )
 
-        # Parse clarification request
-        clarification_data = data.get("clarification")
-        clarification = None
-        if clarification_data and verdict == ReflectionVerdict.CLARIFY_USER:
-            # Validate default assumption is present
-            default = clarification_data.get("default_assumption", "")
-            if not default and self.config.require_default_assumption:
-                # Reject clarification without default
-                self._log(
-                    "warning",
-                    "Clarification rejected: no default assumption"
-                )
-                # Convert to REDO with the default we invent
-                verdict = ReflectionVerdict.REDO
-                redo_modifications = RedoModifications(
-                    injected_context="Make a reasonable assumption and proceed."
-                )
-            else:
-                urgency_str = clarification_data.get("urgency", "medium")
-                try:
-                    urgency = ClarificationUrgency(urgency_str)
-                except ValueError:
-                    urgency = ClarificationUrgency.MEDIUM
-
-                clarification = ClarificationRequest(
-                    question=clarification_data.get("question", ""),
-                    options=clarification_data.get("options", []),
-                    default_assumption=default,
-                    urgency=urgency,
-                    context=clarification_data.get("context", ""),
-                    step_num=input.step_context.step_num,
-                )
-                if clarification.timeout_seconds <= 0:
-                    clarification.timeout_seconds = self.config.default_clarification_timeout
-                is_valid, reason = self._validate_clarification_request(clarification)
-                if not is_valid:
-                    self._log("warning", f"Clarification rejected: {reason}")
-                    verdict = ReflectionVerdict.REDO
-                    redo_modifications = RedoModifications(
-                        injected_context="Make a reasonable assumption and proceed."
-                    )
-                    clarification = None
-
         # Parse abort category if present
         abort_category = None
         abort_category_str = data.get("abort_category")
@@ -665,7 +660,6 @@ Respond with JSON:
             quality=quality,
             scaffolded_steps=scaffolded_steps,
             redo_modifications=redo_modifications,
-            clarification=clarification,
             abort_reason=data.get("abort_reason"),
             abort_category=abort_category,
             user_message=data.get("user_message", ""),
@@ -678,33 +672,10 @@ Respond with JSON:
             "accept_extend": ReflectionVerdict.ACCEPT_AND_EXTEND,
             "extend": ReflectionVerdict.ACCEPT_AND_EXTEND,
             "redo": ReflectionVerdict.REDO,
-            "clarify_user": ReflectionVerdict.CLARIFY_USER,
-            "clarify": ReflectionVerdict.CLARIFY_USER,
             "abort_step": ReflectionVerdict.ABORT_STEP,
             "abort_goal": ReflectionVerdict.ABORT_GOAL,
         }
         return mapping.get(verdict_str.lower(), ReflectionVerdict.ACCEPT)
-
-    def _validate_clarification_request(
-        self,
-        request: ClarificationRequest,
-    ) -> tuple[bool, Optional[str]]:
-        """Validate a clarification request."""
-        if not request.question or len(request.question) < 10:
-            return False, "Question too short or missing"
-
-        if self.config.require_default_assumption and not request.default_assumption:
-            return False, "Missing default assumption"
-
-        if len(request.options) > self.config.max_clarification_options:
-            return False, f"Too many options (max {self.config.max_clarification_options})"
-
-        question_lower = request.question.lower()
-        for pattern in ASSUMABLE_QUESTION_PATTERNS:
-            if re.search(pattern, question_lower):
-                return False, f"This can be assumed: {request.default_assumption}"
-
-        return True, None
 
     def _create_fallback_output(
         self,
@@ -943,23 +914,86 @@ Respond with JSON:
             output.redo_modifications = RedoModifications(injected_context=injected)
             return output
 
-        if action == "clarify_or_abort":
-            output.verdict = ReflectionVerdict.CLARIFY_USER
-            output.clarification = ClarificationRequest(
-                question=f"Please clarify the missing details for: {input.step_context.objective}",
-                default_assumption="Proceed with reasonable defaults based on the goal.",
-                timeout_seconds=self.config.default_clarification_timeout,
-                urgency=ClarificationUrgency.MEDIUM,
-                step_num=input.step_context.step_num,
+        # NEW: Handle scaffold_decompose - task was too big, need to break it down
+        if action == "scaffold_decompose":
+            self._log("info", f"Triggering scaffold_decompose for step {input.step_context.step_num}")
+            output.verdict = ReflectionVerdict.ACCEPT_AND_EXTEND
+            # Generate scaffolded steps to break down the task
+            scaffolded = self._generate_decomposition_steps(input)
+            output.scaffolded_steps = scaffolded
+            output.user_message = (
+                f"The task '{input.step_context.objective[:50]}...' was too complex for a single step. "
+                f"Breaking it down into {len(scaffolded)} sub-steps."
             )
+            # Mark original step as skipped (it was a refusal, not actual work)
+            # The scaffolded steps will do the actual work
             return output
 
-        if action == "abort_step":
+        if action == "clarify_or_abort" or action == "abort_step":
             output.verdict = ReflectionVerdict.ABORT_STEP
             output.abort_reason = "Step failed repeatedly; aborting this step."
             return output
 
         return output
+
+    def _generate_decomposition_steps(
+        self,
+        input: WizardReflectionInput,
+    ) -> List[ScaffoldedStep]:
+        """
+        Generate scaffolded steps to decompose a task that was too complex.
+
+        This is triggered when the Worker refuses to attempt work, indicating
+        the task needs to be broken into smaller pieces.
+        """
+        objective = input.step_context.objective
+        goal = input.global_context.goal
+
+        # Generate decomposition steps based on common patterns
+        steps: List[ScaffoldedStep] = []
+
+        # Step 1: Discovery/Investigation
+        steps.append(ScaffoldedStep(
+            objective=f"Investigate and understand the current state for: {objective[:80]}",
+            tool_hint="file_read",
+            phase="discovery",
+            rationale="Need to understand current implementation before making changes",
+            required=True,
+        ))
+
+        # Step 2: Identify specific changes needed
+        steps.append(ScaffoldedStep(
+            objective=f"Identify specific files and changes needed for: {objective[:60]}",
+            tool_hint="search_filesystem",
+            phase="discovery",
+            rationale="Locate all relevant files that need modification",
+            required=True,
+        ))
+
+        # Step 3: Implement core changes (first part)
+        steps.append(ScaffoldedStep(
+            objective=f"Implement the first concrete change for: {objective[:60]}",
+            tool_hint="file_write",
+            phase="execution",
+            rationale="Break implementation into incremental changes",
+            required=True,
+        ))
+
+        # Step 4: Verification
+        steps.append(ScaffoldedStep(
+            objective=f"Verify changes work correctly for: {objective[:60]}",
+            tool_hint="bash_execute",
+            phase="verification",
+            rationale="Ensure changes don't break existing functionality",
+            required=False,
+        ))
+
+        self._log(
+            "info",
+            f"Generated {len(steps)} decomposition steps for: {objective[:50]}..."
+        )
+
+        return steps
 
     def _ensure_user_message(
         self,
@@ -974,8 +1008,6 @@ Respond with JSON:
             return input.outcome.get("final_response") or "Step completed."
         if output.verdict == ReflectionVerdict.REDO:
             return "Retrying the step with adjustments."
-        if output.verdict == ReflectionVerdict.CLARIFY_USER and output.clarification:
-            return f"Need clarification: {output.clarification.question}"
         if output.verdict == ReflectionVerdict.ABORT_STEP:
             return output.abort_reason or "Step aborted."
         if output.verdict == ReflectionVerdict.ABORT_GOAL:

@@ -31,8 +31,9 @@ class SkillRouter:
         self.config = config
         self.logger = logger or StructuredLogger()
         self._semantic_adapter = None
-        if config.semantic_enabled and semantic_llm_config:
-            self._semantic_adapter = create_adapter(semantic_llm_config, logger=self.logger)
+        effective_llm_config = semantic_llm_config or config.semantic_llm_config
+        if effective_llm_config:
+            self._semantic_adapter = create_adapter(effective_llm_config, logger=self.logger)
 
     def route(self, text: str, tier: str, session_key: Optional[str]) -> Optional[SkillMatch]:
         if not self.config.enabled:
@@ -50,10 +51,9 @@ class SkillRouter:
         if keyword_matches:
             return self._select_match(keyword_matches)
 
-        if self.config.semantic_enabled:
-            semantic_match = self._match_semantic(skills, text)
-            if semantic_match:
-                return semantic_match
+        semantic_match = self._match_semantic(skills, text)
+        if semantic_match:
+            return semantic_match
 
         return None
 

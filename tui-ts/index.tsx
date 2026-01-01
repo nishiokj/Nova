@@ -50,317 +50,8 @@ interface AppOptions {
   logTranscripts: boolean;
 }
 
-type WizardMode = "new" | "edit";
-
-type WizardData = {
-  mode: WizardMode;
-  definition: Record<string, unknown>;
-};
-
-const SKILL_WIZARD_STEPS = [
-  { title: "Basics", prompt: "Enter JSON with id, name, description, version." },
-  { title: "Type", prompt: "Enter \"workflow\" or \"tool_chain\" (string or JSON)." },
-  { title: "Triggers", prompt: "Enter JSON array of triggers." },
-  { title: "Input Schema", prompt: "Enter JSON object for input_schema." },
-  { title: "Steps", prompt: "Enter JSON array of steps/tool_chain." },
-  { title: "Settings", prompt: "Enter JSON with allowed_tools, timeout_ms, enabled, tags." },
-  { title: "Review", prompt: "Review the definition. Ctrl+S saves." },
-];
-
-const HOOK_WIZARD_STEPS = [
-  { title: "Basics", prompt: "Enter JSON with id, name, description, priority, timeout_ms, fail_open." },
-  { title: "Trigger", prompt: "Enter trigger string (e.g., \"invocation.before\")." },
-  { title: "Filters", prompt: "Enter JSON object for filter." },
-  { title: "Action", prompt: "Enter JSON with action type/message." },
-  { title: "Mutation Ops", prompt: "Enter JSON array of ops (only for mutate)." },
-  { title: "Review", prompt: "Review the definition. Ctrl+S saves." },
-];
-
-function createDefaultSkillDefinition(): Record<string, unknown> {
-  return {
-    id: "",
-    name: "",
-    description: "",
-    version: "v1",
-    type: "workflow",
-    triggers: [],
-    input_schema: { type: "object", properties: {}, required: [] },
-    steps: [],
-    tool_chain: [],
-    allowed_tools: ["*"],
-    timeout_ms: 30000,
-    enabled: true,
-    tags: [],
-  };
-}
-
-function createDefaultHookDefinition(): Record<string, unknown> {
-  return {
-    id: "",
-    name: "",
-    description: "",
-    enabled: true,
-    trigger: "invocation.before",
-    priority: 0,
-    timeout_ms: 100,
-    fail_open: true,
-    filter: {},
-    action: { type: "observe" },
-  };
-}
-
-function parseJsonInput(input: string): { value?: unknown; error?: string } {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return {};
-  }
-  try {
-    return { value: JSON.parse(trimmed) };
-  } catch (err) {
-    return { error: (err as Error).message || "Invalid JSON" };
-  }
-}
-
-function parseFlexibleInput(input: string): { value?: unknown; error?: string } {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return {};
-  }
-  try {
-    return { value: JSON.parse(trimmed) };
-  } catch {
-    return { value: trimmed };
-  }
-}
-
-function applySkillWizardStep(
-  stepIndex: number,
-  input: string,
-  data: WizardData,
-): { data: WizardData; errors: string[] } {
-  const definition = { ...data.definition } as Record<string, unknown>;
-  const errors: string[] = [];
-
-  if (stepIndex === 0) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
-        errors.push("Basics must be a JSON object.");
-        return { data, errors };
-      }
-      const basics = parsed.value as Record<string, unknown>;
-      definition.id = basics.id ?? definition.id;
-      definition.name = basics.name ?? definition.name;
-      definition.description = basics.description ?? definition.description;
-      definition.version = basics.version ?? definition.version;
-    }
-    if (!definition.id) errors.push("id is required.");
-    if (!definition.name) errors.push("name is required.");
-    if (!definition.description) errors.push("description is required.");
-    if (!definition.version) errors.push("version is required.");
-  } else if (stepIndex === 1) {
-    const parsed = parseFlexibleInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (typeof parsed.value === "string") {
-        definition.type = parsed.value;
-      } else if (parsed.value && typeof parsed.value === "object") {
-        const obj = parsed.value as Record<string, unknown>;
-        if (typeof obj.type === "string") {
-          definition.type = obj.type;
-        }
-      }
-    }
-    if (!definition.type) errors.push("type is required.");
-  } else if (stepIndex === 2) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!Array.isArray(parsed.value)) {
-        errors.push("Triggers must be a JSON array.");
-        return { data, errors };
-      }
-      definition.triggers = parsed.value;
-    }
-  } else if (stepIndex === 3) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
-        errors.push("Input schema must be a JSON object.");
-        return { data, errors };
-      }
-      definition.input_schema = parsed.value;
-    }
-  } else if (stepIndex === 4) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (!definition.type) {
-      errors.push("type must be set before steps.");
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!Array.isArray(parsed.value)) {
-        errors.push("Steps must be a JSON array.");
-        return { data, errors };
-      }
-      if (definition.type === "workflow") {
-        definition.steps = parsed.value;
-        delete definition.tool_chain;
-      } else {
-        definition.tool_chain = parsed.value;
-        delete definition.steps;
-      }
-    }
-  } else if (stepIndex === 5) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
-        errors.push("Settings must be a JSON object.");
-        return { data, errors };
-      }
-      const settings = parsed.value as Record<string, unknown>;
-      if (settings.allowed_tools !== undefined) {
-        definition.allowed_tools = settings.allowed_tools as unknown;
-      }
-      if (settings.timeout_ms !== undefined) {
-        definition.timeout_ms = settings.timeout_ms as unknown;
-      }
-      if (settings.enabled !== undefined) {
-        definition.enabled = settings.enabled as unknown;
-      }
-      if (settings.tags !== undefined) {
-        definition.tags = settings.tags as unknown;
-      }
-    }
-  }
-
-  return { data: { ...data, definition }, errors };
-}
-
-function applyHookWizardStep(
-  stepIndex: number,
-  input: string,
-  data: WizardData,
-): { data: WizardData; errors: string[] } {
-  const definition = { ...data.definition } as Record<string, unknown>;
-  const errors: string[] = [];
-
-  if (stepIndex === 0) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
-        errors.push("Basics must be a JSON object.");
-        return { data, errors };
-      }
-      const basics = parsed.value as Record<string, unknown>;
-      definition.id = basics.id ?? definition.id;
-      definition.name = basics.name ?? definition.name;
-      definition.description = basics.description ?? definition.description;
-      definition.priority = basics.priority ?? definition.priority;
-      definition.timeout_ms = basics.timeout_ms ?? definition.timeout_ms;
-      definition.fail_open = basics.fail_open ?? definition.fail_open;
-    }
-    if (!definition.id) errors.push("id is required.");
-    if (!definition.name) errors.push("name is required.");
-    if (!definition.description) errors.push("description is required.");
-  } else if (stepIndex === 1) {
-    const parsed = parseFlexibleInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (typeof parsed.value === "string") {
-        definition.trigger = parsed.value;
-      } else if (parsed.value && typeof parsed.value === "object") {
-        const obj = parsed.value as Record<string, unknown>;
-        if (typeof obj.trigger === "string") {
-          definition.trigger = obj.trigger;
-        }
-      }
-    }
-    if (!definition.trigger) errors.push("trigger is required.");
-  } else if (stepIndex === 2) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
-        errors.push("Filters must be a JSON object.");
-        return { data, errors };
-      }
-      definition.filter = parsed.value;
-    }
-  } else if (stepIndex === 3) {
-    const parsed = parseJsonInput(input);
-    if (parsed.error) {
-      errors.push(parsed.error);
-      return { data, errors };
-    }
-    if (parsed.value !== undefined) {
-      if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
-        errors.push("Action must be a JSON object.");
-        return { data, errors };
-      }
-      definition.action = parsed.value;
-    }
-  } else if (stepIndex === 4) {
-    const action = definition.action as Record<string, unknown> | undefined;
-    if (action && action.type === "mutate") {
-      const parsed = parseJsonInput(input);
-      if (parsed.error) {
-        errors.push(parsed.error);
-        return { data, errors };
-      }
-      if (parsed.value !== undefined) {
-        if (!Array.isArray(parsed.value)) {
-          errors.push("Mutation ops must be a JSON array.");
-          return { data, errors };
-        }
-        action.ops = parsed.value;
-        definition.action = action;
-      }
-    }
-  }
-
-  return { data: { ...data, definition }, errors };
-}
-
-function formatJsonLines(value: unknown, maxLines = 18): string[] {
-  const raw = JSON.stringify(value, null, 2) ?? "";
-  const lines = raw.split("\n");
-  if (lines.length > maxLines) {
-    return [...lines.slice(0, maxLines), "..."];
-  }
-  return lines;
-}
+// Skills and hooks are read-only in the TUI.
+// To create/edit skills, use the agent with file_write to create SKILL.md files in config/skills/
 
 function useTerminalSize() {
   const { stdout } = useStdout();
@@ -409,14 +100,6 @@ function App({ options }: { options: AppOptions }) {
     manualStopMode: false,
     interval: null as NodeJS.Timeout | null,
   });
-  const pendingSkillActionRef = useRef<{
-    type: "edit" | "enable" | "disable";
-    id: string;
-  } | null>(null);
-  const pendingHookActionRef = useRef<{
-    type: "edit" | "enable" | "disable";
-    id: string;
-  } | null>(null);
   useEffect(() => {
     return store.subscribe(() => {
       setSnapshot(store.getSnapshot());
@@ -639,48 +322,9 @@ function App({ options }: { options: AppOptions }) {
       store.scrollToBottom();
       return;
     }
-
-    if (action === "get") {
-      const item = payload?.item as Record<string, unknown> | undefined;
-      const pending = pendingSkillActionRef.current;
-      if (pending && item && pending.id === item.id) {
-        if (pending.type === "edit") {
-          store.startWizard("skill", { mode: "edit", definition: item });
-        } else {
-          const next = { ...item, enabled: pending.type === "enable" };
-          sendCommand("skills_update", { id: pending.id, definition: next });
-        }
-        pendingSkillActionRef.current = null;
-        store.clearInput();
-        return;
-      }
-      if (item) {
-        store.addMessage("system", `Skill ${item.id ?? ""} loaded.`);
-      }
-      return;
-    }
-
-    if (action === "create" || action === "update") {
-      store.exitWizard();
-      if (content) {
-        store.addMessage("system", content);
-      }
-      sendCommand("skills_list");
-      return;
-    }
-
-    if (action === "delete") {
-      if (content) {
-        store.addMessage("system", content);
-      }
-      sendCommand("skills_list");
-      return;
-    }
-
-    if (action === "run") {
-      if (content) {
-        store.addMessage("agent", content);
-      }
+    // Skills are read-only in TUI. To create/edit, use the agent with file_write.
+    if (content) {
+      store.addMessage("system", content);
     }
   };
 
@@ -698,42 +342,9 @@ function App({ options }: { options: AppOptions }) {
       store.scrollToBottom();
       return;
     }
-
-    if (action === "get") {
-      const item = payload?.item as Record<string, unknown> | undefined;
-      const pending = pendingHookActionRef.current;
-      if (pending && item && pending.id === item.id) {
-        if (pending.type === "edit") {
-          store.startWizard("hook", { mode: "edit", definition: item });
-        } else {
-          const next = { ...item, enabled: pending.type === "enable" };
-          sendCommand("hooks_update", { id: pending.id, definition: next });
-        }
-        pendingHookActionRef.current = null;
-        store.clearInput();
-        return;
-      }
-      if (item) {
-        store.addMessage("system", `Hook ${item.id ?? ""} loaded.`);
-      }
-      return;
-    }
-
-    if (action === "create" || action === "update") {
-      store.exitWizard();
-      if (content) {
-        store.addMessage("system", content);
-      }
-      sendCommand("hooks_list");
-      return;
-    }
-
-    if (action === "delete") {
-      if (content) {
-        store.addMessage("system", content);
-      }
-      sendCommand("hooks_list");
-      return;
+    // Hooks are read-only in TUI. To create/edit, use the agent with file_write.
+    if (content) {
+      store.addMessage("system", content);
     }
   };
 
@@ -802,7 +413,7 @@ function App({ options }: { options: AppOptions }) {
       return;
     }
     loggerRef.current?.transcript("voice", data.text);
-    store.insertInput(data.text);
+    store.replaceInput(data.text);
     const cache = fileCacheRef.current;
     if (cache) {
       store.updateAutocomplete(cache);
@@ -850,182 +461,27 @@ function App({ options }: { options: AppOptions }) {
     exit();
   };
 
-  const startSkillWizard = (mode: WizardMode, definition?: Record<string, unknown>) => {
-    store.startWizard("skill", {
-      mode,
-      definition: definition ?? createDefaultSkillDefinition(),
-    });
-    store.clearInput();
-  };
-
-  const startHookWizard = (mode: WizardMode, definition?: Record<string, unknown>) => {
-    store.startWizard("hook", {
-      mode,
-      definition: definition ?? createDefaultHookDefinition(),
-    });
-    store.clearInput();
-  };
-
-  const handleWizardSubmit = () => {
-    if (snapshot.uiMode !== "wizard" || !snapshot.wizardType) {
-      return;
-    }
-    const wizardData = snapshot.wizardData as WizardData;
-    const stepIndex = snapshot.wizardStepIndex;
-    const inputText = snapshot.inputText;
-    const maxSteps = snapshot.wizardType === "skill" ? SKILL_WIZARD_STEPS.length : HOOK_WIZARD_STEPS.length;
-    if (stepIndex >= maxSteps - 1) {
-      return;
-    }
-    const result =
-      snapshot.wizardType === "skill"
-        ? applySkillWizardStep(stepIndex, inputText, wizardData)
-        : applyHookWizardStep(stepIndex, inputText, wizardData);
-    if (result.errors.length > 0) {
-      store.setWizardErrors(result.errors);
-      return;
-    }
-    const nextStep = Math.min(stepIndex + 1, maxSteps - 1);
-    store.updateWizard(result.data, nextStep);
-    store.clearInput();
-  };
-
-  const handleWizardSave = () => {
-    if (snapshot.uiMode !== "wizard" || !snapshot.wizardType) {
-      return;
-    }
-    const wizardData = snapshot.wizardData as WizardData;
-    const definition = wizardData.definition as Record<string, unknown>;
-    const id = definition.id;
-    if (!id || typeof id !== "string") {
-      store.setWizardErrors(["id is required before saving."]);
-      return;
-    }
-    if (snapshot.wizardType === "skill") {
-      if (wizardData.mode === "new") {
-        sendCommand("skills_create", { definition });
-      } else {
-        sendCommand("skills_update", { id, definition });
-      }
-    } else {
-      if (wizardData.mode === "new") {
-        sendCommand("hooks_create", { definition });
-      } else {
-        sendCommand("hooks_update", { id, definition });
-      }
-    }
-  };
-
+  // Skills and hooks commands - read-only listing
   const handleSkillsCommand = (arg?: string) => {
     const parts = (arg ?? "").trim().split(/\s+/).filter(Boolean);
     const sub = parts[0]?.toLowerCase();
-    const id = parts[1];
-    if (!sub) {
+    if (!sub || sub === "list") {
       store.setUIMode("skills");
       sendCommand("skills_list");
       return;
     }
-    if (sub === "list") {
-      store.setUIMode("skills");
-      sendCommand("skills_list");
-      return;
-    }
-    if (sub === "new") {
-      startSkillWizard("new");
-      return;
-    }
-    if (sub === "edit") {
-      if (!id) {
-        store.addMessage("system", "Usage: /skills edit <id>");
-        return;
-      }
-      pendingSkillActionRef.current = { type: "edit", id };
-      sendCommand("skills_get", { id });
-      return;
-    }
-    if (sub === "enable" || sub === "disable") {
-      if (!id) {
-        store.addMessage("system", `Usage: /skills ${sub} <id>`);
-        return;
-      }
-      pendingSkillActionRef.current = { type: sub, id } as { type: "enable" | "disable"; id: string };
-      sendCommand("skills_get", { id });
-      return;
-    }
-    if (sub === "delete") {
-      if (!id) {
-        store.addMessage("system", "Usage: /skills delete <id>");
-        return;
-      }
-      sendCommand("skills_delete", { id });
-      return;
-    }
-    if (sub === "run") {
-      if (!id) {
-        store.addMessage("system", "Usage: /skills run <id> [input]");
-        return;
-      }
-      const rawInput = parts.slice(2).join(" ");
-      let payload: unknown = undefined;
-      if (rawInput) {
-        try {
-          payload = JSON.parse(rawInput);
-        } catch {
-          payload = rawInput;
-        }
-      }
-      store.setUIMode("chat");
-      sendCommand("skills_run", { id, input: payload });
-      return;
-    }
-    store.addMessage("system", `Unknown skills command: ${sub}`);
+    store.addMessage("system", "Skills are read-only in TUI. Use /skills to list. To create/edit, ask the agent.");
   };
 
   const handleHooksCommand = (arg?: string) => {
     const parts = (arg ?? "").trim().split(/\s+/).filter(Boolean);
     const sub = parts[0]?.toLowerCase();
-    const id = parts[1];
-    if (!sub) {
+    if (!sub || sub === "list") {
       store.setUIMode("hooks");
       sendCommand("hooks_list");
       return;
     }
-    if (sub === "list") {
-      store.setUIMode("hooks");
-      sendCommand("hooks_list");
-      return;
-    }
-    if (sub === "new") {
-      startHookWizard("new");
-      return;
-    }
-    if (sub === "edit") {
-      if (!id) {
-        store.addMessage("system", "Usage: /hooks edit <id>");
-        return;
-      }
-      pendingHookActionRef.current = { type: "edit", id };
-      sendCommand("hooks_get", { id });
-      return;
-    }
-    if (sub === "enable" || sub === "disable") {
-      if (!id) {
-        store.addMessage("system", `Usage: /hooks ${sub} <id>`);
-        return;
-      }
-      pendingHookActionRef.current = { type: sub, id } as { type: "enable" | "disable"; id: string };
-      sendCommand("hooks_get", { id });
-      return;
-    }
-    if (sub === "delete") {
-      if (!id) {
-        store.addMessage("system", "Usage: /hooks delete <id>");
-        return;
-      }
-      sendCommand("hooks_delete", { id });
-      return;
-    }
-    store.addMessage("system", `Unknown hooks command: ${sub}`);
+    store.addMessage("system", "Hooks are read-only in TUI. Use /hooks to list. To create/edit, ask the agent.");
   };
 
   useInput((input, key) => {
@@ -1046,25 +502,12 @@ function App({ options }: { options: AppOptions }) {
       return;
     }
 
-    if (snapshot.uiMode === "wizard") {
+    // Skills/hooks list modes - escape to return to chat
+    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks") {
       if (key.escape) {
-        store.exitWizard();
-        store.clearInput();
+        store.setUIMode("chat");
         return;
       }
-      if (key.ctrl && input === "s") {
-        handleWizardSave();
-        return;
-      }
-      if (key.return && !key.shift) {
-        handleWizardSubmit();
-        return;
-      }
-    }
-
-    if ((snapshot.uiMode === "skills" || snapshot.uiMode === "hooks") && key.escape) {
-      store.setUIMode("chat");
-      return;
     }
 
     // Debug: log key events early to catch everything
@@ -1476,9 +919,10 @@ function App({ options }: { options: AppOptions }) {
     title: string,
     items: Record<string, unknown>[],
     errors: string[],
+    isSkills: boolean = false,
   ): { text: string; role?: Role }[] => {
     const lines: { text: string; role?: Role }[] = [];
-    lines.push({ text: `${title} (${items.length})`, role: "system" });
+    lines.push({ text: `${title} (${items.length}) - Read Only`, role: "system" });
     if (items.length === 0) {
       lines.push({ text: "No items found.", role: "system" });
     } else {
@@ -1497,106 +941,18 @@ function App({ options }: { options: AppOptions }) {
       }
     }
     lines.push({ text: "", role: "system" });
+    lines.push({ text: "-".repeat(40), role: "system" });
+    const itemType = isSkills ? "skills" : "hooks";
+    lines.push({ text: `To create/edit ${itemType}, ask the agent to write ${itemType.toUpperCase().slice(0, -1)}.md files.`, role: "system" });
     lines.push({ text: "Press Esc to return to chat.", role: "system" });
-    return lines;
-  };
-
-  const buildWizardLines = (): { text: string; role?: Role }[] => {
-    const lines: { text: string; role?: Role }[] = [];
-    const wizardType = snapshot.wizardType ?? "skill";
-    const steps = wizardType === "skill" ? SKILL_WIZARD_STEPS : HOOK_WIZARD_STEPS;
-    const step = steps[snapshot.wizardStepIndex] ?? steps[0];
-    const wizardData = snapshot.wizardData as WizardData;
-    const definition = (wizardData?.definition ?? {}) as Record<string, any>;
-    lines.push({
-      text: `Wizard: ${wizardType} (${snapshot.wizardStepIndex + 1}/${steps.length}) - ${step.title}`,
-      role: "system",
-    });
-    lines.push({ text: step.prompt, role: "system" });
-
-    if (snapshot.wizardErrors.length > 0) {
-      lines.push({ text: "", role: "system" });
-      lines.push({ text: "Errors:", role: "system" });
-      for (const err of snapshot.wizardErrors) {
-        lines.push({ text: `- ${err}`, role: "system" });
-      }
-    }
-
-    lines.push({ text: "", role: "system" });
-    lines.push({ text: "Current values:", role: "system" });
-
-    if (wizardType === "skill") {
-      if (snapshot.wizardStepIndex === 0) {
-        lines.push({ text: `id: ${definition.id ?? ""}`, role: "system" });
-        lines.push({ text: `name: ${definition.name ?? ""}`, role: "system" });
-        lines.push({ text: `description: ${definition.description ?? ""}`, role: "system" });
-        lines.push({ text: `version: ${definition.version ?? ""}`, role: "system" });
-      } else if (snapshot.wizardStepIndex === 1) {
-        lines.push({ text: `type: ${definition.type ?? ""}`, role: "system" });
-      } else if (snapshot.wizardStepIndex === 2) {
-        for (const line of formatJsonLines(definition.triggers)) {
-          lines.push({ text: line, role: "system" });
-        }
-      } else if (snapshot.wizardStepIndex === 3) {
-        for (const line of formatJsonLines(definition.input_schema)) {
-          lines.push({ text: line, role: "system" });
-        }
-      } else if (snapshot.wizardStepIndex === 4) {
-        const stepsValue = definition.type === "tool_chain" ? definition.tool_chain : definition.steps;
-        for (const line of formatJsonLines(stepsValue)) {
-          lines.push({ text: line, role: "system" });
-        }
-      } else if (snapshot.wizardStepIndex === 5) {
-        lines.push({ text: `allowed_tools: ${JSON.stringify(definition.allowed_tools)}`, role: "system" });
-        lines.push({ text: `timeout_ms: ${definition.timeout_ms ?? ""}`, role: "system" });
-        lines.push({ text: `enabled: ${definition.enabled ?? ""}`, role: "system" });
-        lines.push({ text: `tags: ${JSON.stringify(definition.tags)}`, role: "system" });
-      } else {
-        for (const line of formatJsonLines(definition)) {
-          lines.push({ text: line, role: "system" });
-        }
-      }
-    } else {
-      if (snapshot.wizardStepIndex === 0) {
-        lines.push({ text: `id: ${definition.id ?? ""}`, role: "system" });
-        lines.push({ text: `name: ${definition.name ?? ""}`, role: "system" });
-        lines.push({ text: `description: ${definition.description ?? ""}`, role: "system" });
-        lines.push({ text: `priority: ${definition.priority ?? ""}`, role: "system" });
-        lines.push({ text: `timeout_ms: ${definition.timeout_ms ?? ""}`, role: "system" });
-      } else if (snapshot.wizardStepIndex === 1) {
-        lines.push({ text: `trigger: ${definition.trigger ?? ""}`, role: "system" });
-      } else if (snapshot.wizardStepIndex === 2) {
-        for (const line of formatJsonLines(definition.filter)) {
-          lines.push({ text: line, role: "system" });
-        }
-      } else if (snapshot.wizardStepIndex === 3) {
-        for (const line of formatJsonLines(definition.action)) {
-          lines.push({ text: line, role: "system" });
-        }
-      } else if (snapshot.wizardStepIndex === 4) {
-        const action = definition.action as Record<string, unknown> | undefined;
-        for (const line of formatJsonLines(action?.ops)) {
-          lines.push({ text: line, role: "system" });
-        }
-      } else {
-        for (const line of formatJsonLines(definition)) {
-          lines.push({ text: line, role: "system" });
-        }
-      }
-    }
-
-    lines.push({ text: "", role: "system" });
-    lines.push({ text: "Enter advances. Ctrl+S saves. Esc cancels.", role: "system" });
     return lines;
   };
 
   let historyLines = store.getHistoryLines(width, snapshot.compact, STREAM_CURSOR);
   if (snapshot.uiMode === "skills") {
-    historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors);
+    historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors, true);
   } else if (snapshot.uiMode === "hooks") {
-    historyLines = buildListLines("Hooks", snapshot.hooksList, snapshot.hooksErrors);
-  } else if (snapshot.uiMode === "wizard") {
-    historyLines = buildWizardLines();
+    historyLines = buildListLines("Hooks", snapshot.hooksList, snapshot.hooksErrors, false);
   }
   const totalHistoryLines = historyLines.length;
   const maxScroll = Math.max(0, totalHistoryLines - historyHeight);

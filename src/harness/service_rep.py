@@ -136,6 +136,10 @@ class ServiceRep:
         self._pending_requests = 0
         self._active_thread_name: Optional[str] = None
 
+        # Track paused request for ask_user resume flow
+        self._paused_request_id: Optional[str] = None
+        self._paused_session_key: Optional[str] = None
+
         # Intent classifier
         self.intent_classifier = create_intent_classifier(
             llm_config=config.llm_config,
@@ -206,23 +210,41 @@ class ServiceRep:
                 self._task_queue.task_done()
                 break
 
-            request_id, text, tier, session_key = task
+            if len(task) == 4:
+                request_id, text, tier, session_key = task
+                budget = None
+            else:
+                request_id, text, tier, session_key, budget = task
             with self._pending_lock:
                 if self._pending_requests > 0:
                     self._pending_requests -= 1
 
             try:
-                self._process_agent_task(request_id, text, tier, session_key)
+                self._process_agent_task(request_id, text, tier, session_key, budget)
             finally:
                 self._task_queue.task_done()
 
-    def _enqueue_agent_task(self, request_id: str, text: str, tier: str, session_key: Optional[str] = None):
+    def _enqueue_agent_task(
+        self,
+        request_id: str,
+        text: str,
+        tier: str,
+        session_key: Optional[str] = None,
+        budget: Optional[Dict[str, int]] = None,
+    ):
         """Add a normal request to the worker queue"""
         with self._pending_lock:
             self._pending_requests += 1
-        self._task_queue.put((request_id, text, tier, session_key))
+        self._task_queue.put((request_id, text, tier, session_key, budget))
 
-    def _process_agent_task(self, request_id: str, text: str, tier: str, session_key: Optional[str] = None):
+    def _process_agent_task(
+        self,
+        request_id: str,
+        text: str,
+        tier: str,
+        session_key: Optional[str] = None,
+        budget: Optional[Dict[str, int]] = None,
+    ):
         """Execute a queued agent task (runs inside worker thread)"""
         self._set_active_request(request_id, text)
         try:
@@ -254,6 +276,7 @@ class ServiceRep:
             harness_response = self.harness.process(
                 speech_text=text,
                 tier=tier,
+                budget=budget,
                 context=None,
                 request_id=request_id,
                 session_key=session_key,
@@ -337,10 +360,11 @@ class ServiceRep:
         Handle transcribed speech from user.
 
         Flow:
-        1. Classify intent
-        2. Route to appropriate tier (if normal request)
-        3. Generate acknowledgment
-        4. Publish AgentRequest + TTS events
+        1. Check for resume from ask_user prompt
+        2. Classify intent
+        3. Route to appropriate tier (if normal request)
+        4. Generate acknowledgment
+        5. Publish AgentRequest + TTS events
         """
         text = event.text.strip()
         if not text:
@@ -349,6 +373,16 @@ class ServiceRep:
         request_id = event.request_id or self.logger.new_request()
         session_key = getattr(event, 'session_key', None)  # Extract session_key from event
         self.logger.request_received(text)
+
+        # Check for resume from ask_user prompt response
+        event_metadata = getattr(event, 'metadata', {}) or {}
+        is_prompt_response = event_metadata.get('is_prompt_response', False)
+
+        if is_prompt_response and self._paused_request_id:
+            # This is a user response to an ask_user prompt - resume the paused agent
+            answer = event_metadata.get('answer', text)
+            self._handle_resume_request(request_id, answer)
+            return
 
         # Fast path: greetings / small-talk should bypass the harness entirely
         if self._handle_small_talk(request_id, text):
@@ -391,8 +425,60 @@ class ServiceRep:
             f"[{request_id}] Routed to tier={classification.tier_name}, queued={self._get_pending_request_count() + 1}",
             component="service_rep"
         )
-        self._enqueue_agent_task(request_id, text, classification.tier_name, session_key)
+        self._enqueue_agent_task(request_id, text, classification.tier_name, session_key, classification.budget)
 
+    def _handle_resume_request(self, request_id: str, answer: str):
+        """
+        Handle resume from ask_user prompt - calls harness.resume_with_answer().
+
+        Args:
+            request_id: Request identifier for this response
+            answer: User's answer to the prompt
+        """
+        paused_request_id = self._paused_request_id
+
+        self.logger.info(
+            f"[{request_id}] Resuming paused request {paused_request_id} with user answer",
+            component="service_rep"
+        )
+
+        # Clear paused state before resuming
+        self._paused_request_id = None
+        session_key = self._paused_session_key
+        self._paused_session_key = None
+
+        # Mark agent as busy
+        self._set_active_request(request_id, f"Resuming with answer: {answer[:50]}...")
+
+        try:
+            # Create streaming callback to emit chunks as events
+            def on_stream_chunk(chunk: str, chunk_index: int, is_final: bool):
+                """Callback that emits StreamingChunkEvent for each chunk"""
+                if self.event_bus:
+                    try:
+                        chunk_event = StreamingChunkEvent(
+                            request_id=request_id,
+                            chunk=chunk,
+                            chunk_index=chunk_index,
+                            is_final=is_final
+                        )
+                        self.event_bus.publish(chunk_event)
+                    except Exception as e:
+                        self.logger.error(
+                            f"[{request_id}] Failed to publish StreamingChunkEvent: {e}",
+                            component="service_rep"
+                        )
+
+            # Call resume_with_answer instead of process
+            harness_response = self.harness.resume_with_answer(answer)
+            self._handle_harness_response(request_id, harness_response)
+
+        except Exception as e:
+            self.logger.error(f"[{request_id}] Resume failed: {e}", component="service_rep")
+            self._handle_harness_error(request_id, str(e))
+
+        finally:
+            self._clear_active_request()
 
     def _handle_stop_intent(self, request_id: str, text: str):
         """Handle STOP intent - cancel current work"""
@@ -583,6 +669,11 @@ class ServiceRep:
                     else:
                         error_msg = harness_response.metadata.get("error")
 
+                # Include paused state in metadata for TUI
+                event_metadata = dict(harness_response.metadata or {})
+                event_metadata["paused"] = harness_response.paused
+                event_metadata["user_prompt"] = harness_response.user_prompt
+
                 agent_event = AgentResponseCompleteEvent(
                     request_id=request_id,
                     success=success,
@@ -591,7 +682,7 @@ class ServiceRep:
                     tools_used=tools_used,
                     duration_ms=harness_response.duration_ms,
                     error=error_msg,
-                    metadata=harness_response.metadata or {}
+                    metadata=event_metadata
                 )
                 self.event_bus.publish(agent_event)
             except Exception as event_err:
@@ -600,8 +691,21 @@ class ServiceRep:
                     component="service_rep"
                 )
 
+        # Store paused state for ask_user resume flow
+        if harness_response.paused:
+            self._paused_request_id = request_id
+            self._paused_session_key = getattr(harness_response, 'session_key', None)
+            self.logger.info(
+                f"[{request_id}] Agent paused awaiting user input",
+                component="service_rep"
+            )
+        else:
+            # Clear paused state on non-paused response
+            self._paused_request_id = None
+            self._paused_session_key = None
+
         self.logger.info(
-            f"[{request_id}] Response delivered: success={success}",
+            f"[{request_id}] Response delivered: success={success}, paused={harness_response.paused}",
             component="service_rep"
         )
 

@@ -17,6 +17,7 @@ from .models import (
     ToolPolicy,
 )
 from .store import HookStore
+from .code_reviewer import CodeReviewer, CodeReviewConfig, CodeReviewResult
 
 
 TEMPLATE_PATTERN = re.compile(r"{{\s*([^}]+?)\s*}}")
@@ -73,11 +74,40 @@ def _coerce_tool_policy(value: Any) -> ToolPolicy:
 
 
 class HookManager:
-    def __init__(self, store: HookStore, config: HooksConfig, logger: Optional[StructuredLogger] = None):
+    def __init__(
+        self,
+        store: HookStore,
+        config: HooksConfig,
+        logger: Optional[StructuredLogger] = None,
+        graphd_client: Optional[Any] = None,
+    ):
         self.store = store
         self.config = config
         self.logger = logger or StructuredLogger()
         self.engine = HookEngine()
+        self.graphd_client = graphd_client
+
+        # Code reviewer instance (lazy-initialized)
+        self._code_reviewer: Optional[CodeReviewer] = None
+
+        # Last code review result (accessible for inspection)
+        self.last_code_review: Optional[CodeReviewResult] = None
+
+    def set_graphd_client(self, client: Any) -> None:
+        """Set the graphd client for code review effects analysis."""
+        self.graphd_client = client
+        # Reset reviewer to pick up new client
+        self._code_reviewer = None
+
+    def _get_code_reviewer(self) -> CodeReviewer:
+        """Get or create the code reviewer instance."""
+        if self._code_reviewer is None:
+            self._code_reviewer = CodeReviewer(
+                graphd_client=self.graphd_client,
+                config=CodeReviewConfig(),
+                logger=self.logger,
+            )
+        return self._code_reviewer
 
     def run(self, trigger: str, context: InvocationContext) -> HookResult:
         if not self.config.enabled:
@@ -283,5 +313,57 @@ class HookManager:
 
         if op.op == "annotate_context":
             context.annotations[str(op.key)] = value
+            decision.applied_ops.append(op.op)
+            return
+
+        if op.op == "trigger_code_review":
+            # Run code review on task completion
+            if context.task_completion is None:
+                self.logger.warning(
+                    "trigger_code_review called without task_completion data",
+                    component="hooks",
+                )
+                return
+
+            review_config = None
+            if op.value is not None:
+                if isinstance(op.value, dict):
+                    review_config = CodeReviewConfig.from_dict(op.value, logger=self.logger)
+                else:
+                    self.logger.warning(
+                        "trigger_code_review config must be an object",
+                        component="hooks",
+                        data={"value_type": type(op.value).__name__},
+                    )
+
+            reviewer = (
+                self._get_code_reviewer()
+                if review_config is None
+                else CodeReviewer(
+                    graphd_client=self.graphd_client,
+                    config=review_config,
+                    logger=self.logger,
+                )
+            )
+            review_result = reviewer.review(context.task_completion)
+            self.last_code_review = review_result
+
+            # Store review result in annotations for downstream access
+            context.annotations["code_review"] = review_result.to_dict()
+            context.annotations["code_review_risk"] = review_result.risk_level
+            context.annotations["code_review_notes"] = review_result.review_notes
+
+            self.logger.info(
+                f"Code review completed: risk={review_result.risk_level}, "
+                f"findings={len(review_result.findings)}",
+                component="hooks",
+                data={
+                    "risk_level": review_result.risk_level,
+                    "findings_count": len(review_result.findings),
+                    "files_written": review_result.files_written_count,
+                    "affected_count": review_result.affected_count,
+                },
+            )
+
             decision.applied_ops.append(op.op)
             return

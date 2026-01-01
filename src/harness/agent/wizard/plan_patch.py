@@ -121,3 +121,27 @@ class PlanPatch:
             justification=justification,
             suggested_by_worker=worker_id,
         )
+
+    @classmethod
+    def create_replace(
+        cls,
+        base_version: int,
+        step_num: int,
+        new_tool_hint: Optional[str] = None,
+        justification: str = "",
+        worker_id: Optional[str] = None,
+    ) -> "PlanPatch":
+        """Create a patch that replaces tool hints on a pending step."""
+        return cls(
+            patch_id=str(uuid.uuid4())[:8],
+            base_plan_version=base_version,
+            operations=[
+                PatchOperation(
+                    type=PatchType.REPLACE,
+                    target_step=step_num,
+                    new_tool_hint=new_tool_hint,
+                )
+            ],
+            justification=justification,
+            suggested_by_worker=worker_id,
+        )

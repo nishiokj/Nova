@@ -60,17 +60,8 @@ class ReflectionVerdict(Enum):
     ACCEPT = "accept"                    # Quality sufficient, proceed
     ACCEPT_AND_EXTEND = "accept_extend"  # Good, scaffold more for excellence
     REDO = "redo"                        # Redo with modifications
-    CLARIFY_USER = "clarify_user"        # Need user input (rare)
     ABORT_STEP = "abort_step"            # Skip this step
     ABORT_GOAL = "abort_goal"            # Cannot achieve goal (very rare)
-
-
-class ClarificationUrgency(Enum):
-    """Urgency level for user clarification requests."""
-    LOW = "low"           # Can proceed with default after short timeout
-    MEDIUM = "medium"     # Should wait for user, but has reasonable default
-    HIGH = "high"         # Genuinely needs user input, no good default
-    BLOCKING = "blocking"  # Cannot proceed without user input
 
 
 class FailureCategory(Enum):

@@ -18,7 +18,6 @@ import os
 import time
 import threading
 import queue
-import json
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Callable
 from enum import Enum
@@ -31,7 +30,8 @@ from .agent.tool_registry import ToolRegistry
 from .agent.agent import Agent, AgentResponse, TieredAgent
 from util.runtime import HarnessRuntime, create_runtime
 from util.agent_execution_logger import AgentExecutionLogger
-from hooks.models import InvocationContext
+from hooks.models import InvocationContext, TaskCompletionData
+from skills.models import SkillDefinition
 
 
 class HarnessState(Enum):
@@ -52,6 +52,9 @@ class HarnessResponse:
     state: HarnessState = HarnessState.IDLE
     duration_ms: float = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Pause state for ask_user tool
+    paused: bool = False
+    user_prompt: Optional[Dict[str, Any]] = None  # {question, options, context}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,7 +63,9 @@ class HarnessResponse:
             "spoken_response": self.spoken_response,
             "state": self.state.value,
             "duration_ms": self.duration_ms,
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "paused": self.paused,
+            "user_prompt": self.user_prompt,
         }
 
 
@@ -118,7 +123,6 @@ class AgentHarness:
         self.graphd = getattr(self.runtime, "graphd", None)
         self.skill_registry = getattr(self.runtime, "skill_registry", None)
         self.skill_router = getattr(self.runtime, "skill_router", None)
-        self.skill_runner = getattr(self.runtime, "skill_runner", None)
         self.hook_manager = getattr(self.runtime, "hook_manager", None)
 
         # Control interface state
@@ -156,6 +160,7 @@ class AgentHarness:
         speech_text: str,
         tier: str = "standard",
         context: Optional[str] = None,
+        budget: Optional[Dict[str, int]] = None,
         request_id: Optional[str] = None,
         session_key: Optional[str] = None,
         on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None
@@ -167,6 +172,7 @@ class AgentHarness:
             speech_text: User's request
             tier: Agent tier (determined by ServiceRep/Router)
             context: Optional additional context
+            budget: Optional budget constraints from router
             request_id: Request identifier
             session_key: Session key for conversation persistence
             on_stream_chunk: Optional callback for streaming final response synthesis.
@@ -232,47 +238,57 @@ class AgentHarness:
                 tier = invocation_context.tier
 
                 skill_match = None
-                if self.skill_router and self.skill_runner:
+                if self.skill_router:
                     skill_match = self.skill_router.route(speech_text, tier, session_key)
 
                 if skill_match:
+                    skill = skill_match.skill
                     self._set_state(HarnessState.AGENT_WORKING)
-                    input_data = self._build_skill_input(
-                        speech_text=speech_text,
-                        tier=tier,
-                        request_id=request_id,
-                        session_key=session_key,
-                        context=context,
-                    )
-                    with self.tool_registry.with_working_dir(call_dir):
-                        with self.tool_registry.with_invocation_context(invocation_context):
-                            skill_result = self.skill_runner.run(skill_match.skill, input_data)
+
+                    # Instruction-based skill: inject instructions into agent context
+                    skill_context = self._build_skill_context(skill, speech_text, context)
+
+                    # Reset progress tracking and wire up callbacks
+                    self._last_progress_tool = None
+                    phase_callback = self._create_phase_callback(request_id)
+
+                    if hasattr(self.agent, "get_agent_for_tier"):
+                        tier_agent = self.agent.get_agent_for_tier(tier)
+                    else:
+                        tier_agent = self.agent
+                    if hasattr(tier_agent, "add_phase_callback"):
+                        tier_agent.add_phase_callback(phase_callback)
+
+                    try:
+                        if self.graphd:
+                            self.graphd.set_active(True)
+                        with self.tool_registry.with_working_dir(call_dir):
+                            with self.tool_registry.with_invocation_context(invocation_context):
+                                with self.tool_registry.with_allowed_tools(skill.allowed_tools):
+                                    with self._profile("harness.skill_agent_run_ms"):
+                                        agent_response = self.agent.run(
+                                            user_input=speech_text,
+                                            tier=tier,
+                                            context=skill_context,
+                                            budget=budget,
+                                            on_stream_chunk=on_stream_chunk,
+                                            session_context=session_context_data,
+                                        )
+                        # Add skill metadata to response
+                        if agent_response.metadata is None:
+                            agent_response.metadata = {}
+                        agent_response.metadata["skill_id"] = skill.id
+                        agent_response.metadata["skill_trigger"] = skill_match.trigger_type
+                        agent_response.metadata["skill_type"] = "instructions"
+                    finally:
+                        if self.graphd:
+                            self.graphd.set_active(False)
+                        if hasattr(tier_agent, "remove_phase_callback"):
+                            tier_agent.remove_phase_callback(phase_callback)
 
                     if self.hook_manager:
                         self.hook_manager.run("invocation.after", invocation_context)
                     ran_invocation_after = True
-
-                    if not skill_result.success:
-                        full_response = skill_result.error or "Skill execution failed"
-                    elif isinstance(skill_result.output, str):
-                        full_response = skill_result.output
-                    else:
-                        try:
-                            full_response = json.dumps(skill_result.output, indent=2, ensure_ascii=True)
-                        except TypeError:
-                            full_response = str(skill_result.output)
-
-                    agent_response = AgentResponse(
-                        content=full_response,
-                        success=skill_result.success,
-                        error=skill_result.error,
-                        tools_used=[call.name for call in skill_result.tool_calls],
-                        metadata={
-                            "skill_id": skill_match.skill.id,
-                            "skill_trigger": skill_match.trigger_type,
-                            "skill_duration_ms": skill_result.duration_ms,
-                        },
-                    )
                 else:
                     # Step 1: Agent execution with progress updates
                     self._set_state(HarnessState.AGENT_WORKING)
@@ -299,6 +315,7 @@ class AgentHarness:
                                         user_input=speech_text,
                                         tier=tier,
                                         context=context,
+                                        budget=budget,
                                         on_stream_chunk=on_stream_chunk,
                                         session_context=session_context_data,
                                     )
@@ -310,6 +327,26 @@ class AgentHarness:
 
                 if self.hook_manager and not ran_invocation_after:
                     self.hook_manager.run("invocation.after", invocation_context)
+
+                # Run task.completed hooks for code review
+                if self.hook_manager and agent_response and not agent_response.paused:
+                    task_completion = self._build_task_completion_data(
+                        agent_response=agent_response,
+                        user_input=speech_text,
+                        tier=tier,
+                        duration_ms=(time.time() - start_time) * 1000,
+                        base_dir=call_dir,
+                    )
+                    invocation_context.task_completion = task_completion
+                    self.hook_manager.run("task.completed", invocation_context)
+
+                    # Log code review result if available
+                    review_notes = invocation_context.annotations.get("code_review_notes")
+                    if review_notes:
+                        self.logger.info(
+                            f"Code review completed: risk={invocation_context.annotations.get('code_review_risk', 'unknown')}",
+                            component="harness",
+                        )
 
             # Step 2: Build response
             if agent_response and not full_response:
@@ -329,18 +366,25 @@ class AgentHarness:
             self._set_state(HarnessState.IDLE)
             duration_ms = (time.time() - start_time) * 1000
 
+            # Check if agent is paused waiting for user input
+            is_paused = agent_response.paused if agent_response else False
+            user_prompt = agent_response.user_prompt if agent_response else None
+            final_state = HarnessState.PAUSED if is_paused else HarnessState.IDLE
+
             response = HarnessResponse(
                 full_response=full_response,
                 agent_response=agent_response,
                 spoken_response=agent_response.content if agent_response else "",  # ServiceRep will summarize
-                state=HarnessState.IDLE,
+                state=final_state,
                 duration_ms=duration_ms,
                 metadata={
                     "request_id": request_id,
                     "tier": tier,
                     "tools_used": agent_response.tools_used if agent_response else [],
                     "session_key": session_key,
-                }
+                },
+                paused=is_paused,
+                user_prompt=user_prompt,
             )
 
             # Session management: persist conversation messages and context state
@@ -400,31 +444,150 @@ class AgentHarness:
 
         return on_phase
 
-    def _build_skill_input(
+    def _build_task_completion_data(
         self,
-        speech_text: str,
+        agent_response: AgentResponse,
+        user_input: str,
         tier: str,
-        request_id: str,
-        session_key: Optional[str],
-        context: Optional[str],
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {}
-        try:
-            parsed = json.loads(speech_text)
-            if isinstance(parsed, dict):
-                payload.update(parsed)
-        except Exception:
-            pass
+        duration_ms: float,
+        base_dir: Optional[str] = None,
+    ) -> TaskCompletionData:
+        """Build TaskCompletionData from agent response for code review hooks."""
+        metadata = agent_response.metadata or {}
 
-        payload.setdefault("text", speech_text)
-        payload.setdefault("tier", tier)
-        payload.setdefault("request_id", request_id)
-        if session_key:
-            payload.setdefault("session_key", session_key)
-        if context:
-            payload.setdefault("context", context)
+        base_dir = base_dir or os.getcwd()
 
-        return payload
+        # Extract file operations
+        file_ops = metadata.get("file_operations", [])
+        normalized_ops = []
+        for op in file_ops:
+            if not isinstance(op, dict):
+                continue
+            path = op.get("path")
+            if not path:
+                continue
+            path_str = str(path)
+            if os.path.isabs(path_str):
+                normalized_path = os.path.abspath(path_str)
+            else:
+                normalized_path = os.path.abspath(os.path.join(base_dir, path_str))
+            normalized_ops.append({"path": normalized_path, "action": op.get("action")})
+
+        files_written = [
+            op.get("path") for op in normalized_ops
+            if op.get("action") in ("write", "edit", "create", "append")
+        ]
+        files_read = [
+            op.get("path") for op in normalized_ops
+            if op.get("action") == "read"
+        ]
+
+        # Dedupe while preserving order
+        files_written = list(dict.fromkeys([p for p in files_written if p]))
+        files_read = list(dict.fromkeys([p for p in files_read if p]))
+
+        # Extract reflection data if available
+        reflection = agent_response.reflection
+        steps_completed = 0
+        steps_failed = 0
+        steps_skipped = 0
+        goal = ""
+
+        if reflection:
+            if hasattr(reflection, "plan_goal"):
+                goal = reflection.plan_goal or ""
+            # Try to get step counts from metadata
+            steps_completed = metadata.get("steps_completed", 0)
+            steps_failed = metadata.get("steps_failed", 0)
+            steps_skipped = metadata.get("steps_skipped", 0)
+
+        # Also check final_context_state for more data
+        final_context = metadata.get("final_context_state", {})
+        if final_context:
+            # Get read_files from context if available
+            ctx_read_files = final_context.get("read_files", [])
+            if ctx_read_files:
+                normalized_ctx_reads = []
+                for path in ctx_read_files:
+                    if not path:
+                        continue
+                    path_str = str(path)
+                    if os.path.isabs(path_str):
+                        normalized_ctx_reads.append(os.path.abspath(path_str))
+                    else:
+                        normalized_ctx_reads.append(os.path.abspath(os.path.join(base_dir, path_str)))
+                files_read = list(dict.fromkeys(files_read + normalized_ctx_reads))
+
+        plan_steps = metadata.get("plan_steps", [])
+        if not isinstance(plan_steps, list):
+            plan_steps = []
+
+        symbols_modified = metadata.get("symbols_modified", [])
+        if not isinstance(symbols_modified, list):
+            symbols_modified = []
+        if not symbols_modified and files_written and self.graphd:
+            try:
+                from harness.graphd.utils import normalize_path
+                collected = []
+                for file_path in files_written:
+                    rel_path = normalize_path(file_path, self.graphd.root)
+                    if rel_path.startswith(".."):
+                        continue
+                    for symbol in self.graphd.store.get_symbols_for_file(rel_path):
+                        symbol_id = symbol.get("id") or symbol.get("name")
+                        if symbol_id:
+                            collected.append(symbol_id)
+                symbols_modified = list(dict.fromkeys(collected))
+            except Exception as exc:
+                self.logger.debug(
+                    f"Failed to derive symbols_modified: {exc}",
+                    component="harness",
+                )
+
+        return TaskCompletionData(
+            success=agent_response.success,
+            goal_achieved=agent_response.goal_achieved,
+            goal=goal or user_input[:100],
+            files_written=files_written,
+            files_read=files_read,
+            tools_used=agent_response.tools_used or [],
+            tool_call_count=len(agent_response.tools_used or []),
+            steps_completed=steps_completed,
+            steps_failed=steps_failed,
+            steps_skipped=steps_skipped,
+            duration_ms=duration_ms,
+            symbols_modified=symbols_modified,
+            plan_steps=plan_steps,
+            final_response=agent_response.content or "",
+        )
+
+    def _build_skill_context(
+        self,
+        skill: SkillDefinition,
+        user_input: str,
+        existing_context: Optional[str],
+    ) -> str:
+        """Build context string with skill instructions injected for agent."""
+        parts = []
+
+        # Add skill instructions as primary context
+        parts.append(f"## Active Skill: {skill.name}")
+        parts.append("")
+        parts.append("You are operating under the following skill instructions. Follow them carefully:")
+        parts.append("")
+        parts.append(skill.instructions or "")
+        parts.append("")
+        parts.append("---")
+        parts.append("")
+
+        # Append any existing context
+        if existing_context:
+            parts.append("## Additional Context")
+            parts.append("")
+            parts.append(existing_context)
+            parts.append("")
+
+        return "\n".join(parts)
 
     def _get_tool_progress_message(self, tool_name: str, step_number: int) -> Optional[str]:
         """
@@ -495,6 +658,49 @@ class AgentHarness:
         """
         self._injected_context.put(context)
         self.logger.info(f"Context injected: {context}", component="harness")
+
+    def resume_with_answer(self, answer: str) -> HarnessResponse:
+        """
+        Resume execution after user provides an answer to ask_user prompt.
+
+        Args:
+            answer: The user's response to the question
+
+        Returns:
+            HarnessResponse with continued execution results
+        """
+        start_time = time.time()
+        self._set_state(HarnessState.AGENT_WORKING)
+
+        try:
+            agent_response = self.agent.resume_with_answer(answer)
+            duration_ms = (time.time() - start_time) * 1000
+
+            is_paused = agent_response.paused
+            user_prompt = agent_response.user_prompt
+            final_state = HarnessState.PAUSED if is_paused else HarnessState.IDLE
+
+            self._set_state(final_state)
+
+            return HarnessResponse(
+                full_response=agent_response.content,
+                agent_response=agent_response,
+                spoken_response=agent_response.content,
+                state=final_state,
+                duration_ms=duration_ms,
+                paused=is_paused,
+                user_prompt=user_prompt,
+            )
+        except Exception as e:
+            self._set_state(HarnessState.ERROR)
+            self.logger.error(f"Resume with answer failed: {e}", component="harness")
+            return HarnessResponse(
+                full_response=f"Error resuming: {str(e)}",
+                agent_response=None,
+                spoken_response="I'm sorry, something went wrong.",
+                state=HarnessState.ERROR,
+                duration_ms=(time.time() - start_time) * 1000,
+            )
 
     @property
     def is_stop_requested(self) -> bool:

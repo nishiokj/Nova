@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Literal
+from typing import List, Optional, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -50,30 +50,15 @@ class TriggerDefinition(BaseModel):
         return self
 
 
-class SkillStep(BaseModel):
-    name: str
-    tool: str
-    args: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ToolStep(BaseModel):
-    name: str
-    tool: str
-    args: Dict[str, Any] = Field(default_factory=dict)
-
-
 class SkillDefinition(BaseModel):
     id: str = Field(pattern=ID_PATTERN.pattern)
     name: str
     description: str
     version: str
-    type: Literal["workflow", "tool_chain"]
+    type: Literal["instructions"] = "instructions"
     triggers: List[TriggerDefinition]
-    input_schema: Dict[str, Any]
-    output_schema: Optional[Dict[str, Any]] = None
-    steps: Optional[List[SkillStep]] = None
-    tool_chain: Optional[List[ToolStep]] = None
-    allowed_tools: List[str]
+    instructions: Optional[str] = None  # Markdown instructions for agent to follow
+    allowed_tools: List[str] = Field(default_factory=lambda: ["*"])
     timeout_ms: int = 30000
     enabled: bool = True
     tags: List[str] = Field(default_factory=list)
@@ -84,13 +69,6 @@ class SkillDefinition(BaseModel):
     @classmethod
     def validate_timestamps(cls, value: str) -> str:
         _parse_rfc3339(value)
-        return value
-
-    @field_validator("input_schema")
-    @classmethod
-    def validate_input_schema(cls, value: Dict[str, Any]) -> Dict[str, Any]:
-        if value.get("type") != "object":
-            raise ValueError("input_schema must be type object")
         return value
 
     @field_validator("allowed_tools")
@@ -106,14 +84,6 @@ class SkillDefinition(BaseModel):
     def validate_steps(self) -> "SkillDefinition":
         if not self.triggers:
             raise ValueError("skill requires at least one trigger")
-        if self.type == "workflow":
-            if not self.steps:
-                raise ValueError("workflow skills require steps")
-            if self.tool_chain:
-                raise ValueError("workflow skills must not include tool_chain")
-        elif self.type == "tool_chain":
-            if not self.tool_chain:
-                raise ValueError("tool_chain skills require tool_chain")
-            if self.steps:
-                raise ValueError("tool_chain skills must not include steps")
+        if not self.instructions:
+            raise ValueError("instruction skills require instructions field")
         return self
