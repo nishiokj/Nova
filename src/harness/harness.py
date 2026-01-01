@@ -257,7 +257,10 @@ class AgentHarness:
                     elif isinstance(skill_result.output, str):
                         full_response = skill_result.output
                     else:
-                        full_response = json.dumps(skill_result.output, indent=2, ensure_ascii=True)
+                        try:
+                            full_response = json.dumps(skill_result.output, indent=2, ensure_ascii=True)
+                        except TypeError:
+                            full_response = str(skill_result.output)
 
                     agent_response = AgentResponse(
                         content=full_response,

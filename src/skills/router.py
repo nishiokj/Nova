@@ -96,6 +96,7 @@ class SkillRouter:
             for trigger in skill.triggers:
                 if trigger.type == "semantic":
                     candidates.append((skill, trigger))
+                    break
 
         if not candidates:
             return None

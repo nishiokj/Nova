@@ -265,6 +265,12 @@ class JSONLBridge:
         def on_voice_error(message: str) -> None:
             self._send_error(message)
 
+        self.voice_service.on_error = on_voice_error
+        started = self.voice_service.start()
+        if not started:
+            self.voice_service = None
+            self.voice_mailbox = None
+
     def _setup_skills_hooks(self) -> None:
         if not self.config:
             return
@@ -288,13 +294,6 @@ class JSONLBridge:
             self.skill_runner = SkillRunner(self.tool_registry, logger=structured_logger)
         except Exception as exc:
             self.logger.warning(f"Skill/hook setup failed: {exc}")
-            self._set_state("error", message)
-
-        self.voice_service.on_error = on_voice_error
-        started = self.voice_service.start()
-        if not started:
-            self.voice_service = None
-            self.voice_mailbox = None
 
     def _handle_send_text(self, data: Dict[str, Any]) -> None:
         if not self.event_bus:
@@ -491,7 +490,10 @@ class JSONLBridge:
             if isinstance(result.output, str):
                 content = result.output
             else:
-                content = json.dumps(result.output, indent=2, ensure_ascii=True)
+                try:
+                    content = json.dumps(result.output, indent=2, ensure_ascii=True)
+                except TypeError:
+                    content = str(result.output)
         else:
             content = result.error or "Skill execution failed"
 

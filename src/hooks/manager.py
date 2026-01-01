@@ -58,7 +58,13 @@ def _coerce_tool_policy(value: Any) -> ToolPolicy:
     if isinstance(value, dict):
         allow = value.get("allow") or value.get("allowed")
         deny = value.get("deny") or value.get("blocked")
-        return ToolPolicy(allow=list(allow) if allow is not None else None, deny=list(deny) if deny is not None else None)
+        allow_list = None
+        deny_list = None
+        if allow is not None:
+            allow_list = [allow] if isinstance(allow, str) else list(allow)
+        if deny is not None:
+            deny_list = [deny] if isinstance(deny, str) else list(deny)
+        return ToolPolicy(allow=allow_list, deny=deny_list)
     if isinstance(value, list):
         return ToolPolicy(allow=[str(v) for v in value], deny=None)
     if isinstance(value, str):
@@ -97,7 +103,20 @@ class HookManager:
                 msg = f"Hook '{hook.id}' failed: {exc}"
                 if hook.fail_open or self.config.default_fail_open:
                     self.logger.warning(msg, component="hooks")
-                    decisions.append(HookDecision(hook_id=hook.id, action_type=hook.action.type, error=str(exc)))
+                    decision = HookDecision(hook_id=hook.id, action_type=hook.action.type, error=str(exc))
+                    decisions.append(decision)
+                    self.logger.info(
+                        f"Hook decision {hook.id}",
+                        component="hooks",
+                        data={
+                            "trigger": trigger,
+                            "hook_id": hook.id,
+                            "action": hook.action.type,
+                            "blocked": False,
+                            "applied_ops": [],
+                            "error": str(exc),
+                        },
+                    )
                     continue
                 return HookResult(blocked=True, message=msg, decisions=decisions, errors=[str(exc)])
 
@@ -106,7 +125,20 @@ class HookManager:
                 msg = f"Hook '{hook.id}' timed out after {hook.timeout_ms} ms"
                 if hook.fail_open or self.config.default_fail_open:
                     self.logger.warning(msg, component="hooks")
-                    decisions.append(HookDecision(hook_id=hook.id, action_type=hook.action.type, error=msg))
+                    decision = HookDecision(hook_id=hook.id, action_type=hook.action.type, error=msg)
+                    decisions.append(decision)
+                    self.logger.info(
+                        f"Hook decision {hook.id}",
+                        component="hooks",
+                        data={
+                            "trigger": trigger,
+                            "hook_id": hook.id,
+                            "action": hook.action.type,
+                            "blocked": False,
+                            "applied_ops": [],
+                            "error": msg,
+                        },
+                    )
                     continue
                 return HookResult(blocked=True, message=msg, decisions=decisions, errors=[msg])
 
