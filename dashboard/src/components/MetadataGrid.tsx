@@ -1,3 +1,5 @@
+import { cn } from '../lib/utils'
+
 export function MetadataGrid({
   title,
   items,
@@ -9,14 +11,18 @@ export function MetadataGrid({
 }) {
   const entries = Object.entries(items).filter(([, v]) => v !== undefined && v !== null)
 
+  if (entries.length === 0) return null
+
   return (
-    <div className="rounded-xl bg-white shadow-sm ring-1 ring-slate-200">
-      {title ? <div className="px-3 py-2 text-sm font-medium">{title}</div> : null}
+    <div>
+      {title && <div className="mb-2 text-sm font-medium text-slate-900">{title}</div>}
       <dl
-        className={[
-          'grid gap-x-6 gap-y-2 px-3 pb-3 text-xs',
-          columns === 1 ? 'grid-cols-1' : columns === 2 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-3',
-        ].join(' ')}
+        className={cn(
+          'grid gap-x-6 gap-y-1 text-sm',
+          columns === 1 && 'grid-cols-1',
+          columns === 2 && 'grid-cols-1 sm:grid-cols-2',
+          columns === 3 && 'grid-cols-1 sm:grid-cols-3'
+        )}
       >
         {entries.map(([k, v]) => (
           <div key={k} className="flex items-center justify-between gap-3">

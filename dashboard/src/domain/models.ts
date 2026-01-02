@@ -8,6 +8,84 @@ export type RequestState = 'queued' | 'running' | 'success' | 'error' | 'cancell
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
+// ============================================
+// AGENT EXECUTION TYPES
+// ============================================
+
+export type StepStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+export type StepPhase = 'discovery' | 'execution';
+
+export interface PlanStep {
+  stepNum: number;
+  objective: string;
+  status: StepStatus;
+  phase: StepPhase;
+  toolHint?: string;
+  required: boolean;
+  durationMs?: number;
+  error?: string;
+}
+
+export interface ToolCall {
+  id: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  result?: string;
+  success: boolean;
+  durationMs: number;
+  timestamp: ISODateTime;
+}
+
+export type ReflectionVerdict = 'accept' | 'accept_extend' | 'redo' | 'abort_step' | 'abort_goal';
+
+export interface Reflection {
+  verdict: ReflectionVerdict;
+  confidence: number;
+  qualityScore: number;
+  reasoning?: string;
+  issues: string[];
+}
+
+export type TaskState = 'queued' | 'running' | 'success' | 'error' | 'cancelled';
+
+export interface AgentTask {
+  id: string;
+  sessionId: string;
+  state: TaskState;
+  userInput: string;
+  createdAt: ISODateTime;
+  startedAt?: ISODateTime;
+  endedAt?: ISODateTime;
+
+  // Execution data
+  plan?: {
+    goal: string;
+    steps: PlanStep[];
+  };
+  toolCalls: ToolCall[];
+  reflection?: Reflection;
+
+  // Metrics
+  stepsCompleted: number;
+  stepsTotal: number;
+  totalToolCalls: number;
+  durationMs?: number;
+
+  // Errors
+  errorMessage?: string;
+}
+
+export interface TaskInsights {
+  durationMs?: number;
+  stepProgress: number; // 0-1
+  hasErrors: boolean;
+  qualityScore?: number;
+}
+
+// ============================================
+// LEGACY TYPES (kept for compatibility)
+// ============================================
+
 export type LatencyPercentiles = {
   p50?: number;
   p90?: number;
@@ -16,63 +94,56 @@ export type LatencyPercentiles = {
 };
 
 export type RequestInsights = {
-  /** Derived duration between startedAt and endedAt (ms). */
   durationMs?: number;
-  /** Placeholder for per-request percentiles when applicable (e.g. streaming/chunked). */
   latency?: LatencyPercentiles;
 };
 
 export type SessionInsights = {
-  /** Derived session duration between startedAt and endedAt/now (ms). */
   durationMs: number;
-  /** errorCount / totalRequests */
   errorRate: number;
-  /** Aggregated latency percentiles for requests (placeholder if no durations). */
   latency: LatencyPercentiles;
+  // New task-based metrics
+  taskCount: number;
+  tasksRunning: number;
+  tasksFailed: number;
+  tasksCompleted: number;
+  avgQuality?: number;
 };
 
 export type Request = {
   id: string;
   sessionId: string;
-
   state: RequestState;
   method: HttpMethod;
   path: string;
-
   createdAt: ISODateTime;
   startedAt?: ISODateTime;
   endedAt?: ISODateTime;
-
   httpStatus?: number;
   errorCode?: string;
   errorMessage?: string;
-
-  /** Client/server provided metadata */
   meta: KV;
-
-  /** Computed fields for UI */
   insights: RequestInsights;
 };
 
 export type Session = {
   id: string;
   userId: string;
-
   state: SessionState;
   env: Environment;
-
   createdAt: ISODateTime;
   startedAt: ISODateTime;
   endedAt?: ISODateTime;
-
   tags: string[];
   meta: KV;
-
   requests: Request[];
-
-  /** Computed fields for UI */
+  tasks: AgentTask[];
   insights: SessionInsights;
 };
+
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
 
 export function msBetween(a: ISODateTime, b: ISODateTime): number {
   return new Date(b).getTime() - new Date(a).getTime();
@@ -87,6 +158,18 @@ export function computeRequestInsights(r: Omit<Request, 'insights'>): RequestIns
   return {
     durationMs,
     latency: undefined,
+  };
+}
+
+export function computeTaskInsights(t: AgentTask): TaskInsights {
+  const durationMs = t.startedAt && t.endedAt ? msBetween(t.startedAt, t.endedAt) : undefined;
+  const stepProgress = t.stepsTotal > 0 ? t.stepsCompleted / t.stepsTotal : 0;
+
+  return {
+    durationMs,
+    stepProgress,
+    hasErrors: t.state === 'error' || (t.plan?.steps.some(s => s.status === 'failed') ?? false),
+    qualityScore: t.reflection?.qualityScore,
   };
 }
 
@@ -110,6 +193,19 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
     return durs[idx];
   };
 
+  // Task metrics
+  const taskCount = s.tasks.length;
+  const tasksRunning = s.tasks.filter(t => t.state === 'running').length;
+  const tasksFailed = s.tasks.filter(t => t.state === 'error').length;
+  const tasksCompleted = s.tasks.filter(t => t.state === 'success').length;
+
+  const qualityScores = s.tasks
+    .map(t => t.reflection?.qualityScore)
+    .filter((q): q is number => typeof q === 'number');
+  const avgQuality = qualityScores.length > 0
+    ? qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length
+    : undefined;
+
   return {
     durationMs,
     errorRate,
@@ -119,5 +215,23 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
       p95: percentile(95),
       p99: percentile(99),
     },
+    taskCount,
+    tasksRunning,
+    tasksFailed,
+    tasksCompleted,
+    avgQuality,
   };
+}
+
+// ============================================
+// FILTER TYPES
+// ============================================
+
+export type FilterType = 'all' | 'errors' | 'running' | 'completed';
+
+export interface FilterCounts {
+  all: number;
+  errors: number;
+  running: number;
+  completed: number;
 }

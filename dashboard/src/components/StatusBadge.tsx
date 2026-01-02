@@ -1,36 +1,72 @@
-import React from 'react'
+import { cn } from '../lib/utils'
 
-export type StatusTone = 'slate' | 'green' | 'red' | 'amber' | 'blue' | 'violet'
+export type StatusTone = 'neutral' | 'success' | 'error' | 'active' | 'warning'
 
-const toneClass: Record<StatusTone, string> = {
-  slate: 'bg-slate-100 text-slate-700 ring-slate-200',
-  green: 'bg-emerald-100 text-emerald-800 ring-emerald-200',
-  red: 'bg-rose-100 text-rose-800 ring-rose-200',
-  amber: 'bg-amber-100 text-amber-900 ring-amber-200',
-  blue: 'bg-sky-100 text-sky-900 ring-sky-200',
-  violet: 'bg-violet-100 text-violet-900 ring-violet-200',
+const toneClasses: Record<StatusTone, string> = {
+  neutral: 'bg-[var(--pending-bg)] text-[var(--text-secondary)] border-[var(--border-subtle)]',
+  success: 'bg-[var(--success-bg)] text-[var(--success)] border-[var(--success-muted)]',
+  error: 'bg-[var(--error-bg)] text-[var(--error)] border-[var(--error-muted)]',
+  active: 'bg-[var(--running-bg)] text-[var(--running)] border-[var(--running-muted)]',
+  warning: 'bg-[var(--warning-bg)] text-[var(--warning)] border-[var(--warning-muted)]',
 }
 
 export function StatusBadge({
-  tone = 'slate',
+  tone = 'neutral',
   children,
   className,
+  pulse = false,
 }: {
   tone?: StatusTone
   children: React.ReactNode
   className?: string
+  pulse?: boolean
 }) {
   return (
     <span
-      className={[
-        'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset',
-        toneClass[tone],
-        className,
-      ]
-        .filter(Boolean)
-        .join(' ')}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-xs font-medium border',
+        'font-mono tracking-tight',
+        toneClasses[tone],
+        pulse && 'animate-pulse-glow',
+        className
+      )}
     >
       {children}
     </span>
+  )
+}
+
+// Dot indicator for compact status display
+export function StatusDot({
+  status,
+  size = 'sm',
+  pulse = false,
+  className,
+}: {
+  status: 'success' | 'error' | 'running' | 'pending' | 'skipped'
+  size?: 'sm' | 'md'
+  pulse?: boolean
+  className?: string
+}) {
+  const sizeClass = size === 'sm' ? 'w-2 h-2' : 'w-3 h-3'
+
+  const colorClass = {
+    success: 'bg-[var(--success)]',
+    error: 'bg-[var(--error)]',
+    running: 'bg-[var(--running)]',
+    pending: 'bg-[var(--pending)]',
+    skipped: 'bg-[var(--pending)] opacity-50',
+  }[status]
+
+  return (
+    <span
+      className={cn(
+        'inline-block rounded-full',
+        sizeClass,
+        colorClass,
+        pulse && status === 'running' && 'animate-pulse-glow',
+        className
+      )}
+    />
   )
 }
