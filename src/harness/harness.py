@@ -382,6 +382,7 @@ class AgentHarness:
                     "tier": tier,
                     "tools_used": agent_response.tools_used if agent_response else [],
                     "session_key": session_key,
+                    "error": agent_response.error if agent_response else None,
                 },
                 paused=is_paused,
                 user_prompt=user_prompt,
@@ -396,7 +397,21 @@ class AgentHarness:
                     assistant_response=full_response,
                     tools_used=agent_response.tools_used if agent_response else [],
                     duration_ms=duration_ms,
+                    agent_metadata=agent_response.metadata if agent_response else None,
                 )
+
+                # Persist code review results from hook annotations
+                code_review = invocation_context.annotations.get("code_review")
+                if code_review:
+                    self.graphd.session_update_metadata(session_key, {
+                        "code_review": code_review,
+                        "code_review_risk": invocation_context.annotations.get("code_review_risk"),
+                    })
+                    self.logger.info(
+                        f"Code review persisted to session {session_key}: "
+                        f"risk={code_review.get('risk_level')}, affected={code_review.get('affected_count')}",
+                        component="harness",
+                    )
 
                 # Persist final context state for next request hydration
                 final_context = agent_response.metadata.get("final_context_state") if agent_response else None
@@ -518,9 +533,7 @@ class AgentHarness:
                         normalized_ctx_reads.append(os.path.abspath(os.path.join(base_dir, path_str)))
                 files_read = list(dict.fromkeys(files_read + normalized_ctx_reads))
 
-        plan_steps = metadata.get("plan_steps", [])
-        if not isinstance(plan_steps, list):
-            plan_steps = []
+        plan_steps: List[Dict[str, Any]] = []
 
         symbols_modified = metadata.get("symbols_modified", [])
         if not isinstance(symbols_modified, list):
@@ -602,13 +615,13 @@ class AgentHarness:
         tool_lower = tool_name.lower()
 
         # Map tools to progress messages
-        if "search" in tool_lower or "web" in tool_lower or "fast_answer" in tool_lower:
+        if "search" in tool_lower or "web" in tool_lower or "fast_answer" in tool_lower or "grep" in tool_lower or "glob" in tool_lower:
             return "Searching now."
         elif "fetch" in tool_lower or "get" in tool_lower:
             return "Getting that information."
         elif "read" in tool_lower or "file" in tool_lower:
             return "Reading the file."
-        elif "write" in tool_lower or "save" in tool_lower:
+        elif "write" in tool_lower or "save" in tool_lower or "edit" in tool_lower:
             return "Writing the file."
         elif "bash" in tool_lower or "command" in tool_lower or "exec" in tool_lower:
             return "Running the command."
@@ -731,6 +744,7 @@ class AgentHarness:
         assistant_response: str,
         tools_used: List[str],
         duration_ms: float,
+        agent_metadata: Optional[Dict[str, Any]] = None,
     ):
         """
         Persist conversation data to GraphDB for the session.
@@ -738,6 +752,7 @@ class AgentHarness:
         This is called after each successful request to store:
         - User message
         - Assistant response with metadata
+        - Wizard execution telemetry (events, tool calls)
 
         Args:
             session_key: Session key for persistence
@@ -746,6 +761,7 @@ class AgentHarness:
             assistant_response: Agent's response
             tools_used: List of tools used
             duration_ms: Request duration in milliseconds
+            agent_metadata: Optional metadata from agent response (contains wizard_events)
         """
         if not self.graphd:
             return
@@ -770,6 +786,28 @@ class AgentHarness:
                     "duration_ms": duration_ms,
                 },
             )
+
+            # Persist wizard telemetry to session metadata for dashboard
+            if agent_metadata:
+                session_telemetry = {}
+                wizard_events = agent_metadata.get("wizard_events")
+
+                if wizard_events:
+                    session_telemetry["wizard_events"] = wizard_events
+                    # Log event types for debugging
+                    event_types = [e.get("type", "unknown") for e in wizard_events if isinstance(e, dict)]
+                    self.logger.info(
+                        f"Wizard events to persist: {len(wizard_events)} total, types={event_types}",
+                        component="harness",
+                    )
+
+                if session_telemetry:
+                    result = self.graphd.session_update_metadata(session_key, session_telemetry)
+                    self.logger.info(
+                        f"Wizard telemetry persisted to {session_key}: success={result.get('success', False)}, "
+                        f"events={len(session_telemetry.get('wizard_events', []))}",
+                        component="harness",
+                    )
 
             self.logger.debug(
                 f"Session data persisted for {session_key}",

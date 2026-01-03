@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
@@ -47,6 +47,14 @@ export interface StoreSnapshot {
   };
   requestCount: number;
   historyVersion: number;
+  // Question flow state
+  activeQuestion: AgentQuestion | null;
+  questionSelection: number[];
+  questionCursor: number;
+  questionInput: string;
+  // Paste state
+  pasteInProgress: boolean;
+  pasteBytesReceived: number;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -87,6 +95,16 @@ export class Store {
   private historyVersion = 0;
   private maxHistory: number;
   private listeners = new Set<() => void>();
+
+  // Question flow state
+  private activeQuestion: AgentQuestion | null = null;
+  private questionSelection: number[] = [];
+  private questionCursor = 0;
+  private questionInput = "";
+
+  // Paste state
+  private pasteInProgress = false;
+  private pasteBytesReceived = 0;
 
   private historyCache: {
     width: number;
@@ -136,6 +154,14 @@ export class Store {
       capabilities: { ...this.capabilities },
       requestCount: this.requestCount,
       historyVersion: this.historyVersion,
+      // Question flow state
+      activeQuestion: this.activeQuestion,
+      questionSelection: [...this.questionSelection],
+      questionCursor: this.questionCursor,
+      questionInput: this.questionInput,
+      // Paste state
+      pasteInProgress: this.pasteInProgress,
+      pasteBytesReceived: this.pasteBytesReceived,
     };
   }
 
@@ -302,6 +328,21 @@ export class Store {
     for (const entry of this.history) {
       if (entry.requestId === requestId) {
         entry.meta = meta;
+        this.historyVersion += 1;
+        this.historyCache = null;
+        this.emit();
+        return;
+      }
+    }
+  }
+
+  updateMessageText(requestId: string, text: string, meta?: string): void {
+    for (const entry of this.history) {
+      if (entry.requestId === requestId) {
+        entry.text = text;
+        if (meta !== undefined) {
+          entry.meta = meta;
+        }
         this.historyVersion += 1;
         this.historyCache = null;
         this.emit();
@@ -569,6 +610,169 @@ export class Store {
 
     return lines;
   }
+
+  // ==================== Question Flow Methods ====================
+
+  /**
+   * Sets the active question and enters question mode.
+   */
+  setActiveQuestion(question: AgentQuestion | null): void {
+    this.activeQuestion = question;
+    this.questionSelection = [];
+    this.questionCursor = 0;
+    this.questionInput = question?.defaultValue || "";
+    if (question) {
+      this.uiMode = "question";
+    }
+    this.emit();
+  }
+
+  /**
+   * Navigates up or down in the question options.
+   */
+  selectQuestionOption(delta: number): void {
+    if (!this.activeQuestion?.options) return;
+    const count = this.activeQuestion.options.length;
+    if (count === 0) return;
+    this.questionCursor = (this.questionCursor + delta + count) % count;
+    this.emit();
+  }
+
+  /**
+   * Toggles selection of the current option.
+   * For single-select (multiple_choice, yes_no), replaces selection.
+   * For multi-select, toggles the current option.
+   */
+  toggleQuestionSelection(): void {
+    if (!this.activeQuestion) return;
+
+    if (
+      this.activeQuestion.type === "multiple_choice" ||
+      this.activeQuestion.type === "yes_no"
+    ) {
+      // Single selection - replace
+      this.questionSelection = [this.questionCursor];
+    } else if (this.activeQuestion.type === "multi_select") {
+      // Toggle selection
+      const idx = this.questionSelection.indexOf(this.questionCursor);
+      if (idx >= 0) {
+        this.questionSelection.splice(idx, 1);
+      } else {
+        this.questionSelection.push(this.questionCursor);
+      }
+    }
+    this.emit();
+  }
+
+  /**
+   * Updates the text input for fill_in_blank/free_text questions.
+   */
+  setQuestionInput(text: string): void {
+    this.questionInput = text;
+    this.emit();
+  }
+
+  /**
+   * Appends text to the question input.
+   */
+  appendQuestionInput(text: string): void {
+    this.questionInput += text;
+    this.emit();
+  }
+
+  /**
+   * Backspaces one character from question input.
+   */
+  backspaceQuestionInput(): void {
+    if (this.questionInput.length > 0) {
+      this.questionInput = this.questionInput.slice(0, -1);
+      this.emit();
+    }
+  }
+
+  /**
+   * Gets the answer in the appropriate format for the question type.
+   */
+  getQuestionAnswer(): unknown {
+    if (!this.activeQuestion) return null;
+
+    switch (this.activeQuestion.type) {
+      case "multiple_choice":
+      case "yes_no":
+        if (this.questionSelection.length === 0) return null;
+        return this.activeQuestion.options?.[this.questionSelection[0]]?.id;
+      case "multi_select":
+        return this.questionSelection.map(
+          (i) => this.activeQuestion!.options![i]?.id
+        );
+      case "fill_in_blank":
+      case "free_text":
+        return this.questionInput;
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Clears the active question and returns to chat mode.
+   */
+  clearQuestion(): void {
+    this.activeQuestion = null;
+    this.questionSelection = [];
+    this.questionCursor = 0;
+    this.questionInput = "";
+    this.uiMode = "chat";
+    this.emit();
+  }
+
+  // ==================== Paste Methods ====================
+
+  /**
+   * Updates paste progress for large paste operations.
+   */
+  setPasteProgress(bytes: number): void {
+    this.pasteInProgress = true;
+    this.pasteBytesReceived = bytes;
+    this.statusMessage = `Pasting... ${formatBytes(bytes)}`;
+    this.emit();
+  }
+
+  /**
+   * Inserts pasted text using the optimized bulk insert.
+   */
+  insertPastedText(text: string): void {
+    this.inputBuffer.insertBulkText(text);
+    this.pasteInProgress = false;
+    this.pasteBytesReceived = 0;
+    this.statusMessage = "Ready";
+    this.emit();
+  }
+
+  /**
+   * Checks if a paste operation is in progress.
+   */
+  isPasting(): boolean {
+    return this.pasteInProgress;
+  }
+
+  /**
+   * Clears paste progress state.
+   */
+  clearPasteProgress(): void {
+    this.pasteInProgress = false;
+    this.pasteBytesReceived = 0;
+    this.statusMessage = "Ready";
+    this.emit();
+  }
+}
+
+/**
+ * Formats bytes into a human-readable string.
+ */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function defaultStatusFor(state: TUIState): string {

@@ -8,7 +8,7 @@
       "turns": [
         {
           "prompt": "Create a Python class called 'BankAccount' with __init__ that takes an initial balance parameter. Save it to bank_account.py",
-          "expected_actions": ["file_write"],
+          "expected_actions": ["Write"],
           "success_criteria": [
             "File bank_account.py exists",
             "Class BankAccount is defined",
@@ -17,7 +17,7 @@
         },
         {
           "prompt": "Add a deposit() method that adds money to the balance. The method should validate that the amount is positive.",
-          "expected_actions": ["file_read", "file_write"],
+          "expected_actions": ["Read", "Edit"],
           "success_criteria": [
             "deposit() method added",
             "Validation for positive amount present",
@@ -26,7 +26,7 @@
         },
         {
           "prompt": "Add a withdraw() method that subtracts money from the balance. It should check for sufficient funds.",
-          "expected_actions": ["file_read", "file_write"],
+          "expected_actions": ["Read", "Edit"],
           "success_criteria": [
             "withdraw() method added",
             "Insufficient funds check present",
@@ -35,7 +35,7 @@
         },
         {
           "prompt": "Write comprehensive unit tests in test_bank_account.py and run them using pytest.",
-          "expected_actions": ["file_write", "bash_execute"],
+          "expected_actions": ["Write", "Bash"],
           "success_criteria": [
             "Test file created",
             "Tests cover deposit, withdraw, and edge cases",
@@ -56,7 +56,7 @@
       "turns": [
         {
           "prompt": "Search the codebase for files that handle user authentication. List all relevant files.",
-          "expected_actions": ["grep", "file_search"],
+          "expected_actions": ["Grep", "Glob"],
           "success_criteria": [
             "Authentication-related files identified",
             "List provided to user"
@@ -64,7 +64,7 @@
         },
         {
           "prompt": "Read the main authentication file and identify potential security vulnerabilities.",
-          "expected_actions": ["file_read"],
+          "expected_actions": ["Read"],
           "success_criteria": [
             "File content analyzed",
             "Vulnerabilities identified"
@@ -72,7 +72,7 @@
         },
         {
           "prompt": "Fix the identified vulnerabilities in the authentication code.",
-          "expected_actions": ["file_read", "file_write"],
+          "expected_actions": ["Read", "Edit"],
           "success_criteria": [
             "Vulnerabilities fixed",
             "Code still functional",
@@ -81,7 +81,7 @@
         },
         {
           "prompt": "Run the security tests to verify the fixes don't break existing functionality.",
-          "expected_actions": ["bash_execute"],
+          "expected_actions": ["Bash"],
           "success_criteria": [
             "Tests executed",
             "All tests pass"
@@ -97,7 +97,7 @@
       "turns": [
         {
           "prompt": "Analyze the data_processor.py file and identify code smells and areas for improvement.",
-          "expected_actions": ["file_read"],
+          "expected_actions": ["Read"],
           "success_criteria": [
             "File analyzed",
             "Code smells identified",
@@ -106,7 +106,7 @@
         },
         {
           "prompt": "Extract the validation logic into a separate ValidationService class in validation.py",
-          "expected_actions": ["file_read", "file_write"],
+          "expected_actions": ["Read", "Edit"],
           "success_criteria": [
             "New validation.py file created",
             "ValidationService class properly defined",
@@ -115,7 +115,7 @@
         },
         {
           "prompt": "Update data_processor.py to use the new ValidationService and remove old validation code.",
-          "expected_actions": ["file_read", "file_write"],
+          "expected_actions": ["Read", "Edit"],
           "success_criteria": [
             "data_processor.py updated",
             "Uses ValidationService",
@@ -124,7 +124,7 @@
         },
         {
           "prompt": "Run all tests to ensure the refactoring didn't break anything.",
-          "expected_actions": ["bash_execute"],
+          "expected_actions": ["Bash"],
           "success_criteria": [
             "Tests executed",
             "All tests pass",
@@ -133,7 +133,7 @@
         },
         {
           "prompt": "Update documentation to reflect the new architecture.",
-          "expected_actions": ["file_read", "file_write"],
+          "expected_actions": ["Read", "Edit"],
           "success_criteria": [
             "Documentation updated",
             "New architecture explained",
@@ -150,7 +150,7 @@
       "turns": [
         {
           "prompt": "Read the contents of nonexistent_file.txt",
-          "expected_actions": ["file_read"],
+          "expected_actions": ["Read"],
           "success_criteria": [
             "Agent handles missing file gracefully",
             "Appropriate error message"
@@ -158,7 +158,7 @@
         },
         {
           "prompt": "Create the file with some default content and read it again.",
-          "expected_actions": ["file_write", "file_read"],
+          "expected_actions": ["Write", "Read"],
           "success_criteria": [
             "File created",
             "Content read successfully"
@@ -174,14 +174,14 @@
       "turns": [
         {
           "prompt": "Create a file called config.json with the following content: {\"key\": \"value\", invalid}",
-          "expected_actions": ["file_write"],
+          "expected_actions": ["Write"],
           "success_criteria": [
             "File created with malformed JSON"
           ]
         },
         {
           "prompt": "Read config.json and parse it as JSON.",
-          "expected_actions": ["file_read"],
+          "expected_actions": ["Read"],
           "success_criteria": [
             "Agent handles JSON parse error",
             "Clear error message provided"
@@ -189,7 +189,7 @@
         },
         {
           "prompt": "Fix the malformed JSON in config.json",
-          "expected_actions": ["file_read", "file_write"],
+          "expected_actions": ["Read", "Edit"],
           "success_criteria": [
             "JSON syntax fixed",
             "File is valid JSON now"
@@ -205,7 +205,7 @@
       "turns": [
         {
           "prompt": "Search for all Python files in the project, then analyze the top 3 largest files.",
-          "expected_actions": ["file_search", "file_read"],
+          "expected_actions": ["Glob", "Read"],
           "success_criteria": [
             "Search completed",
             "Top 3 files identified",
@@ -214,7 +214,7 @@
         },
         {
           "prompt": "Create a summary report of the analysis in analysis_report.md",
-          "expected_actions": ["file_write"],
+          "expected_actions": ["Write"],
           "success_criteria": [
             "Report file created",
             "Summary includes key findings"
@@ -222,7 +222,7 @@
         },
         {
           "prompt": "Run a complexity analysis using radon or similar tool on the identified files.",
-          "expected_actions": ["bash_execute"],
+          "expected_actions": ["Bash"],
           "success_criteria": [
             "Complexity analysis run",
             "Results captured"

@@ -196,7 +196,7 @@ def build_files_message(files: Sequence[Tuple[str, str]]) -> Optional[Dict[str, 
         lines.append("```")
         lines.append("")
 
-    lines.append("Do NOT call file_read on these paths.")
+    lines.append("Do NOT call Read on these paths.")
 
     return {"role": "user", "content": "\n".join(lines)}
 

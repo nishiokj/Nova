@@ -149,6 +149,7 @@ class Agent:
                 config=WizardConfig(),
                 logger=self.logger,
             )
+            self._planner._event_emitter = self._wizard._emit_event
 
         # State
         self._stop_requested = False
@@ -306,6 +307,10 @@ class Agent:
 
         planning_context = self._render_context_for_planner(session_state, context)
 
+        # Reset wizard state for new request (clears token counters and events)
+        if self._wizard:
+            self._wizard.reset_for_new_request()
+
         # Create and execute plan via Wizard
         plan = self._planner.create_plan(
             user_input=user_input,
@@ -313,6 +318,7 @@ class Agent:
             tier=self.config.tier,
             budget=budget
         )
+        planner_events = self._wizard.drain_events() if self._wizard else []
         wizard_plan = convert_plan_to_wizard_plan(plan)
 
         result = self._wizard.orchestrate(
@@ -324,29 +330,45 @@ class Agent:
             session_context=session_state,
         )
 
+        result_error = None
+        if not result.success:
+            result_error = result.to_dict().get("error")
+            if not result_error:
+                result_error = "Unable to complete request. Check logs for details."
+
         # Build response metadata
-        response_metadata = result.to_dict().get("metadata", {})
+        result_dict = result.to_dict()
+        response_metadata = result_dict.get("metadata", {})
         if result.final_context_state:
             response_metadata["final_context_state"] = result.final_context_state
-        if result.plan_state:
-            response_metadata["plan_steps"] = [
-                {
-                    "step_num": step.step_num,
-                    "objective": step.objective,
-                    "tool_hint": step.tool_hint,
-                    "status": step.status.value,
-                    "phase": step.phase.value,
-                    "depends_on": list(step.depends_on),
-                    "required": step.required,
-                }
-                for step in sorted(result.plan_state.steps.values(), key=lambda s: s.step_num)
+        if result_error:
+            response_metadata["error"] = result_error
+
+        # Include wizard events (planner + execution) for dashboard telemetry
+        merged_events = []
+        if planner_events:
+            merged_events.extend(planner_events)
+        if result.events:
+            merged_events.extend(result.events)
+        if merged_events:
+            response_metadata["wizard_events"] = [
+                event.to_dict() for event in merged_events
             ]
+            self.logger.info(
+                f"Agent collected {len(merged_events)} wizard events for dashboard",
+                component="agent",
+            )
+
+        content = result.final_response
+        if result_error and (not content or not content.strip() or content.strip() == "Task processing complete."):
+            content = result_error
 
         return AgentResponse(
-            content=result.final_response,
+            content=content,
             structured_action=result.plan_state.goal,
             total_duration_ms=result.duration_ms,
             success=result.success,
+            error=result_error,
             goal_achieved=result.goal_achieved,
             reflection=result.to_reflection(),
             metadata=response_metadata,
@@ -483,10 +505,14 @@ class TieredAgent:
         self.logger = logger or NullLogger()
         self._agent_logger = agent_logger
         self._prepare_tier_runtimes()
+        self._last_tier_used = self._current_tier
 
     def _get_tier_prompt(self, tier: str) -> str:
         """Get the appropriate system prompt for the tier"""
-        tools = self.tool_registry.list_tools(enabled_only=True)
+        tools = [
+            tool for tool in self.tool_registry.list_tools(enabled_only=True)
+            if not tool.name.startswith("graphd_")
+        ]
         tool_descriptions = "\n".join([f"- {t.name}: {t.description}" for t in tools])
 
         # Get prompt template from config
@@ -647,6 +673,7 @@ class TieredAgent:
                             Contains persisted messages, read_files, and cache state.
         """
         tier = tier or self._current_tier
+        self._last_tier_used = tier
 
         # Use budget from classification if provided, otherwise fall back to config
         if budget:
@@ -673,6 +700,24 @@ class TieredAgent:
             classification=classification,
             on_stream_chunk=on_stream_chunk,
             session_context=session_context,
+        )
+
+    def resume_with_answer(
+        self,
+        answer: str,
+        budget: Optional[Dict[str, int]] = None,
+        on_stream_chunk: Optional[Callable[[str, int, bool], None]] = None,
+    ) -> AgentResponse:
+        """
+        Delegate resume calls to the most recently used tier so ask_user follow-ups continue
+        in the same context.
+        """
+        tier = self._last_tier_used or self._current_tier
+        agent = self._get_agent(tier)
+        return agent.resume_with_answer(
+            answer=answer,
+            budget=budget,
+            on_stream_chunk=on_stream_chunk,
         )
 
     def set_tier(self, tier: str):

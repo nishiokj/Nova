@@ -12,14 +12,13 @@
     },
     "tool_config": {
       "enabled_tools": [
-        "file_read",
-        "file_write",
-        "python_execute",
-        "bash_execute",
-        "calculator",
-        "get_current_time",
-        "list_files",
-        "search_filesystem"
+        "Read",
+        "Write",
+        "Edit",
+        "Bash",
+        "Glob",
+        "Grep",
+        "python_execute"
       ]
     }
   },

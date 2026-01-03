@@ -444,7 +444,7 @@ class IsolatedAgentSession:
         tool_registry = ToolRegistry(tool_config, logger=structured_logger)
 
         # CRITICAL: Set tool registry's working directory to the sandbox workspace
-        # Without this, file_write and other tools write to os.getcwd() instead of workspace
+        # Without this, Write and other tools write to os.getcwd() instead of workspace
         tool_registry.set_default_working_dir(str(self.workspace.workspace_path))
 
         # Create agent config

@@ -674,10 +674,14 @@ class ServiceRep:
                 event_metadata["paused"] = harness_response.paused
                 event_metadata["user_prompt"] = harness_response.user_prompt
 
+                event_content = harness_response.full_response or ""
+                if not success and not event_content.strip():
+                    event_content = error_msg or spoken_text
+
                 agent_event = AgentResponseCompleteEvent(
                     request_id=request_id,
                     success=success,
-                    content=harness_response.full_response,
+                    content=event_content,
                     spoken_response=spoken_text,
                     tools_used=tools_used,
                     duration_ms=harness_response.duration_ms,

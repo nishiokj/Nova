@@ -355,7 +355,7 @@ class FileStateTracker:
     def _is_read_operation(self, tool_call: Dict) -> bool:
         """Check if tool call is a read operation."""
         tool_name = tool_call.get('tool_name', '').lower()
-        read_tools = {'file_read', 'read_file', 'cat', 'grep', 'search'}
+        read_tools = {'read', 'read_file', 'cat', 'grep', 'search', 'glob'}
         return any(read_tool in tool_name for read_tool in read_tools)
 
     def _get_git_diff_since_last(self) -> str:

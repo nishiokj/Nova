@@ -10,12 +10,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
 # Environment variable to enable full context debug logging
 # Set AGENT_DEBUG_CONTEXT=1 to see the complete context sent to LLM
 _DEBUG_CONTEXT = os.getenv("AGENT_DEBUG_CONTEXT", "0") == "1"
 
+from .events import WizardEvent, WizardEventType
 from .knowledge_store import KnowledgeFact, FactSource
 from .plan_patch import PlanPatch
 
@@ -165,6 +166,7 @@ class WorkerOutcome:
     success: bool
     final_response: Optional[str] = None
     error: Optional[str] = None
+    tool_errors: List[str] = field(default_factory=list)
 
     # Flag: True if LLM refused to attempt work (detected via REFUSAL_PATTERNS)
     is_refusal: bool = False
@@ -251,12 +253,14 @@ class Worker:
         llm: Any,  # LLMAdapter
         config: Optional[WorkerConfig] = None,
         logger: Optional[Logger] = None,
+        event_emitter: Optional[Callable[[WizardEvent], None]] = None,
     ):
         self.tool_registry = tool_registry
         self.llm = llm
         self.config = config or WorkerConfig()
         self.logger = logger
         self._disallowed_tools = set(self.config.disallowed_tools)
+        self._event_emitter = event_emitter
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -299,6 +303,78 @@ class Worker:
                     component="worker",
                     data={"full_context": full_context, "step_num": step_num}
                 )
+
+    def _get_prompt_preview(self, messages: List[Dict[str, Any]]) -> str:
+        """
+        Extract preview from messages, prioritizing the system prompt.
+
+        The system message (always first) contains step-specific info:
+        GOAL, CURRENT STEP, OBJECTIVE - this differentiates each worker call.
+        """
+        if not messages:
+            return ""
+        # System message is always first and contains step-specific objective
+        first = messages[0]
+        if first.get("role") == "system" and first.get("content"):
+            return str(first["content"])[:500]
+        # Fallback: find any user/system message
+        for msg in messages:
+            if msg.get("role") in ("user", "system") and msg.get("content"):
+                return str(msg["content"])[:500]
+        return ""
+
+    def _emit_llm_call_event(
+        self,
+        response: Any,
+        messages: List[Dict[str, Any]],
+        step_num: Optional[int],
+        duration_ms: float,
+    ) -> None:
+        if not self._event_emitter or not response:
+            return
+
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+
+        tool_calls = getattr(response, "tool_calls", None)
+        if tool_calls is None and isinstance(response, dict):
+            tool_calls = response.get("tool_calls")
+
+        content = self._extract_content(response) or ""
+        total_tokens = (
+            usage.get("total_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "total_tokens", 0) if usage else 0
+        )
+        prompt_tokens = (
+            usage.get("prompt_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "prompt_tokens", 0) if usage else 0
+        )
+        completion_tokens = (
+            usage.get("completion_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "completion_tokens", 0) if usage else 0
+        )
+
+        self._event_emitter(
+            WizardEvent(
+                event_type=WizardEventType.LLM_CALL,
+                step_num=step_num,
+                data={
+                    "agent_type": "worker",
+                    "prompt_preview": self._get_prompt_preview(messages),
+                    "response_preview": content[:500],
+                    "total_tokens": total_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "duration_ms": duration_ms,
+                    "model": getattr(response, "model", "unknown"),
+                    "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                },
+            )
+        )
 
     def execute(
         self,
@@ -372,13 +448,14 @@ class Worker:
             self._log("debug", f"Auto-reading {len(work_item.target_paths)} target files")
 
             files_read: List[Tuple[str, str]] = []
+            cwd = self.tool_registry._get_current_working_dir()
             for path in work_item.target_paths:
                 if path in read_files or path in context_delta.read_files:
                     self._log("debug", f"  ⊘ Skipping {path} (already read)")
                     continue
 
                 try:
-                    result = self.tool_registry.execute("file_read", path=path)
+                    result = self.tool_registry.execute("Read", cwd=cwd, path=path)
                     outcome.metrics.tool_calls_made += 1
 
                     if result.is_success and result.output is not None:
@@ -612,12 +689,15 @@ class Worker:
                 tools = [t for t in tools if t.name not in self._disallowed_tools]
 
             if hasattr(self.llm, "respond_with_messages"):
+                call_start = time.time()
                 response = self.llm.respond_with_messages(
                     messages=messages,
                     tools=tools,
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, work_item.step_num, duration_ms)
                 return response
 
             # Fallback for LLMs without respond_with_messages
@@ -628,6 +708,7 @@ class Worker:
                     if m.get("content")
                 )
                 system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+                call_start = time.time()
                 response = self.llm.respond(
                     input=packed,
                     instructions=system_msg,
@@ -635,6 +716,8 @@ class Worker:
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, work_item.step_num, duration_ms)
                 return response
 
             outcome.error = "LLM adapter missing respond methods"
@@ -660,12 +743,15 @@ class Worker:
 
         try:
             if hasattr(self.llm, "respond_with_messages"):
+                call_start = time.time()
                 response = self.llm.respond_with_messages(
                     messages=messages,
                     tools=[],
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, outcome.step_num, duration_ms)
                 return response
 
             if hasattr(self.llm, "respond"):
@@ -675,6 +761,7 @@ class Worker:
                     if m.get("content")
                 )
                 system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+                call_start = time.time()
                 response = self.llm.respond(
                     input=packed,
                     instructions=system_msg,
@@ -682,6 +769,8 @@ class Worker:
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, outcome.step_num, duration_ms)
                 return response
 
             return None
@@ -735,6 +824,7 @@ class Worker:
                     outcome.error = exchange.error
                     outcome.termination_reason = "tool_requested_user"
                     self._log("warning", f"Blocked tool call to {tool_name}")
+                    outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
                     exchanges.append(exchange)
                     continue
 
@@ -749,6 +839,7 @@ class Worker:
                     outcome.error = exchange.error
                     outcome.termination_reason = "tool_requested_user"
                     self._log("warning", f"Tool {tool_name} requested user input; blocked")
+                    outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
                     exchanges.append(exchange)
                     return exchanges
 
@@ -779,12 +870,15 @@ class Worker:
                     exchange.error = result.error
                     exchange.result_content = str(result.output) if result.output is not None else ""
                     self._log("warning", f"  result: FAILED - {result.error}")
+                    if exchange.error:
+                        outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
 
             except Exception as exc:
                 outcome.metrics.tool_calls_made += 1
                 outcome.metrics.tool_calls_failed += 1
                 exchange.success = False
                 exchange.error = str(exc)
+                outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
 
             exchanges.append(exchange)
 
@@ -978,13 +1072,12 @@ class Worker:
         self, outcome: WorkerOutcome, final_content: Optional[str], work_item: WorkItem
     ) -> None:
         """
-        Determine success based on completion claim and evidence.
+        Determine success based on hard errors and evidence.
 
         Simplified logic:
         - REFUSAL: If LLM says "I can't do this" → FAILED, is_refusal=True
-        - SUCCESS: explicit [FINAL] marker + evidence (facts or entity_refs)
-        - SUCCESS: Q&A case - substantive response without needing tools (but NOT a refusal)
-        - FAILED: otherwise
+        - FAILED: explicit error, hard termination, or no output/evidence
+        - SUCCESS: otherwise
 
         The Wizard uses outcome.made_progress (property) for nuanced retry decisions.
         """
@@ -1001,32 +1094,42 @@ class Worker:
 
         # Collect evidence
         has_evidence = len(outcome.entity_refs) > 0 or len(outcome.facts) > 0
+        has_output = bool(final_content and final_content.strip())
 
-        # Determine if worker claimed completion
-        explicit_final = outcome.termination_reason == "completed"
-        implicit_final = outcome.termination_reason == "implicit_final"
-        has_final_response = bool(final_content and len(final_content) > 30)
+        failure_reasons = {
+            "max_tool_calls",
+            "max_llm_calls",
+            "timeout",
+            "max_iterations",
+            "llm_error",
+            "need_context_no_prompt",
+            "no_action",
+            "max_continues",
+        }
 
-        completion_claim = explicit_final
-        if self.config.allow_implicit_finals:
-            completion_claim = completion_claim or implicit_final or has_final_response
+        if outcome.termination_reason in failure_reasons and not outcome.error:
+            outcome.error = f"Termination reason: {outcome.termination_reason}"
 
-        # Determine success
-        if completion_claim and has_evidence:
-            # SUCCESS: Claimed completion with evidence
-            outcome.success = True
-
-        elif completion_claim and has_final_response and outcome.metrics.tool_calls_made == 0:
-            # SUCCESS for Q&A: Substantive response without needing tools
-            outcome.success = True
-
-        else:
-            # FAILED: No completion claim or no evidence
-            outcome.success = False
-            if not outcome.error:
-                if outcome.metrics.tool_calls_failed > 0 and outcome.metrics.tool_calls_succeeded == 0:
+        if not outcome.error:
+            if outcome.metrics.tool_calls_failed > 0 and outcome.metrics.tool_calls_succeeded == 0:
+                if outcome.tool_errors:
+                    detail = outcome.tool_errors[0][:200]
+                    outcome.error = (
+                        f"All {outcome.metrics.tool_calls_failed} tool calls failed. "
+                        f"First error: {detail}"
+                    )
+                else:
                     outcome.error = f"All {outcome.metrics.tool_calls_failed} tool calls failed"
-                elif outcome.metrics.tool_calls_made == 0 and not has_final_response:
-                    outcome.error = "No tools called and no substantive response"
-                elif not completion_claim:
-                    outcome.error = "No explicit completion claim ([FINAL] marker)"
+            elif outcome.metrics.tool_calls_made == 0 and not has_output and not has_evidence:
+                outcome.error = "No tools called and no substantive response"
+
+        if outcome.error:
+            outcome.success = False
+            return
+
+        if not has_output and not has_evidence:
+            outcome.success = False
+            outcome.error = "No output or evidence produced"
+            return
+
+        outcome.success = True

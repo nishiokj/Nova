@@ -19,8 +19,8 @@
     "allow_bash": true,
     "tier_tool_limits": {
       "simple": 1,
-      "standard": 5,
-      "advanced": 25
+      "standard": 20,
+      "advanced": 100
     },
     "tier_max_tokens": {
       "simple": 1500,
@@ -30,17 +30,13 @@
   },
   "tools": {
       "enabled_tools": [
-        "web_fetch",
-        "bash_execute",
-        "python_execute",
-        "file_read",
-        "file_write",
-        "search_filesystem",
-        "calculator",
-        "get_current_time",
-        "get_working_directory",
-        "list_files",
-        "generate_image"
+        "Read",
+        "Write",
+        "Edit",
+        "Bash",
+        "Glob",
+        "Grep",
+        "python_execute"
       ],
     "sandbox_bash": true,
     "sandbox_python": true,

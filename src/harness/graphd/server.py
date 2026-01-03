@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
@@ -10,21 +12,46 @@ from urllib.parse import parse_qs, urlparse
 from .utils import safe_int
 
 
+class ReuseAddrHTTPServer(ThreadingHTTPServer):
+    """HTTP server with SO_REUSEADDR to allow quick restarts."""
+
+    allow_reuse_address = True
+    daemon_threads = True  # Don't wait for request handler threads on shutdown
+
+    def server_bind(self):
+        """Override to set SO_REUSEADDR and SO_REUSEPORT if available."""
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # SO_REUSEPORT allows multiple processes to bind to same port (macOS/Linux)
+        if hasattr(socket, 'SO_REUSEPORT'):
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass  # Not supported on all systems
+        super().server_bind()
+
+
 class GraphdHTTPServer:
     def __init__(self, host: str, port: int, handler_factory):
         self.host = host
         self.port = port
-        self._server: Optional[ThreadingHTTPServer] = None
+        self._server: Optional[ReuseAddrHTTPServer] = None
         self._handler_factory = handler_factory
+        self._shutdown_event = threading.Event()
 
     def start(self) -> None:
-        self._server = ThreadingHTTPServer((self.host, self.port), self._handler_factory)
-        self._server.serve_forever()
+        """Start the HTTP server with graceful shutdown support."""
+        self._server = ReuseAddrHTTPServer((self.host, self.port), self._handler_factory)
+        # Use poll_interval to check shutdown flag periodically
+        self._server.serve_forever(poll_interval=0.5)
 
     def stop(self) -> None:
+        """Stop the server gracefully with timeout."""
+        self._shutdown_event.set()
         if self._server:
+            # shutdown() signals serve_forever() to stop
             self._server.shutdown()
             self._server.server_close()
+            self._server = None
 
 
 class GraphdRequestHandler(BaseHTTPRequestHandler):
@@ -69,6 +96,18 @@ class GraphdRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/artifact":
             self._send_json(self.manager.handle_artifact(payload))
+            return
+        self._send_json({"error": "not_found"}, status=404)
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/session/"):
+            session_key = parsed.path.split("/session/", 1)[1]
+            if not session_key:
+                self._send_json({"error": "missing_session_key"}, status=400)
+                return
+            deleted = self.manager.session_delete(session_key)
+            self._send_json({"deleted": deleted, "session_key": session_key})
             return
         self._send_json({"error": "not_found"}, status=404)
 

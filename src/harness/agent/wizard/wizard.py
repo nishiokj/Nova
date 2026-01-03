@@ -156,9 +156,26 @@ class WizardResult:
             summary=self.final_response[:200] if self.final_response else "",
         )
 
+    def _derive_error_message(self) -> str:
+        if self.final_response:
+            if self.final_response.startswith("Unable to complete"):
+                return self.final_response
+            if self.final_response.startswith("ERROR:"):
+                return self.final_response
+
+        failed_steps = [
+            s for s in self.plan_state.steps.values()
+            if s.status == StepStatus.FAILED
+        ]
+        for step in failed_steps:
+            if step.last_error:
+                return step.last_error
+
+        return "Wizard orchestration failed"
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization or interop."""
-        error = None if (self.success or self.paused) else "Wizard orchestration failed"
+        error = None if (self.success or self.paused) else self._derive_error_message()
         return {
             "content": self.final_response,
             "structured_action": self.plan_state.goal,
@@ -228,7 +245,13 @@ class Wizard:
 
         # Worker - require explicit [FINAL] marker for completion
         worker_config = WorkerConfig(allow_implicit_finals=False)
-        self._worker = Worker(tool_registry, llm, worker_config, logger=logger)
+        self._worker = Worker(
+            tool_registry,
+            llm,
+            worker_config,
+            logger=logger,
+            event_emitter=self._emit_event,
+        )
 
         # Synthesizer for final response generation
         self._synthesizer = ResponseSynthesizer(llm=llm)
@@ -244,7 +267,12 @@ class Wizard:
             require_default_assumption=self.config.require_default_assumption,
             reflection_timeout_ms=self.config.reflection_timeout_ms,
         )
-        self._reflector = WizardReflector(llm, reflector_config, logger=logger)
+        self._reflector = WizardReflector(
+            llm,
+            reflector_config,
+            logger=logger,
+            event_emitter=self._emit_event,
+        )
 
         # User input request state (tool-driven, replaces callback-based clarification)
         self._pending_user_prompt: Optional[Dict[str, Any]] = None
@@ -272,6 +300,9 @@ class Wizard:
         self._iteration_count: int = 0
         self._total_tool_calls: int = 0
         self._total_llm_calls: int = 0
+        # Token tracking: separate output (cumulative) from context window (peak)
+        self._total_output_tokens: int = 0  # Cumulative completion tokens
+        self._peak_context_tokens: int = 0  # Peak prompt tokens (context window usage)
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -296,8 +327,23 @@ class Wizard:
         self._events.clear()
         return events
 
+    def reset_for_new_request(self) -> None:
+        """Reset token counters and events for a new request. Call before planning."""
+        self._total_output_tokens = 0
+        self._peak_context_tokens = 0
+        self._events.clear()
+
     def _emit_event(self, event: WizardEvent) -> None:
         """Emit event to registered handlers and store in buffer."""
+        if event.event_type == WizardEventType.LLM_CALL and event.data:
+            # Track completion tokens cumulatively (actual LLM output)
+            completion_tokens = event.data.get("completion_tokens", 0)
+            if isinstance(completion_tokens, (int, float)):
+                self._total_output_tokens += max(0, int(completion_tokens))
+            # Track prompt tokens as peak (context window usage)
+            prompt_tokens = event.data.get("prompt_tokens", 0)
+            if isinstance(prompt_tokens, (int, float)):
+                self._peak_context_tokens = max(self._peak_context_tokens, int(prompt_tokens))
         self._events.append(event)
         for handler in list(self._event_handlers):
             try:
@@ -305,6 +351,60 @@ class Wizard:
             except Exception as exc:
                 self._log("warning", f"Event handler error: {exc}")
         self._log("debug", f"Event: {event.event_type.value}", data=event.data)
+
+    def _emit_plan_snapshot(self, trigger: str, snapshot_type: str) -> None:
+        """Emit full plan snapshot for dashboard versioning."""
+        if not self._plan_state:
+            return
+
+        steps_data = [
+            {
+                "step_num": step.step_num,
+                "objective": step.objective,
+                "status": step.status.value,
+                "phase": step.phase.value,
+                "tool_hint": step.tool_hint,
+                "depends_on": list(step.depends_on) if step.depends_on else [],
+                "required": step.required,
+            }
+            for step in sorted(self._plan_state.steps.values(), key=lambda s: s.step_num)
+        ]
+
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.PLAN_SNAPSHOT,
+                data={
+                    "version": self._plan_state.version,
+                    "snapshot_type": snapshot_type,
+                    "steps": steps_data,
+                    "goal": self._plan_state.goal,
+                    "trigger": trigger,
+                },
+            )
+        )
+
+    def _emit_context_window_update(self) -> None:
+        """Emit context window metrics for dashboard."""
+        max_tokens = 200000
+        message_count = len(self._session_context.messages) if self._session_context else 0
+        # Context window % is based on peak prompt tokens (actual context usage)
+        percentage_used = self._peak_context_tokens / max_tokens if max_tokens else 0
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.CONTEXT_WINDOW_UPDATE,
+                data={
+                    # Peak context window usage (prompt tokens)
+                    "context_tokens": self._peak_context_tokens,
+                    # Cumulative output tokens (completion tokens)
+                    "output_tokens": self._total_output_tokens,
+                    "max_tokens": max_tokens,
+                    "percentage_used": percentage_used,
+                    "message_count": message_count,
+                    # Legacy field for backwards compatibility
+                    "total_tokens": self._peak_context_tokens + self._total_output_tokens,
+                },
+            )
+        )
 
     def orchestrate(
         self,
@@ -353,6 +453,9 @@ class Wizard:
         self._iteration_count = 0
         self._total_tool_calls = 0
         self._total_llm_calls = 0
+        # Note: token counters (_total_output_tokens, _peak_context_tokens) are NOT reset here.
+        # They're reset in reset_for_new_request() which is called before planning starts.
+        # This allows planner tokens to be included in the final context window metrics.
         # Collect all outcomes for synthesis
         self._collected_outcomes = []
 
@@ -414,6 +517,31 @@ class Wizard:
             )
         )
 
+        # Emit goal started event with user input and initial plan
+        self._emit_event(
+            WizardEvent(
+                event_type=WizardEventType.GOAL_STARTED,
+                data={
+                    "goal": plan.goal,
+                    "user_input": user_input,
+                    "steps": [
+                        {
+                            "step_num": step.step_num,
+                            "objective": step.objective,
+                            "tool_hint": step.tool_hint,
+                            "phase": step.phase.value,
+                        }
+                        for step in sorted(
+                            self._plan_state.steps.values(),
+                            key=lambda s: s.step_num,
+                        )
+                    ],
+                },
+            )
+        )
+        self._emit_plan_snapshot("goal_started", "initial")
+        self._emit_context_window_update()
+
 
         # ========== FULL PLAN LOGGING ==========
         self._log("info", f"Wizard starting: goal='{plan.goal[:80]}', steps={len(plan.steps)}")
@@ -464,14 +592,19 @@ class Wizard:
             "content": f"User response to '{question}':\n{answer}"
         })
 
+        # Clear events from previous run before emitting new ones
+        self._events.clear()
+
         # Emit event
+        request_id = self._pending_user_prompt.get("request_id") if self._pending_user_prompt else None
         self._emit_event(
             WizardEvent(
                 event_type=WizardEventType.USER_INPUT_RECEIVED,
                 step_num=self._paused_step_num,
-                data={"answer": answer},
+                data={"answer": answer, "request_id": request_id},
             )
         )
+        self._emit_context_window_update()
 
         # Reset paused step back to PENDING now that we have the answer
         if self._paused_step_num is not None:
@@ -480,8 +613,6 @@ class Wizard:
         # Clear the pending prompt
         self._pending_user_prompt = None
         self._paused_step_num = None
-
-        self._events.clear()
         if self._start_time <= 0:
             self._start_time = time.time()
 
@@ -658,13 +789,51 @@ class Wizard:
                 )
 
             # Log outcome
-            status_str = "success" if outcome.success else "failed"
+            if outcome.needs_user_input or outcome.termination_reason == "awaiting_user":
+                status_str = "awaiting_user"
+            else:
+                status_str = "success" if outcome.success else "failed"
             self._log(
                 "debug",
                 f"Step {step.step_num} {status_str}: "
                 f"tools={outcome.metrics.tool_calls_made}, "
                 f"llm={outcome.metrics.llm_calls_made}",
             )
+
+            # ==================================================================
+            # EMIT TOOL_CALL EVENTS for dashboard telemetry
+            # ==================================================================
+            for fact in outcome.facts:
+                if fact.source == FactSource.TOOL and fact.tool_name:
+                    # Truncate result for reasonable event size
+                    result_str = str(fact.value)[:2000] if fact.value else ""
+                    self._emit_event(
+                        WizardEvent(
+                            event_type=WizardEventType.TOOL_CALL,
+                            step_num=step.step_num,
+                            data={
+                                "tool_name": fact.tool_name,
+                                "result": result_str,
+                                "success": True,
+                                "fact_key": fact.key,
+                            },
+                        )
+                    )
+
+            # Emit events for tool errors
+            for error in outcome.tool_errors:
+                self._emit_event(
+                    WizardEvent(
+                        event_type=WizardEventType.TOOL_CALL,
+                        step_num=step.step_num,
+                        data={
+                            "tool_name": "unknown",
+                            "result": error[:500],
+                            "success": False,
+                            "error": error[:500],
+                        },
+                    )
+                )
 
             # ==================================================================
             # CHECK FOR USER INPUT REQUEST (Wizard-owned clarification)
@@ -692,45 +861,17 @@ class Wizard:
                         },
                     )
                 )
-                # Treat as non-failure in the ledger to avoid retry penalties
-                outcome.success = True
-                self._ledger.record_completion(entry_id, outcome)
+                # Record pause without counting as completion/failure
+                self._ledger.record_awaiting_user(entry_id, outcome.user_prompt)
                 break
 
             # Record completion in ledger (audit trail)
             self._ledger.record_completion(entry_id, outcome)
 
             # ==================================================================
-            # NEW: WIZARD REFLECTION STAGE
+            # REFLECTION DISABLED: Use deterministic fallback verdicts only.
             # ==================================================================
-            if self.config.reflection_enabled:
-                self._emit_event(
-                    WizardEvent(
-                        event_type=WizardEventType.REFLECTION_STARTED,
-                        step_num=step.step_num,
-                        data={
-                            "success": outcome.success,
-                            "termination_reason": outcome.termination_reason,
-                        },
-                    )
-                )
-                reflection_output = self._reflect_on_outcome(
-                    plan, step, outcome, collected_outcomes, iteration
-                )
-
-                self._emit_event(
-                    WizardEvent(
-                        event_type=WizardEventType.REFLECTION_COMPLETED,
-                        step_num=step.step_num,
-                        data={
-                            "verdict": reflection_output.verdict.value,
-                            "confidence": reflection_output.confidence,
-                            "quality_score": reflection_output.quality.overall_score,
-                        },
-                    )
-                )
-            else:
-                reflection_output = self._fallback_reflection_output(step, outcome)
+            reflection_output = self._fallback_reflection_output(step, outcome)
 
             # ==================================================================
             # ACT ON REFLECTION VERDICT
@@ -816,6 +957,9 @@ class Wizard:
                 )
             )
 
+        # Emit final context window metrics after all LLM calls complete
+        self._emit_context_window_update()
+
         # Build final context state for session persistence
         final_context_state = None
         if self._session_context:
@@ -854,16 +998,19 @@ class Wizard:
                 self._plan_state.reset_step_for_retry(step.step_num)
             else:
                 # Max retries exceeded - skip the step
-                self._plan_state.mark_step_skipped(
-                    step.step_num,
-                    f"Max retries ({self.config.max_retries_per_step}) exceeded after {step.attempt_count} attempts. Last error: {step.last_error or 'unknown'}"
-                )
+                skip_reason = f"Max retries ({self.config.max_retries_per_step}) exceeded after {step.attempt_count} attempts. Last error: {step.last_error or 'unknown'}"
+                self._plan_state.mark_step_skipped(step.step_num, skip_reason)
                 self._stagnation_detector.reset_step(step.step_num)
                 self._emit_event(
                     WizardEvent(
                         event_type=WizardEventType.STEP_SKIPPED,
                         step_num=step.step_num,
-                        data={"reason": "max_retries_exceeded"},
+                        data={
+                            "reason": "max_retries_exceeded",
+                            "error": step.last_error or "unknown",
+                            "attempts": step.attempt_count,
+                            "message": skip_reason,
+                        },
                     )
                 )
 
@@ -891,16 +1038,19 @@ class Wizard:
 
         # For severe stagnation (identical outputs, no progress), skip immediately
         if signal.severity >= 0.8:
-            self._plan_state.mark_step_skipped(
-                signal.step_num,
-                f"Stagnation detected: {signal.reason}"
-            )
+            stag_reason = f"Stagnation detected: {signal.reason}"
+            self._plan_state.mark_step_skipped(signal.step_num, stag_reason)
             self._stagnation_detector.reset_step(signal.step_num)
             self._emit_event(
                 WizardEvent(
                     event_type=WizardEventType.STEP_SKIPPED,
                     step_num=signal.step_num,
-                    data={"reason": "stagnation"},
+                    data={
+                        "reason": "stagnation",
+                        "error": signal.reason,
+                        "severity": signal.severity,
+                        "message": stag_reason,
+                    },
                 )
             )
 
@@ -993,12 +1143,14 @@ class Wizard:
 
             # Apply if approved
             if decision.approved:
+                self._emit_plan_snapshot(f"patch_{patch.patch_id}", "pre_patch")
                 applied = self._plan_state.apply_patch(patch)
                 if applied:
                     self._ledger.record_patch_applied(
                         patch_id=patch.patch_id,
                         resulting_version=self._plan_state.version,
                     )
+                    self._emit_plan_snapshot(f"patch_{patch.patch_id}_applied", "post_patch")
 
     def _apply_patch_suggestions(
         self,
@@ -1302,6 +1454,7 @@ class Wizard:
             "final_response": outcome.final_response,
             "error": outcome.error,
             "termination_reason": outcome.termination_reason,
+            "tool_errors": list(outcome.tool_errors),
             "facts": [
                 {
                     "key": f.key,
@@ -1443,6 +1596,7 @@ class Wizard:
                 ).__dict__,
             )
         )
+        self._emit_context_window_update()
 
     def _handle_accept_extend(
         self,
@@ -1511,6 +1665,7 @@ class Wizard:
                 ).__dict__,
             )
         )
+        self._emit_context_window_update()
 
     def _handle_redo(
         self,
@@ -1571,21 +1726,21 @@ class Wizard:
         reflection: WizardReflectionOutput,
     ) -> None:
         """Handle ABORT_STEP verdict."""
-        self._plan_state.mark_step_skipped(
-            step.step_num,
-            f"Wizard decision: {reflection.abort_reason or 'Not achievable'}"
-        )
+        abort_reason = reflection.abort_reason or "Not achievable"
+        abort_message = f"Wizard decision: {abort_reason}"
+        self._plan_state.mark_step_skipped(step.step_num, abort_message)
         self._stagnation_detector.reset_step(step.step_num)
 
-        self._log(
-            "info",
-            f"Step {step.step_num} ABORTED: {reflection.abort_reason}"
-        )
+        self._log("info", f"Step {step.step_num} ABORTED: {abort_reason}")
         self._emit_event(
             WizardEvent(
                 event_type=WizardEventType.STEP_SKIPPED,
                 step_num=step.step_num,
-                data={"reason": reflection.abort_reason or "Not achievable"},
+                data={
+                    "reason": "aborted",
+                    "error": abort_reason,
+                    "message": abort_message,
+                },
             )
         )
 
@@ -1648,8 +1803,10 @@ class Wizard:
             patch.operations[0].new_step["scaffold_depth"] = parent_depth + 1
 
         # Apply patch
+        self._emit_plan_snapshot(f"patch_{patch.patch_id}", "pre_patch")
         applied = self._plan_state.apply_patch(patch)
         if applied:
+            self._emit_plan_snapshot(f"patch_{patch.patch_id}_applied", "post_patch")
             self._log(
                 "debug",
                 f"Scaffolded new step after {after_step}: {scaffolded.objective[:50]}..."

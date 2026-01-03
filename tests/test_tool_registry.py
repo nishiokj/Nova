@@ -2,13 +2,10 @@
 Comprehensive tests for the ToolRegistry.
 
 Tests all built-in tools:
-- calculator
-- get_current_time
-- file_read / file_write
-- bash_execute
+- Read / Write / Edit
+- Glob / Grep
+- Bash
 - python_execute
-- web_fetch (mocked)
-- fast_answer (mocked)
 
 Also tests:
 - Tool registration/unregistration
@@ -50,21 +47,19 @@ class TestToolRegistryBasics:
 
         # Check all expected tools are registered
         expected_tools = [
-            "fast_answer", "web_fetch",
-            "bash_execute", "python_execute",
-            "file_read", "file_write",
-            "search_filesystem",
-            "calculator", "get_current_time"
+            "Read", "Write", "Edit",
+            "Glob", "Grep",
+            "Bash", "python_execute"
         ]
         for expected in expected_tools:
             assert expected in tool_names, f"Expected tool '{expected}' not found"
 
     def test_get_tool(self, tool_registry):
         """Test getting a tool by name"""
-        calc = tool_registry.get("calculator")
-        assert calc is not None
-        assert calc.name == "calculator"
-        assert calc.enabled
+        read_tool = tool_registry.get("Read")
+        assert read_tool is not None
+        assert read_tool.name == "Read"
+        assert read_tool.enabled
 
     def test_get_nonexistent_tool(self, tool_registry):
         """Test getting a tool that doesn't exist"""
@@ -78,29 +73,30 @@ class TestToolRegistryBasics:
         assert all(isinstance(d, ToolDefinition) for d in definitions)
 
         # Check definition structure
-        calc_def = next((d for d in definitions if d.name == "calculator"), None)
-        assert calc_def is not None
-        assert "expression" in calc_def.parameters
-        assert "expression" in calc_def.required
+        read_def = next((d for d in definitions if d.name == "Read"), None)
+        assert read_def is not None
+        assert "cwd" in read_def.parameters
+        assert "path" in read_def.parameters
+        assert "cwd" in read_def.required
 
     def test_enable_disable_tool(self, tool_registry):
         """Test enabling and disabling tools"""
-        # Disable calculator
-        result = tool_registry.disable("calculator")
+        # Disable Read
+        result = tool_registry.disable("Read")
         assert result is True
 
-        calc = tool_registry.get("calculator")
-        assert not calc.enabled
+        read_tool = tool_registry.get("Read")
+        assert not read_tool.enabled
 
         # Shouldn't be in enabled-only list
         enabled_tools = tool_registry.list_tools(enabled_only=True)
         enabled_names = [t.name for t in enabled_tools]
-        assert "calculator" not in enabled_names
+        assert "Read" not in enabled_names
 
         # Re-enable
-        result = tool_registry.enable("calculator")
+        result = tool_registry.enable("Read")
         assert result is True
-        assert tool_registry.get("calculator").enabled
+        assert tool_registry.get("Read").enabled
 
     def test_register_custom_tool(self, tool_registry):
         """Test registering a custom tool"""
@@ -162,13 +158,13 @@ class TestToolRegistryBasics:
 
     def test_execute_disabled_tool(self, tool_registry):
         """Test executing a disabled tool"""
-        tool_registry.disable("calculator")
-        result = tool_registry.execute("calculator", expression="2+2")
+        tool_registry.disable("Read")
+        result = tool_registry.execute("Read", cwd=".", path="file.txt")
         assert result.status == ToolStatus.PERMISSION_DENIED
         assert "disabled" in result.error.lower()
 
         # Re-enable for other tests
-        tool_registry.enable("calculator")
+        tool_registry.enable("Read")
 
 
 class TestToolCircuitBreaker:
@@ -212,142 +208,63 @@ class TestToolCircuitBreaker:
             registry.execute("flaky_tool")
 
 
-class TestCalculatorTool:
-    """Test the calculator tool"""
-
-    @pytest.mark.parametrize("expression,expected", [
-        ("2+2", 4),
-        ("10-5", 5),
-        ("3*4", 12),
-        ("20/4", 5.0),
-        ("2^3", 8),  # Power (converted to **)
-        ("2**3", 8),
-        ("sqrt(16)", 4.0),
-        ("abs(-5)", 5),
-        ("round(3.7)", 4),
-        ("min(1,2,3)", 1),
-        ("max(1,2,3)", 3),
-        ("sin(0)", 0.0),
-        ("cos(0)", 1.0),
-        ("pi", 3.141592653589793),
-        ("e", 2.718281828459045),
-        ("floor(3.7)", 3),
-        ("ceil(3.2)", 4),
-        ("log(e)", 1.0),
-        ("log10(100)", 2.0),
-        ("(2+3)*4", 20),
-        ("100/4/5", 5.0),
-    ])
-    def test_calculator_expressions(self, tool_registry, expression, expected):
-        """Test various calculator expressions"""
-        result = tool_registry.execute("calculator", expression=expression)
-        assert_tool_result_success(result)
-        assert abs(float(result.output) - expected) < 0.0001, \
-            f"Expected {expected}, got {result.output}"
-
-    def test_calculator_invalid_expression(self, tool_registry):
-        """Test calculator with invalid expression"""
-        # Note: 2++2 is actually valid Python (parses as 2 + (+2) = 4)
-        # Use a truly invalid expression
-        result = tool_registry.execute("calculator", expression="2+*3")
-        assert_tool_result_error(result)
-
-    def test_calculator_undefined_variable(self, tool_registry):
-        """Test calculator with undefined variable"""
-        result = tool_registry.execute("calculator", expression="x+5")
-        assert_tool_result_error(result)
-
-    def test_calculator_division_by_zero(self, tool_registry):
-        """Test calculator division by zero"""
-        result = tool_registry.execute("calculator", expression="1/0")
-        assert_tool_result_error(result)
-
-
-class TestGetCurrentTimeTool:
-    """Test the get_current_time tool"""
-
-    def test_get_time_human_format(self, tool_registry):
-        """Test getting time in human format"""
-        result = tool_registry.execute("get_current_time", format="human")
-        assert_tool_result_success(result)
-        # Should contain day name and date
-        output = str(result.output)
-        # Human format includes day name
-        assert any(day in output for day in
-                   ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
-
-    def test_get_time_iso_format(self, tool_registry):
-        """Test getting time in ISO format"""
-        result = tool_registry.execute("get_current_time", format="iso")
-        assert_tool_result_success(result)
-        # ISO format has T separator
-        assert "T" in str(result.output)
-
-    def test_get_time_unix_format(self, tool_registry):
-        """Test getting time in Unix timestamp"""
-        result = tool_registry.execute("get_current_time", format="unix")
-        assert_tool_result_success(result)
-        # Should be a reasonable timestamp
-        timestamp = int(result.output)
-        assert timestamp > 1700000000  # After 2023
-
-    def test_get_time_custom_format(self, tool_registry):
-        """Test getting time with custom strftime format"""
-        result = tool_registry.execute("get_current_time", format="%Y-%m-%d")
-        assert_tool_result_success(result)
-        # Should match YYYY-MM-DD format
-        import re
-        assert re.match(r"\d{4}-\d{2}-\d{2}", str(result.output))
-
-    def test_get_time_default_format(self, tool_registry):
-        """Test getting time with default format"""
-        result = tool_registry.execute("get_current_time")
-        assert_tool_result_success(result)
-
-
 class TestFileOperations:
-    """Test file_read and file_write tools"""
+    """Test Read, Write, and Edit tools"""
 
     def test_file_read_existing(self, tool_registry_with_workdir, temp_working_dir):
         """Test reading an existing file"""
-        result = tool_registry_with_workdir.execute("file_read", path="test_file.txt")
+        result = tool_registry_with_workdir.execute(
+            "Read", cwd=temp_working_dir, path="test_file.txt"
+        )
         assert_tool_result_success(result, "Hello, World!")
 
     def test_file_read_json(self, tool_registry_with_workdir, temp_working_dir):
         """Test reading a JSON file"""
-        result = tool_registry_with_workdir.execute("file_read", path="test_data.json")
+        result = tool_registry_with_workdir.execute(
+            "Read", cwd=temp_working_dir, path="test_data.json"
+        )
         assert_tool_result_success(result, '"key": "value"')
 
     def test_file_read_nested(self, tool_registry_with_workdir, temp_working_dir):
         """Test reading from nested directory"""
-        result = tool_registry_with_workdir.execute("file_read", path="subdir/sub_file.txt")
+        result = tool_registry_with_workdir.execute(
+            "Read", cwd=temp_working_dir, path="subdir/sub_file.txt"
+        )
         assert_tool_result_success(result, "Subdirectory file content")
 
     def test_file_read_deep_nested(self, tool_registry_with_workdir, temp_working_dir):
         """Test reading deeply nested file"""
-        result = tool_registry_with_workdir.execute("file_read", path="subdir/nested/deep_file.txt")
+        result = tool_registry_with_workdir.execute(
+            "Read", cwd=temp_working_dir, path="subdir/nested/deep_file.txt"
+        )
         assert_tool_result_success(result, "Deeply nested content")
 
     def test_file_read_absolute_path(self, tool_registry_with_workdir, temp_working_dir):
         """Test reading with absolute path"""
         abs_path = os.path.join(temp_working_dir, "test_file.txt")
-        result = tool_registry_with_workdir.execute("file_read", path=abs_path)
+        result = tool_registry_with_workdir.execute(
+            "Read", cwd=temp_working_dir, path=abs_path
+        )
         assert_tool_result_success(result, "Hello, World!")
 
     def test_file_read_nonexistent(self, tool_registry_with_workdir):
         """Test reading a file that doesn't exist"""
-        result = tool_registry_with_workdir.execute("file_read", path="nonexistent.txt")
+        result = tool_registry_with_workdir.execute(
+            "Read", cwd=tool_registry_with_workdir._get_current_working_dir(), path="nonexistent.txt"
+        )
         assert_tool_result_error(result, "not found")
 
     def test_file_read_directory(self, tool_registry_with_workdir, temp_working_dir):
         """Test reading a directory (should fail)"""
-        result = tool_registry_with_workdir.execute("file_read", path="subdir")
+        result = tool_registry_with_workdir.execute(
+            "Read", cwd=temp_working_dir, path="subdir"
+        )
         assert_tool_result_error(result, "not a file")
 
     def test_file_read_max_bytes(self, tool_registry_with_workdir, temp_working_dir):
         """Test reading with max_bytes limit"""
         result = tool_registry_with_workdir.execute(
-            "file_read", path="test_file.txt", max_bytes=5
+            "Read", cwd=temp_working_dir, path="test_file.txt", max_bytes=5
         )
         assert_tool_result_success(result)
         # Should be truncated
@@ -356,7 +273,8 @@ class TestFileOperations:
     def test_file_write_new(self, tool_registry_with_workdir, temp_working_dir):
         """Test writing a new file"""
         result = tool_registry_with_workdir.execute(
-            "file_write",
+            "Write",
+            cwd=temp_working_dir,
             path="new_file.txt",
             content="New content here"
         )
@@ -369,38 +287,34 @@ class TestFileOperations:
             assert f.read() == "New content here"
 
     def test_file_write_overwrite(self, tool_registry_with_workdir, temp_working_dir):
-        """Test overwriting an existing file"""
+        """Write should fail when target already exists"""
         result = tool_registry_with_workdir.execute(
-            "file_write",
+            "Write",
+            cwd=temp_working_dir,
             path="test_file.txt",
             content="Overwritten content"
         )
-        assert_tool_result_success(result)
+        assert_tool_result_error(result, "already exists")
 
-        # Verify content changed
-        with open(os.path.join(temp_working_dir, "test_file.txt")) as f:
-            assert f.read() == "Overwritten content"
-
-    def test_file_write_append(self, tool_registry_with_workdir, temp_working_dir):
-        """Test appending to a file"""
+    def test_file_edit_replaces_text(self, tool_registry_with_workdir, temp_working_dir):
+        """Test editing a file with targeted replacement"""
         result = tool_registry_with_workdir.execute(
-            "file_write",
+            "Edit",
+            cwd=temp_working_dir,
             path="test_file.txt",
-            content=" Appended text",
-            append=True
+            old_string="Hello, World!",
+            new_string="Hello, Edited!"
         )
         assert_tool_result_success(result)
 
-        # Verify content was appended
         with open(os.path.join(temp_working_dir, "test_file.txt")) as f:
-            content = f.read()
-            assert "Hello, World!" in content
-            assert "Appended text" in content
+            assert "Hello, Edited!" in f.read()
 
     def test_file_write_creates_directory(self, tool_registry_with_workdir, temp_working_dir):
-        """Test that file_write creates parent directories"""
+        """Test that Write creates parent directories"""
         result = tool_registry_with_workdir.execute(
-            "file_write",
+            "Write",
+            cwd=temp_working_dir,
             path="new_dir/another/file.txt",
             content="Nested file content"
         )
@@ -411,10 +325,11 @@ class TestFileOperations:
         assert os.path.exists(nested_path)
 
     def test_file_write_unicode(self, tool_registry_with_workdir, temp_working_dir):
-        """Test writing unicode content"""
+        """Test Write with unicode content"""
         unicode_content = "Hello 你好 مرحبا 🔥💻"
         result = tool_registry_with_workdir.execute(
-            "file_write",
+            "Write",
+            cwd=temp_working_dir,
             path="unicode.txt",
             content=unicode_content
         )
@@ -425,31 +340,43 @@ class TestFileOperations:
             assert f.read() == unicode_content
 
 
-class TestSearchFilesystemTool:
-    """Test the search_filesystem tool"""
+class TestSearchTools:
+    """Test Glob and Grep tools"""
 
-    def test_search_filesystem_matches_filename_and_content(self, tool_registry_with_workdir, temp_working_dir):
-        """Pattern should match both file name and its contents"""
+    def test_glob_matches_filename(self, tool_registry_with_workdir, temp_working_dir):
+        """Glob should match filenames"""
         notes_path = os.path.join(temp_working_dir, "project_notes.md")
         with open(notes_path, "w", encoding="utf-8") as f:
             f.write("Project TODOs:\n- search pattern context\nEnd of file.")
 
         result = tool_registry_with_workdir.execute(
-            "search_filesystem",
-            pattern="project\n",
+            "Glob",
+            cwd=temp_working_dir,
+            pattern="**/*notes*.md",
             max_results=5
         )
 
         assert_tool_result_success(result)
-        assert "Matching filenames" in result.output
         assert "project_notes.md" in result.output
-        assert "Content matches" in result.output
-        assert "Project TODOs" in result.output
 
-    def test_search_filesystem_respects_path(self, tool_registry_with_workdir, temp_working_dir):
-        """Search should be scoped when a path is provided"""
+    def test_grep_matches_content(self, tool_registry_with_workdir, temp_working_dir):
+        """Grep should match file contents"""
         result = tool_registry_with_workdir.execute(
-            "search_filesystem",
+            "Grep",
+            cwd=temp_working_dir,
+            pattern="Project TODOs",
+            path=".",
+            max_results=5
+        )
+
+        assert_tool_result_success(result)
+        assert "project_notes.md" in result.output
+
+    def test_grep_respects_path(self, tool_registry_with_workdir, temp_working_dir):
+        """Grep should be scoped when a path is provided"""
+        result = tool_registry_with_workdir.execute(
+            "Grep",
+            cwd=temp_working_dir,
             pattern="deep",
             path="subdir",
             max_results=10
@@ -459,10 +386,11 @@ class TestSearchFilesystemTool:
         assert "nested/deep_file.txt" in result.output
         assert os.path.join(temp_working_dir, "subdir") == result.metadata["path"]
 
-    def test_search_filesystem_empty_pattern(self, tool_registry_with_workdir):
+    def test_grep_empty_pattern(self, tool_registry_with_workdir):
         """Empty or whitespace-only patterns should return an error"""
         result = tool_registry_with_workdir.execute(
-            "search_filesystem",
+            "Grep",
+            cwd=tool_registry_with_workdir._get_current_working_dir(),
             pattern="   \n   "
         )
 
@@ -470,16 +398,16 @@ class TestSearchFilesystemTool:
 
 
 class TestBashExecuteTool:
-    """Test the bash_execute tool"""
+    """Test the Bash tool"""
 
     def test_bash_echo(self, tool_registry):
         """Test simple echo command"""
-        result = tool_registry.execute("bash_execute", command="echo 'Hello, World!'")
+        result = tool_registry.execute("Bash", cwd=os.getcwd(), command="echo 'Hello, World!'")
         assert_tool_result_success(result, "Hello, World!")
 
     def test_bash_pwd(self, tool_registry):
         """Test pwd command"""
-        result = tool_registry.execute("bash_execute", command="pwd")
+        result = tool_registry.execute("Bash", cwd=os.getcwd(), command="pwd")
         assert_tool_result_success(result)
         # Should return a valid path
         assert "/" in str(result.output)
@@ -487,9 +415,9 @@ class TestBashExecuteTool:
     def test_bash_ls(self, tool_registry_with_workdir, temp_working_dir):
         """Test ls command in working directory"""
         result = tool_registry_with_workdir.execute(
-            "bash_execute",
-            command="ls",
-            working_dir=temp_working_dir
+            "Bash",
+            cwd=temp_working_dir,
+            command="ls"
         )
         assert_tool_result_success(result)
         assert "test_file.txt" in result.output
@@ -497,7 +425,8 @@ class TestBashExecuteTool:
     def test_bash_pipe(self, tool_registry):
         """Test command with pipes"""
         result = tool_registry.execute(
-            "bash_execute",
+            "Bash",
+            cwd=os.getcwd(),
             command="echo 'hello world' | wc -w"
         )
         assert_tool_result_success(result)
@@ -506,7 +435,8 @@ class TestBashExecuteTool:
     def test_bash_env_variable(self, tool_registry):
         """Test environment variable access"""
         result = tool_registry.execute(
-            "bash_execute",
+            "Bash",
+            cwd=os.getcwd(),
             command="echo $HOME"
         )
         assert_tool_result_success(result)
@@ -516,7 +446,8 @@ class TestBashExecuteTool:
     def test_bash_nonexistent_command(self, tool_registry):
         """Test running a command that doesn't exist"""
         result = tool_registry.execute(
-            "bash_execute",
+            "Bash",
+            cwd=os.getcwd(),
             command="nonexistent_command_12345"
         )
         assert_tool_result_error(result)
@@ -524,7 +455,8 @@ class TestBashExecuteTool:
     def test_bash_exit_code(self, tool_registry):
         """Test command with non-zero exit code"""
         result = tool_registry.execute(
-            "bash_execute",
+            "Bash",
+            cwd=os.getcwd(),
             command="exit 1"
         )
         assert_tool_result_error(result)
@@ -537,23 +469,24 @@ class TestBashExecuteTool:
     ])
     def test_bash_security_blocks_dangerous(self, tool_registry, dangerous_cmd):
         """Test that dangerous commands are blocked"""
-        result = tool_registry.execute("bash_execute", command=dangerous_cmd)
+        result = tool_registry.execute("Bash", cwd=os.getcwd(), command=dangerous_cmd)
         assert result.status == ToolStatus.PERMISSION_DENIED
         assert "blocked" in result.error.lower() or "safety" in result.error.lower()
 
     def test_bash_with_working_dir(self, tool_registry_with_workdir, temp_working_dir):
         """Test bash with specific working directory"""
         result = tool_registry_with_workdir.execute(
-            "bash_execute",
-            command="cat test_file.txt",
-            working_dir=temp_working_dir
+            "Bash",
+            cwd=temp_working_dir,
+            command="cat test_file.txt"
         )
         assert_tool_result_success(result, "Hello, World!")
 
     def test_bash_timeout(self, tool_registry):
         """Test command timeout"""
         result = tool_registry.execute(
-            "bash_execute",
+            "Bash",
+            cwd=os.getcwd(),
             command="sleep 100",
             timeout=1
         )
@@ -728,7 +661,7 @@ class TestWorkingDirectoryHandling:
 
     def test_resolve_relative_path(self, tool_registry_with_workdir, temp_working_dir):
         """Test resolving relative paths"""
-        resolved = tool_registry_with_workdir._resolve_path("subdir/file.txt")
+        resolved = tool_registry_with_workdir._resolve_path("subdir/file.txt", cwd=temp_working_dir)
         expected = os.path.join(temp_working_dir, "subdir/file.txt")
         assert resolved == expected
 
@@ -774,9 +707,10 @@ class TestWorkingDirectoryHandling:
         assert tool_registry_with_workdir._get_current_working_dir() == temp_working_dir
 
     def test_file_write_uses_working_dir(self, tool_registry_with_workdir, temp_working_dir):
-        """Test that file_write uses the working directory for relative paths"""
+        """Test that Write uses the cwd for relative paths"""
         result = tool_registry_with_workdir.execute(
-            "file_write",
+            "Write",
+            cwd=temp_working_dir,
             path="workdir_test.txt",
             content="Working directory content"
         )
@@ -836,12 +770,12 @@ class TestToolEdgeCases:
 
     def test_tool_with_empty_params(self, tool_registry):
         """Test calling a tool with no required params"""
-        result = tool_registry.execute("get_current_time")
-        assert_tool_result_success(result)
+        result = tool_registry.execute("Read")
+        assert_tool_result_error(result)
 
     def test_tool_with_missing_required_param(self, tool_registry):
         """Test calling a tool missing required params"""
-        result = tool_registry.execute("calculator")  # Missing expression
+        result = tool_registry.execute("Edit", cwd=os.getcwd(), path="missing.txt")
         assert_tool_result_error(result)
 
     def test_tool_output_truncation(self, tool_registry_with_workdir, temp_working_dir):
@@ -853,7 +787,8 @@ class TestToolEdgeCases:
             f.write(large_content)
 
         result = tool_registry_with_workdir.execute(
-            "file_read",
+            "Read",
+            cwd=temp_working_dir,
             path=large_file,
             max_bytes=100000
         )
@@ -862,15 +797,9 @@ class TestToolEdgeCases:
         assert len(result.output) < 200000
         assert "truncated" in result.output.lower()
 
-    def test_calculator_with_special_chars(self, tool_registry):
-        """Test calculator handles special characters"""
-        result = tool_registry.execute("calculator", expression="2+2 # comment")
-        # Should either succeed or fail gracefully
-        assert result.status in (ToolStatus.SUCCESS, ToolStatus.ERROR)
-
     def test_bash_unicode_output(self, tool_registry):
         """Test bash with unicode output"""
-        result = tool_registry.execute("bash_execute", command="echo '你好世界'")
+        result = tool_registry.execute("Bash", cwd=os.getcwd(), command="echo '你好世界'")
         assert_tool_result_success(result)
         assert "你好世界" in result.output
 
@@ -882,29 +811,38 @@ class TestToolEdgeCases:
         )
         assert_tool_result_success(result, "Hello 世界")
 
-    def test_concurrent_tool_execution(self, tool_registry):
+    def test_concurrent_tool_execution(self, tool_registry_with_workdir, temp_working_dir):
         """Test that tools can be executed concurrently"""
         import concurrent.futures
 
-        def run_calc(n):
-            return tool_registry.execute("calculator", expression=f"{n}+1")
+        def run_read():
+            return tool_registry_with_workdir.execute(
+                "Read",
+                cwd=temp_working_dir,
+                path="test_file.txt"
+            )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(run_calc, i) for i in range(10)]
+            futures = [executor.submit(run_read) for _ in range(10)]
             results = [f.result() for f in concurrent.futures.as_completed(futures)]
 
         assert all(r.is_success for r in results)
 
     def test_tool_result_duration_tracking(self, tool_registry):
         """Test that tool execution duration is tracked"""
-        result = tool_registry.execute("calculator", expression="2+2")
+        result = tool_registry.execute("Bash", cwd=os.getcwd(), command="echo ok")
         assert result.duration_ms >= 0
 
     def test_tool_metadata(self, tool_registry):
         """Test that tool results include metadata"""
-        result = tool_registry.execute("get_current_time", format="human")
-        assert "format" in result.metadata
-        assert "timezone" in result.metadata
+        result = tool_registry.execute(
+            "Grep",
+            cwd=os.getcwd(),
+            pattern="ToolRegistry",
+            path="src"
+        )
+        assert "pattern" in result.metadata
+        assert "path" in result.metadata
 
 
 if __name__ == "__main__":

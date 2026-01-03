@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from multiprocessing import Queue as MPQueue
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
@@ -119,7 +119,7 @@ class JSONLBridge:
             self._send_error("Bridge not initialized", detail="Send init first")
             return
 
-        # Skills and hooks are read-only in TUI. Create/update/delete via agent file_write.
+        # Skills and hooks are read-only in TUI. Create/update/delete via agent Write/Edit.
         handler = {
             "init": self._handle_init,
             "send_text": self._handle_send_text,
@@ -364,7 +364,7 @@ class JSONLBridge:
         self._send_response(kind="status", content=text, metadata=meta)
 
     def _handle_skills_list(self, data: Dict[str, Any]) -> None:
-        """List skills (read-only). To create/edit, use the agent with file_write."""
+        """List skills (read-only). To create/edit, use the agent with Write/Edit."""
         if not self.skill_store:
             self._send_error("Skills not initialized")
             return
@@ -375,7 +375,7 @@ class JSONLBridge:
         self._send_response(kind="skills", content=content, payload=payload)
 
     def _handle_hooks_list(self, data: Dict[str, Any]) -> None:
-        """List hooks (read-only). To create/edit, use the agent with file_write."""
+        """List hooks (read-only). To create/edit, use the agent with Write/Edit."""
         if not self.hook_store:
             self._send_error("Hooks not initialized")
             return
@@ -430,25 +430,26 @@ class JSONLBridge:
     def _event_loop(self) -> None:
         while not self._shutdown:
             try:
-                if self.response_mailbox:
-                    event = self.response_mailbox.receive(timeout=0.01)
-                    if isinstance(event, AgentResponseCompleteEvent):
-                        self._handle_agent_response(event)
-
-                if self.streaming_mailbox:
-                    event = self.streaming_mailbox.receive(timeout=0.01)
-                    if isinstance(event, StreamingChunkEvent):
-                        self._handle_stream_chunk(event)
-
-                if self.progress_mailbox:
-                    event = self.progress_mailbox.receive(timeout=0.01)
-                    if isinstance(event, AgentProgressEvent):
-                        self._handle_progress(event)
-
-                if self.voice_mailbox:
-                    event = self.voice_mailbox.receive(timeout=0.01)
-                    if isinstance(event, TranscriptionCompleteEvent):
-                        self._handle_transcription(event)
+                self._drain_mailbox(
+                    self.response_mailbox,
+                    AgentResponseCompleteEvent,
+                    self._handle_agent_response,
+                )
+                self._drain_mailbox(
+                    self.streaming_mailbox,
+                    StreamingChunkEvent,
+                    self._handle_stream_chunk,
+                )
+                self._drain_mailbox(
+                    self.progress_mailbox,
+                    AgentProgressEvent,
+                    self._handle_progress,
+                )
+                self._drain_mailbox(
+                    self.voice_mailbox,
+                    TranscriptionCompleteEvent,
+                    self._handle_transcription,
+                )
             except Exception as exc:
                 self.logger.error(f"Bridge event loop error: {exc}")
                 time.sleep(0.05)
@@ -516,6 +517,22 @@ class JSONLBridge:
                 "user_prompt": user_prompt,
             },
         )
+
+    def _drain_mailbox(
+        self,
+        mailbox: Optional[Mailbox],
+        expected_type: type,
+        handler: Callable[[Any], None],
+        timeout: float = 0.01,
+    ) -> None:
+        if not mailbox:
+            return
+
+        event = mailbox.receive(timeout=timeout)
+        while event:
+            if isinstance(event, expected_type):
+                handler(event)
+            event = mailbox.receive(timeout=0)
 
     def _handle_transcription(self, event: TranscriptionCompleteEvent) -> None:
         if not event.request_id or not event.request_id.startswith("ptt_"):

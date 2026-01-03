@@ -280,25 +280,31 @@ class TestDataGenerator:
     ]
 
     TOOL_TRIGGERING_QUERIES = {
-        "calculator": [
-            "Calculate 25 * 4",
-            "What is sqrt(144)?",
-            "Compute 3.14 * 2^2"
-        ],
-        "get_current_time": [
-            "What time is it?",
-            "What's today's date?",
-            "Tell me the current time"
-        ],
-        "file_read": [
+        "Read": [
             "Read the file test.txt",
             "Show me the contents of config.json",
             "Open and display readme.md"
         ],
-        "bash_execute": [
+        "Write": [
+            "Create a new file named notes.txt with a short summary",
+            "Write a README.md for this project"
+        ],
+        "Edit": [
+            "Update config.json to use production settings",
+            "Replace localhost with 127.0.0.1 in settings"
+        ],
+        "Bash": [
             "Run ls -la",
             "Execute the command pwd",
             "Run echo hello"
+        ],
+        "Glob": [
+            "Find all *.py files",
+            "List all files under src/"
+        ],
+        "Grep": [
+            "Search for TODO in the codebase",
+            "Find occurrences of validatePassword"
         ],
         "python_execute": [
             "Run this Python code: print('hello')",

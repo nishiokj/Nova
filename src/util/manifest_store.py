@@ -287,9 +287,13 @@ def ensure_default_manifests():
     # Note: In production, get actual tool definitions from ToolRegistry
     # For now, create a reference manifest
     default_tools = [
-        {"name": "bash_execute", "description": "Execute bash command"},
-        {"name": "file_read", "description": "Read file contents"},
-        {"name": "file_write", "description": "Write to file"},
+        {"name": "Read", "description": "Read any file in the working directory"},
+        {"name": "Write", "description": "Create new files"},
+        {"name": "Edit", "description": "Edit existing files"},
+        {"name": "Bash", "description": "Run terminal commands"},
+        {"name": "Glob", "description": "Find files by pattern"},
+        {"name": "Grep", "description": "Search file contents with regex"},
+        {"name": "python_execute", "description": "Execute Python code"},
         # ... etc
     ]
 

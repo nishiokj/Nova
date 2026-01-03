@@ -375,7 +375,7 @@ class TestAgentResponse:
         response = AgentResponse(
             content="Test response",
             total_duration_ms=100.5,
-            tools_used=["calculator"],
+            tools_used=["Read"],
             success=True
         )
 
@@ -384,7 +384,7 @@ class TestAgentResponse:
         assert d["content"] == "Test response"
         assert d["success"] is True
         assert d["total_duration_ms"] == 100.5
-        assert "calculator" in d["tools_used"]
+        assert "Read" in d["tools_used"]
 
     def test_response_with_error(self):
         """Test AgentResponse with error"""

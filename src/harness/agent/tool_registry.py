@@ -593,10 +593,9 @@ class ToolRegistry:
         self._cache_max_size: int = 100  # max cached entries
         # Only cache read-only tools with deterministic outputs
         self._cacheable_tools: set = {
-            "file_read",           # File contents (invalidate on write)
-            "search_filesystem",   # Search results
-            "list_files",          # Directory listings
-            "get_working_directory",  # CWD (rarely changes)
+            "Read",   # File contents (invalidate on write)
+            "Glob",   # File pattern matches
+            "Grep",   # Content search results
         }
         # Track file writes to invalidate relevant caches
         self._cache_invalidation_paths: Dict[str, float] = {}
@@ -724,12 +723,12 @@ class ToolRegistry:
                 else:
                     os.environ[key] = value
 
-    def _resolve_path(self, path: str) -> str:
-        """Resolve a user-provided path against the active working directory"""
+    def _resolve_path(self, path: str, cwd: Optional[str] = None) -> str:
+        """Resolve a user-provided path against the active working directory."""
         path = os.path.expanduser(path)
         if os.path.isabs(path):
             return os.path.abspath(path)
-        base = self._get_current_working_dir()
+        base = os.path.abspath(cwd) if cwd else self._get_current_working_dir()
         return os.path.abspath(os.path.join(base, path))
 
     def _summarize_kwargs(self, kwargs: Dict[str, Any], max_length: int = 200) -> Dict[str, str]:
@@ -747,6 +746,27 @@ class ToolRegistry:
         if not text:
             return None
         return text if len(text) <= max_length else text[:max_length] + "..."
+
+    def _filter_tool_kwargs(self, tool: Tool, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Drop unexpected kwargs before invoking a tool executor."""
+        if not kwargs or not tool.executor:
+            return kwargs
+        try:
+            import inspect
+            sig = inspect.signature(tool.executor)
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return kwargs
+            allowed = set(sig.parameters.keys())
+            filtered = {k: v for k, v in kwargs.items() if k in allowed}
+            dropped = [k for k in kwargs.keys() if k not in allowed]
+            if dropped:
+                self.logger.debug(
+                    f"Dropped unexpected args for tool '{tool.name}': {dropped}",
+                    component="tools"
+                )
+            return filtered
+        except Exception:
+            return kwargs
 
     def register(self, tool: Tool):
         """Register a tool"""
@@ -794,7 +814,11 @@ class ToolRegistry:
 
     def get_definitions(self, enabled_only: bool = True) -> List[ToolDefinition]:
         """Get tool definitions for LLM"""
-        return [t.to_definition() for t in self.list_tools(enabled_only)]
+        return [
+            t.to_definition()
+            for t in self.list_tools(enabled_only)
+            if not t.name.startswith("graphd_")
+        ]
 
     # ========== CACHE HELPER METHODS ==========
 
@@ -807,6 +831,17 @@ class ToolRegistry:
         for k, v in sorted_items:
             key_parts.append(f"{k}={v}")
         return "|".join(key_parts)
+
+    def _parse_cache_key(self, key: str) -> Tuple[str, Dict[str, str]]:
+        """Parse a cache key back into tool name and parameters."""
+        parts = key.split("|") if key else []
+        tool = parts[0] if parts else ""
+        params: Dict[str, str] = {}
+        for part in parts[1:]:
+            if "=" in part:
+                param, value = part.split("=", 1)
+                params[param] = value
+        return tool, params
 
     def _get_cached_result(self, cache_key: str) -> Optional[ToolResult]:
         """
@@ -847,20 +882,21 @@ class ToolRegistry:
                 hit_count=0
             )
 
-    def _invalidate_cache_for_path(self, path: str):
+    def _invalidate_cache_for_path(self, path: str, cwd: Optional[str] = None):
         """Invalidate cache entries that might be affected by a file write."""
-        resolved = os.path.abspath(path) if path else ""
+        resolved = self._resolve_path(path, cwd=cwd) if path else ""
         with self._cache_lock:
             keys_to_remove = []
             for key in self._result_cache:
-                # Invalidate file_read for this exact path
-                if f"file_read|path={resolved}" in key:
-                    keys_to_remove.append(key)
-                # Invalidate list_files for parent directory
-                elif "list_files|" in key and resolved.startswith(key.split("path=")[-1].split("|")[0] if "path=" in key else ""):
-                    keys_to_remove.append(key)
-                # Invalidate search_filesystem that might include this file
-                elif "search_filesystem|" in key:
+                tool_name, params = self._parse_cache_key(key)
+                if tool_name == "Read":
+                    cached_path = params.get("path")
+                    cached_cwd = params.get("cwd")
+                    if cached_path:
+                        cached_resolved = self._resolve_path(cached_path, cwd=cached_cwd)
+                        if cached_resolved == resolved:
+                            keys_to_remove.append(key)
+                elif tool_name in ("Glob", "Grep"):
                     keys_to_remove.append(key)
 
             for key in keys_to_remove:
@@ -983,6 +1019,9 @@ class ToolRegistry:
                 error=f"Tool '{name}' blocked by invocation policy"
             )
 
+        # Remove any unexpected args before caching/execution.
+        kwargs = self._filter_tool_kwargs(tool, kwargs)
+
         # ========== CACHE CHECK (read-only tools only) ==========
         is_cacheable = name in self._cacheable_tools and tool.read_only
         if exec_context.env_overrides or exec_context.workdir_override:
@@ -1003,12 +1042,12 @@ class ToolRegistry:
 
         # ========== EXECUTE TOOL ==========
         env_overrides = exec_context.env_overrides
-        if name == "bash_execute" and env_overrides and "env" not in kwargs:
+        if name == "Bash" and env_overrides and "env" not in kwargs:
             env = os.environ.copy()
             env.update(env_overrides)
             kwargs["env"] = env
-        if name == "bash_execute" and exec_context.workdir_override and "working_dir" not in kwargs:
-            kwargs["working_dir"] = exec_context.workdir_override
+        if name == "Bash" and exec_context.workdir_override and "cwd" not in kwargs:
+            kwargs["cwd"] = exec_context.workdir_override
 
         workdir_ctx = self.with_working_dir(exec_context.workdir_override) if exec_context.workdir_override else nullcontext()
         with workdir_ctx:
@@ -1052,11 +1091,12 @@ class ToolRegistry:
 
         # ========== CACHE INVALIDATION (write operations) ==========
         if result.is_success:
-            if name == "file_write":
+            if name in ("Write", "Edit"):
                 path = kwargs.get("path", "")
+                cwd = kwargs.get("cwd")
                 if path:
-                    self._invalidate_cache_for_path(path)
-            elif name in ("bash_execute", "python_execute"):
+                    self._invalidate_cache_for_path(path, cwd=cwd)
+            elif name in ("Bash", "python_execute"):
                 # These can modify files in unknown ways - clear filesystem caches
                 # Only clear if the command likely modified files
                 command = kwargs.get("command", "") or kwargs.get("code", "")
@@ -1072,11 +1112,11 @@ class ToolRegistry:
         return result
 
     def _invalidate_filesystem_caches(self):
-        """Clear all filesystem-related caches (file_read, list_files, search_filesystem)."""
+        """Clear all filesystem-related caches (Read, Glob, Grep)."""
         with self._cache_lock:
             keys_to_remove = [
                 key for key in self._result_cache
-                if any(tool in key for tool in ("file_read", "list_files", "search_filesystem"))
+                if any(tool in key for tool in ("Read", "Glob", "Grep"))
             ]
             for key in keys_to_remove:
                 del self._result_cache[key]
@@ -1126,28 +1166,179 @@ class ToolRegistry:
         #     timeout=60
         # ))
 
-        # Bash Execute Tool
+        # Core tool set (cwd is required for filesystem operations)
         self.register(Tool(
-            name="bash_execute",
-            description="Execute a bash command and return the output. Use for system operations, file management, or running scripts.",
+            name="Read",
+            description="Read any file in the working directory.",
             parameters={
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory to resolve relative paths against"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to read (relative to cwd or absolute)"
+                },
+                "encoding": {
+                    "type": "string",
+                    "description": "File encoding (default: utf-8)",
+                    "default": "utf-8"
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "description": "Maximum bytes to read (default: 100000)",
+                    "default": 100000
+                }
+            },
+            required_params=["cwd", "path"],
+            executor=self._file_read,
+            timeout=10,
+            read_only=True,
+            parallelizable=True,
+            cost_hint="low"
+        ))
+
+        self.register(Tool(
+            name="Write",
+            description="Create new files in the working directory.",
+            parameters={
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory to resolve relative paths against"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Path to the new file (relative to cwd or absolute)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full file content to write"
+                }
+            },
+            required_params=["cwd", "path", "content"],
+            executor=self._file_create,
+            timeout=10
+        ))
+
+        self.register(Tool(
+            name="Edit",
+            description="Make precise edits to existing files.",
+            parameters={
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory to resolve relative paths against"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit (relative to cwd or absolute)"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact string to find"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement string"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace all occurrences (default: false, requires unique match)",
+                    "default": False
+                }
+            },
+            required_params=["cwd", "path", "old_string", "new_string"],
+            executor=self._file_edit,
+            timeout=10
+        ))
+
+        self.register(Tool(
+            name="Bash",
+            description="Run terminal commands, scripts, or git operations.",
+            parameters={
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for command execution"
+                },
                 "command": {
                     "type": "string",
-                    "description": "The bash command to execute"
+                    "description": "The command to execute"
                 },
                 "timeout": {
                     "type": "integer",
                     "description": "Timeout in seconds (default: 30)",
                     "default": 30
-                },
-                "working_dir": {
-                    "type": "string",
-                    "description": "Working directory for command execution"
                 }
             },
-            required_params=["command"],
+            required_params=["cwd", "command"],
             executor=self._bash_execute,
             timeout=self.config.bash_timeout
+        ))
+
+        self.register(Tool(
+            name="Glob",
+            description="Find files by glob pattern (e.g., **/*.ts, src/**/*.py).",
+            parameters={
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory to resolve patterns against"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to match"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to return (default: 200)",
+                    "default": 200
+                },
+                "include_hidden": {
+                    "type": "boolean",
+                    "description": "Include hidden files and directories (default: false)",
+                    "default": False
+                }
+            },
+            required_params=["cwd", "pattern"],
+            executor=self._glob_search,
+            timeout=15,
+            read_only=True,
+            parallelizable=True,
+            cost_hint="low"
+        ))
+
+        self.register(Tool(
+            name="Grep",
+            description="Search file contents with a regex pattern.",
+            parameters={
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory to search within"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to search for"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional subpath to scope the search (default: '.')",
+                    "default": "."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to return (default: 20)",
+                    "default": 20
+                },
+                "case_sensitive": {
+                    "type": "boolean",
+                    "description": "Whether the search should respect case",
+                    "default": False
+                }
+            },
+            required_params=["cwd", "pattern"],
+            executor=self._grep_search,
+            timeout=20,
+            read_only=True,
+            parallelizable=True,
+            cost_hint="low"
         ))
 
         # Python Execute Tool
@@ -1168,192 +1359,6 @@ class ToolRegistry:
             required_params=["code"],
             executor=self._python_execute,
             timeout=self.config.python_timeout
-        ))
-
-        # File Read Tool
-        self.register(Tool(
-            name="file_read",
-            description="Read the contents of a file. Returns the file content as text.",
-            parameters={
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to read"
-                },
-                "encoding": {
-                    "type": "string",
-                    "description": "File encoding (default: utf-8)",
-                    "default": "utf-8"
-                },
-                "max_bytes": {
-                    "type": "integer",
-                    "description": "Maximum bytes to read (default: 100000)",
-                    "default": 100000
-                }
-            },
-            required_params=["path"],
-            executor=self._file_read,
-            timeout=10,
-            read_only=True,
-            parallelizable=True,
-            cost_hint="low"
-        ))
-
-        # File Write Tool (supports full write, append, and targeted edit modes)
-        self.register(Tool(
-            name="file_write",
-            description="""Write or edit a file. Supports three modes:
-1. FULL WRITE: Provide 'content' to replace entire file (creates if missing)
-2. APPEND: Provide 'content' + append=true to add to end of file
-3. TARGETED EDIT: Provide 'old_string' + 'new_string' to replace specific text (file must exist)
-
-For targeted edits, old_string must be unique in the file unless replace_all=true.
-All writes are atomic (crash-safe).""",
-            parameters={
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to write/edit"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Full content to write (for full write or append mode). Omit for targeted edit."
-                },
-                "append": {
-                    "type": "boolean",
-                    "description": "If true, append content to existing file (default: false)",
-                    "default": False
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "For targeted edit: exact string to find and replace"
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "For targeted edit: replacement string"
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "For targeted edit: replace all occurrences (default: false, requires unique match)",
-                    "default": False
-                }
-            },
-            required_params=["path"],
-            executor=self._file_write,
-            timeout=10
-        ))
-
-        # Filesystem Search Tool
-        self.register(Tool(
-            name="search_filesystem",
-            description="Fast filesystem search that looks for file names or contents. Use it to gather context on files in the current workspace.",
-            parameters={
-                "pattern": {
-                    "type": "string",
-                    "description": "Pattern to search for within file names or file contents"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Optional relative path to scope the search"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of matches to return",
-                    "default": 20
-                },
-                "case_sensitive": {
-                    "type": "boolean",
-                    "description": "Whether the search should respect case",
-                    "default": False
-                }
-            },
-            required_params=["pattern"],
-            executor=self._search_filesystem,
-            timeout=20,
-            read_only=True,
-            parallelizable=True,
-            cost_hint="low"
-        ))
-
-        # Calculator Tool
-        self.register(Tool(
-            name="calculator",
-            description="Perform mathematical calculations. Supports basic arithmetic, functions (sin, cos, sqrt, etc.), and variables.",
-            parameters={
-                "expression": {
-                    "type": "string",
-                    "description": "Mathematical expression to evaluate (e.g., '2 + 2', 'sqrt(16)', '3.14 * 2^2')"
-                }
-            },
-            required_params=["expression"],
-            executor=self._calculator,
-            timeout=5
-        ))
-
-        # Get Current Time Tool
-        self.register(Tool(
-            name="get_current_time",
-            description="Get the current date and time in various formats.",
-            parameters={
-                "format": {
-                    "type": "string",
-                    "description": "Time format (iso, unix, human, custom strftime format)",
-                    "default": "human"
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "Timezone (e.g., 'UTC', 'America/New_York')",
-                    "default": "local"
-                }
-            },
-            required_params=[],
-            executor=self._get_current_time,
-            timeout=5
-        ))
-
-        # Get Working Directory Tool
-        self.register(Tool(
-            name="get_working_directory",
-            description="Get the current working directory path. Use this to understand where you are in the filesystem before performing file operations.",
-            parameters={},
-            required_params=[],
-            executor=self._get_working_directory,
-            timeout=5,
-            read_only=True,
-            parallelizable=True,
-            cost_hint="low"
-        ))
-
-        # List Files Tool
-        self.register(Tool(
-            name="list_files",
-            description="List files and directories in a given path. Returns file names, sizes, and types.",
-            parameters={
-                "path": {
-                    "type": "string",
-                    "description": "Path to list (defaults to current working directory)",
-                    "default": "."
-                },
-                "include_hidden": {
-                    "type": "boolean",
-                    "description": "Include hidden files (default: false)",
-                    "default": False
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "description": "List recursively (default: false)",
-                    "default": False
-                },
-                "max_depth": {
-                    "type": "integer",
-                    "description": "Maximum depth for recursive listing (default: 3)",
-                    "default": 3
-                }
-            },
-            required_params=[],
-            executor=self._list_files,
-            timeout=10,
-            read_only=True,
-            parallelizable=True,
-            cost_hint="low"
         ))
 
         # Ask User Tool - for interactive workflows
@@ -1596,6 +1601,7 @@ All writes are atomic (crash-safe).""",
         self,
         command: str,
         timeout: int = 30,
+        cwd: Optional[str] = None,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> ToolResult:
@@ -1620,8 +1626,9 @@ All writes are atomic (crash-safe).""",
             timeout = min(timeout, self.config.bash_timeout)
 
             # Resolve working directory against calling context
-            if working_dir:
-                resolved_cwd = self._resolve_path(working_dir)
+            base_dir = cwd or working_dir
+            if base_dir:
+                resolved_cwd = self._resolve_path(base_dir)
             else:
                 resolved_cwd = self._get_current_working_dir()
 
@@ -1760,9 +1767,15 @@ All writes are atomic (crash-safe).""",
                 error=f"Python execution failed: {str(e)}"
             )
 
-    def _file_read(self, path: str, encoding: str = "utf-8", max_bytes: int = 100000) -> ToolResult:
+    def _file_read(
+        self,
+        path: str,
+        cwd: Optional[str] = None,
+        encoding: str = "utf-8",
+        max_bytes: int = 100000
+    ) -> ToolResult:
         """Read file contents"""
-        resolved_path = self._resolve_path(path)
+        resolved_path = self._resolve_path(path, cwd=cwd)
         try:
             self.logger.file_operation("file_read", resolved_path, status="starting")
 
@@ -1826,6 +1839,7 @@ All writes are atomic (crash-safe).""",
     def _file_write(
         self,
         path: str,
+        cwd: Optional[str] = None,
         content: Optional[str] = None,
         append: bool = False,
         old_string: Optional[str] = None,
@@ -1840,7 +1854,7 @@ All writes are atomic (crash-safe).""",
         2. APPEND: content provided, append=True
         3. TARGETED EDIT: old_string + new_string provided (content ignored)
         """
-        resolved_path = self._resolve_path(path)
+        resolved_path = self._resolve_path(path, cwd=cwd)
 
         # Determine mode
         is_edit_mode = old_string is not None and new_string is not None
@@ -1851,7 +1865,7 @@ All writes are atomic (crash-safe).""",
                 return ToolResult(
                     status=ToolStatus.ERROR,
                     output=None,
-                    error=f"File not found for edit: {resolved_path}. Use content param to create new files."
+                    error=f"File not found for edit: {resolved_path}. Use Write to create new files."
                 )
         else:
             if content is None:
@@ -1991,41 +2005,46 @@ All writes are atomic (crash-safe).""",
                 error=detail
             )
 
-    def _calculator(self, expression: str) -> ToolResult:
-        """Evaluate mathematical expression"""
-        try:
-            import math
-
-            # Safe evaluation namespace
-            safe_dict = {
-                "abs": abs, "round": round, "min": min, "max": max,
-                "sum": sum, "pow": pow, "len": len,
-                "sin": math.sin, "cos": math.cos, "tan": math.tan,
-                "asin": math.asin, "acos": math.acos, "atan": math.atan,
-                "sqrt": math.sqrt, "log": math.log, "log10": math.log10,
-                "exp": math.exp, "pi": math.pi, "e": math.e,
-                "floor": math.floor, "ceil": math.ceil,
-                "degrees": math.degrees, "radians": math.radians
-            }
-
-            # Replace ^ with ** for power
-            expression = expression.replace("^", "**")
-
-            # Evaluate
-            result = eval(expression, {"__builtins__": {}}, safe_dict)
-
-            return ToolResult(
-                status=ToolStatus.SUCCESS,
-                output=result,
-                metadata={"expression": expression}
-            )
-
-        except Exception as e:
+    def _file_create(self, cwd: str, path: str, content: str) -> ToolResult:
+        """Create a new file; fails if the file already exists."""
+        if content is None:
             return ToolResult(
                 status=ToolStatus.ERROR,
                 output=None,
-                error=f"Calculation failed: {str(e)}"
+                error="Must provide 'content' to create a new file"
             )
+
+        resolved_path = self._resolve_path(path, cwd=cwd)
+        if os.path.exists(resolved_path):
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"File already exists: {resolved_path}. Use Edit to modify existing files."
+            )
+
+        return self._file_write(
+            path=path,
+            cwd=cwd,
+            content=content,
+            append=False
+        )
+
+    def _file_edit(
+        self,
+        cwd: str,
+        path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False
+    ) -> ToolResult:
+        """Apply a precise string replacement to an existing file."""
+        return self._file_write(
+            path=path,
+            cwd=cwd,
+            old_string=old_string,
+            new_string=new_string,
+            replace_all=replace_all
+        )
 
     def _get_current_time(self, format: str = "human", timezone: str = "local") -> ToolResult:
         """Get current time"""
@@ -2193,6 +2212,19 @@ All writes are atomic (crash-safe).""",
         cleaned = re.sub(r"\s+", " ", cleaned)
         return cleaned
 
+    def _relax_grep_pattern(self, pattern: str) -> Optional[str]:
+        """Derive a broader literal token from a regex pattern for fallback matching."""
+        if not pattern or re.fullmatch(r"[A-Za-z0-9_]+", pattern):
+            return None
+        stripped = re.sub(r"\\.", " ", pattern)
+        tokens = re.findall(r"[A-Za-z0-9_]+", stripped)
+        if not tokens:
+            return None
+        candidate = max(tokens, key=len)
+        if len(candidate) < 3:
+            return None
+        return candidate
+
     def _match_filenames(self, root: str, pattern: str, limit: int) -> List[str]:
         """
         Find files whose names contain the pattern.
@@ -2357,6 +2389,192 @@ All writes are atomic (crash-safe).""",
                     continue
 
         return "\n".join(matches)
+
+    def _glob_search(
+        self,
+        cwd: str,
+        pattern: str,
+        max_results: int = 200,
+        include_hidden: bool = False
+    ) -> ToolResult:
+        """Find files by glob pattern rooted at cwd."""
+        if not pattern:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error="Empty glob pattern"
+            )
+
+        max_results = max(1, min(max_results, 1000))
+        resolved_cwd = self._resolve_path(cwd)
+
+        if not os.path.isdir(resolved_cwd):
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Working directory does not exist or is not a directory: {resolved_cwd}"
+            )
+
+        search_pattern = pattern if os.path.isabs(pattern) else os.path.join(resolved_cwd, pattern)
+
+        try:
+            import glob
+
+            def _filter_glob_matches(matches: List[str]) -> List[str]:
+                filtered: List[str] = []
+                seen = set()
+                for match in sorted(matches):
+                    if not self._is_safe_path(match, resolved_cwd):
+                        continue
+
+                    rel_path = os.path.relpath(match, resolved_cwd)
+                    parts = rel_path.split(os.sep)
+
+                    if not include_hidden and any(part.startswith(".") for part in parts):
+                        continue
+
+                    if any(self._should_skip_dir(part) for part in parts[:-1]):
+                        continue
+
+                    basename = os.path.basename(match)
+                    if os.path.isfile(match) and self._should_skip_file(basename):
+                        continue
+
+                    if rel_path in seen:
+                        continue
+
+                    seen.add(rel_path)
+                    if os.path.isdir(match):
+                        rel_path = f"{rel_path}/"
+                    filtered.append(rel_path)
+
+                    if len(filtered) >= max_results:
+                        break
+                return filtered
+
+            raw_matches = glob.glob(search_pattern, recursive=True)
+            filtered = _filter_glob_matches(raw_matches)
+            used_pattern = pattern
+
+            if not filtered and not os.path.isabs(pattern) and not glob.has_magic(pattern):
+                if not pattern.startswith("..") and not pattern.startswith("~"):
+                    fallback_seed = pattern
+                    if fallback_seed.startswith("./"):
+                        fallback_seed = fallback_seed[2:]
+                    fallback_seed = fallback_seed.lstrip(os.sep)
+                    if fallback_seed:
+                        fallback_pattern = f"**/*{fallback_seed}*"
+                        fallback_search = os.path.join(resolved_cwd, fallback_pattern)
+                        raw_matches = glob.glob(fallback_search, recursive=True)
+                        filtered = _filter_glob_matches(raw_matches)
+                        if filtered:
+                            used_pattern = fallback_pattern
+
+            if filtered:
+                output = "\n".join(filtered)
+            else:
+                output = f"No matches for '{pattern}' in {resolved_cwd}"
+
+            if len(output) > self.config.max_output_length:
+                output = output[:self.config.max_output_length] + "\n...[truncated]"
+
+            return ToolResult(
+                status=ToolStatus.SUCCESS,
+                output=output,
+                metadata={
+                    "cwd": resolved_cwd,
+                    "pattern": pattern,
+                    "count": len(filtered),
+                    **({"pattern_used": used_pattern} if used_pattern != pattern else {})
+                }
+            )
+
+        except Exception as e:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Glob search failed: {str(e)}"
+            )
+
+    def _grep_search(
+        self,
+        cwd: str,
+        pattern: str,
+        path: str = ".",
+        max_results: int = 20,
+        case_sensitive: bool = False
+    ) -> ToolResult:
+        """Search file contents with a regex pattern rooted at cwd."""
+        sanitized = self._sanitize_search_pattern(pattern)
+        if not sanitized:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error="Empty or invalid search pattern"
+            )
+
+        max_results = max(1, min(max_results, 200))
+        resolved_root = self._resolve_path(path, cwd=cwd)
+
+        if not os.path.isdir(resolved_root):
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                output=None,
+                error=f"Search path does not exist or is not a directory: {resolved_root}"
+            )
+
+        content_output, strategy = self._run_fast_search(
+            resolved_root, sanitized, max_results, case_sensitive
+        )
+        if not content_output:
+            content_output = self._manual_content_search(
+                resolved_root, sanitized, max_results, case_sensitive
+            )
+            if not strategy:
+                strategy = "manual"
+
+        used_relaxed = False
+        relaxed_pattern = None
+        if not content_output:
+            relaxed_pattern = self._relax_grep_pattern(sanitized)
+            if relaxed_pattern:
+                relaxed_output, relaxed_strategy = self._run_fast_search(
+                    resolved_root, relaxed_pattern, max_results, case_sensitive
+                )
+                if not relaxed_output:
+                    relaxed_output = self._manual_content_search(
+                        resolved_root, relaxed_pattern, max_results, case_sensitive
+                    )
+                    if not relaxed_strategy:
+                        relaxed_strategy = "manual"
+                if relaxed_output:
+                    content_output = relaxed_output
+                    strategy = f"{relaxed_strategy or 'manual'}-relaxed"
+                    used_relaxed = True
+
+        if content_output:
+            output = content_output
+        else:
+            output = f"No matches for '{sanitized}' in {resolved_root}"
+
+        if len(output) > self.config.max_output_length:
+            output = output[:self.config.max_output_length] + "\n...[truncated]"
+
+        return ToolResult(
+            status=ToolStatus.SUCCESS,
+            output=output,
+            metadata={
+                "path": resolved_root,
+                "pattern": sanitized,
+                "strategy": strategy or "manual",
+                "matches": bool(content_output),
+                **(
+                    {"pattern_used": relaxed_pattern, "pattern_relaxed_from": sanitized}
+                    if used_relaxed and relaxed_pattern
+                    else {}
+                )
+            }
+        )
 
     def _search_filesystem(
         self,

@@ -120,7 +120,7 @@ def test_episode_reconstruction():
                     {
                         "step_num": 1,
                         "objective": "Create file",
-                        "tool_hint": "file_write",
+                        "tool_hint": "Write",
                         "status": "pending"
                     }
                 ]
@@ -135,7 +135,7 @@ def test_episode_reconstruction():
             "step_id": "step-1",
             "step_num": 1,
             "status": "completed",
-            "action": {"type": "tool_call", "tool_name": "file_write"},
+            "action": {"type": "tool_call", "tool_name": "Write"},
             "result": {"duration_ms": 50, "tool_success": True}
         },
         {

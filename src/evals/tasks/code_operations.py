@@ -37,7 +37,7 @@ Example: is_palindrome("A man a plan a canal Panama") should return True""",
         "Function works for test cases"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "palindrome.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=120,
     tags=["code_generation", "string_manipulation", "python"]
 )
@@ -78,7 +78,7 @@ The bug: This function crashes when given an empty list. Fix it to return 0 for 
         "Saves to fixed_average.py"
     ],
     rubric=CODE_DEBUG_RUBRIC,
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["debugging", "edge_cases", "python"]
 )
@@ -104,7 +104,7 @@ Example: remove_duplicates([1, 2, 2, 3, 1, 4]) should return [1, 2, 3, 4]""",
         "Handles edge cases (empty list, all duplicates)"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "remove_duplicates.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=120,
     tags=["code_generation", "list_manipulation", "python"]
 )
@@ -135,7 +135,7 @@ Handle the case where the file doesn't exist gracefully.""",
         "Prints result"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "word_count.py"),
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["file_io", "text_processing", "python"]
 )
@@ -160,7 +160,7 @@ Example: fibonacci(10) should return 55""",
         "Handles edge cases (n=0, n=1)"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "fibonacci.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=120,
     tags=["algorithms", "recursion", "python"]
 )
@@ -195,7 +195,7 @@ Handle JSON parsing errors gracefully.""",
         "Handles errors gracefully"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "parse_json.py"),
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["json", "data_processing", "python"]
 )
@@ -225,7 +225,7 @@ The withdraw method should return False if insufficient funds, True if successfu
         "get_balance() returns current balance"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "bank_account.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=150,
     tags=["oop", "classes", "python"]
 )
@@ -251,7 +251,7 @@ Example: quicksort([3, 1, 4, 1, 5, 9, 2, 6]) should return [1, 1, 2, 3, 4, 5, 6,
         "Returns new list (doesn't modify original)"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "quicksort.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=150,
     tags=["algorithms", "sorting", "python"]
 )
@@ -282,7 +282,7 @@ Return True if valid, False otherwise.""",
         "Handles edge cases"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "email_validator.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=120,
     tags=["regex", "validation", "python"]
 )
@@ -326,7 +326,7 @@ print(result)
         "Saves to safe_division.py"
     ],
     rubric=CODE_DEBUG_RUBRIC,
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["exception_handling", "error_handling", "python"]
 )
@@ -356,7 +356,7 @@ Raise an exception if pop() or peek() are called on an empty stack.""",
         "Raises exception for invalid operations"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "stack.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=150,
     tags=["data_structures", "stack", "python"]
 )
@@ -382,7 +382,7 @@ Example: reverse_words("Hello World Python") should return "Python World Hello" 
         "Handles edge cases (empty string, single word)"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "reverse_words.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=90,
     tags=["string_manipulation", "python"]
 )
@@ -408,7 +408,7 @@ Example: filter_evens([1, 2, 3, 4, 5, 6]) should return [2, 4, 6]""",
         "Works with various inputs"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "filter_evens.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=90,
     tags=["list_comprehension", "filtering", "python"]
 )
@@ -434,7 +434,7 @@ Example: merge_dicts({'a': 1, 'b': 2}, {'b': 3, 'c': 4}) should return {'a': 1, 
         "Returns new dictionary"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "merge_dicts.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=120,
     tags=["dictionaries", "data_structures", "python"]
 )
@@ -461,7 +461,7 @@ Include a comment explaining your approach.""",
         "Includes explanatory comment"
     ],
     rubric=template_file_path(CODE_GENERATION_RUBRIC, "prime_generator.py"),
-    requires_tools=["file_write", "python_execute"],
+    requires_tools=["Write", "python_execute"],
     timeout_seconds=150,
     tags=["generators", "algorithms", "python"]
 )

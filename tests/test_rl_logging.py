@@ -32,13 +32,13 @@ def test_reward_shaper():
                 {
                     "step_num": 1,
                     "objective": "Create directory",
-                    "tool_hint": "bash_execute",
+                    "tool_hint": "Bash",
                     "status": "completed"
                 },
                 {
                     "step_num": 2,
                     "objective": "Write file",
-                    "tool_hint": "file_write",
+                    "tool_hint": "Write",
                     "status": "completed"
                 }
             ]
@@ -49,7 +49,7 @@ def test_reward_shaper():
                     "step_id": "step-1",
                     "step_num": 1,
                     "objective": "Create directory",
-                    "tool_hint": "bash_execute",
+                    "tool_hint": "Bash",
                     "status": "completed",
                     "result": "Directory created",
                     "error": None,
@@ -59,7 +59,7 @@ def test_reward_shaper():
                     "step_id": "step-2",
                     "step_num": 2,
                     "objective": "Write file",
-                    "tool_hint": "file_write",
+                    "tool_hint": "Write",
                     "status": "completed",
                     "result": "File written",
                     "error": None,
@@ -127,7 +127,7 @@ def test_failed_episode():
                 {
                     "step_num": 1,
                     "objective": "Delete file",
-                    "tool_hint": "bash_execute",
+                    "tool_hint": "Bash",
                     "status": "failed"
                 }
             ]
@@ -138,7 +138,7 @@ def test_failed_episode():
                     "step_id": "step-1",
                     "step_num": 1,
                     "objective": "Delete file",
-                    "tool_hint": "bash_execute",
+                    "tool_hint": "Bash",
                     "status": "failed",
                     "result": None,
                     "error": "File not found",

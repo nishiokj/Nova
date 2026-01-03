@@ -599,7 +599,7 @@ class HTMLExporter:
         """
         Fix artifact paths to be relative from HTML directory to records directory.
 
-        Artifact paths are stored as: artifacts/step2_file_write_output.txt
+        Artifact paths are stored as: artifacts/step2_Write_output.txt
         They're relative to: records/<scenario_id>/
         HTML is in: html/
         Need to change to: ../records/<scenario_id>/artifacts/...
@@ -608,8 +608,8 @@ class HTMLExporter:
             for step in turn.get('execution_steps', []):
                 for tc in step.get('tool_calls', []):
                     if tc.get('output_artifact_path'):
-                        # Original: artifacts/step2_file_write_output.txt
-                        # Need: ../records/<scenario_id>/artifacts/step2_file_write_output.txt
+                        # Original: artifacts/step2_Write_output.txt
+                        # Need: ../records/<scenario_id>/artifacts/step2_Write_output.txt
                         relative_path = tc['output_artifact_path']
                         fixed_path = f"../records/{scenario_id}/{relative_path}"
                         tc['output_artifact_path'] = fixed_path

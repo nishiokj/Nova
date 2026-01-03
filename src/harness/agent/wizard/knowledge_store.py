@@ -131,6 +131,13 @@ class KnowledgeStore:
         """
         return self.get_all_facts(limit=limit)
 
+    def get_top_facts(self, limit: int = 20) -> List[KnowledgeFact]:
+        """
+        Backwards-compatible alias used by older callers.
+        Returns most recent non-expired facts.
+        """
+        return self.get_all_facts(limit=limit)
+
     def evict_expired(self) -> None:
         """Remove all expired facts."""
         now = time.time()

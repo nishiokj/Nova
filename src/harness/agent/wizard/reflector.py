@@ -15,8 +15,9 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
+from .events import WizardEvent, WizardEventType
 from .types import ReflectionVerdict, FailureCategory
 from .reflection_types import (
     WizardReflectionInput,
@@ -153,6 +154,63 @@ RECOVERY_MATRIX = {
     },
 }
 
+API_KEY_PATTERNS = [
+    r"api[_ -]?key",
+    r"openai_api_key",
+    r"anthropic_api_key",
+    r"google_api_key",
+    r"gemini_api_key",
+    r"unauthorized",
+    r"invalid api key",
+    r"invalid authentication",
+    r"authentication failed",
+    r"no api key",
+    r"missing api key",
+    r"\b401\b",
+    r"\b403\b",
+]
+
+TIMEOUT_PATTERNS = [
+    r"timeout",
+    r"timed out",
+    r"deadline exceeded",
+    r"readtimeout",
+    r"gateway timeout",
+    r"etimedout",
+]
+
+RATE_LIMIT_PATTERNS = [
+    r"rate limit",
+    r"too many requests",
+    r"\b429\b",
+    r"quota",
+    r"exceeded quota",
+]
+
+NETWORK_PATTERNS = [
+    r"connection refused",
+    r"connection error",
+    r"network is unreachable",
+    r"temporary failure in name resolution",
+    r"name or service not known",
+    r"failed to establish a new connection",
+    r"dns",
+    r"ssl",
+    r"certificate verify failed",
+]
+
+NOT_FOUND_PATTERNS = [
+    r"\b404\b",
+    r"not found",
+    r"model .* not found",
+    r"unknown model",
+]
+
+@dataclass
+class InfraIssue:
+    kind: str
+    user_message: str
+
 
 class WizardReflector:
     """
@@ -170,10 +228,12 @@ class WizardReflector:
         llm: Any,
         config: Optional[ReflectorConfig] = None,
         logger: Optional[Logger] = None,
+        event_emitter: Optional[Callable[[WizardEvent], None]] = None,
     ):
         self.llm = llm
         self.config = config or ReflectorConfig()
         self.logger = logger
+        self._event_emitter = event_emitter
 
     def reflect(
         self,
@@ -191,6 +251,11 @@ class WizardReflector:
             ReflectionOutput with verdict and associated data
         """
         start_time = time.time()
+
+        infra_override = self._fast_fail_infra(input)
+        if infra_override:
+            infra_override.reflection_duration_ms = (time.time() - start_time) * 1000
+            return infra_override
 
         cached = self._check_reflection_cache(input)
         if cached:
@@ -216,9 +281,17 @@ class WizardReflector:
             if self.config.reflection_timeout_ms > 0:
                 llm_kwargs["timeout"] = self.config.reflection_timeout_ms / 1000
 
+            call_start = time.time()
             response = self.llm.respond(
                 messages,
                 **llm_kwargs,
+            )
+            duration_ms = (time.time() - call_start) * 1000
+            self._emit_llm_call_event(
+                prompt,
+                response,
+                duration_ms,
+                input.step_context.step_num,
             )
 
             # Extract content from response
@@ -256,6 +329,55 @@ class WizardReflector:
         if hasattr(response, "content"):
             return response.content
         return str(response)
+
+    def _emit_llm_call_event(
+        self,
+        prompt: str,
+        response: Any,
+        duration_ms: float,
+        step_num: int,
+    ) -> None:
+        if not self._event_emitter or not response:
+            return
+
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+
+        total_tokens = (
+            usage.get("total_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "total_tokens", 0) if usage else 0
+        )
+        prompt_tokens = (
+            usage.get("prompt_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "prompt_tokens", 0) if usage else 0
+        )
+        completion_tokens = (
+            usage.get("completion_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "completion_tokens", 0) if usage else 0
+        )
+        content = self._extract_llm_content(response) or ""
+
+        self._event_emitter(
+            WizardEvent(
+                event_type=WizardEventType.LLM_CALL,
+                step_num=step_num,
+                data={
+                    "agent_type": "reflector",
+                    "prompt_preview": prompt[:500],
+                    "response_preview": content[:500],
+                    "total_tokens": total_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "duration_ms": duration_ms,
+                    "model": getattr(response, "model", "unknown"),
+                    "tool_calls_count": 0,
+                },
+            )
+        )
 
     def _build_reflection_prompt(self, input: WizardReflectionInput) -> str:
         """Build the reflection prompt with full context."""
@@ -555,6 +677,141 @@ Respond with JSON:
 
         return None
 
+    def _fast_fail_infra(
+        self,
+        input: WizardReflectionInput,
+    ) -> Optional[WizardReflectionOutput]:
+        if input.outcome.get("success", False):
+            return None
+
+        issue = self._detect_infra_issue(input)
+        if not issue:
+            return None
+
+        return WizardReflectionOutput(
+            verdict=ReflectionVerdict.ABORT_GOAL,
+            reasoning=f"Infrastructure/configuration error detected: {issue.kind}",
+            confidence=0.9,
+            quality=QualityAssessment(
+                overall_score=0.1,
+                completeness=0.0,
+                correctness=0.0,
+                clarity=0.5,
+                maintainability=0.4,
+                actionability=0.7,
+                relevance=1.0,
+                errors=[issue.kind],
+            ),
+            abort_reason=issue.user_message,
+            abort_category=FailureCategory.INFRASTRUCTURE,
+            user_message=issue.user_message,
+        )
+
+    def _detect_infra_issue(
+        self,
+        input: WizardReflectionInput,
+    ) -> Optional[InfraIssue]:
+        errors: List[str] = []
+        error_text = input.outcome.get("error")
+        if error_text:
+            errors.append(str(error_text))
+        tool_errors = input.outcome.get("tool_errors") or []
+        for err in tool_errors:
+            if err:
+                errors.append(str(err))
+
+        termination = str(input.outcome.get("termination_reason") or "")
+        combined = " | ".join(errors)
+        combined_lower = combined.lower()
+
+        details = errors[0] if errors else termination
+        if details:
+            details = str(details).strip()
+            if len(details) > 200:
+                details = f"{details[:200]}..."
+
+        if termination == "timeout" or any(
+            re.search(p, combined_lower, re.IGNORECASE) for p in TIMEOUT_PATTERNS
+        ):
+            message = self._build_infra_message(
+                headline="LLM API request timed out.",
+                steps=[
+                    "Check network connectivity and API status.",
+                    "Retry, or increase the LLM timeout in config (llm.timeout).",
+                ],
+                details=details,
+            )
+            return InfraIssue(kind="timeout", user_message=message)
+
+        if any(re.search(p, combined_lower, re.IGNORECASE) for p in API_KEY_PATTERNS):
+            env_hint = ""
+            try:
+                from util.config_discovery import get_user_config_dir
+                env_path = get_user_config_dir() / ".env"
+                env_hint = f" (e.g., {env_path})"
+            except Exception:
+                env_hint = ""
+
+            message = self._build_infra_message(
+                headline="Missing or invalid API key for the LLM provider.",
+                steps=[
+                    f"Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in your environment or .env{env_hint}.",
+                    "Example: export OPENAI_API_KEY=sk-...",
+                    "Restart the app after updating the key.",
+                ],
+                details=details,
+            )
+            return InfraIssue(kind="api_key", user_message=message)
+
+        if any(re.search(p, combined_lower, re.IGNORECASE) for p in RATE_LIMIT_PATTERNS):
+            message = self._build_infra_message(
+                headline="API rate limit or quota exceeded.",
+                steps=[
+                    "Wait and retry after the rate limit resets.",
+                    "Reduce concurrency or choose a smaller model if available.",
+                    "Check account quota/billing.",
+                ],
+                details=details,
+            )
+            return InfraIssue(kind="rate_limit", user_message=message)
+
+        if any(re.search(p, combined_lower, re.IGNORECASE) for p in NOT_FOUND_PATTERNS):
+            message = self._build_infra_message(
+                headline="LLM model or endpoint not found.",
+                steps=[
+                    "Verify the model name and API base configuration.",
+                    "If using a proxy, ensure the endpoint supports the Responses API.",
+                ],
+                details=details,
+            )
+            return InfraIssue(kind="not_found", user_message=message)
+
+        if any(re.search(p, combined_lower, re.IGNORECASE) for p in NETWORK_PATTERNS):
+            message = self._build_infra_message(
+                headline="Unable to reach the API endpoint.",
+                steps=[
+                    "Check internet connection, DNS, and proxy settings.",
+                    "Retry once connectivity is restored.",
+                ],
+                details=details,
+            )
+            return InfraIssue(kind="network", user_message=message)
+
+        return None
+
+    def _build_infra_message(
+        self,
+        headline: str,
+        steps: List[str],
+        details: Optional[str] = None,
+    ) -> str:
+        lines = [f"ERROR: {headline}"]
+        if details:
+            lines.append(f"Details: {details}")
+        lines.append("Fix:")
+        lines.extend(f"- {step}" for step in steps)
+        return "\n".join(lines)
+
     def _adjust_prompt_for_context(
         self,
         base_prompt: str,
@@ -683,6 +940,18 @@ Respond with JSON:
         error: str
     ) -> WizardReflectionOutput:
         """Create fallback output when reflection fails."""
+        infra_issue = self._detect_infra_issue_from_text(error)
+        if infra_issue:
+            return WizardReflectionOutput(
+                verdict=ReflectionVerdict.ABORT_GOAL,
+                reasoning=f"Reflection failed due to infrastructure issue: {infra_issue.kind}",
+                confidence=0.3,
+                quality=QualityAssessment(overall_score=0.1),
+                abort_reason=infra_issue.user_message,
+                abort_category=FailureCategory.INFRASTRUCTURE,
+                user_message=infra_issue.user_message,
+            )
+
         # If worker succeeded, accept; otherwise, retry
         if input.outcome.get("success", False):
             verdict = ReflectionVerdict.ACCEPT
@@ -702,6 +971,70 @@ Respond with JSON:
             quality=QualityAssessment(overall_score=0.5),
             user_message=user_message,
         )
+
+    def _detect_infra_issue_from_text(self, text: str) -> Optional[InfraIssue]:
+        if not text:
+            return None
+
+        lowered = text.lower()
+        if any(re.search(p, lowered, re.IGNORECASE) for p in TIMEOUT_PATTERNS):
+            message = self._build_infra_message(
+                headline="LLM API request timed out.",
+                steps=[
+                    "Check network connectivity and API status.",
+                    "Retry, or increase the LLM timeout in config (llm.timeout).",
+                ],
+                details=text[:200],
+            )
+            return InfraIssue(kind="timeout", user_message=message)
+
+        if any(re.search(p, lowered, re.IGNORECASE) for p in API_KEY_PATTERNS):
+            message = self._build_infra_message(
+                headline="Missing or invalid API key for the LLM provider.",
+                steps=[
+                    "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in your environment or .env.",
+                    "Example: export OPENAI_API_KEY=sk-...",
+                    "Restart the app after updating the key.",
+                ],
+                details=text[:200],
+            )
+            return InfraIssue(kind="api_key", user_message=message)
+
+        if any(re.search(p, lowered, re.IGNORECASE) for p in RATE_LIMIT_PATTERNS):
+            message = self._build_infra_message(
+                headline="API rate limit or quota exceeded.",
+                steps=[
+                    "Wait and retry after the rate limit resets.",
+                    "Reduce concurrency or choose a smaller model if available.",
+                    "Check account quota/billing.",
+                ],
+                details=text[:200],
+            )
+            return InfraIssue(kind="rate_limit", user_message=message)
+
+        if any(re.search(p, lowered, re.IGNORECASE) for p in NOT_FOUND_PATTERNS):
+            message = self._build_infra_message(
+                headline="LLM model or endpoint not found.",
+                steps=[
+                    "Verify the model name and API base configuration.",
+                    "If using a proxy, ensure the endpoint supports the Responses API.",
+                ],
+                details=text[:200],
+            )
+            return InfraIssue(kind="not_found", user_message=message)
+
+        if any(re.search(p, lowered, re.IGNORECASE) for p in NETWORK_PATTERNS):
+            message = self._build_infra_message(
+                headline="Unable to reach the API endpoint.",
+                steps=[
+                    "Check internet connection, DNS, and proxy settings.",
+                    "Retry once connectivity is restored.",
+                ],
+                details=text[:200],
+            )
+            return InfraIssue(kind="network", user_message=message)
+
+        return None
 
     def _enforce_quality_and_policy(
         self,
@@ -856,7 +1189,7 @@ Respond with JSON:
         if has_code and not has_tests:
             steps.append(ScaffoldedStep(
                 objective="Write tests for the new/updated code",
-                tool_hint="file_write",
+                tool_hint="Edit",
                 phase="verification",
                 rationale="Code changes should include tests for reliability",
             ))
@@ -864,7 +1197,7 @@ Respond with JSON:
         if has_code and not has_docs:
             steps.append(ScaffoldedStep(
                 objective="Add documentation or docstrings for the new code",
-                tool_hint="file_write",
+                tool_hint="Edit",
                 phase="execution",
                 rationale="Documentation improves maintainability",
             ))
@@ -872,7 +1205,7 @@ Respond with JSON:
         if input.outcome.get("success") and not re.search(r"\bverify|validated|tested\b", text, re.IGNORECASE):
             steps.append(ScaffoldedStep(
                 objective="Verify the implementation and report results",
-                tool_hint="bash_execute",
+                tool_hint="Bash",
                 phase="verification",
                 rationale="Verification ensures correctness",
             ))
@@ -955,7 +1288,7 @@ Respond with JSON:
         # Step 1: Discovery/Investigation
         steps.append(ScaffoldedStep(
             objective=f"Investigate and understand the current state for: {objective[:80]}",
-            tool_hint="file_read",
+            tool_hint="Read",
             phase="discovery",
             rationale="Need to understand current implementation before making changes",
             required=True,
@@ -964,7 +1297,7 @@ Respond with JSON:
         # Step 2: Identify specific changes needed
         steps.append(ScaffoldedStep(
             objective=f"Identify specific files and changes needed for: {objective[:60]}",
-            tool_hint="search_filesystem",
+            tool_hint="Grep",
             phase="discovery",
             rationale="Locate all relevant files that need modification",
             required=True,
@@ -973,7 +1306,7 @@ Respond with JSON:
         # Step 3: Implement core changes (first part)
         steps.append(ScaffoldedStep(
             objective=f"Implement the first concrete change for: {objective[:60]}",
-            tool_hint="file_write",
+            tool_hint="Edit",
             phase="execution",
             rationale="Break implementation into incremental changes",
             required=True,
@@ -982,7 +1315,7 @@ Respond with JSON:
         # Step 4: Verification
         steps.append(ScaffoldedStep(
             objective=f"Verify changes work correctly for: {objective[:60]}",
-            tool_hint="bash_execute",
+            tool_hint="Bash",
             phase="verification",
             rationale="Ensure changes don't break existing functionality",
             required=False,

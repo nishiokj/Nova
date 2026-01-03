@@ -131,7 +131,7 @@ class TestAgentResponseQueue:
             success=True,
             content="The answer is 4.",
             spoken_response="The answer is 4.",
-            tools_used=["calculator"],
+            tools_used=["Read"],
             duration_ms=150.5
         )
 

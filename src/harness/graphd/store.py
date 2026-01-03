@@ -353,7 +353,7 @@ class GraphStore:
             }
 
     # Tables that can be exported via export_table()
-    EXPORTABLE_TABLES = frozenset({"files", "symbols", "module_edges", "exports", "run_artifacts"})
+    EXPORTABLE_TABLES = frozenset({"files", "symbols", "module_edges", "exports", "run_artifacts", "sessions", "conversation_messages"})
 
     def vacuum(self) -> None:
         """Rebuild database to reclaim space and defragment.
@@ -500,13 +500,68 @@ class GraphStore:
             self._conn.commit()
             return cursor.rowcount > 0
 
+    def update_session_metadata(
+        self,
+        session_key: str,
+        metadata: Dict[str, Any],
+        merge: bool = True,
+    ) -> bool:
+        """Update session metadata.
+
+        Args:
+            session_key: Session to update
+            metadata: Metadata dict to store
+            merge: If True, merge with existing metadata. If False, replace entirely.
+
+        Returns:
+            True if updated, False if not found
+        """
+        with self._lock:
+            if merge:
+                # Get existing metadata first
+                row = self._conn.execute(
+                    "SELECT metadata_json FROM sessions WHERE session_key = ?;",
+                    (session_key,),
+                ).fetchone()
+                if not row:
+                    return False
+                existing = {}
+                if row["metadata_json"]:
+                    try:
+                        existing = json.loads(row["metadata_json"])
+                    except json.JSONDecodeError:
+                        pass
+                # Smart merge: for arrays like wizard_events, append instead of replace
+                for key, value in metadata.items():
+                    if isinstance(value, list) and isinstance(existing.get(key), list):
+                        # Append new items to existing array
+                        existing[key] = existing[key] + value
+                    else:
+                        existing[key] = value
+                metadata = existing
+
+            cursor = self._conn.execute(
+                "UPDATE sessions SET metadata_json = ? WHERE session_key = ?;",
+                (json.dumps(metadata), session_key),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
     def delete_session(self, session_key: str) -> bool:
-        """Delete a session and all associated data (cascades to messages and snapshots).
+        """Delete a session and all associated data.
 
         Returns:
             True if deleted, False if not found
         """
         with self._lock:
+            self._conn.execute(
+                "DELETE FROM context_snapshots WHERE session_key = ?;",
+                (session_key,),
+            )
+            self._conn.execute(
+                "DELETE FROM conversation_messages WHERE session_key = ?;",
+                (session_key,),
+            )
             cursor = self._conn.execute(
                 "DELETE FROM sessions WHERE session_key = ?;",
                 (session_key,),

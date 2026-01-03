@@ -14,11 +14,19 @@ from typing import Any, Dict, List, Optional
 class WizardEventType(Enum):
     """Types of events emitted by the Wizard."""
 
+    # Goal events
+    GOAL_STARTED = "goal_started"
+    GOAL_ACHIEVED = "goal_achieved"
+    GOAL_ABORTED = "goal_aborted"
+
     # Progress events
     STEP_STARTED = "step_started"
     STEP_COMPLETED = "step_completed"
     STEP_FAILED = "step_failed"
     STEP_SKIPPED = "step_skipped"
+
+    # Tool events
+    TOOL_CALL = "tool_call"
 
     # Reflection events
     REFLECTION_STARTED = "reflection_started"
@@ -35,9 +43,15 @@ class WizardEventType(Enum):
     QUALITY_ISSUE_DETECTED = "quality_issue_detected"
     ERROR_DETECTED = "error_detected"
 
-    # Goal events
-    GOAL_ACHIEVED = "goal_achieved"
-    GOAL_ABORTED = "goal_aborted"
+    # LLM call tracking (for dashboard observability)
+    LLM_CALL = "llm_call"
+
+    # Plan versioning (for dashboard plan carousel)
+    PLAN_SNAPSHOT = "plan_snapshot"
+    PLAN_PATCHED = "plan_patched"
+
+    # Context window metrics (for dashboard token widget)
+    CONTEXT_WINDOW_UPDATE = "context_window_update"
 
 
 @dataclass
@@ -75,6 +89,7 @@ class UserInputRequestedData:
     question: str
     options: List[str]
     context: str
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -83,3 +98,42 @@ class QualityIssueData:
     issues: List[str]
     errors: List[str]
     severity: str  # low, medium, high
+
+
+@dataclass
+class LLMCallData:
+    """Data for LLM_CALL event - tracks individual LLM API calls."""
+
+    agent_type: str  # "wizard", "worker", "planner", "reflector", "synthesizer"
+    step_num: Optional[int]
+    prompt_preview: str  # First 500 chars of prompt
+    response_preview: str  # First 500 chars of response
+    total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
+    duration_ms: float
+    model: str
+    tool_calls_count: int
+
+
+@dataclass
+class PlanSnapshotData:
+    """Data for PLAN_SNAPSHOT event - full plan state for versioning."""
+
+    version: int
+    snapshot_type: str  # "initial", "pre_patch", "post_patch"
+    steps: List[Dict[str, Any]]
+    goal: str
+    trigger: str  # What caused the snapshot
+
+
+@dataclass
+class ContextWindowUpdateData:
+    """Data for CONTEXT_WINDOW_UPDATE event - token usage metrics."""
+
+    context_tokens: int  # Peak prompt tokens (actual context window usage)
+    output_tokens: int  # Cumulative completion tokens
+    max_tokens: int  # Default 200000
+    percentage_used: float  # context_tokens / max_tokens
+    message_count: int
+    total_tokens: int  # Legacy: context_tokens + output_tokens
