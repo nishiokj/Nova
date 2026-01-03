@@ -17,7 +17,8 @@ export type BridgeCommandType =
   | "hooks_create"
   | "hooks_update"
   | "hooks_delete"
-  | "shutdown";
+  | "shutdown"
+  | "user_prompt_response";
 
 export type BridgeEventType =
   | "ready"
@@ -26,6 +27,7 @@ export type BridgeEventType =
   | "stream"
   | "response"
   | "transcription"
+  | "user_prompt"
   | "error";
 
 export interface BridgeCommand {
@@ -48,7 +50,7 @@ export type TUIState =
 
 export type Role = "user" | "agent" | "system" | "status";
 
-export type UIMode = "chat" | "skills" | "hooks" | "wizard";
+export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question";
 export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {
@@ -111,4 +113,55 @@ export interface ErrorData {
   message?: string;
   detail?: unknown;
   fatal?: boolean;
+}
+
+// Box styling for message containers
+export type BoxStyle = "rounded" | "sharp" | "double" | "minimal";
+
+export const BOX_CHARS = {
+  rounded: { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" },
+  sharp: { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" },
+  double: { tl: "╔", tr: "╗", bl: "╚", br: "╝", h: "═", v: "║" },
+  minimal: { tl: " ", tr: " ", bl: " ", br: " ", h: " ", v: "│" },
+} as const;
+
+export interface MessageBoxConfig {
+  style: BoxStyle;
+  alignment: "left" | "right";
+  maxWidth: number;
+  padding: number;
+  showTimestamp?: boolean;
+}
+
+// Question flow types
+export type QuestionType =
+  | "multiple_choice"
+  | "multi_select"
+  | "fill_in_blank"
+  | "yes_no"
+  | "free_text";
+
+export interface QuestionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface AgentQuestion {
+  requestId: string;
+  type: QuestionType;
+  question: string;
+  context?: string;
+  options?: QuestionOption[];
+  placeholder?: string;
+  defaultValue?: string;
+  required?: boolean;
+}
+
+export interface UserPromptData {
+  request_id: string;
+  question: string;
+  options?: Array<string | { label: string; description?: string }>;
+  context?: string;
+  multi_select?: boolean;
 }

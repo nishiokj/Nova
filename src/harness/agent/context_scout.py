@@ -34,10 +34,58 @@ Selective Context Injection:
 """
 
 import logging
+import os
 import re
 import time
 import threading
 from dataclasses import dataclass, field
+
+
+@dataclass
+class ContextScoutConfig:
+    """Configuration for ContextScout behavior.
+
+    Controls how aggressive and expensive pre-planning context
+    gathering should be. The scout itself remains non-reasoning
+    and pattern-based; higher-level planners can toggle these
+    knobs to trade off grounding vs. latency.
+    """
+
+    enabled: bool = True
+    max_tool_calls: int = 5
+    max_duration_ms: int = 5_000
+    max_primary_file_size: int = 50_000
+    # Heuristic mode for should_scout():
+    #   - "minimal": only run when explicit paths are present
+    #   - "normal": current behavior
+    #   - "aggressive": also run on broad refactor/improve/location tasks
+    mode: str = "normal"  # "minimal" | "normal" | "aggressive"
+
+
+
+@dataclass
+class ContextScoutConfig:
+    """Configuration for ContextScout behavior.
+
+    Exposes knobs for:
+    - max_tool_calls / max_duration_ms: budget for cheap pre-planning context
+    - max_primary_file_size: cap for full-content injection on PRIMARY files
+    - mode: heuristic aggressiveness for when to run scouting
+
+    This keeps the scout itself non-reasoning and cheap, while
+    allowing the planner/wizard to tune dynamic behavior.
+    """
+
+    enabled: bool = True
+    max_tool_calls: int = 5
+    max_duration_ms: int = 5_000
+    max_primary_file_size: int = 50_000
+    # Heuristic mode for should_scout():
+    #   - "minimal": only run when explicit paths are present
+    #   - "normal": current behavior
+    #   - "aggressive": also run on broad refactor/improve/location tasks
+    mode: str = "normal"  # "minimal" | "normal" | "aggressive"
+
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -89,6 +137,10 @@ class ContextSnapshot:
     search_results: Dict[str, List[str]] = field(default_factory=dict)
     # Errors encountered
     errors: List[str] = field(default_factory=list)
+    # Project metadata
+    package_managers: List[str] = field(default_factory=list)
+    languages: List[str] = field(default_factory=list)
+    frameworks: List[str] = field(default_factory=list)
     # Timing
     duration_ms: float = 0
     tool_calls_made: int = 0
@@ -107,6 +159,15 @@ class ContextSnapshot:
     def to_context_string(self) -> str:
         """Format snapshot for injection into planner context."""
         lines = ["PRE-PLANNING CONTEXT (verified):"]
+
+        if self.package_managers or self.languages or self.frameworks:
+            lines.append("\nPROJECT METADATA:")
+            if self.package_managers:
+                lines.append(f"  Package managers: {', '.join(self.package_managers)}")
+            if self.languages:
+                lines.append(f"  Languages: {', '.join(self.languages)}")
+            if self.frameworks:
+                lines.append(f"  Frameworks: {', '.join(self.frameworks)}")
 
         # PRIMARY files - include FULL CONTENT
         primary_files = [fc for fc in self.files.values() if fc.importance == FileImportance.PRIMARY and fc.exists]
@@ -180,7 +241,14 @@ class ContextSnapshot:
     @property
     def has_useful_context(self) -> bool:
         """Check if we gathered anything useful."""
-        return bool(self.files or self.directories or self.search_results)
+        return bool(
+            self.files
+            or self.directories
+            or self.search_results
+            or self.package_managers
+            or self.languages
+            or self.frameworks
+        )
 
     @property
     def primary_files(self) -> List[FileContext]:
@@ -211,11 +279,22 @@ class ContextScout:
         max_tool_calls: int = 5,
         max_duration_ms: float = 5_000,
         max_primary_file_size: int = 50_000,  # Max bytes for full content
+        config: Optional[ContextScoutConfig] = None,
     ):
         self.tool_registry = tool_registry
-        self.max_tool_calls = max_tool_calls
-        self.max_duration_ms = max_duration_ms
-        self.max_primary_file_size = max_primary_file_size
+
+        # Backwards-compatible: allow either raw args or a config object.
+        if config is None:
+            config = ContextScoutConfig(
+                max_tool_calls=max_tool_calls,
+                max_duration_ms=int(max_duration_ms),
+                max_primary_file_size=max_primary_file_size,
+            )
+
+        self.config = config
+        self.max_tool_calls = config.max_tool_calls
+        self.max_duration_ms = config.max_duration_ms
+        self.max_primary_file_size = config.max_primary_file_size
 
         # Async state
         self._pending_results: Dict[str, ContextSnapshot] = {}
@@ -253,6 +332,10 @@ class ContextScout:
                 break
 
             self._check_path_with_importance(path, importance, snapshot, working_dir)
+
+        # Auto-detect project metadata if we have budget left
+        if snapshot.tool_calls_made < self.max_tool_calls:
+            self._infer_project_metadata(snapshot, working_dir, start_time)
 
         # Do searches if we have budget
         for term in search_terms:
@@ -333,6 +416,15 @@ class ContextScout:
         with self._pending_lock:
             return request_id in self._active_scouts
 
+    def _looks_like_pathish(self, token: str) -> bool:
+        if not token:
+            return False
+        if "/" in token or "-" in token or "_" in token:
+            return True
+        return token.endswith((
+            ".py", ".ts", ".js", ".json", ".md", ".txt", ".yaml", ".yml"
+        ))
+
     def _extract_paths_with_importance(self, user_input: str) -> List[tuple]:
         """
         Extract file paths with importance classification.
@@ -367,12 +459,16 @@ class ContextScout:
             r'take inspiration\s+from\s+["\']?([^\s"\']+)',
             r'copy from\s+["\']?([^\s"\']+\.[a-z]+)',
             r'convert\s+["\']?([^\s"\']+\.[a-z]+)',
+            r'improve\s+["\']?([^\s"\']+)',
+            r'audit\s+["\']?([^\s"\']+)',
+            r'review\s+["\']?([^\s"\']+)',
         ]
 
         for pattern in primary_patterns:
             for match in re.finditer(pattern, input_lower):
-                path = match.group(1)
-                paths_importance[path] = FileImportance.PRIMARY
+                path = match.group(1).rstrip(".,;:")
+                if self._looks_like_pathish(path):
+                    paths_importance[path] = FileImportance.PRIMARY
 
         # Extract all other paths as REFERENCE
         all_paths = self._extract_paths(user_input)
@@ -398,18 +494,18 @@ class ContextScout:
         paths = []
 
         # Pattern 1: @mentions like @tui/render_engine.py - HIGHEST PRIORITY
-        at_mentions = re.findall(r'@([\w/\-\.]+\.[\w]+)', user_input)
-        paths.extend(at_mentions)
+        at_mentions = re.findall(r'@([\w/\-\.]+)', user_input)
+        paths.extend([m for m in at_mentions if self._looks_like_pathish(m)])
 
         # Pattern 2: Match paths in quotes
         quoted = re.findall(r'["\']([^"\']+)["\']', user_input)
-        paths.extend([p for p in quoted if '/' in p or '.' in p])
+        paths.extend([p for p in quoted if self._looks_like_pathish(p)])
 
         # Pattern 3: Explicit paths like /foo/bar.py or ./foo/bar
         path_pattern = r'(?:^|[^@\w])[./]([\w/-]+(?:\.\w+)?)'
         for match in re.finditer(path_pattern, user_input):
             candidate = match.group(1)
-            if '/' in candidate or candidate.endswith(('.py', '.ts', '.js', '.json', '.md', '.txt')):
+            if self._looks_like_pathish(candidate):
                 paths.append(candidate)
 
         return list(set(paths))
@@ -429,9 +525,10 @@ class ContextScout:
         REFERENCE: Brief preview (200 chars)
         """
         try:
-            # Try file_read first
+            # Try Read first
             result = self.tool_registry.execute(
-                "file_read",
+                "Read",
+                cwd=working_dir,
                 path=path,
                 timeout_override=5
             )
@@ -491,8 +588,9 @@ class ContextScout:
             else:
                 # Maybe it's a directory?
                 list_result = self.tool_registry.execute(
-                    "list_files",
-                    path=path,
+                    "Glob",
+                    cwd=working_dir,
+                    pattern=os.path.join(path, "*"),
                     timeout_override=5
                 )
                 snapshot.tool_calls_made += 1
@@ -528,12 +626,202 @@ class ContextScout:
 
         return list(set(terms))
 
+    def _infer_project_metadata(
+        self,
+        snapshot: ContextSnapshot,
+        working_dir: str,
+        start_time: float
+    ) -> None:
+        """Infer package managers, languages, and frameworks from common files."""
+        if snapshot.tool_calls_made >= self.max_tool_calls:
+            return
+        if (time.time() - start_time) * 1000 > self.max_duration_ms:
+            return
+
+        root_entries = self._glob_root_entries(snapshot, working_dir)
+        if not root_entries:
+            return
+
+        entries_set = set(root_entries)
+        entry_basenames = {os.path.basename(p.rstrip("/")) for p in root_entries}
+
+        # Package managers
+        package_manager_hints = [
+            ("package-lock.json", "npm"),
+            ("yarn.lock", "yarn"),
+            ("pnpm-lock.yaml", "pnpm"),
+            ("bun.lockb", "bun"),
+            ("bun.lock", "bun"),
+            ("Pipfile", "pipenv"),
+            ("poetry.lock", "poetry"),
+            ("requirements.txt", "pip"),
+            ("requirements-dev.txt", "pip"),
+            ("pyproject.toml", "pip/poetry"),
+            ("Gemfile", "bundler"),
+            ("composer.json", "composer"),
+            ("go.mod", "go mod"),
+            ("Cargo.toml", "cargo"),
+        ]
+        for filename, manager in package_manager_hints:
+            if filename in entry_basenames:
+                self._append_unique(snapshot.package_managers, manager)
+
+        # Languages (from common project markers)
+        language_hints = [
+            ("package.json", "JavaScript/TypeScript"),
+            ("tsconfig.json", "TypeScript"),
+            ("deno.json", "TypeScript"),
+            ("deno.jsonc", "TypeScript"),
+            ("pyproject.toml", "Python"),
+            ("requirements.txt", "Python"),
+            ("Pipfile", "Python"),
+            ("poetry.lock", "Python"),
+            ("go.mod", "Go"),
+            ("Cargo.toml", "Rust"),
+            ("Gemfile", "Ruby"),
+            ("composer.json", "PHP"),
+            ("build.gradle", "Java"),
+            ("build.gradle.kts", "Kotlin"),
+            ("pom.xml", "Java"),
+            ("Package.swift", "Swift"),
+            ("mix.exs", "Elixir"),
+            ("CMakeLists.txt", "C/C++"),
+        ]
+        for filename, language in language_hints:
+            if filename in entry_basenames:
+                self._append_unique(snapshot.languages, language)
+
+        for entry in entry_basenames:
+            if entry.endswith(".csproj") or entry.endswith(".sln"):
+                self._append_unique(snapshot.languages, "C#")
+
+        # Frameworks: prioritize package.json, then python manifests
+        if "package.json" in entry_basenames and snapshot.tool_calls_made < self.max_tool_calls:
+            self._detect_frameworks_from_package_json(snapshot, working_dir)
+        elif "pyproject.toml" in entry_basenames and snapshot.tool_calls_made < self.max_tool_calls:
+            self._detect_frameworks_from_text_file(snapshot, working_dir, "pyproject.toml")
+        elif "requirements.txt" in entry_basenames and snapshot.tool_calls_made < self.max_tool_calls:
+            self._detect_frameworks_from_text_file(snapshot, working_dir, "requirements.txt")
+        elif "Pipfile" in entry_basenames and snapshot.tool_calls_made < self.max_tool_calls:
+            self._detect_frameworks_from_text_file(snapshot, working_dir, "Pipfile")
+
+    def _glob_root_entries(self, snapshot: ContextSnapshot, working_dir: str) -> List[str]:
+        """List top-level entries in the working directory."""
+        try:
+            result = self.tool_registry.execute(
+                "Glob",
+                cwd=working_dir,
+                pattern="*",
+                timeout_override=5
+            )
+            snapshot.tool_calls_made += 1
+            if not result.is_success:
+                return []
+            output = str(result.output) if result.output else ""
+            if output.startswith("No matches"):
+                return []
+            entries = [line.strip() for line in output.split("\n") if line.strip()]
+            return entries
+        except Exception as e:
+            snapshot.errors.append(f"Error listing root entries: {str(e)[:50]}")
+            return []
+
+    def _detect_frameworks_from_package_json(self, snapshot: ContextSnapshot, working_dir: str) -> None:
+        """Detect frameworks from package.json dependencies."""
+        try:
+            result = self.tool_registry.execute(
+                "Read",
+                cwd=working_dir,
+                path="package.json",
+                timeout_override=5
+            )
+            snapshot.tool_calls_made += 1
+            if not result.is_success or not result.output:
+                return
+            import json
+            try:
+                data = json.loads(str(result.output))
+            except json.JSONDecodeError:
+                return
+            deps = {}
+            for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                if isinstance(data.get(key), dict):
+                    deps.update(data.get(key, {}))
+            frameworks_map = {
+                "react": "React",
+                "next": "Next.js",
+                "vue": "Vue",
+                "nuxt": "Nuxt",
+                "svelte": "Svelte",
+                "@sveltejs/kit": "SvelteKit",
+                "@angular/core": "Angular",
+                "express": "Express",
+                "fastify": "Fastify",
+                "koa": "Koa",
+                "nest": "NestJS",
+                "@nestjs/core": "NestJS",
+                "astro": "Astro",
+                "remix": "Remix",
+                "@remix-run/react": "Remix",
+                "gatsby": "Gatsby",
+                "solid-js": "SolidJS",
+                "qwik": "Qwik",
+                "hono": "Hono",
+                "electron": "Electron",
+                "@tauri-apps/api": "Tauri",
+                "react-native": "React Native",
+                "expo": "Expo",
+            }
+            dep_names = set(deps.keys())
+            for pkg, label in frameworks_map.items():
+                if pkg in dep_names:
+                    self._append_unique(snapshot.frameworks, label)
+        except Exception as e:
+            snapshot.errors.append(f"Error reading package.json: {str(e)[:50]}")
+
+    def _detect_frameworks_from_text_file(
+        self,
+        snapshot: ContextSnapshot,
+        working_dir: str,
+        path: str
+    ) -> None:
+        """Detect frameworks by scanning text manifests."""
+        try:
+            result = self.tool_registry.execute(
+                "Read",
+                cwd=working_dir,
+                path=path,
+                timeout_override=5
+            )
+            snapshot.tool_calls_made += 1
+            if not result.is_success or not result.output:
+                return
+            content = str(result.output).lower()
+            frameworks = [
+                ("django", "Django"),
+                ("flask", "Flask"),
+                ("fastapi", "FastAPI"),
+                ("starlette", "Starlette"),
+                ("sanic", "Sanic"),
+                ("tornado", "Tornado"),
+            ]
+            for key, label in frameworks:
+                if key in content:
+                    self._append_unique(snapshot.frameworks, label)
+        except Exception as e:
+            snapshot.errors.append(f"Error reading {path}: {str(e)[:50]}")
+
+    def _append_unique(self, items: List[str], value: str) -> None:
+        if value not in items:
+            items.append(value)
+
     def _check_path(self, path: str, snapshot: ContextSnapshot, working_dir: str) -> None:
         """Check if a path exists and gather info about it."""
         try:
-            # Try file_read first
+            # Try Read first
             result = self.tool_registry.execute(
-                "file_read",
+                "Read",
+                cwd=working_dir,
                 path=path,
                 timeout_override=5
             )
@@ -548,8 +836,9 @@ class ContextScout:
             else:
                 # Maybe it's a directory?
                 list_result = self.tool_registry.execute(
-                    "list_files",
-                    path=path,
+                    "Glob",
+                    cwd=working_dir,
+                    pattern=os.path.join(path, "*"),
                     timeout_override=5
                 )
                 snapshot.tool_calls_made += 1
@@ -568,9 +857,10 @@ class ContextScout:
         """Search for a term in the codebase."""
         try:
             result = self.tool_registry.execute(
-                "search_filesystem",
-                pattern=f"*{term}*",
-                path=working_dir,
+                "Grep",
+                cwd=working_dir,
+                pattern=term,
+                path=".",
                 timeout_override=5
             )
             snapshot.tool_calls_made += 1
@@ -678,7 +968,7 @@ def should_scout(user_input: str) -> bool:
     # Creation tasks that reference existing files
     creation_with_reference = any(kw in input_lower for kw in [
         "take inspiration", "based on", "similar to", "like the",
-        "copy from", "refactor", "convert", "migrate"
+        "copy from", "refactor", "convert", "migrate", "improve", "audit", "review"
     ])
 
     # Explicit location requests

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import signal
+import socket
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -17,6 +20,28 @@ from .indexer import GraphIndexer
 from .server import GraphdHTTPServer, GraphdRequestHandler
 from .store import GraphStore, SchemaVersionError
 from .utils import normalize_path
+
+
+def _is_port_in_use(host: str, port: int) -> bool:
+    """Check if a port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        try:
+            s.connect((host, port))
+            return True
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            return False
+
+
+def _check_port_responsive(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Check if a port is responsive (accepts connections and responds)."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"http://{host}:{port}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 class GraphdManager:
@@ -66,8 +91,30 @@ class GraphdManager:
     def start(self) -> bool:
         try:
             self._apply_resource_limits()
+
+            # Check if port is already in use
+            host = self.config.host
+            port = self.config.port
+            if _is_port_in_use(host, port):
+                # Check if it's responsive
+                if _check_port_responsive(host, port):
+                    self.logger.warning(
+                        f"GraphD already running on {host}:{port}, reusing existing instance",
+                        component="graphd",
+                    )
+                    self._running = True
+                    self._reusing_existing = True
+                    return True
+                else:
+                    self.logger.warning(
+                        f"Port {port} is bound but unresponsive (zombie process). "
+                        f"SO_REUSEADDR will allow binding anyway.",
+                        component="graphd",
+                    )
+
             self.store.initialize()
             self._running = True
+            self._reusing_existing = False
 
             self._index_thread = threading.Thread(target=self._index_loop, name="graphd-index", daemon=True)
             self._index_thread.start()
@@ -76,6 +123,17 @@ class GraphdManager:
             self._server = GraphdHTTPServer(self.config.host, self.config.port, handler)
             self._server_thread = threading.Thread(target=self._server.start, name="graphd-http", daemon=True)
             self._server_thread.start()
+
+            # Register cleanup handler
+            atexit.register(self._atexit_cleanup)
+
+            # Give server time to start and verify it's working
+            time.sleep(0.1)
+            if not _check_port_responsive(host, port, timeout=1.0):
+                self.logger.warning(
+                    "GraphD server started but health check failed - may have binding issues",
+                    component="graphd",
+                )
 
             self.logger.system_init("graphd", "ready", {"db_path": self.db_path, "root": self.root})
             return True
@@ -93,11 +151,32 @@ class GraphdManager:
             self._running = False
             return False
 
+    def _atexit_cleanup(self) -> None:
+        """Cleanup handler called on process exit."""
+        try:
+            self.stop()
+        except Exception:
+            pass
+
     def stop(self) -> None:
+        """Stop the GraphD server and cleanup resources."""
         self._running = False
+
+        # Don't stop if we're reusing an existing instance
+        if getattr(self, '_reusing_existing', False):
+            return
+
         if self._server:
-            self._server.stop()
-        self.store.close()
+            try:
+                self._server.stop()
+            except Exception:
+                pass
+            self._server = None
+
+        try:
+            self.store.close()
+        except Exception:
+            pass
 
     def set_active(self, active: bool) -> None:
         self._active = active
@@ -455,6 +534,32 @@ class GraphdManager:
             return {"success": updated}
         except Exception as exc:
             self.logger.warning(f"Session close failed: {exc}", component="graphd")
+            return {"success": False, "error": str(exc)}
+
+    def session_update_metadata(
+        self,
+        session_key: str,
+        metadata: Dict[str, Any],
+        merge: bool = True,
+    ) -> Dict[str, Any]:
+        """Update session metadata.
+
+        This is used to persist wizard execution telemetry (events, steps, tool calls)
+        for dashboard visualization.
+
+        Args:
+            session_key: Session to update
+            metadata: Metadata dict to store (e.g., wizard_events, work_ledger)
+            merge: If True, merge with existing. If False, replace entirely.
+
+        Returns:
+            Dict with 'success' bool
+        """
+        try:
+            updated = self.store.update_session_metadata(session_key, metadata, merge)
+            return {"success": updated}
+        except Exception as exc:
+            self.logger.warning(f"Session update metadata failed: {exc}", component="graphd")
             return {"success": False, "error": str(exc)}
 
     def session_delete(self, session_key: str) -> Dict[str, Any]:

@@ -57,7 +57,7 @@ class TestHarnessCreation:
             service_rep=ServiceRepConfig(enabled=False),  # Disable TTS in tests
             agent=AgentConfig(tier="standard", max_tool_calls=3),
             tools=ToolConfig(enabled_tools=[
-                "calculator", "get_current_time", "file_read", "file_write"
+                "Read", "Write", "Edit", "Bash", "Glob", "Grep"
             ]),
             logging=LoggingConfig(log_to_file=False, log_to_console=False),
             llm_configs={
@@ -147,7 +147,7 @@ class TestHarnessProcessing:
         mock_response = AgentResponse(
             content="Test response",
             success=True,
-            tools_used=["calculator"]
+            tools_used=["Read"]
         )
         harness.agent.run.return_value = mock_response
         harness.agent._get_agent.return_value = MagicMock(_step_callbacks=[])
@@ -300,12 +300,12 @@ class TestHarnessToolManagement:
 
     def test_enable_disable_tool(self, harness):
         """Test enabling/disabling specific tools"""
-        harness.disable_tool("calculator")
-        calc = harness.tool_registry.get("calculator")
-        assert not calc.enabled
+        harness.disable_tool("Read")
+        read_tool = harness.tool_registry.get("Read")
+        assert not read_tool.enabled
 
-        harness.enable_tool("calculator")
-        assert calc.enabled
+        harness.enable_tool("Read")
+        assert read_tool.enabled
 
 
 class TestHarnessCallbacks:
@@ -535,13 +535,12 @@ class TestHarnessProgressMessages:
             return harness
 
     @pytest.mark.parametrize("tool_name,expected_message", [
-        ("fast_answer", "searching"),
-        ("fetch_url", "getting"),
-        ("file_read", "reading"),
-        # Note: file_write matches "file" first, so it returns "reading" (implementation quirk)
-        ("file_write", "reading"),  # pattern matching order
-        ("bash_execute", "running"),
-        ("calculator", "calculating"),
+        ("Grep", "searching"),
+        ("Glob", "searching"),
+        ("Read", "reading"),
+        ("Write", "writing"),
+        ("Edit", "writing"),
+        ("Bash", "running"),
     ])
     def test_tool_progress_messages(self, harness, tool_name, expected_message):
         """Test progress messages for different tools"""

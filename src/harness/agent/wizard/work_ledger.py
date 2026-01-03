@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .work_item import WorkItem
@@ -21,6 +21,7 @@ class EntryStatus(Enum):
     DISPATCHED = "dispatched"
     COMPLETED = "completed"
     FAILED = "failed"
+    AWAITING_USER = "awaiting_user"
 
 
 class PatchDecision(Enum):
@@ -125,12 +126,16 @@ class WorkLedger:
     def _evict_oldest_completed(self) -> None:
         """
         Evict oldest completed entries to stay within max_entries.
-        Only evicts COMPLETED or FAILED entries, never DISPATCHED (in-flight).
+        Only evicts COMPLETED/FAILED/AWAITING_USER entries, never DISPATCHED (in-flight).
         """
         # Find completed entries that can be evicted
         evictable_indices: List[int] = []
         for i, entry in enumerate(self._entries):
-            if entry.status in (EntryStatus.COMPLETED, EntryStatus.FAILED):
+            if entry.status in (
+                EntryStatus.COMPLETED,
+                EntryStatus.FAILED,
+                EntryStatus.AWAITING_USER,
+            ):
                 evictable_indices.append(i)
 
         # Evict oldest first until we're under limit
@@ -175,6 +180,30 @@ class WorkLedger:
         entry.tool_calls_made = outcome.metrics.tool_calls_made
         entry.llm_calls_made = outcome.metrics.llm_calls_made
         entry.duration_ms = outcome.metrics.duration_ms
+
+    def record_awaiting_user(
+        self,
+        entry_id: str,
+        prompt: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Record that the step is awaiting user input.
+        Keeps status distinct from COMPLETED/FAILED so stagnation doesn't penalize.
+        """
+        entry = self._by_id.get(entry_id)
+        if entry is None or entry.status != EntryStatus.DISPATCHED:
+            return
+
+        entry.completed_at = time.time()
+        entry.status = EntryStatus.AWAITING_USER
+
+        question = ""
+        if prompt:
+            question = str(prompt.get("question") or "")
+        summary = "Awaiting user input"
+        if question:
+            summary = f"{summary}: {question[:200]}"
+        entry.outcome_summary = summary
 
     def get_step_history(self, step_num: int) -> List[LedgerEntry]:
         """Get all entries for a step in chronological order."""

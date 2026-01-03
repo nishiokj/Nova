@@ -102,12 +102,12 @@ def real_tool_registry(temp_workspace, real_logger):
     """Create a real tool registry with enabled tools."""
     config = ToolConfig(
         enabled_tools=[
-            "file_read",
-            "file_write",
-            "bash_execute",
-            "search_filesystem",
-            "list_files",
-            "get_working_directory",
+            "Read",
+            "Write",
+            "Edit",
+            "Bash",
+            "Glob",
+            "Grep",
         ],
         max_output_length=10000,
         bash_timeout=30,
@@ -161,7 +161,7 @@ class TestWizardRealE2E:
 
         Verifies:
         1. Wizard creates a plan
-        2. Worker executes file_write tool
+        2. Worker executes Write tool
         3. File actually exists with correct content
         4. Goal is achieved
         """
@@ -244,7 +244,7 @@ class TestWizardRealE2E:
         assert result.plan_state is not None
 
         # 2. File read tool was called
-        assert result.total_tool_calls > 0, "No tools called - file_read should have been used"
+        assert result.total_tool_calls > 0, "No tools called - Read should have been used"
 
         # 3. Check that the secret content was found (in response or observations)
         content_found = False
@@ -281,12 +281,12 @@ class TestWizardRealE2E:
         # 4. Success
         assert result.success is True, f"Wizard failed: {result.ledger.summarize_tail()}"
 
-    def test_search_filesystem(self, wizard, temp_workspace):
+    def test_grep_search(self, wizard, temp_workspace):
         """
         REAL TEST: Create files and ask wizard to search for them.
 
         Verifies:
-        1. Wizard can use search_filesystem tool
+        1. Wizard can use Grep tool
         2. Search results include created files
         """
         skip_if_no_api_key()

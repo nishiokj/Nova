@@ -107,9 +107,9 @@ def tool_registry(mock_logger):
     config = ToolConfig(
         enabled_tools=[
             "fast_answer", "web_fetch",
-            "bash_execute", "python_execute",
-            "file_read", "file_write", "search_filesystem",
-            "calculator", "get_current_time"
+            "Bash", "python_execute",
+            "Read", "Write", "Edit", "Glob", "Grep",
+            "calculator"
         ],
         sandbox_bash=True,
         sandbox_python=True,
@@ -125,7 +125,7 @@ def tool_registry_with_workdir(temp_working_dir, mock_logger):
     """Create ToolRegistry with a specific working directory"""
     config = ToolConfig(
         enabled_tools=[
-            "file_read", "file_write", "search_filesystem", "bash_execute", "python_execute"
+            "Read", "Write", "Edit", "Glob", "Grep", "Bash", "python_execute"
         ]
     )
     registry = ToolRegistry(config, default_working_dir=temp_working_dir, logger=mock_logger)

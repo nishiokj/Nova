@@ -31,7 +31,7 @@ TASK_FILE_001 = EvalTask(
         "README.md exists in myapp with content"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["bash_execute", "file_write", "list_files"],
+    requires_tools=["Bash", "Write", "Glob"],
     timeout_seconds=120,
     tags=["directory_structure", "project_setup"]
 )
@@ -63,7 +63,7 @@ Format the output nicely in summary.txt.""",
         "Creates summary.txt with formatted output"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["csv", "data_processing", "statistics"]
 )
@@ -95,7 +95,7 @@ cache_server=localhost:6379
         "All replacements correct"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write"],
+    requires_tools=["Read", "Write"],
     timeout_seconds=90,
     tags=["text_replacement", "file_manipulation"]
 )
@@ -128,7 +128,7 @@ Each JSON object should become a row in the CSV.""",
         "Creates users.csv"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["json", "csv", "data_conversion"]
 )
@@ -156,7 +156,7 @@ Create a new file 'evens.txt' containing only the even numbers, maintaining the 
         "Contains only 2, 4, 6, 8, 10"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write"],
+    requires_tools=["Read", "Write"],
     timeout_seconds=90,
     tags=["filtering", "text_processing"]
 )
@@ -180,7 +180,7 @@ Sort the filenames alphabetically.""",
         "Excludes directories (only files)"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["bash_execute", "file_write", "list_files"],
+    requires_tools=["Bash", "Write", "Glob"],
     timeout_seconds=90,
     tags=["directory", "listing", "sorting"]
 )
@@ -220,7 +220,7 @@ Also list all unique ERROR messages.""",
         "Creates log_summary.txt with findings"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["log_parsing", "text_processing", "analysis"]
 )
@@ -251,7 +251,7 @@ Maintain the order: part1, then part2, then part3.""",
         "No extra whitespace or formatting issues"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write"],
+    requires_tools=["Read", "Write"],
     timeout_seconds=90,
     tags=["file_concatenation", "text_processing"]
 )
@@ -290,7 +290,7 @@ Make sure to use proper markdown formatting.""",
         "Proper markdown syntax"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_write"],
+    requires_tools=["Write"],
     timeout_seconds=90,
     tags=["markdown", "documentation", "formatting"]
 )
@@ -323,7 +323,7 @@ The fox was very quick and clever."""
         "Results are formatted clearly"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write", "python_execute"],
+    requires_tools=["Read", "Write", "python_execute"],
     timeout_seconds=120,
     tags=["text_analysis", "statistics", "nlp"]
 )
@@ -360,7 +360,7 @@ Use proper INI file format.""",
         "Values are correctly formatted"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_write"],
+    requires_tools=["Write"],
     timeout_seconds=90,
     tags=["configuration", "ini", "formatting"]
 )
@@ -388,7 +388,7 @@ Verify that both files have identical content.""",
         "Content integrity maintained"
     ],
     rubric=FILE_OPERATIONS_RUBRIC,
-    requires_tools=["file_read", "file_write", "bash_execute"],
+    requires_tools=["Read", "Write", "Bash"],
     timeout_seconds=90,
     tags=["backup", "file_copying"]
 )

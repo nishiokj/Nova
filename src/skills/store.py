@@ -15,10 +15,12 @@ from util.logger import StructuredLogger
 from .models import SkillDefinition, TriggerDefinition
 
 _ALLOWED_TOOL_ALIASES = {
-    "read": "file_read",
-    "write": "file_write",
-    "bash": "bash_execute",
-    "glob": "search_filesystem",
+    "read": "Read",
+    "write": "Write",
+    "edit": "Edit",
+    "bash": "Bash",
+    "glob": "Glob",
+    "grep": "Grep",
 }
 
 

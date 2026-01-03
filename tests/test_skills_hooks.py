@@ -51,11 +51,11 @@ def _hook_def(hook_id: str) -> dict:
         "priority": 10,
         "timeout_ms": 100,
         "fail_open": True,
-        "filter": {"tool_name": "calculator"},
+        "filter": {"tool_name": "python_execute"},
         "action": {
             "type": "mutate",
             "ops": [
-                {"op": "transform_tool_args", "path": "expression", "value": "3+3"},
+                {"op": "transform_tool_args", "path": "code", "value": "print(3+3)"},
             ],
         },
         "created_at": ts,
@@ -134,7 +134,7 @@ def test_hook_engine_filter(mock_logger):
         session_key=None,
         user_input="calculate",
         tier="standard",
-        tool_name="calculator",
+        tool_name="python_execute",
     )
     matches = engine.evaluate([hook], "tool.before", ctx)
     assert len(matches) == 1
@@ -145,7 +145,7 @@ def test_tool_hook_mutates_args(temp_dir, mock_logger):
     hook_store.create(_hook_def("mutate_args"))
     hook_manager = HookManager(hook_store, HooksConfig(enabled=True), logger=mock_logger)
 
-    config = ToolConfig(enabled_tools=["calculator"])
+    config = ToolConfig(enabled_tools=["python_execute"])
     registry = ToolRegistry(config, logger=mock_logger, hook_manager=hook_manager)
     context = InvocationContext(
         request_id="req2",
@@ -154,5 +154,5 @@ def test_tool_hook_mutates_args(temp_dir, mock_logger):
         tier="standard",
     )
     with registry.with_invocation_context(context):
-        result = registry.execute("calculator", expression="1+1")
-    assert result.output == 6
+        result = registry.execute("python_execute", code="print(1+1)")
+    assert "6" in str(result.output)

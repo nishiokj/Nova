@@ -71,7 +71,12 @@
       "Bash(rm:*)",
       "Bash(vulture:*)",
       "Bash(bandit:*)",
-      "Bash(twine check:*)"
+      "Bash(twine check:*)",
+      "Skill(frontend-design)",
+      "Bash(curl -s \"http://localhost:5173/api/export?table=sessions\")",
+      "Bash(curl:*)",
+      "Bash(lsof:*)",
+      "Bash(timeout 3 curl:*)"
     ],
     "deny": []
   }

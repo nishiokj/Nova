@@ -39,9 +39,8 @@ def test_working_directory_context():
         # Create config with all tools enabled
         config = ToolConfig()
         config.enabled_tools = [
-            "fast_answer", "web_fetch", "bash_execute",
-            "python_execute", "file_read", "file_write", "search_filesystem",
-            "calculator", "get_current_time", "get_working_directory", "list_files"
+            "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+            "python_execute"
         ]
 
         registry = ToolRegistry(
@@ -50,48 +49,39 @@ def test_working_directory_context():
         )
 
         print("\n" + "="*60)
-        print("TEST 1: get_working_directory tool")
+        print("TEST 1: Glob in current directory")
         print("="*60)
-        result = registry.execute("get_working_directory")
-        print(f"Result: {result.output}")
-        assert result.is_success, f"get_working_directory failed: {result.error}"
-        assert result.output == test_dir, f"Expected {test_dir}, got {result.output}"
-        print("✓ PASSED: Working directory is correct")
-
-        print("\n" + "="*60)
-        print("TEST 2: list_files in current directory")
-        print("="*60)
-        result = registry.execute("list_files", path=".")
+        result = registry.execute("Glob", cwd=test_dir, pattern="*")
         print(f"Result:\n{result.output}")
-        assert result.is_success, f"list_files failed: {result.error}"
-        assert "file1.txt" in result.output, "file1.txt not found in listing"
-        assert "subdir/" in result.output, "subdir/ not found in listing"
-        print("✓ PASSED: list_files shows correct contents")
+        assert result.is_success, f"Glob failed: {result.error}"
+        assert "file1.txt" in result.output, "file1.txt not found in glob results"
+        assert "subdir/" in result.output, "subdir/ not found in glob results"
+        print("✓ PASSED: Glob shows correct contents")
 
         print("\n" + "="*60)
-        print("TEST 3: file_read with relative path")
+        print("TEST 2: Read with relative path")
         print("="*60)
-        result = registry.execute("file_read", path="file1.txt")
+        result = registry.execute("Read", cwd=test_dir, path="file1.txt")
         print(f"Result: {result.output}")
-        assert result.is_success, f"file_read failed: {result.error}"
+        assert result.is_success, f"Read failed: {result.error}"
         assert "Hello from file1" in result.output, "File content incorrect"
-        print("✓ PASSED: file_read with relative path works")
+        print("✓ PASSED: Read with relative path works")
 
         print("\n" + "="*60)
-        print("TEST 4: file_read with relative subdirectory path")
+        print("TEST 3: Read with relative subdirectory path")
         print("="*60)
-        result = registry.execute("file_read", path="subdir/file2.txt")
+        result = registry.execute("Read", cwd=test_dir, path="subdir/file2.txt")
         print(f"Result: {result.output}")
-        assert result.is_success, f"file_read failed: {result.error}"
+        assert result.is_success, f"Read failed: {result.error}"
         assert "Hello from file2" in result.output, "File content incorrect"
-        print("✓ PASSED: file_read with relative subdirectory path works")
+        print("✓ PASSED: Read with relative subdirectory path works")
 
         print("\n" + "="*60)
-        print("TEST 5: file_write with relative path")
+        print("TEST 4: Write with relative path")
         print("="*60)
-        result = registry.execute("file_write", path="newfile.txt", content="Created by test")
+        result = registry.execute("Write", cwd=test_dir, path="newfile.txt", content="Created by test")
         print(f"Result: {result.output}")
-        assert result.is_success, f"file_write failed: {result.error}"
+        assert result.is_success, f"Write failed: {result.error}"
 
         # Verify it was created in the right place
         expected_path = os.path.join(test_dir, "newfile.txt")
@@ -99,61 +89,51 @@ def test_working_directory_context():
         with open(expected_path, "r") as f:
             content = f.read()
         assert content == "Created by test", f"File content incorrect: {content}"
-        print("✓ PASSED: file_write creates file in correct location")
+        print("✓ PASSED: Write creates file in correct location")
 
         print("\n" + "="*60)
-        print("TEST 6: bash_execute runs in correct directory")
+        print("TEST 5: Edit updates file contents")
         print("="*60)
-        result = registry.execute("bash_execute", command="pwd")
+        result = registry.execute(
+            "Edit",
+            cwd=test_dir,
+            path="newfile.txt",
+            old_string="Created by test",
+            new_string="Updated by test"
+        )
         print(f"Result: {result.output}")
-        assert result.is_success, f"bash_execute failed: {result.error}"
-        # The output should contain the test_dir path
-        assert test_dir in result.output, f"bash pwd output doesn't match: {result.output}"
-        print("✓ PASSED: bash_execute runs in correct directory")
+        assert result.is_success, f"Edit failed: {result.error}"
+        with open(expected_path, "r") as f:
+            content = f.read()
+        assert content == "Updated by test", f"Edit did not update content: {content}"
+        print("✓ PASSED: Edit updates file correctly")
 
         print("\n" + "="*60)
-        print("TEST 7: bash_execute can see relative files")
+        print("TEST 6: Bash runs in correct directory")
         print("="*60)
-        result = registry.execute("bash_execute", command="ls -la")
+        result = registry.execute("Bash", cwd=test_dir, command="pwd")
+        print(f"Result: {result.output}")
+        assert result.is_success, f"Bash failed: {result.error}"
+        assert test_dir in result.output, f"Bash pwd output doesn't match: {result.output}"
+        print("✓ PASSED: Bash runs in correct directory")
+
+        print("\n" + "="*60)
+        print("TEST 7: Bash can see relative files")
+        print("="*60)
+        result = registry.execute("Bash", cwd=test_dir, command="ls -la")
         print(f"Result:\n{result.output}")
-        assert result.is_success, f"bash_execute failed: {result.error}"
-        assert "file1.txt" in result.output, "file1.txt not found in bash ls output"
-        assert "newfile.txt" in result.output, "newfile.txt not found in bash ls output"
-        print("✓ PASSED: bash ls shows files in working directory")
-
-        print("\n" + "="*60)
-        print("TEST 8: Context manager temporarily changes directory")
-        print("="*60)
-
-        # Create a different directory
-        other_dir = os.path.join(tmpdir, "other_workspace")
-        os.makedirs(other_dir)
-        with open(os.path.join(other_dir, "other_file.txt"), "w") as f:
-            f.write("In other workspace")
-
-        # Use context manager to temporarily switch
-        with registry.with_working_dir(other_dir):
-            result = registry.execute("get_working_directory")
-            print(f"Inside context: {result.output}")
-            assert result.output == other_dir, f"Context didn't change directory"
-
-            result = registry.execute("list_files", path=".")
-            assert "other_file.txt" in result.output, "Can't see other workspace files"
-
-        # Outside context, should be back to original
-        result = registry.execute("get_working_directory")
-        print(f"Outside context: {result.output}")
-        assert result.output == test_dir, f"Context didn't restore directory"
-        print("✓ PASSED: Context manager works correctly")
+        assert result.is_success, f"Bash failed: {result.error}"
+        assert "file1.txt" in result.output, "file1.txt not found in Bash ls output"
+        assert "newfile.txt" in result.output, "newfile.txt not found in Bash ls output"
+        print("✓ PASSED: Bash ls shows files in working directory")
 
         print("\n" + "="*60)
         print("ALL TESTS PASSED! ✓")
         print("="*60)
         print("\nThe agent now has proper directory context awareness:")
-        print("1. It knows its current working directory")
-        print("2. All relative paths are resolved against the calling directory")
+        print("1. All relative paths are resolved against the provided cwd")
+        print("2. Read/Write/Edit operate within cwd")
         print("3. Bash commands run in the correct directory")
-        print("4. Context can be temporarily changed per-request")
 
 if __name__ == "__main__":
     test_working_directory_context()

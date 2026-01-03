@@ -24,8 +24,8 @@ def test_step_context_embedding():
     )
     store.store_tool_manifest(
         tools=[
-            {"name": "file_write", "description": "Write to file"},
-            {"name": "bash_execute", "description": "Execute bash"}
+            {"name": "Write", "description": "Create new files"},
+            {"name": "Bash", "description": "Run terminal commands"}
         ],
         version="v1",
         manifest_id="test_tools_v1"
@@ -72,7 +72,7 @@ def test_step_context_embedding():
                     {
                         "step_num": 1,
                         "objective": "Write file with content",
-                        "tool_hint": "file_write",
+                        "tool_hint": "Write",
                         "status": "pending"
                     }
                 ]
@@ -88,12 +88,12 @@ def test_step_context_embedding():
             "context": {
                 "step_num": 1,
                 "step_objective": "Write file with content",
-                "tool_hint": "file_write",
+                "tool_hint": "Write",
                 "messages": [
                     {"role": "system", "content": "You are an expert assistant."},
                     {"role": "user", "content": "Create test.txt with hello world"}
                 ],
-                "available_tools": ["file_write", "bash_execute"],
+                "available_tools": ["Write", "Bash"],
                 "system_prompt_id": "test_prompt_v1",
                 "tool_manifest_id": "test_tools_v1"
             }
@@ -109,8 +109,8 @@ def test_step_context_embedding():
             "status": "completed",
             "action": {
                 "type": "tool_call",
-                "tool_name": "file_write",
-                "tool_args": {"path": "test.txt", "content": "hello world"}
+                "tool_name": "Write",
+                "tool_args": {"cwd": ".", "path": "test.txt", "content": "hello world"}
             },
             "result": {
                 "duration_ms": 50,
@@ -212,8 +212,8 @@ def test_step_context_embedding():
     assert len(step_context["messages"]) == 2
     assert step_context["messages"][0]["role"] == "system"
     assert step_context["messages"][1]["role"] == "user"
-    assert step_context["available_tools"] == ["file_write", "bash_execute"]
-    assert step_context["tool_hint"] == "file_write"
+    assert step_context["available_tools"] == ["Write", "Bash"]
+    assert step_context["tool_hint"] == "Write"
 
     print(f"✓ step_context content is correct")
 
@@ -223,7 +223,7 @@ def test_step_context_embedding():
 
     action = step["action"]
     assert action["type"] == "tool_call"
-    assert action["tool_name"] == "file_write"
+    assert action["tool_name"] == "Write"
     assert action["tool_args"]["path"] == "test.txt"
 
     print(f"✓ action is correct")
@@ -299,7 +299,7 @@ def test_training_sample_format():
     # Validate action
     action = transition["action"]
     assert "tool_name" in action
-    assert action["tool_name"] == "file_write"
+    assert action["tool_name"] == "Write"
 
     print(f"✓ Action has tool_name: {action['tool_name']}")
 

@@ -12,7 +12,7 @@ Usage:
     python run_tests.py --watch         # Watch mode (rerun on file changes)
 
 Test modules:
-    - test_tool_registry: Tool execution tests (calculator, file ops, bash, python)
+    - test_tool_registry: Tool execution tests (Read/Write/Edit, Glob/Grep, Bash, Python)
     - test_router: Request classification tests
     - test_agent: Agent execution and tiering tests
     - test_event_bus: Message passing and queue tests
@@ -156,7 +156,7 @@ def print_test_summary():
     print("""
 Test Modules:
   - test_tool_registry.py  : Tests for all built-in tools
-                             (calculator, file ops, bash, python, web)
+                             (Read/Write/Edit, Glob/Grep, Bash, Python, web)
   - test_router.py         : Request classification tests
   - test_agent.py          : Agent execution and tiering tests
   - test_event_bus.py      : Message passing tests

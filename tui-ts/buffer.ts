@@ -134,6 +134,50 @@ export class InputBuffer {
     this.cursor = targetStart + targetCol;
     return true;
   }
+
+  /**
+   * Efficiently insert a large block of text at the cursor position.
+   * Optimized for pasting: uses array concatenation for large texts.
+   * Preserves all whitespace and indentation.
+   */
+  insertBulkText(text: string): void {
+    if (!text) return;
+
+    // Normalize line endings but preserve all other whitespace
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+    // For large pastes (>1000 chars), use array concatenation
+    // which is more efficient than splice for large insertions
+    if (normalized.length > 1000) {
+      const before = this.buffer.slice(0, this.cursor);
+      const after = this.buffer.slice(this.cursor);
+      const chars = normalized.split("");
+      this.buffer = [...before, ...chars, ...after];
+      this.cursor += chars.length;
+    } else {
+      // Small paste - use existing method
+      const chars = normalized.split("");
+      this.buffer.splice(this.cursor, 0, ...chars);
+      this.cursor += chars.length;
+    }
+  }
+
+  /**
+   * Replace entire buffer content efficiently.
+   * Used for very large pastes where incremental update is too slow.
+   */
+  replaceBulk(text: string, cursorAtEnd = true): void {
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    this.buffer = normalized.split("");
+    this.cursor = cursorAtEnd ? this.buffer.length : 0;
+  }
+
+  /**
+   * Get buffer length without joining to string.
+   */
+  getLength(): number {
+    return this.buffer.length;
+  }
 }
 
 export function computeInputLayout(

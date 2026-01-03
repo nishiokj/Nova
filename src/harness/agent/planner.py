@@ -294,12 +294,12 @@ class Planner:
                     PlanStep(
                         step_num=1,
                         objective=f"Search codebase for '{search_term}' handlers/functions",
-                        tool_hint="search_filesystem",
-                        tool_args_hint={"pattern": search_term, "path": "."},
+                        tool_hint="Grep",
+                        tool_args_hint={"pattern": search_term, "cwd": ".", "path": "."},
                         phase=PlanPhase.DISCOVERY,
                         success_criteria=SuccessCriteria(
                             description=f"Found files containing '{search_term}'",
-                            required_outputs=["search_filesystem_output"]
+                            required_outputs=["Grep_output"]
                         ),
                         max_tool_calls=2
                     ),
@@ -393,8 +393,8 @@ class Planner:
                         step_num=1,
                         objective=f"Read and explain the code",
                         # Skip tool hint if scout already has full content
-                        tool_hint="file_read" if mentioned_files and not has_full_content else None,
-                        tool_args_hint={"path": mentioned_files[0]} if mentioned_files and not has_full_content else None,
+                        tool_hint="Read" if mentioned_files and not has_full_content else None,
+                        tool_args_hint={"cwd": ".", "path": mentioned_files[0]} if mentioned_files and not has_full_content else None,
                         phase=PlanPhase.EXECUTION,
                         success_criteria=SuccessCriteria(
                             description="Provide clear explanation of how the code works"
@@ -652,7 +652,7 @@ class Planner:
                 steps=[PlanStep(
                     step_num=1,
                     objective="Execute user request directly",
-                    tool_hint="bash_execute" if is_creation_task else None,
+                    tool_hint="Bash" if is_creation_task else None,
                     success_criteria=SuccessCriteria(description="Request processed"),
                     phase=PlanPhase.EXECUTION
                 )],
@@ -970,11 +970,11 @@ class Planner:
                     PlanStep(
                         step_num=step_num,
                         objective=f"Find and read '{file_pattern}'",
-                        tool_hint="search_filesystem",
-                        tool_args_hint={"pattern": file_pattern, "path": "."},
+                        tool_hint="Glob",
+                        tool_args_hint={"pattern": f"**/*{file_pattern}*", "cwd": "."},
                         success_criteria=SuccessCriteria(
                             description=f"Located {file_pattern}",
-                            required_outputs=["search_filesystem_output"]
+                            required_outputs=["Glob_output"]
                         ),
                         phase=PlanPhase.DISCOVERY,
                         max_tool_calls=2
@@ -990,11 +990,11 @@ class Planner:
                 PlanStep(
                     step_num=step_num,
                     objective=f"Search codebase for '{primary_term}'",
-                    tool_hint="search_filesystem",
-                    tool_args_hint={"pattern": primary_term, "path": "."},
+                    tool_hint="Grep",
+                    tool_args_hint={"pattern": primary_term, "cwd": ".", "path": "."},
                     success_criteria=SuccessCriteria(
                         description=f"Found files related to '{primary_term}'",
-                        required_outputs=["search_filesystem_output"]
+                        required_outputs=["Grep_output"]
                     ),
                     phase=PlanPhase.DISCOVERY,
                     max_tool_calls=2
@@ -1009,11 +1009,11 @@ class Planner:
                 PlanStep(
                     step_num=step_num,
                     objective="List repository structure",
-                    tool_hint="list_files",
-                    tool_args_hint={"path": "."},
+                    tool_hint="Glob",
+                    tool_args_hint={"pattern": "**/*", "cwd": "."},
                     success_criteria=SuccessCriteria(
                         description="Repository structure enumerated",
-                        required_outputs=["list_files_output"]
+                        required_outputs=["Glob_output"]
                     ),
                     phase=PlanPhase.DISCOVERY,
                     max_tool_calls=1

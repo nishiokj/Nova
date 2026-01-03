@@ -125,6 +125,7 @@ function parseTasksFromMetadata(meta: Record<string, unknown>, sessionKey: strin
 
   // Check for wizard_events in metadata
   const wizardEvents = meta.wizard_events as unknown[] | undefined
+  const planSteps = meta.plan_steps as unknown[] | undefined
   const workLedger = meta.work_ledger as Record<string, unknown> | undefined
 
   if (wizardEvents && Array.isArray(wizardEvents) && wizardEvents.length > 0) {
@@ -158,11 +159,17 @@ function parseTasksFromMetadata(meta: Record<string, unknown>, sessionKey: strin
       taskEventGroups.push(currentGroup)
     }
 
-    // Create tasks from each group
+    // Create tasks from each group, passing plan_steps for enrichment
     for (let i = 0; i < taskEventGroups.length; i++) {
-      const task = createTaskFromEvents(sessionKey, `goal-${i}`, taskEventGroups[i], i, createdAt)
+      const task = createTaskFromEvents(sessionKey, `goal-${i}`, taskEventGroups[i], i, createdAt, planSteps)
       tasks.push(task)
     }
+  }
+
+  // If no wizard events but we have plan_steps, create task from that
+  if (tasks.length === 0 && planSteps && planSteps.length > 0) {
+    const task = createTaskFromPlanSteps(sessionKey, planSteps, createdAt)
+    tasks.push(task)
   }
 
   // If no wizard events but we have work_ledger, create task from that
@@ -177,12 +184,54 @@ function parseTasksFromMetadata(meta: Record<string, unknown>, sessionKey: strin
   return tasks
 }
 
+// Create task from plan_steps when no wizard_events available
+function createTaskFromPlanSteps(
+  sessionKey: string,
+  planSteps: unknown[],
+  fallbackTime: string
+): AgentTask {
+  const steps: PlanStep[] = planSteps.map((s) => {
+    const step = s as Record<string, unknown>
+    return {
+      stepNum: (step.step_num as number) ?? 0,
+      objective: (step.objective as string) ?? `Step ${step.step_num ?? 0}`,
+      status: mapLedgerStatus(step.status as string),
+      phase: (step.phase as 'discovery' | 'execution') ?? 'execution',
+      toolHint: step.tool_hint as string | undefined,
+      required: (step.required as boolean) ?? true,
+    }
+  })
+
+  const stepsCompleted = steps.filter(s => s.status === 'completed').length
+  const hasErrors = steps.some(s => s.status === 'failed')
+  const hasRunning = steps.some(s => s.status === 'in_progress')
+  const allDone = steps.length > 0 && steps.every(s => s.status === 'completed' || s.status === 'skipped')
+
+  // Derive goal from first step if available
+  const goal = steps.length > 0 ? `${steps.length} step plan` : 'Agent task'
+
+  return {
+    id: `${sessionKey}-task-0`,
+    sessionId: sessionKey,
+    state: hasErrors ? 'error' : allDone ? 'success' : hasRunning ? 'running' : 'queued',
+    userInput: goal,
+    createdAt: fallbackTime,
+    plan: { goal, steps },
+    toolCalls: [],
+    stepsCompleted,
+    stepsTotal: steps.length,
+    totalToolCalls: 0,
+    errorMessage: hasErrors ? steps.find(s => s.status === 'failed')?.error : undefined,
+  }
+}
+
 function createTaskFromEvents(
   sessionKey: string,
   _goalId: string,
   events: unknown[],
   index: number,
-  fallbackTime: string
+  fallbackTime: string,
+  planSteps?: unknown[]
 ): AgentTask {
   const toolCalls: ToolCall[] = []
   let reflection: Reflection | undefined
@@ -196,6 +245,24 @@ function createTaskFromEvents(
 
   // Track step objectives by step_num for updates
   const stepMap = new Map<number, PlanStep>()
+
+  // Pre-populate from plan_steps if available (these have accurate status/objective)
+  if (planSteps && planSteps.length > 0) {
+    for (const s of planSteps) {
+      const step = s as Record<string, unknown>
+      const sNum = step.step_num as number
+      if (sNum !== undefined) {
+        stepMap.set(sNum, {
+          stepNum: sNum,
+          objective: (step.objective as string) ?? `Step ${sNum}`,
+          status: mapLedgerStatus(step.status as string),
+          phase: (step.phase as 'discovery' | 'execution') ?? 'execution',
+          toolHint: step.tool_hint as string | undefined,
+          required: (step.required as boolean) ?? true,
+        })
+      }
+    }
+  }
 
   for (const event of events) {
     const e = event as Record<string, unknown>
@@ -278,6 +345,15 @@ function createTaskFromEvents(
         if (stepNum !== undefined && stepMap.has(stepNum)) {
           const step = stepMap.get(stepNum)!
           step.status = 'skipped'
+          // Extract error from enhanced skip event data
+          step.error = (data.message as string) ?? (data.error as string) ?? (data.reason as string)
+        }
+        // If this skip was due to retries/stagnation, mark task as having issues
+        if (data.reason === 'max_retries_exceeded' || data.reason === 'stagnation') {
+          // Don't override error state, but capture the skip reason
+          if (!errorMessage) {
+            errorMessage = (data.message as string) ?? (data.error as string)
+          }
         }
         break
 

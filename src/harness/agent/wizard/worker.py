@@ -165,6 +165,7 @@ class WorkerOutcome:
     success: bool
     final_response: Optional[str] = None
     error: Optional[str] = None
+    tool_errors: List[str] = field(default_factory=list)
 
     # Flag: True if LLM refused to attempt work (detected via REFUSAL_PATTERNS)
     is_refusal: bool = False
@@ -372,13 +373,14 @@ class Worker:
             self._log("debug", f"Auto-reading {len(work_item.target_paths)} target files")
 
             files_read: List[Tuple[str, str]] = []
+            cwd = self.tool_registry._get_current_working_dir()
             for path in work_item.target_paths:
                 if path in read_files or path in context_delta.read_files:
                     self._log("debug", f"  ⊘ Skipping {path} (already read)")
                     continue
 
                 try:
-                    result = self.tool_registry.execute("file_read", path=path)
+                    result = self.tool_registry.execute("Read", cwd=cwd, path=path)
                     outcome.metrics.tool_calls_made += 1
 
                     if result.is_success and result.output is not None:
@@ -735,6 +737,7 @@ class Worker:
                     outcome.error = exchange.error
                     outcome.termination_reason = "tool_requested_user"
                     self._log("warning", f"Blocked tool call to {tool_name}")
+                    outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
                     exchanges.append(exchange)
                     continue
 
@@ -749,6 +752,7 @@ class Worker:
                     outcome.error = exchange.error
                     outcome.termination_reason = "tool_requested_user"
                     self._log("warning", f"Tool {tool_name} requested user input; blocked")
+                    outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
                     exchanges.append(exchange)
                     return exchanges
 
@@ -779,12 +783,15 @@ class Worker:
                     exchange.error = result.error
                     exchange.result_content = str(result.output) if result.output is not None else ""
                     self._log("warning", f"  result: FAILED - {result.error}")
+                    if exchange.error:
+                        outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
 
             except Exception as exc:
                 outcome.metrics.tool_calls_made += 1
                 outcome.metrics.tool_calls_failed += 1
                 exchange.success = False
                 exchange.error = str(exc)
+                outcome.tool_errors.append(f"{tool_name}: {exchange.error}")
 
             exchanges.append(exchange)
 
@@ -978,13 +985,12 @@ class Worker:
         self, outcome: WorkerOutcome, final_content: Optional[str], work_item: WorkItem
     ) -> None:
         """
-        Determine success based on completion claim and evidence.
+        Determine success based on hard errors and evidence.
 
         Simplified logic:
         - REFUSAL: If LLM says "I can't do this" → FAILED, is_refusal=True
-        - SUCCESS: explicit [FINAL] marker + evidence (facts or entity_refs)
-        - SUCCESS: Q&A case - substantive response without needing tools (but NOT a refusal)
-        - FAILED: otherwise
+        - FAILED: explicit error, hard termination, or no output/evidence
+        - SUCCESS: otherwise
 
         The Wizard uses outcome.made_progress (property) for nuanced retry decisions.
         """
@@ -1001,32 +1007,42 @@ class Worker:
 
         # Collect evidence
         has_evidence = len(outcome.entity_refs) > 0 or len(outcome.facts) > 0
+        has_output = bool(final_content and final_content.strip())
 
-        # Determine if worker claimed completion
-        explicit_final = outcome.termination_reason == "completed"
-        implicit_final = outcome.termination_reason == "implicit_final"
-        has_final_response = bool(final_content and len(final_content) > 30)
+        failure_reasons = {
+            "max_tool_calls",
+            "max_llm_calls",
+            "timeout",
+            "max_iterations",
+            "llm_error",
+            "need_context_no_prompt",
+            "no_action",
+            "max_continues",
+        }
 
-        completion_claim = explicit_final
-        if self.config.allow_implicit_finals:
-            completion_claim = completion_claim or implicit_final or has_final_response
+        if outcome.termination_reason in failure_reasons and not outcome.error:
+            outcome.error = f"Termination reason: {outcome.termination_reason}"
 
-        # Determine success
-        if completion_claim and has_evidence:
-            # SUCCESS: Claimed completion with evidence
-            outcome.success = True
-
-        elif completion_claim and has_final_response and outcome.metrics.tool_calls_made == 0:
-            # SUCCESS for Q&A: Substantive response without needing tools
-            outcome.success = True
-
-        else:
-            # FAILED: No completion claim or no evidence
-            outcome.success = False
-            if not outcome.error:
-                if outcome.metrics.tool_calls_failed > 0 and outcome.metrics.tool_calls_succeeded == 0:
+        if not outcome.error:
+            if outcome.metrics.tool_calls_failed > 0 and outcome.metrics.tool_calls_succeeded == 0:
+                if outcome.tool_errors:
+                    detail = outcome.tool_errors[0][:200]
+                    outcome.error = (
+                        f"All {outcome.metrics.tool_calls_failed} tool calls failed. "
+                        f"First error: {detail}"
+                    )
+                else:
                     outcome.error = f"All {outcome.metrics.tool_calls_failed} tool calls failed"
-                elif outcome.metrics.tool_calls_made == 0 and not has_final_response:
-                    outcome.error = "No tools called and no substantive response"
-                elif not completion_claim:
-                    outcome.error = "No explicit completion claim ([FINAL] marker)"
+            elif outcome.metrics.tool_calls_made == 0 and not has_output and not has_evidence:
+                outcome.error = "No tools called and no substantive response"
+
+        if outcome.error:
+            outcome.success = False
+            return
+
+        if not has_output and not has_evidence:
+            outcome.success = False
+            outcome.error = "No output or evidence produced"
+            return
+
+        outcome.success = True

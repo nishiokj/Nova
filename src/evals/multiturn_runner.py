@@ -79,9 +79,9 @@ class MultiTurnEvalRunner:
             name="Incremental Code Development",
             category="multi_turn_code_dev",
             turns=[
-                {"prompt": "Create a Calculator class", "expected_actions": ["file_write"]},
-                {"prompt": "Add multiply method", "expected_actions": ["file_read", "file_write"]},
-                {"prompt": "Write tests", "expected_actions": ["file_write", "bash_execute"]}
+                {"prompt": "Create a Calculator class", "expected_actions": ["Write"]},
+                {"prompt": "Add multiply method", "expected_actions": ["Read", "Edit"]},
+                {"prompt": "Write tests", "expected_actions": ["Write", "Bash"]}
             ]
         )
 

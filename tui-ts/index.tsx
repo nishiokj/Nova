@@ -20,13 +20,19 @@ import {
   type MessageEntry,
   type Role,
   type BridgeCommandType,
+  type UserPromptData,
+  type AgentQuestion,
+  type QuestionType,
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
 import { useMouse } from "./useMouse.js";
+import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
+import { QuestionPrompt } from "./components/QuestionPrompt.js";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
-const STREAM_CURSOR = "|";
+const STREAM_CURSOR_FRAMES = ["|", " "];
+const STATUS_SPINNER_FRAMES = ["-", "\\", "|", "/"];
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,7 +57,7 @@ interface AppOptions {
 }
 
 // Skills and hooks are read-only in the TUI.
-// To create/edit skills, use the agent with file_write to create SKILL.md files in config/skills/
+// To create/edit skills, use the agent with Write/Edit to create SKILL.md files in config/skills/
 
 function useTerminalSize() {
   const { stdout } = useStdout();
@@ -83,6 +89,7 @@ function App({ options }: { options: AppOptions }) {
   const size = useTerminalSize();
   const store = useMemo(() => new Store(), []);
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
+  const [statusTick, setStatusTick] = useState(0);
   const clientRef = useRef<JSONLClient | null>(null);
   const loggerRef = useRef<UILogger | null>(null);
   const fileCacheRef = useRef<FileCache | null>(null);
@@ -109,6 +116,20 @@ function App({ options }: { options: AppOptions }) {
   useEffect(() => {
     widthRef.current = width;
   }, [width]);
+
+  const isBusy = snapshot.state !== "idle" && snapshot.state !== "error";
+
+  useEffect(() => {
+    if (!isBusy) {
+      return;
+    }
+    const interval = setInterval(() => {
+      setStatusTick((tick) => tick + 1);
+    }, 150);
+    return () => {
+      clearInterval(interval);
+    };
+  }, [isBusy]);
 
   useEffect(() => {
     return () => {
@@ -214,6 +235,25 @@ function App({ options }: { options: AppOptions }) {
     },
   });
 
+  // Bracketed paste mode for better paste handling
+  useBracketedPaste({
+    onPaste: (text) => {
+      store.insertPastedText(text);
+      const cache = fileCacheRef.current;
+      if (cache) {
+        store.updateAutocomplete(cache);
+      }
+      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+    },
+    onPasteProgress: (bytes) => {
+      store.setPasteProgress(bytes);
+    },
+    onPasteEnd: () => {
+      store.clearPasteProgress();
+    },
+    enabled: !snapshot.helpVisible && snapshot.uiMode !== "question",
+  });
+
   const handleBridgeEvent = (event: BridgeEvent) => {
     switch (event.type) {
       case "ready":
@@ -233,6 +273,9 @@ function App({ options }: { options: AppOptions }) {
         break;
       case "transcription":
         handleTranscription(event.data as TranscriptionData | undefined);
+        break;
+      case "user_prompt":
+        handleUserPrompt(event.data as UserPromptData | undefined);
         break;
       case "error":
         handleError(event.data as ErrorData | undefined);
@@ -322,7 +365,7 @@ function App({ options }: { options: AppOptions }) {
       store.scrollToBottom();
       return;
     }
-    // Skills are read-only in TUI. To create/edit, use the agent with file_write.
+    // Skills are read-only in TUI. To create/edit, use the agent with Write/Edit.
     if (content) {
       store.addMessage("system", content);
     }
@@ -342,7 +385,7 @@ function App({ options }: { options: AppOptions }) {
       store.scrollToBottom();
       return;
     }
-    // Hooks are read-only in TUI. To create/edit, use the agent with file_write.
+    // Hooks are read-only in TUI. To create/edit, use the agent with Write/Edit.
     if (content) {
       store.addMessage("system", content);
     }
@@ -356,6 +399,12 @@ function App({ options }: { options: AppOptions }) {
     const metadata = data.metadata ?? {};
     const kind = typeof metadata.kind === "string" ? metadata.kind : null;
     const content = data.content ?? "";
+    const error =
+      typeof data.error === "string"
+        ? data.error
+        : typeof metadata.error === "string"
+          ? metadata.error
+          : "";
     if (kind === "config" || kind === "models" || kind === "status") {
       if (content) {
         store.addMessage("system", content);
@@ -385,8 +434,8 @@ function App({ options }: { options: AppOptions }) {
     if (data.tools_used && data.tools_used.length > 0) {
       metaLines.push(`Tools: ${data.tools_used.join(", ")}`);
     }
-    if (data.error) {
-      metaLines.push(`Error: ${data.error}`);
+    if (error) {
+      metaLines.push(`Error: ${error}`);
     }
 
     const meta = metaLines.length ? metaLines.join("\n") : undefined;
@@ -395,11 +444,24 @@ function App({ options }: { options: AppOptions }) {
       store.updateMessageMeta(requestId, meta);
     }
 
-    if (!content && data.error) {
-      store.addMessage("system", `Error: ${data.error}`);
+    if (!content && error) {
+      if (requestId && messageExists(store.getSnapshot().history, requestId)) {
+        store.updateMessageText(requestId, `Error: ${error}`, meta);
+      } else {
+        store.addMessage("system", `Error: ${error}`);
+      }
+    } else if (!content && data.success === false) {
+      const fallback = "Error: Request failed with no details. Check logs for diagnostics.";
+      if (requestId && messageExists(store.getSnapshot().history, requestId)) {
+        store.updateMessageText(requestId, fallback, meta);
+      } else {
+        store.addMessage("system", fallback);
+      }
     }
 
-    if (content && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
+    if (content && requestId && messageExists(store.getSnapshot().history, requestId)) {
+      store.updateMessageText(requestId, content, meta);
+    } else if (content && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
       store.addMessage("agent", content, meta, requestId);
     }
 
@@ -419,6 +481,45 @@ function App({ options }: { options: AppOptions }) {
       store.updateAutocomplete(cache);
     }
     store.ensureInputCursorVisible(widthRef.current - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+  };
+
+  const handleUserPrompt = (data?: UserPromptData) => {
+    if (!data?.question) return;
+
+    // Infer question type from the data
+    const inferQuestionType = (): QuestionType => {
+      if (!data.options || data.options.length === 0) {
+        return "free_text";
+      }
+      if (data.multi_select) {
+        return "multi_select";
+      }
+      // Check if it's a yes/no question
+      const labels = data.options.map((opt) =>
+        (typeof opt === "string" ? opt : opt.label).toLowerCase()
+      );
+      if (
+        labels.length === 2 &&
+        labels.every((l) => ["yes", "no", "y", "n"].includes(l))
+      ) {
+        return "yes_no";
+      }
+      return "multiple_choice";
+    };
+
+    const question: AgentQuestion = {
+      requestId: data.request_id,
+      type: inferQuestionType(),
+      question: data.question,
+      context: data.context,
+      options: data.options?.map((opt, i) => ({
+        id: String(i),
+        label: typeof opt === "string" ? opt : opt.label,
+        description: typeof opt === "object" ? opt.description : undefined,
+      })),
+    };
+
+    store.setActiveQuestion(question);
   };
 
   const handleError = (data?: ErrorData) => {
@@ -508,6 +609,93 @@ function App({ options }: { options: AppOptions }) {
         store.setUIMode("chat");
         return;
       }
+    }
+
+    // Question mode input handling
+    if (snapshot.uiMode === "question" && snapshot.activeQuestion) {
+      const questionType = snapshot.activeQuestion.type;
+
+      // Escape cancels the question
+      if (key.escape) {
+        store.clearQuestion();
+        return;
+      }
+
+      // Navigation for option-based questions
+      if (snapshot.activeQuestion.options && snapshot.activeQuestion.options.length > 0) {
+        if (key.upArrow) {
+          store.selectQuestionOption(-1);
+          return;
+        }
+        if (key.downArrow) {
+          store.selectQuestionOption(1);
+          return;
+        }
+
+        // Space toggles selection for multi-select
+        if (input === " " && questionType === "multi_select") {
+          store.toggleQuestionSelection();
+          return;
+        }
+
+        // Enter selects for single-select or submits for multi-select
+        if (key.return) {
+          if (questionType === "multiple_choice" || questionType === "yes_no") {
+            store.toggleQuestionSelection();
+          }
+          const answer = store.getQuestionAnswer();
+          const requestId = snapshot.activeQuestion.requestId;
+          sendCommand("user_prompt_response", {
+            request_id: requestId,
+            answer,
+          });
+          store.clearQuestion();
+          return;
+        }
+      }
+
+      // Text input for fill_in_blank/free_text
+      if (questionType === "fill_in_blank" || questionType === "free_text") {
+        // Handle backspace
+        const firstCharCode = input.length > 0 ? input.charCodeAt(0) : -1;
+        const isBackspace =
+          key.backspace || key.delete || input === "\x7f" || input === "\b" ||
+          firstCharCode === 127 || firstCharCode === 8;
+        if (isBackspace) {
+          store.backspaceQuestionInput();
+          return;
+        }
+
+        // Enter submits
+        if (key.return && !key.shift) {
+          const answer = store.getQuestionAnswer();
+          const requestId = snapshot.activeQuestion.requestId;
+          sendCommand("user_prompt_response", {
+            request_id: requestId,
+            answer,
+          });
+          store.clearQuestion();
+          return;
+        }
+
+        // Shift+Enter adds newline for free_text
+        if (key.return && key.shift && questionType === "free_text") {
+          store.appendQuestionInput("\n");
+          return;
+        }
+
+        // Regular text input
+        if (input && !key.ctrl && !key.meta) {
+          const printable = input.replace(/[\x00-\x1f\x7f]/g, "");
+          if (printable) {
+            store.appendQuestionInput(printable);
+          }
+          return;
+        }
+      }
+
+      // Consume all input in question mode to prevent interference
+      return;
     }
 
     // Debug: log key events early to catch everything
@@ -889,6 +1077,10 @@ function App({ options }: { options: AppOptions }) {
   };
 
   const statusLine = snapshot.progressMessage || snapshot.statusMessage;
+  const statusSpinner = isBusy
+    ? STATUS_SPINNER_FRAMES[statusTick % STATUS_SPINNER_FRAMES.length]
+    : "";
+  const statusText = statusSpinner ? `${statusSpinner} ${statusLine}` : statusLine;
   const scrollInfo = snapshot.scrollOffset > 0
     ? `Scroll: ${snapshot.scrollOffset} lines up`
     : "At bottom";
@@ -897,7 +1089,7 @@ function App({ options }: { options: AppOptions }) {
   const headerLines = [
     `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}`,
     `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}`,
-    `Status: ${statusLine}`,
+    `Status: ${statusText}`,
     `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`,
     "-".repeat(width),
   ];
@@ -948,7 +1140,10 @@ function App({ options }: { options: AppOptions }) {
     return lines;
   };
 
-  let historyLines = store.getHistoryLines(width, snapshot.compact, STREAM_CURSOR);
+  const streamCursor = snapshot.state === "streaming"
+    ? STREAM_CURSOR_FRAMES[statusTick % STREAM_CURSOR_FRAMES.length]
+    : "";
+  let historyLines = store.getHistoryLines(width, snapshot.compact, streamCursor);
   if (snapshot.uiMode === "skills") {
     historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors, true);
   } else if (snapshot.uiMode === "hooks") {
@@ -1004,6 +1199,9 @@ function App({ options }: { options: AppOptions }) {
     );
   }
 
+  // Question mode: show QuestionPrompt instead of input box
+  const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
+
   return (
     <Box flexDirection="column" width={width}>
       {headerLines.map((line, index) => (
@@ -1016,22 +1214,34 @@ function App({ options }: { options: AppOptions }) {
           </Text>
         ))}
       </Box>
-      <Text>{borderTop}</Text>
-      {inputLines.map((line, index) => (
-        <Text key={`input-${index}`}>{`|${line}|`}</Text>
-      ))}
-      <Text>{borderBottom}</Text>
-      {snapshot.autocomplete.active ? (
-        <Box flexDirection="column" width={width}>
-          <Text>{"-".repeat(width)}</Text>
-          {snapshot.autocomplete.suggestions.map((suggestion, index) => (
-            <Text key={`ac-${index}`}>
-              {index === snapshot.autocomplete.selected ? "> " : "  "}
-              {suggestion}
-            </Text>
+      {isQuestionMode ? (
+        <QuestionPrompt
+          question={snapshot.activeQuestion!}
+          cursor={snapshot.questionCursor}
+          selection={snapshot.questionSelection}
+          inputText={snapshot.questionInput}
+          width={width}
+        />
+      ) : (
+        <>
+          <Text>{borderTop}</Text>
+          {inputLines.map((line, index) => (
+            <Text key={`input-${index}`}>{`|${line}|`}</Text>
           ))}
-        </Box>
-      ) : null}
+          <Text>{borderBottom}</Text>
+          {snapshot.autocomplete.active ? (
+            <Box flexDirection="column" width={width}>
+              <Text>{"-".repeat(width)}</Text>
+              {snapshot.autocomplete.suggestions.map((suggestion, index) => (
+                <Text key={`ac-${index}`}>
+                  {index === snapshot.autocomplete.selected ? "> " : "  "}
+                  {suggestion}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
+        </>
+      )}
     </Box>
   );
 }

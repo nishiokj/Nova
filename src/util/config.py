@@ -120,9 +120,8 @@ class AgentConfig:
 class ToolConfig:
     """Configuration for the Tool Registry"""
     enabled_tools: List[str] = field(default_factory=lambda: [
-        "web_fetch", "bash_execute", "python_execute",
-        "file_read", "file_write", "search_filesystem", "calculator", "get_current_time",
-        "generate_image"
+        "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+        "python_execute"
     ])
     sandbox_bash: bool = True
     sandbox_python: bool = True

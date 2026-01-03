@@ -38,8 +38,8 @@ class TaskClassification:
         # These are hard limits - the agent MUST stay within these
         tier_budgets = {
             TaskTier.SIMPLE: {"max_tool_calls": 0, "max_tokens": 500, "max_steps": 1},
-            TaskTier.STANDARD: {"max_tool_calls": 5, "max_tokens": 2000, "max_steps": 5},
-            TaskTier.ADVANCED: {"max_tool_calls": 15, "max_tokens": 8000, "max_steps": 10},
+            TaskTier.STANDARD: {"max_tool_calls": 25, "max_tokens": 2000, "max_steps": 15},
+            TaskTier.ADVANCED: {"max_tool_calls": 100, "max_tokens": 8000, "max_steps": 25},
         }
         defaults = tier_budgets.get(self.tier, tier_budgets[TaskTier.STANDARD])
 
