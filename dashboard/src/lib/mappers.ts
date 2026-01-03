@@ -1,9 +1,33 @@
-import type { Session, Request, SessionState, Environment, AgentTask, TaskState, PlanStep, ToolCall, Reflection } from '../domain/models'
-import { computeSessionInsights, computeRequestInsights } from '../domain/models'
+import type {
+  Session,
+  LegacyHttpRequest,
+  SessionState,
+  Environment,
+  AgentRequest,
+  AgentRequestState,
+  PlanStep,
+  ToolCall,
+  Reflection,
+  AgentType,
+  LLMCall,
+  PlanSnapshot,
+  UserPrompt,
+  ContextWindowMetrics,
+} from '../domain/models'
+import { computeSessionInsights, computeLegacyRequestInsights } from '../domain/models'
 import type { GraphDSession, GraphDMessage } from './api'
 
 function unixToIso(ts: number): string {
   return new Date(ts * 1000).toISOString()
+}
+
+function toISOTimestamp(ts: unknown, fallback: string): string {
+  if (typeof ts === 'number') return unixToIso(ts)
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts)
+    if (!Number.isNaN(parsed)) return new Date(parsed).toISOString()
+  }
+  return fallback
 }
 
 function mapStatus(status: string, lastAccessedAt: number): SessionState {
@@ -33,211 +57,66 @@ function mapClientTypeToEnv(clientType: string): Environment {
   return 'dev'
 }
 
-// Parse tasks from messages - each user message is a task request
-// This is the FALLBACK when wizard_events are not available
-function parseTasksFromMessages(messages: GraphDMessage[], sessionKey: string): AgentTask[] {
-  const tasks: AgentTask[] = []
-
-  // Group messages by user message (each user message starts a new task)
-  let currentTask: { userMessage: GraphDMessage; assistantMessages: GraphDMessage[] } | null = null
-  const taskGroups: { userMessage: GraphDMessage; assistantMessages: GraphDMessage[] }[] = []
-
-  for (const msg of messages) {
-    if (msg.role === 'user') {
-      // Start a new task
-      if (currentTask) {
-        taskGroups.push(currentTask)
-      }
-      currentTask = { userMessage: msg, assistantMessages: [] }
-    } else if (msg.role === 'assistant' && currentTask) {
-      currentTask.assistantMessages.push(msg)
-    }
-  }
-  if (currentTask) {
-    taskGroups.push(currentTask)
-  }
-
-  // Convert each group to an AgentTask
-  for (let i = 0; i < taskGroups.length; i++) {
-    const group = taskGroups[i]
-    const userMsg = group.userMessage
-    const assistantMsgs = group.assistantMessages
-
-    // Keep full user input - truncation is display's job
-    const userInput = userMsg.content
-
-    // Determine task state based on assistant responses
-    let state: TaskState = 'queued'
-    let errorMessage: string | undefined
-
-    if (assistantMsgs.length > 0) {
-      const lastResponse = assistantMsgs[assistantMsgs.length - 1].content
-
-      // Only mark as error for explicit failure markers, not just the word "error"
-      if (lastResponse.includes('BUDGET_EXCEEDED')) {
-        state = 'error'
-        errorMessage = 'Budget exceeded - task could not complete'
-      } else if (lastResponse.startsWith('Unable to complete')) {
-        state = 'error'
-        // Extract the actual error message
-        errorMessage = lastResponse.slice(0, 200)
-      } else if (lastResponse.startsWith('ERROR:')) {
-        state = 'error'
-        errorMessage = lastResponse.slice(6).trim().slice(0, 200)
-      } else {
-        // Don't assume error just because the word "error" appears
-        state = 'success'
-      }
-    }
-
-    // Calculate duration if we have both timestamps
-    const startedAt = unixToIso(userMsg.created_at)
-    const endedAt = assistantMsgs.length > 0
-      ? unixToIso(assistantMsgs[assistantMsgs.length - 1].created_at)
-      : undefined
-    const durationMs = endedAt
-      ? new Date(endedAt).getTime() - new Date(startedAt).getTime()
-      : undefined
-
-    tasks.push({
-      id: `${sessionKey}-task-${i}`,
-      sessionId: sessionKey,
-      state,
-      userInput,
-      createdAt: startedAt,
-      startedAt,
-      endedAt,
-      toolCalls: [],
-      stepsCompleted: assistantMsgs.length > 0 ? 1 : 0,
-      stepsTotal: 1,
-      totalToolCalls: 0,
-      durationMs,
-      errorMessage,
-    })
-  }
-
-  return tasks
-}
-
-// Parse wizard/agent metadata to extract task information
-function parseTasksFromMetadata(meta: Record<string, unknown>, sessionKey: string, createdAt: string): AgentTask[] {
-  const tasks: AgentTask[] = []
-
-  // Check for wizard_events in metadata
+// Parse wizard/agent metadata to extract request information
+function parseRequestsFromMetadata(meta: Record<string, unknown>, sessionKey: string, createdAt: string): AgentRequest[] {
+  const requests: AgentRequest[] = []
   const wizardEvents = meta.wizard_events as unknown[] | undefined
-  const planSteps = meta.plan_steps as unknown[] | undefined
-  const workLedger = meta.work_ledger as Record<string, unknown> | undefined
 
-  if (wizardEvents && Array.isArray(wizardEvents) && wizardEvents.length > 0) {
-    // Split events into tasks by goal boundaries (goal_started -> goal_achieved/goal_aborted)
-    const taskEventGroups: unknown[][] = []
-    let currentGroup: unknown[] = []
+  if (!wizardEvents || !Array.isArray(wizardEvents) || wizardEvents.length === 0) {
+    return requests
+  }
 
-    for (const event of wizardEvents) {
-      const e = event as Record<string, unknown>
-      const eventType = e.type as string
+  // Split events into requests by goal boundaries (goal_started -> goal_achieved/goal_aborted)
+  const requestEventGroups: unknown[][] = []
+  let currentGroup: unknown[] = []
 
-      if (eventType === 'goal_started') {
-        // Start a new task group
-        if (currentGroup.length > 0) {
-          taskEventGroups.push(currentGroup)
-        }
-        currentGroup = [event]
-      } else {
-        currentGroup.push(event)
+  for (const event of wizardEvents) {
+    const e = event as Record<string, unknown>
+    const eventType = e.type as string
 
-        // End of task
-        if (eventType === 'goal_achieved' || eventType === 'goal_aborted') {
-          taskEventGroups.push(currentGroup)
-          currentGroup = []
-        }
+    if (eventType === 'goal_started') {
+      if (currentGroup.length > 0) {
+        requestEventGroups.push(currentGroup)
+      }
+      currentGroup = [event]
+    } else {
+      currentGroup.push(event)
+
+      if (eventType === 'goal_achieved' || eventType === 'goal_aborted') {
+        requestEventGroups.push(currentGroup)
+        currentGroup = []
       }
     }
-
-    // Don't forget any remaining events (running task)
-    if (currentGroup.length > 0) {
-      taskEventGroups.push(currentGroup)
-    }
-
-    // Create tasks from each group, passing plan_steps for enrichment
-    for (let i = 0; i < taskEventGroups.length; i++) {
-      const task = createTaskFromEvents(sessionKey, `goal-${i}`, taskEventGroups[i], i, createdAt, planSteps)
-      tasks.push(task)
-    }
   }
 
-  // If no wizard events but we have plan_steps, create task from that
-  if (tasks.length === 0 && planSteps && planSteps.length > 0) {
-    const task = createTaskFromPlanSteps(sessionKey, planSteps, createdAt)
-    tasks.push(task)
+  if (currentGroup.length > 0) {
+    requestEventGroups.push(currentGroup)
   }
 
-  // If no wizard events but we have work_ledger, create task from that
-  if (tasks.length === 0 && workLedger) {
-    const entries = workLedger.entries as unknown[] | undefined
-    if (entries && entries.length > 0) {
-      const task = createTaskFromLedger(sessionKey, workLedger, createdAt)
-      tasks.push(task)
-    }
+  for (let i = 0; i < requestEventGroups.length; i++) {
+    const request = createRequestFromEvents(sessionKey, `goal-${i}`, requestEventGroups[i], i, createdAt)
+    requests.push(request)
   }
 
-  return tasks
+  return requests
 }
 
-// Create task from plan_steps when no wizard_events available
-function createTaskFromPlanSteps(
-  sessionKey: string,
-  planSteps: unknown[],
-  fallbackTime: string
-): AgentTask {
-  const steps: PlanStep[] = planSteps.map((s) => {
-    const step = s as Record<string, unknown>
-    return {
-      stepNum: (step.step_num as number) ?? 0,
-      objective: (step.objective as string) ?? `Step ${step.step_num ?? 0}`,
-      status: mapLedgerStatus(step.status as string),
-      phase: (step.phase as 'discovery' | 'execution') ?? 'execution',
-      toolHint: step.tool_hint as string | undefined,
-      required: (step.required as boolean) ?? true,
-    }
-  })
-
-  const stepsCompleted = steps.filter(s => s.status === 'completed').length
-  const hasErrors = steps.some(s => s.status === 'failed')
-  const hasRunning = steps.some(s => s.status === 'in_progress')
-  const allDone = steps.length > 0 && steps.every(s => s.status === 'completed' || s.status === 'skipped')
-
-  // Derive goal from first step if available
-  const goal = steps.length > 0 ? `${steps.length} step plan` : 'Agent task'
-
-  return {
-    id: `${sessionKey}-task-0`,
-    sessionId: sessionKey,
-    state: hasErrors ? 'error' : allDone ? 'success' : hasRunning ? 'running' : 'queued',
-    userInput: goal,
-    createdAt: fallbackTime,
-    plan: { goal, steps },
-    toolCalls: [],
-    stepsCompleted,
-    stepsTotal: steps.length,
-    totalToolCalls: 0,
-    errorMessage: hasErrors ? steps.find(s => s.status === 'failed')?.error : undefined,
-  }
-}
-
-function createTaskFromEvents(
+function createRequestFromEvents(
   sessionKey: string,
   _goalId: string,
   events: unknown[],
   index: number,
-  fallbackTime: string,
-  planSteps?: unknown[]
-): AgentTask {
+  fallbackTime: string
+): AgentRequest {
   const toolCalls: ToolCall[] = []
+  const llmCalls: LLMCall[] = []
+  const planSnapshots: PlanSnapshot[] = []
+  const userPrompts: UserPrompt[] = []
+  let contextWindow: ContextWindowMetrics | undefined
   let reflection: Reflection | undefined
-  let userInput = `Task ${index + 1}`
+  let userInput = `Request ${index + 1}`
   let goalText = ''
-  let state: TaskState = 'queued'
+  let state: AgentRequestState = 'queued'
   let errorMessage: string | undefined
   let createdAt = fallbackTime
   let startedAt: string | undefined
@@ -246,40 +125,123 @@ function createTaskFromEvents(
   // Track step objectives by step_num for updates
   const stepMap = new Map<number, PlanStep>()
 
-  // Pre-populate from plan_steps if available (these have accurate status/objective)
-  if (planSteps && planSteps.length > 0) {
-    for (const s of planSteps) {
-      const step = s as Record<string, unknown>
-      const sNum = step.step_num as number
-      if (sNum !== undefined) {
-        stepMap.set(sNum, {
-          stepNum: sNum,
-          objective: (step.objective as string) ?? `Step ${sNum}`,
-          status: mapLedgerStatus(step.status as string),
-          phase: (step.phase as 'discovery' | 'execution') ?? 'execution',
-          toolHint: step.tool_hint as string | undefined,
-          required: (step.required as boolean) ?? true,
-        })
-      }
-    }
-  }
+  // Track tool calls by step_num for nesting
+  const toolCallsByStep = new Map<number, ToolCall[]>()
+  // Track LLM calls by step_num for nesting (planner calls have no step_num)
+  const llmCallsByStep = new Map<number | undefined, LLMCall[]>()
 
   for (const event of events) {
     const e = event as Record<string, unknown>
     const eventType = e.type as string
     const data = (e.data ?? {}) as Record<string, unknown>
     const stepNum = e.step_num as number | undefined
+    const eventTimestamp = toISOTimestamp(e.timestamp, fallbackTime)
 
     // Extract timing - convert unix timestamp to ISO if needed
     if (e.timestamp && !startedAt) {
-      const ts = e.timestamp as number | string
-      startedAt = typeof ts === 'number' ? new Date(ts * 1000).toISOString() : ts
-      createdAt = startedAt
+      startedAt = eventTimestamp
+      createdAt = eventTimestamp
     }
 
     switch (eventType) {
+      case 'llm_call': {
+        const callData = e.data as Record<string, unknown>
+        const llmCall: LLMCall = {
+          id: `${sessionKey}-llm-${llmCalls.length}`,
+          agentType: (callData.agent_type as AgentType) ?? 'worker',
+          stepNum: stepNum ?? undefined,
+          promptPreview: (callData.prompt_preview as string) ?? '',
+          responsePreview: (callData.response_preview as string) ?? '',
+          totalTokens: (callData.total_tokens as number) ?? 0,
+          promptTokens: (callData.prompt_tokens as number) ?? 0,
+          completionTokens: (callData.completion_tokens as number) ?? 0,
+          durationMs: (callData.duration_ms as number) ?? 0,
+          model: (callData.model as string) ?? 'unknown',
+          toolCallsCount: (callData.tool_calls_count as number) ?? 0,
+          timestamp: eventTimestamp,
+        }
+        llmCalls.push(llmCall)
+        // Group by step_num for nesting
+        if (!llmCallsByStep.has(stepNum)) {
+          llmCallsByStep.set(stepNum, [])
+        }
+        llmCallsByStep.get(stepNum)!.push(llmCall)
+        break
+      }
+
+      case 'plan_snapshot': {
+        const snapData = e.data as Record<string, unknown>
+        const rawSteps = (snapData.steps as Array<Record<string, unknown>>) ?? []
+        const steps = rawSteps.map((s) => ({
+          stepNum: (s.step_num as number) ?? 0,
+          objective: (s.objective as string) ?? '',
+          status: mapLedgerStatus(s.status as string),
+          phase: mapPhase(s.phase),
+          toolHint: s.tool_hint as string | undefined,
+          required: (s.required as boolean) ?? true,
+        }))
+
+        planSnapshots.push({
+          version: (snapData.version as number) ?? 0,
+          snapshotType: (snapData.snapshot_type as 'initial' | 'pre_patch' | 'post_patch') ?? 'initial',
+          steps,
+          goal: (snapData.goal as string) ?? '',
+          trigger: (snapData.trigger as string) ?? '',
+          timestamp: eventTimestamp,
+        })
+
+        for (const step of steps) {
+          stepMap.set(step.stepNum, { ...step })
+        }
+        if (!goalText && snapData.goal) {
+          goalText = snapData.goal as string
+        }
+        break
+      }
+
+      case 'user_input_requested': {
+        const promptData = e.data as Record<string, unknown>
+        userPrompts.push({
+          requestId: (promptData.request_id as string) ?? `prompt-${userPrompts.length}`,
+          stepNum: stepNum ?? 0,
+          question: (promptData.question as string) ?? '',
+          options: (promptData.options as string[]) ?? [],
+          context: (promptData.context as string) ?? '',
+          timestamp: eventTimestamp,
+          answered: false,
+        })
+        break
+      }
+
+      case 'user_input_received': {
+        const promptData = e.data as Record<string, unknown>
+        const requestId = promptData.request_id as string | undefined
+        const prompt = requestId
+          ? userPrompts.find((p) => p.requestId === requestId)
+          : userPrompts[userPrompts.length - 1]
+        if (prompt) {
+          prompt.answered = true
+          prompt.answer = (promptData.answer as string) ?? ''
+        }
+        break
+      }
+
+      case 'context_window_update': {
+        const ctxData = e.data as Record<string, unknown>
+        contextWindow = {
+          contextTokens: (ctxData.context_tokens as number) ?? 0,
+          outputTokens: (ctxData.output_tokens as number) ?? 0,
+          maxTokens: (ctxData.max_tokens as number) ?? 200000,
+          percentageUsed: (ctxData.percentage_used as number) ?? 0,
+          messageCount: (ctxData.message_count as number) ?? 0,
+          totalTokens: (ctxData.total_tokens as number) ?? 0,
+          timestamp: eventTimestamp,
+        }
+        break
+      }
+
       case 'goal_started':
-        // NEW: Extract user input and goal from goal_started event
+        // Extract user input and goal from goal_started event
         userInput = (data.user_input as string) ?? (data.goal as string) ?? userInput
         goalText = (data.goal as string) ?? ''
         state = 'running'
@@ -292,7 +254,7 @@ function createTaskFromEvents(
               stepNum: sNum,
               objective: (s.objective as string) ?? `Step ${sNum}`,
               status: 'pending',
-              phase: (s.phase as 'discovery' | 'execution') ?? 'execution',
+              phase: mapPhase(s.phase),
               toolHint: s.tool_hint as string | undefined,
               required: true,
             }
@@ -313,7 +275,7 @@ function createTaskFromEvents(
               stepNum,
               objective: (data.objective as string) ?? `Step ${stepNum}`,
               status: 'in_progress',
-              phase: (data.phase as 'discovery' | 'execution') ?? 'execution',
+              phase: mapPhase(data.phase),
               toolHint: data.tool_hint as string | undefined,
               required: true,
             })
@@ -348,7 +310,7 @@ function createTaskFromEvents(
           // Extract error from enhanced skip event data
           step.error = (data.message as string) ?? (data.error as string) ?? (data.reason as string)
         }
-        // If this skip was due to retries/stagnation, mark task as having issues
+        // If this skip was due to retries/stagnation, mark request as having issues
         if (data.reason === 'max_retries_exceeded' || data.reason === 'stagnation') {
           // Don't override error state, but capture the skip reason
           if (!errorMessage) {
@@ -357,19 +319,26 @@ function createTaskFromEvents(
         }
         break
 
-      case 'tool_call':
-        toolCalls.push({
+      case 'tool_call': {
+        const toolCall: ToolCall = {
           id: `${sessionKey}-tool-${toolCalls.length}`,
           toolName: (data.tool_name as string) ?? 'unknown',
           arguments: (data.arguments as Record<string, unknown>) ?? {},
           result: data.result as string | undefined,
           success: (data.success as boolean) ?? true,
           durationMs: (data.duration_ms as number) ?? 0,
-          timestamp: typeof e.timestamp === 'number'
-            ? new Date((e.timestamp as number) * 1000).toISOString()
-            : (e.timestamp as string) ?? fallbackTime,
-        })
+          timestamp: eventTimestamp,
+        }
+        toolCalls.push(toolCall)
+        // Group by step_num for nesting
+        if (stepNum !== undefined) {
+          if (!toolCallsByStep.has(stepNum)) {
+            toolCallsByStep.set(stepNum, [])
+          }
+          toolCallsByStep.get(stepNum)!.push(toolCall)
+        }
         break
+      }
 
       case 'reflection':
       case 'reflection_completed':
@@ -385,9 +354,7 @@ function createTaskFromEvents(
       case 'goal_achieved':
         state = 'success'
         if (e.timestamp) {
-          endedAt = typeof e.timestamp === 'number'
-            ? new Date((e.timestamp as number) * 1000).toISOString()
-            : e.timestamp as string
+          endedAt = eventTimestamp
         }
         // Can also extract goal from here if not set
         if (!goalText && data.goal) {
@@ -398,9 +365,7 @@ function createTaskFromEvents(
       case 'goal_aborted':
         state = 'error'
         if (e.timestamp) {
-          endedAt = typeof e.timestamp === 'number'
-            ? new Date((e.timestamp as number) * 1000).toISOString()
-            : e.timestamp as string
+          endedAt = eventTimestamp
         }
         errorMessage = (data.reason as string) ?? 'Aborted'
         break
@@ -415,13 +380,17 @@ function createTaskFromEvents(
     }
   }
 
-  // Convert stepMap to sorted array
+  // Convert stepMap to sorted array and attach nested calls
   const stepsArray = Array.from(stepMap.values()).sort((a, b) => a.stepNum - b.stepNum)
+  for (const step of stepsArray) {
+    step.toolCalls = toolCallsByStep.get(step.stepNum) ?? []
+    step.llmCalls = llmCallsByStep.get(step.stepNum) ?? []
+  }
   const stepsCompleted = stepsArray.filter(s => s.status === 'completed').length
   const stepsTotal = stepsArray.length
 
   return {
-    id: `${sessionKey}-task-${index}`,
+    id: `${sessionKey}-request-${index}`,
     sessionId: sessionKey,
     state,
     userInput,
@@ -431,6 +400,10 @@ function createTaskFromEvents(
     plan: stepsArray.length > 0 ? { goal: goalText || userInput, steps: stepsArray } : undefined,
     toolCalls,
     reflection,
+    llmCalls,
+    planSnapshots,
+    userPrompts,
+    contextWindow,
     stepsCompleted,
     stepsTotal,
     totalToolCalls: toolCalls.length,
@@ -441,52 +414,13 @@ function createTaskFromEvents(
   }
 }
 
-function createTaskFromLedger(
-  sessionKey: string,
-  ledger: Record<string, unknown>,
-  fallbackTime: string
-): AgentTask {
-  const entries = ledger.entries as unknown[] ?? []
-  const goal = (ledger.current_goal as string) ?? 'Agent task'
-
-  const steps: PlanStep[] = entries.map((entry, i) => {
-    const e = entry as Record<string, unknown>
-    return {
-      stepNum: i + 1,
-      objective: (e.description as string) ?? `Step ${i + 1}`,
-      status: mapLedgerStatus(e.status as string),
-      phase: 'execution' as const,
-      toolHint: e.tool_hint as string | undefined,
-      required: true,
-      durationMs: e.duration_ms as number | undefined,
-      error: e.error as string | undefined,
-    }
-  })
-
-  const stepsCompleted = steps.filter(s => s.status === 'completed').length
-  const hasErrors = steps.some(s => s.status === 'failed')
-  const allDone = steps.length > 0 && steps.every(s => s.status === 'completed' || s.status === 'skipped')
-
-  return {
-    id: `${sessionKey}-task-0`,
-    sessionId: sessionKey,
-    state: hasErrors ? 'error' : allDone ? 'success' : steps.some(s => s.status === 'in_progress') ? 'running' : 'queued',
-    userInput: goal,
-    createdAt: fallbackTime,
-    plan: { goal, steps },
-    toolCalls: [],
-    stepsCompleted,
-    stepsTotal: steps.length,
-    totalToolCalls: 0,
-    errorMessage: hasErrors ? steps.find(s => s.error)?.error : undefined,
-  }
-}
-
 function mapLedgerStatus(status: string | undefined): PlanStep['status'] {
   switch (status) {
     case 'done':
     case 'completed':
       return 'completed'
+    case 'awaiting_user':
+      return 'in_progress'
     case 'running':
     case 'in_progress':
       return 'in_progress'
@@ -500,12 +434,16 @@ function mapLedgerStatus(status: string | undefined): PlanStep['status'] {
   }
 }
 
+function mapPhase(phase: unknown): PlanStep['phase'] {
+  return phase === 'discovery' ? 'discovery' : 'execution'
+}
+
 export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] = []): Session {
   const meta = raw.metadata_json ? JSON.parse(raw.metadata_json) : {}
   const createdAt = unixToIso(raw.created_at)
 
-  // Map messages to requests (each message can be a "request")
-  const requests: Request[] = messages
+  // Map messages to legacy HTTP requests (for backwards compatibility)
+  const legacyRequests: LegacyHttpRequest[] = messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => {
       const partial = {
@@ -521,24 +459,19 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
       }
       return {
         ...partial,
-        insights: computeRequestInsights(partial),
+        insights: computeLegacyRequestInsights(partial),
       }
     })
 
-  // Parse tasks: prefer wizard metadata, fallback to message-based tasks
-  let tasks: AgentTask[] = parseTasksFromMetadata(meta, raw.session_key, createdAt)
+  // Parse agent requests from wizard metadata
+  const requests: AgentRequest[] = parseRequestsFromMetadata(meta, raw.session_key, createdAt)
 
-  // If no tasks from metadata, create tasks from messages
-  if (tasks.length === 0 && messages.length > 0) {
-    tasks = parseTasksFromMessages(messages, raw.session_key)
-  }
-
-  // Infer session state from tasks if we have them
-  const hasRunningTasks = tasks.some(t => t.state === 'running')
-  const hasErrorTasks = tasks.some(t => t.state === 'error')
-  const inferredState = hasRunningTasks
+  // Infer session state from requests if we have them
+  const hasRunningRequests = requests.some(r => r.state === 'running')
+  const hasErrorRequests = requests.some(r => r.state === 'error')
+  const inferredState = hasRunningRequests
     ? 'active'
-    : hasErrorTasks
+    : hasErrorRequests
       ? 'error'
       : mapStatus(raw.status, raw.last_accessed_at)
 
@@ -556,8 +489,8 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
       workingDir: raw.working_dir ?? undefined,
       ...meta,
     },
+    legacyRequests,
     requests,
-    tasks,
   }
 
   return {

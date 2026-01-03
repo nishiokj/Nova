@@ -400,6 +400,19 @@ class AgentHarness:
                     agent_metadata=agent_response.metadata if agent_response else None,
                 )
 
+                # Persist code review results from hook annotations
+                code_review = invocation_context.annotations.get("code_review")
+                if code_review:
+                    self.graphd.session_update_metadata(session_key, {
+                        "code_review": code_review,
+                        "code_review_risk": invocation_context.annotations.get("code_review_risk"),
+                    })
+                    self.logger.info(
+                        f"Code review persisted to session {session_key}: "
+                        f"risk={code_review.get('risk_level')}, affected={code_review.get('affected_count')}",
+                        component="harness",
+                    )
+
                 # Persist final context state for next request hydration
                 final_context = agent_response.metadata.get("final_context_state") if agent_response else None
                 if final_context:
@@ -520,9 +533,7 @@ class AgentHarness:
                         normalized_ctx_reads.append(os.path.abspath(os.path.join(base_dir, path_str)))
                 files_read = list(dict.fromkeys(files_read + normalized_ctx_reads))
 
-        plan_steps = metadata.get("plan_steps", [])
-        if not isinstance(plan_steps, list):
-            plan_steps = []
+        plan_steps: List[Dict[str, Any]] = []
 
         symbols_modified = metadata.get("symbols_modified", [])
         if not isinstance(symbols_modified, list):
@@ -741,7 +752,7 @@ class AgentHarness:
         This is called after each successful request to store:
         - User message
         - Assistant response with metadata
-        - Wizard execution telemetry (events, steps, tool calls)
+        - Wizard execution telemetry (events, tool calls)
 
         Args:
             session_key: Session key for persistence
@@ -750,7 +761,7 @@ class AgentHarness:
             assistant_response: Agent's response
             tools_used: List of tools used
             duration_ms: Request duration in milliseconds
-            agent_metadata: Optional metadata from agent response (contains wizard_events, plan_steps)
+            agent_metadata: Optional metadata from agent response (contains wizard_events)
         """
         if not self.graphd:
             return
@@ -780,7 +791,6 @@ class AgentHarness:
             if agent_metadata:
                 session_telemetry = {}
                 wizard_events = agent_metadata.get("wizard_events")
-                plan_steps = agent_metadata.get("plan_steps")
 
                 if wizard_events:
                     session_telemetry["wizard_events"] = wizard_events
@@ -791,19 +801,11 @@ class AgentHarness:
                         component="harness",
                     )
 
-                if plan_steps:
-                    session_telemetry["plan_steps"] = plan_steps
-                    self.logger.info(
-                        f"Plan steps to persist: {len(plan_steps)} steps",
-                        component="harness",
-                    )
-
                 if session_telemetry:
                     result = self.graphd.session_update_metadata(session_key, session_telemetry)
                     self.logger.info(
                         f"Wizard telemetry persisted to {session_key}: success={result.get('success', False)}, "
-                        f"events={len(session_telemetry.get('wizard_events', []))}, "
-                        f"steps={len(session_telemetry.get('plan_steps', []))}",
+                        f"events={len(session_telemetry.get('wizard_events', []))}",
                         component="harness",
                     )
 

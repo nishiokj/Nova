@@ -548,12 +548,20 @@ class GraphStore:
             return cursor.rowcount > 0
 
     def delete_session(self, session_key: str) -> bool:
-        """Delete a session and all associated data (cascades to messages and snapshots).
+        """Delete a session and all associated data.
 
         Returns:
             True if deleted, False if not found
         """
         with self._lock:
+            self._conn.execute(
+                "DELETE FROM context_snapshots WHERE session_key = ?;",
+                (session_key,),
+            )
+            self._conn.execute(
+                "DELETE FROM conversation_messages WHERE session_key = ?;",
+                (session_key,),
+            )
             cursor = self._conn.execute(
                 "DELETE FROM sessions WHERE session_key = ?;",
                 (session_key,),

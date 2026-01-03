@@ -9,10 +9,12 @@ import { EmptyState } from './components/EmptyState'
 import { StatusDot } from './components/StatusBadge'
 
 export default function App() {
-  const { sessions: fetchedSessions, state, hasRunningTasks } = useSessions()
+  const { sessions: fetchedSessions, state, hasRunningRequests } = useSessions()
+  const [deletedSessions, setDeletedSessions] = useState<Set<string>>(new Set())
 
   // Use fetched data when available, fallback to mock only on error
-  const sessions = state === 'error' ? mockSessions : fetchedSessions
+  const rawSessions = state === 'error' ? mockSessions : fetchedSessions
+  const sessions = rawSessions.filter((s) => !deletedSessions.has(s.id))
   const showMockWarning = state === 'error'
 
   // Filter state
@@ -22,22 +24,34 @@ export default function App() {
 
   // Session expansion state - initialize ALL sessions as COLLAPSED
   const [open, setOpen] = useState<Record<string, boolean>>({})
+  const handleDelete = (sessionId: string) => {
+    setDeletedSessions((prev) => {
+      const next = new Set(prev)
+      next.add(sessionId)
+      return next
+    })
+    setOpen((prev) => {
+      const next = { ...prev }
+      delete next[sessionId]
+      return next
+    })
+  }
 
   // Global stats
   const totals = useMemo(() => {
-    let tasks = 0
+    let requests = 0
     let running = 0
     let errors = 0
     let completed = 0
 
     for (const s of sessions) {
-      tasks += s.insights.taskCount
-      running += s.insights.tasksRunning
-      errors += s.insights.tasksFailed
-      completed += s.insights.tasksCompleted
+      requests += s.insights.requestCount
+      running += s.insights.requestsRunning
+      errors += s.insights.requestsFailed
+      completed += s.insights.requestsCompleted
     }
 
-    return { sessions: sessions.length, tasks, running, errors, completed }
+    return { sessions: sessions.length, requests, running, errors, completed }
   }, [sessions])
 
   return (
@@ -75,9 +89,9 @@ export default function App() {
 
             <div className="flex items-center gap-2">
               <span className="text-2xl font-semibold font-mono tabular-nums text-[var(--text-primary)]">
-                {totals.tasks}
+                {totals.requests}
               </span>
-              <span className="text-sm text-[var(--text-muted)]">tasks</span>
+              <span className="text-sm text-[var(--text-muted)]">requests</span>
             </div>
 
             {totals.running > 0 && (
@@ -120,7 +134,7 @@ export default function App() {
             )}
 
             {/* Live indicator */}
-            {hasRunningTasks && (
+            {hasRunningRequests && (
               <div className="ml-auto flex items-center gap-2">
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--running)] opacity-75" />
@@ -181,6 +195,7 @@ export default function App() {
                   session={s}
                   open={open[s.id] ?? false}
                   onOpenChange={(next) => setOpen((m) => ({ ...m, [s.id]: next }))}
+                  onDelete={handleDelete}
                 />
               </div>
             ))}

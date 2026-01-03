@@ -15,11 +15,10 @@ export * from './ReflectionPanel'
 // Filters
 export * from './QuickFilters'
 
-// Session/Task display
-export * from './TaskRow'
+// Session/Request display
+export * from './RequestRow'
 export * from './SessionCard'
 
 // Legacy (kept for compatibility)
 export * from './MetadataGrid'
 export * from './InsightCallout'
-export * from './RequestRow'

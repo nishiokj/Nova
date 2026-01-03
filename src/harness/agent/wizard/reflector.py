@@ -15,8 +15,9 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
+from .events import WizardEvent, WizardEventType
 from .types import ReflectionVerdict, FailureCategory
 from .reflection_types import (
     WizardReflectionInput,
@@ -227,10 +228,12 @@ class WizardReflector:
         llm: Any,
         config: Optional[ReflectorConfig] = None,
         logger: Optional[Logger] = None,
+        event_emitter: Optional[Callable[[WizardEvent], None]] = None,
     ):
         self.llm = llm
         self.config = config or ReflectorConfig()
         self.logger = logger
+        self._event_emitter = event_emitter
 
     def reflect(
         self,
@@ -278,9 +281,17 @@ class WizardReflector:
             if self.config.reflection_timeout_ms > 0:
                 llm_kwargs["timeout"] = self.config.reflection_timeout_ms / 1000
 
+            call_start = time.time()
             response = self.llm.respond(
                 messages,
                 **llm_kwargs,
+            )
+            duration_ms = (time.time() - call_start) * 1000
+            self._emit_llm_call_event(
+                prompt,
+                response,
+                duration_ms,
+                input.step_context.step_num,
             )
 
             # Extract content from response
@@ -318,6 +329,55 @@ class WizardReflector:
         if hasattr(response, "content"):
             return response.content
         return str(response)
+
+    def _emit_llm_call_event(
+        self,
+        prompt: str,
+        response: Any,
+        duration_ms: float,
+        step_num: int,
+    ) -> None:
+        if not self._event_emitter or not response:
+            return
+
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+
+        total_tokens = (
+            usage.get("total_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "total_tokens", 0) if usage else 0
+        )
+        prompt_tokens = (
+            usage.get("prompt_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "prompt_tokens", 0) if usage else 0
+        )
+        completion_tokens = (
+            usage.get("completion_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "completion_tokens", 0) if usage else 0
+        )
+        content = self._extract_llm_content(response) or ""
+
+        self._event_emitter(
+            WizardEvent(
+                event_type=WizardEventType.LLM_CALL,
+                step_num=step_num,
+                data={
+                    "agent_type": "reflector",
+                    "prompt_preview": prompt[:500],
+                    "response_preview": content[:500],
+                    "total_tokens": total_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "duration_ms": duration_ms,
+                    "model": getattr(response, "model", "unknown"),
+                    "tool_calls_count": 0,
+                },
+            )
+        )
 
     def _build_reflection_prompt(self, input: WizardReflectionInput) -> str:
         """Build the reflection prompt with full context."""

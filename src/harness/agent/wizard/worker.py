@@ -10,12 +10,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
 # Environment variable to enable full context debug logging
 # Set AGENT_DEBUG_CONTEXT=1 to see the complete context sent to LLM
 _DEBUG_CONTEXT = os.getenv("AGENT_DEBUG_CONTEXT", "0") == "1"
 
+from .events import WizardEvent, WizardEventType
 from .knowledge_store import KnowledgeFact, FactSource
 from .plan_patch import PlanPatch
 
@@ -252,12 +253,14 @@ class Worker:
         llm: Any,  # LLMAdapter
         config: Optional[WorkerConfig] = None,
         logger: Optional[Logger] = None,
+        event_emitter: Optional[Callable[[WizardEvent], None]] = None,
     ):
         self.tool_registry = tool_registry
         self.llm = llm
         self.config = config or WorkerConfig()
         self.logger = logger
         self._disallowed_tools = set(self.config.disallowed_tools)
+        self._event_emitter = event_emitter
 
     def _log(self, level: str, msg: str, **kwargs) -> None:
         """Log with optional logger. Silently no-ops if logger is None."""
@@ -300,6 +303,78 @@ class Worker:
                     component="worker",
                     data={"full_context": full_context, "step_num": step_num}
                 )
+
+    def _get_prompt_preview(self, messages: List[Dict[str, Any]]) -> str:
+        """
+        Extract preview from messages, prioritizing the system prompt.
+
+        The system message (always first) contains step-specific info:
+        GOAL, CURRENT STEP, OBJECTIVE - this differentiates each worker call.
+        """
+        if not messages:
+            return ""
+        # System message is always first and contains step-specific objective
+        first = messages[0]
+        if first.get("role") == "system" and first.get("content"):
+            return str(first["content"])[:500]
+        # Fallback: find any user/system message
+        for msg in messages:
+            if msg.get("role") in ("user", "system") and msg.get("content"):
+                return str(msg["content"])[:500]
+        return ""
+
+    def _emit_llm_call_event(
+        self,
+        response: Any,
+        messages: List[Dict[str, Any]],
+        step_num: Optional[int],
+        duration_ms: float,
+    ) -> None:
+        if not self._event_emitter or not response:
+            return
+
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+
+        tool_calls = getattr(response, "tool_calls", None)
+        if tool_calls is None and isinstance(response, dict):
+            tool_calls = response.get("tool_calls")
+
+        content = self._extract_content(response) or ""
+        total_tokens = (
+            usage.get("total_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "total_tokens", 0) if usage else 0
+        )
+        prompt_tokens = (
+            usage.get("prompt_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "prompt_tokens", 0) if usage else 0
+        )
+        completion_tokens = (
+            usage.get("completion_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "completion_tokens", 0) if usage else 0
+        )
+
+        self._event_emitter(
+            WizardEvent(
+                event_type=WizardEventType.LLM_CALL,
+                step_num=step_num,
+                data={
+                    "agent_type": "worker",
+                    "prompt_preview": self._get_prompt_preview(messages),
+                    "response_preview": content[:500],
+                    "total_tokens": total_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "duration_ms": duration_ms,
+                    "model": getattr(response, "model", "unknown"),
+                    "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                },
+            )
+        )
 
     def execute(
         self,
@@ -614,12 +689,15 @@ class Worker:
                 tools = [t for t in tools if t.name not in self._disallowed_tools]
 
             if hasattr(self.llm, "respond_with_messages"):
+                call_start = time.time()
                 response = self.llm.respond_with_messages(
                     messages=messages,
                     tools=tools,
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, work_item.step_num, duration_ms)
                 return response
 
             # Fallback for LLMs without respond_with_messages
@@ -630,6 +708,7 @@ class Worker:
                     if m.get("content")
                 )
                 system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+                call_start = time.time()
                 response = self.llm.respond(
                     input=packed,
                     instructions=system_msg,
@@ -637,6 +716,8 @@ class Worker:
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, work_item.step_num, duration_ms)
                 return response
 
             outcome.error = "LLM adapter missing respond methods"
@@ -662,12 +743,15 @@ class Worker:
 
         try:
             if hasattr(self.llm, "respond_with_messages"):
+                call_start = time.time()
                 response = self.llm.respond_with_messages(
                     messages=messages,
                     tools=[],
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, outcome.step_num, duration_ms)
                 return response
 
             if hasattr(self.llm, "respond"):
@@ -677,6 +761,7 @@ class Worker:
                     if m.get("content")
                 )
                 system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+                call_start = time.time()
                 response = self.llm.respond(
                     input=packed,
                     instructions=system_msg,
@@ -684,6 +769,8 @@ class Worker:
                     prompt_cache_key=self._cache_params.prompt_cache_key,
                     prompt_cache_retention=self._cache_params.prompt_cache_retention,
                 )
+                duration_ms = (time.time() - call_start) * 1000
+                self._emit_llm_call_event(response, messages, outcome.step_num, duration_ms)
                 return response
 
             return None

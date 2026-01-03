@@ -562,18 +562,13 @@ class GraphdManager:
             self.logger.warning(f"Session update metadata failed: {exc}", component="graphd")
             return {"success": False, "error": str(exc)}
 
-    def session_delete(self, session_key: str) -> Dict[str, Any]:
-        """Delete a session and all associated data.
-
-        Returns:
-            Dict with 'success' bool
-        """
+    def session_delete(self, session_key: str) -> bool:
+        """Delete a session and all associated data."""
         try:
-            deleted = self.store.delete_session(session_key)
-            return {"success": deleted}
+            return self.store.delete_session(session_key)
         except Exception as exc:
             self.logger.warning(f"Session delete failed: {exc}", component="graphd")
-            return {"success": False, "error": str(exc)}
+            return False
 
     def sessions_list(
         self,

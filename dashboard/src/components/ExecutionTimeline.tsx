@@ -1,5 +1,8 @@
+import { useState } from 'react'
 import type { PlanStep, StepStatus } from '../domain/models'
 import { cn } from '../lib/utils'
+import { ToolCallList } from './ToolCallRow'
+import { LLMCallList } from './LLMCallList'
 
 function getStepColor(status: StepStatus): string {
   switch (status) {
@@ -118,7 +121,7 @@ export function ExecutionTimeline({
   )
 }
 
-// Vertical timeline variant for expanded view
+// Vertical timeline variant for expanded view with nested calls
 export function VerticalTimeline({
   steps,
   onStepClick,
@@ -128,13 +131,31 @@ export function VerticalTimeline({
   onStepClick?: (step: PlanStep) => void
   selectedStep?: number
 }) {
+  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
+
   if (steps.length === 0) return null
+
+  const toggleStep = (stepNum: number) => {
+    setExpandedSteps((prev) => {
+      const next = new Set(prev)
+      if (next.has(stepNum)) {
+        next.delete(stepNum)
+      } else {
+        next.add(stepNum)
+      }
+      return next
+    })
+  }
 
   return (
     <div className="space-y-0">
       {steps.map((step, idx) => {
         const isLast = idx === steps.length - 1
         const isSelected = step.stepNum === selectedStep
+        const isExpanded = expandedSteps.has(step.stepNum)
+        const toolCallCount = step.toolCalls?.length ?? 0
+        const llmCallCount = step.llmCalls?.length ?? 0
+        const hasNestedCalls = toolCallCount > 0 || llmCallCount > 0
 
         return (
           <div key={step.stepNum} className="relative flex gap-3">
@@ -203,7 +224,7 @@ export function VerticalTimeline({
             {/* Step content */}
             <div className={cn('flex-1 pb-4', isLast && 'pb-0')}>
               <div className="flex items-start justify-between gap-2">
-                <div>
+                <div className="flex-1">
                   <p
                     className={cn(
                       'text-sm font-medium',
@@ -214,7 +235,7 @@ export function VerticalTimeline({
                   >
                     {step.objective}
                   </p>
-                  <div className="flex items-center gap-2 mt-1">
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
                     <span
                       className={cn(
                         'text-xs font-mono px-1.5 py-0.5 rounded',
@@ -230,6 +251,44 @@ export function VerticalTimeline({
                         → {step.toolHint}
                       </span>
                     )}
+                    {/* Call counts badge - clickable to expand */}
+                    {hasNestedCalls && (
+                      <button
+                        onClick={() => toggleStep(step.stepNum)}
+                        className={cn(
+                          'flex items-center gap-1 text-xs px-1.5 py-0.5 rounded',
+                          'bg-[var(--bg-surface)] border border-[var(--border-subtle)]',
+                          'hover:bg-[var(--bg-hover)] transition-colors',
+                          isExpanded && 'bg-[var(--bg-hover)] border-[var(--border-default)]'
+                        )}
+                      >
+                        {toolCallCount > 0 && (
+                          <span className="font-mono text-[var(--text-muted)]">
+                            {toolCallCount} tool{toolCallCount !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                        {toolCallCount > 0 && llmCallCount > 0 && (
+                          <span className="text-[var(--border-default)]">·</span>
+                        )}
+                        {llmCallCount > 0 && (
+                          <span className="font-mono text-[var(--text-muted)]">
+                            {llmCallCount} LLM
+                          </span>
+                        )}
+                        <svg
+                          className={cn(
+                            'w-3 h-3 text-[var(--text-muted)] transition-transform',
+                            isExpanded && 'rotate-180'
+                          )}
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                 </div>
                 {step.durationMs && (
@@ -240,10 +299,38 @@ export function VerticalTimeline({
                   </span>
                 )}
               </div>
+
+              {/* Error message */}
               {step.error && (
                 <p className="mt-2 text-xs text-[var(--error)] bg-[var(--error-bg)] rounded px-2 py-1 font-mono">
                   {step.error}
                 </p>
+              )}
+
+              {/* Expanded nested calls */}
+              {isExpanded && hasNestedCalls && (
+                <div className="mt-3 space-y-3 animate-fade-in">
+                  {toolCallCount > 0 && (
+                    <div>
+                      <span className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
+                        Tool Calls
+                      </span>
+                      <div className="mt-1">
+                        <ToolCallList calls={step.toolCalls!} maxVisible={10} />
+                      </div>
+                    </div>
+                  )}
+                  {llmCallCount > 0 && (
+                    <div>
+                      <span className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
+                        LLM Calls
+                      </span>
+                      <div className="mt-1">
+                        <LLMCallList calls={step.llmCalls!} maxVisible={5} />
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </div>

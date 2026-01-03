@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Generator, List, Optional, Protocol, Union
 
 from util.llm_adapter import LLMAdapter
+from .wizard.events import WizardEvent, WizardEventType
 
 
 # ========== PROTOCOLS ==========
@@ -178,7 +179,8 @@ class ResponseSynthesizer:
         self,
         llm: Optional[LLMAdapter] = None,
         max_tool_outputs: int = 5,
-        max_output_preview: int = 1000
+        max_output_preview: int = 1000,
+        event_emitter: Optional[Callable[[WizardEvent], None]] = None,
     ):
         """
         Initialize synthesizer.
@@ -191,6 +193,7 @@ class ResponseSynthesizer:
         self.llm = llm
         self.max_tool_outputs = max_tool_outputs
         self.max_output_preview = max_output_preview
+        self._event_emitter = event_emitter
 
     def synthesize(
         self,
@@ -327,22 +330,32 @@ class ResponseSynthesizer:
 
         # Stream or direct call
         if on_stream and hasattr(self.llm, 'stream'):
-            return self._stream_llm_response(prompt, on_stream)
+            call_start = time.time()
+            content, response = self._stream_llm_response(prompt, on_stream)
+            duration_ms = (time.time() - call_start) * 1000
+            if response is None:
+                response = {"content": content}
+            self._emit_llm_call_event(prompt, response, duration_ms)
+            return content
         else:
+            call_start = time.time()
             response = self.llm.respond(input=prompt, instructions="")
+            duration_ms = (time.time() - call_start) * 1000
             content = response.content or ""
             if on_stream:
                 self._stream_content(content, on_stream)
+            self._emit_llm_call_event(prompt, response, duration_ms)
             return content
 
     def _stream_llm_response(
         self,
         prompt: str,
         callback: StreamCallback
-    ) -> str:
+    ) -> tuple[str, Optional[Any]]:
         """Stream LLM response through callback."""
         full_content = ""
         chunk_index = 0
+        response_obj: Optional[Any] = None
 
         try:
             stream_gen = self.llm.stream(input=prompt, instructions="")
@@ -356,6 +369,7 @@ class ResponseSynthesizer:
                         chunk_index += 1
                 except StopIteration as stop:
                     if hasattr(stop, 'value') and stop.value:
+                        response_obj = stop.value
                         full_content = stop.value.content or full_content
                     callback("", chunk_index, True)
                     break
@@ -368,7 +382,57 @@ class ResponseSynthesizer:
                 full_content = "Unable to generate response."
                 callback(full_content, 0, True)
 
-        return full_content
+        return full_content, response_obj
+
+    def _emit_llm_call_event(
+        self,
+        prompt: str,
+        response: Any,
+        duration_ms: float,
+    ) -> None:
+        if not self._event_emitter or not response:
+            return
+
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+
+        total_tokens = (
+            usage.get("total_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "total_tokens", 0) if usage else 0
+        )
+        prompt_tokens = (
+            usage.get("prompt_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "prompt_tokens", 0) if usage else 0
+        )
+        completion_tokens = (
+            usage.get("completion_tokens", 0)
+            if isinstance(usage, dict)
+            else getattr(usage, "completion_tokens", 0) if usage else 0
+        )
+        if isinstance(response, dict):
+            content = str(response.get("content", "") or "")
+        else:
+            content = getattr(response, "content", "") or ""
+
+        self._event_emitter(
+            WizardEvent(
+                event_type=WizardEventType.LLM_CALL,
+                data={
+                    "agent_type": "synthesizer",
+                    "prompt_preview": prompt[:500],
+                    "response_preview": content[:500],
+                    "total_tokens": total_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "duration_ms": duration_ms,
+                    "model": getattr(response, "model", "unknown"),
+                    "tool_calls_count": 0,
+                },
+            )
+        )
 
     def _stream_content(
         self,

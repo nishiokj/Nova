@@ -1,12 +1,19 @@
 // API base URL - uses Vite proxy in dev, configurable via env
 export const API_BASE = import.meta.env.VITE_GRAPHD_URL ?? '/api'
 
-export async function fetchAPI<T>(endpoint: string, timeoutMs = 5000): Promise<T> {
+export async function fetchAPI<T>(
+  endpoint: string,
+  options?: RequestInit | number,
+  timeoutMs = 5000
+): Promise<T> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  const resolvedTimeoutMs = typeof options === 'number' ? options : timeoutMs
+  const init = typeof options === 'number' ? undefined : options
+  const timeoutId = setTimeout(() => controller.abort(), resolvedTimeoutMs)
 
   try {
     const res = await fetch(`${API_BASE}${endpoint}`, {
+      ...init,
       signal: controller.signal,
     })
     clearTimeout(timeoutId)
@@ -50,4 +57,11 @@ export interface GraphDMessage {
   request_id: string | null
   created_at: number
   metadata_json: string | null
+}
+
+export async function deleteSession(sessionKey: string): Promise<boolean> {
+  const response = await fetchAPI<{ deleted: boolean }>(`/session/${sessionKey}`, {
+    method: 'DELETE',
+  })
+  return response.deleted
 }

@@ -76,7 +76,9 @@
       "Bash(curl -s \"http://localhost:5173/api/export?table=sessions\")",
       "Bash(curl:*)",
       "Bash(lsof:*)",
-      "Bash(timeout 3 curl:*)"
+      "Bash(timeout 3 curl:*)",
+      "Bash(bun install:*)",
+      "Bash(bun add:*)"
     ],
     "deny": []
   }

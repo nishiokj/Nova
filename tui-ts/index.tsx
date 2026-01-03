@@ -34,6 +34,48 @@ const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
 const STATUS_SPINNER_FRAMES = ["-", "\\", "|", "/"];
 
+interface GraphDSession {
+  session_key: string;
+  status: string;
+  working_dir: string | null;
+  last_accessed_at: number;
+}
+
+function resolveGraphdUrl(): string {
+  if (process.env.GRAPHD_URL) {
+    return process.env.GRAPHD_URL;
+  }
+  const host = process.env.GRAPHD_HOST ?? "127.0.0.1";
+  const port = process.env.GRAPHD_PORT ?? "9444";
+  return `http://${host}:${port}`;
+}
+
+async function fetchGraphdSessions(): Promise<GraphDSession[]> {
+  const baseUrl = resolveGraphdUrl();
+  const response = await fetch(`${baseUrl}/export?table=sessions`);
+  if (!response.ok) {
+    throw new Error(`GraphD export failed (${response.status})`);
+  }
+  const payload = (await response.json()) as { data?: string };
+  if (!payload.data) return [];
+  return payload.data
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as GraphDSession);
+}
+
+async function deleteGraphdSession(sessionKey: string): Promise<boolean> {
+  const baseUrl = resolveGraphdUrl();
+  const response = await fetch(`${baseUrl}/session/${encodeURIComponent(sessionKey)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    return false;
+  }
+  const payload = (await response.json()) as { deleted?: boolean };
+  return payload.deleted === true;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = (() => {
@@ -93,6 +135,11 @@ function App({ options }: { options: AppOptions }) {
   const clientRef = useRef<JSONLClient | null>(null);
   const loggerRef = useRef<UILogger | null>(null);
   const fileCacheRef = useRef<FileCache | null>(null);
+  const deleteFlowRef = useRef<{
+    stage: "select" | "confirm";
+    sessions: GraphDSession[];
+    selectedKey?: string;
+  } | null>(null);
   const maxScrollRef = useRef(0);
   const historyHeightRef = useRef(0);
   const width = Math.max(40, size.columns || 80);
@@ -796,6 +843,12 @@ function App({ options }: { options: AppOptions }) {
         return;
       }
 
+      if (deleteFlowRef.current) {
+        void handleDeleteFlowInput(text);
+        store.clearInput();
+        return;
+      }
+
       const command = parseSlashCommand(text);
       if (command) {
         handleSlashCommand(command.command, command.arg);
@@ -926,6 +979,104 @@ function App({ options }: { options: AppOptions }) {
     }
   });
 
+  const startDeleteFlow = async (arg?: string) => {
+    if (arg) {
+      deleteFlowRef.current = { stage: "confirm", sessions: [], selectedKey: arg };
+      store.addMessage("system", `Delete session ${arg}? (y/n)`);
+      return;
+    }
+
+    store.addMessage("system", "Fetching active sessions...");
+    try {
+      const sessions = await fetchGraphdSessions();
+      const active = sessions.filter((s) => s.status === "active");
+      if (active.length === 0) {
+        store.addMessage("system", "No active sessions found.");
+        deleteFlowRef.current = null;
+        return;
+      }
+
+      store.addMessage("system", "Select a session to delete:");
+      active.forEach((session, idx) => {
+        const suffix = session.working_dir
+          ? ` (${session.working_dir.split("/").pop()})`
+          : "";
+        store.addMessage("system", `${idx + 1}. ${session.session_key}${suffix}`);
+      });
+      store.addMessage("system", "Enter a number or session key, or type 'cancel'.");
+      deleteFlowRef.current = { stage: "select", sessions: active };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      store.addMessage("system", `Failed to fetch sessions: ${message}`);
+      deleteFlowRef.current = null;
+    }
+  };
+
+  const handleDeleteFlowInput = async (text: string) => {
+    const flow = deleteFlowRef.current;
+    if (!flow) return;
+
+    const input = text.trim();
+    if (!input) {
+      return;
+    }
+
+    const normalized = input.toLowerCase();
+    const isCancel = ["cancel", "/cancel", "n", "no"].includes(normalized);
+
+    if (flow.stage === "select") {
+      if (isCancel) {
+        store.addMessage("system", "Delete cancelled.");
+        deleteFlowRef.current = null;
+        return;
+      }
+
+      let selected: GraphDSession | undefined;
+      if (/^\\d+$/.test(input)) {
+        const idx = Number.parseInt(input, 10) - 1;
+        selected = flow.sessions[idx];
+      } else {
+        selected = flow.sessions.find((s) => s.session_key === input);
+      }
+
+      if (!selected) {
+        store.addMessage("system", "Invalid selection. Enter a number, session key, or 'cancel'.");
+        return;
+      }
+
+      deleteFlowRef.current = { stage: "confirm", sessions: flow.sessions, selectedKey: selected.session_key };
+      store.addMessage("system", `Delete session ${selected.session_key}? (y/n)`);
+      return;
+    }
+
+    if (flow.stage === "confirm") {
+      if (isCancel) {
+        store.addMessage("system", "Delete cancelled.");
+        deleteFlowRef.current = null;
+        return;
+      }
+
+      if (["y", "yes"].includes(normalized)) {
+        const target = flow.selectedKey;
+        if (!target) {
+          deleteFlowRef.current = null;
+          return;
+        }
+
+        store.addMessage("system", `Deleting session ${target}...`);
+        const deleted = await deleteGraphdSession(target);
+        store.addMessage(
+          "system",
+          deleted ? `Deleted session ${target}.` : `Failed to delete session ${target}.`,
+        );
+        deleteFlowRef.current = null;
+        return;
+      }
+
+      store.addMessage("system", "Please answer 'y' to confirm or 'n' to cancel.");
+    }
+  };
+
   const handleSlashCommand = (command: string, arg?: string) => {
     switch (command) {
       case "/help":
@@ -945,6 +1096,10 @@ function App({ options }: { options: AppOptions }) {
         return;
       case "/hooks":
         handleHooksCommand(arg);
+        return;
+      case "/delete":
+      case "/trash":
+        void startDeleteFlow(arg);
         return;
       case "/compact": {
         const enabled = store.toggleCompact();

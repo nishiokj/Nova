@@ -10,10 +10,10 @@ interface UseSessionsResult {
   state: FetchState
   error: string | null
   refetch: () => void
-  hasRunningTasks: boolean
+  hasRunningRequests: boolean
 }
 
-export function useSessions(pollInterval = 5000): UseSessionsResult {
+export function useSessions(pollInterval = 500): UseSessionsResult {
   const [sessions, setSessions] = useState<Session[]>([])
   const [state, setState] = useState<FetchState>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -62,24 +62,24 @@ export function useSessions(pollInterval = 5000): UseSessionsResult {
     }
   }, [state])
 
-  // Check if any session has running tasks (for auto-polling)
-  const hasRunningTasks = useMemo(() => {
-    return sessions.some((s) => s.insights.tasksRunning > 0 || s.state === 'active')
+  // Check if any session has running requests (for auto-polling)
+  const hasRunningRequests = useMemo(() => {
+    return sessions.some((s) => s.insights.requestsRunning > 0 || s.state === 'active')
   }, [sessions])
 
   useEffect(() => {
     fetchSessions()
   }, []) // Only fetch on mount
 
-  // Auto-poll when there are running tasks
+  // Auto-poll when there are running requests
   useEffect(() => {
-    if (pollInterval > 0 && (hasRunningTasks || state === 'success')) {
+    if (pollInterval > 0 && (hasRunningRequests || state === 'success')) {
       const interval = setInterval(fetchSessions, pollInterval)
       return () => clearInterval(interval)
     }
-  }, [pollInterval, hasRunningTasks, state])
+  }, [pollInterval, hasRunningRequests, state])
 
-  return { sessions, state, error, refetch: fetchSessions, hasRunningTasks }
+  return { sessions, state, error, refetch: fetchSessions, hasRunningRequests }
 }
 
 // Hook for computing filter counts
@@ -90,9 +90,9 @@ export function useFilterCounts(sessions: Session[]): FilterCounts {
     let completed = 0
 
     for (const session of sessions) {
-      if (session.insights.tasksFailed > 0) errors++
-      if (session.insights.tasksRunning > 0) running++
-      if (session.insights.tasksCompleted > 0 && session.insights.tasksRunning === 0) completed++
+      if (session.insights.requestsFailed > 0) errors++
+      if (session.insights.requestsRunning > 0) running++
+      if (session.insights.requestsCompleted > 0 && session.insights.requestsRunning === 0) completed++
     }
 
     return {
@@ -109,12 +109,12 @@ export function useFilteredSessions(sessions: Session[], filter: FilterType): Se
   return useMemo(() => {
     switch (filter) {
       case 'errors':
-        return sessions.filter((s) => s.insights.tasksFailed > 0)
+        return sessions.filter((s) => s.insights.requestsFailed > 0)
       case 'running':
-        return sessions.filter((s) => s.insights.tasksRunning > 0)
+        return sessions.filter((s) => s.insights.requestsRunning > 0)
       case 'completed':
         return sessions.filter(
-          (s) => s.insights.tasksCompleted > 0 && s.insights.tasksRunning === 0
+          (s) => s.insights.requestsCompleted > 0 && s.insights.requestsRunning === 0
         )
       case 'all':
       default:

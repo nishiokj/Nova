@@ -99,6 +99,18 @@ class GraphdRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"error": "not_found"}, status=404)
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/session/"):
+            session_key = parsed.path.split("/session/", 1)[1]
+            if not session_key:
+                self._send_json({"error": "missing_session_key"}, status=400)
+                return
+            deleted = self.manager.session_delete(session_key)
+            self._send_json({"deleted": deleted, "session_key": session_key})
+            return
+        self._send_json({"error": "not_found"}, status=404)
+
     def log_message(self, format, *args):
         return
 

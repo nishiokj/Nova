@@ -1,9 +1,9 @@
-import { computeRequestInsights, computeSessionInsights, type Request, type Session, type AgentTask } from './models';
+import { computeAgentRequestInsights, computeSessionInsights, type AgentRequest, type Session } from './models';
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 
-function req(partial: Omit<Request, 'insights'>): Request {
-  return { ...partial, insights: computeRequestInsights(partial) };
+function agentReq(partial: Omit<AgentRequest, 'insights'>): AgentRequest {
+  return { ...partial, insights: computeAgentRequestInsights(partial) };
 }
 
 function sess(partial: Omit<Session, 'insights'>): Session {
@@ -11,10 +11,10 @@ function sess(partial: Omit<Session, 'insights'>): Session {
 }
 
 // ============================================
-// MOCK AGENT TASKS
+// MOCK AGENT REQUESTS
 // ============================================
 
-const runningTask: AgentTask = {
+const runningRequest: AgentRequest = {
   id: 'task-001',
   sessionId: 'S-1042',
   state: 'running',
@@ -126,9 +126,19 @@ const runningTask: AgentTask = {
       timestamp: iso(1000 * 60 * 1.5),
     },
   ],
+  llmCalls: [],
+  planSnapshots: [],
+  userPrompts: [],
+  contextWindow: {
+    totalTokens: 48200,
+    maxTokens: 200000,
+    percentageUsed: 0.241,
+    messageCount: 18,
+    timestamp: iso(1000 * 60 * 1),
+  },
 };
 
-const successTask: AgentTask = {
+const successRequest: AgentRequest = {
   id: 'task-002',
   sessionId: 'S-1042',
   state: 'success',
@@ -235,9 +245,19 @@ const successTask: AgentTask = {
     reasoning: 'Fix is minimal and targeted. Tests pass. Added early return for empty strings before expensive hash comparison.',
     issues: [],
   },
+  llmCalls: [],
+  planSnapshots: [],
+  userPrompts: [],
+  contextWindow: {
+    totalTokens: 76200,
+    maxTokens: 200000,
+    percentageUsed: 0.381,
+    messageCount: 24,
+    timestamp: iso(1000 * 60 * 15),
+  },
 };
 
-const errorTask: AgentTask = {
+const errorRequest: AgentRequest = {
   id: 'task-003',
   sessionId: 'S-1042',
   state: 'error',
@@ -335,9 +355,19 @@ const errorTask: AgentTask = {
     reasoning: 'Cannot proceed without required secrets. User must configure STRIPE_API_KEY in environment.',
     issues: ['Missing STRIPE_API_KEY', 'No .env.production file found'],
   },
+  llmCalls: [],
+  planSnapshots: [],
+  userPrompts: [],
+  contextWindow: {
+    totalTokens: 153400,
+    maxTokens: 200000,
+    percentageUsed: 0.767,
+    messageCount: 32,
+    timestamp: iso(1000 * 60 * 32),
+  },
 };
 
-const queuedTask: AgentTask = {
+const queuedRequest: AgentRequest = {
   id: 'task-004',
   sessionId: 'S-1043',
   state: 'queued',
@@ -347,10 +377,13 @@ const queuedTask: AgentTask = {
   stepsTotal: 0,
   totalToolCalls: 0,
   toolCalls: [],
+  llmCalls: [],
+  planSnapshots: [],
+  userPrompts: [],
 };
 
 // ============================================
-// MOCK SESSIONS WITH TASKS
+// MOCK SESSIONS WITH REQUESTS
 // ============================================
 
 export const mockSessions: Session[] = [
@@ -380,7 +413,7 @@ export const mockSessions: Session[] = [
         meta: { cache: 'HIT', traceId: 'tr_aa12' },
       }),
     ],
-    tasks: [runningTask, successTask, errorTask],
+    requests: [runningRequest, successRequest, errorRequest],
   }),
   sess({
     id: 'S-1043',
@@ -394,8 +427,8 @@ export const mockSessions: Session[] = [
       clientType: 'tui',
       workingDir: '/home/dev/sandbox',
     },
-    requests: [],
-    tasks: [queuedTask],
+    legacyRequests: [],
+    requests: [queuedRequest],
   }),
   sess({
     id: 'S-1044',
@@ -410,8 +443,8 @@ export const mockSessions: Session[] = [
       clientType: 'api',
       workingDir: '/builds/ci-runner/workspace',
     },
-    requests: [],
-    tasks: [
+    legacyRequests: [],
+    requests: [
       {
         id: 'task-005',
         sessionId: 'S-1044',

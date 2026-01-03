@@ -149,6 +149,7 @@ class Agent:
                 config=WizardConfig(),
                 logger=self.logger,
             )
+            self._planner._event_emitter = self._wizard._emit_event
 
         # State
         self._stop_requested = False
@@ -306,6 +307,10 @@ class Agent:
 
         planning_context = self._render_context_for_planner(session_state, context)
 
+        # Reset wizard state for new request (clears token counters and events)
+        if self._wizard:
+            self._wizard.reset_for_new_request()
+
         # Create and execute plan via Wizard
         plan = self._planner.create_plan(
             user_input=user_input,
@@ -313,6 +318,7 @@ class Agent:
             tier=self.config.tier,
             budget=budget
         )
+        planner_events = self._wizard.drain_events() if self._wizard else []
         wizard_plan = convert_plan_to_wizard_plan(plan)
 
         result = self._wizard.orchestrate(
@@ -338,29 +344,20 @@ class Agent:
         if result_error:
             response_metadata["error"] = result_error
 
-        # Include wizard events for dashboard telemetry
+        # Include wizard events (planner + execution) for dashboard telemetry
+        merged_events = []
+        if planner_events:
+            merged_events.extend(planner_events)
         if result.events:
+            merged_events.extend(result.events)
+        if merged_events:
             response_metadata["wizard_events"] = [
-                event.to_dict() for event in result.events
+                event.to_dict() for event in merged_events
             ]
             self.logger.info(
-                f"Agent collected {len(result.events)} wizard events for dashboard",
+                f"Agent collected {len(merged_events)} wizard events for dashboard",
                 component="agent",
             )
-
-        if result.plan_state:
-            response_metadata["plan_steps"] = [
-                {
-                    "step_num": step.step_num,
-                    "objective": step.objective,
-                    "tool_hint": step.tool_hint,
-                    "status": step.status.value,
-                    "phase": step.phase.value,
-                    "depends_on": list(step.depends_on),
-                    "required": step.required,
-                }
-                for step in sorted(result.plan_state.steps.values(), key=lambda s: s.step_num)
-            ]
 
         content = result.final_response
         if result_error and (not content or not content.strip() or content.strip() == "Task processing complete."):

@@ -24,6 +24,9 @@ export interface PlanStep {
   required: boolean;
   durationMs?: number;
   error?: string;
+  // Nested calls for this step (assigned by mapper from flat arrays)
+  toolCalls?: ToolCall[];
+  llmCalls?: LLMCall[];
 }
 
 export interface ToolCall {
@@ -33,6 +36,69 @@ export interface ToolCall {
   result?: string;
   success: boolean;
   durationMs: number;
+  timestamp: ISODateTime;
+}
+
+// ============================================
+// LLM CALL TRACKING
+// ============================================
+
+export type AgentType = 'wizard' | 'worker' | 'planner' | 'reflector' | 'synthesizer';
+
+export interface LLMCall {
+  id: string;
+  agentType: AgentType;
+  stepNum?: number;
+  promptPreview: string;
+  responsePreview: string;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  durationMs: number;
+  model: string;
+  toolCallsCount: number;
+  timestamp: ISODateTime;
+}
+
+// ============================================
+// PLAN VERSION HISTORY
+// ============================================
+
+export interface PlanSnapshot {
+  version: number;
+  snapshotType: 'initial' | 'pre_patch' | 'post_patch';
+  steps: PlanStep[];
+  goal: string;
+  trigger: string;
+  timestamp: ISODateTime;
+}
+
+// ============================================
+// USER INPUT (ask_user)
+// ============================================
+
+export interface UserPrompt {
+  requestId: string;
+  stepNum: number;
+  question: string;
+  options: string[];
+  context: string;
+  timestamp: ISODateTime;
+  answered: boolean;
+  answer?: string;
+}
+
+// ============================================
+// CONTEXT WINDOW METRICS
+// ============================================
+
+export interface ContextWindowMetrics {
+  contextTokens: number; // Peak prompt tokens (actual context window usage)
+  outputTokens: number; // Cumulative completion tokens
+  maxTokens: number;
+  percentageUsed: number; // contextTokens / maxTokens
+  messageCount: number;
+  totalTokens: number; // Legacy: contextTokens + outputTokens
   timestamp: ISODateTime;
 }
 
@@ -46,12 +112,14 @@ export interface Reflection {
   issues: string[];
 }
 
-export type TaskState = 'queued' | 'running' | 'success' | 'error' | 'cancelled';
+// Agent execution state (renamed from TaskState for clarity)
+export type AgentRequestState = 'queued' | 'running' | 'success' | 'error' | 'cancelled';
 
-export interface AgentTask {
+// Represents a single user request → agent execution (renamed from AgentTask)
+export interface AgentRequest {
   id: string;
   sessionId: string;
-  state: TaskState;
+  state: AgentRequestState;
   userInput: string;
   createdAt: ISODateTime;
   startedAt?: ISODateTime;
@@ -64,6 +132,10 @@ export interface AgentTask {
   };
   toolCalls: ToolCall[];
   reflection?: Reflection;
+  llmCalls: LLMCall[];
+  planSnapshots: PlanSnapshot[];
+  userPrompts: UserPrompt[];
+  contextWindow?: ContextWindowMetrics;
 
   // Metrics
   stepsCompleted: number;
@@ -75,7 +147,7 @@ export interface AgentTask {
   errorMessage?: string;
 }
 
-export interface TaskInsights {
+export interface AgentRequestInsights {
   durationMs?: number;
   stepProgress: number; // 0-1
   hasErrors: boolean;
@@ -102,15 +174,16 @@ export type SessionInsights = {
   durationMs: number;
   errorRate: number;
   latency: LatencyPercentiles;
-  // New task-based metrics
-  taskCount: number;
-  tasksRunning: number;
-  tasksFailed: number;
-  tasksCompleted: number;
+  // Request-based metrics
+  requestCount: number;
+  requestsRunning: number;
+  requestsFailed: number;
+  requestsCompleted: number;
   avgQuality?: number;
 };
 
-export type Request = {
+// Legacy HTTP request type (kept for compatibility with old data)
+export type LegacyHttpRequest = {
   id: string;
   sessionId: string;
   state: RequestState;
@@ -136,8 +209,8 @@ export type Session = {
   endedAt?: ISODateTime;
   tags: string[];
   meta: KV;
-  requests: Request[];
-  tasks: AgentTask[];
+  legacyRequests: LegacyHttpRequest[];
+  requests: AgentRequest[];
   insights: SessionInsights;
 };
 
@@ -153,7 +226,7 @@ export function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
-export function computeRequestInsights(r: Omit<Request, 'insights'>): RequestInsights {
+export function computeLegacyRequestInsights(r: Omit<LegacyHttpRequest, 'insights'>): RequestInsights {
   const durationMs = r.startedAt && r.endedAt ? msBetween(r.startedAt, r.endedAt) : undefined;
   return {
     durationMs,
@@ -161,15 +234,15 @@ export function computeRequestInsights(r: Omit<Request, 'insights'>): RequestIns
   };
 }
 
-export function computeTaskInsights(t: AgentTask): TaskInsights {
-  const durationMs = t.startedAt && t.endedAt ? msBetween(t.startedAt, t.endedAt) : undefined;
-  const stepProgress = t.stepsTotal > 0 ? t.stepsCompleted / t.stepsTotal : 0;
+export function computeAgentRequestInsights(r: AgentRequest): AgentRequestInsights {
+  const durationMs = r.startedAt && r.endedAt ? msBetween(r.startedAt, r.endedAt) : undefined;
+  const stepProgress = r.stepsTotal > 0 ? r.stepsCompleted / r.stepsTotal : 0;
 
   return {
     durationMs,
     stepProgress,
-    hasErrors: t.state === 'error' || (t.plan?.steps.some(s => s.status === 'failed') ?? false),
-    qualityScore: t.reflection?.qualityScore,
+    hasErrors: r.state === 'error' || (r.plan?.steps.some(s => s.status === 'failed') ?? false),
+    qualityScore: r.reflection?.qualityScore,
   };
 }
 
@@ -178,11 +251,11 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
   const end = s.endedAt ?? now;
   const durationMs = msBetween(s.startedAt, end);
 
-  const total = s.requests.length || 1;
-  const errors = s.requests.filter((r) => r.state === 'error').length;
+  const total = s.legacyRequests.length || 1;
+  const errors = s.legacyRequests.filter((r) => r.state === 'error').length;
   const errorRate = clamp01(errors / total);
 
-  const durs = s.requests
+  const durs = s.legacyRequests
     .map((r) => (r.startedAt && r.endedAt ? msBetween(r.startedAt, r.endedAt) : undefined))
     .filter((x): x is number => typeof x === 'number')
     .sort((a, b) => a - b);
@@ -193,14 +266,14 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
     return durs[idx];
   };
 
-  // Task metrics
-  const taskCount = s.tasks.length;
-  const tasksRunning = s.tasks.filter(t => t.state === 'running').length;
-  const tasksFailed = s.tasks.filter(t => t.state === 'error').length;
-  const tasksCompleted = s.tasks.filter(t => t.state === 'success').length;
+  // Request metrics (from agent requests)
+  const requestCount = s.requests.length;
+  const requestsRunning = s.requests.filter(r => r.state === 'running').length;
+  const requestsFailed = s.requests.filter(r => r.state === 'error').length;
+  const requestsCompleted = s.requests.filter(r => r.state === 'success').length;
 
-  const qualityScores = s.tasks
-    .map(t => t.reflection?.qualityScore)
+  const qualityScores = s.requests
+    .map(r => r.reflection?.qualityScore)
     .filter((q): q is number => typeof q === 'number');
   const avgQuality = qualityScores.length > 0
     ? qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length
@@ -215,10 +288,10 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
       p95: percentile(95),
       p99: percentile(99),
     },
-    taskCount,
-    tasksRunning,
-    tasksFailed,
-    tasksCompleted,
+    requestCount,
+    requestsRunning,
+    requestsFailed,
+    requestsCompleted,
     avgQuality,
   };
 }

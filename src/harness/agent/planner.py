@@ -3,7 +3,7 @@ Planner - Creates explicit execution plans for agent requests.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from util.llm_adapter import LLMAdapter
 from util.perf_trace import get_tracer
@@ -17,6 +17,7 @@ from .plan_models import (
 )
 from .prompts import PLANNING_PROMPT
 from .tool_registry import ToolRegistry
+from .wizard.events import WizardEvent, WizardEventType
 
 
 class Planner:
@@ -44,6 +45,7 @@ class Planner:
         self.last_call_input: str = ""
         self.last_call_response: str = ""
         self.last_call_duration_ms: float = 0.0
+        self._event_emitter: Optional[Callable[[WizardEvent], None]] = None
 
         # Context scouting for grounded planning
         self._enable_scouting = enable_scouting
@@ -569,6 +571,42 @@ class Planner:
                 self.last_call_duration_ms = (_time.time() - _call_start) * 1000
                 self.last_call_response = response.content or ""
 
+            if self._event_emitter and response:
+                usage = getattr(response, "usage", None)
+                if usage is None and isinstance(response, dict):
+                    usage = response.get("usage")
+                total_tokens = (
+                    usage.get("total_tokens", 0)
+                    if isinstance(usage, dict)
+                    else getattr(usage, "total_tokens", 0) if usage else 0
+                )
+                prompt_tokens = (
+                    usage.get("prompt_tokens", 0)
+                    if isinstance(usage, dict)
+                    else getattr(usage, "prompt_tokens", 0) if usage else 0
+                )
+                completion_tokens = (
+                    usage.get("completion_tokens", 0)
+                    if isinstance(usage, dict)
+                    else getattr(usage, "completion_tokens", 0) if usage else 0
+                )
+                self._event_emitter(
+                    WizardEvent(
+                        event_type=WizardEventType.LLM_CALL,
+                        data={
+                            "agent_type": "planner",
+                            "prompt_preview": system_instructions[:500],
+                            "response_preview": (response.content or "")[:500],
+                            "total_tokens": total_tokens,
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "duration_ms": self.last_call_duration_ms,
+                            "model": getattr(response, "model", "unknown"),
+                            "tool_calls_count": 0,
+                        },
+                    )
+                )
+
             self._tracer.add_metadata("response_len", len(response.content) if response.content else 0)
 
             with self._tracer.span("parse_plan_response"):
@@ -582,11 +620,6 @@ class Planner:
                 plan_data.get("execution_plan"),
                 PlanPhase.EXECUTION
             )
-
-            # Backwards compatibility: fall back to legacy `steps`
-            if not discovery_steps and not execution_steps and plan_data.get("steps"):
-                inferred = self._build_phase_steps(plan_data.get("steps"), PlanPhase.EXECUTION)
-                execution_steps.extend(inferred)
 
             steps = discovery_steps + execution_steps
             if not steps:

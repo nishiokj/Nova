@@ -89,6 +89,7 @@ class UserInputRequestedData:
     question: str
     options: List[str]
     context: str
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -130,7 +131,9 @@ class PlanSnapshotData:
 class ContextWindowUpdateData:
     """Data for CONTEXT_WINDOW_UPDATE event - token usage metrics."""
 
-    total_tokens: int
+    context_tokens: int  # Peak prompt tokens (actual context window usage)
+    output_tokens: int  # Cumulative completion tokens
     max_tokens: int  # Default 200000
-    percentage_used: float
+    percentage_used: float  # context_tokens / max_tokens
     message_count: int
+    total_tokens: int  # Legacy: context_tokens + output_tokens
