@@ -14,12 +14,15 @@ import type { ToolRegistry } from '../tools/registry.js';
 import type { WizardPlan } from '../types/plans.js';
 import { StepStatus } from '../types/plans.js';
 import type { WizardEvent } from '../types/events.js';
+import { createEvent } from '../types/events.js';
+import { ContextWindow } from '../types/context.js';
+import type { EventBusProtocol } from '../communication/event_bus.js';
+import { FactSource } from './knowledge.js';
 import { PlanState, type StepState } from './plan-state.js';
 import { WorkLedger } from './work-ledger.js';
 import { KnowledgeStore } from './knowledge.js';
 import { Worker, type WorkerConfig, type WorkerOutcome, outcomeMadeProgress } from './worker.js';
 import { createWorkItem, workItemFromStepState, type WorkBounds } from './work-item.js';
-import { createContextWindow, type ContextWindow } from './context.js';
 import { StagnationDetector } from './stagnation.js';
 
 /**
@@ -84,13 +87,16 @@ export interface WizardLogger {
  * - PlanState (versioned, single-writer)
  * - WorkLedger (append-only audit trail)
  * - KnowledgeStore (accumulated facts)
+ *
+ * NOTE: ContextWindow is now passed in from the caller (Agent) and mutated
+ * directly during execution. Wizard no longer creates context windows.
  */
 export class Wizard {
   private toolRegistry: ToolRegistry;
   private llm: LLMAdapter;
   private config: WizardConfig;
   private logger?: WizardLogger;
-  private eventEmitter?: (event: WizardEvent) => void;
+  private eventBus?: EventBusProtocol;
 
   // State (owned by Wizard)
   private planState!: PlanState;
@@ -109,13 +115,13 @@ export class Wizard {
     llm: LLMAdapter,
     config?: Partial<WizardConfig>,
     logger?: WizardLogger,
-    eventEmitter?: (event: WizardEvent) => void
+    eventBus?: EventBusProtocol
   ) {
     this.toolRegistry = toolRegistry;
     this.llm = llm;
     this.config = { ...DEFAULT_WIZARD_CONFIG, ...config };
     this.logger = logger;
-    this.eventEmitter = eventEmitter;
+    this.eventBus = eventBus;
   }
 
   private log(level: keyof WizardLogger, msg: string, meta?: Record<string, unknown>): void {
@@ -124,19 +130,31 @@ export class Wizard {
     }
   }
 
-  private emit(event: WizardEvent): void {
+  private publish(event: WizardEvent): void {
     this.events.push(event);
-    if (this.eventEmitter) {
-      this.eventEmitter(event);
+    if (this.eventBus) {
+      this.eventBus.publish(event);
     }
   }
 
   /**
+   * Emit context_window_telemetry event for observability.
+   */
+  private emitContextTelemetry(context: ContextWindow, stepNum?: number): void {
+    const telemetry = context.toTelemetry();
+    this.publish(createEvent('context_window_telemetry', telemetry, stepNum));
+  }
+
+  /**
    * Execute a plan and return the result.
+   *
+   * @param plan - The plan to execute
+   * @param context - The ContextWindow to use (mutated during execution)
+   * @param behavioralRules - Optional behavioral rules for the Worker
    */
   async execute(
     plan: WizardPlan,
-    baseContext?: Partial<ContextWindow>,
+    context: ContextWindow,
     behavioralRules = ''
   ): Promise<WizardResult> {
     const startTime = Date.now();
@@ -146,11 +164,33 @@ export class Wizard {
     this.ledger = new WorkLedger();
     this.knowledge = new KnowledgeStore();
     this.stagnation = new StagnationDetector(this.config.maxRetriesPerStep);
-    this.worker = new Worker(this.toolRegistry, this.llm, this.config.workerConfig);
+    // Pass event emitter callback to Worker for LLM_CALL and TOOL_CALL events
+    this.worker = new Worker(
+      this.toolRegistry,
+      this.llm,
+      this.config.workerConfig,
+      this.logger, // Pass logger for Worker logging
+      this.publish.bind(this) // eventEmitter callback
+    );
 
     this.events = [];
     this.totalToolCalls = 0;
     this.totalLlmCalls = 0;
+
+    // Emit GOAL_STARTED event
+    this.publish(createEvent('goal_started', {
+      goal: plan.goal,
+      userInput: '', // Would come from context in full implementation
+      steps: Array.from(this.planState.steps.values()).map(s => ({
+        stepNum: s.stepNum,
+        objective: s.objective,
+        phase: s.phase,
+        toolHint: s.toolHint,
+      })),
+    }));
+
+    // Emit initial context telemetry
+    this.emitContextTelemetry(context);
 
     let iteration = 0;
     let deadlockCounter = 0;
@@ -175,7 +215,14 @@ export class Wizard {
           // Check for deadlock
           deadlockCounter++;
           if (deadlockCounter >= this.config.deadlockThreshold) {
-            this.log('warning', 'Deadlock detected - no ready steps');
+            // CRITICAL: Deadlock is a fatal condition - record it properly
+            const stepStatuses = Array.from(this.planState.steps.values())
+              .map(s => `Step ${s.stepNum}: ${s.status}${s.lastError ? ` (${s.lastError.slice(0, 50)})` : ''}`)
+              .join(', ');
+            const deadlockError = `Deadlock detected after ${deadlockCounter} iterations. No ready steps. Step states: ${stepStatuses}`;
+            this.log('error', deadlockError);
+            // Store the error for the result
+            lastResponse = deadlockError;
             break;
           }
 
@@ -183,13 +230,18 @@ export class Wizard {
           const stuckSteps = this.planState.getStuckSteps();
           if (stuckSteps.length > 0) {
             // Try to recover stuck steps
-            for (const step of stuckSteps) {
-              if (step.status === StepStatus.FAILED) {
-                if (step.attemptCount >= this.config.maxRetriesPerStep) {
-                  this.planState.markStepSkipped(step.stepNum, 'Max retries exceeded');
-                  this.stagnation.resetStep(step.stepNum);
+            for (const stuckStep of stuckSteps) {
+              if (stuckStep.status === StepStatus.FAILED) {
+                if (stuckStep.attemptCount >= this.config.maxRetriesPerStep) {
+                  this.planState.markStepSkipped(stuckStep.stepNum, 'Max retries exceeded');
+                  this.stagnation.resetStep(stuckStep.stepNum);
+                  // Emit STEP_SKIPPED event for stuck step recovery
+                  this.publish(createEvent('step_skipped', {
+                    objective: stuckStep.objective,
+                    reason: 'Max retries exceeded (stuck step recovery)',
+                  }, stuckStep.stepNum));
                 } else {
-                  this.planState.resetStepForRetry(step.stepNum);
+                  this.planState.resetStepForRetry(stuckStep.stepNum);
                 }
               }
             }
@@ -212,24 +264,25 @@ export class Wizard {
         const entryId = this.ledger.recordDispatch(step.stepNum, workItem, workerId);
         this.planState.markStepInProgress(step.stepNum, workerId);
 
-        // Build context window
-        const context = createContextWindow(
-          baseContext?.systemPrompt ?? '',
-          this.planState.goal,
-          step.overrideObjective ?? step.objective,
-          step.stepNum,
-          baseContext?.messages ?? [],
-          baseContext?.readFiles ?? new Set()
-        );
+        // Emit STEP_STARTED event
+        this.publish(createEvent('step_started', {
+          objective: step.objective,
+          workerId,
+        }, step.stepNum));
 
         try {
-          // Execute work
+          // Execute work (pass workspace root for context in LLM prompts)
+          const workspaceRoot = this.toolRegistry.getWorkingDir();
           const outcome = await this.worker.execute(
             context,
             workItem,
             this.planState.version,
-            behavioralRules
+            behavioralRules,
+            workspaceRoot
           );
+
+          // Emit context telemetry after step execution
+          this.emitContextTelemetry(context, step.stepNum);
 
           // Update metrics
           this.totalToolCalls += outcome.metrics.toolCallsMade;
@@ -243,6 +296,11 @@ export class Wizard {
             if (action.action === 'skip' && action.stepNum !== undefined) {
               this.planState.markStepSkipped(action.stepNum, signal.reason);
               this.stagnation.resetStep(action.stepNum);
+              // Emit STEP_SKIPPED event for stagnation
+              this.publish(createEvent('step_skipped', {
+                objective: step.objective,
+                reason: `Stagnation: ${signal.reason}`,
+              }, action.stepNum));
               continue;
             }
           }
@@ -263,6 +321,28 @@ export class Wizard {
             this.stagnation.resetStep(step.stepNum);
             lastResponse = outcome.finalResponse ?? '';
 
+            // Emit STEP_COMPLETED event
+            this.publish(createEvent('step_completed', {
+              objective: step.objective,
+              finalResponse: outcome.finalResponse?.slice(0, 500) ?? '',
+              toolCalls: outcome.metrics.toolCallsMade,
+              llmCalls: outcome.metrics.llmCallsMade,
+              durationMs: outcome.metrics.durationMs,
+            }, step.stepNum));
+
+            // Emit TOOL_CALL events for successful tools
+            for (const fact of outcome.facts) {
+              if (fact.source === FactSource.TOOL && fact.toolName) {
+                this.publish(createEvent('tool_call', {
+                  toolName: fact.toolName,
+                  arguments: {}, // Tool args not captured in facts - would need worker to emit these
+                  result: String(fact.value).slice(0, 2000),
+                  success: true,
+                  durationMs: 0, // Duration not captured in facts
+                }, step.stepNum));
+              }
+            }
+
             // Ingest facts
             for (const fact of outcome.facts) {
               this.knowledge.upsert(fact);
@@ -271,21 +351,80 @@ export class Wizard {
             this.ledger.recordCompletion(entryId, outcome);
             this.planState.markStepFailed(step.stepNum, outcome.error ?? 'Unknown error');
 
+            // Emit STEP_FAILED event
+            this.publish(createEvent('step_failed', {
+              objective: step.objective,
+              error: outcome.error ?? 'Unknown error',
+              toolErrors: outcome.toolErrors,
+              terminationReason: outcome.terminationReason,
+            }, step.stepNum));
+
+            // Emit TOOL_CALL events for tool errors
+            for (const error of outcome.toolErrors) {
+              this.publish(createEvent('tool_call', {
+                toolName: 'unknown',
+                arguments: {},
+                result: error.slice(0, 500),
+                success: false,
+                durationMs: 0,
+                error: error.slice(0, 500),
+              }, step.stepNum));
+            }
+
             // Check if we should retry
             if (step.attemptCount >= this.config.maxRetriesPerStep) {
               this.planState.markStepSkipped(step.stepNum, 'Max retries exceeded');
               this.stagnation.resetStep(step.stepNum);
+              // Emit STEP_SKIPPED event
+              this.publish(createEvent('step_skipped', {
+                objective: step.objective,
+                reason: 'Max retries exceeded',
+              }, step.stepNum));
             }
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.log('error', `Step ${step.stepNum} error: ${message}`);
-          this.planState.clearInProgress(step.stepNum);
+          const stack = error instanceof Error ? error.stack : undefined;
+
+          // CRITICAL: Log with full context and NEVER silently swallow
+          this.log('error', `Step ${step.stepNum} threw exception: ${message}`, {
+            stepNum: step.stepNum,
+            objective: step.objective.slice(0, 100),
+            stack,
+          });
+
+          // Record the failure with the actual error message
+          this.planState.markStepFailed(step.stepNum, `Exception: ${message}`);
+
+          // Also record in ledger so it shows up in history
+          this.ledger.recordCompletion(entryId, {
+            workId: workItem.workId,
+            stepNum: step.stepNum,
+            baseVersion: this.planState.version,
+            success: false,
+            error: `Exception: ${message}`,
+            toolErrors: [],
+            isRefusal: false,
+            facts: [],
+            patchSuggestions: [],
+            metrics: { toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, llmCallsMade: 0, durationMs: 0 },
+            entityRefs: [],
+            needsUserInput: false,
+            terminationReason: `exception:${message.slice(0, 100)}`,
+          });
+
+          // IMPORTANT: If this is the only step and it failed, capture the error in lastResponse
+          if (Array.from(this.planState.steps.values()).every(s => s.status === StepStatus.FAILED || s.status === StepStatus.SKIPPED)) {
+            lastResponse = `All steps failed. Last error: ${message}`;
+          }
         }
       }
     } finally {
       this.stagnation.cleanupAll();
     }
+
+    // Emit final context telemetry
+    this.emitContextTelemetry(context);
 
     // Build result
     const stepsCompleted = Array.from(this.planState.steps.values()).filter(
@@ -301,7 +440,24 @@ export class Wizard {
     const success = this.planState.goalAchieved();
     const finalResponse = success
       ? lastResponse || 'Plan completed successfully'
-      : `Plan did not achieve goal. Completed: ${stepsCompleted}, Skipped: ${stepsSkipped}, Failed: ${stepsFailed}`;
+      : lastResponse || `Plan did not achieve goal. Completed: ${stepsCompleted}, Skipped: ${stepsSkipped}, Failed: ${stepsFailed}`;
+
+    // Emit GOAL_ACHIEVED or GOAL_ABORTED event
+    if (success) {
+      this.publish(createEvent('goal_achieved', {
+        goal: this.planState.goal,
+        completed: stepsCompleted,
+        skipped: stepsSkipped,
+      }));
+    } else if (!paused) {
+      this.publish(createEvent('goal_aborted', {
+        goal: this.planState.goal,
+        reason: finalResponse,
+        completed: stepsCompleted,
+        skipped: stepsSkipped,
+        failed: stepsFailed,
+      }));
+    }
 
     return {
       success,
@@ -325,19 +481,22 @@ export class Wizard {
    * Resume execution after user provides input.
    */
   async resume(
+    context: ContextWindow,
     userResponse: string,
     behavioralRules = ''
   ): Promise<WizardResult> {
-    // Find the awaiting step and reset it with user response context
+    // Add user response to context
+    context.addMessage('user', userResponse);
+
+    // Find the awaiting step and reset it
     for (const step of this.planState.steps.values()) {
       if (step.status === StepStatus.AWAITING_USER) {
         this.planState.resetStepForRetry(step.stepNum);
-        // Add user response to context (would need to track this)
         break;
       }
     }
 
-    // Continue execution (simplified - would need full context restoration)
+    // Continue execution
     const plan: WizardPlan = {
       goal: this.planState.goal,
       goalType: this.planState.goalType,
@@ -353,6 +512,6 @@ export class Wizard {
       })),
     };
 
-    return this.execute(plan, undefined, behavioralRules);
+    return this.execute(plan, context, behavioralRules);
   }
 }

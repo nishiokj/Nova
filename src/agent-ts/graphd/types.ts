@@ -267,6 +267,20 @@ export interface GraphDContextSnapshot {
   context?: Record<string, unknown>;
 }
 
+/**
+ * GraphD session event as stored in database.
+ */
+export interface GraphDEvent {
+  id: number;
+  sessionKey: string;
+  requestId: string | null;
+  eventType: string;
+  stepNum: number | null;
+  timestamp: number;
+  dataJson: string | null;
+  data?: Record<string, unknown>;
+}
+
 // ============================================
 // STATS
 // ============================================

@@ -219,16 +219,23 @@ export class CircuitOpenError extends Error {
 
 /**
  * Error thrown when all retries exhausted.
+ * Preserves the underlying error message for debugging.
  */
 export class RetriesExhaustedError extends Error {
   public readonly lastError: Error;
   public readonly attempts: number;
 
   constructor(message: string, lastError: Error, attempts: number) {
-    super(message);
+    // Include the underlying error message so it surfaces to users
+    const underlyingMessage = lastError.message;
+    super(`${message} after ${attempts} attempts: ${underlyingMessage}`);
     this.name = 'RetriesExhaustedError';
     this.lastError = lastError;
     this.attempts = attempts;
+    // Preserve the stack trace from the original error
+    if (lastError.stack) {
+      this.stack = `${this.stack}\nCaused by: ${lastError.stack}`;
+    }
   }
 }
 
@@ -286,7 +293,7 @@ export async function resilientCall<T>(
   }
 
   throw new RetriesExhaustedError(
-    `All ${config.maxRetries + 1} attempts failed`,
+    'All retries failed',
     lastError!,
     config.maxRetries + 1
   );

@@ -7,6 +7,13 @@ export interface LoggerOptions {
   logTranscripts: boolean;
 }
 
+const LEVEL_LABELS: Record<string, string> = {
+  info: "INFO ",
+  warn: "WARN ",
+  error: "ERROR",
+  transcript: "TRANS",
+};
+
 export class UILogger {
   private stream: fs.WriteStream | null = null;
   private redact: boolean;
@@ -53,20 +60,42 @@ export class UILogger {
     }
   }
 
+  private formatTimestamp(date: Date): string {
+    const h = date.getHours().toString().padStart(2, "0");
+    const m = date.getMinutes().toString().padStart(2, "0");
+    const s = date.getSeconds().toString().padStart(2, "0");
+    const ms = date.getMilliseconds().toString().padStart(3, "0");
+    return `${h}:${m}:${s}.${ms}`;
+  }
+
+  private formatFields(fields: Record<string, unknown>): string {
+    const keys = Object.keys(fields);
+    if (keys.length === 0) return "";
+
+    const parts = keys.map((key) => {
+      const val = fields[key];
+      const formatted =
+        typeof val === "object" ? JSON.stringify(val, null, 2) : String(val);
+      return `  ${key}: ${formatted}`;
+    });
+
+    return "\n" + parts.join("\n");
+  }
+
   private write(level: string, message: string, fields: Record<string, unknown> = {}): void {
     if (!this.stream) {
       return;
     }
 
-    const entry = {
-      timestamp: new Date().toISOString(),
-      level,
-      message,
-      ...fields,
-    };
+    const now = new Date();
+    const timestamp = this.formatTimestamp(now);
+    const label = LEVEL_LABELS[level] ?? level.toUpperCase().padEnd(5);
+    const fieldStr = this.formatFields(fields);
+
+    const line = `[${timestamp}] ${label} │ ${message}${fieldStr}\n`;
 
     try {
-      this.stream.write(`${JSON.stringify(entry)}\n`);
+      this.stream.write(line);
     } catch (error) {
       // Ignore logging errors to avoid breaking the UI.
     }

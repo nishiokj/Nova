@@ -3,10 +3,10 @@
  *
  * Ported from: src/harness/graphd/store.py
  *
- * Uses better-sqlite3 for synchronous SQLite operations.
+ * Uses Bun's native SQLite (bun:sqlite) for synchronous SQLite operations.
  */
 
-import Database, { type Database as DatabaseType } from 'better-sqlite3';
+import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, statSync } from 'fs';
 import { dirname } from 'path';
 import {
@@ -26,6 +26,7 @@ import type {
   GraphDSession,
   GraphDMessage,
   GraphDContextSnapshot,
+  GraphDEvent,
   GraphDStats,
 } from './types.js';
 import { nowSeconds, safeJsonParse } from './utils.js';
@@ -59,7 +60,7 @@ export class SchemaVersionError extends Error {
  * Persistent, low-churn store of files, symbols, and module edges.
  */
 export class GraphStore {
-  private db: DatabaseType;
+  private db: Database;
   readonly dbPath: string;
 
   constructor(dbPath: string) {
@@ -75,8 +76,8 @@ export class GraphStore {
     this.db = new Database(dbPath);
 
     // Enable WAL mode for concurrent reads
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('synchronous = NORMAL');
+    this.db.exec('PRAGMA journal_mode = WAL;');
+    this.db.exec('PRAGMA synchronous = NORMAL;');
   }
 
   /**
@@ -92,7 +93,7 @@ export class GraphStore {
   initialize(): void {
     // Check if metadata table exists (indicates existing database)
     const metadataExists = this.db
-      .prepare(
+      .query(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='graphd_metadata';"
       )
       .get();
@@ -100,8 +101,8 @@ export class GraphStore {
     if (metadataExists) {
       // Verify schema version
       const row = this.db
-        .prepare("SELECT value FROM graphd_metadata WHERE key = 'schema_version';")
-        .get() as { value: string } | undefined;
+        .query("SELECT value FROM graphd_metadata WHERE key = 'schema_version';")
+        .get() as { value: string } | null;
 
       if (row && row.value !== GRAPHD_SCHEMA_VERSION) {
         throw new SchemaVersionError(row.value, GRAPHD_SCHEMA_VERSION, this.dbPath);
@@ -116,7 +117,7 @@ export class GraphStore {
 
     // Store schema version (upsert)
     this.db
-      .prepare(
+      .query(
         'INSERT OR REPLACE INTO graphd_metadata (key, value) VALUES (?, ?);'
       )
       .run('schema_version', GRAPHD_SCHEMA_VERSION);
@@ -131,7 +132,7 @@ export class GraphStore {
    */
   upsertFile(path: string, lang: string, hashValue: string, mtime: number): void {
     this.db
-      .prepare(
+      .query(
         'INSERT OR REPLACE INTO files (path, lang, hash, mtime) VALUES (?, ?, ?, ?);'
       )
       .run(path, lang, hashValue, mtime);
@@ -142,11 +143,11 @@ export class GraphStore {
    */
   removeFile(path: string): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM files WHERE path = ?;').run(path);
-      this.db.prepare('DELETE FROM symbols WHERE path = ?;').run(path);
-      this.db.prepare('DELETE FROM module_edges WHERE src_path = ?;').run(path);
-      this.db.prepare('DELETE FROM module_edges WHERE dst_path = ?;').run(path);
-      this.db.prepare('DELETE FROM exports WHERE path = ?;').run(path);
+      this.db.query('DELETE FROM files WHERE path = ?;').run(path);
+      this.db.query('DELETE FROM symbols WHERE path = ?;').run(path);
+      this.db.query('DELETE FROM module_edges WHERE src_path = ?;').run(path);
+      this.db.query('DELETE FROM module_edges WHERE dst_path = ?;').run(path);
+      this.db.query('DELETE FROM exports WHERE path = ?;').run(path);
     });
     transaction();
   }
@@ -156,7 +157,7 @@ export class GraphStore {
    */
   getFile(path: string): FileRecord | null {
     const row = this.db
-      .prepare('SELECT * FROM files WHERE path = ?;')
+      .query('SELECT * FROM files WHERE path = ?;')
       .get(path) as FileRecord | undefined;
     return row ?? null;
   }
@@ -170,9 +171,9 @@ export class GraphStore {
    */
   replaceSymbols(path: string, symbols: SymbolDef[]): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM symbols WHERE path = ?;').run(path);
+      this.db.query('DELETE FROM symbols WHERE path = ?;').run(path);
 
-      const insert = this.db.prepare(
+      const insert = this.db.query(
         `INSERT INTO symbols (id, path, kind, name, qualname, sig, span_start, span_end, hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`
       );
@@ -199,7 +200,7 @@ export class GraphStore {
    */
   getSymbol(symbolId: string): Record<string, unknown> | null {
     const row = this.db
-      .prepare('SELECT * FROM symbols WHERE id = ?;')
+      .query('SELECT * FROM symbols WHERE id = ?;')
       .get(symbolId) as Record<string, unknown> | undefined;
     return row ?? null;
   }
@@ -209,7 +210,7 @@ export class GraphStore {
    */
   findSymbolByPosition(path: string, line: number): Record<string, unknown> | null {
     const row = this.db
-      .prepare(
+      .query(
         `SELECT * FROM symbols
          WHERE path = ? AND span_start <= ?
          ORDER BY span_start DESC
@@ -224,7 +225,7 @@ export class GraphStore {
    */
   getSymbolsForFile(path: string): Record<string, unknown>[] {
     return this.db
-      .prepare('SELECT * FROM symbols WHERE path = ? ORDER BY span_start ASC;')
+      .query('SELECT * FROM symbols WHERE path = ? ORDER BY span_start ASC;')
       .all(path) as Record<string, unknown>[];
   }
 
@@ -237,9 +238,9 @@ export class GraphStore {
    */
   replaceModuleEdges(path: string, edges: ModuleEdge[]): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM module_edges WHERE src_path = ?;').run(path);
+      this.db.query('DELETE FROM module_edges WHERE src_path = ?;').run(path);
 
-      const insert = this.db.prepare(
+      const insert = this.db.query(
         `INSERT INTO module_edges (src_path, dst_path, kind, confidence)
          VALUES (?, ?, ?, ?);`
       );
@@ -256,7 +257,7 @@ export class GraphStore {
    */
   getImportsForFile(path: string): Record<string, unknown>[] {
     return this.db
-      .prepare('SELECT * FROM module_edges WHERE src_path = ?;')
+      .query('SELECT * FROM module_edges WHERE src_path = ?;')
       .all(path) as Record<string, unknown>[];
   }
 
@@ -265,7 +266,7 @@ export class GraphStore {
    */
   getImportersForFile(path: string): Record<string, unknown>[] {
     return this.db
-      .prepare('SELECT * FROM module_edges WHERE dst_path = ?;')
+      .query('SELECT * FROM module_edges WHERE dst_path = ?;')
       .all(path) as Record<string, unknown>[];
   }
 
@@ -278,9 +279,9 @@ export class GraphStore {
    */
   replaceExports(path: string, exports: ExportDef[]): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM exports WHERE path = ?;').run(path);
+      this.db.query('DELETE FROM exports WHERE path = ?;').run(path);
 
-      const insert = this.db.prepare(
+      const insert = this.db.query(
         `INSERT INTO exports (path, symbol_id, kind, confidence)
          VALUES (?, ?, ?, ?);`
       );
@@ -311,14 +312,14 @@ export class GraphStore {
     const transaction = this.db.transaction(() => {
       // Upsert file
       this.db
-        .prepare(
+        .query(
           'INSERT OR REPLACE INTO files (path, lang, hash, mtime) VALUES (?, ?, ?, ?);'
         )
         .run(path, lang, hashValue, mtime);
 
       // Replace symbols
-      this.db.prepare('DELETE FROM symbols WHERE path = ?;').run(path);
-      const insertSymbol = this.db.prepare(
+      this.db.query('DELETE FROM symbols WHERE path = ?;').run(path);
+      const insertSymbol = this.db.query(
         `INSERT INTO symbols (id, path, kind, name, qualname, sig, span_start, span_end, hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`
       );
@@ -337,8 +338,8 @@ export class GraphStore {
       }
 
       // Replace edges
-      this.db.prepare('DELETE FROM module_edges WHERE src_path = ?;').run(path);
-      const insertEdge = this.db.prepare(
+      this.db.query('DELETE FROM module_edges WHERE src_path = ?;').run(path);
+      const insertEdge = this.db.query(
         `INSERT INTO module_edges (src_path, dst_path, kind, confidence)
          VALUES (?, ?, ?, ?);`
       );
@@ -347,8 +348,8 @@ export class GraphStore {
       }
 
       // Replace exports
-      this.db.prepare('DELETE FROM exports WHERE path = ?;').run(path);
-      const insertExport = this.db.prepare(
+      this.db.query('DELETE FROM exports WHERE path = ?;').run(path);
+      const insertExport = this.db.query(
         `INSERT INTO exports (path, symbol_id, kind, confidence)
          VALUES (?, ?, ?, ?);`
       );
@@ -373,7 +374,7 @@ export class GraphStore {
     updatedAt: number
   ): void {
     this.db
-      .prepare(
+      .query(
         `INSERT INTO run_artifacts (path, kind, details_json, updated_at)
          VALUES (?, ?, ?, ?);`
       )
@@ -389,18 +390,18 @@ export class GraphStore {
    */
   getStats(): GraphDStats {
     const files = (
-      this.db.prepare('SELECT COUNT(*) as c FROM files;').get() as { c: number }
+      this.db.query('SELECT COUNT(*) as c FROM files;').get() as { c: number }
     ).c;
     const symbols = (
-      this.db.prepare('SELECT COUNT(*) as c FROM symbols;').get() as { c: number }
+      this.db.query('SELECT COUNT(*) as c FROM symbols;').get() as { c: number }
     ).c;
     const moduleEdges = (
-      this.db.prepare('SELECT COUNT(*) as c FROM module_edges;').get() as {
+      this.db.query('SELECT COUNT(*) as c FROM module_edges;').get() as {
         c: number;
       }
     ).c;
     const exports = (
-      this.db.prepare('SELECT COUNT(*) as c FROM exports;').get() as { c: number }
+      this.db.query('SELECT COUNT(*) as c FROM exports;').get() as { c: number }
     ).c;
 
     return { files, symbols, moduleEdges, exports };
@@ -435,7 +436,7 @@ export class GraphStore {
       );
     }
     // Safe: table name validated against whitelist above
-    return this.db.prepare(`SELECT * FROM ${table};`).all() as Record<
+    return this.db.query(`SELECT * FROM ${table};`).all() as Record<
       string,
       unknown
     >[];
@@ -458,7 +459,7 @@ export class GraphStore {
     const now = nowSeconds();
     try {
       this.db
-        .prepare(
+        .query(
           `INSERT INTO sessions (session_key, client_type, created_at, last_accessed_at,
                                  expires_at, working_dir, status, metadata_json)
            VALUES (?, ?, ?, ?, ?, ?, 'active', ?);`
@@ -487,7 +488,7 @@ export class GraphStore {
    */
   getSession(sessionKey: string): GraphDSession | null {
     const row = this.db
-      .prepare('SELECT * FROM sessions WHERE session_key = ?;')
+      .query('SELECT * FROM sessions WHERE session_key = ?;')
       .get(sessionKey) as Record<string, unknown> | undefined;
 
     if (!row) return null;
@@ -516,7 +517,7 @@ export class GraphStore {
    */
   updateSessionAccess(sessionKey: string): boolean {
     const result = this.db
-      .prepare(
+      .query(
         "UPDATE sessions SET last_accessed_at = ? WHERE session_key = ? AND status = 'active';"
       )
       .run(nowSeconds(), sessionKey);
@@ -528,7 +529,7 @@ export class GraphStore {
    */
   updateSessionStatus(sessionKey: string, status: string): boolean {
     const result = this.db
-      .prepare('UPDATE sessions SET status = ? WHERE session_key = ?;')
+      .query('UPDATE sessions SET status = ? WHERE session_key = ?;')
       .run(status, sessionKey);
     return result.changes > 0;
   }
@@ -544,7 +545,7 @@ export class GraphStore {
     if (merge) {
       // Get existing metadata first
       const row = this.db
-        .prepare('SELECT metadata_json FROM sessions WHERE session_key = ?;')
+        .query('SELECT metadata_json FROM sessions WHERE session_key = ?;')
         .get(sessionKey) as { metadata_json: string | null } | undefined;
 
       if (!row) return false;
@@ -554,7 +555,7 @@ export class GraphStore {
         existing = safeJsonParse(row.metadata_json, {});
       }
 
-      // Smart merge: for arrays like wizard_events, append instead of replace
+      // Smart merge: for arrays, append instead of replace
       for (const [key, value] of Object.entries(metadata)) {
         if (Array.isArray(value) && Array.isArray(existing[key])) {
           // Append new items to existing array
@@ -568,7 +569,7 @@ export class GraphStore {
     }
 
     const result = this.db
-      .prepare('UPDATE sessions SET metadata_json = ? WHERE session_key = ?;')
+      .query('UPDATE sessions SET metadata_json = ? WHERE session_key = ?;')
       .run(JSON.stringify(metadata), sessionKey);
     return result.changes > 0;
   }
@@ -579,13 +580,13 @@ export class GraphStore {
   deleteSession(sessionKey: string): boolean {
     const transaction = this.db.transaction(() => {
       this.db
-        .prepare('DELETE FROM context_snapshots WHERE session_key = ?;')
+        .query('DELETE FROM context_snapshots WHERE session_key = ?;')
         .run(sessionKey);
       this.db
-        .prepare('DELETE FROM conversation_messages WHERE session_key = ?;')
+        .query('DELETE FROM conversation_messages WHERE session_key = ?;')
         .run(sessionKey);
       return this.db
-        .prepare('DELETE FROM sessions WHERE session_key = ?;')
+        .query('DELETE FROM sessions WHERE session_key = ?;')
         .run(sessionKey);
     });
     const result = transaction();
@@ -604,7 +605,7 @@ export class GraphStore {
 
     if (clientType) {
       rows = this.db
-        .prepare(
+        .query(
           `SELECT * FROM sessions
            WHERE client_type = ? AND status = ?
            ORDER BY last_accessed_at DESC
@@ -613,7 +614,7 @@ export class GraphStore {
         .all(clientType, status, limit) as Record<string, unknown>[];
     } else {
       rows = this.db
-        .prepare(
+        .query(
           `SELECT * FROM sessions
            WHERE status = ?
            ORDER BY last_accessed_at DESC
@@ -643,7 +644,7 @@ export class GraphStore {
     const transaction = this.db.transaction(() => {
       // First mark as expired
       this.db
-        .prepare(
+        .query(
           `UPDATE sessions SET status = 'expired'
            WHERE expires_at IS NOT NULL AND expires_at < ? AND status = 'active';`
         )
@@ -651,7 +652,7 @@ export class GraphStore {
 
       // Then delete expired sessions
       const result = this.db
-        .prepare("DELETE FROM sessions WHERE status = 'expired';")
+        .query("DELETE FROM sessions WHERE status = 'expired';")
         .run();
       return result.changes;
     });
@@ -675,7 +676,7 @@ export class GraphStore {
   ): number {
     // Get next message index for this session
     const row = this.db
-      .prepare(
+      .query(
         'SELECT COALESCE(MAX(message_index), -1) + 1 as next_idx FROM conversation_messages WHERE session_key = ?;'
       )
       .get(sessionKey) as { next_idx: number };
@@ -683,7 +684,7 @@ export class GraphStore {
 
     try {
       this.db
-        .prepare(
+        .query(
           `INSERT INTO conversation_messages
            (session_key, message_index, role, content, request_id, created_at, metadata_json)
            VALUES (?, ?, ?, ?, ?, ?, ?);`
@@ -715,7 +716,7 @@ export class GraphStore {
     offset = 0
   ): GraphDMessage[] {
     const rows = this.db
-      .prepare(
+      .query(
         `SELECT * FROM conversation_messages
          WHERE session_key = ?
          ORDER BY message_index ASC
@@ -746,7 +747,7 @@ export class GraphStore {
    */
   getMessageCount(sessionKey: string): number {
     const row = this.db
-      .prepare(
+      .query(
         'SELECT COUNT(*) as count FROM conversation_messages WHERE session_key = ?;'
       )
       .get(sessionKey) as { count: number };
@@ -758,7 +759,7 @@ export class GraphStore {
    */
   clearMessages(sessionKey: string): number {
     const result = this.db
-      .prepare('DELETE FROM conversation_messages WHERE session_key = ?;')
+      .query('DELETE FROM conversation_messages WHERE session_key = ?;')
       .run(sessionKey);
     return result.changes;
   }
@@ -776,7 +777,7 @@ export class GraphStore {
   ): number {
     // Get next version number
     const row = this.db
-      .prepare(
+      .query(
         'SELECT COALESCE(MAX(snapshot_version), 0) + 1 as next_ver FROM context_snapshots WHERE session_key = ?;'
       )
       .get(sessionKey) as { next_ver: number };
@@ -784,7 +785,7 @@ export class GraphStore {
 
     try {
       this.db
-        .prepare(
+        .query(
           `INSERT INTO context_snapshots
            (session_key, snapshot_version, created_at, context_json)
            VALUES (?, ?, ?, ?);`
@@ -804,7 +805,7 @@ export class GraphStore {
    */
   getLatestContextSnapshot(sessionKey: string): GraphDContextSnapshot | null {
     const row = this.db
-      .prepare(
+      .query(
         `SELECT * FROM context_snapshots
          WHERE session_key = ?
          ORDER BY snapshot_version DESC
@@ -837,7 +838,7 @@ export class GraphStore {
     version: number
   ): GraphDContextSnapshot | null {
     const row = this.db
-      .prepare(
+      .query(
         `SELECT * FROM context_snapshots
          WHERE session_key = ? AND snapshot_version = ?;`
       )
@@ -868,7 +869,7 @@ export class GraphStore {
     limit = 10
   ): Array<{ id: number; sessionKey: string; snapshotVersion: number; createdAt: number }> {
     const rows = this.db
-      .prepare(
+      .query(
         `SELECT id, session_key, snapshot_version, created_at
          FROM context_snapshots
          WHERE session_key = ?
@@ -891,7 +892,7 @@ export class GraphStore {
   cleanupOldSnapshots(sessionKey: string, keepCount = 5): number {
     // Get IDs to keep
     const keepRows = this.db
-      .prepare(
+      .query(
         `SELECT id FROM context_snapshots
          WHERE session_key = ?
          ORDER BY snapshot_version DESC
@@ -905,12 +906,128 @@ export class GraphStore {
     const placeholders = keepIds.map(() => '?').join(',');
 
     const result = this.db
-      .prepare(
+      .query(
         `DELETE FROM context_snapshots
          WHERE session_key = ? AND id NOT IN (${placeholders});`
       )
       .run(sessionKey, ...keepIds);
 
+    return result.changes;
+  }
+
+  // =========================================================================
+  // Session Event Methods
+  // =========================================================================
+
+  /**
+   * Add an event to a session.
+   */
+  addEvent(
+    sessionKey: string,
+    eventType: string,
+    data: Record<string, unknown>,
+    requestId?: string,
+    stepNum?: number,
+    timestamp?: number
+  ): number {
+    const ts = timestamp ?? nowSeconds();
+    try {
+      const result = this.db
+        .query(
+          `INSERT INTO session_events
+           (session_key, request_id, event_type, step_num, timestamp, data_json)
+           VALUES (?, ?, ?, ?, ?, ?);`
+        )
+        .run(
+          sessionKey,
+          requestId ?? null,
+          eventType,
+          stepNum ?? null,
+          ts,
+          JSON.stringify(data)
+        );
+      return Number(result.lastInsertRowid);
+    } catch (err) {
+      if ((err as Error).message.includes('FOREIGN KEY constraint')) {
+        throw new Error(`Session '${sessionKey}' does not exist`);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Get events for a session.
+   */
+  getEvents(
+    sessionKey: string,
+    requestId?: string,
+    eventType?: string,
+    limit = 1000,
+    offset = 0
+  ): GraphDEvent[] {
+    let query = 'SELECT * FROM session_events WHERE session_key = ?';
+    const params: (string | number)[] = [sessionKey];
+
+    if (requestId) {
+      query += ' AND request_id = ?';
+      params.push(requestId);
+    }
+    if (eventType) {
+      query += ' AND event_type = ?';
+      params.push(eventType);
+    }
+
+    query += ' ORDER BY timestamp ASC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const rows = this.db.query(query).all(...params) as Record<string, unknown>[];
+
+    return rows.map((row) => {
+      const event: GraphDEvent = {
+        id: row.id as number,
+        sessionKey: row.session_key as string,
+        requestId: row.request_id as string | null,
+        eventType: row.event_type as string,
+        stepNum: row.step_num as number | null,
+        timestamp: row.timestamp as number,
+        dataJson: row.data_json as string | null,
+      };
+      if (event.dataJson) {
+        event.data = safeJsonParse(event.dataJson, {});
+      }
+      return event;
+    });
+  }
+
+  /**
+   * Get total event count for a session.
+   */
+  getEventCount(sessionKey: string, requestId?: string): number {
+    let query = 'SELECT COUNT(*) as count FROM session_events WHERE session_key = ?';
+    const params: string[] = [sessionKey];
+
+    if (requestId) {
+      query += ' AND request_id = ?';
+      params.push(requestId);
+    }
+
+    const row = this.db.query(query).get(...params) as { count: number };
+    return row.count;
+  }
+
+  /**
+   * Delete events for a session (optionally filtered by request_id).
+   */
+  deleteEvents(sessionKey: string, requestId?: string): number {
+    let query = 'DELETE FROM session_events WHERE session_key = ?';
+    const params: string[] = [sessionKey];
+
+    if (requestId) {
+      query += ' AND request_id = ?';
+      params.push(requestId);
+    }
+
+    const result = this.db.query(query).run(...params);
     return result.changes;
   }
 }

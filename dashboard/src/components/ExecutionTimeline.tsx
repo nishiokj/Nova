@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import type { PlanStep, StepStatus } from '../domain/models'
 import { cn } from '../lib/utils'
-import { ToolCallList } from './ToolCallRow'
-import { LLMCallList } from './LLMCallList'
+import { ExecutionFlow } from './ExecutionFlow'
 
 function getStepColor(status: StepStatus): string {
   switch (status) {
@@ -307,29 +306,14 @@ export function VerticalTimeline({
                 </p>
               )}
 
-              {/* Expanded nested calls */}
+              {/* Expanded nested calls - chronological execution flow */}
               {isExpanded && hasNestedCalls && (
-                <div className="mt-3 space-y-3 animate-fade-in">
-                  {toolCallCount > 0 && (
-                    <div>
-                      <span className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
-                        Tool Calls
-                      </span>
-                      <div className="mt-1">
-                        <ToolCallList calls={step.toolCalls!} maxVisible={10} />
-                      </div>
-                    </div>
-                  )}
-                  {llmCallCount > 0 && (
-                    <div>
-                      <span className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">
-                        LLM Calls
-                      </span>
-                      <div className="mt-1">
-                        <LLMCallList calls={step.llmCalls!} maxVisible={5} />
-                      </div>
-                    </div>
-                  )}
+                <div className="mt-3 animate-fade-in">
+                  <ExecutionFlow
+                    llmCalls={step.llmCalls ?? []}
+                    toolCalls={step.toolCalls ?? []}
+                    maxVisible={15}
+                  />
                 </div>
               )}
             </div>

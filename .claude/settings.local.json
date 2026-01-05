@@ -78,7 +78,11 @@
       "Bash(lsof:*)",
       "Bash(timeout 3 curl:*)",
       "Bash(bun install:*)",
-      "Bash(bun add:*)"
+      "Bash(bun add:*)",
+      "Bash(kill:*)",
+      "Bash(~/.bun/bin/bun install:*)",
+      "Bash(env:*)",
+      "Bash(bun test:*)"
     ],
     "deny": []
   }

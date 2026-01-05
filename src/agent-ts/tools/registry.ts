@@ -189,10 +189,17 @@ export class ToolRegistry {
       return errorResult(name, `Tool '${name}' is disabled`, 0);
     }
 
+    // Build execution context with defaultWorkingDir as fallback
+    // This ensures tools always have a consistent workspace root
+    const execContext: ToolExecutionContext = {
+      ...this.currentContext,
+      workdirOverride: this.currentContext.workdirOverride ?? this.defaultWorkingDir,
+    };
+
     // Check allowed tools restriction
     if (
-      this.currentContext.allowedTools &&
-      !this.currentContext.allowedTools.has(name)
+      execContext.allowedTools &&
+      !execContext.allowedTools.has(name)
     ) {
       return errorResult(
         name,
@@ -215,7 +222,7 @@ export class ToolRegistry {
       }
     }
 
-    // Execute with timeout
+    // Execute with timeout, passing the merged context
     const timeout = timeoutOverride ?? tool.timeoutMs;
     const startTime = Date.now();
 
@@ -223,7 +230,8 @@ export class ToolRegistry {
       const result = await this.executeWithTimeout(
         tool,
         args,
-        timeout
+        timeout,
+        execContext
       );
 
       result.durationMs = Date.now() - startTime;
@@ -257,7 +265,8 @@ export class ToolRegistry {
   private async executeWithTimeout(
     tool: Tool,
     args: Record<string, unknown>,
-    timeoutMs: number
+    timeoutMs: number,
+    context: ToolExecutionContext
   ): Promise<ToolResult> {
     return new Promise((resolve) => {
       const timeoutId = setTimeout(() => {
@@ -265,7 +274,7 @@ export class ToolRegistry {
       }, timeoutMs);
 
       tool
-        .executor(args, this.currentContext)
+        .executor(args, context)
         .then((result) => {
           clearTimeout(timeoutId);
           resolve(result);

@@ -67,6 +67,7 @@ function parseRequestsFromMetadata(meta: Record<string, unknown>, sessionKey: st
   }
 
   // Split events into requests by goal boundaries (goal_started -> goal_achieved/goal_aborted)
+  // Only create requests for event groups that contain a goal_started event
   const requestEventGroups: unknown[][] = []
   let currentGroup: unknown[] = []
 
@@ -75,7 +76,8 @@ function parseRequestsFromMetadata(meta: Record<string, unknown>, sessionKey: st
     const eventType = e.type as string
 
     if (eventType === 'goal_started') {
-      if (currentGroup.length > 0) {
+      // Only push previous group if it started with goal_started (discard orphan events)
+      if (currentGroup.length > 0 && (currentGroup[0] as Record<string, unknown>).type === 'goal_started') {
         requestEventGroups.push(currentGroup)
       }
       currentGroup = [event]
@@ -89,7 +91,8 @@ function parseRequestsFromMetadata(meta: Record<string, unknown>, sessionKey: st
     }
   }
 
-  if (currentGroup.length > 0) {
+  // Only push remaining group if it has a goal_started (in-progress request)
+  if (currentGroup.length > 0 && (currentGroup[0] as Record<string, unknown>).type === 'goal_started') {
     requestEventGroups.push(currentGroup)
   }
 

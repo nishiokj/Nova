@@ -60,8 +60,11 @@ export class StagnationDetector {
 
   /**
    * Check for stagnation signals.
+   * Evaluates all conditions and returns the signal with highest severity.
    */
   check(stepNum: number, ledger: WorkLedger, outcome?: WorkerOutcome): StagnationSignal {
+    const signals: StagnationSignal[] = [];
+
     const history = ledger.getStepHistory(stepNum);
 
     // Count only COMPLETED or FAILED attempts, not DISPATCHED (in-flight)
@@ -71,13 +74,13 @@ export class StagnationDetector {
     ).length;
 
     if (completedAttempts > this.maxRetriesPerStep) {
-      return {
+      signals.push({
         detected: true,
         severity: 0.8,
         reason: `Step ${stepNum} failed ${completedAttempts} times (max ${this.maxRetriesPerStep})`,
         stepNum,
         suggestedAction: 'skip_step',
-      };
+      });
     }
 
     // Check for identical outputs (spinning)
@@ -95,13 +98,13 @@ export class StagnationDetector {
         const recent = hashes.slice(-this.maxIdenticalOutputs);
         const uniqueHashes = new Set(recent);
         if (uniqueHashes.size === 1) {
-          return {
+          signals.push({
             detected: true,
             severity: 0.9,
             reason: `Step ${stepNum} producing identical outputs`,
             stepNum,
             suggestedAction: 'pivot_approach',
-          };
+          });
         }
       }
     }
@@ -111,16 +114,23 @@ export class StagnationDetector {
     if (recent.length >= this.noProgressThreshold) {
       const completed = recent.filter((e) => e.status === EntryStatus.COMPLETED).length;
       if (completed === 0) {
-        return {
+        signals.push({
           detected: true,
           severity: 1.0,
           reason: 'No steps completed in recent work items',
           suggestedAction: 'abort_or_simplify',
-        };
+        });
       }
     }
 
-    return noStagnation();
+    // Return the signal with highest severity, or noStagnation if none detected
+    if (signals.length === 0) {
+      return noStagnation();
+    }
+
+    return signals.reduce((highest, current) =>
+      current.severity > highest.severity ? current : highest
+    );
   }
 
   /**

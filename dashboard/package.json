@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "bun run start-graphd.ts & sleep 1 && vite",
+    "dev:vite": "vite",
+    "graphd": "bun run start-graphd.ts",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

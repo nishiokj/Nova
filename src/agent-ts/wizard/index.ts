@@ -2,19 +2,12 @@
  * Wizard Module - Barrel Export
  *
  * Provides the Worker/Wizard orchestration pattern.
+ *
+ * NOTE: ContextWindow and related types have been moved to types/context.ts.
  */
 
-// Context management
-export type { ContextDelta, ContextWindow } from './context.js';
-export {
-  createContextDelta,
-  addDeltaMessage,
-  mergeMessages,
-  createContextWindow,
-  buildSystemMessage,
-  buildFilesMessage,
-  getContextMessages,
-} from './context.js';
+// Context utilities (only buildSystemMessage remains)
+export { buildSystemMessage } from './context.js';
 
 // Work items
 export type { WorkBounds, WorkItemCriteria, WorkItem } from './work-item.js';
@@ -54,6 +47,7 @@ export {
   type WorkerConfig,
   DEFAULT_WORKER_CONFIG,
   type WorkerLogger,
+  type EventEmitter,
   Worker,
 } from './worker.js';
 

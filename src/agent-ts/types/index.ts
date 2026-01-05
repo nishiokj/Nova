@@ -5,6 +5,23 @@
  */
 
 // ============================================
+// CONTEXT (Responses API compatible)
+// ============================================
+export type {
+  ContextItemType,
+  MessageItem,
+  FunctionCallItem,
+  FunctionCallOutputItem,
+  ReasoningItem,
+  FileContentItem,
+  ContextItem,
+  ContextWindowSnapshot,
+  ContextWindowTelemetry,
+} from './context.js';
+
+export { ContextWindow } from './context.js';
+
+// ============================================
 // EVENTS
 // ============================================
 export type {

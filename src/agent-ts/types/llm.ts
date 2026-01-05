@@ -179,6 +179,7 @@ export interface LLMResponse {
   toolCalls?: ToolCall[];
   model: string;
   durationMs: number;
+  responseId?: string; // OpenAI Responses API response ID
 }
 
 // ============================================
@@ -194,6 +195,12 @@ export interface RespondParams {
   maxTokens?: number;
   temperature?: number;
   system?: string;
+  // Responses API specific parameters (OpenAI)
+  promptCacheKey?: string;
+  promptCacheRetention?: string;
+  previousResponseId?: string;
+  maxToolCalls?: number;
+  parallelToolCalls?: boolean;
 }
 
 /**

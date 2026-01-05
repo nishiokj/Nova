@@ -1,22 +1,19 @@
 /**
  * Stateless Worker that executes bounded work items.
- * Workers NEVER mutate global state - all results go through WorkerOutcome.
+ * Worker mutates the ContextWindow directly during execution.
  *
  * Ported from: src/harness/agent/wizard/worker.py
  */
 
-import type { LLMAdapter } from '../llm/index.js';
+import type { LLMAdapter, LLMResponse, Message } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import type { ToolResult } from '../types/tools.js';
+import type { ToolResult, ToolDefinition } from '../types/tools.js';
 import type { WorkItem } from './work-item.js';
-import type { ContextWindow, ContextDelta } from './context.js';
-import type { KnowledgeFact } from './knowledge.js';
-import {
-  createContextDelta,
-  addDeltaMessage,
-  mergeMessages,
-  buildSystemMessage,
-} from './context.js';
+import type { KnowledgeFact, FactSource } from './knowledge.js';
+import type { WizardEvent } from '../types/events.js';
+import { ContextWindow } from '../types/context.js';
+import { createEvent } from '../types/events.js';
+import { buildSystemMessage } from './context.js';
 
 /**
  * Explicit action requested by LLM.
@@ -81,8 +78,8 @@ export interface PatchSuggestion {
 /**
  * Canonical output from Worker.
  *
- * CRITICAL: Workers NEVER mutate global state.
- * All state changes go through WorkerOutcome for Wizard to ingest.
+ * NOTE: contextMessages and readFiles have been removed.
+ * Worker now mutates ContextWindow directly.
  */
 export interface WorkerOutcome {
   // Identity
@@ -105,9 +102,6 @@ export interface WorkerOutcome {
   metrics: WorkerMetrics;
   // Entity refs discovered
   entityRefs: string[];
-  // Context updates
-  contextMessages: Array<Record<string, unknown>>;
-  readFiles: Set<string>;
   // User input request
   needsUserInput: boolean;
   userPrompt?: Record<string, unknown>;
@@ -131,8 +125,6 @@ export function createWorkerOutcome(params: {
     patchSuggestions: [],
     metrics: createWorkerMetrics(),
     entityRefs: [],
-    contextMessages: [],
-    readFiles: new Set(),
     needsUserInput: false,
     terminationReason: '',
   };
@@ -216,29 +208,50 @@ export interface WorkerLogger {
 }
 
 /**
+ * Event emitter callback type - Worker receives this from Wizard.
+ * Worker knows nothing about EventBus, only emits via callback.
+ */
+export type EventEmitter = (event: WizardEvent) => void;
+
+/**
+ * Extended telemetry for LLM calls - includes full params for debugging.
+ */
+interface LlmCallTelemetry {
+  response: LLMResponse;
+  messages: Array<Record<string, unknown>>;
+  stepNum: number | undefined;
+  durationMs: number;
+  /** Tool definitions passed to the LLM */
+  toolDefs?: ToolDefinition[];
+  /** Working directory for file operations */
+  workingDir?: string;
+}
+
+/**
  * Stateless inner-loop executor.
  *
- * CRITICAL INVARIANTS:
- * - Worker NEVER mutates PlanState, Ledger, or Stores
- * - All observations are returned in WorkerOutcome
- * - Worker receives a read-only ContextWindow + WorkItem, returns WorkerOutcome
+ * Worker receives a ContextWindow and mutates it directly during execution.
+ * Results are returned in WorkerOutcome for Wizard to process.
  */
 export class Worker {
   private toolRegistry: ToolRegistry;
   private llm: LLMAdapter;
   private config: WorkerConfig;
   private logger?: WorkerLogger;
+  private eventEmitter?: EventEmitter;
 
   constructor(
     toolRegistry: ToolRegistry,
     llm: LLMAdapter,
     config?: Partial<WorkerConfig>,
-    logger?: WorkerLogger
+    logger?: WorkerLogger,
+    eventEmitter?: EventEmitter
   ) {
     this.toolRegistry = toolRegistry;
     this.llm = llm;
     this.config = { ...DEFAULT_WORKER_CONFIG, ...config };
     this.logger = logger;
+    this.eventEmitter = eventEmitter;
   }
 
   private log(level: keyof WorkerLogger, msg: string, meta?: Record<string, unknown>): void {
@@ -248,13 +261,161 @@ export class Worker {
   }
 
   /**
+   * Get preview from messages, prioritizing the system prompt.
+   */
+  private getPromptPreview(messages: Array<Record<string, unknown>>): string {
+    if (!messages.length) return '';
+    const first = messages[0];
+    if (first.role === 'system' && typeof first.content === 'string') {
+      return first.content.slice(0, 500);
+    }
+    for (const msg of messages) {
+      if ((msg.role === 'user' || msg.role === 'system') && typeof msg.content === 'string') {
+        return msg.content.slice(0, 500);
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Build response preview that includes tool call intent when content is blank.
+   */
+  private buildResponsePreview(content: string, toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>): string {
+    // If we have text content, use it
+    if (content.trim()) {
+      return content.slice(0, 500);
+    }
+
+    // No text content - build preview from tool calls if any
+    if (toolCalls.length === 0) {
+      return '';
+    }
+
+    // Format tool calls as preview
+    const toolSummaries = toolCalls.map(tc => {
+      const args = tc.arguments;
+      // Show key argument (usually 'path', 'pattern', 'query', etc.)
+      const keyArg = args.path ?? args.pattern ?? args.query ?? args.command ?? args.content?.toString().slice(0, 30);
+      if (keyArg) {
+        return `${tc.name}(${String(keyArg).slice(0, 50)})`;
+      }
+      return tc.name;
+    });
+
+    return `[Tools: ${toolSummaries.join(', ')}]`.slice(0, 500);
+  }
+
+  /**
+   * Emit LLM_CALL event for observability.
+   */
+  private emitLlmCallEvent(telemetry: LlmCallTelemetry): void {
+    if (!this.eventEmitter) return;
+
+    const { response, messages, stepNum, durationMs, toolDefs, workingDir } = telemetry;
+    const usage = response.usage;
+    const content = response.content ?? '';
+    const responseToolCalls = response.toolCalls ?? [];
+
+    // Count messages by role for structure analysis
+    const messagesByRole: Record<string, number> = {};
+    for (const msg of messages) {
+      const role = String(msg.role ?? 'unknown');
+      messagesByRole[role] = (messagesByRole[role] ?? 0) + 1;
+    }
+
+    // Extract tool names for quick reference
+    const toolNames = toolDefs?.map(t => t.name) ?? [];
+
+    const event = createEvent(
+      'llm_call',
+      {
+        agentType: 'worker',
+        promptPreview: this.getPromptPreview(messages),
+        responsePreview: this.buildResponsePreview(content, responseToolCalls),
+        totalTokens: usage?.totalTokens ?? 0,
+        promptTokens: usage?.promptTokens ?? 0,
+        completionTokens: usage?.completionTokens ?? 0,
+        durationMs,
+        model: response.model ?? 'unknown',
+        toolCallsCount: responseToolCalls.length,
+        toolNames,
+        toolCount: toolNames.length,
+        workingDir: workingDir ?? 'not_set',
+        messageCount: messages.length,
+        messagesByRole,
+        systemPrompt: messages[0]?.role === 'system'
+          ? String(messages[0].content).slice(0, 2000)
+          : undefined,
+      },
+      stepNum
+    );
+    this.eventEmitter(event);
+
+    this.log('debug', 'LLM call params', {
+      stepNum,
+      toolCount: toolNames.length,
+      toolNames,
+      workingDir,
+      messageCount: messages.length,
+      messagesByRole,
+      hasSystemMessage: messages[0]?.role === 'system',
+    });
+  }
+
+  /**
+   * Emit llm_error event for error propagation.
+   */
+  private emitLlmErrorEvent(error: Error, stepNum: number | undefined): void {
+    if (!this.eventEmitter) return;
+
+    const message = error.message;
+    let errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown' = 'unknown';
+    let statusCode: number | undefined;
+
+    const statusMatch = message.match(/(\d{3}):/);
+    if (statusMatch) {
+      statusCode = parseInt(statusMatch[1], 10);
+    }
+
+    if (message.includes('rate limit') || statusCode === 429) {
+      errorType = 'rate_limit';
+    } else if (message.includes('timeout') || message.includes('ETIMEDOUT')) {
+      errorType = 'timeout';
+    } else if (message.includes('circuit') || message.includes('Circuit')) {
+      errorType = 'circuit_open';
+    } else if (statusCode && statusCode >= 400 && statusCode < 500) {
+      errorType = 'validation';
+    } else if (statusCode && statusCode >= 500) {
+      errorType = 'api_error';
+    }
+
+    const event = createEvent(
+      'llm_error',
+      {
+        agentType: 'worker' as const,
+        provider: this.llm.provider,
+        model: this.llm.model,
+        error: message,
+        errorType,
+        statusCode,
+        circuitBreakerTriggered: message.includes('circuit'),
+        willRetry: false,
+      },
+      stepNum
+    );
+    this.eventEmitter(event);
+  }
+
+  /**
    * Execute a work item and return the outcome.
+   * Mutates the context window directly during execution.
    */
   async execute(
-    baseContext: ContextWindow,
+    context: ContextWindow,
     workItem: WorkItem,
     planVersion: number,
-    behavioralRules = ''
+    behavioralRules = '',
+    workspaceRoot = ''
   ): Promise<WorkerOutcome> {
     const startTime = Date.now();
     const outcome = createWorkerOutcome({
@@ -263,23 +424,17 @@ export class Worker {
       baseVersion: planVersion,
     });
 
-    // Create local delta - Worker never mutates base context
-    const delta = createContextDelta();
-
     try {
-      await this.executeLoop(baseContext, workItem, delta, outcome, behavioralRules);
+      await this.executeLoop(context, workItem, outcome, behavioralRules, workspaceRoot);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      outcome.error = message;
-      outcome.terminationReason = `error:${message}`;
-      this.log('error', `Worker execution error: ${message}`);
+      const errorObj = error instanceof Error ? error : new Error(String(error));
+      outcome.error = errorObj.message;
+      outcome.terminationReason = `error:${errorObj.message}`;
+      this.log('error', `Worker execution error: ${errorObj.message}`);
+      this.emitLlmErrorEvent(errorObj, workItem.stepNum);
     }
 
-    // Finalize metrics
     outcome.metrics.durationMs = Date.now() - startTime;
-    outcome.contextMessages = delta.messages;
-    outcome.readFiles = delta.readFiles;
-
     return outcome;
   }
 
@@ -287,16 +442,52 @@ export class Worker {
    * Main execution loop.
    */
   private async executeLoop(
-    baseContext: ContextWindow,
+    context: ContextWindow,
     workItem: WorkItem,
-    delta: ContextDelta,
     outcome: WorkerOutcome,
-    behavioralRules: string
+    behavioralRules: string,
+    workspaceRoot: string
   ): Promise<void> {
     const maxIterations = Math.min(this.config.maxIterations, workItem.bounds.maxLlmCalls);
 
+    // PRE-LOOP: Auto-read target files
+    if (workItem.targetPaths && workItem.targetPaths.length > 0) {
+      for (const targetPath of workItem.targetPaths) {
+        if (context.hasReadFile(targetPath)) continue;
+
+        try {
+          const result = await this.toolRegistry.execute('read', { path: targetPath });
+          if (result.isSuccess) {
+            context.markFileRead(targetPath);
+            outcome.entityRefs.push(targetPath);
+            outcome.metrics.toolCallsMade++;
+            outcome.metrics.toolCallsSucceeded++;
+
+            const fileContent = typeof result.output === 'string'
+              ? result.output
+              : JSON.stringify(result.output);
+            context.addFileContent(targetPath, fileContent.slice(0, 10000));
+
+            this.log('debug', `Auto-read target file: ${targetPath}`, {
+              stepNum: workItem.stepNum,
+              size: fileContent.length,
+            });
+          } else {
+            outcome.metrics.toolCallsFailed++;
+            this.log('warning', `Failed to auto-read target file: ${targetPath}`, {
+              error: result.error,
+            });
+          }
+        } catch (error) {
+          outcome.metrics.toolCallsFailed++;
+          this.log('warning', `Exception auto-reading file: ${targetPath}`, {
+            error: String(error),
+          });
+        }
+      }
+    }
+
     for (let iteration = 0; iteration < maxIterations; iteration++) {
-      // Check bounds
       if (outcome.metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         outcome.terminationReason = 'bounds:tool_calls';
         outcome.error = 'Tool call limit reached';
@@ -309,43 +500,101 @@ export class Worker {
         break;
       }
 
-      // Build messages for LLM
+      // Build system message
       const systemMessage = buildSystemMessage(
-        baseContext.goal,
+        workItem.objective, // Use objective as goal in system message
         workItem.objective,
         workItem.stepNum,
-        behavioralRules
+        behavioralRules,
+        workspaceRoot
       );
 
-      const messages = [
+      const toolDefs = this.toolRegistry.getDefinitions();
+      const workingDir = this.toolRegistry.getWorkingDir();
+
+      // Build messages for LLM from ContextWindow
+      const contextItems = context.getItemsForLLM();
+      const hasUserInput = contextItems.some((item) => {
+        if (item.type === 'message') {
+          return (item as Record<string, unknown>).role === 'user';
+        }
+        return false;
+      });
+
+      const messages: Array<Record<string, unknown>> = [
         { role: 'system', content: systemMessage },
-        ...mergeMessages(baseContext.messages, delta),
       ];
 
-      // Get tool definitions
-      const toolDefs = this.toolRegistry.getDefinitions();
+      // If no prior user input, add the objective as a user message
+      if (!hasUserInput) {
+        messages.push({
+          role: 'user',
+          content: `Execute the following objective:\n\n${workItem.objective}`,
+        });
+      }
 
-      // Call LLM
+      // Add context items (converted from ContextWindow)
+      for (const item of contextItems) {
+        if (item.type === 'message') {
+          messages.push({
+            role: (item as Record<string, unknown>).role,
+            content: (item as Record<string, unknown>).content,
+          });
+        } else if (item.type === 'function_call') {
+          // Function calls are handled by the adapter
+          messages.push(item);
+        } else if (item.type === 'function_call_output') {
+          // Function call outputs are handled by the adapter
+          messages.push(item);
+        }
+      }
+
       this.log('debug', `LLM call ${iteration + 1}/${maxIterations}`, {
         stepNum: workItem.stepNum,
       });
 
+      const llmStartTime = Date.now();
       const response = await this.llm.respond({
-        messages: messages as any,
+        messages: messages as unknown as Message[],
         tools: toolDefs,
       });
+      const llmDurationMs = Date.now() - llmStartTime;
       outcome.metrics.llmCallsMade++;
 
-      // Process response
+      // Update context metrics
+      if (response.usage) {
+        context.updateMetrics(response.usage.promptTokens, response.usage.completionTokens);
+      }
+
+      this.emitLlmCallEvent({
+        response,
+        messages,
+        stepNum: workItem.stepNum,
+        durationMs: llmDurationMs,
+        toolDefs,
+        workingDir,
+      });
+
       const content = response.content ?? '';
       const toolCalls = response.toolCalls ?? [];
 
-      // Add assistant message to delta
-      addDeltaMessage(delta, { role: 'assistant', content, toolCalls });
+      // Add assistant message to context
+      if (toolCalls.length > 0) {
+        // Add assistant message with text content if present
+        if (content) {
+          context.addMessage('assistant', content);
+        }
+        // Add function calls to context
+        for (const tc of toolCalls) {
+          context.addFunctionCall(tc.id, tc.name, tc.arguments);
+        }
+      } else {
+        context.addMessage('assistant', content);
+      }
 
       // Handle tool calls
       if (toolCalls.length > 0) {
-        const exchanges = await this.processToolCalls(toolCalls, delta, outcome);
+        const exchanges = await this.processToolCalls(toolCalls, context, outcome, workItem.stepNum);
 
         // Check if any tool requested user input
         for (const exchange of exchanges) {
@@ -362,6 +611,56 @@ export class Worker {
           }
         }
 
+        // SYNTHESIS STEP
+        const synthesisSuffix = `
+SYNTHESIS REQUIRED: Read the tool outputs above and do ONE of:
+1) Explain findings and state your next action clearly.
+2) If the objective "${workItem.objective}" is satisfied, output [FINAL] with a concise explanation.
+Do NOT call tools in this synthesis step - only analyze and explain.`;
+
+        const synthMessages = [
+          ...messages,
+          { role: 'system', content: synthesisSuffix },
+        ];
+
+        const synthStartTime = Date.now();
+        const synthResponse = await this.llm.respond({
+          messages: synthMessages as unknown as Message[],
+          tools: [],
+        });
+        const synthDurationMs = Date.now() - synthStartTime;
+        outcome.metrics.llmCallsMade++;
+
+        if (synthResponse.usage) {
+          context.updateMetrics(synthResponse.usage.promptTokens, synthResponse.usage.completionTokens);
+        }
+
+        this.emitLlmCallEvent({
+          response: synthResponse,
+          messages: synthMessages,
+          stepNum: workItem.stepNum,
+          durationMs: synthDurationMs,
+          toolDefs: [],
+          workingDir,
+        });
+
+        const synthContent = synthResponse.content ?? '';
+        context.addMessage('assistant', synthContent);
+
+        const synthAction = extractAction(synthContent);
+        if (synthAction === WorkerAction.FINAL) {
+          if (isRefusalResponse(synthContent)) {
+            outcome.isRefusal = true;
+            outcome.error = 'LLM refused to complete the task';
+            outcome.terminationReason = 'refusal';
+          } else {
+            outcome.success = true;
+            outcome.finalResponse = synthContent.replace(/\[FINAL\]/gi, '').trim();
+            outcome.terminationReason = 'final';
+          }
+          return;
+        }
+
         continue;
       }
 
@@ -369,7 +668,6 @@ export class Worker {
       const action = extractAction(content);
 
       if (action === WorkerAction.FINAL) {
-        // Check for refusal
         if (isRefusalResponse(content)) {
           outcome.isRefusal = true;
           outcome.error = 'LLM refused to complete the task';
@@ -383,7 +681,6 @@ export class Worker {
       }
 
       if (action === WorkerAction.NEED_CONTEXT) {
-        // Try to parse user prompt
         const promptMatch = content.match(/\{[\s\S]*\}/);
         if (promptMatch) {
           try {
@@ -413,10 +710,15 @@ export class Worker {
 
       // No action, no tools - stuck
       outcome.terminationReason = 'no_action';
+      outcome.error = `LLM response has no tools and no action markers ([FINAL], [NEED_CONTEXT], [CONTINUE]). Response preview: "${content.slice(0, 200)}..."`;
+      this.log('error', 'Worker stuck: no action or tools', {
+        stepNum: workItem.stepNum,
+        responseLength: content.length,
+        responsePreview: content.slice(0, 100),
+      });
       break;
     }
 
-    // Loop exhausted
     if (!outcome.terminationReason) {
       outcome.terminationReason = 'iterations_exhausted';
       outcome.error = 'Maximum iterations reached without completion';
@@ -424,17 +726,151 @@ export class Worker {
   }
 
   /**
-   * Process tool calls and add results to delta.
+   * Emit tool_call event for observability.
+   */
+  private emitToolCallEvent(
+    toolName: string,
+    args: Record<string, unknown>,
+    result: string | undefined,
+    success: boolean,
+    durationMs: number,
+    stepNum?: number
+  ): void {
+    if (!this.eventEmitter) return;
+
+    const event = createEvent(
+      'tool_call',
+      {
+        toolName,
+        arguments: args,
+        result: result?.slice(0, 1000),
+        success,
+        durationMs,
+      },
+      stepNum
+    );
+    this.eventEmitter(event);
+  }
+
+  /**
+   * Execute a single tool call and return the exchange.
+   */
+  private async executeSingleTool(
+    call: { id: string; name: string; arguments: Record<string, unknown> },
+    stepNum?: number
+  ): Promise<{ exchange: ToolExchange; result: ToolResult | null; durationMs: number }> {
+    const toolStartTime = Date.now();
+
+    this.log('info', `Tool call: ${call.name}`, {
+      stepNum,
+      args: call.arguments,
+    });
+
+    try {
+      const result: ToolResult = await this.toolRegistry.execute(call.name, call.arguments);
+      const toolDurationMs = Date.now() - toolStartTime;
+
+      const exchange: ToolExchange = {
+        callId: call.id,
+        toolName: call.name,
+        arguments: call.arguments,
+        resultContent: result.output,
+        success: result.isSuccess,
+        error: result.error,
+      };
+
+      this.emitToolCallEvent(call.name, call.arguments, result.output, result.isSuccess, toolDurationMs, stepNum);
+
+      if (result.isSuccess) {
+        this.log('info', `Tool success: ${call.name}`, {
+          stepNum,
+          durationMs: toolDurationMs,
+          outputLength: result.output?.length ?? 0,
+        });
+      } else {
+        this.log('error', `Tool failed: ${call.name}`, {
+          stepNum,
+          durationMs: toolDurationMs,
+          error: result.error,
+        });
+      }
+
+      return { exchange, result, durationMs: toolDurationMs };
+    } catch (error) {
+      const toolDurationMs = Date.now() - toolStartTime;
+      const message = error instanceof Error ? error.message : String(error);
+
+      const exchange: ToolExchange = {
+        callId: call.id,
+        toolName: call.name,
+        arguments: call.arguments,
+        resultContent: `Error: ${message}`,
+        success: false,
+        error: message,
+      };
+
+      this.emitToolCallEvent(call.name, call.arguments, `Error: ${message}`, false, toolDurationMs, stepNum);
+      this.log('error', `Tool exception: ${call.name}`, {
+        stepNum,
+        durationMs: toolDurationMs,
+        error: message,
+      });
+
+      return { exchange, result: null, durationMs: toolDurationMs };
+    }
+  }
+
+  /**
+   * Process tool call results and update context.
+   */
+  private processToolResult(
+    call: { id: string; name: string; arguments: Record<string, unknown> },
+    execResult: { exchange: ToolExchange; result: ToolResult | null; durationMs: number },
+    context: ContextWindow,
+    outcome: WorkerOutcome
+  ): void {
+    const { exchange, result } = execResult;
+
+    outcome.metrics.toolCallsMade++;
+
+    if (result && result.isSuccess) {
+      outcome.metrics.toolCallsSucceeded++;
+
+      // Track read files
+      if (call.name.toLowerCase() === 'read' && call.arguments.path) {
+        context.markFileRead(String(call.arguments.path));
+      }
+    } else {
+      outcome.metrics.toolCallsFailed++;
+      if (exchange.error) {
+        outcome.toolErrors.push(`${call.name}: ${exchange.error}`);
+      }
+    }
+
+    // Add function call output to context
+    context.addFunctionCallOutput(
+      call.id,
+      exchange.resultContent,
+      !exchange.success,
+      execResult.durationMs
+    );
+  }
+
+  /**
+   * Process tool calls and add results to context.
+   * Parallelizes read-only tools for efficiency.
    */
   private async processToolCalls(
     toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
-    delta: ContextDelta,
-    outcome: WorkerOutcome
+    context: ContextWindow,
+    outcome: WorkerOutcome,
+    stepNum?: number
   ): Promise<ToolExchange[]> {
     const exchanges: ToolExchange[] = [];
 
+    // Filter out disallowed tools first
+    const validCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
     for (const call of toolCalls) {
-      // Check if tool is disallowed
       if (this.config.disallowedTools.has(call.name)) {
         const exchange: ToolExchange = {
           callId: call.id,
@@ -446,63 +882,63 @@ export class Worker {
         };
         exchanges.push(exchange);
         outcome.toolErrors.push(`Disallowed tool: ${call.name}`);
-        continue;
+        this.emitToolCallEvent(call.name, call.arguments, exchange.resultContent, false, 0, stepNum);
+        this.log('warning', `Disallowed tool attempted: ${call.name}`, { stepNum, args: call.arguments });
+
+        // Add error result to context
+        context.addFunctionCallOutput(call.id, exchange.resultContent, true, 0);
+      } else {
+        validCalls.push(call);
       }
+    }
 
-      outcome.metrics.toolCallsMade++;
+    if (validCalls.length === 0) {
+      return exchanges;
+    }
 
-      try {
-        const result: ToolResult = await this.toolRegistry.execute(call.name, call.arguments);
+    // Group consecutive parallelizable tools
+    type ToolGroup = {
+      calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
+      parallel: boolean;
+    };
 
-        const exchange: ToolExchange = {
-          callId: call.id,
-          toolName: call.name,
-          arguments: call.arguments,
-          resultContent: result.output,
-          success: result.isSuccess,
-          error: result.error,
-        };
-        exchanges.push(exchange);
+    const groups: ToolGroup[] = [];
+    let currentGroup: ToolGroup | null = null;
 
-        if (result.isSuccess) {
-          outcome.metrics.toolCallsSucceeded++;
+    for (const call of validCalls) {
+      const isParallel = this.toolRegistry.isParallelSafe(call.name);
 
-          // Track read files
-          if (call.name.toLowerCase() === 'read' && call.arguments.path) {
-            delta.readFiles.add(String(call.arguments.path));
-          }
-        } else {
-          outcome.metrics.toolCallsFailed++;
-          if (result.error) {
-            outcome.toolErrors.push(`${call.name}: ${result.error}`);
-          }
+      if (!currentGroup || currentGroup.parallel !== isParallel) {
+        currentGroup = { calls: [call], parallel: isParallel };
+        groups.push(currentGroup);
+      } else {
+        currentGroup.calls.push(call);
+      }
+    }
+
+    // Execute groups
+    for (const group of groups) {
+      if (group.parallel && group.calls.length > 1) {
+        this.log('debug', `Executing ${group.calls.length} tools in parallel`, {
+          stepNum,
+          tools: group.calls.map(c => c.name),
+        });
+
+        const promises = group.calls.map(call => this.executeSingleTool(call, stepNum));
+        const results = await Promise.all(promises);
+
+        for (let i = 0; i < group.calls.length; i++) {
+          const call = group.calls[i];
+          const execResult = results[i];
+          exchanges.push(execResult.exchange);
+          this.processToolResult(call, execResult, context, outcome);
         }
-
-        // Add tool result to delta
-        addDeltaMessage(delta, {
-          role: 'tool',
-          toolCallId: call.id,
-          content: result.output,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const exchange: ToolExchange = {
-          callId: call.id,
-          toolName: call.name,
-          arguments: call.arguments,
-          resultContent: `Error: ${message}`,
-          success: false,
-          error: message,
-        };
-        exchanges.push(exchange);
-        outcome.metrics.toolCallsFailed++;
-        outcome.toolErrors.push(`${call.name}: ${message}`);
-
-        addDeltaMessage(delta, {
-          role: 'tool',
-          toolCallId: call.id,
-          content: `Error: ${message}`,
-        });
+      } else {
+        for (const call of group.calls) {
+          const execResult = await this.executeSingleTool(call, stepNum);
+          exchanges.push(execResult.exchange);
+          this.processToolResult(call, execResult, context, outcome);
+        }
       }
     }
 
