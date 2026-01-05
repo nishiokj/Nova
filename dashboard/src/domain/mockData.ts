@@ -1,10 +1,6 @@
-import { computeAgentRequestInsights, computeSessionInsights, type AgentRequest, type Session } from './models';
+import { computeSessionInsights, type AgentRequest, type Session } from './models';
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
-
-function agentReq(partial: Omit<AgentRequest, 'insights'>): AgentRequest {
-  return { ...partial, insights: computeAgentRequestInsights(partial) };
-}
 
 function sess(partial: Omit<Session, 'insights'>): Session {
   return { ...partial, insights: computeSessionInsights(partial) };
@@ -130,9 +126,11 @@ const runningRequest: AgentRequest = {
   planSnapshots: [],
   userPrompts: [],
   contextWindow: {
+    contextTokens: 42000,
+    outputTokens: 6200,
     totalTokens: 48200,
     maxTokens: 200000,
-    percentageUsed: 0.241,
+    percentageUsed: 0.21,
     messageCount: 18,
     timestamp: iso(1000 * 60 * 1),
   },
@@ -249,9 +247,11 @@ const successRequest: AgentRequest = {
   planSnapshots: [],
   userPrompts: [],
   contextWindow: {
+    contextTokens: 68000,
+    outputTokens: 8200,
     totalTokens: 76200,
     maxTokens: 200000,
-    percentageUsed: 0.381,
+    percentageUsed: 0.34,
     messageCount: 24,
     timestamp: iso(1000 * 60 * 15),
   },
@@ -359,9 +359,11 @@ const errorRequest: AgentRequest = {
   planSnapshots: [],
   userPrompts: [],
   contextWindow: {
+    contextTokens: 140000,
+    outputTokens: 13400,
     totalTokens: 153400,
     maxTokens: 200000,
-    percentageUsed: 0.767,
+    percentageUsed: 0.70,
     messageCount: 32,
     timestamp: iso(1000 * 60 * 32),
   },
@@ -399,20 +401,7 @@ export const mockSessions: Session[] = [
       clientType: 'voice',
       workingDir: '/home/dev/project-alpha',
     },
-    requests: [
-      req({
-        id: 'R-1',
-        sessionId: 'S-1042',
-        state: 'success',
-        method: 'GET',
-        path: '/api/sessions',
-        createdAt: iso(1000 * 60 * 33),
-        startedAt: iso(1000 * 60 * 33),
-        endedAt: iso(1000 * 60 * 33 - 180),
-        httpStatus: 200,
-        meta: { cache: 'HIT', traceId: 'tr_aa12' },
-      }),
-    ],
+    legacyRequests: [],
     requests: [runningRequest, successRequest, errorRequest],
   }),
   sess({
@@ -478,6 +467,9 @@ export const mockSessions: Session[] = [
           reasoning: 'All 156 tests passed. Coverage at 94% exceeds threshold. Report generated successfully.',
           issues: [],
         },
+        llmCalls: [],
+        planSnapshots: [],
+        userPrompts: [],
       },
     ],
   }),

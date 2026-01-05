@@ -13,10 +13,11 @@
  * Schema version - bump when adding/modifying tables.
  * v1: Initial schema (files, symbols, module_edges, exports, run_artifacts)
  * v2: Added session management tables (sessions, conversation_messages, context_snapshots)
+ * v3: Added session_events table for real-time event persistence
  *
  * MUST match Python GRAPH_D_SCHEMA_VERSION
  */
-export const GRAPHD_SCHEMA_VERSION = 'v2';
+export const GRAPHD_SCHEMA_VERSION = 'v3';
 
 /**
  * GraphD version string.
@@ -127,6 +128,24 @@ CREATE INDEX IF NOT EXISTS idx_conv_session ON conversation_messages(session_key
 CREATE INDEX IF NOT EXISTS idx_conv_session_idx ON conversation_messages(session_key, message_index);
 CREATE INDEX IF NOT EXISTS idx_snapshot_session ON context_snapshots(session_key);
 CREATE INDEX IF NOT EXISTS idx_snapshot_session_ver ON context_snapshots(session_key, snapshot_version DESC);
+
+-- Session events table (v3) - for real-time event persistence
+CREATE TABLE IF NOT EXISTS session_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    request_id TEXT,
+    event_type TEXT NOT NULL,
+    step_num INTEGER,
+    timestamp REAL NOT NULL,
+    data_json TEXT,
+    FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
+);
+
+-- Session events indexes
+CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_key);
+CREATE INDEX IF NOT EXISTS idx_events_session_request ON session_events(session_key, request_id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON session_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON session_events(timestamp DESC);
 `;
 
 /**
@@ -155,6 +174,7 @@ export const EXPORTABLE_TABLES = new Set([
   'run_artifacts',
   'sessions',
   'conversation_messages',
+  'session_events',
 ]);
 
 /**

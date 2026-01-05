@@ -10,7 +10,10 @@ import type { LLMAdapter } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { WizardPlan, WizardStep } from '../types/plans.js';
 import { StepStatus, StepPhase } from '../types/plans.js';
-import type { WizardEvent } from '../types/events.js';
+import type { WizardEvent, PlanSnapshotData } from '../types/events.js';
+import { createEvent } from '../types/events.js';
+import type { EventBusProtocol } from '../communication/event_bus.js';
+import type { ContextWindow } from '../types/context.js';
 
 /**
  * Budget constraints for planning.
@@ -77,7 +80,7 @@ export class Planner {
   private llm: LLMAdapter;
   private toolRegistry: ToolRegistry;
   private config: PlannerConfig;
-  private eventEmitter?: (event: WizardEvent) => void;
+  private eventBus?: EventBusProtocol;
 
   // Store last LLM call details for logging
   lastCallInstructions = '';
@@ -89,22 +92,96 @@ export class Planner {
     llm: LLMAdapter,
     toolRegistry: ToolRegistry,
     config?: Partial<PlannerConfig>,
-    eventEmitter?: (event: WizardEvent) => void
+    eventBus?: EventBusProtocol
   ) {
     this.llm = llm;
     this.toolRegistry = toolRegistry;
     this.config = { ...DEFAULT_PLANNER_CONFIG, ...config };
-    this.eventEmitter = eventEmitter;
+    this.eventBus = eventBus;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private publish(event: WizardEvent<any>): void {
+    if (this.eventBus) {
+      this.eventBus.publish(event);
+    }
+  }
+
+  /**
+   * Emit llm_error event for error propagation.
+   */
+  private emitLlmErrorEvent(error: Error): void {
+    const message = error.message;
+    let errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown' = 'unknown';
+    let statusCode: number | undefined;
+
+    // Extract status code from error message
+    const statusMatch = message.match(/(\d{3}):/);
+    if (statusMatch) {
+      statusCode = parseInt(statusMatch[1], 10);
+    }
+
+    // Classify error type
+    if (message.includes('rate limit') || statusCode === 429) {
+      errorType = 'rate_limit';
+    } else if (message.includes('timeout') || message.includes('ETIMEDOUT')) {
+      errorType = 'timeout';
+    } else if (message.includes('circuit') || message.includes('Circuit')) {
+      errorType = 'circuit_open';
+    } else if (statusCode && statusCode >= 400 && statusCode < 500) {
+      errorType = 'validation';
+    } else if (statusCode && statusCode >= 500) {
+      errorType = 'api_error';
+    }
+
+    this.publish(createEvent('llm_error', {
+      agentType: 'planner' as const,
+      provider: this.llm.provider,
+      model: this.llm.model,
+      error: message,
+      errorType,
+      statusCode,
+      circuitBreakerTriggered: message.includes('circuit'),
+      willRetry: false,
+    }));
+  }
+
+  /**
+   * Publish a plan_snapshot event.
+   */
+  private publishPlanSnapshot(plan: WizardPlan, snapshotType: 'initial' | 'pre_patch' | 'post_patch'): void {
+    const data: PlanSnapshotData = {
+      version: 1,
+      snapshotType,
+      goal: plan.goal,
+      trigger: snapshotType === 'initial' ? 'plan_created' : 'plan_modified',
+      steps: plan.steps.map(s => ({
+        stepNum: s.stepNum,
+        objective: s.objective,
+        status: s.status,
+        phase: s.phase,
+        toolHint: s.toolHint,
+        required: s.required,
+      })),
+    };
+    this.publish(createEvent('plan_snapshot', data));
   }
 
   /**
    * Create an execution plan for the user's request.
+   *
+   * @param userInput - The user's request
+   * @param context - Optional context string for the LLM
+   * @param tier - Budget tier (simple, standard, complex)
+   * @param budget - Budget constraints
+   * @param contextWindow - Optional ContextWindow to check hasReadFile() for smarter planning
    */
   async createPlan(
     userInput: string,
     context?: string,
     tier = 'standard',
-    budget?: PlanBudget
+    budget?: PlanBudget,
+    contextWindow?: ContextWindow
   ): Promise<WizardPlan> {
     // Fast path: detect simple patterns that don't need LLM planning
     const simplePlan = this.trySimplePlan(userInput);
@@ -115,11 +192,13 @@ export class Planner {
           return this.createBudgetExceededPlan(userInput, budget, tier, validation.reason!);
         }
       }
+      // Emit plan_snapshot event
+      this.publishPlanSnapshot(simplePlan, 'initial');
       return simplePlan;
     }
 
     // Complex path: use LLM to create plan
-    const plan = await this.createLlmPlan(userInput, context, tier);
+    const plan = await this.createLlmPlan(userInput, context, tier, contextWindow);
 
     // Validate against budget
     if (budget) {
@@ -129,6 +208,8 @@ export class Planner {
       }
     }
 
+    // Emit plan_snapshot event
+    this.publishPlanSnapshot(plan, 'initial');
     return plan;
   }
 
@@ -250,12 +331,20 @@ export class Planner {
   private async createLlmPlan(
     userInput: string,
     context?: string,
-    _tier = 'standard'
+    _tier = 'standard',
+    contextWindow?: ContextWindow
   ): Promise<WizardPlan> {
     const startTime = Date.now();
 
-    // Build prompt
-    const contextSection = context ? `Context:\n${context}\n` : '';
+    // Build context section with information about already-read files
+    let contextSection = context ? `Context:\n${context}\n` : '';
+
+    // Add info about files already in context (avoids redundant reads)
+    if (contextWindow && contextWindow.readFiles.size > 0) {
+      const readFilesList = Array.from(contextWindow.readFiles).slice(0, 20);
+      contextSection += `\nFiles already read in this session (no need to read again):\n${readFilesList.map(f => `- ${f}`).join('\n')}\n`;
+    }
+
     const prompt = PLANNING_PROMPT.replace('{user_input}', userInput).replace(
       '{context_section}',
       contextSection
@@ -274,12 +363,24 @@ export class Planner {
       const content = response.content ?? '';
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        throw new Error('No JSON found in LLM response');
+        throw new Error(`No JSON found in LLM response. Response: ${content.slice(0, 200)}`);
       }
 
       const parsed = JSON.parse(jsonMatch[0]);
       return this.normalizePlan(parsed, userInput);
     } catch (error) {
+      // CRITICAL: Log the actual error before falling back
+      const errorObj = error instanceof Error ? error : new Error(String(error));
+      console.error(`[Planner] LLM planning failed: ${errorObj.message}`);
+      console.error(`[Planner] Input was: ${userInput.slice(0, 100)}`);
+      console.error(`[Planner] Falling back to single-step plan`);
+
+      // Emit LLM error event for propagation
+      this.emitLlmErrorEvent(errorObj);
+
+      // Store the error for debugging
+      this.lastCallResponse = `[ERROR] ${errorObj.message}`;
+
       // Fallback to simple single-step plan
       return {
         goal: userInput,
@@ -287,7 +388,7 @@ export class Planner {
         steps: [
           {
             stepNum: 1,
-            objective: `Execute: ${userInput}`,
+            objective: `Execute (planning failed: ${errorObj.message.slice(0, 50)}): ${userInput}`,
             phase: StepPhase.EXECUTION,
             status: StepStatus.PENDING,
             dependsOn: [],

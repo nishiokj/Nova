@@ -13,11 +13,14 @@
 import type { LLMAdapter } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { WizardEvent } from '../types/events.js';
+import { createEvent } from '../types/events.js';
 import type { WizardPlan } from '../types/plans.js';
 import { StepStatus, StepPhase } from '../types/plans.js';
+import { ContextWindow } from '../types/context.js';
 import { Planner, type PlanBudget } from '../planner/index.js';
-import { Wizard, type WizardResult, createContextWindow } from '../wizard/index.js';
+import { Wizard, type WizardResult } from '../wizard/index.js';
 import { ResponseSynthesizer, type SynthesisInput, createSynthesisInput } from '../synthesis/index.js';
+import type { EventBusProtocol } from '../communication/event_bus.js';
 
 /**
  * Agent configuration.
@@ -27,6 +30,8 @@ export interface AgentConfig {
   maxIterations?: number;
   enablePlanning?: boolean;
   enableScouting?: boolean;
+  /** Behavioral rules for worker prompts (loaded from config/behavioral_rules.md) */
+  behavioralRules?: string;
 }
 
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
@@ -64,16 +69,11 @@ export interface AgentLogger {
 }
 
 /**
- * Session context for multi-turn conversations.
- */
-export interface SessionContext {
-  messages: Array<Record<string, unknown>>;
-  readFiles: Set<string>;
-}
-
-/**
  * Main reasoning and execution agent.
  * Uses Wizard orchestration for plan execution.
+ *
+ * NOTE: Agent now receives ContextWindow from the caller (Harness).
+ * ContextWindow is created/hydrated in Harness BEFORE Agent.run().
  */
 export class Agent {
   private config: AgentConfig;
@@ -83,38 +83,38 @@ export class Agent {
   private wizard: Wizard;
   private synthesizer: ResponseSynthesizer;
   private logger?: AgentLogger;
-  private eventEmitter?: (event: WizardEvent) => void;
-  private events: WizardEvent[] = [];
+  private eventBus?: EventBusProtocol;
+  /** Last context window for resume capability */
+  private lastContext?: ContextWindow;
 
   constructor(
     config: AgentConfig,
     toolRegistry: ToolRegistry,
     llm: LLMAdapter,
     logger?: AgentLogger,
-    eventEmitter?: (event: WizardEvent) => void
+    eventBus?: EventBusProtocol
   ) {
     this.config = { ...DEFAULT_AGENT_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
     this.llm = llm;
     this.logger = logger;
-    this.eventEmitter = eventEmitter;
+    this.eventBus = eventBus;
 
-    // Initialize components
-    this.planner = new Planner(llm, toolRegistry, { enableScouting: this.config.enableScouting });
+    // Initialize components - pass EventBus to all
+    this.planner = new Planner(llm, toolRegistry, { enableScouting: this.config.enableScouting }, eventBus);
     this.wizard = new Wizard(
       toolRegistry,
       llm,
       { maxIterations: this.config.maxIterations },
       logger,
-      this.emitEvent.bind(this)
+      eventBus
     );
     this.synthesizer = new ResponseSynthesizer(llm);
   }
 
-  private emitEvent(event: WizardEvent): void {
-    this.events.push(event);
-    if (this.eventEmitter) {
-      this.eventEmitter(event);
+  private publish(event: WizardEvent): void {
+    if (this.eventBus) {
+      this.eventBus.publish(event);
     }
   }
 
@@ -125,31 +125,82 @@ export class Agent {
   }
 
   /**
+   * Emit llm_error event for error propagation.
+   */
+  private emitLlmErrorEvent(error: Error): void {
+    const message = error.message;
+    let errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown' = 'unknown';
+    let statusCode: number | undefined;
+
+    // Extract status code from error message
+    const statusMatch = message.match(/(\d{3}):/);
+    if (statusMatch) {
+      statusCode = parseInt(statusMatch[1], 10);
+    }
+
+    // Classify error type
+    if (message.includes('rate limit') || statusCode === 429) {
+      errorType = 'rate_limit';
+    } else if (message.includes('timeout') || message.includes('ETIMEDOUT')) {
+      errorType = 'timeout';
+    } else if (message.includes('circuit') || message.includes('Circuit')) {
+      errorType = 'circuit_open';
+    } else if (statusCode && statusCode >= 400 && statusCode < 500) {
+      errorType = 'validation';
+    } else if (statusCode && statusCode >= 500) {
+      errorType = 'api_error';
+    }
+
+    this.publish(createEvent('llm_error', {
+      agentType: 'wizard' as const, // Agent uses wizard type for consistency
+      provider: this.llm.provider,
+      model: this.llm.model,
+      error: message,
+      errorType,
+      statusCode,
+      circuitBreakerTriggered: message.includes('circuit'),
+      willRetry: false,
+    }));
+  }
+
+  /**
    * Process a user request and return a response.
+   *
+   * @param userInput - The user's request
+   * @param context - The ContextWindow (created/hydrated by Harness)
+   * @param additionalContext - Optional additional context string for planning
+   * @param tier - Budget tier (simple, standard, complex)
+   * @param budget - Budget constraints
+   * @param onStreamChunk - Optional callback for streaming responses
    */
   async run(
     userInput: string,
-    context?: string,
-    sessionState?: SessionContext,
+    context: ContextWindow,
+    additionalContext?: string,
     tier = 'standard',
     budget?: PlanBudget,
     onStreamChunk?: (chunk: string, index: number, isFinal: boolean) => void
   ): Promise<AgentResponse> {
     const startTime = Date.now();
-    this.events = [];
 
     this.log('info', `Processing request: ${userInput.slice(0, 100)}`);
+
+    // Add user input to context
+    context.addMessage('user', userInput);
+
+    // Store context for resume capability
+    this.lastContext = context;
 
     try {
       // Simple tier: single LLM call, no tools
       if (tier === 'simple') {
-        return this.runSimpleTier(userInput, context, sessionState, onStreamChunk);
+        return this.runSimpleTier(userInput, context, onStreamChunk);
       }
 
-      // Create plan
+      // Create plan (pass ContextWindow for smarter planning)
       let plan;
       if (this.config.enablePlanning) {
-        plan = await this.planner.createPlan(userInput, context, tier, budget);
+        plan = await this.planner.createPlan(userInput, additionalContext, tier, budget, context);
 
         // Check for budget exceeded
         if (plan.goal.startsWith('BUDGET_EXCEEDED')) {
@@ -184,18 +235,8 @@ export class Agent {
 
       this.log('debug', `Created plan with ${plan.steps.length} steps`);
 
-      // Build base context
-      const baseContext = createContextWindow(
-        this.config.systemPrompt ?? '',
-        plan.goal,
-        plan.steps[0]?.objective ?? '',
-        1,
-        sessionState?.messages ?? [],
-        sessionState?.readFiles ?? new Set()
-      );
-
-      // Execute plan with Wizard
-      const result = await this.wizard.execute(plan, baseContext);
+      // Execute plan with Wizard (pass ContextWindow and behavioral rules)
+      const result = await this.wizard.execute(plan, context, this.config.behavioralRules ?? '');
 
       // Synthesize response if needed
       let finalContent = result.finalResponse;
@@ -227,15 +268,18 @@ export class Agent {
         userPrompt: result.userPrompt,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log('error', `Agent error: ${message}`);
+      const errorObj = error instanceof Error ? error : new Error(String(error));
+      this.log('error', `Agent error: ${errorObj.message}`);
+
+      // Emit LLM error event for propagation
+      this.emitLlmErrorEvent(errorObj);
 
       return {
-        content: `I encountered an error while processing your request: ${message}`,
+        content: `I encountered an error while processing your request: ${errorObj.message}`,
         totalDurationMs: Date.now() - startTime,
         toolsUsed: [],
         success: false,
-        error: message,
+        error: errorObj.message,
         metadata: { tier },
         goalAchieved: false,
         paused: false,
@@ -245,16 +289,16 @@ export class Agent {
 
   /**
    * Simple tier: single LLM call, no tools.
+   * Uses ContextWindow.getItemsForLLM() for messages.
    */
   private async runSimpleTier(
     userInput: string,
-    context?: string,
-    sessionState?: SessionContext,
+    context: ContextWindow,
     onStreamChunk?: (chunk: string, index: number, isFinal: boolean) => void
   ): Promise<AgentResponse> {
     const startTime = Date.now();
 
-    // Build messages
+    // Build messages from context window
     const messages: Array<{ role: string; content: string }> = [];
 
     // System message
@@ -262,26 +306,28 @@ export class Agent {
       messages.push({ role: 'system', content: this.config.systemPrompt });
     }
 
-    // Context if provided
-    if (context) {
-      messages.push({ role: 'user', content: `Context: ${context}` });
-    }
-
-    // Session history
-    if (sessionState?.messages) {
-      for (const msg of sessionState.messages) {
-        if (msg.role && msg.content) {
-          messages.push({ role: String(msg.role), content: String(msg.content) });
-        }
+    // Add messages from context window
+    const contextItems = context.getItemsForLLM();
+    for (const item of contextItems) {
+      if (item.type === 'message') {
+        messages.push({
+          role: String((item as Record<string, unknown>).role),
+          content: String((item as Record<string, unknown>).content),
+        });
       }
     }
-
-    // User input
-    messages.push({ role: 'user', content: userInput });
 
     try {
       const response = await this.llm.respond({ messages: messages as any });
       const content = response.content ?? '';
+
+      // Update context metrics
+      if (response.usage) {
+        context.updateMetrics(response.usage.promptTokens, response.usage.completionTokens);
+      }
+
+      // Add assistant response to context
+      context.addMessage('assistant', content);
 
       if (onStreamChunk) {
         this.synthesizer.streamContent(content, onStreamChunk);
@@ -297,13 +343,17 @@ export class Agent {
         paused: false,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const errorObj = error instanceof Error ? error : new Error(String(error));
+
+      // Emit LLM error event for propagation
+      this.emitLlmErrorEvent(errorObj);
+
       return {
-        content: `Error: ${message}`,
+        content: `Error: ${errorObj.message}`,
         totalDurationMs: Date.now() - startTime,
         toolsUsed: [],
         success: false,
-        error: message,
+        error: errorObj.message,
         metadata: { tier: 'simple' },
         goalAchieved: false,
         paused: false,
@@ -350,15 +400,27 @@ export class Agent {
 
   /**
    * Resume execution after user provides input.
+   *
+   * @param context - The ContextWindow (from Harness)
+   * @param userResponse - The user's response
+   * @param onStreamChunk - Optional callback for streaming responses
    */
   async resume(
+    context: ContextWindow,
     userResponse: string,
     onStreamChunk?: (chunk: string, index: number, isFinal: boolean) => void
   ): Promise<AgentResponse> {
     const startTime = Date.now();
 
+    // Store context for any future resume calls
+    this.lastContext = context;
+
     try {
-      const result = await this.wizard.resume(userResponse);
+      const result = await this.wizard.resume(
+        context,
+        userResponse,
+        this.config.behavioralRules ?? ''
+      );
 
       let finalContent = result.finalResponse;
       if (onStreamChunk) {

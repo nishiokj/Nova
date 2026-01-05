@@ -3,8 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import path from "path";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
-import { JSONLClient } from "./client.js";
+import { AgentClient } from "./agent_client.js";
 import { FileCache } from "./file_cache.js";
 import { Store } from "./store.js";
 import { HELP_LINES, parseSlashCommand } from "./commands.js";
@@ -132,7 +131,7 @@ function App({ options }: { options: AppOptions }) {
   const store = useMemo(() => new Store(), []);
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
   const [statusTick, setStatusTick] = useState(0);
-  const clientRef = useRef<JSONLClient | null>(null);
+  const clientRef = useRef<AgentClient | null>(null);
   const loggerRef = useRef<UILogger | null>(null);
   const fileCacheRef = useRef<FileCache | null>(null);
   const deleteFlowRef = useRef<{
@@ -215,35 +214,20 @@ function App({ options }: { options: AppOptions }) {
         store.addMessage("system", "Autocomplete indexing failed.");
       });
 
-    const python = process.env.TUI_PYTHON ?? "python3";
-    const bridgePath = path.join(PROJECT_ROOT, "tui-ts", "bridge.py");
-    const child = spawn(python, [bridgePath], {
-      cwd: PROJECT_ROOT,
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: "1",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const client = new JSONLClient(child);
+    // Create TypeScript agent client (replaces Python bridge)
+    const client = new AgentClient(PROJECT_ROOT);
     clientRef.current = client;
-
-    child.stderr.on("data", (chunk) => {
-      logger.warn("Bridge stderr", { chunk: chunk.toString("utf8").slice(0, 2000) });
-    });
 
     client.on("event", (event: BridgeEvent) => {
       handleBridgeEvent(event);
     });
 
     client.on("exit", ({ code, signal }) => {
-      logger.error("Bridge exited", { code, signal });
-      store.setError("Bridge exited");
+      logger.info("Agent client exited", { code, signal });
     });
 
     client.on("error", (payload) => {
-      const message = typeof payload?.message === "string" ? payload.message : "Bridge error";
+      const message = typeof payload?.message === "string" ? payload.message : "Agent error";
       store.setError(message);
     });
 
@@ -258,13 +242,18 @@ function App({ options }: { options: AppOptions }) {
       },
     });
 
-    return () => {
+    // Cleanup function for both useEffect and signal handlers
+    const cleanup = () => {
       client.send({ type: "shutdown" });
       client.close();
-      child.kill();
       clearInterval(refreshInterval);
       logger.close();
     };
+
+    // Register cleanup for signal handlers (Ctrl+C, kill)
+    setGlobalCleanup(cleanup);
+
+    return cleanup;
   }, [options, store]);
 
   useEffect(() => {
@@ -1471,4 +1460,26 @@ function parseArgs(argv: string[]): AppOptions {
 }
 
 const options = parseArgs(process.argv.slice(2));
+
+// Global cleanup reference for signal handlers
+let globalCleanup: (() => void) | null = null;
+
+// Handle graceful shutdown on signals
+const handleSignal = (signal: string) => {
+  console.log(`\nReceived ${signal}, shutting down gracefully...`);
+  if (globalCleanup) {
+    globalCleanup();
+  }
+  // Give cleanup time to complete before exit
+  setTimeout(() => process.exit(0), 1000);
+};
+
+process.on('SIGINT', () => handleSignal('SIGINT'));
+process.on('SIGTERM', () => handleSignal('SIGTERM'));
+
+// Export cleanup setter for App component
+export const setGlobalCleanup = (cleanup: () => void) => {
+  globalCleanup = cleanup;
+};
+
 render(<App options={options} />);

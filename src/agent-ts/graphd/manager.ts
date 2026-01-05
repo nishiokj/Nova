@@ -119,7 +119,7 @@ export class GraphDManager {
   readonly root: string;
   readonly dbPath: string;
 
-  private store: GraphStore;
+  private store: GraphStore | null = null;
   private server: GraphDHTTPServer | null = null;
   private running = false;
   private active = false;
@@ -131,23 +131,22 @@ export class GraphDManager {
     this.config = config;
     this.root = resolve(config.rootPath);
     this.dbPath = this.resolveDbPath(config.dbPath);
-
-    // Ensure database directory exists
-    const dbDir = dirname(this.dbPath);
-    if (dbDir && !existsSync(dbDir)) {
-      mkdirSync(dbDir, { recursive: true });
-    }
-
-    // Initialize store
-    this.store = new GraphStore(this.dbPath);
   }
 
   /**
+   * Last error encountered during start.
+   */
+  lastError: Error | null = null;
+
+  /**
    * Start the GraphD manager.
+   * Throws on failure with detailed error message.
    */
   async start(): Promise<boolean> {
+    this.lastError = null;
+
     try {
-      // Check if port is already in use
+      // Check if port is already in use BEFORE opening database
       const inUse = await checkHealthy(this.config.host, this.config.port, 1000);
       if (inUse) {
         console.warn(
@@ -155,10 +154,18 @@ export class GraphDManager {
         );
         this.running = true;
         this.reusingExisting = true;
+        // Don't open database - use HTTP API to talk to existing instance
         return true;
       }
 
-      // Initialize database
+      // Ensure database directory exists
+      const dbDir = dirname(this.dbPath);
+      if (dbDir && !existsSync(dbDir)) {
+        mkdirSync(dbDir, { recursive: true });
+      }
+
+      // Now open database - we're the primary instance
+      this.store = new GraphStore(this.dbPath);
       this.store.initialize();
       this.running = true;
       this.reusingExisting = false;
@@ -186,16 +193,30 @@ export class GraphDManager {
       );
       return true;
     } catch (err) {
-      if (err instanceof SchemaVersionError) {
-        console.error(
-          `GraphD schema version mismatch: found '${err.foundVersion}', ` +
-            `expected '${err.expectedVersion}'. Delete ${err.dbPath} to recreate.`
-        );
-      } else {
-        console.error('GraphD failed to start:', err);
-      }
       this.running = false;
-      return false;
+
+      // Create detailed error message
+      let errorMessage: string;
+      if (err instanceof SchemaVersionError) {
+        errorMessage = `Schema version mismatch: found '${err.foundVersion}', expected '${err.expectedVersion}'. Delete ${err.dbPath} to recreate.`;
+      } else if (err instanceof Error) {
+        errorMessage = `${err.name}: ${err.message}`;
+        if (err.stack) {
+          // Include first line of stack for context
+          const stackLine = err.stack.split('\n')[1]?.trim();
+          if (stackLine) {
+            errorMessage += ` (${stackLine})`;
+          }
+        }
+      } else {
+        errorMessage = String(err);
+      }
+
+      // Store error for retrieval
+      this.lastError = new Error(`GraphD failed to start: ${errorMessage}`);
+
+      // Re-throw with detailed message so callers get the info
+      throw this.lastError;
     }
   }
 
@@ -215,7 +236,10 @@ export class GraphDManager {
       this.server = null;
     }
 
-    this.store.close();
+    if (this.store) {
+      this.store.close();
+      this.store = null;
+    }
   }
 
   /**
@@ -248,9 +272,16 @@ export class GraphDManager {
       dbPath: this.dbPath,
       active: this.active,
       paused: this.paused,
-      stats: this.store.getStats(),
+      stats: this.store?.getStats() ?? { files: 0, symbols: 0, moduleEdges: 0, exports: 0 },
       lastIndex: this.lastIndexStats,
     };
+  }
+
+  /**
+   * Check if this manager is reusing an existing instance.
+   */
+  isReusing(): boolean {
+    return this.reusingExisting;
   }
 
   /**
@@ -260,6 +291,9 @@ export class GraphDManager {
     path: string,
     line: number
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { error: 'reusing_existing_instance' };
+    }
     if (!path || line <= 0) {
       return { error: 'missing_path_or_line' };
     }
@@ -278,6 +312,9 @@ export class GraphDManager {
     symbolId: string,
     depth: number
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { error: 'reusing_existing_instance' };
+    }
     const symbol = this.store.getSymbol(symbolId);
     if (!symbol) {
       return { error: 'symbol_not_found' };
@@ -338,6 +375,9 @@ export class GraphDManager {
    * Handle /export endpoint.
    */
   handleExport(table: string, fmt: string): Record<string, unknown> {
+    if (!this.store) {
+      return { error: 'reusing_existing_instance' };
+    }
     if (!this.config.allowExport) {
       return { error: 'export_disabled' };
     }
@@ -357,6 +397,9 @@ export class GraphDManager {
    * Handle /artifact endpoint.
    */
   handleArtifact(payload: Record<string, unknown>): Record<string, unknown> {
+    if (!this.store) {
+      return { error: 'reusing_existing_instance' };
+    }
     const path = payload.path as string | undefined;
     const kind = payload.kind as string | undefined;
     const details = (payload.details ?? {}) as Record<string, unknown>;
@@ -384,6 +427,9 @@ export class GraphDManager {
     expiresAt?: number,
     metadata?: Record<string, unknown>
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
     try {
       const created = this.store.createSession(
         sessionKey,
@@ -406,6 +452,9 @@ export class GraphDManager {
    * Get session by key.
    */
   sessionGet(sessionKey: string): Record<string, unknown> {
+    if (!this.store) {
+      return { error: 'reusing_existing_instance' };
+    }
     try {
       const session = this.store.getSession(sessionKey);
       if (session) {
@@ -425,6 +474,9 @@ export class GraphDManager {
     sessionKey: string,
     workingDir?: string
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
     try {
       const updated = this.store.updateSessionAccess(sessionKey);
       if (updated) {
@@ -457,6 +509,9 @@ export class GraphDManager {
    * Close a session.
    */
   sessionClose(sessionKey: string): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
     try {
       const updated = this.store.updateSessionStatus(sessionKey, 'closed');
       return { success: updated };
@@ -474,6 +529,9 @@ export class GraphDManager {
     metadata: Record<string, unknown>,
     merge = true
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
     try {
       const updated = this.store.updateSessionMetadata(
         sessionKey,
@@ -491,6 +549,9 @@ export class GraphDManager {
    * Delete a session.
    */
   sessionDelete(sessionKey: string): boolean {
+    if (!this.store) {
+      return false;
+    }
     try {
       return this.store.deleteSession(sessionKey);
     } catch (err) {
@@ -507,6 +568,9 @@ export class GraphDManager {
     status = 'active',
     limit = 50
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { sessions: [], error: 'reusing_existing_instance' };
+    }
     try {
       const sessions = this.store.listSessions(clientType, status, limit);
       return { sessions };
@@ -520,6 +584,9 @@ export class GraphDManager {
    * Cleanup expired sessions.
    */
   sessionsCleanup(): Record<string, unknown> {
+    if (!this.store) {
+      return { deleted_count: 0, error: 'reusing_existing_instance' };
+    }
     try {
       const count = this.store.cleanupExpiredSessions();
       return { deleted_count: count };
@@ -543,6 +610,9 @@ export class GraphDManager {
     requestId?: string,
     metadata?: Record<string, unknown>
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
     try {
       const messageIndex = this.store.addMessage(
         sessionKey,
@@ -566,6 +636,9 @@ export class GraphDManager {
     limit = 100,
     offset = 0
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { messages: [], error: 'reusing_existing_instance' };
+    }
     try {
       const messages = this.store.getMessages(sessionKey, limit, offset);
       return { messages };
@@ -579,6 +652,9 @@ export class GraphDManager {
    * Clear all messages for a session.
    */
   messagesClear(sessionKey: string): Record<string, unknown> {
+    if (!this.store) {
+      return { deleted_count: 0, error: 'reusing_existing_instance' };
+    }
     try {
       const count = this.store.clearMessages(sessionKey);
       return { deleted_count: count };
@@ -599,6 +675,9 @@ export class GraphDManager {
     sessionKey: string,
     contextData: Record<string, unknown>
   ): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
     try {
       const version = this.store.saveContextSnapshot(sessionKey, contextData);
       // Cleanup old snapshots
@@ -614,6 +693,9 @@ export class GraphDManager {
    * Get latest context snapshot.
    */
   contextGet(sessionKey: string): Record<string, unknown> {
+    if (!this.store) {
+      return { snapshot: null, error: 'reusing_existing_instance' };
+    }
     try {
       const snapshot = this.store.getLatestContextSnapshot(sessionKey);
       return { snapshot };
@@ -627,12 +709,107 @@ export class GraphDManager {
    * List context snapshots.
    */
   contextList(sessionKey: string, limit = 10): Record<string, unknown> {
+    if (!this.store) {
+      return { snapshots: [], error: 'reusing_existing_instance' };
+    }
     try {
       const snapshots = this.store.listContextSnapshots(sessionKey, limit);
       return { snapshots };
     } catch (err) {
       console.warn('Context list failed:', err);
       return { snapshots: [], error: (err as Error).message };
+    }
+  }
+
+  // =========================================================================
+  // Event Management
+  // =========================================================================
+
+  /**
+   * Add an event to a session.
+   */
+  eventAdd(
+    sessionKey: string,
+    eventType: string,
+    data: Record<string, unknown>,
+    requestId?: string,
+    stepNum?: number
+  ): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
+    try {
+      const eventId = this.store.addEvent(
+        sessionKey,
+        eventType,
+        data,
+        requestId,
+        stepNum
+      );
+      return { success: true, event_id: eventId };
+    } catch (err) {
+      console.warn('Event add failed:', err);
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Get events for a session.
+   */
+  eventsGet(
+    sessionKey: string,
+    requestId?: string,
+    eventType?: string,
+    limit = 1000,
+    offset = 0
+  ): Record<string, unknown> {
+    if (!this.store) {
+      return { events: [], error: 'reusing_existing_instance' };
+    }
+    try {
+      const events = this.store.getEvents(
+        sessionKey,
+        requestId,
+        eventType,
+        limit,
+        offset
+      );
+      return { events };
+    } catch (err) {
+      console.warn('Events get failed:', err);
+      return { events: [], error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Get event count for a session.
+   */
+  eventsCount(sessionKey: string, requestId?: string): Record<string, unknown> {
+    if (!this.store) {
+      return { count: 0, error: 'reusing_existing_instance' };
+    }
+    try {
+      const count = this.store.getEventCount(sessionKey, requestId);
+      return { count };
+    } catch (err) {
+      console.warn('Events count failed:', err);
+      return { count: 0, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Delete events for a session.
+   */
+  eventsDelete(sessionKey: string, requestId?: string): Record<string, unknown> {
+    if (!this.store) {
+      return { deleted_count: 0, error: 'reusing_existing_instance' };
+    }
+    try {
+      const count = this.store.deleteEvents(sessionKey, requestId);
+      return { deleted_count: count };
+    } catch (err) {
+      console.warn('Events delete failed:', err);
+      return { deleted_count: 0, error: (err as Error).message };
     }
   }
 

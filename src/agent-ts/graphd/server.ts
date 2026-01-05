@@ -172,6 +172,7 @@ export class GraphDHTTPServer {
   private server: Server | null = null;
   private readonly handler: GraphDRequestHandler;
   private shutdownRequested = false;
+  private connections = new Set<import('net').Socket>();
 
   constructor(
     private readonly host: string,
@@ -197,11 +198,17 @@ export class GraphDHTTPServer {
         });
       });
 
-      // Enable SO_REUSEADDR
+      // Track connections for clean shutdown
+      this.server.on('connection', (socket) => {
+        this.connections.add(socket);
+        socket.on('close', () => {
+          this.connections.delete(socket);
+        });
+      });
+
       this.server.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
-          console.warn(`Port ${this.port} is in use, attempting to bind anyway`);
-          // Try to close and rebind
+          console.warn(`Port ${this.port} is in use`);
           this.server?.close();
           reject(err);
         } else {
@@ -221,21 +228,34 @@ export class GraphDHTTPServer {
   stop(): Promise<void> {
     return new Promise((resolve) => {
       this.shutdownRequested = true;
-      if (this.server) {
-        this.server.close(() => {
-          this.server = null;
-          resolve();
-        });
-        // Force close after 5 seconds
-        setTimeout(() => {
-          if (this.server) {
-            this.server = null;
-          }
-          resolve();
-        }, 5000);
-      } else {
+      if (!this.server) {
         resolve();
+        return;
       }
+
+      // Stop accepting new connections
+      this.server.close(() => {
+        this.server = null;
+        this.connections.clear();
+        resolve();
+      });
+
+      // Destroy all active connections after a short grace period
+      setTimeout(() => {
+        for (const socket of this.connections) {
+          socket.destroy();
+        }
+        this.connections.clear();
+      }, 500);
+
+      // Force resolve after 2 seconds if server.close() hasn't completed
+      setTimeout(() => {
+        if (this.server) {
+          this.server = null;
+          this.connections.clear();
+        }
+        resolve();
+      }, 2000);
     });
   }
 

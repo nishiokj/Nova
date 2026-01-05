@@ -122,7 +122,6 @@ When NOT calling tools, you MUST use one of:
                      USER PROMPTS & PLAN CHANGES (STRICT)
 ═══════════════════════════════════════════════════════════════════════════════
 
-• DO NOT call ask_user. The Wizard owns user prompts.
 • Avoid asking the user clarifying questions.
   - Treat [NEED_CONTEXT] as an escape hatch for major blockers only.
   - If the answer is likely in the repo, you MUST search for it with tools first.

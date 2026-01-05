@@ -95,19 +95,11 @@ export {
 
 // ============================================
 // WIZARD (orchestration)
-// Prefixed exports to avoid name conflicts
+// NOTE: ContextWindow is now exported from types/index.js
 // ============================================
 export {
-  // Context (renamed to avoid conflict)
-  type ContextDelta as WizardContextDelta,
-  type ContextWindow,
-  createContextDelta as createWizardContextDelta,
-  addDeltaMessage,
-  mergeMessages,
-  createContextWindow,
+  // Context utilities (only buildSystemMessage remains here)
   buildSystemMessage,
-  buildFilesMessage,
-  getContextMessages,
   // Work items (renamed to avoid conflict)
   type WorkBounds,
   type WorkItemCriteria,
@@ -168,13 +160,41 @@ export * from './planner/index.js';
 export * from './synthesis/index.js';
 
 // ============================================
-// AGENT (renamed SessionContext to avoid conflict)
+// AGENT
+// NOTE: SessionContext has been removed, use ContextWindow from types/
 // ============================================
 export {
   type AgentConfig,
   type AgentResponse,
   type AgentLogger,
-  type SessionContext as AgentSessionContext,
   DEFAULT_AGENT_CONFIG,
   Agent,
 } from './agent/index.js';
+
+// ============================================
+// HARNESS (TUI integration layer)
+// ============================================
+export {
+  AgentHarness,
+  createHarnessFromEnv,
+  translateWizardEvent,
+  createStreamEvent,
+  createStatusEvent,
+  createResponseEvent,
+  createErrorEvent,
+  createReadyEvent,
+  type FullHarnessConfig,
+  type AgentRunParams,
+  type AgentRunResult,
+  type AgentRunHandle,
+  type BridgeEvent,
+  type BridgeEventType,
+  type UserPromptInfo,
+  type StatusEventData,
+  type ProgressEventData,
+  type StreamEventData,
+  type ResponseEventData,
+  type ReadyEventData,
+  type UserPromptEventData,
+  type ErrorEventData,
+} from './harness/index.js';

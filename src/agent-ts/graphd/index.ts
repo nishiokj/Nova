@@ -24,6 +24,7 @@ export type {
   GraphDSession,
   GraphDMessage,
   GraphDContextSnapshot,
+  GraphDEvent,
   GraphDStats,
   HealthResponse,
 } from './types.js';

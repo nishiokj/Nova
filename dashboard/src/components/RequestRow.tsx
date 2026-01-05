@@ -11,6 +11,7 @@ import { formatDuration } from '../lib/time'
 import { ContextWindowWidget } from './ContextWindowWidget'
 import { UserPromptDisplay } from './UserPromptDisplay'
 import { PlanCarousel } from './PlanCarousel'
+import { ExecutionFlow } from './ExecutionFlow'
 
 function getRequestTone(state: AgentRequestState): StatusTone {
   switch (state) {
@@ -309,6 +310,18 @@ export function RequestRow({ request, defaultExpanded = false }: RequestRowProps
                   <VerticalTimeline steps={request.plan!.steps} />
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Execution Flow - interleaved LLM and tool calls */}
+          {(request.llmCalls.length > 0 || request.toolCalls.length > 0) && (
+            <div className="pt-3">
+              <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+                Execution Flow
+              </span>
+              <div className="mt-2 bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
+                <ExecutionFlow llmCalls={request.llmCalls} toolCalls={request.toolCalls} />
+              </div>
             </div>
           )}
 

@@ -40,11 +40,15 @@ export type WizardEventType =
   | 'error_detected'
   // LLM call tracking (for dashboard observability)
   | 'llm_call'
+  // LLM error tracking (for error propagation and circuit breaker visibility)
+  | 'llm_error'
   // Plan versioning (for dashboard plan carousel)
   | 'plan_snapshot'
   | 'plan_patched'
   // Context window metrics (for dashboard token widget)
-  | 'context_window_update';
+  | 'context_window_update'
+  // Context window telemetry (full item-based context state)
+  | 'context_window_telemetry';
 
 // ============================================
 // BASE EVENT
@@ -236,6 +240,30 @@ export interface LLMCallData {
   durationMs: number;
   model: string;
   toolCallsCount: number;
+}
+
+/**
+ * Data for llm_error event - tracks LLM API errors.
+ */
+export interface LLMErrorData {
+  agentType: AgentType;
+  stepNum?: number;
+  provider: string;
+  model: string;
+  /** Error message */
+  error: string;
+  /** Error classification */
+  errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown';
+  /** HTTP status code if available */
+  statusCode?: number;
+  /** Whether this error triggered circuit breaker */
+  circuitBreakerTriggered?: boolean;
+  /** Whether the operation will be retried */
+  willRetry?: boolean;
+  /** Attempt number (1-based) */
+  attemptNumber?: number;
+  /** Max retries configured */
+  maxRetries?: number;
 }
 
 /**

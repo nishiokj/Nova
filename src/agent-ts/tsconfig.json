@@ -11,7 +11,7 @@
     "declarationMap": true,
     "outDir": "./dist",
     "rootDir": ".",
-    "types": ["node"],
+    "types": ["node", "bun"],
     "resolveJsonModule": true,
     "isolatedModules": true
   },
