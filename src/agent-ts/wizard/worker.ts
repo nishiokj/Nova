@@ -112,6 +112,8 @@ export interface WorkerOutcome {
   contextItems: ContextItem[];
   // Files read during execution (for dedup tracking)
   filesRead: string[];
+  // Paths invalidated by Write/Edit operations (for context ejection)
+  invalidatedPaths: string[];
 }
 
 export function createWorkerOutcome(params: {
@@ -134,6 +136,7 @@ export function createWorkerOutcome(params: {
     terminationReason: '',
     contextItems: [],
     filesRead: [],
+    invalidatedPaths: [],
   };
 }
 
@@ -467,6 +470,11 @@ export class Worker {
     const localItems: ContextItem[] = [];
     const localReadFiles = new Set(context.getReadFilesArray());
 
+    // Local file content ID generator (uses session key + work id for uniqueness)
+    let localFileContentCounter = 0;
+    const generateFileContentId = (): string =>
+      `fc_${context.sessionKey.slice(0, 4)}_${workItem.workId.slice(0, 4)}_${++localFileContentCounter}`;
+
     // PRE-LOOP: Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
       for (const targetPath of workItem.targetPaths) {
@@ -485,6 +493,7 @@ export class Worker {
               : JSON.stringify(result.output);
             localItems.push({
               type: 'file_content',
+              id: generateFileContentId(),
               path: targetPath,
               content: fileContent.slice(0, 10000),
               timestamp: Date.now(),
@@ -931,6 +940,15 @@ export class Worker {
       // Track read files
       if (call.name.toLowerCase() === 'read' && call.arguments.path) {
         localReadFiles.add(String(call.arguments.path));
+      }
+
+      // Track invalidated paths for Write/Edit (auto-eject stale file_content)
+      const toolNameLower = call.name.toLowerCase();
+      if ((toolNameLower === 'write' || toolNameLower === 'edit') && call.arguments.path) {
+        const modifiedPath = String(call.arguments.path);
+        outcome.invalidatedPaths.push(modifiedPath);
+        // Also remove from localReadFiles so re-read is possible
+        localReadFiles.delete(modifiedPath);
       }
     } else {
       outcome.metrics.toolCallsFailed++;

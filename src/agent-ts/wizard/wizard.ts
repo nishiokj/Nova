@@ -177,6 +177,10 @@ export class Wizard {
       this.publish.bind(this)
     );
 
+    // Telemetry containers (lightweight)
+    const iterationSamples: Array<{ iteration: number; timestamp: number; readyQueueLen: number; inFlightLen: number }> = [];
+    const stepStartTimes = new Map<number, number>();
+
     this.events = [];
     this.totalToolCalls = 0;
     this.totalLlmCalls = 0;
@@ -194,7 +198,15 @@ export class Wizard {
       })),
     }));
 
+    // Emit initial context telemetry and record token count
     this.emitContextTelemetry(context);
+    let lastContextTokens: number | undefined;
+    try {
+      const ctxTelemetry = context.toTelemetry();
+      lastContextTokens = typeof ctxTelemetry.tokenCount === 'number' ? ctxTelemetry.tokenCount : undefined;
+    } catch (err) {
+      // ignore
+    }
 
     let iteration = 0;
     let paused = false;
@@ -240,6 +252,15 @@ export class Wizard {
           break;
         }
 
+        // Sample memory and queue state at start of iteration
+        try {
+          const mem = process.memoryUsage();
+          this.publish(createEvent('memory_telemetry', { heapUsed: mem.heapUsed, rss: mem.rss }, undefined));
+        } catch (err) {
+          // ignore environment without process.memoryUsage
+        }
+        iterationSamples.push({ iteration, timestamp: Date.now(), readyQueueLen: readyQueue.length, inFlightLen: inFlight.size });
+
         // Dispatch up to maxWorkers
         while (readyQueue.length > 0 && inFlight.size < this.config.maxWorkers) {
           const step = readyQueue.shift()!;
@@ -256,6 +277,9 @@ export class Wizard {
             workerId,
             dependsOn: step.dependsOn,
           }, step.stepNum));
+
+          // record step start time for per-step duration telemetry
+          stepStartTimes.set(step.stepNum, Date.now());
 
           // Launch worker asynchronously
           const workerPromise = this.executeWorker(
@@ -305,6 +329,40 @@ export class Wizard {
 
         // Wait for any worker to complete
         const completed = await Promise.race(inFlight.values());
+
+        // Capture telemetry before removing from inFlight
+        try {
+          const start = stepStartTimes.get(completed.step.stepNum);
+          const end = Date.now();
+          const durationMs = start ? end - start : completed.outcome.metrics.durationMs ?? 0;
+
+          // Publish per-step telemetry event
+          this.publish(createEvent('step_telemetry', {
+            stepNum: completed.step.stepNum,
+            durationMs,
+            toolCalls: completed.outcome.metrics.toolCallsMade,
+            llmCalls: completed.outcome.metrics.llmCallsMade,
+            inFlightBefore: inFlight.size,
+          }, completed.step.stepNum));
+
+          // Context growth: compare token counts and emit delta
+          try {
+            const ctxTelemetry = context.toTelemetry();
+            const currentTokens = typeof ctxTelemetry.tokenCount === 'number' ? ctxTelemetry.tokenCount : undefined;
+            if (typeof lastContextTokens === 'number' && typeof currentTokens === 'number') {
+              const delta = currentTokens - lastContextTokens;
+              if (delta !== 0) {
+                this.publish(createEvent('context_growth', { prevTokens: lastContextTokens, currentTokens, delta }, completed.step.stepNum));
+              }
+            }
+            lastContextTokens = currentTokens;
+          } catch (err) {
+            // ignore
+          }
+        } catch (err) {
+          // ignore telemetry failures
+        }
+
         inFlight.delete(completed.step.stepNum);
 
         const { step, outcome, entryId } = completed;
@@ -315,6 +373,17 @@ export class Wizard {
         }
         for (const file of outcome.filesRead) {
           context.markFileRead(file);
+        }
+
+        // Invalidate stale file_content for paths modified by Write/Edit
+        for (const path of outcome.invalidatedPaths) {
+          const ejectResult = context.invalidateFileContent(path);
+          if (ejectResult.ejectedCount > 0) {
+            this.log('debug', `Invalidated stale file_content for ${path}`, {
+              stepNum: step.stepNum,
+              ejectedCount: ejectResult.ejectedCount,
+            });
+          }
         }
 
         this.emitContextTelemetry(context, step.stepNum);
@@ -459,6 +528,19 @@ export class Wizard {
       }));
     }
 
+    // Emit summary telemetry
+    try {
+      this.publish(createEvent('execution_telemetry', {
+        totalIterations: iteration,
+        iterationSamplesCount: iterationSamples.length,
+        totalToolCalls: this.totalToolCalls,
+        totalLlmCalls: this.totalLlmCalls,
+        durationMs: Date.now() - startTime,
+      }));
+    } catch (err) {
+      // ignore
+    }
+
     return {
       success,
       finalResponse,
@@ -532,6 +614,7 @@ export class Wizard {
         terminationReason: `exception:${message}`,
         contextItems: [],
         filesRead: [],
+        invalidatedPaths: [],
       };
 
       return { step, outcome, workerId, entryId };

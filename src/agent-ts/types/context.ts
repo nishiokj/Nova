@@ -67,6 +67,7 @@ export interface ReasoningItem {
 /** File content item - file loaded into context */
 export interface FileContentItem {
   type: 'file_content';
+  id: string;
   path: string;
   content: string;
   language?: string;
@@ -92,6 +93,38 @@ export interface ContextWindowSnapshot {
   metrics: ContextWindowMetrics;
   version: number;
   readFiles: string[];
+  fileContentCounter?: number;
+}
+
+// ============================================
+// EJECTION & COMPACTION TYPES
+// ============================================
+
+/** Result of ejecting file content items */
+export interface EjectResult {
+  ejectedCount: number;
+  ejectedIds: string[];
+  pathsRemoved: string[];
+}
+
+/** Options for context compaction */
+export interface CompactOptions {
+  /** Remove file_content older than this many milliseconds */
+  maxFileContentAgeMs?: number;
+  /** Keep at most this many file_content items (LRU eviction) */
+  maxFileContentCount?: number;
+  /** Remove file_content items for the same path, keeping only the newest */
+  deduplicateByPath?: boolean;
+  /** Truncate function_call_output items longer than this */
+  truncateOutputsTo?: number;
+}
+
+/** Result of compaction */
+export interface CompactResult {
+  itemsRemoved: number;
+  fileContentRemoved: number;
+  outputsTruncated: number;
+  bytesRecovered: number;
 }
 
 // ============================================
@@ -134,6 +167,7 @@ export class ContextWindow {
   private _metrics: ContextWindowMetrics;
   private _version = 0;
   private _readFiles: Set<string> = new Set();
+  private _fileContentCounter = 0;
 
   constructor(sessionKey: string, maxTokens = 200_000) {
     this.sessionKey = sessionKey;
@@ -209,11 +243,13 @@ export class ContextWindow {
   }
 
   /**
-   * Add file content to context.
+   * Add file content to context. Returns the generated ID.
    */
-  addFileContent(path: string, content: string, language?: string): void {
+  addFileContent(path: string, content: string, language?: string): string {
+    const id = `fc_${this.sessionKey.slice(0, 4)}_${++this._fileContentCounter}`;
     this._items.push({
       type: 'file_content',
+      id,
       path,
       content,
       language,
@@ -221,6 +257,7 @@ export class ContextWindow {
     });
     this._readFiles.add(path);
     this._version++;
+    return id;
   }
 
   /**
@@ -256,6 +293,196 @@ export class ContextWindow {
    */
   getReadFilesArray(): string[] {
     return Array.from(this._readFiles);
+  }
+
+  // =========================================================================
+  // Ejection & Compaction Methods
+  // =========================================================================
+
+  /**
+   * Eject all file_content items for a given path.
+   * Removes the path from _readFiles if no items remain.
+   */
+  ejectFileContentByPath(path: string): EjectResult {
+    const ejectedIds: string[] = [];
+    this._items = this._items.filter((item) => {
+      if (item.type === 'file_content' && item.path === path) {
+        ejectedIds.push(item.id);
+        return false;
+      }
+      return true;
+    });
+
+    if (ejectedIds.length > 0) {
+      this._readFiles.delete(path);
+      this._version++;
+    }
+
+    return {
+      ejectedCount: ejectedIds.length,
+      ejectedIds,
+      pathsRemoved: ejectedIds.length > 0 ? [path] : [],
+    };
+  }
+
+  /**
+   * Eject a specific file_content item by ID.
+   */
+  ejectFileContentById(id: string): EjectResult {
+    let ejectedPath: string | null = null;
+
+    this._items = this._items.filter((item) => {
+      if (item.type === 'file_content' && item.id === id) {
+        ejectedPath = item.path;
+        return false;
+      }
+      return true;
+    });
+
+    if (ejectedPath) {
+      // Check if any other items for this path remain
+      const hasOtherItems = this._items.some(
+        (item) => item.type === 'file_content' && item.path === ejectedPath
+      );
+      if (!hasOtherItems) {
+        this._readFiles.delete(ejectedPath);
+      }
+      this._version++;
+      return {
+        ejectedCount: 1,
+        ejectedIds: [id],
+        pathsRemoved: hasOtherItems ? [] : [ejectedPath],
+      };
+    }
+
+    return { ejectedCount: 0, ejectedIds: [], pathsRemoved: [] };
+  }
+
+  /**
+   * Invalidate file content after a file modification.
+   * Convenience alias for ejectFileContentByPath.
+   */
+  invalidateFileContent(path: string): EjectResult {
+    return this.ejectFileContentByPath(path);
+  }
+
+  /**
+   * Compact the context window to reduce size.
+   */
+  compact(options: CompactOptions = {}): CompactResult {
+    const {
+      maxFileContentAgeMs,
+      maxFileContentCount,
+      deduplicateByPath = false,
+      truncateOutputsTo,
+    } = options;
+
+    let itemsRemoved = 0;
+    let fileContentRemoved = 0;
+    let outputsTruncated = 0;
+    let bytesRecovered = 0;
+    const now = Date.now();
+    const pathsRemoved = new Set<string>();
+
+    // Track newest file_content per path for deduplication
+    const newestByPath = new Map<string, { item: FileContentItem; index: number }>();
+
+    // First pass: identify items to remove
+    const toRemove = new Set<number>();
+
+    this._items.forEach((item, index) => {
+      if (item.type === 'file_content') {
+        // Age-based removal
+        if (maxFileContentAgeMs && now - item.timestamp > maxFileContentAgeMs) {
+          toRemove.add(index);
+          bytesRecovered += item.content.length;
+          pathsRemoved.add(item.path);
+          return;
+        }
+
+        // Track for deduplication
+        if (deduplicateByPath) {
+          const existing = newestByPath.get(item.path);
+          if (existing) {
+            if (item.timestamp > existing.item.timestamp) {
+              toRemove.add(existing.index);
+              bytesRecovered += existing.item.content.length;
+              newestByPath.set(item.path, { item, index });
+            } else {
+              toRemove.add(index);
+              bytesRecovered += item.content.length;
+            }
+          } else {
+            newestByPath.set(item.path, { item, index });
+          }
+        }
+      }
+    });
+
+    // Count-based removal (LRU - remove oldest first)
+    if (maxFileContentCount) {
+      const fileItems = this._items
+        .map((item, index) => ({ item, index }))
+        .filter(
+          ({ item, index }) => item.type === 'file_content' && !toRemove.has(index)
+        )
+        .sort((a, b) => a.item.timestamp - b.item.timestamp);
+
+      const excess = fileItems.length - maxFileContentCount;
+      if (excess > 0) {
+        for (let i = 0; i < excess; i++) {
+          const { item, index } = fileItems[i];
+          toRemove.add(index);
+          bytesRecovered += (item as FileContentItem).content.length;
+          pathsRemoved.add((item as FileContentItem).path);
+        }
+      }
+    }
+
+    // Apply removals
+    if (toRemove.size > 0) {
+      this._items = this._items.filter((_, index) => !toRemove.has(index));
+      itemsRemoved = toRemove.size;
+      fileContentRemoved = toRemove.size;
+      this._version++;
+    }
+
+    // Update _readFiles - remove paths with no remaining file_content
+    for (const path of pathsRemoved) {
+      const hasRemaining = this._items.some(
+        (item) => item.type === 'file_content' && item.path === path
+      );
+      if (!hasRemaining) {
+        this._readFiles.delete(path);
+      }
+    }
+
+    // Truncate long outputs
+    if (truncateOutputsTo) {
+      for (const item of this._items) {
+        if (
+          item.type === 'function_call_output' &&
+          item.output.length > truncateOutputsTo
+        ) {
+          const originalLength = item.output.length;
+          item.output =
+            item.output.slice(0, truncateOutputsTo) +
+            `\n... [truncated ${originalLength - truncateOutputsTo} chars]`;
+          bytesRecovered += originalLength - item.output.length;
+          outputsTruncated++;
+        }
+      }
+      if (outputsTruncated > 0) {
+        this._version++;
+      }
+    }
+
+    return {
+      itemsRemoved,
+      fileContentRemoved,
+      outputsTruncated,
+      bytesRecovered,
+    };
   }
 
   // =========================================================================
@@ -461,6 +688,7 @@ export class ContextWindow {
       metrics: { ...this._metrics },
       version: this._version,
       readFiles: Array.from(this._readFiles),
+      fileContentCounter: this._fileContentCounter,
     };
   }
 
@@ -473,6 +701,7 @@ export class ContextWindow {
     context._metrics = { ...snapshot.metrics };
     context._version = snapshot.version;
     context._readFiles = new Set(snapshot.readFiles);
+    context._fileContentCounter = snapshot.fileContentCounter ?? 0;
     return context;
   }
 
