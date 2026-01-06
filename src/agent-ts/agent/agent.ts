@@ -188,6 +188,19 @@ export class Agent {
     // Add user input to context
     context.addMessage('user', userInput);
 
+    // Pre-read @mentioned files before planning
+    for (const match of userInput.matchAll(/@(?:"([^"]+)"|(\S+))/g)) {
+      const filePath = match[1] || match[2];
+      if (filePath && !context.hasReadFile(filePath)) {
+        try {
+          const result = await this.toolRegistry.execute('Read', { path: filePath });
+          if (result.isSuccess && result.output) {
+            context.addFileContent(filePath, String(result.output));
+          }
+        } catch { /* ignore read failures */ }
+      }
+    }
+
     // Store context for resume capability
     this.lastContext = context;
 

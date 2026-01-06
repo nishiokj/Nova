@@ -27,6 +27,8 @@ export type WizardEventType =
   | 'step_skipped'
   // Tool events
   | 'tool_call'
+  // Synthesis events (after tool calls, before LLM analysis)
+  | 'synthesis_started'
   // Reflection events
   | 'reflection_started'
   | 'reflection_completed'
@@ -114,6 +116,7 @@ export interface GoalStartedData {
     objective: string;
     phase?: 'discovery' | 'execution';
     toolHint?: string;
+    dependsOn?: number[];
   }>;
 }
 
@@ -142,6 +145,10 @@ export interface StepStartedData {
   objective: string;
   phase?: 'discovery' | 'execution';
   toolHint?: string;
+  /** Step numbers this step depends on */
+  dependsOn?: number[];
+  /** Worker ID assigned to this step */
+  workerId?: string;
 }
 
 /**
@@ -164,6 +171,12 @@ export interface StepFailedData {
   objective: string;
   error: string;
   reason?: string;
+  /** Full stack trace if available */
+  stack?: string;
+  /** Tool errors that contributed to failure */
+  toolErrors?: string[];
+  /** Why execution terminated */
+  terminationReason?: string;
 }
 
 /**
@@ -177,14 +190,24 @@ export interface StepSkippedData {
 }
 
 /**
+ * Phase of a tool call event.
+ */
+export type ToolCallPhase = 'starting' | 'completed';
+
+/**
  * Data for tool_call event.
  */
 export interface ToolCallData {
   toolName: string;
   arguments: Record<string, unknown>;
+  /** Phase of the tool call: 'starting' before execution, 'completed' after */
+  phase: ToolCallPhase;
+  /** Result content (only present when phase='completed') */
   result?: string;
-  success: boolean;
-  durationMs: number;
+  /** Success status (only present when phase='completed') */
+  success?: boolean;
+  /** Duration in ms (only present when phase='completed') */
+  durationMs?: number;
 }
 
 /**

@@ -169,12 +169,12 @@ export function VerticalTimeline({
               />
             )}
 
-            {/* Step marker */}
+            {/* Step marker - always show step number */}
             <div className="relative z-10 pt-1">
               <button
                 onClick={() => onStepClick?.(step)}
                 className={cn(
-                  'w-6 h-6 rounded-full flex items-center justify-center',
+                  'w-7 h-7 rounded-full flex items-center justify-center',
                   'border-2 transition-all duration-200',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2',
                   'focus-visible:ring-[var(--running)] focus-visible:ring-offset-[var(--bg-surface)]',
@@ -192,31 +192,9 @@ export function VerticalTimeline({
                     'bg-[var(--bg-elevated)] border-[var(--border-subtle)] text-[var(--text-muted)] opacity-50',
                   isSelected && 'ring-2 ring-[var(--accent-cyan)]'
                 )}
+                title={`Step ${step.stepNum}${step.dependsOn?.length ? ` (depends on: ${step.dependsOn.join(', ')})` : ''}`}
               >
-                {step.status === 'completed' && (
-                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                )}
-                {step.status === 'in_progress' && (
-                  <span className="w-2 h-2 rounded-full bg-current" />
-                )}
-                {step.status === 'failed' && (
-                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                )}
-                {step.status === 'skipped' && step.error && (
-                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
-                )}
-                {step.status === 'skipped' && !step.error && (
-                  <span className="font-mono text-[10px] font-medium">{step.stepNum}</span>
-                )}
-                {step.status === 'pending' && (
-                  <span className="font-mono text-[10px] font-medium">{step.stepNum}</span>
-                )}
+                <span className="font-mono text-[11px] font-bold">{step.stepNum}</span>
               </button>
             </div>
 
@@ -232,6 +210,7 @@ export function VerticalTimeline({
                         : 'text-[var(--text-primary)]'
                     )}
                   >
+                    <span className="font-mono text-[var(--text-muted)] mr-1">#{step.stepNum}</span>
                     {step.objective}
                   </p>
                   <div className="flex items-center gap-2 mt-1 flex-wrap">
@@ -245,6 +224,12 @@ export function VerticalTimeline({
                     >
                       {step.phase}
                     </span>
+                    {/* Prerequisites badge */}
+                    {step.dependsOn && step.dependsOn.length > 0 && (
+                      <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-muted)]">
+                        after {step.dependsOn.map(d => `#${d}`).join(', ')}
+                      </span>
+                    )}
                     {step.toolHint && (
                       <span className="text-xs font-mono text-[var(--text-muted)]">
                         → {step.toolHint}

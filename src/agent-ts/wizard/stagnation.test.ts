@@ -48,7 +48,7 @@ describe('StagnationDetector', () => {
 
   describe('Retry counting', () => {
     it('should not detect stagnation below retry threshold', () => {
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       // Dispatch and complete 3 times (at threshold, not over)
       for (let i = 0; i < 3; i++) {
@@ -62,7 +62,7 @@ describe('StagnationDetector', () => {
     });
 
     it('should detect stagnation when over retry threshold', () => {
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       // Dispatch and complete 4 times (over threshold of 3)
       for (let i = 0; i < 4; i++) {
@@ -77,7 +77,7 @@ describe('StagnationDetector', () => {
     });
 
     it('should NOT count DISPATCHED entries (in-flight)', () => {
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       // Dispatch 5 times but don't complete - all are "in-flight"
       for (let i = 0; i < 5; i++) {
@@ -92,7 +92,7 @@ describe('StagnationDetector', () => {
     });
 
     it('should count FAILED entries', () => {
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       for (let i = 0; i < 4; i++) {
         const entryId = ledger.recordDispatch(1, workItem, `worker-${i}`);
@@ -107,7 +107,7 @@ describe('StagnationDetector', () => {
     it('BUG CANDIDATE: COMPLETED entries also count toward retry limit', () => {
       // If a step keeps completing successfully but then failing,
       // the COMPLETED entries also count toward the retry limit
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       // 2 successful completions
       for (let i = 0; i < 2; i++) {
@@ -286,7 +286,7 @@ describe('StagnationDetector', () => {
 
   describe('Global stagnation detection', () => {
     it('should not detect with less than threshold entries', () => {
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       // Create 5 entries, all failed (less than threshold of 10)
       for (let i = 0; i < 5; i++) {
@@ -301,12 +301,12 @@ describe('StagnationDetector', () => {
     });
 
     it('should detect when no steps completed in recent work', () => {
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       // Create 10+ failed entries across different steps
       for (let i = 0; i < 12; i++) {
         const stepNum = (i % 3) + 1; // Steps 1, 2, 3 cycling
-        const item = createWorkItem({ stepNum, objective: 'Test' });
+        const item = createWorkItem({ stepNum, goal: 'Test', objective: 'Test' });
         const entryId = ledger.recordDispatch(stepNum, item, `worker-${i}`);
         ledger.recordCompletion(entryId, createMockOutcome({ success: false, stepNum }));
       }
@@ -319,7 +319,7 @@ describe('StagnationDetector', () => {
     });
 
     it('should not detect global stagnation if some entries completed', () => {
-      const workItem = createWorkItem({ stepNum: 1, objective: 'Test' });
+      const workItem = createWorkItem({ stepNum: 1, goal: 'Test', objective: 'Test' });
 
       // Create 11 entries: 10 failed, 1 completed
       for (let i = 0; i < 10; i++) {

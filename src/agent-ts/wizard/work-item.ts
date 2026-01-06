@@ -62,6 +62,8 @@ export interface WorkItem {
   readonly workId: string;
   /** Step number in the plan */
   readonly stepNum: number;
+  /** High-level goal of the plan */
+  readonly goal: string;
   /** Objective to accomplish */
   readonly objective: string;
   /** Target file paths to operate on */
@@ -83,6 +85,7 @@ export interface WorkItem {
  */
 export function createWorkItem(params: {
   stepNum: number;
+  goal: string;
   objective: string;
   targetPaths?: string[];
   toolHint?: string;
@@ -94,6 +97,7 @@ export function createWorkItem(params: {
   return {
     workId: uuidv4().slice(0, 8),
     stepNum: params.stepNum,
+    goal: params.goal,
     objective: params.objective,
     targetPaths: Object.freeze(params.targetPaths ?? []),
     toolHint: params.toolHint,
@@ -120,10 +124,12 @@ export function workItemFromStepState(
     toolHint?: string;
     targetPaths?: string[];
   },
+  goal: string,
   bounds?: Partial<WorkBounds>
 ): WorkItem {
   return createWorkItem({
     stepNum: step.stepNum,
+    goal,
     objective: step.overrideObjective ?? step.objective,
     targetPaths: step.targetPaths ?? [],
     toolHint: step.toolHint,

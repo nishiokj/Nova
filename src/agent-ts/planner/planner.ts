@@ -13,7 +13,7 @@ import { StepStatus, StepPhase } from '../types/plans.js';
 import type { WizardEvent, PlanSnapshotData } from '../types/events.js';
 import { createEvent } from '../types/events.js';
 import type { EventBusProtocol } from '../communication/event_bus.js';
-import type { ContextWindow } from '../types/context.js';
+import type { ContextWindow, FileContentItem } from '../types/context.js';
 
 /**
  * Budget constraints for planning.
@@ -64,11 +64,14 @@ Create a JSON plan with this structure:
 }
 
 Guidelines:
+- Be intelligent, you will be required to plan a WIDE range of tasks. There is absolutely a chance you are planning something that should not require planning at all. Do not be afraid to be ultra-concise. Assume that each step will require a minimum of 1 LLM call. Knowing this, do not needlessly separate steps UNLESS we can run them in parallel (they are not dependent on one another. This is actually very desirable, and our plans should be crafted in a way so that we parallelize as much work as possible). Each Step should be a fairly large unit. For example this is BAD: '1. Get file A 2. Answer question about A. 3. Answer different question about A (unless not dependent on 2, then this is good) 4. Summarize' An extra summarization step is rarely necessary, it can be part of the final step in most cases. 
+- If a file's contents are provided in this prompt and that file is pertinent to the task then DO NOT create steps involving reducing uncertainty of that file. YOU can use the knowledge of that file to create a sharper, more tailored plan. 
 - Keep plans simple - prefer fewer steps
 - Only include tool hints when truly necessary
-- Mark steps as "required" only if they must complete for success
+- Mark steps as "required" only if they MUST complete for success
 - Discovery steps gather information; execution steps perform actions
 - Consider dependencies between steps
+
 
 Return ONLY the JSON, no additional text.
 `;
@@ -339,10 +342,15 @@ export class Planner {
     // Build context section with information about already-read files
     let contextSection = context ? `Context:\n${context}\n` : '';
 
-    // Add info about files already in context (avoids redundant reads)
-    if (contextWindow && contextWindow.readFiles.size > 0) {
-      const readFilesList = Array.from(contextWindow.readFiles).slice(0, 20);
-      contextSection += `\nFiles already read in this session (no need to read again):\n${readFilesList.map(f => `- ${f}`).join('\n')}\n`;
+    // Include file content for informed planning
+    if (contextWindow) {
+      const fileItems = contextWindow.getItemsByType<FileContentItem>('file_content');
+      if (fileItems.length > 0) {
+        contextSection += '\n--- Files Already Loaded (available to subsequent steps) ---\n';
+        for (const file of fileItems) {
+          contextSection += `\n[${file.path}]\n\`\`\`\n${file.content}\n\`\`\`\n`;
+        }
+      }
     }
 
     const prompt = PLANNING_PROMPT.replace('{user_input}', userInput).replace(

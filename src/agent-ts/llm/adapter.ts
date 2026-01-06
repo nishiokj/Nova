@@ -613,12 +613,14 @@ export class OpenAIAdapter extends BaseLLMAdapter {
     for (const msg of messages) {
       // Cast to access potential 'type' field for raw items
       const item = msg as unknown as Record<string, unknown>;
+      const callId = (item.call_id ?? item.id ?? item.callId) as string;
+
 
       // Handle raw function_call items (already in Responses API format)
       if (item.type === 'function_call') {
         input.push({
           type: 'function_call',
-          call_id: item.call_id,
+          call_id: callId,
           name: item.name,
           arguments: item.arguments,
         });
@@ -798,7 +800,7 @@ export class OpenAIAdapter extends BaseLLMAdapter {
       if (params.tools && params.tools.length > 0) {
         body.tools = this.formatTools(params.tools);
         // For reasoning models, force tool use
-        body.tool_choice = this.isReasoningModel() ? 'required' : 'auto';
+        body.tool_choice = 'auto';
       }
 
       // 3. Prompt caching parameters - config for cache behavior

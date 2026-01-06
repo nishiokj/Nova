@@ -97,6 +97,7 @@ describe('Worker', () => {
     baseContext = new ContextWindow('test-session', 200_000);
     baseWorkItem = createWorkItem({
       stepNum: 1,
+      goal: 'Test goal',
       objective: 'Test objective',
     });
   });
@@ -425,6 +426,7 @@ describe('Worker', () => {
     it('should respect maxToolCalls limit', async () => {
       const workItem = createWorkItem({
         stepNum: 1,
+        goal: 'Test',
         objective: 'Test',
         bounds: { maxToolCalls: 2, maxDurationMs: 120000, maxLlmCalls: 10 },
       });
@@ -455,6 +457,7 @@ describe('Worker', () => {
     it('should respect maxLlmCalls limit', async () => {
       const workItem = createWorkItem({
         stepNum: 1,
+        goal: 'Test',
         objective: 'Test',
         bounds: { maxToolCalls: 100, maxDurationMs: 120000, maxLlmCalls: 2 },
       });
@@ -479,6 +482,7 @@ describe('Worker', () => {
       // This means we could exceed the duration by up to one full LLM call
       const workItem = createWorkItem({
         stepNum: 1,
+        goal: 'Test',
         objective: 'Test',
         bounds: { maxToolCalls: 100, maxDurationMs: 1, maxLlmCalls: 10 }, // 1ms limit
       });
@@ -591,6 +595,7 @@ describe('Worker', () => {
 
       const workItem = createWorkItem({
         stepNum: 1,
+        goal: 'Test',
         objective: 'Edit the files',
         targetPaths: ['/src/a.ts', '/src/b.ts'],
       });
@@ -625,6 +630,7 @@ describe('Worker', () => {
 
       const workItem = createWorkItem({
         stepNum: 1,
+        goal: 'Test',
         objective: 'Edit the files',
         targetPaths: ['/src/a.ts'],
       });
