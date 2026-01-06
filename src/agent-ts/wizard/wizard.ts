@@ -33,7 +33,7 @@ export interface WizardConfig {
   contextBudgetTokens: number;
   compactionThreshold: number;
   maxRetriesPerStep: number;
-  deadlockThreshold: number;
+  maxWorkers: number;
   // Worker configuration
   workerConfig?: Partial<WorkerConfig>;
 }
@@ -43,7 +43,7 @@ export const DEFAULT_WIZARD_CONFIG: WizardConfig = {
   contextBudgetTokens: 100_000,
   compactionThreshold: 0.6,
   maxRetriesPerStep: 3,
-  deadlockThreshold: 5,
+  maxWorkers: 3,
 };
 
 /**
@@ -148,6 +148,11 @@ export class Wizard {
   /**
    * Execute a plan and return the result.
    *
+   * Uses parallel dispatch with dependency graph:
+   * - Builds topo-sorted queue from step dependencies
+   * - Dispatches up to maxWorkers concurrently
+   * - Merges WorkerContext on completion in completion order
+   *
    * @param plan - The plan to execute
    * @param context - The ContextWindow to use (mutated during execution)
    * @param behavioralRules - Optional behavioral rules for the Worker
@@ -164,13 +169,12 @@ export class Wizard {
     this.ledger = new WorkLedger();
     this.knowledge = new KnowledgeStore();
     this.stagnation = new StagnationDetector(this.config.maxRetriesPerStep);
-    // Pass event emitter callback to Worker for LLM_CALL and TOOL_CALL events
     this.worker = new Worker(
       this.toolRegistry,
       this.llm,
       this.config.workerConfig,
-      this.logger, // Pass logger for Worker logging
-      this.publish.bind(this) // eventEmitter callback
+      this.logger,
+      this.publish.bind(this)
     );
 
     this.events = [];
@@ -180,250 +184,240 @@ export class Wizard {
     // Emit GOAL_STARTED event
     this.publish(createEvent('goal_started', {
       goal: plan.goal,
-      userInput: '', // Would come from context in full implementation
+      userInput: '',
       steps: Array.from(this.planState.steps.values()).map(s => ({
         stepNum: s.stepNum,
         objective: s.objective,
         phase: s.phase,
         toolHint: s.toolHint,
+        dependsOn: s.dependsOn,
       })),
     }));
 
-    // Emit initial context telemetry
     this.emitContextTelemetry(context);
 
     let iteration = 0;
-    let deadlockCounter = 0;
     let paused = false;
     let userPrompt: Record<string, unknown> | undefined;
     let lastResponse = '';
 
-    try {
-      while (iteration < this.config.maxIterations) {
-        iteration++;
+    // Build dependency graph
+    const remainingDeps = new Map<number, Set<number>>();
+    const readyQueue: StepState[] = [];
 
-        // Check termination
-        if (this.planState.isTerminated()) {
-          this.log('info', 'Plan terminated - all steps complete');
+    for (const step of this.planState.steps.values()) {
+      // Filter to only include deps that are not yet completed/skipped
+      const deps = new Set(
+        step.dependsOn.filter(d => {
+          const depStep = this.planState.steps.get(d);
+          return depStep && depStep.status !== StepStatus.COMPLETED && depStep.status !== StepStatus.SKIPPED;
+        })
+      );
+      if (deps.size === 0 && step.status === StepStatus.PENDING) {
+        readyQueue.push(step);
+      } else if (step.status === StepStatus.PENDING) {
+        remainingDeps.set(step.stepNum, deps);
+      }
+    }
+
+    // Sort ready queue by position for deterministic order
+    readyQueue.sort((a, b) => a.position - b.position);
+
+    // In-flight workers: stepNum -> Promise<{step, outcome, workerId, entryId}>
+    type InFlightResult = {
+      step: StepState;
+      outcome: WorkerOutcome;
+      workerId: string;
+      entryId: string;
+    };
+    const inFlight = new Map<number, Promise<InFlightResult>>();
+
+    try {
+      while (readyQueue.length > 0 || inFlight.size > 0) {
+        iteration++;
+        if (iteration > this.config.maxIterations) {
+          this.log('warning', 'Max iterations reached');
           break;
         }
 
-        // Get ready steps
-        const readySteps = this.planState.getReadySteps();
+        // Dispatch up to maxWorkers
+        while (readyQueue.length > 0 && inFlight.size < this.config.maxWorkers) {
+          const step = readyQueue.shift()!;
+          const workerId = uuidv4().slice(0, 8);
 
-        if (readySteps.length === 0) {
-          // Check for deadlock
-          deadlockCounter++;
-          if (deadlockCounter >= this.config.deadlockThreshold) {
-            // CRITICAL: Deadlock is a fatal condition - record it properly
-            const stepStatuses = Array.from(this.planState.steps.values())
-              .map(s => `Step ${s.stepNum}: ${s.status}${s.lastError ? ` (${s.lastError.slice(0, 50)})` : ''}`)
-              .join(', ');
-            const deadlockError = `Deadlock detected after ${deadlockCounter} iterations. No ready steps. Step states: ${stepStatuses}`;
-            this.log('error', deadlockError);
-            // Store the error for the result
-            lastResponse = deadlockError;
-            break;
-          }
+          this.log('debug', `Dispatching step ${step.stepNum}: ${step.objective.slice(0, 50)}`);
 
-          // Check for stuck steps
-          const stuckSteps = this.planState.getStuckSteps();
-          if (stuckSteps.length > 0) {
-            // Try to recover stuck steps
-            for (const stuckStep of stuckSteps) {
-              if (stuckStep.status === StepStatus.FAILED) {
-                if (stuckStep.attemptCount >= this.config.maxRetriesPerStep) {
-                  this.planState.markStepSkipped(stuckStep.stepNum, 'Max retries exceeded');
-                  this.stagnation.resetStep(stuckStep.stepNum);
-                  // Emit STEP_SKIPPED event for stuck step recovery
-                  this.publish(createEvent('step_skipped', {
-                    objective: stuckStep.objective,
-                    reason: 'Max retries exceeded (stuck step recovery)',
-                  }, stuckStep.stepNum));
-                } else {
-                  this.planState.resetStepForRetry(stuckStep.stepNum);
+          const workItem = workItemFromStepState(step, plan.goal);
+          const entryId = this.ledger.recordDispatch(step.stepNum, workItem, workerId);
+          this.planState.markStepInProgress(step.stepNum, workerId);
+
+          this.publish(createEvent('step_started', {
+            objective: step.objective,
+            workerId,
+            dependsOn: step.dependsOn,
+          }, step.stepNum));
+
+          // Launch worker asynchronously
+          const workerPromise = this.executeWorker(
+            step,
+            workItem,
+            context,
+            behavioralRules,
+            workerId,
+            entryId
+          );
+
+          inFlight.set(step.stepNum, workerPromise);
+        }
+
+        if (inFlight.size === 0) {
+          // No work in flight and no ready steps - check for blocked steps
+          if (remainingDeps.size > 0) {
+            this.log('warning', 'No ready steps but dependencies remain - possible deadlock');
+            // Try to recover by skipping failed steps
+            for (const step of this.planState.steps.values()) {
+              if (step.status === StepStatus.FAILED && step.attemptCount >= this.config.maxRetriesPerStep) {
+                this.planState.markStepSkipped(step.stepNum, 'Max retries exceeded');
+                this.publish(createEvent('step_skipped', {
+                  objective: step.objective,
+                  reason: 'Max retries exceeded',
+                }, step.stepNum));
+                // Update remaining deps
+                for (const [stepNum, deps] of remainingDeps) {
+                  deps.delete(step.stepNum);
+                  if (deps.size === 0) {
+                    remainingDeps.delete(stepNum);
+                    const unblocked = this.planState.steps.get(stepNum);
+                    if (unblocked && unblocked.status === StepStatus.PENDING) {
+                      readyQueue.push(unblocked);
+                    }
+                  }
                 }
               }
+            }
+            if (readyQueue.length === 0) {
+              lastResponse = 'Deadlock: no steps can proceed';
+              break;
             }
           }
           continue;
         }
 
-        deadlockCounter = 0;
+        // Wait for any worker to complete
+        const completed = await Promise.race(inFlight.values());
+        inFlight.delete(completed.step.stepNum);
 
-        // Execute first ready step
-        const step = readySteps[0];
-        const workerId = uuidv4().slice(0, 8);
+        const { step, outcome, entryId } = completed;
 
-        this.log('debug', `Executing step ${step.stepNum}: ${step.objective.slice(0, 50)}`);
+        // Merge WorkerContext into ContextWindow (completion order)
+        for (const item of outcome.contextItems) {
+          context.appendItem(item);
+        }
+        for (const file of outcome.filesRead) {
+          context.markFileRead(file);
+        }
 
-        // Create work item
-        const workItem = workItemFromStepState(step);
+        this.emitContextTelemetry(context, step.stepNum);
 
-        // Record dispatch
-        const entryId = this.ledger.recordDispatch(step.stepNum, workItem, workerId);
-        this.planState.markStepInProgress(step.stepNum, workerId);
+        // Update metrics
+        this.totalToolCalls += outcome.metrics.toolCallsMade;
+        this.totalLlmCalls += outcome.metrics.llmCallsMade;
 
-        // Emit STEP_STARTED event
-        this.publish(createEvent('step_started', {
-          objective: step.objective,
-          workerId,
-        }, step.stepNum));
-
-        try {
-          // Execute work (pass workspace root for context in LLM prompts)
-          const workspaceRoot = this.toolRegistry.getWorkingDir();
-          const outcome = await this.worker.execute(
-            context,
-            workItem,
-            this.planState.version,
-            behavioralRules,
-            workspaceRoot
-          );
-
-          // Emit context telemetry after step execution
-          this.emitContextTelemetry(context, step.stepNum);
-
-          // Update metrics
-          this.totalToolCalls += outcome.metrics.toolCallsMade;
-          this.totalLlmCalls += outcome.metrics.llmCallsMade;
-
-          // Check stagnation
-          const signal = this.stagnation.check(step.stepNum, this.ledger, outcome);
-          if (signal.detected) {
-            this.log('warning', `Stagnation detected: ${signal.reason}`);
-            const action = this.stagnation.getEscalationAction(signal, this.planState);
-            if (action.action === 'skip' && action.stepNum !== undefined) {
-              this.planState.markStepSkipped(action.stepNum, signal.reason);
-              this.stagnation.resetStep(action.stepNum);
-              // Emit STEP_SKIPPED event for stagnation
-              this.publish(createEvent('step_skipped', {
-                objective: step.objective,
-                reason: `Stagnation: ${signal.reason}`,
-              }, action.stepNum));
-              continue;
-            }
-          }
-
-          // Process outcome
-          if (outcome.needsUserInput && outcome.userPrompt) {
-            // Pause for user input
-            this.ledger.recordAwaitingUser(entryId, outcome.userPrompt);
-            this.planState.markStepAwaitingUser(step.stepNum, uuidv4().slice(0, 8));
-            paused = true;
-            userPrompt = outcome.userPrompt;
-            break;
-          }
-
-          if (outcome.success) {
-            this.ledger.recordCompletion(entryId, outcome);
-            this.planState.markStepComplete(step.stepNum, outcome.finalResponse ?? 'Completed');
-            this.stagnation.resetStep(step.stepNum);
-            lastResponse = outcome.finalResponse ?? '';
-
-            // Emit STEP_COMPLETED event (no truncation - observability needs full context)
-            this.publish(createEvent('step_completed', {
+        // Check stagnation
+        const signal = this.stagnation.check(step.stepNum, this.ledger, outcome);
+        if (signal.detected) {
+          this.log('warning', `Stagnation detected: ${signal.reason}`);
+          const action = this.stagnation.getEscalationAction(signal, this.planState);
+          if (action.action === 'skip' && action.stepNum !== undefined) {
+            this.planState.markStepSkipped(action.stepNum, signal.reason);
+            this.stagnation.resetStep(action.stepNum);
+            this.publish(createEvent('step_skipped', {
               objective: step.objective,
-              finalResponse: outcome.finalResponse ?? '',
-              toolCalls: outcome.metrics.toolCallsMade,
-              llmCalls: outcome.metrics.llmCallsMade,
-              durationMs: outcome.metrics.durationMs,
-            }, step.stepNum));
-
-            // Emit TOOL_CALL events for successful tools (no truncation for observability)
-            for (const fact of outcome.facts) {
-              if (fact.source === FactSource.TOOL && fact.toolName) {
-                this.publish(createEvent('tool_call', {
-                  toolName: fact.toolName,
-                  arguments: {}, // Tool args not captured in facts - would need worker to emit these
-                  result: String(fact.value),
-                  success: true,
-                  durationMs: 0, // Duration not captured in facts
-                }, step.stepNum));
-              }
-            }
-
-            // Ingest facts
-            for (const fact of outcome.facts) {
-              this.knowledge.upsert(fact);
-            }
-          } else {
-            this.ledger.recordCompletion(entryId, outcome);
-            this.planState.markStepFailed(step.stepNum, outcome.error ?? 'Unknown error');
-
-            // Emit STEP_FAILED event with full error details
-            this.publish(createEvent('step_failed', {
-              objective: step.objective,
-              error: outcome.error ?? 'Unknown error',
-              toolErrors: outcome.toolErrors,
-              terminationReason: outcome.terminationReason,
-            }, step.stepNum));
-
-            // Emit TOOL_CALL events for tool errors (no truncation - observability needs full context)
-            for (const toolError of outcome.toolErrors) {
-              this.publish(createEvent('tool_call', {
-                toolName: 'unknown',
-                arguments: {},
-                result: toolError,
-                success: false,
-                durationMs: 0,
-                error: toolError,
-              }, step.stepNum));
-            }
-
-            // Check if we should retry
-            if (step.attemptCount >= this.config.maxRetriesPerStep) {
-              this.planState.markStepSkipped(step.stepNum, 'Max retries exceeded');
-              this.stagnation.resetStep(step.stepNum);
-              // Emit STEP_SKIPPED event
-              this.publish(createEvent('step_skipped', {
-                objective: step.objective,
-                reason: 'Max retries exceeded',
-              }, step.stepNum));
-            }
+              reason: `Stagnation: ${signal.reason}`,
+            }, action.stepNum));
+            this.promoteReadySteps(action.stepNum, remainingDeps, readyQueue);
+            continue;
           }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const stack = error instanceof Error ? error.stack : undefined;
+        }
 
-          // CRITICAL: Log with full context and NEVER silently swallow
-          this.log('error', `Step ${step.stepNum} threw exception: ${message}`, {
-            stepNum: step.stepNum,
-            objective: step.objective,
-            stack,
-          });
+        // Process outcome
+        if (outcome.needsUserInput && outcome.userPrompt) {
+          this.ledger.recordAwaitingUser(entryId, outcome.userPrompt);
+          this.planState.markStepAwaitingUser(step.stepNum, uuidv4().slice(0, 8));
+          paused = true;
+          userPrompt = outcome.userPrompt;
+          break;
+        }
 
-          // Emit STEP_FAILED event with full stack trace for observability
-          this.publish(createEvent('step_failed', {
+        if (outcome.success) {
+          this.ledger.recordCompletion(entryId, outcome);
+          this.planState.markStepComplete(step.stepNum, outcome.finalResponse ?? 'Completed');
+          this.stagnation.resetStep(step.stepNum);
+          lastResponse = outcome.finalResponse ?? '';
+
+          this.publish(createEvent('step_completed', {
             objective: step.objective,
-            error: `Exception: ${message}`,
-            stack,
-            terminationReason: `exception:${message}`,
+            finalResponse: outcome.finalResponse ?? '',
+            toolCalls: outcome.metrics.toolCallsMade,
+            llmCalls: outcome.metrics.llmCallsMade,
+            durationMs: outcome.metrics.durationMs,
           }, step.stepNum));
 
-          // Record the failure with the actual error message
-          this.planState.markStepFailed(step.stepNum, `Exception: ${message}`);
+          for (const fact of outcome.facts) {
+            if (fact.source === FactSource.TOOL && fact.toolName) {
+              this.publish(createEvent('tool_call', {
+                toolName: fact.toolName,
+                arguments: {},
+                result: String(fact.value),
+                success: true,
+                durationMs: 0,
+              }, step.stepNum));
+            }
+            this.knowledge.upsert(fact);
+          }
 
-          // Also record in ledger so it shows up in history
-          this.ledger.recordCompletion(entryId, {
-            workId: workItem.workId,
-            stepNum: step.stepNum,
-            baseVersion: this.planState.version,
-            success: false,
-            error: `Exception: ${message}`,
-            toolErrors: [],
-            isRefusal: outcome.isRefusal,
-            facts: [],
-            patchSuggestions: [],
-            metrics: { toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, llmCallsMade: 0, durationMs: 0 },
-            entityRefs: [],
-            needsUserInput: false,
-            terminationReason: `exception:${message}`,
-          });
+          // Promote steps whose deps are now satisfied
+          this.promoteReadySteps(step.stepNum, remainingDeps, readyQueue);
+        } else {
+          this.ledger.recordCompletion(entryId, outcome);
+          this.planState.markStepFailed(step.stepNum, outcome.error ?? 'Unknown error');
 
-          // IMPORTANT: If this is the only step and it failed, capture the error in lastResponse
-          if (Array.from(this.planState.steps.values()).every(s => s.status === StepStatus.FAILED || s.status === StepStatus.SKIPPED)) {
-            lastResponse = `All steps failed. Last error: ${message}`;
+          this.publish(createEvent('step_failed', {
+            objective: step.objective,
+            error: outcome.error ?? 'Unknown error',
+            toolErrors: outcome.toolErrors,
+            terminationReason: outcome.terminationReason,
+          }, step.stepNum));
+
+          for (const toolError of outcome.toolErrors) {
+            this.publish(createEvent('tool_call', {
+              toolName: 'unknown',
+              arguments: {},
+              result: toolError,
+              success: false,
+              durationMs: 0,
+              error: toolError,
+            }, step.stepNum));
+          }
+
+          // Check retry or skip
+          if (step.attemptCount >= this.config.maxRetriesPerStep) {
+            this.planState.markStepSkipped(step.stepNum, 'Max retries exceeded');
+            this.stagnation.resetStep(step.stepNum);
+            this.publish(createEvent('step_skipped', {
+              objective: step.objective,
+              reason: 'Max retries exceeded',
+            }, step.stepNum));
+            // Skipped step also satisfies soft deps
+            this.promoteReadySteps(step.stepNum, remainingDeps, readyQueue);
+          } else {
+            // Reset for retry - add back to ready queue
+            this.planState.resetStepForRetry(step.stepNum);
+            const retryStep = this.planState.steps.get(step.stepNum);
+            if (retryStep) {
+              readyQueue.push(retryStep);
+              readyQueue.sort((a, b) => a.position - b.position);
+            }
           }
         }
       }
@@ -431,7 +425,6 @@ export class Wizard {
       this.stagnation.cleanupAll();
     }
 
-    // Emit final context telemetry
     this.emitContextTelemetry(context);
 
     // Build result
@@ -450,7 +443,6 @@ export class Wizard {
       ? lastResponse || 'Plan completed successfully'
       : lastResponse || `Plan did not achieve goal. Completed: ${stepsCompleted}, Skipped: ${stepsSkipped}, Failed: ${stepsFailed}`;
 
-    // Emit GOAL_ACHIEVED or GOAL_ABORTED event
     if (success) {
       this.publish(createEvent('goal_achieved', {
         goal: this.planState.goal,
@@ -483,6 +475,89 @@ export class Wizard {
       paused,
       userPrompt,
     };
+  }
+
+  /**
+   * Execute a single worker and handle exceptions.
+   */
+  private async executeWorker(
+    step: StepState,
+    workItem: ReturnType<typeof workItemFromStepState>,
+    context: ContextWindow,
+    behavioralRules: string,
+    workerId: string,
+    entryId: string
+  ): Promise<{ step: StepState; outcome: WorkerOutcome; workerId: string; entryId: string }> {
+    try {
+      const workspaceRoot = this.toolRegistry.getWorkingDir();
+      const outcome = await this.worker.execute(
+        context,
+        workItem,
+        this.planState.version,
+        behavioralRules,
+        workspaceRoot
+      );
+      return { step, outcome, workerId, entryId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+
+      this.log('error', `Step ${step.stepNum} threw exception: ${message}`, {
+        stepNum: step.stepNum,
+        objective: step.objective,
+        stack,
+      });
+
+      this.publish(createEvent('step_failed', {
+        objective: step.objective,
+        error: `Exception: ${message}`,
+        stack,
+        terminationReason: `exception:${message}`,
+      }, step.stepNum));
+
+      // Return a failed outcome
+      const outcome: WorkerOutcome = {
+        workId: workItem.workId,
+        stepNum: step.stepNum,
+        baseVersion: this.planState.version,
+        success: false,
+        error: `Exception: ${message}`,
+        toolErrors: [],
+        isRefusal: false,
+        facts: [],
+        patchSuggestions: [],
+        metrics: { toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, llmCallsMade: 0, durationMs: 0 },
+        entityRefs: [],
+        needsUserInput: false,
+        terminationReason: `exception:${message}`,
+        contextItems: [],
+        filesRead: [],
+      };
+
+      return { step, outcome, workerId, entryId };
+    }
+  }
+
+  /**
+   * Promote steps whose dependencies are now satisfied.
+   */
+  private promoteReadySteps(
+    completedStepNum: number,
+    remainingDeps: Map<number, Set<number>>,
+    readyQueue: StepState[]
+  ): void {
+    for (const [stepNum, deps] of remainingDeps) {
+      deps.delete(completedStepNum);
+      if (deps.size === 0) {
+        remainingDeps.delete(stepNum);
+        const step = this.planState.steps.get(stepNum);
+        if (step && step.status === StepStatus.PENDING) {
+          readyQueue.push(step);
+        }
+      }
+    }
+    // Keep sorted by position
+    readyQueue.sort((a, b) => a.position - b.position);
   }
 
   /**

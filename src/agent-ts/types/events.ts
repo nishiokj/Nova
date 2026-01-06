@@ -116,6 +116,7 @@ export interface GoalStartedData {
     objective: string;
     phase?: 'discovery' | 'execution';
     toolHint?: string;
+    dependsOn?: number[];
   }>;
 }
 
@@ -144,6 +145,10 @@ export interface StepStartedData {
   objective: string;
   phase?: 'discovery' | 'execution';
   toolHint?: string;
+  /** Step numbers this step depends on */
+  dependsOn?: number[];
+  /** Worker ID assigned to this step */
+  workerId?: string;
 }
 
 /**

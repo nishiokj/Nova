@@ -260,6 +260,7 @@ function createRequestFromEvents(
               phase: mapPhase(s.phase),
               toolHint: s.tool_hint as string | undefined,
               required: true,
+              dependsOn: (s.depends_on as number[]) ?? [],
             }
             stepMap.set(sNum, step)
           }
@@ -273,6 +274,10 @@ function createRequestFromEvents(
           if (existing) {
             existing.status = 'in_progress'
             existing.objective = (data.objective as string) ?? existing.objective
+            // Update dependsOn if provided
+            if (data.depends_on) {
+              existing.dependsOn = data.depends_on as number[]
+            }
           } else {
             stepMap.set(stepNum, {
               stepNum,
@@ -281,6 +286,7 @@ function createRequestFromEvents(
               phase: mapPhase(data.phase),
               toolHint: data.tool_hint as string | undefined,
               required: true,
+              dependsOn: (data.depends_on as number[]) ?? [],
             })
           }
         }

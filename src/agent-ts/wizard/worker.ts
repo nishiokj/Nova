@@ -11,6 +11,7 @@ import type { ToolResult, ToolDefinition } from '../types/tools.js';
 import type { WorkItem } from './work-item.js';
 import type { KnowledgeFact, FactSource } from './knowledge.js';
 import type { WizardEvent } from '../types/events.js';
+import type { ContextItem } from '../types/context.js';
 import { ContextWindow } from '../types/context.js';
 import { createEvent } from '../types/events.js';
 import { buildSystemMessage } from './context.js';
@@ -78,8 +79,8 @@ export interface PatchSuggestion {
 /**
  * Canonical output from Worker.
  *
- * NOTE: contextMessages and readFiles have been removed.
- * Worker now mutates ContextWindow directly.
+ * Worker builds an append-only local context during execution.
+ * Wizard merges contextItems into the shared ContextWindow on step completion.
  */
 export interface WorkerOutcome {
   // Identity
@@ -107,6 +108,10 @@ export interface WorkerOutcome {
   userPrompt?: Record<string, unknown>;
   // Internal tracking
   terminationReason: string;
+  // Context items accumulated during execution (for Wizard to merge)
+  contextItems: ContextItem[];
+  // Files read during execution (for dedup tracking)
+  filesRead: string[];
 }
 
 export function createWorkerOutcome(params: {
@@ -127,6 +132,8 @@ export function createWorkerOutcome(params: {
     entityRefs: [],
     needsUserInput: false,
     terminationReason: '',
+    contextItems: [],
+    filesRead: [],
   };
 }
 
@@ -442,6 +449,9 @@ export class Worker {
 
   /**
    * Main execution loop.
+   *
+   * Uses local overlay pattern: Worker reads from base context + local items,
+   * writes only to local items. Wizard merges on step completion.
    */
   private async executeLoop(
     context: ContextWindow,
@@ -452,15 +462,20 @@ export class Worker {
   ): Promise<void> {
     const maxIterations = Math.min(this.config.maxIterations, workItem.bounds.maxLlmCalls);
 
+    // LOCAL OVERLAY: Snapshot base context, accumulate locally
+    const baseItems = context.getItemsForLLM();
+    const localItems: ContextItem[] = [];
+    const localReadFiles = new Set(context.getReadFilesArray());
+
     // PRE-LOOP: Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
       for (const targetPath of workItem.targetPaths) {
-        if (context.hasReadFile(targetPath)) continue;
+        if (localReadFiles.has(targetPath)) continue;
 
         try {
           const result = await this.toolRegistry.execute('read', { path: targetPath });
           if (result.isSuccess) {
-            context.markFileRead(targetPath);
+            localReadFiles.add(targetPath);
             outcome.entityRefs.push(targetPath);
             outcome.metrics.toolCallsMade++;
             outcome.metrics.toolCallsSucceeded++;
@@ -468,7 +483,12 @@ export class Worker {
             const fileContent = typeof result.output === 'string'
               ? result.output
               : JSON.stringify(result.output);
-            context.addFileContent(targetPath, fileContent.slice(0, 10000));
+            localItems.push({
+              type: 'file_content',
+              path: targetPath,
+              content: fileContent.slice(0, 10000),
+              timestamp: Date.now(),
+            });
 
             this.log('debug', `Auto-read target file: ${targetPath}`, {
               stepNum: workItem.stepNum,
@@ -504,7 +524,7 @@ export class Worker {
 
       // Build system message
       const systemMessage = buildSystemMessage(
-        workItem.objective, // Use objective as goal in system message
+        workItem.goal,
         workItem.objective,
         workItem.stepNum,
         behavioralRules,
@@ -514,10 +534,11 @@ export class Worker {
       const toolDefs = this.toolRegistry.getDefinitions();
       const workingDir = (this.toolRegistry as any).getWorkingDir?.() ?? '';
 
+      // Build messages: base context + local items (overlay pattern)
+      const localItemsForLLM = this.convertLocalItemsForLLM(localItems);
+      const allContextItems = [...baseItems, ...localItemsForLLM];
 
-      // Build messages for LLM from ContextWindow
-      const contextItems = context.getItemsForLLM();
-      const hasUserInput = contextItems.some((item) => {
+      const hasUserInput = allContextItems.some((item) => {
         if (item.type === 'message') {
           return (item as Record<string, unknown>).role === 'user';
         }
@@ -529,29 +550,31 @@ export class Worker {
       ];
 
       // If no prior user input, add the objective as a user message
-      // CRITICAL: Also add to context so subsequent iterations don't re-add it
       if (!hasUserInput) {
         const objectiveMessage = `Execute the following objective:\n\n${workItem.objective}`;
         messages.push({
           role: 'user',
           content: objectiveMessage,
         });
-        // Add to context so hasUserInput is true on next iteration
-        context.addMessage('user', objectiveMessage);
+        // Add to local items so hasUserInput is true on next iteration
+        localItems.push({
+          type: 'message',
+          role: 'user',
+          content: objectiveMessage,
+          timestamp: Date.now(),
+        });
       }
 
-      // Add context items (converted from ContextWindow)
-      for (const item of contextItems) {
+      // Add context items
+      for (const item of allContextItems) {
         if (item.type === 'message') {
           messages.push({
             role: (item as Record<string, unknown>).role,
             content: (item as Record<string, unknown>).content,
           });
         } else if (item.type === 'function_call') {
-          // Function calls are handled by the adapter
           messages.push(item);
         } else if (item.type === 'function_call_output') {
-          // Function call outputs are handled by the adapter
           messages.push(item);
         }
       }
@@ -568,11 +591,6 @@ export class Worker {
       const llmDurationMs = Date.now() - llmStartTime;
       outcome.metrics.llmCallsMade++;
 
-      // Update context metrics
-      if (response.usage) {
-        context.updateMetrics(response.usage.promptTokens, response.usage.completionTokens);
-      }
-
       this.emitLlmCallEvent({
         response,
         messages,
@@ -585,23 +603,47 @@ export class Worker {
       const content = response.content ?? '';
       const toolCalls = response.toolCalls ?? [];
 
-      // Add assistant message to context
+      // Add assistant message to local items
       if (toolCalls.length > 0) {
-        // Add assistant message with text content if present
         if (content) {
-          context.addMessage('assistant', content);
+          localItems.push({
+            type: 'message',
+            role: 'assistant',
+            content,
+            timestamp: Date.now(),
+          });
         }
-        // Add function calls to context
         for (const tc of toolCalls) {
-          context.addFunctionCall(tc.id, tc.name, tc.arguments);
+          localItems.push({
+            type: 'function_call',
+            callId: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+            timestamp: Date.now(),
+          });
         }
       } else {
-        context.addMessage('assistant', content);
+        localItems.push({
+          type: 'message',
+          role: 'assistant',
+          content,
+          timestamp: Date.now(),
+        });
       }
+
+      // Check for action markers FIRST (before tool processing)
+      // This ensures [FINAL] is respected even if LLM also emitted tool calls
+      const action = extractAction(content);
 
       // Handle tool calls
       if (toolCalls.length > 0) {
-        const exchanges = await this.processToolCalls(toolCalls, context, outcome, workItem.stepNum);
+        const exchanges = await this.processToolCalls(
+          toolCalls,
+          localItems,
+          localReadFiles,
+          outcome,
+          workItem.stepNum
+        );
 
         // Check if any tool requested user input
         for (const exchange of exchanges) {
@@ -611,6 +653,9 @@ export class Worker {
               outcome.needsUserInput = true;
               outcome.userPrompt = parsed;
               outcome.terminationReason = 'user_input_required';
+              // Copy local state to outcome before returning
+              outcome.contextItems = localItems;
+              outcome.filesRead = Array.from(localReadFiles);
               return;
             } catch {
               // Not a user prompt
@@ -618,12 +663,27 @@ export class Worker {
           }
         }
 
-        // Tool calls were made - continue to next iteration for LLM to process results
+        // If [FINAL] was in content, terminate after processing tools
+        if (action === WorkerAction.FINAL) {
+          if (isRefusalResponse(content)) {
+            outcome.isRefusal = true;
+            outcome.error = 'LLM refused to complete the task';
+            outcome.terminationReason = 'refusal';
+          } else {
+            outcome.success = true;
+            outcome.finalResponse = content.replace(/\[FINAL\]/gi, '').trim();
+            outcome.terminationReason = 'final';
+          }
+          outcome.contextItems = localItems;
+          outcome.filesRead = Array.from(localReadFiles);
+          return;
+        }
+
+        // Tool calls were made, no [FINAL] - continue to next iteration
         continue;
       }
 
-      // No tool calls - check for action markers in text response
-      const action = extractAction(content);
+      // No tool calls - check action markers (already extracted above)
 
       if (action === WorkerAction.FINAL) {
         if (isRefusalResponse(content)) {
@@ -635,6 +695,8 @@ export class Worker {
           outcome.finalResponse = content.replace(/\[FINAL\]/gi, '').trim();
           outcome.terminationReason = 'final';
         }
+        outcome.contextItems = localItems;
+        outcome.filesRead = Array.from(localReadFiles);
         return;
       }
 
@@ -646,6 +708,8 @@ export class Worker {
             outcome.needsUserInput = true;
             outcome.userPrompt = parsed;
             outcome.terminationReason = 'user_input_required';
+            outcome.contextItems = localItems;
+            outcome.filesRead = Array.from(localReadFiles);
             return;
           } catch {
             // Invalid JSON
@@ -663,6 +727,8 @@ export class Worker {
         outcome.success = true;
         outcome.finalResponse = content;
         outcome.terminationReason = 'implicit_final';
+        outcome.contextItems = localItems;
+        outcome.filesRead = Array.from(localReadFiles);
         return;
       }
 
@@ -681,6 +747,59 @@ export class Worker {
       outcome.terminationReason = 'iterations_exhausted';
       outcome.error = 'Maximum iterations reached without completion';
     }
+
+    // Always copy local state to outcome
+    outcome.contextItems = localItems;
+    outcome.filesRead = Array.from(localReadFiles);
+  }
+
+  /**
+   * Convert local ContextItems to LLM format (mirrors ContextWindow.getItemsForLLM).
+   */
+  private convertLocalItemsForLLM(items: ContextItem[]): Array<Record<string, unknown>> {
+    const result: Array<Record<string, unknown>> = [];
+
+    for (const item of items) {
+      switch (item.type) {
+        case 'message':
+          result.push({
+            type: 'message',
+            role: item.role,
+            content: item.content,
+          });
+          break;
+        case 'function_call':
+          result.push({
+            type: 'function_call',
+            call_id: item.callId,
+            name: item.name,
+            arguments: JSON.stringify(item.arguments),
+          });
+          break;
+        case 'function_call_output':
+          result.push({
+            type: 'function_call_output',
+            call_id: item.callId,
+            output: item.output,
+          });
+          break;
+        case 'file_content':
+          result.push({
+            type: 'message',
+            role: 'user',
+            content: `[File: ${item.path}]\n\`\`\`${item.language ?? ''}\n${item.content}\n\`\`\``,
+          });
+          break;
+        case 'reasoning':
+          result.push({
+            type: 'reasoning',
+            content: item.content,
+          });
+          break;
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -793,12 +912,13 @@ export class Worker {
   }
 
   /**
-   * Process tool call results and update context.
+   * Process tool call results and update local items.
    */
   private processToolResult(
     call: { id: string; name: string; arguments: Record<string, unknown> },
     execResult: { exchange: ToolExchange; result: ToolResult | null; durationMs: number },
-    context: ContextWindow,
+    localItems: ContextItem[],
+    localReadFiles: Set<string>,
     outcome: WorkerOutcome
   ): void {
     const { exchange, result } = execResult;
@@ -810,7 +930,7 @@ export class Worker {
 
       // Track read files
       if (call.name.toLowerCase() === 'read' && call.arguments.path) {
-        context.markFileRead(String(call.arguments.path));
+        localReadFiles.add(String(call.arguments.path));
       }
     } else {
       outcome.metrics.toolCallsFailed++;
@@ -819,22 +939,25 @@ export class Worker {
       }
     }
 
-    // Add function call output to context
-    context.addFunctionCallOutput(
-      call.id,
-      exchange.resultContent,
-      !exchange.success,
-      execResult.durationMs
-    );
+    // Add function call output to local items
+    localItems.push({
+      type: 'function_call_output',
+      callId: call.id,
+      output: exchange.resultContent,
+      isError: !exchange.success,
+      durationMs: execResult.durationMs,
+      timestamp: Date.now(),
+    });
   }
 
   /**
-   * Process tool calls and add results to context.
+   * Process tool calls and add results to local items.
    * Parallelizes read-only tools for efficiency.
    */
   private async processToolCalls(
     toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
-    context: ContextWindow,
+    localItems: ContextItem[],
+    localReadFiles: Set<string>,
     outcome: WorkerOutcome,
     stepNum?: number
   ): Promise<ToolExchange[]> {
@@ -854,12 +977,18 @@ export class Worker {
         };
         exchanges.push(exchange);
         outcome.toolErrors.push(`Disallowed tool: ${call.name}`);
-        // Disallowed tools are immediately 'completed' with error (no 'starting' event)
         this.emitToolCallEvent(call.name, call.arguments, 'completed', stepNum, exchange.resultContent, false, 0);
         this.log('warning', `Disallowed tool attempted: ${call.name}`, { stepNum, args: call.arguments });
 
-        // Add error result to context
-        context.addFunctionCallOutput(call.id, exchange.resultContent, true, 0);
+        // Add error result to local items
+        localItems.push({
+          type: 'function_call_output',
+          callId: call.id,
+          output: exchange.resultContent,
+          isError: true,
+          durationMs: 0,
+          timestamp: Date.now(),
+        });
       } else {
         validCalls.push(call);
       }
@@ -904,13 +1033,13 @@ export class Worker {
           const call = group.calls[i];
           const execResult = results[i];
           exchanges.push(execResult.exchange);
-          this.processToolResult(call, execResult, context, outcome);
+          this.processToolResult(call, execResult, localItems, localReadFiles, outcome);
         }
       } else {
         for (const call of group.calls) {
           const execResult = await this.executeSingleTool(call, stepNum);
           exchanges.push(execResult.exchange);
-          this.processToolResult(call, execResult, context, outcome);
+          this.processToolResult(call, execResult, localItems, localReadFiles, outcome);
         }
       }
     }

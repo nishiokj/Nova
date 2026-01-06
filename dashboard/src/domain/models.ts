@@ -24,6 +24,8 @@ export interface PlanStep {
   required: boolean;
   durationMs?: number;
   error?: string;
+  /** Step numbers this step depends on (prerequisites) */
+  dependsOn?: number[];
   // Nested calls for this step (assigned by mapper from flat arrays)
   toolCalls?: ToolCall[];
   llmCalls?: LLMCall[];

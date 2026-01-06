@@ -243,6 +243,21 @@ export class ContextWindow {
     this._readFiles.add(path);
   }
 
+  /**
+   * Append a pre-built context item (used by Wizard to merge Worker results).
+   */
+  appendItem(item: ContextItem): void {
+    this._items.push(item);
+    this._version++;
+  }
+
+  /**
+   * Get read files as array (for Worker snapshot).
+   */
+  getReadFilesArray(): string[] {
+    return Array.from(this._readFiles);
+  }
+
   // =========================================================================
   // Query Methods
   // =========================================================================

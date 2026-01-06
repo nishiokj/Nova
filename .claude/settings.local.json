@@ -82,7 +82,10 @@
       "Bash(kill:*)",
       "Bash(~/.bun/bin/bun install:*)",
       "Bash(env:*)",
-      "Bash(bun test:*)"
+      "Bash(bun test:*)",
+      "Bash(./node_modules/.bin/tsc:*)",
+      "Bash(src/agent-ts/node_modules/.bin/tsc:*)",
+      "Bash(/Users/jevinnishioka/Desktop/jesus/src/agent-ts/node_modules/.bin/tsc:*)"
     ],
     "deny": []
   }

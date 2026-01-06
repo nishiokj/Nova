@@ -176,7 +176,7 @@
     },
     "standard": {
       "provider": "openai",
-      "model": "gpt-5.2",
+      "model": "gpt-5-mini",
       "max_tokens": 16000,
       "temperature": 0.7,
       "failover_models": [
@@ -198,7 +198,7 @@
     },
     "advanced": {
       "provider": "openai",
-      "model": "gpt-5.1",
+      "model": "gpt-5.2",
       "max_tokens": 32000,
       "temperature": 0.7,
       "failover_models": [

@@ -253,7 +253,7 @@ describe('Wizard', () => {
     it('should detect deadlock when no steps are ready', async () => {
       // Create a plan where step 1 depends on step 2 and vice versa (circular)
       const llm = createSucceedingLLM();
-      const wizard = new Wizard(toolRegistry, llm, { deadlockThreshold: 2 });
+      const wizard = new Wizard(toolRegistry, llm, {});
 
       // Manually create plan with circular deps
       const plan: WizardPlan = {
@@ -288,7 +288,6 @@ describe('Wizard', () => {
       const llm = createFailingLLM();
       const config: Partial<WizardConfig> = {
         maxRetriesPerStep: 0,
-        deadlockThreshold: 3,
       };
       const wizard = new Wizard(toolRegistry, llm, config);
 
@@ -308,9 +307,7 @@ describe('Wizard', () => {
       // The deadlockCounter resets to 0 when readySteps.length > 0
       // But what if getReadySteps keeps returning empty forever?
       const llm = createSucceedingLLM();
-      const config: Partial<WizardConfig> = {
-        deadlockThreshold: 2,
-      };
+      const config: Partial<WizardConfig> = {};
       const wizard = new Wizard(toolRegistry, llm, config);
 
       // Plan where step depends on non-existent step
