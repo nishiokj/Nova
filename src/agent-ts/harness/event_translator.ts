@@ -84,13 +84,41 @@ export function translateWizardEvent(
     }
 
     case 'tool_call': {
-      const toolData = data as { toolName?: string; arguments?: Record<string, unknown>; success?: boolean };
+      const toolData = data as {
+        toolName?: string;
+        arguments?: Record<string, unknown>;
+        phase?: 'starting' | 'completed';
+        success?: boolean;
+        durationMs?: number;
+      };
+      // Phase 'starting' = tool is about to run, 'completed' = tool finished
+      const phase = toolData.phase ?? 'starting';
+      let message: string;
+      if (phase === 'starting') {
+        message = `Using ${toolData.toolName || 'tool'}...`;
+      } else {
+        // Completed - show brief status, will be replaced by synthesis message
+        const status = toolData.success ? '✓' : '✗';
+        const duration = toolData.durationMs !== undefined ? ` (${toolData.durationMs}ms)` : '';
+        message = `${status} ${toolData.toolName || 'tool'}${duration}`;
+      }
       return {
         type: 'progress',
         data: {
           request_id: requestId,
-          message: `Using ${toolData.toolName || 'tool'}...`,
+          message,
           tool_name: toolData.toolName,
+          step_number: stepNum,
+        } satisfies ProgressEventData,
+      };
+    }
+
+    case 'synthesis_started': {
+      return {
+        type: 'progress',
+        data: {
+          request_id: requestId,
+          message: 'Analyzing results...',
           step_number: stepNum,
         } satisfies ProgressEventData,
       };

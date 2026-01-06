@@ -262,16 +262,17 @@ export class Worker {
 
   /**
    * Get preview from messages, prioritizing the system prompt.
+   * Increased limit for better observability in dashboard.
    */
   private getPromptPreview(messages: Array<Record<string, unknown>>): string {
     if (!messages.length) return '';
     const first = messages[0];
     if (first.role === 'system' && typeof first.content === 'string') {
-      return first.content.slice(0, 500);
+      return first.content.slice(0, 4000);
     }
     for (const msg of messages) {
       if ((msg.role === 'user' || msg.role === 'system') && typeof msg.content === 'string') {
-        return msg.content.slice(0, 500);
+        return msg.content.slice(0, 4000);
       }
     }
     return '';
@@ -279,11 +280,12 @@ export class Worker {
 
   /**
    * Build response preview that includes tool call intent when content is blank.
+   * Increased limits for better observability.
    */
   private buildResponsePreview(content: string, toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>): string {
     // If we have text content, use it
     if (content.trim()) {
-      return content.slice(0, 500);
+      return content.slice(0, 4000);
     }
 
     // No text content - build preview from tool calls if any
@@ -291,18 +293,18 @@ export class Worker {
       return '';
     }
 
-    // Format tool calls as preview
+    // Format tool calls as preview with more detail
     const toolSummaries = toolCalls.map(tc => {
       const args = tc.arguments;
-      // Show key argument (usually 'path', 'pattern', 'query', etc.)
-      const keyArg = args.path ?? args.pattern ?? args.query ?? args.command ?? args.content?.toString().slice(0, 30);
+      // Show key argument with more context
+      const keyArg = args.path ?? args.pattern ?? args.query ?? args.command ?? args.content?.toString().slice(0, 200);
       if (keyArg) {
-        return `${tc.name}(${String(keyArg).slice(0, 50)})`;
+        return `${tc.name}(${String(keyArg).slice(0, 200)})`;
       }
       return tc.name;
     });
 
-    return `[Tools: ${toolSummaries.join(', ')}]`.slice(0, 500);
+    return `[Tools: ${toolSummaries.join(', ')}]`.slice(0, 4000);
   }
 
   /**
@@ -344,7 +346,7 @@ export class Worker {
         messageCount: messages.length,
         messagesByRole,
         systemPrompt: messages[0]?.role === 'system'
-          ? String(messages[0].content).slice(0, 2000)
+          ? String(messages[0].content).slice(0, 8000)
           : undefined,
       },
       stepNum
@@ -510,7 +512,8 @@ export class Worker {
       );
 
       const toolDefs = this.toolRegistry.getDefinitions();
-      const workingDir = this.toolRegistry.getWorkingDir();
+      const workingDir = (this.toolRegistry as any).getWorkingDir?.() ?? '';
+
 
       // Build messages for LLM from ContextWindow
       const contextItems = context.getItemsForLLM();
@@ -526,11 +529,15 @@ export class Worker {
       ];
 
       // If no prior user input, add the objective as a user message
+      // CRITICAL: Also add to context so subsequent iterations don't re-add it
       if (!hasUserInput) {
+        const objectiveMessage = `Execute the following objective:\n\n${workItem.objective}`;
         messages.push({
           role: 'user',
-          content: `Execute the following objective:\n\n${workItem.objective}`,
+          content: objectiveMessage,
         });
+        // Add to context so hasUserInput is true on next iteration
+        context.addMessage('user', objectiveMessage);
       }
 
       // Add context items (converted from ContextWindow)
@@ -611,60 +618,11 @@ export class Worker {
           }
         }
 
-        // SYNTHESIS STEP
-        const synthesisSuffix = `
-SYNTHESIS REQUIRED: Read the tool outputs above and do ONE of:
-1) Explain findings and state your next action clearly.
-2) If the objective "${workItem.objective}" is satisfied, output [FINAL] with a concise explanation.
-Do NOT call tools in this synthesis step - only analyze and explain.`;
-
-        const synthMessages = [
-          ...messages,
-          { role: 'system', content: synthesisSuffix },
-        ];
-
-        const synthStartTime = Date.now();
-        const synthResponse = await this.llm.respond({
-          messages: synthMessages as unknown as Message[],
-          tools: [],
-        });
-        const synthDurationMs = Date.now() - synthStartTime;
-        outcome.metrics.llmCallsMade++;
-
-        if (synthResponse.usage) {
-          context.updateMetrics(synthResponse.usage.promptTokens, synthResponse.usage.completionTokens);
-        }
-
-        this.emitLlmCallEvent({
-          response: synthResponse,
-          messages: synthMessages,
-          stepNum: workItem.stepNum,
-          durationMs: synthDurationMs,
-          toolDefs: [],
-          workingDir,
-        });
-
-        const synthContent = synthResponse.content ?? '';
-        context.addMessage('assistant', synthContent);
-
-        const synthAction = extractAction(synthContent);
-        if (synthAction === WorkerAction.FINAL) {
-          if (isRefusalResponse(synthContent)) {
-            outcome.isRefusal = true;
-            outcome.error = 'LLM refused to complete the task';
-            outcome.terminationReason = 'refusal';
-          } else {
-            outcome.success = true;
-            outcome.finalResponse = synthContent.replace(/\[FINAL\]/gi, '').trim();
-            outcome.terminationReason = 'final';
-          }
-          return;
-        }
-
+        // Tool calls were made - continue to next iteration for LLM to process results
         continue;
       }
 
-      // No tool calls - check for action markers
+      // No tool calls - check for action markers in text response
       const action = extractAction(content);
 
       if (action === WorkerAction.FINAL) {
@@ -727,23 +685,32 @@ Do NOT call tools in this synthesis step - only analyze and explain.`;
 
   /**
    * Emit tool_call event for observability.
+   * Phase 'starting' is emitted before execution, 'completed' after.
    */
   private emitToolCallEvent(
     toolName: string,
     args: Record<string, unknown>,
-    result: string | undefined,
-    success: boolean,
-    durationMs: number,
-    stepNum?: number
+    phase: 'starting' | 'completed',
+    stepNum?: number,
+    result?: string,
+    success?: boolean,
+    durationMs?: number
   ): void {
     if (!this.eventEmitter) return;
+
+    this.log('debug', `Emitting tool_call event: ${toolName} phase=${phase}`, {
+      stepNum,
+      success,
+      durationMs,
+    });
 
     const event = createEvent(
       'tool_call',
       {
         toolName,
         arguments: args,
-        result: result?.slice(0, 1000),
+        phase,
+        result: result?.slice(0, 10000), // Increased for observability - full tool output is critical for debugging
         success,
         durationMs,
       },
@@ -766,6 +733,9 @@ Do NOT call tools in this synthesis step - only analyze and explain.`;
       args: call.arguments,
     });
 
+    // Emit 'starting' event BEFORE execution
+    this.emitToolCallEvent(call.name, call.arguments, 'starting', stepNum);
+
     try {
       const result: ToolResult = await this.toolRegistry.execute(call.name, call.arguments);
       const toolDurationMs = Date.now() - toolStartTime;
@@ -779,7 +749,8 @@ Do NOT call tools in this synthesis step - only analyze and explain.`;
         error: result.error,
       };
 
-      this.emitToolCallEvent(call.name, call.arguments, result.output, result.isSuccess, toolDurationMs, stepNum);
+      // Emit 'completed' event AFTER execution
+      this.emitToolCallEvent(call.name, call.arguments, 'completed', stepNum, result.output, result.isSuccess, toolDurationMs);
 
       if (result.isSuccess) {
         this.log('info', `Tool success: ${call.name}`, {
@@ -809,7 +780,8 @@ Do NOT call tools in this synthesis step - only analyze and explain.`;
         error: message,
       };
 
-      this.emitToolCallEvent(call.name, call.arguments, `Error: ${message}`, false, toolDurationMs, stepNum);
+      // Emit 'completed' event for exceptions too
+      this.emitToolCallEvent(call.name, call.arguments, 'completed', stepNum, `Error: ${message}`, false, toolDurationMs);
       this.log('error', `Tool exception: ${call.name}`, {
         stepNum,
         durationMs: toolDurationMs,
@@ -882,7 +854,8 @@ Do NOT call tools in this synthesis step - only analyze and explain.`;
         };
         exchanges.push(exchange);
         outcome.toolErrors.push(`Disallowed tool: ${call.name}`);
-        this.emitToolCallEvent(call.name, call.arguments, exchange.resultContent, false, 0, stepNum);
+        // Disallowed tools are immediately 'completed' with error (no 'starting' event)
+        this.emitToolCallEvent(call.name, call.arguments, 'completed', stepNum, exchange.resultContent, false, 0);
         this.log('warning', `Disallowed tool attempted: ${call.name}`, { stepNum, args: call.arguments });
 
         // Add error result to context
@@ -906,7 +879,7 @@ Do NOT call tools in this synthesis step - only analyze and explain.`;
     let currentGroup: ToolGroup | null = null;
 
     for (const call of validCalls) {
-      const isParallel = this.toolRegistry.isParallelSafe(call.name);
+      const isParallel = (this.toolRegistry as any).isParallelSafe?.(call.name) ?? false;
 
       if (!currentGroup || currentGroup.parallel !== isParallel) {
         currentGroup = { calls: [call], parallel: isParallel };

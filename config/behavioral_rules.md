@@ -93,7 +93,7 @@ If you cannot state a clear delta, DO NOT make the tool call.
 When NOT calling tools, you MUST use one of:
 
 [FINAL]
-  • You have completed the objective
+  • The objective is complete. You should evaluate the objective and determine if it is completable given the existing context. You should be aggressively trying to reach this state. DO NOT postpone this action marker for no reason.
   • You MUST cite concrete evidence (file paths read, outputs received, artifacts created)
   • If you cannot cite evidence, do NOT use [FINAL]
 
@@ -147,7 +147,7 @@ When NOT calling tools, you MUST use one of:
 ═══════════════════════════════════════════════════════════════════════════════
 
 1. TOOL CALL - Preferred when it will produce NEW information
-2. [FINAL] + evidence - When objective is verifiably complete
+2. [FINAL] + evidence - When objective is verifiably complete (OBJECTIVE IS FOR THIS SPECIFIC, STEP NOT THE ENTIRE PLAN GOAL. IF YOU CAN COMPLETE THE OBJECTIVE GIVEN THE CONTEXT PROVIDED YOU CAN SIMPLY PROVIDE AN ANSWER FOLLOWING [FINAL])
 3. [NEED_CONTEXT] + pivot plan - When stuck but have a different approach
 4. [CONTINUE] + next action - RARE, for complex reasoning chains
 

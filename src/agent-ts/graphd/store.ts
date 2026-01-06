@@ -660,6 +660,21 @@ export class GraphStore {
     return transaction();
   }
 
+  /**
+   * Mark sessions as inactive if they haven't been accessed within maxIdleSeconds.
+   * Returns the number of sessions marked inactive.
+   */
+  markStaleSessions(maxIdleSeconds: number): number {
+    const cutoff = nowSeconds() - maxIdleSeconds;
+    const result = this.db
+      .query(
+        `UPDATE sessions SET status = 'inactive'
+         WHERE status = 'active' AND last_accessed_at < ?;`
+      )
+      .run(cutoff);
+    return result.changes;
+  }
+
   // =========================================================================
   // Conversation Message Methods
   // =========================================================================

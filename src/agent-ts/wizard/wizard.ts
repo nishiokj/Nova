@@ -321,22 +321,22 @@ export class Wizard {
             this.stagnation.resetStep(step.stepNum);
             lastResponse = outcome.finalResponse ?? '';
 
-            // Emit STEP_COMPLETED event
+            // Emit STEP_COMPLETED event (no truncation - observability needs full context)
             this.publish(createEvent('step_completed', {
               objective: step.objective,
-              finalResponse: outcome.finalResponse?.slice(0, 500) ?? '',
+              finalResponse: outcome.finalResponse ?? '',
               toolCalls: outcome.metrics.toolCallsMade,
               llmCalls: outcome.metrics.llmCallsMade,
               durationMs: outcome.metrics.durationMs,
             }, step.stepNum));
 
-            // Emit TOOL_CALL events for successful tools
+            // Emit TOOL_CALL events for successful tools (no truncation for observability)
             for (const fact of outcome.facts) {
               if (fact.source === FactSource.TOOL && fact.toolName) {
                 this.publish(createEvent('tool_call', {
                   toolName: fact.toolName,
                   arguments: {}, // Tool args not captured in facts - would need worker to emit these
-                  result: String(fact.value).slice(0, 2000),
+                  result: String(fact.value),
                   success: true,
                   durationMs: 0, // Duration not captured in facts
                 }, step.stepNum));
@@ -351,7 +351,7 @@ export class Wizard {
             this.ledger.recordCompletion(entryId, outcome);
             this.planState.markStepFailed(step.stepNum, outcome.error ?? 'Unknown error');
 
-            // Emit STEP_FAILED event
+            // Emit STEP_FAILED event with full error details
             this.publish(createEvent('step_failed', {
               objective: step.objective,
               error: outcome.error ?? 'Unknown error',
@@ -359,15 +359,15 @@ export class Wizard {
               terminationReason: outcome.terminationReason,
             }, step.stepNum));
 
-            // Emit TOOL_CALL events for tool errors
-            for (const error of outcome.toolErrors) {
+            // Emit TOOL_CALL events for tool errors (no truncation - observability needs full context)
+            for (const toolError of outcome.toolErrors) {
               this.publish(createEvent('tool_call', {
                 toolName: 'unknown',
                 arguments: {},
-                result: error.slice(0, 500),
+                result: toolError,
                 success: false,
                 durationMs: 0,
-                error: error.slice(0, 500),
+                error: toolError,
               }, step.stepNum));
             }
 
@@ -389,9 +389,17 @@ export class Wizard {
           // CRITICAL: Log with full context and NEVER silently swallow
           this.log('error', `Step ${step.stepNum} threw exception: ${message}`, {
             stepNum: step.stepNum,
-            objective: step.objective.slice(0, 100),
+            objective: step.objective,
             stack,
           });
+
+          // Emit STEP_FAILED event with full stack trace for observability
+          this.publish(createEvent('step_failed', {
+            objective: step.objective,
+            error: `Exception: ${message}`,
+            stack,
+            terminationReason: `exception:${message}`,
+          }, step.stepNum));
 
           // Record the failure with the actual error message
           this.planState.markStepFailed(step.stepNum, `Exception: ${message}`);
@@ -404,13 +412,13 @@ export class Wizard {
             success: false,
             error: `Exception: ${message}`,
             toolErrors: [],
-            isRefusal: false,
+            isRefusal: outcome.isRefusal,
             facts: [],
             patchSuggestions: [],
             metrics: { toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, llmCallsMade: 0, durationMs: 0 },
             entityRefs: [],
             needsUserInput: false,
-            terminationReason: `exception:${message.slice(0, 100)}`,
+            terminationReason: `exception:${message}`,
           });
 
           // IMPORTANT: If this is the only step and it failed, capture the error in lastResponse

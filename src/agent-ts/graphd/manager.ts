@@ -68,6 +68,10 @@ export interface GraphDConfig {
   ignoreFile: string | null;
   /** Extra patterns to ignore */
   extraIgnore: string[];
+  /** Session idle timeout in seconds (mark inactive after this) */
+  sessionIdleTimeoutS: number;
+  /** Session cleanup interval in seconds */
+  sessionCleanupIntervalS: number;
 }
 
 /**
@@ -102,6 +106,8 @@ export function createGraphDConfig(
     maxMemoryMb: opts?.maxMemoryMb ?? null,
     ignoreFile: opts?.ignoreFile ?? '.gitignore',
     extraIgnore: opts?.extraIgnore ?? [],
+    sessionIdleTimeoutS: opts?.sessionIdleTimeoutS ?? 300, // 5 minutes
+    sessionCleanupIntervalS: opts?.sessionCleanupIntervalS ?? 60, // 1 minute
   };
 }
 
@@ -126,6 +132,7 @@ export class GraphDManager {
   private paused = false;
   private reusingExisting = false;
   private lastIndexStats: Record<string, unknown> = {};
+  private sessionCleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: GraphDConfig) {
     this.config = config;
@@ -188,6 +195,9 @@ export class GraphDManager {
         console.warn('GraphD server started but health check failed');
       }
 
+      // Start session cleanup timer
+      this.startSessionCleanupTimer();
+
       console.log(
         `GraphD ready: db=${this.dbPath} root=${this.root} port=${this.config.port}`
       );
@@ -226,6 +236,9 @@ export class GraphDManager {
   async stop(): Promise<void> {
     this.running = false;
 
+    // Stop session cleanup timer
+    this.stopSessionCleanupTimer();
+
     // Don't stop if we're reusing an existing instance
     if (this.reusingExisting) {
       return;
@@ -239,6 +252,49 @@ export class GraphDManager {
     if (this.store) {
       this.store.close();
       this.store = null;
+    }
+  }
+
+  /**
+   * Start the background session cleanup timer.
+   */
+  private startSessionCleanupTimer(): void {
+    if (this.sessionCleanupTimer) return;
+
+    const intervalMs = this.config.sessionCleanupIntervalS * 1000;
+    this.sessionCleanupTimer = setInterval(() => {
+      this.runSessionCleanup();
+    }, intervalMs);
+
+    // Run immediately on start to clean up any stale sessions
+    this.runSessionCleanup();
+  }
+
+  /**
+   * Stop the background session cleanup timer.
+   */
+  private stopSessionCleanupTimer(): void {
+    if (this.sessionCleanupTimer) {
+      clearInterval(this.sessionCleanupTimer);
+      this.sessionCleanupTimer = null;
+    }
+  }
+
+  /**
+   * Run session cleanup: mark stale sessions as inactive and clean expired ones.
+   */
+  private runSessionCleanup(): void {
+    if (!this.store) return;
+
+    try {
+      const staleCount = this.store.markStaleSessions(this.config.sessionIdleTimeoutS);
+      const expiredCount = this.store.cleanupExpiredSessions();
+
+      if (staleCount > 0 || expiredCount > 0) {
+        console.log(`Session cleanup: ${staleCount} marked inactive, ${expiredCount} expired deleted`);
+      }
+    } catch (err) {
+      console.warn('Session cleanup failed:', err);
     }
   }
 
