@@ -207,7 +207,8 @@ export class AgentClient extends EventEmitter {
 
     const text = String(data?.text ?? '');
     const clientRequestId = String(data?.client_request_id ?? generateRequestId());
-    const tier = String(data?.tier ?? 'standard');
+    const rawTier = typeof data?.tier === 'string' ? data.tier.trim() : '';
+    const tier = rawTier && rawTier !== 'auto' ? rawTier : undefined;
 
     if (!text.trim()) {
       this.emitEvent({
@@ -223,7 +224,7 @@ export class AgentClient extends EventEmitter {
     const handle = this.harness.run({
       requestId: clientRequestId,
       inputText: text,
-      tier,
+      ...(tier ? { tier: tier as 'simple' | 'standard' | 'complex' } : {}),
       sessionKey: this.sessionKey,
     });
 
