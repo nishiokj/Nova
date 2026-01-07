@@ -1,0 +1,128 @@
+/**
+ * JSONL-over-TCP bus client for bridge communication.
+ */
+
+import net from 'net';
+import { EventEmitter } from 'events';
+import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
+
+export interface BusClientOptions {
+  host: string;
+  port: number;
+}
+
+export class BusClient extends EventEmitter {
+  private readonly host: string;
+  private readonly port: number;
+  private socket: net.Socket | null = null;
+  private buffer = '';
+  private connected = false;
+  private subscriptions = new Set<string>();
+
+  constructor(options: BusClientOptions) {
+    super();
+    this.host = options.host;
+    this.port = options.port;
+  }
+
+  async connect(): Promise<void> {
+    if (this.connected) return;
+    this.socket = new net.Socket();
+
+    await new Promise<void>((resolve, reject) => {
+      this.socket!.once('error', reject);
+      this.socket!.connect(this.port, this.host, () => resolve());
+    });
+
+    this.connected = true;
+    this.socket.setEncoding('utf8');
+    this.socket.on('data', (chunk) => this.handleData(chunk));
+    this.socket.on('close', () => this.handleClose());
+    this.socket.on('error', (error) => {
+      this.emit('error', { message: 'bus_client_error', detail: String(error) });
+    });
+  }
+
+  subscribe(channel: string): void {
+    if (this.subscriptions.has(channel)) return;
+    this.subscriptions.add(channel);
+    this.send({ type: 'subscribe', channel });
+  }
+
+  unsubscribe(channel: string): void {
+    if (!this.subscriptions.has(channel)) return;
+    this.subscriptions.delete(channel);
+    this.send({ type: 'unsubscribe', channel });
+  }
+
+  publish(channel: string, payload: unknown): void {
+    this.send({ type: 'publish', channel, payload });
+  }
+
+  close(): void {
+    if (!this.socket) return;
+    this.connected = false;
+    this.subscriptions.clear();
+    this.socket.end();
+    this.socket.destroy();
+    this.socket = null;
+  }
+
+  private handleClose(): void {
+    this.connected = false;
+    this.emit('close');
+  }
+
+  private handleData(chunk: string): void {
+    this.buffer += chunk;
+    let newlineIndex = this.buffer.indexOf('\n');
+
+    while (newlineIndex >= 0) {
+      const line = this.buffer.slice(0, newlineIndex).trim();
+      this.buffer = this.buffer.slice(newlineIndex + 1);
+      if (line.length > 0) {
+        this.handleLine(line);
+      }
+      newlineIndex = this.buffer.indexOf('\n');
+    }
+  }
+
+  private handleLine(line: string): void {
+    let message: BusMessage;
+    try {
+      message = JSON.parse(line) as BusMessage;
+    } catch (error) {
+      this.emit('error', { message: 'invalid_json', detail: String(error) });
+      return;
+    }
+
+    if (!message || typeof message !== 'object' || !('type' in message)) {
+      this.emit('error', { message: 'invalid_message', detail: line });
+      return;
+    }
+
+    switch (message.type) {
+      case 'event':
+        this.emit('event', message.payload, message.channel);
+        return;
+      case 'error':
+        this.emit('error', { message: message.message, detail: message.detail });
+        return;
+      default:
+        this.emit('error', { message: 'unexpected_message', detail: message });
+    }
+  }
+
+  private send(message: BusClientMessage | BusServerMessage): void {
+    if (!this.socket || !this.connected) {
+      this.emit('error', { message: 'bus_not_connected' });
+      return;
+    }
+
+    try {
+      this.socket.write(`${JSON.stringify(message)}\n`);
+    } catch (error) {
+      this.emit('error', { message: 'bus_send_failed', detail: String(error) });
+    }
+  }
+}

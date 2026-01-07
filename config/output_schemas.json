@@ -1,0 +1,318 @@
+{
+  "$comment": "Output schema definitions. Referenced by harness_config.json agents via 'output_schema' key.",
+
+  "components": {
+    "user_prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "question": { "type": "string" },
+        "options": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  { "type": "string" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "label": { "type": "string" },
+                      "description": { "type": ["string", "null"] }
+                    },
+                    "required": ["label", "description"]
+                  }
+                ]
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "context": { "type": ["string", "null"] },
+        "multiSelect": { "type": ["boolean", "null"] }
+      },
+      "required": ["question", "options", "context", "multiSelect"]
+    },
+    "user_prompt_nullable": {
+      "anyOf": [
+        { "$ref": "#/components/user_prompt" },
+        { "type": "null" }
+      ]
+    }
+  },
+
+  "schemas": {
+    "routing": {
+      "name": "routing_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "tier": {
+            "type": "string",
+            "enum": ["simple", "standard", "complex"]
+          }
+        },
+        "required": ["tier"]
+      }
+    },
+
+    "agent_action": {
+      "name": "agent_action_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["final", "need_context", "continue"]
+          },
+          "response": { "type": ["string", "null"] },
+          "user_prompt": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "question": { "type": "string" },
+                  "options": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "anyOf": [
+                            { "type": "string" },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "label": { "type": "string" },
+                                "description": { "type": ["string", "null"] }
+                              },
+                              "required": ["label", "description"]
+                            }
+                          ]
+                        }
+                      },
+                      { "type": "null" }
+                    ]
+                  },
+                  "context": { "type": ["string", "null"] },
+                  "multiSelect": { "type": ["boolean", "null"] }
+                },
+                "required": ["question", "options", "context", "multiSelect"]
+              },
+              { "type": "null" }
+            ]
+          }
+        },
+        "required": ["action", "response", "user_prompt"]
+      }
+    },
+
+    "goal_driven": {
+      "name": "goal_driven_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["done", "need_user_input", "continue"]
+          },
+          "response": { "type": ["string", "null"] },
+          "goalStateReached": { "type": ["boolean", "null"] },
+          "userPrompt": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "question": { "type": "string" },
+                  "options": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "anyOf": [
+                            { "type": "string" },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "label": { "type": "string" },
+                                "description": { "type": ["string", "null"] }
+                              },
+                              "required": ["label", "description"]
+                            }
+                          ]
+                        }
+                      },
+                      { "type": "null" }
+                    ]
+                  },
+                  "context": { "type": ["string", "null"] },
+                  "multiSelect": { "type": ["boolean", "null"] }
+                },
+                "required": ["question", "options", "context", "multiSelect"]
+              },
+              { "type": "null" }
+            ]
+          },
+          "reasoning": { "type": ["string", "null"] }
+        },
+        "required": ["action", "response", "goalStateReached", "userPrompt", "reasoning"]
+      }
+    },
+
+    "explorer": {
+      "name": "explorer_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["final", "need_context", "continue"]
+          },
+          "response": { "type": ["string", "null"] },
+          "user_prompt": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "question": { "type": "string" },
+                  "options": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "anyOf": [
+                            { "type": "string" },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "label": { "type": "string" },
+                                "description": { "type": ["string", "null"] }
+                              },
+                              "required": ["label", "description"]
+                            }
+                          ]
+                        }
+                      },
+                      { "type": "null" }
+                    ]
+                  },
+                  "context": { "type": ["string", "null"] },
+                  "multiSelect": { "type": ["boolean", "null"] }
+                },
+                "required": ["question", "options", "context", "multiSelect"]
+              },
+              { "type": "null" }
+            ]
+          },
+          "packageManagers": { "type": "array", "items": { "type": "string" } },
+          "frameworks": { "type": "array", "items": { "type": "string" } },
+          "languages": { "type": "array", "items": { "type": "string" } },
+          "os": { "type": "string" },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": { "type": "string" },
+                "type": { "type": "string", "enum": ["config", "source", "test", "doc", "other"] },
+                "description": { "type": ["string", "null"] },
+                "relevance": { "type": ["number", "null"] }
+              },
+              "required": ["path", "type", "description", "relevance"]
+            }
+          },
+          "patterns": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["action", "response", "user_prompt", "packageManagers", "frameworks", "languages", "os", "artifacts", "patterns"]
+      }
+    },
+
+    "runtime_script": {
+      "name": "runtime_script_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["final", "need_context", "continue"]
+          },
+          "response": { "type": ["string", "null"] },
+          "user_prompt": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "question": { "type": "string" },
+                  "options": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "anyOf": [
+                            { "type": "string" },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "label": { "type": "string" },
+                                "description": { "type": ["string", "null"] }
+                              },
+                              "required": ["label", "description"]
+                            }
+                          ]
+                        }
+                      },
+                      { "type": "null" }
+                    ]
+                  },
+                  "context": { "type": ["string", "null"] },
+                  "multiSelect": { "type": ["boolean", "null"] }
+                },
+                "required": ["question", "options", "context", "multiSelect"]
+              },
+              { "type": "null" }
+            ]
+          },
+          "goal": { "type": "string" },
+          "workItems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string" },
+                "objective": { "type": "string" },
+                "delta": { "type": "string" },
+                "agent": { "type": "string" },
+                "dependencies": { "type": "array", "items": { "type": "string" } },
+                "toolHint": { "type": ["string", "null"] },
+                "targetPaths": { "type": ["array", "null"], "items": { "type": "string" } },
+                "params": { "type": ["object", "null"], "additionalProperties": false, "properties": {}, "required": [] }
+              },
+              "required": ["id", "objective", "delta", "agent", "dependencies", "toolHint", "targetPaths", "params"]
+            }
+          }
+        },
+        "required": ["action", "response", "user_prompt", "goal", "workItems"]
+      }
+    }
+  }
+}

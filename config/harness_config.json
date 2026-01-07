@@ -3,8 +3,8 @@
     "routing": {
       "llm": {
         "provider": "openai",
-        "model": "gpt-5-nano",
-        "max_tokens": 100,
+        "model": "gpt-5-mini",
+        "max_tokens": 200,
         "temperature": 0.1
       },
       "budget": {
@@ -12,27 +12,7 @@
         "max_tool_calls": 0,
         "max_duration_ms": 3000
       },
-      "output_schema": {
-        "name": "routing_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "tier": {
-              "type": "string",
-              "enum": [
-                "simple",
-                "standard",
-                "complex"
-              ]
-            }
-          },
-          "required": [
-            "tier"
-          ]
-        },
-        "strict": true
-      }
+      "output_schema": "routing"
     },
     "simple": {
       "llm": {
@@ -46,262 +26,22 @@
         "max_tool_calls": 0,
         "max_duration_ms": 3000
       },
-      "output_schema": {
-        "name": "agent_action_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt"
-          ]
-        },
-        "strict": true
-      }
+      "output_schema": "agent_action"
     },
     "explorer": {
       "llm": {
         "provider": "openai",
         "model": "gpt-5-mini",
-        "max_tokens": 8000,
+        "max_tokens": 100000,
         "temperature": 0.3
       },
       "budget": {
-        "max_iterations": 2,
-        "max_tool_calls": 20,
-        "max_duration_ms": 60000
+        "max_iterations": 3,
+        "max_tool_calls": 40,
+        "max_duration_ms": 30000
       },
-      "tools": [
-        "Read",
-        "Glob",
-        "Grep",
-        "Bash"
-      ],
-      "output_schema": {
-        "name": "explorer_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "packageManagers": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "frameworks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "languages": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "os": {
-              "type": "string"
-            },
-            "artifacts": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "path": {
-                    "type": "string"
-                  },
-                  "type": {
-                    "type": "string",
-                    "enum": [
-                      "config",
-                      "source",
-                      "test",
-                      "doc",
-                      "other"
-                    ]
-                  },
-                  "description": {
-                    "type": "string"
-                  },
-                  "relevance": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "path",
-                  "type"
-                ]
-              }
-            },
-            "patterns": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt",
-            "packageManagers",
-            "frameworks",
-            "languages",
-            "os",
-            "artifacts",
-            "patterns"
-          ]
-        },
-        "strict": true
-      }
+      "tools": ["Read", "Glob", "Grep", "Bash"],
+      "output_schema": "explorer"
     },
     "runtime_script": {
       "llm": {
@@ -309,156 +49,15 @@
         "model": "gpt-5.2",
         "max_tokens": 16000,
         "temperature": 0.5,
-        "reasoning": {
-          "effort": "medium"
-        }
+        "reasoning": { "effort": "medium" }
       },
       "budget": {
         "max_iterations": 2,
         "max_tool_calls": 15,
         "max_duration_ms": 30000
       },
-      "tools": [
-        "explorer"
-      ],
-      "output_schema": {
-        "name": "runtime_script_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "goal": {
-              "type": "string"
-            },
-            "workItems": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "id": {
-                    "type": "string"
-                  },
-                  "objective": {
-                    "type": "string"
-                  },
-                  "delta": {
-                    "type": "string"
-                  },
-                  "agent": {
-                    "type": "string"
-                  },
-                  "dependencies": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "toolHint": {
-                    "type": "string"
-                  },
-                  "targetPaths": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "params": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
-                },
-                "required": [
-                  "id",
-                  "objective",
-                  "delta",
-                  "agent",
-                  "dependencies"
-                ]
-              }
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt",
-            "goal",
-            "workItems"
-          ]
-        },
-        "strict": true
-      }
+      "tools": ["explorer", "standard", "coding-agent"],
+      "output_schema": "runtime_script"
     },
     "standard": {
       "llm": {
@@ -472,211 +71,24 @@
         "max_tool_calls": 15,
         "max_duration_ms": 120000
       },
-      "tools": [
-        "Read",
-        "Write",
-        "Edit",
-        "Glob",
-        "Grep",
-        "Bash"
-      ],
-      "output_schema": {
-        "name": "agent_action_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt"
-          ]
-        },
-        "strict": true
-      }
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      "output_schema": "goal_driven"
     },
-    "complex": {
+    "coding-agent": {
       "llm": {
         "provider": "openai",
-        "model": "gpt-5.2",
-        "max_tokens": 32000,
+        "model": "gpt-5.2-codex",
+        "max_tokens": 128000,
         "temperature": 0.7,
-        "reasoning": {
-          "effort": "high"
-        }
+        "reasoning": { "effort": "high" }
       },
       "budget": {
-        "max_iterations": 15,
-        "max_tool_calls": 50,
-        "max_duration_ms": 500000
+        "max_iterations": 20,
+        "max_tool_calls": 100,
+        "max_duration_ms": 5000000
       },
-      "tools": [
-        "Read",
-        "Write",
-        "Edit",
-        "Glob",
-        "Grep",
-        "Bash",
-        "standard"
-      ],
-      "output_schema": {
-        "name": "agent_action_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt"
-          ]
-        },
-        "strict": true
-      }
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "standard"],
+      "output_schema": "goal_driven"
     },
     "context_compactor": {
       "llm": {
@@ -690,92 +102,7 @@
         "max_tool_calls": 0,
         "max_duration_ms": 30000
       },
-      "output_schema": {
-        "name": "agent_action_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt"
-          ]
-        },
-        "strict": true
-      }
+      "output_schema": "agent_action"
     },
     "debugger": {
       "llm": {
@@ -789,100 +116,8 @@
         "max_tool_calls": 15,
         "max_duration_ms": 120000
       },
-      "tools": [
-        "Read",
-        "Write",
-        "Edit",
-        "Glob",
-        "Grep",
-        "Bash"
-      ],
-      "output_schema": {
-        "name": "agent_action_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt"
-          ]
-        },
-        "strict": true
-      }
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      "output_schema": "agent_action"
     },
     "web_crawler": {
       "llm": {
@@ -896,96 +131,8 @@
         "max_tool_calls": 15,
         "max_duration_ms": 120000
       },
-      "tools": [
-        "WebFetch",
-        "WebSearch"
-      ],
-      "output_schema": {
-        "name": "agent_action_output",
-        "schema": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
-                "final",
-                "need_context",
-                "continue"
-              ]
-            },
-            "response": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "user_prompt": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "question": {
-                      "type": "string"
-                    },
-                    "options": {
-                      "anyOf": [
-                        {
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "label": {
-                                    "type": "string"
-                                  },
-                                  "description": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "label"
-                                ]
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "context": {
-                      "type": "string"
-                    },
-                    "multiSelect": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "question"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "response",
-            "user_prompt"
-          ]
-        },
-        "strict": true
-      }
+      "tools": ["WebFetch", "WebSearch"],
+      "output_schema": "agent_action"
     }
   },
   "tools": {
