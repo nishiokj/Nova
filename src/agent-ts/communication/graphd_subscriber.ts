@@ -3,13 +3,13 @@
  *
  * This enables real-time event persistence for the dashboard and analytics.
  *
- * CRITICAL: The dashboard expects events in `sessions.metadata_json.wizard_events[]`
+ * CRITICAL: The dashboard expects events in `sessions.metadata_json.agent_events[]`
  * NOT in the separate `session_events` table. This subscriber appends events to
  * the session metadata so the dashboard mapper can parse them.
  */
 
 import type { EventBusProtocol } from './event_bus.js';
-import type { WizardEvent } from '../types/events.js';
+import type { AgentEvent } from '../types/events.js';
 import type { GraphDManager } from '../graphd/index.js';
 
 /**
@@ -35,7 +35,7 @@ export class GraphDSubscriber {
   private graphd: GraphDManager;
   private config: Required<GraphDSubscriberConfig>;
   private unsubscribe: (() => void) | null = null;
-  private eventBatch: WizardEvent<unknown>[] = [];
+  private eventBatch: AgentEvent<unknown>[] = [];
   private eventCount = 0;
 
   constructor(
@@ -47,12 +47,11 @@ export class GraphDSubscriber {
     this.config = {
       sessionKey: config.sessionKey,
       requestId: config.requestId ?? '',
-      eventTypes: config.eventTypes ?? [], // empty = all
+      eventTypes: config.eventTypes ?? [],
       batchMode: config.batchMode ?? false,
       batchSize: config.batchSize ?? 50,
     };
 
-    // Subscribe to all events
     this.unsubscribe = eventBus.subscribeAll((event) => this.handleEvent(event));
   }
 
@@ -67,8 +66,7 @@ export class GraphDSubscriber {
    * Handle an event from the EventBus.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleEvent(event: WizardEvent<any>): void {
-    // Filter by event type if configured
+  private handleEvent(event: AgentEvent<any>): void {
     if (this.config.eventTypes.length > 0 && !this.config.eventTypes.includes(event.type)) {
       return;
     }
@@ -87,55 +85,38 @@ export class GraphDSubscriber {
 
   /**
    * Persist a single event to GraphD.
-   *
-   * CRITICAL: Dashboard expects events in `sessions.metadata_json.wizard_events[]`
-   * The mapper parses this array to build AgentRequest objects.
-   *
-   * Event format expected by dashboard (snake_case):
-   * {
-   *   type: 'goal_started' | 'step_started' | 'tool_call' | 'llm_call' | etc.,
-   *   timestamp: number (unix seconds),
-   *   step_num?: number,
-   *   data: { ... event-specific fields in snake_case ... }
-   * }
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private persistEvent(event: WizardEvent<any>): void {
+  private persistEvent(event: AgentEvent<any>): void {
     try {
-      // Format event for dashboard consumption (snake_case keys)
       const formattedEvent = this.formatEventForDashboard(event);
 
-      // Append to wizard_events array in session metadata
-      // GraphDManager.updateSessionMetadata with merge=true appends to arrays
       this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
-        wizard_events: [formattedEvent],
+        agent_events: [formattedEvent],
       });
     } catch (error) {
-      // Swallow errors to not disrupt the system
       console.error(`[GraphDSubscriber] Failed to persist event: ${error}`);
     }
   }
 
   /**
-   * Format a WizardEvent for dashboard consumption.
+   * Format an AgentEvent for dashboard consumption.
    * Converts camelCase keys to snake_case and ensures proper timestamp format.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private formatEventForDashboard(event: WizardEvent<any>): Record<string, unknown> {
-    // Timestamp is already unix seconds from createEvent()
-    // Just ensure it's in seconds, not milliseconds
+  private formatEventForDashboard(event: AgentEvent<any>): Record<string, unknown> {
     const timestamp = event.timestamp > 1e12
       ? Math.floor(event.timestamp / 1000)
       : event.timestamp;
 
-    // Convert event data keys from camelCase to snake_case
     const formattedData = this.camelToSnake(event.data ?? {});
 
     return {
       type: event.type,
       timestamp,
-      step_num: event.stepNum,
-      request_id: this.config.requestId || undefined,
+      work_item_id: event.workItemId ?? null,
+      request_id: event.requestId || this.config.requestId || undefined,
+      run_id: event.runId ?? undefined,
       data: formattedData,
     };
   }
@@ -167,14 +148,12 @@ export class GraphDSubscriber {
     if (this.eventBatch.length === 0) return;
 
     try {
-      // Format all events for dashboard consumption
       const formattedEvents = this.eventBatch.map((event) =>
         this.formatEventForDashboard(event)
       );
 
-      // Append all events to wizard_events array in session metadata
       this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
-        wizard_events: formattedEvents,
+        agent_events: formattedEvents,
       });
 
       this.eventBatch = [];
@@ -194,7 +173,6 @@ export class GraphDSubscriber {
    * Flush any remaining events and close the subscriber.
    */
   close(): void {
-    // Flush any remaining batched events
     if (this.config.batchMode && this.eventBatch.length > 0) {
       this.flushBatch();
     }

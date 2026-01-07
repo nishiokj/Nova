@@ -1,111 +1,112 @@
 /**
- * EventBus - Central pub/sub event router for the agent system.
+ * EventBus - Central pub/sub event router.
  *
- * Implements the EventBusProtocol from typescript_refactor2.md.
- * All components emit events through the bus, and multiple subscribers
- * (TUI, logger, dashboard, tests) can consume them independently.
+ * Supports:
+ * - Per-run subscriptions via subscribeRun(runId, handler)
+ * - Microtask-based async fan-out
+ * - requestId tagging
  */
 
 import { EventEmitter } from 'events';
-import type { WizardEvent, WizardEventType } from '../types/events.js';
+import type { AgentEvent, AgentEventType } from '../types/events.js';
 
-// Use a more permissive type for events with any data shape
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyWizardEvent = WizardEvent<any>;
+type AnyEvent = AgentEvent<any>;
 
 /**
  * EventBus protocol interface.
- * Components depend on this interface, not the concrete implementation.
  */
 export interface EventBusProtocol {
-  /**
-   * Publish an event to all subscribers.
-   */
-  publish(event: AnyWizardEvent): void;
-
-  /**
-   * Subscribe to events of a specific type.
-   * Returns an unsubscribe function.
-   */
-  subscribe(
-    type: WizardEventType,
-    handler: (event: AnyWizardEvent) => void
-  ): () => void;
-
-  /**
-   * Subscribe to all events regardless of type.
-   * Returns an unsubscribe function.
-   */
-  subscribeAll(handler: (event: AnyWizardEvent) => void): () => void;
-
-  /**
-   * Shutdown the event bus. Emits a shutdown event and stops accepting new events.
-   */
+  publish(event: AnyEvent): void;
+  subscribe(type: AgentEventType, handler: (event: AnyEvent) => void): () => void;
+  subscribeAll(handler: (event: AnyEvent) => void): () => void;
+  /** Subscribe to events for a specific run */
+  subscribeRun(runId: string, handler: (event: AnyEvent) => void): () => void;
+  /** Subscribe to all events globally */
+  subscribeGlobal(handler: (event: AnyEvent) => void): () => void;
   shutdown(): void;
-
-  /**
-   * Check if the event bus has been shut down.
-   */
   isShutdown(): boolean;
 }
 
 /**
- * Filter predicate for event subscriptions.
- */
-export type EventFilter = (event: WizardEvent) => boolean;
-
-/**
- * EventBus implementation using Node's EventEmitter.
+ * EventBus implementation.
  */
 export class EventBus implements EventBusProtocol {
   private emitter = new EventEmitter();
+  private runHandlers = new Map<string, Set<(event: AnyEvent) => void>>();
+  private globalHandlers = new Set<(event: AnyEvent) => void>();
   private shutdownFlag = false;
   private readonly ALL_EVENTS = '__all__';
 
   constructor() {
-    // Increase max listeners to accommodate multiple subscribers
-    this.emitter.setMaxListeners(50);
+    this.emitter.setMaxListeners(100);
   }
 
-  publish(event: AnyWizardEvent): void {
+  publish(event: AnyEvent): void {
     if (this.shutdownFlag) return;
 
-    // Emit to type-specific subscribers
-    this.emitter.emit(event.type, event);
+    const runId = (event as any).runId ?? event.requestId;
 
-    // Emit to catch-all subscribers
+    if (runId && this.runHandlers.has(runId)) {
+      for (const handler of this.runHandlers.get(runId)!) {
+        queueMicrotask(() => {
+          try {
+            handler(event);
+          } catch (err) {
+            console.error('[EventBus] Handler error:', err);
+          }
+        });
+      }
+    }
+
+    for (const handler of this.globalHandlers) {
+      queueMicrotask(() => {
+        try {
+          handler(event);
+        } catch (err) {
+          console.error('[EventBus] Handler error:', err);
+        }
+      });
+    }
+
+    this.emitter.emit(event.type, event);
     this.emitter.emit(this.ALL_EVENTS, event);
   }
 
-  subscribe(
-    type: WizardEventType,
-    handler: (event: AnyWizardEvent) => void
-  ): () => void {
+  subscribe(type: AgentEventType, handler: (event: AnyEvent) => void): () => void {
     this.emitter.on(type, handler);
     return () => this.emitter.off(type, handler);
   }
 
-  subscribeAll(handler: (event: AnyWizardEvent) => void): () => void {
+  subscribeAll(handler: (event: AnyEvent) => void): () => void {
     this.emitter.on(this.ALL_EVENTS, handler);
     return () => this.emitter.off(this.ALL_EVENTS, handler);
+  }
+
+  subscribeRun(runId: string, handler: (event: AnyEvent) => void): () => void {
+    if (!this.runHandlers.has(runId)) {
+      this.runHandlers.set(runId, new Set());
+    }
+    this.runHandlers.get(runId)!.add(handler);
+    return () => {
+      this.runHandlers.get(runId)?.delete(handler);
+      if (this.runHandlers.get(runId)?.size === 0) {
+        this.runHandlers.delete(runId);
+      }
+    };
+  }
+
+  subscribeGlobal(handler: (event: AnyEvent) => void): () => void {
+    this.globalHandlers.add(handler);
+    return () => this.globalHandlers.delete(handler);
   }
 
   shutdown(): void {
     if (this.shutdownFlag) return;
     this.shutdownFlag = true;
-
-    // Emit shutdown event before stopping
-    const shutdownEvent: AnyWizardEvent = {
-      type: 'goal_aborted',
-      timestamp: Date.now() / 1000,
-      data: {
-        goal: '',
-        reason: 'shutdown',
-        stepsCompleted: 0,
-      },
-    };
-    this.emitter.emit(this.ALL_EVENTS, shutdownEvent);
     this.emitter.removeAllListeners();
+    this.runHandlers.clear();
+    this.globalHandlers.clear();
   }
 
   isShutdown(): boolean {
@@ -114,71 +115,20 @@ export class EventBus implements EventBusProtocol {
 }
 
 /**
- * Create an async iterator that yields events for a specific request.
- * Filters events by requestId in the event data.
+ * Create an EventEmitCallback that tags events and publishes to EventBus.
  */
-export function createRequestEventStream(
-  bus: EventBusProtocol,
-  requestId: string
-): AsyncIterableIterator<AnyWizardEvent> {
-  const queue: AnyWizardEvent[] = [];
-  const waiters: Array<(result: IteratorResult<AnyWizardEvent>) => void> = [];
-  let done = false;
-
-  const unsubscribe = bus.subscribeAll((event) => {
-    // Filter by requestId if present in event data
-    const eventRequestId = (event.data as Record<string, unknown>)?.requestId;
-    if (eventRequestId && eventRequestId !== requestId) {
-      return;
-    }
-
-    if (waiters.length > 0) {
-      const resolve = waiters.shift()!;
-      resolve({ value: event, done: false });
-    } else {
-      queue.push(event);
-    }
-  });
-
-  return {
-    [Symbol.asyncIterator]() {
-      return this;
-    },
-
-    async next(): Promise<IteratorResult<AnyWizardEvent>> {
-      if (queue.length > 0) {
-        return { value: queue.shift()!, done: false };
-      }
-
-      if (done) {
-        return { value: undefined as unknown as AnyWizardEvent, done: true };
-      }
-
-      return new Promise((resolve) => {
-        waiters.push(resolve);
-      });
-    },
-
-    async return(): Promise<IteratorResult<AnyWizardEvent>> {
-      done = true;
-      unsubscribe();
-      // Resolve any pending waiters
-      for (const resolve of waiters) {
-        resolve({ value: undefined as unknown as AnyWizardEvent, done: true });
-      }
-      waiters.length = 0;
-      return { value: undefined as unknown as AnyWizardEvent, done: true };
-    },
+export function createEventEmitCallback(
+  eventBus: EventBusProtocol,
+  requestId: string,
+  runId?: string
+): (event: AnyEvent) => void {
+  return (event: AnyEvent) => {
+    const taggedEvent = {
+      ...event,
+      requestId,
+      runId: runId ?? requestId,
+      timestamp: event.timestamp ?? Date.now() / 1000,
+    };
+    eventBus.publish(taggedEvent);
   };
-}
-
-/**
- * Marks the end of a request's event stream.
- */
-export function completeRequestStream(
-  iterator: AsyncIterableIterator<AnyWizardEvent>
-): void {
-  if ('return' in iterator && typeof iterator.return === 'function') {
-    iterator.return();
-  }
 }

@@ -132,6 +132,7 @@ export interface ToolParameterSchema {
   properties?: Record<string, ToolParameterSchema>;
   required?: string[];
   default?: unknown;
+  additionalProperties?: boolean | ToolParameterSchema;
 }
 
 /**
@@ -144,7 +145,9 @@ export interface ToolDefinition {
     type: 'object';
     properties: Record<string, ToolParameterSchema>;
     required: string[];
+    additionalProperties?: boolean;
   };
+  strict?: boolean;
 }
 
 // ============================================

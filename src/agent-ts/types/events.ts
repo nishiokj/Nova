@@ -1,56 +1,44 @@
 /**
- * Wizard event types and payloads.
+ * Agent and Orchestrator event types.
  *
- * Events are emitted by Wizard for observability. Emission is optional and
- * pluggable via callbacks; Wizard does not depend on any event bus.
- *
- * Ported from: src/harness/agent/wizard/events.py
+ * Events are emitted via callbacks; the EventBus tags requestId/runId and fans out.
  */
+
+import type { AgentType as CoreAgentType } from '../agent/types.js';
 
 // ============================================
 // EVENT TYPES
 // ============================================
 
 /**
- * Types of events emitted by the Wizard.
- * Using string literal union for cleaner TypeScript patterns.
+ * Core agent event types.
  */
-export type WizardEventType =
-  // Goal events
-  | 'goal_started'
-  | 'goal_achieved'
-  | 'goal_aborted'
-  // Progress events
-  | 'step_started'
-  | 'step_completed'
-  | 'step_failed'
-  | 'step_skipped'
-  // Tool events
+export type AgentCoreEventType =
   | 'tool_call'
-  // Synthesis events (after tool calls, before LLM analysis)
-  | 'synthesis_started'
-  // Reflection events
-  | 'reflection_started'
-  | 'reflection_completed'
-  // Scaffolding events
-  | 'steps_scaffolded'
-  // User input events
-  | 'user_input_requested'
-  | 'user_input_received'
-  // Quality events
-  | 'quality_issue_detected'
-  | 'error_detected'
-  // LLM call tracking (for dashboard observability)
   | 'llm_call'
-  // LLM error tracking (for error propagation and circuit breaker visibility)
-  | 'llm_error'
-  // Plan versioning (for dashboard plan carousel)
-  | 'plan_snapshot'
-  | 'plan_patched'
-  // Context window metrics (for dashboard token widget)
-  | 'context_window_update'
-  // Context window telemetry (full item-based context state)
-  | 'context_window_telemetry';
+  | 'llm_error';
+
+/**
+ * Orchestrator event types.
+ */
+export type OrchestratorEventType =
+  | 'runtime_script_created'
+  | 'workitem_started'
+  | 'workitem_completed'
+  | 'workitem_failed'
+  | 'workitem_skipped'
+  | 'goal_achieved'
+  | 'goal_not_achieved';
+
+/**
+ * All event types.
+ */
+export type AgentEventType = AgentCoreEventType | OrchestratorEventType;
+
+/**
+ * Event agent type identifiers.
+ */
+export type AgentType = CoreAgentType | 'orchestrator';
 
 // ============================================
 // BASE EVENT
@@ -58,43 +46,50 @@ export type WizardEventType =
 
 /**
  * Base event structure.
- * All wizard events conform to this shape.
+ * All events conform to this shape.
  */
-export interface WizardEvent<T = Record<string, unknown>> {
-  type: WizardEventType;
-  /** Unix timestamp in seconds (float) - matches Python time.time() */
+export interface AgentEvent<T = Record<string, unknown>> {
+  type: AgentEventType;
+  /** REQUIRED: Correlates all events for a single request */
+  requestId: string;
+  /** Optional run ID for per-run channels */
+  runId?: string;
+  /** Unix timestamp in seconds */
   timestamp: number;
-  /** Step number if event is step-related */
-  stepNum?: number;
+  /** WorkItem ID if event is workitem-related */
+  workItemId?: string;
   /** Event-specific payload */
   data: T;
 }
 
 /**
- * Create a WizardEvent with current timestamp.
+ * Create an event with current timestamp.
  */
 export function createEvent<T>(
-  type: WizardEventType,
+  type: AgentEventType,
   data: T,
-  stepNum?: number
-): WizardEvent<T> {
+  workItemId?: string,
+  requestId = ''
+): AgentEvent<T> {
   return {
     type,
-    timestamp: Date.now() / 1000, // Convert to Python-compatible float seconds
-    stepNum,
+    requestId,
+    timestamp: Date.now() / 1000,
+    workItemId,
     data,
   };
 }
 
 /**
  * Serialize event to JSON-compatible dict.
- * Matches Python WizardEvent.to_dict()
  */
-export function eventToDict(event: WizardEvent): Record<string, unknown> {
+export function eventToDict(event: AgentEvent): Record<string, unknown> {
   return {
     type: event.type,
     timestamp: event.timestamp,
-    step_num: event.stepNum ?? null,
+    request_id: event.requestId,
+    run_id: event.runId ?? null,
+    work_item_id: event.workItemId ?? null,
     data: event.data ?? {},
   };
 }
@@ -103,21 +98,69 @@ export function eventToDict(event: WizardEvent): Record<string, unknown> {
 // EVENT PAYLOADS
 // ============================================
 
-export type AgentType = 'wizard' | 'worker' | 'planner' | 'reflector' | 'synthesizer';
+/**
+ * Data for runtime_script_created event.
+ */
+export interface RuntimeScriptCreatedData {
+  goal: string;
+  workItemCount: number;
+  workItems: Array<{
+    workId: string;
+    objective: string;
+    delta?: string;
+    agent: AgentType;
+    dependencies: string[];
+  }>;
+  systemContext: {
+    packageManagers: string[];
+    frameworks: string[];
+    languages: string[];
+  };
+}
 
 /**
- * Data for goal_started event.
+ * Data for workitem_started event.
  */
-export interface GoalStartedData {
-  goal: string;
-  userInput: string;
-  steps?: Array<{
-    stepNum: number;
-    objective: string;
-    phase?: 'discovery' | 'execution';
-    toolHint?: string;
-    dependsOn?: number[];
-  }>;
+export interface WorkItemStartedData {
+  workId: string;
+  objective: string;
+  delta?: string;
+  agent: AgentType;
+  dependencies: string[];
+}
+
+/**
+ * Data for workitem_completed event.
+ */
+export interface WorkItemCompletedData {
+  workId: string;
+  objective: string;
+  response: string;
+  metrics: {
+    llmCallsMade: number;
+    toolCallsMade: number;
+    durationMs: number;
+  };
+}
+
+/**
+ * Data for workitem_failed event.
+ */
+export interface WorkItemFailedData {
+  workId: string;
+  objective: string;
+  error: string;
+  toolErrors?: string[];
+  terminationReason: string;
+}
+
+/**
+ * Data for workitem_skipped event.
+ */
+export interface WorkItemSkippedData {
+  workId: string;
+  objective: string;
+  reason: string;
 }
 
 /**
@@ -125,68 +168,19 @@ export interface GoalStartedData {
  */
 export interface GoalAchievedData {
   goal: string;
-  stepsCompleted: number;
-  totalDurationMs: number;
+  completed: number;
+  skipped: number;
 }
 
 /**
- * Data for goal_aborted event.
+ * Data for goal_not_achieved event.
  */
-export interface GoalAbortedData {
+export interface GoalNotAchievedData {
   goal: string;
   reason: string;
-  stepsCompleted: number;
-}
-
-/**
- * Data for step_started event.
- */
-export interface StepStartedData {
-  objective: string;
-  phase?: 'discovery' | 'execution';
-  toolHint?: string;
-  /** Step numbers this step depends on */
-  dependsOn?: number[];
-  /** Worker ID assigned to this step */
-  workerId?: string;
-}
-
-/**
- * Data for step_completed event.
- */
-export interface StepCompletedData {
-  stepNum: number;
-  objective: string;
-  outcomeSummary: string;
-  qualityScore: number;
-  verdict: string;
-  scaffoldedCount: number;
-  durationMs?: number;
-}
-
-/**
- * Data for step_failed event.
- */
-export interface StepFailedData {
-  objective: string;
-  error: string;
-  reason?: string;
-  /** Full stack trace if available */
-  stack?: string;
-  /** Tool errors that contributed to failure */
-  toolErrors?: string[];
-  /** Why execution terminated */
-  terminationReason?: string;
-}
-
-/**
- * Data for step_skipped event.
- */
-export interface StepSkippedData {
-  objective: string;
-  reason: string;
-  message?: string;
-  error?: string;
+  completed: number;
+  failed: number;
+  skipped: number;
 }
 
 /**
@@ -200,62 +194,18 @@ export type ToolCallPhase = 'starting' | 'completed';
 export interface ToolCallData {
   toolName: string;
   arguments: Record<string, unknown>;
-  /** Phase of the tool call: 'starting' before execution, 'completed' after */
   phase: ToolCallPhase;
-  /** Result content (only present when phase='completed') */
   result?: string;
-  /** Success status (only present when phase='completed') */
   success?: boolean;
-  /** Duration in ms (only present when phase='completed') */
   durationMs?: number;
 }
 
 /**
- * Data for USER_INPUT_REQUESTED event.
- */
-export interface UserInputRequestedData {
-  stepNum: number;
-  question: string;
-  options: string[];
-  context: string;
-  requestId?: string;
-}
-
-/**
- * Data for USER_INPUT_RECEIVED event.
- */
-export interface UserInputReceivedData {
-  requestId?: string;
-  answer: string;
-}
-
-/**
- * Data for quality_issue_detected event.
- */
-export interface QualityIssueData {
-  stepNum: number;
-  issues: string[];
-  errors: string[];
-  severity: 'low' | 'medium' | 'high';
-}
-
-/**
- * Data for error_detected event.
- */
-export interface ErrorDetectedData {
-  errors: string[];
-  context?: string;
-}
-
-/**
- * Data for LLM_CALL event - tracks individual LLM API calls.
+ * Data for llm_call event.
  */
 export interface LLMCallData {
   agentType: AgentType;
-  stepNum?: number;
-  /** First 500 chars of prompt */
   promptPreview: string;
-  /** First 500 chars of response */
   responsePreview: string;
   totalTokens: number;
   promptTokens: number;
@@ -263,88 +213,19 @@ export interface LLMCallData {
   durationMs: number;
   model: string;
   toolCallsCount: number;
+  toolNames: string[];
+  messageCount: number;
 }
 
 /**
- * Data for llm_error event - tracks LLM API errors.
+ * Data for llm_error event.
  */
 export interface LLMErrorData {
   agentType: AgentType;
-  stepNum?: number;
   provider: string;
   model: string;
-  /** Error message */
   error: string;
-  /** Error classification */
   errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown';
-  /** HTTP status code if available */
-  statusCode?: number;
-  /** Whether this error triggered circuit breaker */
-  circuitBreakerTriggered?: boolean;
-  /** Whether the operation will be retried */
-  willRetry?: boolean;
-  /** Attempt number (1-based) */
-  attemptNumber?: number;
-  /** Max retries configured */
-  maxRetries?: number;
-}
-
-/**
- * Data for PLAN_SNAPSHOT event - full plan state for versioning.
- */
-export interface PlanSnapshotData {
-  version: number;
-  snapshotType: 'initial' | 'pre_patch' | 'post_patch';
-  steps: Array<{
-    stepNum: number;
-    objective: string;
-    status: string;
-    phase: 'discovery' | 'execution';
-    toolHint?: string;
-    required?: boolean;
-  }>;
-  goal: string;
-  trigger: string;
-}
-
-/**
- * Data for CONTEXT_WINDOW_UPDATE event - token usage metrics.
- */
-export interface ContextWindowUpdateData {
-  /** Peak prompt tokens (actual context window usage) */
-  contextTokens: number;
-  /** Cumulative completion tokens */
-  outputTokens: number;
-  /** Default 200000 */
-  maxTokens: number;
-  /** contextTokens / maxTokens */
-  percentageUsed: number;
-  messageCount: number;
-  /** Legacy: contextTokens + outputTokens */
-  totalTokens: number;
-}
-
-/**
- * Data for reflection_completed event.
- */
-export interface ReflectionCompletedData {
-  verdict: 'accept' | 'accept_extend' | 'redo' | 'abort_step' | 'abort_goal';
-  confidence: number;
-  qualityScore: number;
-  reasoning?: string;
-  issues: string[];
-}
-
-/**
- * Data for steps_scaffolded event.
- */
-export interface StepsScaffoldedData {
-  count: number;
-  steps: Array<{
-    stepNum: number;
-    objective: string;
-    phase: 'discovery' | 'execution';
-  }>;
 }
 
 // ============================================
@@ -352,41 +233,6 @@ export interface StepsScaffoldedData {
 // ============================================
 
 /**
- * Callback function type for receiving wizard events.
+ * Callback function type for receiving events.
  */
-export type WizardEventCallback = (event: WizardEvent) => void;
-
-/**
- * Event emitter interface for wizard observability.
- */
-export interface WizardEventEmitter {
-  emit(event: WizardEvent): void;
-  on(callback: WizardEventCallback): () => void;
-}
-
-/**
- * Simple in-memory event emitter implementation.
- */
-export class SimpleEventEmitter implements WizardEventEmitter {
-  private callbacks: WizardEventCallback[] = [];
-
-  emit(event: WizardEvent): void {
-    for (const cb of this.callbacks) {
-      try {
-        cb(event);
-      } catch {
-        // Swallow callback errors to not disrupt wizard
-      }
-    }
-  }
-
-  on(callback: WizardEventCallback): () => void {
-    this.callbacks.push(callback);
-    return () => {
-      const idx = this.callbacks.indexOf(callback);
-      if (idx !== -1) {
-        this.callbacks.splice(idx, 1);
-      }
-    };
-  }
-}
+export type EventCallback = (event: AgentEvent) => void;

@@ -1,39 +1,69 @@
 /**
  * AgentHarness - Main entry point for wiring the TypeScript agent to the TUI.
  *
- * Wraps the Agent class and provides a TUI-compatible interface with:
- * - Event translation from WizardEvent to BridgeEvent
+ * Wraps the Agent/Orchestrator classes and provides a TUI-compatible interface with:
+ * - Event translation from AgentEvent to BridgeEvent
  * - Async event streaming via AsyncIterable
  * - Session state management via GraphD
+ *
+ * Configuration is loaded from config/harness_config.json which is the
+ * SINGLE SOURCE OF TRUTH for agent LLM assignments, budgets, and tools.
  */
 
-import { Agent, type AgentConfig } from '../agent/agent.js';
+import { Agent } from '../agent/agent.js';
+import { AgentRegistry } from '../agent/agent-registry.js';
+import type { AgentConfig } from '../agent/types.js';
+import { getAgentPrompt, buildAgentConfig } from '../agent/prompts.js';
+import { Orchestrator } from '../orchestrator/orchestrator.js';
 import { createAdapter } from '../llm/adapter.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { builtinToolOptions } from '../tools/builtins/index.js';
 import { GraphDManager, createGraphDConfig } from '../graphd/index.js';
-import type { WizardEvent } from '../types/events.js';
-import type { LLMConfig } from '../types/llm.js';
+import { createEvent, type AgentEvent } from '../types/events.js';
 import { ContextWindow, type ContextWindowSnapshot } from '../types/context.js';
-import { EventBus, type EventBusProtocol, GraphDSubscriber, LogSubscriber, createLogSubscriber } from '../communication/index.js';
+import { EventBus, type EventBusProtocol, GraphDSubscriber, LogSubscriber, createLogSubscriber, createEventEmitCallback } from '../communication/index.js';
+import { createWorkItem } from '../wizard/work-item.js';
 import path from 'path';
+import { coerceStructuredOutput } from '../shared/structured_output.js';
 import {
-  translateWizardEvent,
-  createStreamEvent,
+  translateAgentEvent,
   createStatusEvent,
   createResponseEvent,
   createErrorEvent,
   createReadyEvent,
+  createUserPromptEvent,
 } from './event_translator.js';
 import type {
   AgentRunParams,
   AgentRunResult,
   AgentRunHandle,
   BridgeEvent,
-  UserPromptInfo,
 } from './types.js';
-import { loadConfig, getLLMConfigForTier } from './config_loader.js';
-import type { FullHarnessConfig, Tier } from './config_types.js';
+import { loadConfig, getAgentConfig } from './config_loader.js';
+import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
+import type { LLMRequestConfig, LLMClientConfig, LLMProvider } from '../types/llm.js';
+
+/** Tier classification for routing */
+type Tier = 'simple' | 'standard' | 'complex';
+
+function buildAgentRegistry(config: FullHarnessConfig): AgentRegistry {
+  const agentConfigs: Array<{ config: AgentConfig; llm: LLMRequestConfig }> = Object.entries(config.agents).map(([agentType, resolved]) => {
+    return {
+      config: buildAgentConfig(agentType, resolved.tools, resolved.budget, resolved.outputSchema) as AgentConfig,
+      llm: {
+        model: resolved.llm.model,
+        provider: resolved.llm.provider,
+        apiKey: resolved.llm.apiKey,
+        maxTokens: resolved.llm.maxTokens,
+        temperature: resolved.llm.temperature,
+        baseUrl: resolved.llm.baseUrl,
+        reasoning: resolved.llm.reasoning,
+      },
+    };
+  });
+
+  return new AgentRegistry(agentConfigs);
+}
 
 /**
  * Simple async queue for streaming events.
@@ -111,9 +141,7 @@ const consoleLogger: HarnessLogger = {
  */
 export class AgentHarness {
   private config: FullHarnessConfig;
-  private agent: Agent;
   private toolRegistry: ToolRegistry;
-  /** Context windows for active sessions */
   private contextWindows = new Map<string, ContextWindow>();
   private logger: HarnessLogger;
   private isShutdown = false;
@@ -122,19 +150,38 @@ export class AgentHarness {
   private graphdSubscribers = new Map<string, GraphDSubscriber>();
   private eventBus: EventBus;
   private logSubscriber: LogSubscriber | null = null;
-  private llm: ReturnType<typeof createAdapter>;
-  private llmConfig: LLMConfig;
-  private agentConfig: AgentConfig;
+  private agentRegistry: AgentRegistry;
+  private llmAdapter: ReturnType<typeof createAdapter>;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
+    this.agentRegistry = buildAgentRegistry(config);
+
+    const apiKeys: Partial<Record<LLMProvider, string>> = {};
+    const baseUrls: Partial<Record<LLMProvider, string>> = {};
+    for (const agent of Object.values(config.agents)) {
+      apiKeys[agent.llm.provider] = agent.llm.apiKey;
+      if (agent.llm.baseUrl) {
+        baseUrls[agent.llm.provider] = agent.llm.baseUrl;
+      }
+    }
+
+    const llmClientConfig: LLMClientConfig = { apiKeys, baseUrls };
+    this.llmAdapter = createAdapter(llmClientConfig);
+
+    for (const agent of Object.values(config.agents)) {
+      this.llmAdapter.registerModel?.(
+        agent.llm.model,
+        agent.llm.provider,
+        agent.llm.baseUrl
+      );
+    }
 
     // Create EventBus - central pub/sub for all events
     this.eventBus = new EventBus();
 
     // Create LogSubscriber for agent events
-    // This writes ALL events to disk for debugging/observability
     const logsDir = path.join(config.tools.workingDir, 'logs');
     try {
       this.logSubscriber = createLogSubscriber(this.eventBus, logsDir, 'agent_events.log');
@@ -143,24 +190,12 @@ export class AgentHarness {
       this.logger.warning('Failed to create LogSubscriber', { error: String(error) });
     }
 
-    // Create LLM adapter from resolved config
-    this.llmConfig = {
-      provider: config.llm.provider,
-      model: config.llm.model,
-      apiKey: config.llm.apiKey,
-      maxTokens: config.llm.maxTokens ?? 4096,
-      temperature: config.llm.temperature,
-      baseUrl: config.llm.baseUrl,
-    };
-    this.llm = createAdapter(this.llmConfig);
-
     const workingDir = config.tools.workingDir;
 
-    // Create tool registry with config-driven enabled tools
+    // Create tool registry - tools are registered globally, agents filter by their config
     this.toolRegistry = new ToolRegistry(
       {
-        enabledTools: config.tools.enabledTools,
-        bashTimeoutMs: config.tools.bashTimeout,
+        bashTimeoutMs: config.tools.bashTimeoutMs,
         maxOutputLength: config.tools.maxOutputLength,
       },
       workingDir
@@ -170,24 +205,6 @@ export class AgentHarness {
     for (const toolOptions of builtinToolOptions) {
       this.toolRegistry.register(toolOptions);
     }
-
-    // Create agent config with tier-aware settings
-    this.agentConfig = {
-      systemPrompt: config.agent.systemPrompt,
-      maxIterations: config.agent.maxIterations ?? 50,
-      enablePlanning: config.agent.enablePlanning ?? true,
-      enableScouting: config.agent.enableScouting ?? true,
-      behavioralRules: config.agent.behavioralRules,
-    };
-
-    // Create agent with EventBus
-    this.agent = new Agent(
-      this.agentConfig,
-      this.toolRegistry,
-      this.llm,
-      this.logger,
-      this.eventBus
-    );
 
     // Initialize GraphD if enabled
     if (config.graphd.enabled) {
@@ -199,16 +216,18 @@ export class AgentHarness {
       this.graphd = new GraphDManager(graphdConfig);
     }
 
+    const defaultAgent = config.agents[config.defaultAgent];
     this.logger.info('AgentHarness initialized', {
-      provider: config.llm.provider,
-      model: this.llmConfig.model,
-      enabledTools: config.tools.enabledTools,
+      defaultAgent: config.defaultAgent,
+      provider: defaultAgent?.llm.provider,
+      model: defaultAgent?.llm.model,
+      agentCount: Object.keys(config.agents).length,
       graphdEnabled: this.graphd !== null,
     });
   }
 
   /**
-   * Get the EventBus for external subscribers (logger, dashboard, etc.)
+   * Get the EventBus for external subscribers.
    */
   getEventBus(): EventBusProtocol {
     return this.eventBus;
@@ -216,7 +235,6 @@ export class AgentHarness {
 
   /**
    * Start async services (GraphD).
-   * Call this before run() if using GraphD.
    */
   async start(): Promise<boolean> {
     if (this.graphd && !this.graphdStarted) {
@@ -231,7 +249,6 @@ export class AgentHarness {
           });
         }
       } catch (error) {
-        // Propagate the detailed error from GraphDManager
         const message = error instanceof Error ? error.message : String(error);
         this.logger.error('GraphD failed to start', { error: message });
         throw error;
@@ -240,16 +257,10 @@ export class AgentHarness {
     return true;
   }
 
-  private getDefaultModel(provider: 'anthropic' | 'openai'): string {
-    return provider === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-4o';
-  }
-
   /**
    * Get or create a ContextWindow for the session.
-   * Attempts to hydrate from GraphD if available.
    */
   private getOrCreateContext(sessionKey: string): ContextWindow {
-    // Check in-memory cache first
     let context = this.contextWindows.get(sessionKey);
     if (context) {
       return context;
@@ -281,7 +292,7 @@ export class AgentHarness {
     }
 
     // Create new context
-    const maxTokens = this.config.agent.maxContextTokens ?? 200_000;
+    const maxTokens = this.config.context.maxTokens;
     context = new ContextWindow(sessionKey, maxTokens);
     this.contextWindows.set(sessionKey, context);
     this.logger.debug('Created new context', { sessionKey, maxTokens });
@@ -295,7 +306,6 @@ export class AgentHarness {
     if (!this.graphd || !this.graphdStarted) return;
 
     try {
-      // Serialize context snapshot as a generic record for GraphD storage
       const snapshot = context.serialize();
       this.graphd.contextSave(context.sessionKey, { context: snapshot });
       this.logger.debug('Persisted context to GraphD', {
@@ -313,30 +323,19 @@ export class AgentHarness {
 
   /**
    * Run the agent with the given parameters.
-   * Returns a handle with a result promise and an async event stream.
    */
   run(params: AgentRunParams): AgentRunHandle {
-    const { requestId, inputText, tier = 'standard', sessionKey, context } = params;
+    const { requestId, inputText, tier: requestedTier, sessionKey } = params;
+    const runId = requestId;
     const eventQueue = new AsyncEventQueue();
 
-    // Emit initial status
     eventQueue.push(createStatusEvent('sending', 'Processing request...'));
 
-    // Touch session in GraphD (creates if needed)
     if (this.graphd && this.graphdStarted) {
       try {
         this.graphd.sessionTouch(sessionKey, this.config.tools.workingDir);
         this.graphd.setActive(true);
 
-        // Set session metadata for dashboard (user_id is required by dashboard mapper)
-        this.graphd.sessionUpdateMetadata(sessionKey, {
-          user_id: 'local-user', // Could be from config or context in a multi-user setup
-          tier,
-          model: this.llmConfig.model,
-          provider: this.llmConfig.provider,
-        });
-
-        // Create or get GraphDSubscriber for this session
         let subscriber = this.graphdSubscribers.get(sessionKey);
         if (!subscriber) {
           subscriber = new GraphDSubscriber(this.eventBus, this.graphd, {
@@ -346,7 +345,6 @@ export class AgentHarness {
           this.graphdSubscribers.set(sessionKey, subscriber);
           this.logger.debug('Created GraphDSubscriber for session', { sessionKey });
         } else {
-          // Update request ID for existing subscriber
           subscriber.setRequestId(requestId);
         }
       } catch (error) {
@@ -354,134 +352,89 @@ export class AgentHarness {
       }
     }
 
-    // Get tier-specific LLM config and create adapter for this run
-    const tierKey = tier as Tier;
-    const tierLLMConfig = getLLMConfigForTier(this.config, tierKey);
-    const tierToolLimit = this.config.agent.tierToolLimits[tierKey] ?? this.config.agent.maxIterations ?? 50;
-
-    this.logger.debug('Running with tier config', {
-      tier,
-      model: tierLLMConfig.model,
-      toolLimit: tierToolLimit,
-    });
-
-    // Create tier-specific adapter if model differs from current
-    let runAdapter = this.llm;
-    if (tierLLMConfig.model !== this.llmConfig.model || tierLLMConfig.provider !== this.llmConfig.provider) {
-      const tierAdapterConfig = {
-        provider: tierLLMConfig.provider,
-        model: tierLLMConfig.model,
-        apiKey: tierLLMConfig.apiKey,
-        maxTokens: tierLLMConfig.maxTokens ?? 4096,
-        temperature: tierLLMConfig.temperature,
-        baseUrl: tierLLMConfig.baseUrl,
-      };
-      runAdapter = createAdapter(tierAdapterConfig);
-      this.logger.info('Created tier-specific adapter', {
-        tier,
-        model: tierLLMConfig.model,
-        provider: tierLLMConfig.provider,
-      });
-    }
-
-    // Create agent for this run with the tier-specific adapter and tool limit
-    const runAgentConfig: AgentConfig = {
-      ...this.agentConfig,
-      maxIterations: tierToolLimit,
-    };
-    const runAgent = new Agent(
-      runAgentConfig,
-      this.toolRegistry,
-      runAdapter,
-      this.logger,
-      this.eventBus
-    );
-
-    // Get or create context window for this session
     const contextWindow = this.getOrCreateContext(sessionKey);
+    contextWindow.addMessage('user', inputText);
 
-    // Track streaming state
-    let chunkIndex = 0;
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId);
 
-    // Subscribe to EventBus for this request's events
-    // Translate WizardEvents to BridgeEvents for the TUI
-    const unsubscribe = this.eventBus.subscribeAll((event: WizardEvent): void => {
-      const bridgeEvent = translateWizardEvent(event, requestId);
+    const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
+      const bridgeEvent = translateAgentEvent(event);
       if (bridgeEvent) {
         eventQueue.push(bridgeEvent);
       }
     });
 
-    // Stream callback
-    const onStreamChunk = (chunk: string, index: number, isFinal: boolean): void => {
-      if (chunkIndex === 0) {
-        eventQueue.push(createStatusEvent('streaming'));
-      }
-      eventQueue.push(createStreamEvent(requestId, chunk, chunkIndex++, isFinal));
-    };
-
-    // Run the agent with tier-specific config
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
-        // Agent.run() now takes ContextWindow instead of SessionContext
-        const response = await runAgent.run(
-          inputText,
-          contextWindow,
-          context, // additional context string for planning
+        // Route to determine tier if not specified
+        const tier = requestedTier ?? await this.route(inputText);
+
+        // Get the appropriate agent config (tier maps directly to agent type)
+        const agentConfig = getAgentConfig(this.config, tier);
+
+        this.logger.debug('Running with agent config', {
           tier,
-          undefined, // budget
-          onStreamChunk
-        );
+          model: agentConfig.llm.model,
+          provider: agentConfig.llm.provider,
+        });
 
-        // Context is already updated by Agent/Wizard - no need to update session state
-
-        // Build result
-        const result: AgentRunResult = {
-          requestId,
-          sessionKey,
-          success: response.success,
-          finalText: response.content,
-          errorMessage: response.error,
-          paused: response.paused,
-          toolsUsed: response.toolsUsed,
-          durationMs: response.totalDurationMs,
-          metadata: response.metadata,
-        };
-
-        // Handle user prompt if paused
-        if (response.paused && response.userPrompt) {
-          result.userPrompt = {
-            requestId,
-            question: String(response.userPrompt.question ?? 'Please provide input:'),
-            options: response.userPrompt.options as Array<string | { label: string; description?: string }>,
-            context: String(response.userPrompt.context ?? ''),
-            multiSelect: Boolean(response.userPrompt.multiSelect),
-          };
+        if (this.graphd && this.graphdStarted) {
+          try {
+            this.graphd.sessionUpdateMetadata(sessionKey, {
+              user_id: 'local-user',
+              tier,
+              model: agentConfig.llm.model,
+              provider: agentConfig.llm.provider,
+            });
+          } catch (error) {
+            this.logger.warning('GraphD session metadata update failed', { error: String(error) });
+          }
         }
 
-        // Emit response event
+        const llmAdapter = this.llmAdapter;
+
+        const result = tier === 'simple'
+          ? await this.runSingleAgent(tier, contextWindow, inputText, requestId, emit, llmAdapter, agentConfig)
+          : await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier);
+
+        if (result.paused && result.userPrompt) {
+          eventQueue.push(createUserPromptEvent(
+            result.userPrompt.requestId,
+            result.userPrompt.question,
+            result.userPrompt.options,
+            result.userPrompt.context,
+            result.userPrompt.multiSelect
+          ));
+        }
+
         eventQueue.push(
           createResponseEvent(
             requestId,
-            response.success,
-            response.content,
-            response.toolsUsed,
-            response.totalDurationMs,
-            response.error,
-            response.metadata
+            result.success,
+            result.finalText,
+            result.toolsUsed,
+            result.durationMs,
+            result.errorMessage,
+            result.metadata
           )
         );
 
-        // Emit idle status
         eventQueue.push(createStatusEvent('idle'));
 
-        // Persist to GraphD (events are persisted in real-time via GraphDSubscriber)
-        this.persistToGraphD(sessionKey, requestId, inputText, response.content, response.totalDurationMs);
+        this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs);
 
         return result;
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.logger.error('Agent run failed', { error: errorMessage, requestId });
+
+        emit(createEvent('goal_not_achieved', {
+          goal: inputText,
+          reason: errorMessage,
+          completed: 0,
+          failed: 0,
+          skipped: 0,
+        }));
 
         eventQueue.push(createErrorEvent(errorMessage, false));
         eventQueue.push(createStatusEvent('error', errorMessage));
@@ -497,13 +450,9 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
-        // Unsubscribe from EventBus
         unsubscribe();
-
-        // Persist context to GraphD
         this.persistContext(contextWindow);
 
-        // Mark agent as inactive
         if (this.graphd && this.graphdStarted) {
           try {
             this.graphd.setActive(false);
@@ -515,15 +464,11 @@ export class AgentHarness {
       }
     })();
 
-    return {
-      result: resultPromise,
-      events: eventQueue,
-    };
+    return { result: resultPromise, events: eventQueue };
   }
 
   /**
    * Persist session data to GraphD.
-   * Note: Events are persisted in real-time via GraphDSubscriber.
    */
   private persistToGraphD(
     sessionKey: string,
@@ -535,15 +480,10 @@ export class AgentHarness {
     if (!this.graphd || !this.graphdStarted) return;
 
     try {
-      // Store user message
       this.graphd.messageAdd(sessionKey, 'user', userInput, requestId);
-
-      // Store assistant response
       this.graphd.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
         duration_ms: durationMs,
       });
-
-      // Update session metadata with request info
       this.graphd.sessionUpdateMetadata(sessionKey, {
         last_request_id: requestId,
         last_duration_ms: durationMs,
@@ -554,127 +494,256 @@ export class AgentHarness {
   }
 
   /**
-   * Resume agent execution after user provides input.
+   * Run a single agent without orchestration.
+   * Used for simple tier or any tier that doesn't need multi-agent coordination.
    */
-  resume(requestId: string, answer: string, sessionKey: string): AgentRunHandle {
-    const eventQueue = new AsyncEventQueue();
+  private async runSingleAgent(
+    agentType: string,
+    context: ContextWindow,
+    goal: string,
+    requestId: string,
+    emit: ReturnType<typeof createEventEmitCallback>,
+    llm: ReturnType<typeof createAdapter>,
+    agentConfig: ResolvedAgentConfig
+  ): Promise<AgentRunResult> {
+    // Get system prompt from prompts.ts, merge with behavioral rules
+    const basePrompt = getAgentPrompt(agentType);
+    const systemPrompt = this.config.behavioralRules
+      ? `${basePrompt}\n\n${this.config.behavioralRules}`
+      : basePrompt;
 
-    // Emit resuming status
-    eventQueue.push(createStatusEvent('sending', 'Resuming with your response...'));
+    const config = {
+      type: agentType,
+      systemPrompt,
+      tools: agentConfig.tools,
+      budget: agentConfig.budget,
+      allowImplicitFinals: false,
+    };
 
-    // Update GraphDSubscriber request ID for this resume
-    const subscriber = this.graphdSubscribers.get(sessionKey);
-    if (subscriber) {
-      subscriber.setRequestId(requestId);
-    }
+    const llmConfig: LLMRequestConfig = {
+      model: agentConfig.llm.model,
+      provider: agentConfig.llm.provider,
+      apiKey: agentConfig.llm.apiKey,
+      maxTokens: agentConfig.llm.maxTokens,
+      temperature: agentConfig.llm.temperature,
+      baseUrl: agentConfig.llm.baseUrl,
+      reasoning: agentConfig.llm.reasoning,
+    };
 
-    // Get context window for this session
-    const contextWindow = this.getOrCreateContext(sessionKey);
-    let chunkIndex = 0;
+    const agent = new Agent(
+      config,
+      llm,
+      this.toolRegistry,
+      emit,
+      requestId,
+      this.agentRegistry,
+      llmConfig
+    );
 
-    // Subscribe to EventBus for this request's events
-    const unsubscribe = this.eventBus.subscribeAll((event: WizardEvent): void => {
-      const bridgeEvent = translateWizardEvent(event, requestId);
-      if (bridgeEvent) {
-        eventQueue.push(bridgeEvent);
-      }
+    const workItem = createWorkItem({
+      goal,
+      objective: goal,
+      agent: agentType,
     });
 
-    const onStreamChunk = (chunk: string, index: number, isFinal: boolean): void => {
-      if (chunkIndex === 0) {
-        eventQueue.push(createStatusEvent('streaming'));
+    emit(createEvent('workitem_started', {
+      workId: workItem.workId,
+      objective: workItem.objective,
+      delta: workItem.delta,
+      agent: workItem.agent,
+      dependencies: [...workItem.dependencies],
+    }, workItem.workId));
+
+    const result = await agent.run({ context, workItem });
+
+    if (!result.needsUserInput) {
+      if (result.success) {
+        emit(createEvent('workitem_completed', {
+          workId: workItem.workId,
+          objective: workItem.objective,
+          response: result.response,
+          metrics: {
+            llmCallsMade: result.metrics.llmCallsMade,
+            toolCallsMade: result.metrics.toolCallsMade,
+            durationMs: result.metrics.durationMs,
+          },
+        }, workItem.workId));
+
+        emit(createEvent('goal_achieved', {
+          goal,
+          completed: 1,
+          skipped: 0,
+        }));
+      } else {
+        emit(createEvent('workitem_failed', {
+          workId: workItem.workId,
+          objective: workItem.objective,
+          error: result.error ?? 'Unknown error',
+          toolErrors: result.toolErrors,
+          terminationReason: result.terminationReason,
+        }, workItem.workId));
+
+        emit(createEvent('goal_not_achieved', {
+          goal,
+          reason: result.error ?? 'Unknown error',
+          completed: 0,
+          failed: 1,
+          skipped: 0,
+        }));
       }
-      eventQueue.push(createStreamEvent(requestId, chunk, chunkIndex++, isFinal));
-    };
-
-    const resultPromise = (async (): Promise<AgentRunResult> => {
-      try {
-        // Agent.resume() now takes ContextWindow
-        const response = await this.agent.resume(contextWindow, answer, onStreamChunk);
-
-        // Context is already updated by Agent/Wizard - no need to update session state
-
-        const result: AgentRunResult = {
-          requestId,
-          sessionKey,
-          success: response.success,
-          finalText: response.content,
-          errorMessage: response.error,
-          paused: response.paused,
-          toolsUsed: response.toolsUsed,
-          durationMs: response.totalDurationMs,
-          metadata: response.metadata,
-        };
-
-        if (response.paused && response.userPrompt) {
-          result.userPrompt = {
-            requestId,
-            question: String(response.userPrompt.question ?? 'Please provide input:'),
-            options: response.userPrompt.options as Array<string | { label: string; description?: string }>,
-            context: String(response.userPrompt.context ?? ''),
-            multiSelect: Boolean(response.userPrompt.multiSelect),
-          };
-        }
-
-        eventQueue.push(
-          createResponseEvent(
-            requestId,
-            response.success,
-            response.content,
-            response.toolsUsed,
-            response.totalDurationMs,
-            response.error,
-            response.metadata
-          )
-        );
-
-        eventQueue.push(createStatusEvent('idle'));
-
-        return result;
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        this.logger.error('Agent resume failed', { error: errorMessage, requestId });
-
-        eventQueue.push(createErrorEvent(errorMessage, false));
-        eventQueue.push(createStatusEvent('error', errorMessage));
-
-        return {
-          requestId,
-          sessionKey,
-          success: false,
-          finalText: '',
-          errorMessage,
-          paused: false,
-          toolsUsed: [],
-          durationMs: 0,
-        };
-      } finally {
-        // Unsubscribe from EventBus
-        unsubscribe();
-
-        // Persist context to GraphD
-        this.persistContext(contextWindow);
-
-        eventQueue.finish();
-      }
-    })();
+    }
 
     return {
-      result: resultPromise,
-      events: eventQueue,
+      requestId,
+      sessionKey: context.sessionKey,
+      success: result.success,
+      finalText: result.response,
+      errorMessage: result.error,
+      paused: result.needsUserInput,
+      userPrompt: result.needsUserInput && result.userPrompt ? {
+        requestId,
+        question: String(result.userPrompt.question ?? 'Please provide input:'),
+        options: result.userPrompt.options,
+        context: result.userPrompt.context,
+        multiSelect: result.userPrompt.multiSelect,
+      } : undefined,
+      toolsUsed: [],
+      durationMs: result.metrics.durationMs,
+      metadata: { tier: agentType, metrics: result.metrics },
     };
+  }
+
+  /**
+   * Run standard/complex tiers via Orchestrator.
+   */
+  private async runOrchestrator(
+    context: ContextWindow,
+    goal: string,
+    requestId: string,
+    emit: ReturnType<typeof createEventEmitCallback>,
+    llm: ReturnType<typeof createAdapter>,
+    tier: Tier
+  ): Promise<AgentRunResult> {
+    const orchestrator = new Orchestrator(
+      {},
+      this.toolRegistry,
+      llm,
+      emit,
+      requestId,
+      this.logger,
+      this.agentRegistry
+    );
+
+    const result = await orchestrator.execute(context, goal, tier === 'complex' ? 'complex' : 'standard');
+
+    return {
+      requestId,
+      sessionKey: context.sessionKey,
+      success: result.success,
+      finalText: result.response,
+      errorMessage: result.error,
+      paused: result.paused,
+      userPrompt: result.paused && result.userPrompt ? {
+        requestId,
+        question: String(result.userPrompt.question ?? 'Please provide input:'),
+        options: result.userPrompt.options,
+        context: result.userPrompt.context,
+        multiSelect: result.userPrompt.multiSelect,
+      } : undefined,
+      toolsUsed: [],
+      durationMs: result.metrics.durationMs,
+      metadata: { tier, metrics: result.metrics },
+    };
+  }
+
+  /**
+   * Route a request to determine tier.
+   * Uses agents.routing config from harness_config.json.
+   */
+  private async route(goal: string): Promise<Tier> {
+    const routingAgentConfig = getAgentConfig(this.config, 'routing');
+    const routingPrompt = getAgentPrompt('routing');
+
+    const routingAdapter = this.llmAdapter;
+
+    this.logger.debug('Routing request', {
+      provider: routingAgentConfig.llm.provider,
+      model: routingAgentConfig.llm.model,
+    });
+
+    const response = await routingAdapter.respond({
+      messages: [
+        { role: 'system', content: routingPrompt },
+        { role: 'user', content: goal },
+      ],
+      llm: {
+        model: routingAgentConfig.llm.model,
+        provider: routingAgentConfig.llm.provider,
+        apiKey: routingAgentConfig.llm.apiKey,
+        maxTokens: routingAgentConfig.llm.maxTokens,
+        temperature: routingAgentConfig.llm.temperature,
+        baseUrl: routingAgentConfig.llm.baseUrl,
+        reasoning: routingAgentConfig.llm.reasoning,
+      },
+      responseSchema: routingAgentConfig.outputSchema,
+    });
+
+    const content = response.content?.toLowerCase().trim() ?? '';
+    const structured = coerceStructuredOutput(response.content);
+    const tierValue =
+      structured && typeof structured.tier === 'string'
+        ? structured.tier.toLowerCase().trim()
+        : '';
+    this.logger.debug('Routing agent response', {
+      content: tierValue || content,
+      model: response.model,
+      stopReason: response.stopReason,
+    });
+    if (tierValue.includes('simple') || content.includes('simple')) return 'simple';
+    if (tierValue.includes('complex') || content.includes('complex')) return 'complex';
+    return 'standard';
+  }
+
+  /**
+   * Resume agent execution after user provides input.
+   */
+  resume(requestId: string, _answer: string, sessionKey: string): AgentRunHandle {
+    const eventQueue = new AsyncEventQueue();
+    eventQueue.push(createStatusEvent('sending', 'Resume is not supported in this refactor.'));
+
+    const resultPromise = (async (): Promise<AgentRunResult> => {
+      const errorMessage = 'Resume not implemented for orchestrator runs.';
+      eventQueue.push(createErrorEvent(errorMessage, true));
+      eventQueue.push(createStatusEvent('error', errorMessage));
+      eventQueue.finish();
+      return {
+        requestId,
+        sessionKey,
+        success: false,
+        finalText: '',
+        errorMessage,
+        paused: false,
+        toolsUsed: [],
+        durationMs: 0,
+      };
+    })();
+
+    return { result: resultPromise, events: eventQueue };
   }
 
   /**
    * Create a ready event for initialization.
    */
   createReadyEvent(sessionKey: string): BridgeEvent {
-    const configSummary = `Provider: ${this.config.llm.provider}, Model: ${this.config.llm.model}`;
+    const defaultAgent = this.config.agents[this.config.defaultAgent];
+    const configSummary = defaultAgent
+      ? `Provider: ${defaultAgent.llm.provider}, Model: ${defaultAgent.llm.model}`
+      : 'No default agent configured';
     return createReadyEvent(sessionKey, configSummary);
   }
 
   /**
-   * Get the loaded configuration (for TUI integration).
+   * Get the loaded configuration.
    */
   getConfig(): FullHarnessConfig {
     return this.config;
@@ -687,8 +756,6 @@ export class AgentHarness {
     if (this.isShutdown) return;
     this.isShutdown = true;
 
-    // Close all GraphDSubscribers first (they flush pending events)
-    // Also collect session keys to close
     const sessionKeysToClose: string[] = [];
     for (const [sessionKey, subscriber] of this.graphdSubscribers) {
       try {
@@ -701,7 +768,6 @@ export class AgentHarness {
     }
     this.graphdSubscribers.clear();
 
-    // Close sessions in GraphD before stopping the server
     if (this.graphd && this.graphdStarted) {
       for (const sessionKey of sessionKeysToClose) {
         try {
@@ -713,7 +779,6 @@ export class AgentHarness {
       }
     }
 
-    // Close LogSubscriber (flushes pending events)
     if (this.logSubscriber) {
       try {
         this.logSubscriber.close();
@@ -723,10 +788,8 @@ export class AgentHarness {
       }
     }
 
-    // Shutdown EventBus
     this.eventBus.shutdown();
 
-    // Stop GraphD
     if (this.graphd && this.graphdStarted) {
       try {
         await this.graphd.stop();
@@ -750,18 +813,13 @@ export class AgentHarness {
 }
 
 /**
- * Create an AgentHarness from configuration file with environment overrides.
+ * Create an AgentHarness from configuration file.
  * Tries to load config/harness_config.json, falls back to env-only mode.
- *
- * @param workingDir - Working directory for tools
- * @param configPath - Optional explicit path to config file
- * @param tier - Initial tier for LLM selection (default: 'standard')
  */
 export function createHarnessFromEnv(
   workingDir?: string,
-  configPath?: string,
-  tier: Tier = 'standard'
+  configPath?: string
 ): AgentHarness {
-  const config = loadConfig(configPath, workingDir, tier);
+  const config = loadConfig(configPath, workingDir);
   return new AgentHarness(config);
 }

@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import type { PlanStep, StepStatus } from '../domain/models'
+import type { WorkItem, WorkItemStatus, AgentType } from '../domain/models'
 import { cn } from '../lib/utils'
 import { ExecutionFlow } from './ExecutionFlow'
 
-function getStepColor(status: StepStatus): string {
+function getStatusColor(status: WorkItemStatus): string {
   switch (status) {
     case 'completed':
       return 'var(--success)'
@@ -12,6 +12,7 @@ function getStepColor(status: StepStatus): string {
     case 'failed':
       return 'var(--error)'
     case 'skipped':
+    case 'awaiting_user':
       return 'var(--pending)'
     case 'pending':
     default:
@@ -19,7 +20,7 @@ function getStepColor(status: StepStatus): string {
   }
 }
 
-function getStepBgClass(status: StepStatus): string {
+function getStatusBgClass(status: WorkItemStatus): string {
   switch (status) {
     case 'completed':
       return 'bg-[var(--success)]'
@@ -27,6 +28,8 @@ function getStepBgClass(status: StepStatus): string {
       return 'bg-[var(--running)]'
     case 'failed':
       return 'bg-[var(--error)]'
+    case 'awaiting_user':
+      return 'bg-[var(--warning)]'
     case 'skipped':
       return 'bg-[var(--pending)] opacity-50'
     case 'pending':
@@ -35,34 +38,47 @@ function getStepBgClass(status: StepStatus): string {
   }
 }
 
+const AGENT_BADGE_COLORS: Record<AgentType, string> = {
+  routing: 'var(--text-muted)',
+  explorer: 'var(--accent-cyan)',
+  runtime_script: 'var(--accent-violet)',
+  standard: 'var(--success)',
+  linter: '#eab308',
+  tester: '#06b6d4',
+  context_compactor: '#f97316',
+  debugger: '#ef4444',
+  web_crawler: '#6366f1',
+  orchestrator: 'var(--text-muted)',
+}
+
 interface ExecutionTimelineProps {
-  steps: PlanStep[]
-  onStepClick?: (step: PlanStep) => void
-  selectedStep?: number
+  workItems: WorkItem[]
+  onWorkItemClick?: (item: WorkItem) => void
+  selectedWorkId?: string
   compact?: boolean
 }
 
 export function ExecutionTimeline({
-  steps,
-  onStepClick,
-  selectedStep,
+  workItems,
+  onWorkItemClick,
+  selectedWorkId,
   compact = false,
 }: ExecutionTimelineProps) {
-  if (steps.length === 0) return null
+  if (workItems.length === 0) return null
 
-  // Find current step (first in_progress or first pending after all completed)
-  const currentStepNum = steps.find((s) => s.status === 'in_progress')?.stepNum
+  // Find current work item (first in_progress)
+  const currentWorkId = workItems.find((w) => w.status === 'in_progress')?.workId
 
   return (
     <div className={cn('flex items-center gap-1', compact ? 'gap-0.5' : 'gap-1')}>
-      {steps.map((step, idx) => {
+      {workItems.map((item, idx) => {
         const isFirst = idx === 0
-        const isLast = idx === steps.length - 1
-        const isCurrent = step.stepNum === currentStepNum
-        const isSelected = step.stepNum === selectedStep
+        const isLast = idx === workItems.length - 1
+        const isCurrent = item.workId === currentWorkId
+        const isSelected = item.workId === selectedWorkId
 
         return (
-          <div key={step.stepNum} className="flex items-center">
+          <div key={item.workId} className="flex items-center">
             {/* Connector line before */}
             {!isFirst && (
               <div
@@ -72,14 +88,14 @@ export function ExecutionTimeline({
                 )}
                 style={{
                   backgroundColor:
-                    step.status === 'pending' ? 'var(--border-subtle)' : getStepColor(steps[idx - 1].status),
+                    item.status === 'pending' ? 'var(--border-subtle)' : getStatusColor(workItems[idx - 1].status),
                 }}
               />
             )}
 
-            {/* Step dot/circle */}
+            {/* Work item dot/circle */}
             <button
-              onClick={() => onStepClick?.(step)}
+              onClick={() => onWorkItemClick?.(item)}
               className={cn(
                 'relative rounded-full transition-all duration-200',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2',
@@ -87,12 +103,12 @@ export function ExecutionTimeline({
                 compact ? 'w-2 h-2' : 'w-3 h-3',
                 isCurrent && 'animate-pulse-glow',
                 isSelected && 'ring-2 ring-[var(--accent-cyan)] ring-offset-2 ring-offset-[var(--bg-surface)]',
-                getStepBgClass(step.status)
+                getStatusBgClass(item.status)
               )}
-              title={`Step ${step.stepNum}: ${step.objective}`}
-              aria-label={`Step ${step.stepNum}: ${step.objective} - ${step.status}`}
+              title={`${item.workId}: ${item.objective}`}
+              aria-label={`${item.workId}: ${item.objective} - ${item.status}`}
             >
-              {/* Inner dot for current step */}
+              {/* Inner dot for current item */}
               {isCurrent && !compact && (
                 <span className="absolute inset-0.5 rounded-full bg-[var(--bg-surface)]" />
               )}
@@ -107,9 +123,9 @@ export function ExecutionTimeline({
                 )}
                 style={{
                   backgroundColor:
-                    steps[idx + 1].status === 'pending' || steps[idx + 1].status === 'skipped'
+                    workItems[idx + 1].status === 'pending' || workItems[idx + 1].status === 'skipped'
                       ? 'var(--border-subtle)'
-                      : getStepColor(step.status),
+                      : getStatusColor(item.status),
                 }}
               />
             )}
@@ -122,25 +138,25 @@ export function ExecutionTimeline({
 
 // Vertical timeline variant for expanded view with nested calls
 export function VerticalTimeline({
-  steps,
-  onStepClick,
-  selectedStep,
+  workItems,
+  onWorkItemClick,
+  selectedWorkId,
 }: {
-  steps: PlanStep[]
-  onStepClick?: (step: PlanStep) => void
-  selectedStep?: number
+  workItems: WorkItem[]
+  onWorkItemClick?: (item: WorkItem) => void
+  selectedWorkId?: string
 }) {
-  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set())
 
-  if (steps.length === 0) return null
+  if (workItems.length === 0) return null
 
-  const toggleStep = (stepNum: number) => {
-    setExpandedSteps((prev) => {
+  const toggleItem = (workId: string) => {
+    setExpandedItems((prev) => {
       const next = new Set(prev)
-      if (next.has(stepNum)) {
-        next.delete(stepNum)
+      if (next.has(workId)) {
+        next.delete(workId)
       } else {
-        next.add(stepNum)
+        next.add(workId)
       }
       return next
     })
@@ -148,97 +164,101 @@ export function VerticalTimeline({
 
   return (
     <div className="space-y-0">
-      {steps.map((step, idx) => {
-        const isLast = idx === steps.length - 1
-        const isSelected = step.stepNum === selectedStep
-        const isExpanded = expandedSteps.has(step.stepNum)
-        const toolCallCount = step.toolCalls?.length ?? 0
-        const llmCallCount = step.llmCalls?.length ?? 0
+      {workItems.map((item, idx) => {
+        const isLast = idx === workItems.length - 1
+        const isSelected = item.workId === selectedWorkId
+        const isExpanded = expandedItems.has(item.workId)
+        const toolCallCount = item.toolCalls?.length ?? 0
+        const llmCallCount = item.llmCalls?.length ?? 0
         const hasNestedCalls = toolCallCount > 0 || llmCallCount > 0
+        const agentColor = AGENT_BADGE_COLORS[item.agent] ?? 'var(--text-muted)'
 
         return (
-          <div key={step.stepNum} className="relative flex gap-3">
+          <div key={item.workId} className="relative flex gap-3">
             {/* Vertical connector */}
             {!isLast && (
               <div
                 className="absolute left-[11px] top-7 bottom-0 w-0.5"
                 style={{
                   backgroundColor:
-                    step.status === 'completed' ? 'var(--success-muted)' : 'var(--border-subtle)',
+                    item.status === 'completed' ? 'var(--success-muted)' : 'var(--border-subtle)',
                 }}
               />
             )}
 
-            {/* Step marker - always show step number */}
+            {/* Work item marker */}
             <div className="relative z-10 pt-1">
               <button
-                onClick={() => onStepClick?.(step)}
+                onClick={() => onWorkItemClick?.(item)}
                 className={cn(
                   'w-7 h-7 rounded-full flex items-center justify-center',
                   'border-2 transition-all duration-200',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2',
                   'focus-visible:ring-[var(--running)] focus-visible:ring-offset-[var(--bg-surface)]',
-                  step.status === 'completed' &&
+                  item.status === 'completed' &&
                     'bg-[var(--success-bg)] border-[var(--success)] text-[var(--success)]',
-                  step.status === 'in_progress' &&
+                  item.status === 'in_progress' &&
                     'bg-[var(--running-bg)] border-[var(--running)] text-[var(--running)] animate-pulse-glow',
-                  step.status === 'failed' &&
+                  item.status === 'failed' &&
                     'bg-[var(--error-bg)] border-[var(--error)] text-[var(--error)]',
-                  step.status === 'pending' &&
+                  item.status === 'pending' &&
                     'bg-[var(--bg-elevated)] border-[var(--border-default)] text-[var(--text-muted)]',
-                  step.status === 'skipped' && step.error &&
+                  item.status === 'awaiting_user' &&
                     'bg-[var(--warning-bg)] border-[var(--warning)] text-[var(--warning)]',
-                  step.status === 'skipped' && !step.error &&
+                  item.status === 'skipped' && item.error &&
+                    'bg-[var(--warning-bg)] border-[var(--warning)] text-[var(--warning)]',
+                  item.status === 'skipped' && !item.error &&
                     'bg-[var(--bg-elevated)] border-[var(--border-subtle)] text-[var(--text-muted)] opacity-50',
                   isSelected && 'ring-2 ring-[var(--accent-cyan)]'
                 )}
-                title={`Step ${step.stepNum}${step.dependsOn?.length ? ` (depends on: ${step.dependsOn.join(', ')})` : ''}`}
+                title={`${item.workId}${item.dependencies.length ? ` (after: ${item.dependencies.join(', ')})` : ''}`}
               >
-                <span className="font-mono text-[11px] font-bold">{step.stepNum}</span>
+                <span className="font-mono text-[11px] font-bold">{idx + 1}</span>
               </button>
             </div>
 
-            {/* Step content */}
+            {/* Work item content */}
             <div className={cn('flex-1 pb-4', isLast && 'pb-0')}>
               <div className="flex items-start justify-between gap-2">
                 <div className="flex-1">
                   <p
                     className={cn(
                       'text-sm font-medium',
-                      step.status === 'pending' || step.status === 'skipped'
+                      item.status === 'pending' || item.status === 'skipped'
                         ? 'text-[var(--text-muted)]'
                         : 'text-[var(--text-primary)]'
                     )}
                   >
-                    <span className="font-mono text-[var(--text-muted)] mr-1">#{step.stepNum}</span>
-                    {step.objective}
+                    {item.objective}
                   </p>
+                  {item.delta && (
+                    <p className="text-xs text-[var(--text-muted)] mt-0.5 italic">
+                      {item.delta}
+                    </p>
+                  )}
                   <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    {/* Agent type badge */}
                     <span
-                      className={cn(
-                        'text-xs font-mono px-1.5 py-0.5 rounded',
-                        step.phase === 'discovery'
-                          ? 'bg-[var(--accent-violet)]/10 text-[var(--accent-violet)]'
-                          : 'bg-[var(--accent-cyan)]/10 text-[var(--accent-cyan)]'
-                      )}
+                      className="text-xs font-mono px-1.5 py-0.5 rounded uppercase"
+                      style={{ backgroundColor: `${agentColor}20`, color: agentColor }}
                     >
-                      {step.phase}
+                      {item.agent}
                     </span>
-                    {/* Prerequisites badge */}
-                    {step.dependsOn && step.dependsOn.length > 0 && (
+                    {/* Dependencies badge */}
+                    {item.dependencies.length > 0 && (
                       <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-muted)]">
-                        after {step.dependsOn.map(d => `#${d}`).join(', ')}
+                        after {item.dependencies.join(', ')}
                       </span>
                     )}
-                    {step.toolHint && (
+                    {item.toolHint && (
                       <span className="text-xs font-mono text-[var(--text-muted)]">
-                        → {step.toolHint}
+                        → {item.toolHint}
                       </span>
                     )}
                     {/* Call counts badge - clickable to expand */}
                     {hasNestedCalls && (
                       <button
-                        onClick={() => toggleStep(step.stepNum)}
+                        onClick={() => toggleItem(item.workId)}
                         className={cn(
                           'flex items-center gap-1 text-xs px-1.5 py-0.5 rounded',
                           'bg-[var(--bg-surface)] border border-[var(--border-subtle)]',
@@ -275,19 +295,19 @@ export function VerticalTimeline({
                     )}
                   </div>
                 </div>
-                {step.durationMs && (
+                {item.durationMs && (
                   <span className="text-xs font-mono text-[var(--text-muted)] tabular-nums whitespace-nowrap">
-                    {step.durationMs < 1000
-                      ? `${step.durationMs}ms`
-                      : `${(step.durationMs / 1000).toFixed(1)}s`}
+                    {item.durationMs < 1000
+                      ? `${item.durationMs}ms`
+                      : `${(item.durationMs / 1000).toFixed(1)}s`}
                   </span>
                 )}
               </div>
 
               {/* Error message */}
-              {step.error && (
+              {item.error && (
                 <p className="mt-2 text-xs text-[var(--error)] bg-[var(--error-bg)] rounded px-2 py-1 font-mono">
-                  {step.error}
+                  {item.error}
                 </p>
               )}
 
@@ -295,8 +315,8 @@ export function VerticalTimeline({
               {isExpanded && hasNestedCalls && (
                 <div className="mt-3 animate-fade-in">
                   <ExecutionFlow
-                    llmCalls={step.llmCalls ?? []}
-                    toolCalls={step.toolCalls ?? []}
+                    llmCalls={item.llmCalls ?? []}
+                    toolCalls={item.toolCalls ?? []}
                     maxVisible={15}
                   />
                 </div>

@@ -4,11 +4,16 @@ import { cn } from '../lib/utils'
 import { formatDuration } from '../lib/time'
 
 const AGENT_COLORS: Record<AgentType, string> = {
-  wizard: 'var(--accent-violet)',
-  worker: 'var(--accent-cyan)',
-  planner: '#f97316',
-  reflector: '#ec4899',
-  synthesizer: 'var(--success)',
+  routing: 'var(--text-muted)',
+  explorer: 'var(--accent-cyan)',
+  runtime_script: 'var(--accent-violet)',
+  standard: 'var(--success)',
+  linter: '#eab308',
+  tester: '#06b6d4',
+  context_compactor: '#f97316',
+  debugger: '#ef4444',
+  web_crawler: '#6366f1',
+  orchestrator: 'var(--text-muted)',
 }
 
 function LLMCallRow({ call }: { call: LLMCall }) {
@@ -29,8 +34,8 @@ function LLMCallRow({ call }: { call: LLMCall }) {
             >
               {call.agentType}
             </span>
-            {call.stepNum !== undefined && (
-              <span className="text-xs text-[var(--text-muted)]">Step {call.stepNum}</span>
+            {call.workItemId && (
+              <span className="text-xs text-[var(--text-muted)] font-mono">{call.workItemId}</span>
             )}
             <span className="text-xs text-[var(--text-secondary)] font-mono">{call.model}</span>
           </div>

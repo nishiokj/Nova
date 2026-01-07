@@ -2,15 +2,10 @@
  * Harness types for wiring the TypeScript agent to the TUI.
  *
  * These types bridge the agent's internal types with the TUI's BridgeEvent format.
- *
- * NOTE: SessionContext has been replaced by ContextWindow from types/context.ts.
- * The harness now manages ContextWindow internally via getOrCreateContext().
  */
 
-import type { Tier } from './config_types.js';
-
-// Re-export Tier for convenience
-export type { Tier } from './config_types.js';
+/** Tier classification for routing */
+export type Tier = 'simple' | 'standard' | 'complex';
 
 /**
  * Parameters for running the agent.
@@ -74,11 +69,8 @@ export interface BridgeEvent {
  * Handle returned from agent.run() for streaming events.
  */
 export interface AgentRunHandle {
-  /** Promise that resolves when the agent completes */
   result: Promise<AgentRunResult>;
-  /** Async iterator of BridgeEvents for streaming updates */
   events: AsyncIterable<BridgeEvent>;
-  /** Abort the current run */
   abort?: () => void;
 }
 

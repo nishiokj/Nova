@@ -1,7 +1,5 @@
 /**
  * Agent TypeScript Types - Barrel Export
- *
- * This module exports all types needed for the TypeScript agent implementation.
  */
 
 // ============================================
@@ -25,69 +23,29 @@ export { ContextWindow } from './context.js';
 // EVENTS
 // ============================================
 export type {
-  WizardEventType,
-  WizardEvent,
-  WizardEventCallback,
-  WizardEventEmitter,
+  AgentCoreEventType,
+  OrchestratorEventType,
+  AgentEventType,
+  AgentEvent,
   AgentType,
-  GoalStartedData,
+  RuntimeScriptCreatedData,
+  WorkItemStartedData,
+  WorkItemCompletedData,
+  WorkItemFailedData,
+  WorkItemSkippedData,
   GoalAchievedData,
-  GoalAbortedData,
-  StepStartedData,
-  StepCompletedData,
-  StepFailedData,
-  StepSkippedData,
+  GoalNotAchievedData,
   ToolCallData,
-  UserInputRequestedData,
-  UserInputReceivedData,
-  QualityIssueData,
-  ErrorDetectedData,
+  ToolCallPhase,
   LLMCallData,
-  PlanSnapshotData,
-  ContextWindowUpdateData,
-  ReflectionCompletedData,
-  StepsScaffoldedData,
+  LLMErrorData,
+  EventCallback,
 } from './events.js';
 
 export {
   createEvent,
   eventToDict,
-  SimpleEventEmitter,
 } from './events.js';
-
-// ============================================
-// PLAN
-// ============================================
-export type {
-  PlanStatus,
-  PlanPhase,
-  DiscoveryType,
-  GoalType,
-  ComplexityLevel,
-  Discovery,
-  SuccessCriteria,
-  StepContext,
-  ValidationResult,
-  PlanStep,
-  StepResult,
-  Plan,
-  ExecutionTrace,
-  Reflection,
-} from './plan.js';
-
-export {
-  createSuccessCriteria,
-  createStepContext,
-  addToolResult,
-  hasRequiredData,
-  createPlanStep,
-  createStepResult,
-  createPlan,
-  planToDict,
-  traceHadFailures,
-  traceAllStepsSucceeded,
-  reflectionToRLLabels,
-} from './plan.js';
 
 // ============================================
 // TOOLS
@@ -127,7 +85,8 @@ export type {
   ContentBlock,
   Message,
   LLMProvider,
-  LLMConfig,
+  LLMRequestConfig,
+  LLMClientConfig,
   StopReason,
   TokenUsage,
   ToolCall,
@@ -172,51 +131,3 @@ export {
   getKnowledge,
   clearExpiredKnowledge,
 } from './session.js';
-
-// ============================================
-// WORKER
-// ============================================
-export type {
-  OutcomeStatus,
-  WorkerOutcome,
-  WorkItem,
-  ContextDelta,
-  DiscoveryDelta,
-  WorkerMetrics,
-  StagnationState,
-} from './worker.js';
-
-export {
-  createWorkItem,
-  createContextDelta,
-  createWorkerMetrics,
-  updateMetricsFromLLM,
-  updateMetricsFromTool,
-  createStagnationState,
-  simpleHash,
-  updateStagnation,
-  isStagnating,
-  getStagnationScore,
-} from './worker.js';
-
-// ============================================
-// WIZARD PLANS
-// ============================================
-export {
-  StepStatus,
-  StepPhase,
-  DependencyType,
-  ReflectionVerdict,
-} from './plans.js';
-
-export type {
-  WizardGoalType,
-  WizardStep,
-  WizardPlan,
-  WizardReflection,
-} from './plans.js';
-
-export {
-  createWizardStep,
-  createWizardPlan,
-} from './plans.js';

@@ -7,7 +7,7 @@
 
 import path from 'path';
 import type { EventBusProtocol } from './event_bus.js';
-import type { WizardEvent } from '../types/events.js';
+import type { AgentEvent } from '../types/events.js';
 import { createLogger, type Logger, type LogLevel } from '../shared/logger.js';
 
 export interface LogSubscriberConfig {
@@ -33,15 +33,16 @@ export class LogSubscriber {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleEvent(event: WizardEvent<any>): void {
+  private handleEvent(event: AgentEvent<any>): void {
     if (this.eventTypes.length > 0 && !this.eventTypes.includes(event.type)) {
       return;
     }
 
     const level = this.inferLevel(event.type);
-    const message = `[${event.type}]${event.stepNum !== undefined ? ` step=${event.stepNum}` : ''}`;
+    const suffix = event.workItemId ? ` workItem=${event.workItemId}` : '';
+    const message = `[${event.type}]${suffix}`;
 
-    this.logger[level](message, event.data ?? {});
+    this.logger[level](message, { requestId: event.requestId, ...(event.data ?? {}) });
   }
 
   private inferLevel(eventType: string): LogLevel {

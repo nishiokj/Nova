@@ -166,8 +166,12 @@ export class AgentClient extends EventEmitter {
 
       // Store skills/hooks directories from loaded config
       const config = this.harness.getConfig();
-      this.skillsDir = path.resolve(this.workingDir, config.skills.skillsDir);
-      this.hooksDir = path.resolve(this.workingDir, config.hooks.hooksDir);
+      if (config.skills.directory) {
+        this.skillsDir = path.resolve(this.workingDir, config.skills.directory);
+      }
+      if (config.hooks.directory) {
+        this.hooksDir = path.resolve(this.workingDir, config.hooks.directory);
+      }
 
       // Set up structured event logging via EventBus subscription
       const logDir = String(data?.log_dir ?? path.join(this.workingDir, 'tui', 'logs'));
@@ -281,6 +285,7 @@ export class AgentClient extends EventEmitter {
   private handleGetConfig(): void {
     if (this.harness) {
       const config = this.harness.getConfig();
+      const defaultAgent = config.agents[config.defaultAgent];
       this.emitEvent({
         type: 'response',
         data: {
@@ -289,16 +294,13 @@ export class AgentClient extends EventEmitter {
           metadata: {
             kind: 'config',
             payload: {
-              llm_provider: config.llm.provider,
-              model: config.llm.model,
-              tier_tool_limits: config.agent.tierToolLimits,
-              tier_max_tokens: config.agent.tierMaxTokens,
-              enabled_tools: config.tools.enabledTools,
+              llm_provider: defaultAgent?.llm.provider ?? 'unknown',
+              model: defaultAgent?.llm.model ?? 'unknown',
+              default_agent: config.defaultAgent,
+              agent_count: Object.keys(config.agents).length,
               graphd_enabled: config.graphd.enabled,
               skills_enabled: config.skills.enabled,
               hooks_enabled: config.hooks.enabled,
-              router_enabled: config.router.enabled,
-              default_tier: config.router.defaultTier,
             },
           },
         },
@@ -322,27 +324,49 @@ export class AgentClient extends EventEmitter {
   }
 
   private handleSkillsList(): void {
-    const skills = loadSkillDefinitions(this.skillsDir);
-    this.emitEvent({
-      type: 'response',
-      data: {
-        success: true,
-        content: '',
-        metadata: { kind: 'skills_list', payload: skills },
-      },
-    });
+    try {
+      const skills = loadSkillDefinitions(this.skillsDir);
+      this.emitEvent({
+        type: 'response',
+        data: {
+          success: true,
+          content: '',
+          metadata: { kind: 'skills', payload: { action: 'list', items: skills, errors: [] } },
+        },
+      });
+    } catch (error) {
+      this.emitEvent({
+        type: 'response',
+        data: {
+          success: true,
+          content: '',
+          metadata: { kind: 'skills', payload: { action: 'list', items: [], errors: [String(error)] } },
+        },
+      });
+    }
   }
 
   private handleHooksList(): void {
-    const hooks = loadHookDefinitions(this.hooksDir);
-    this.emitEvent({
-      type: 'response',
-      data: {
-        success: true,
-        content: '',
-        metadata: { kind: 'hooks_list', payload: hooks },
-      },
-    });
+    try {
+      const hooks = loadHookDefinitions(this.hooksDir);
+      this.emitEvent({
+        type: 'response',
+        data: {
+          success: true,
+          content: '',
+          metadata: { kind: 'hooks', payload: { action: 'list', items: hooks, errors: [] } },
+        },
+      });
+    } catch (error) {
+      this.emitEvent({
+        type: 'response',
+        data: {
+          success: true,
+          content: '',
+          metadata: { kind: 'hooks', payload: { action: 'list', items: [], errors: [String(error)] } },
+        },
+      });
+    }
   }
 
   private handleGetStatus(): void {

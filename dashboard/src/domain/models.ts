@@ -4,29 +4,26 @@ export type KV = Record<string, string>;
 export type Environment = 'prod' | 'staging' | 'dev';
 
 export type SessionState = 'active' | 'idle' | 'ended' | 'error';
-export type RequestState = 'queued' | 'running' | 'success' | 'error' | 'cancelled';
-
-export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 // ============================================
 // AGENT EXECUTION TYPES
 // ============================================
 
-export type StepStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
-export type StepPhase = 'discovery' | 'execution';
+export type WorkItemStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped' | 'awaiting_user';
 
-export interface PlanStep {
-  stepNum: number;
+export interface WorkItem {
+  workId: string;
+  goal: string;
   objective: string;
-  status: StepStatus;
-  phase: StepPhase;
+  delta?: string;
+  dependencies: string[];
+  agent: AgentType;
+  status: WorkItemStatus;
   toolHint?: string;
-  required: boolean;
+  targetPaths?: string[];
   durationMs?: number;
   error?: string;
-  /** Step numbers this step depends on (prerequisites) */
-  dependsOn?: number[];
-  // Nested calls for this step (assigned by mapper from flat arrays)
+  // Nested calls for this work item (assigned by mapper from flat arrays)
   toolCalls?: ToolCall[];
   llmCalls?: LLMCall[];
 }
@@ -45,12 +42,22 @@ export interface ToolCall {
 // LLM CALL TRACKING
 // ============================================
 
-export type AgentType = 'wizard' | 'worker' | 'planner' | 'reflector' | 'synthesizer';
+export type AgentType =
+  | 'routing'
+  | 'explorer'
+  | 'runtime_script'
+  | 'standard'
+  | 'linter'
+  | 'tester'
+  | 'context_compactor'
+  | 'debugger'
+  | 'web_crawler'
+  | 'orchestrator';
 
 export interface LLMCall {
   id: string;
   agentType: AgentType;
-  stepNum?: number;
+  workItemId?: string;
   promptPreview: string;
   responsePreview: string;
   totalTokens: number;
@@ -63,16 +70,23 @@ export interface LLMCall {
 }
 
 // ============================================
-// PLAN VERSION HISTORY
+// RUNTIME SCRIPT (replaces PlanSnapshot)
 // ============================================
 
-export interface PlanSnapshot {
-  version: number;
-  snapshotType: 'initial' | 'pre_patch' | 'post_patch';
-  steps: PlanStep[];
+export interface SystemContext {
+  packageManagers: string[];
+  frameworks: string[];
+  languages: string[];
+  os: string;
+  artifacts: Array<{ path: string; type: string; description?: string }>;
+  patterns: string[];
+}
+
+export interface RuntimeScript {
   goal: string;
-  trigger: string;
-  timestamp: ISODateTime;
+  workItems: WorkItem[];
+  systemContext: SystemContext;
+  createdAt: ISODateTime;
 }
 
 // ============================================
@@ -81,7 +95,7 @@ export interface PlanSnapshot {
 
 export interface UserPrompt {
   requestId: string;
-  stepNum: number;
+  workItemId: string;
   question: string;
   options: string[];
   context: string;
@@ -130,18 +144,18 @@ export interface AgentRequest {
   // Execution data
   plan?: {
     goal: string;
-    steps: PlanStep[];
+    workItems: WorkItem[];
+    systemContext?: SystemContext;
   };
   toolCalls: ToolCall[];
   reflection?: Reflection;
   llmCalls: LLMCall[];
-  planSnapshots: PlanSnapshot[];
   userPrompts: UserPrompt[];
   contextWindow?: ContextWindowMetrics;
 
   // Metrics
-  stepsCompleted: number;
-  stepsTotal: number;
+  workItemsCompleted: number;
+  workItemsTotal: number;
   totalToolCalls: number;
   durationMs?: number;
 
@@ -151,13 +165,13 @@ export interface AgentRequest {
 
 export interface AgentRequestInsights {
   durationMs?: number;
-  stepProgress: number; // 0-1
+  workItemProgress: number; // 0-1
   hasErrors: boolean;
   qualityScore?: number;
 }
 
 // ============================================
-// LEGACY TYPES (kept for compatibility)
+// SESSION INSIGHTS
 // ============================================
 
 export type LatencyPercentiles = {
@@ -165,11 +179,6 @@ export type LatencyPercentiles = {
   p90?: number;
   p95?: number;
   p99?: number;
-};
-
-export type RequestInsights = {
-  durationMs?: number;
-  latency?: LatencyPercentiles;
 };
 
 export type SessionInsights = {
@@ -184,23 +193,6 @@ export type SessionInsights = {
   avgQuality?: number;
 };
 
-// Legacy HTTP request type (kept for compatibility with old data)
-export type LegacyHttpRequest = {
-  id: string;
-  sessionId: string;
-  state: RequestState;
-  method: HttpMethod;
-  path: string;
-  createdAt: ISODateTime;
-  startedAt?: ISODateTime;
-  endedAt?: ISODateTime;
-  httpStatus?: number;
-  errorCode?: string;
-  errorMessage?: string;
-  meta: KV;
-  insights: RequestInsights;
-};
-
 export type Session = {
   id: string;
   userId: string;
@@ -211,7 +203,6 @@ export type Session = {
   endedAt?: ISODateTime;
   tags: string[];
   meta: KV;
-  legacyRequests: LegacyHttpRequest[];
   requests: AgentRequest[];
   insights: SessionInsights;
 };
@@ -228,22 +219,14 @@ export function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
-export function computeLegacyRequestInsights(r: Omit<LegacyHttpRequest, 'insights'>): RequestInsights {
-  const durationMs = r.startedAt && r.endedAt ? msBetween(r.startedAt, r.endedAt) : undefined;
-  return {
-    durationMs,
-    latency: undefined,
-  };
-}
-
 export function computeAgentRequestInsights(r: AgentRequest): AgentRequestInsights {
   const durationMs = r.startedAt && r.endedAt ? msBetween(r.startedAt, r.endedAt) : undefined;
-  const stepProgress = r.stepsTotal > 0 ? r.stepsCompleted / r.stepsTotal : 0;
+  const workItemProgress = r.workItemsTotal > 0 ? r.workItemsCompleted / r.workItemsTotal : 0;
 
   return {
     durationMs,
-    stepProgress,
-    hasErrors: r.state === 'error' || (r.plan?.steps.some(s => s.status === 'failed') ?? false),
+    workItemProgress,
+    hasErrors: r.state === 'error' || (r.plan?.workItems.some(w => w.status === 'failed') ?? false),
     qualityScore: r.reflection?.qualityScore,
   };
 }
@@ -253,11 +236,11 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
   const end = s.endedAt ?? now;
   const durationMs = msBetween(s.startedAt, end);
 
-  const total = s.legacyRequests.length || 1;
-  const errors = s.legacyRequests.filter((r) => r.state === 'error').length;
+  const total = s.requests.length || 1;
+  const errors = s.requests.filter((r) => r.state === 'error').length;
   const errorRate = clamp01(errors / total);
 
-  const durs = s.legacyRequests
+  const durs = s.requests
     .map((r) => (r.startedAt && r.endedAt ? msBetween(r.startedAt, r.endedAt) : undefined))
     .filter((x): x is number => typeof x === 'number')
     .sort((a, b) => a - b);

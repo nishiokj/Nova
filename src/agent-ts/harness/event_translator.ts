@@ -1,10 +1,10 @@
 /**
- * Event translator for converting WizardEvents to BridgeEvents.
+ * Event translator for converting AgentEvents to BridgeEvents.
  *
  * Translates the agent's internal event format to the TUI-compatible format.
  */
 
-import type { WizardEvent, WizardEventType } from '../types/events.js';
+import type { AgentEvent, AgentEventType } from '../types/events.js';
 import type {
   BridgeEvent,
   ProgressEventData,
@@ -13,72 +13,67 @@ import type {
 } from './types.js';
 
 /**
- * Translate a WizardEvent to a BridgeEvent for the TUI.
+ * Translate an AgentEvent to a BridgeEvent for the TUI.
  *
  * Returns null if the event should not be forwarded to the TUI.
  */
-export function translateWizardEvent(
-  event: WizardEvent,
-  requestId: string
-): BridgeEvent | null {
-  const { type, data, stepNum } = event;
+export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
+  const { type, data, requestId } = event;
 
-  switch (type as WizardEventType) {
-    case 'goal_started': {
-      const goalData = data as { goal?: string; userInput?: string };
+  switch (type as AgentEventType) {
+    case 'runtime_script_created': {
+      const goalData = data as { goal?: string };
       return {
         type: 'status',
         data: {
           state: 'sending',
-          message: `Processing: ${goalData.goal?.slice(0, 50) || 'request'}...`,
+          message: `Planning: ${goalData.goal?.slice(0, 50) || 'request'}...`,
         } satisfies StatusEventData,
       };
     }
 
-    case 'step_started': {
-      const stepData = data as { objective?: string; phase?: string; toolHint?: string };
+    case 'workitem_started': {
+      const itemData = data as { objective?: string };
       return {
         type: 'progress',
         data: {
           request_id: requestId,
-          message: stepData.objective || 'Executing step...',
-          step_number: stepNum,
+          message: itemData.objective ? `Starting: ${itemData.objective}` : 'Starting work item...',
         } satisfies ProgressEventData,
       };
     }
 
-    case 'step_completed': {
-      const stepData = data as { objective?: string; outcomeSummary?: string; stepNum?: number };
+    case 'workitem_completed': {
+      const itemData = data as { objective?: string };
       return {
         type: 'progress',
         data: {
           request_id: requestId,
-          message: `Completed: ${stepData.outcomeSummary?.slice(0, 100) || stepData.objective || 'step'}`,
-          step_number: stepData.stepNum ?? stepNum,
+          message: itemData.objective
+            ? `Completed: ${itemData.objective}`
+            : 'Work item completed',
         } satisfies ProgressEventData,
       };
     }
 
-    case 'step_failed': {
-      const stepData = data as { objective?: string; error?: string };
+    case 'workitem_failed': {
+      const itemData = data as { objective?: string; error?: string };
       return {
         type: 'progress',
         data: {
           request_id: requestId,
-          message: `Failed: ${stepData.error || stepData.objective || 'step failed'}`,
-          step_number: stepNum,
+          message: `Failed: ${itemData.error || itemData.objective || 'work item failed'}`,
         } satisfies ProgressEventData,
       };
     }
 
-    case 'step_skipped': {
-      const stepData = data as { objective?: string; reason?: string };
+    case 'workitem_skipped': {
+      const itemData = data as { objective?: string; reason?: string };
       return {
         type: 'progress',
         data: {
           request_id: requestId,
-          message: `Skipped: ${stepData.reason || stepData.objective || 'step skipped'}`,
-          step_number: stepNum,
+          message: `Skipped: ${itemData.reason || itemData.objective || 'work item skipped'}`,
         } satisfies ProgressEventData,
       };
     }
@@ -91,13 +86,11 @@ export function translateWizardEvent(
         success?: boolean;
         durationMs?: number;
       };
-      // Phase 'starting' = tool is about to run, 'completed' = tool finished
       const phase = toolData.phase ?? 'starting';
       let message: string;
       if (phase === 'starting') {
         message = `Using ${toolData.toolName || 'tool'}...`;
       } else {
-        // Completed - show brief status, will be replaced by synthesis message
         const status = toolData.success ? '✓' : '✗';
         const duration = toolData.durationMs !== undefined ? ` (${toolData.durationMs}ms)` : '';
         message = `${status} ${toolData.toolName || 'tool'}${duration}`;
@@ -107,53 +100,9 @@ export function translateWizardEvent(
         data: {
           request_id: requestId,
           message,
-          tool_name: toolData.toolName,
-          step_number: stepNum,
         } satisfies ProgressEventData,
       };
     }
-
-    case 'synthesis_started': {
-      return {
-        type: 'progress',
-        data: {
-          request_id: requestId,
-          message: 'Analyzing results...',
-          step_number: stepNum,
-        } satisfies ProgressEventData,
-      };
-    }
-
-    case 'user_input_requested': {
-      const promptData = data as {
-        question?: string;
-        options?: string[];
-        context?: string;
-        requestId?: string;
-      };
-      return {
-        type: 'user_prompt',
-        data: {
-          request_id: promptData.requestId || requestId,
-          question: promptData.question || 'Please provide input:',
-          options: promptData.options,
-          context: promptData.context,
-          multi_select: false,
-        } satisfies UserPromptEventData,
-      };
-    }
-
-    case 'reflection_started':
-    case 'reflection_completed':
-      // These are internal events, don't forward to TUI
-      return null;
-
-    case 'llm_call':
-    case 'plan_snapshot':
-    case 'plan_patched':
-    case 'context_window_update':
-      // Dashboard-specific events, don't forward to TUI
-      return null;
 
     case 'llm_error': {
       const errorData = data as {
@@ -161,53 +110,27 @@ export function translateWizardEvent(
         model?: string;
         error?: string;
         errorType?: string;
-        statusCode?: number;
-        willRetry?: boolean;
-        attemptNumber?: number;
       };
-      const retryInfo = errorData.willRetry
-        ? ` (retry ${errorData.attemptNumber ?? 1})`
-        : '';
       return {
         type: 'error',
         data: {
-          message: `LLM error (${errorData.provider}/${errorData.model}): ${errorData.error}${retryInfo}`,
-          fatal: !errorData.willRetry,
+          message: `LLM error (${errorData.provider}/${errorData.model}): ${errorData.error}`,
+          fatal: true,
           detail: {
             provider: errorData.provider,
             model: errorData.model,
             errorType: errorData.errorType,
-            statusCode: errorData.statusCode,
           },
         },
       };
     }
 
-    case 'quality_issue_detected':
-    case 'error_detected': {
-      const errorData = data as { errors?: string[]; context?: string };
-      return {
-        type: 'progress',
-        data: {
-          request_id: requestId,
-          message: `Issue: ${errorData.errors?.[0] || 'quality issue detected'}`,
-          step_number: stepNum,
-        } satisfies ProgressEventData,
-      };
-    }
-
     case 'goal_achieved':
-    case 'goal_aborted':
-      // These are handled by the final result, not as events
-      return null;
-
-    case 'steps_scaffolded':
-    case 'user_input_received':
-      // Internal events, don't forward to TUI
+    case 'goal_not_achieved':
+    case 'llm_call':
       return null;
 
     default:
-      // Unknown event type, skip
       return null;
   }
 }
@@ -241,7 +164,10 @@ export function createStatusEvent(
 ): BridgeEvent {
   return {
     type: 'status',
-    data: { state, message } satisfies StatusEventData,
+    data: {
+      state,
+      message,
+    } satisfies StatusEventData,
   };
 }
 
@@ -274,33 +200,51 @@ export function createResponseEvent(
 /**
  * Create an error event for the TUI.
  */
-export function createErrorEvent(
-  message: string,
-  fatal = false,
-  detail?: unknown
-): BridgeEvent {
+export function createErrorEvent(message: string, fatal = false): BridgeEvent {
   return {
     type: 'error',
-    data: { message, fatal, detail },
+    data: {
+      message,
+      fatal,
+    },
   };
 }
 
 /**
- * Create a ready event for the TUI.
+ * Create a ready event for initialization.
  */
-export function createReadyEvent(
-  sessionKey: string,
-  configSummary?: string
-): BridgeEvent {
+export function createReadyEvent(sessionKey: string, configSummary?: string): BridgeEvent {
   return {
     type: 'ready',
     data: {
       session_key: sessionKey,
       capabilities: {
-        voice_available: false, // Voice deferred
+        voice_available: false,
         streaming_supported: true,
       },
       config_summary: configSummary,
     },
+  };
+}
+
+/**
+ * Create a user prompt event for the TUI.
+ */
+export function createUserPromptEvent(
+  requestId: string,
+  question: string,
+  options?: Array<string | { label: string; description?: string }>,
+  context?: string,
+  multiSelect?: boolean
+): BridgeEvent {
+  return {
+    type: 'user_prompt',
+    data: {
+      request_id: requestId,
+      question,
+      options,
+      context,
+      multi_select: multiSelect,
+    } satisfies UserPromptEventData,
   };
 }

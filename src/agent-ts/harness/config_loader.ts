@@ -1,25 +1,28 @@
 /**
  * Configuration loader for the TypeScript harness.
  *
- * Loads harness_config.json with environment variable overrides.
- * Falls back to env-only mode if config file not found.
+ * Loads harness_config.json and resolves API keys from environment.
+ * The config file is the SINGLE SOURCE OF TRUTH for agent configurations.
  */
 
 import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import type {
-  Tier,
   LLMProvider,
-  TieredLLMConfig,
+  AgentConfigEntry,
   HarnessConfigFile,
   FullHarnessConfig,
+  ResolvedAgentConfig,
   ResolvedLLMConfig,
+  ReasoningEffort,
 } from './config_types.js';
 import {
-  DEFAULT_TIER_TOOL_LIMITS,
-  DEFAULT_TIER_MAX_TOKENS,
-  DEFAULT_ENABLED_TOOLS,
+  DEFAULT_TOOLS_CONFIG,
   DEFAULT_GRAPHD_CONFIG,
+  DEFAULT_CONTEXT_CONFIG,
+  DEFAULT_ENABLED_TOOLS,
+  DEFAULT_SKILLS_CONFIG,
+  DEFAULT_HOOKS_CONFIG,
 } from './config_types.js';
 
 const DEFAULT_CONFIG_PATH = 'config/harness_config.json';
@@ -31,13 +34,11 @@ const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
 
 /**
  * Find project root by looking for config/harness_config.json.
- * This is the canonical marker for the project root.
  */
 function findProjectRoot(startDir: string): string {
   let dir = startDir;
   const root = '/';
   while (dir !== root) {
-    // Look for the actual config file, not just any package.json
     if (existsSync(resolve(dir, DEFAULT_CONFIG_PATH))) {
       return dir;
     }
@@ -54,15 +55,11 @@ function findProjectRoot(startDir: string): string {
 
 /**
  * Load behavioral rules from config/behavioral_rules.md.
- * Returns empty string if file not found.
  */
 export function loadBehavioralRules(): string {
   const paths: string[] = [];
-
-  // Try relative to cwd
   paths.push(resolve(process.cwd(), BEHAVIORAL_RULES_PATH));
 
-  // Try relative to project root
   const projectRoot = findProjectRoot(process.cwd());
   if (projectRoot !== process.cwd()) {
     paths.push(resolve(projectRoot, BEHAVIORAL_RULES_PATH));
@@ -80,7 +77,6 @@ export function loadBehavioralRules(): string {
     }
   }
 
-  console.log('[config] No behavioral_rules.md found, using empty rules');
   return '';
 }
 
@@ -90,7 +86,6 @@ export function loadBehavioralRules(): string {
 
 /**
  * Load config file from disk.
- * Tries multiple paths: explicit path, cwd/config/, projectRoot/config/.
  */
 export function loadConfigFile(configPath?: string): HarnessConfigFile | null {
   const paths: string[] = [];
@@ -99,10 +94,8 @@ export function loadConfigFile(configPath?: string): HarnessConfigFile | null {
     paths.push(resolve(configPath));
   }
 
-  // Try relative to cwd
   paths.push(resolve(process.cwd(), DEFAULT_CONFIG_PATH));
 
-  // Try relative to project root
   const projectRoot = findProjectRoot(process.cwd());
   if (projectRoot !== process.cwd()) {
     paths.push(resolve(projectRoot, DEFAULT_CONFIG_PATH));
@@ -128,14 +121,25 @@ export function loadConfigFile(configPath?: string): HarnessConfigFile | null {
 // API KEY RESOLUTION
 // ============================================
 
-/**
- * Map of provider to environment variable name.
- */
 const API_KEY_ENV_MAP: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
   gemini: 'GOOGLE_API_KEY',
 };
+
+const OPENAI_REASONING_EFFORTS = new Set<ReasoningEffort>([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+]);
+
+const ANTHROPIC_REASONING_EFFORTS = new Set<ReasoningEffort>([
+  'none',
+  'standard',
+]);
 
 /**
  * Resolve API key from environment based on provider.
@@ -152,62 +156,88 @@ export function resolveApiKey(provider: string): string {
 }
 
 /**
- * Check if a provider is supported (has adapter).
+ * Check if a provider is supported.
  */
 function isSupportedProvider(provider: string): provider is LLMProvider {
   return provider === 'anthropic' || provider === 'openai';
 }
 
+function normalizeReasoningEffort(
+  provider: LLMProvider,
+  effort?: string
+): ReasoningEffort {
+  if (!effort || typeof effort !== 'string') {
+    return 'none';
+  }
+
+  const normalized = effort.toLowerCase() as ReasoningEffort;
+  const allowed =
+    provider === 'openai' ? OPENAI_REASONING_EFFORTS : ANTHROPIC_REASONING_EFFORTS;
+
+  if (allowed.has(normalized)) {
+    return normalized;
+  }
+
+  console.warn(
+    `[config] Invalid reasoning.effort '${effort}' for provider '${provider}', defaulting to 'none'`
+  );
+  return 'none';
+}
+
 // ============================================
-// TIER-BASED CONFIG SELECTION
+// AGENT CONFIG RESOLUTION
 // ============================================
 
 /**
- * Select LLM config for a given tier from llm_configs.
- * Falls back to 'standard' tier if requested tier not found.
+ * Resolve a single agent config entry to runtime format.
  */
-function selectTierConfig(
-  llmConfigs: Record<string, TieredLLMConfig>,
-  tier: Tier
-): TieredLLMConfig {
-  const config = llmConfigs[tier];
-  if (config) return config;
+function resolveAgentConfig(entry: AgentConfigEntry): ResolvedAgentConfig {
+  const provider = entry.llm.provider;
 
-  // Fallback to standard
-  const standard = llmConfigs['standard'];
-  if (standard) return standard;
+  if (!isSupportedProvider(provider)) {
+    throw new Error(`Unsupported LLM provider: ${provider}`);
+  }
 
-  // Final fallback
+  const rawReasoning = entry.llm.reasoning;
+  const rawEffort =
+    typeof rawReasoning === 'string' ? rawReasoning : rawReasoning?.effort;
+  const reasoningEffort = normalizeReasoningEffort(provider, rawEffort);
+
+  const llm: ResolvedLLMConfig = {
+    provider,
+    model: entry.llm.model,
+    apiKey: resolveApiKey(provider),
+    maxTokens: entry.llm.max_tokens,
+    temperature: entry.llm.temperature,
+    baseUrl: entry.llm.api_base,
+    reasoning: { effort: reasoningEffort },
+  };
+
   return {
-    provider: 'openai',
-    model: 'gpt-4o',
-    max_tokens: 16000,
+    llm,
+    budget: {
+      maxIterations: entry.budget.max_iterations,
+      maxToolCalls: entry.budget.max_tool_calls,
+      maxDurationMs: entry.budget.max_duration_ms,
+    },
+    tools: entry.tools ?? DEFAULT_ENABLED_TOOLS,
+    outputSchema: entry.output_schema,
   };
 }
 
 /**
- * Get LLM config for a specific tier from a loaded config.
- * Resolves API key and filters to supported providers only.
+ * Get resolved config for a specific agent type.
+ * Falls back to 'standard' if agent not found.
  */
-export function getLLMConfigForTier(
+export function getAgentConfig(
   config: FullHarnessConfig,
-  tier: Tier
-): ResolvedLLMConfig {
-  const tierConfig = config.llmConfigs[tier];
-
-  if (!tierConfig || !isSupportedProvider(tierConfig.provider)) {
-    // Use current resolved config
-    return config.llm;
+  agentType: string
+): ResolvedAgentConfig {
+  const agentConfig = config.agents[agentType];
+  if (agentConfig) {
+    return agentConfig;
   }
-
-  return {
-    provider: tierConfig.provider as LLMProvider,
-    model: tierConfig.model,
-    apiKey: resolveApiKey(tierConfig.provider),
-    maxTokens: config.agent.tierMaxTokens[tier] ?? tierConfig.max_tokens,
-    temperature: tierConfig.temperature,
-    baseUrl: tierConfig.api_base,
-  };
+  throw new Error(`Agent config not found: ${agentType}`);
 }
 
 // ============================================
@@ -215,108 +245,59 @@ export function getLLMConfigForTier(
 // ============================================
 
 /**
- * Create FullHarnessConfig from file config with environment overrides.
+ * Create FullHarnessConfig from file config.
  */
 export function createConfigFromFile(
   fileConfig: HarnessConfigFile,
-  tier: Tier = 'standard',
   workingDir?: string
 ): FullHarnessConfig {
-  // Select tier config, filtering to supported providers
-  let tierConfig = selectTierConfig(fileConfig.llm_configs, tier);
-
-  // If selected tier's provider is not supported, try to find a supported one
-  if (!isSupportedProvider(tierConfig.provider)) {
-    // Try standard tier
-    const standardConfig = fileConfig.llm_configs['standard'];
-    if (standardConfig && isSupportedProvider(standardConfig.provider)) {
-      tierConfig = standardConfig;
-    } else {
-      // Find any supported provider
-      for (const [, cfg] of Object.entries(fileConfig.llm_configs)) {
-        if (isSupportedProvider(cfg.provider)) {
-          tierConfig = cfg;
-          break;
-        }
-      }
+  // Resolve all agent configs
+  const agents: Record<string, ResolvedAgentConfig> = {};
+  for (const [agentType, entry] of Object.entries(fileConfig.agents)) {
+    try {
+      agents[agentType] = resolveAgentConfig(entry);
+    } catch (e) {
+      console.warn(`[config] Failed to resolve agent '${agentType}':`, e);
     }
   }
 
-  // Apply environment overrides
-  const envProvider = process.env.LLM_PROVIDER;
-  const envModel = process.env.LLM_MODEL;
-
-  const provider: LLMProvider = envProvider && isSupportedProvider(envProvider)
-    ? envProvider
-    : isSupportedProvider(tierConfig.provider)
-      ? tierConfig.provider
-      : 'openai';
-
-  const model = envModel ?? tierConfig.model;
-  const apiKey = resolveApiKey(provider);
-
-  // Build tier tool limits and max tokens from config
-  const tierToolLimits: Record<string, number> = {};
-  const tierMaxTokens: Record<string, number> = {};
-
-  for (const [t, limit] of Object.entries(fileConfig.agent.tier_tool_limits)) {
-    tierToolLimits[t] = limit;
-  }
-  for (const [t, tokens] of Object.entries(fileConfig.agent.tier_max_tokens)) {
-    tierMaxTokens[t] = tokens;
+  if (Object.keys(agents).length === 0) {
+    throw new Error('No valid agent configs found in config file');
   }
 
   return {
-    llm: {
-      provider,
-      model,
-      apiKey,
-      maxTokens: tierMaxTokens[tier] ?? tierConfig.max_tokens,
-      temperature: tierConfig.temperature,
-      baseUrl: tierConfig.api_base,
-    },
-    llmConfigs: fileConfig.llm_configs,
+    agents,
+    defaultAgent: 'standard',
     tools: {
       workingDir: workingDir ?? process.cwd(),
-      enabledTools: fileConfig.tools.enabled_tools,
-      bashTimeout: fileConfig.tools.bash_timeout * 1000, // Convert to ms
-      maxOutputLength: fileConfig.tools.max_output_length,
-    },
-    agent: {
-      maxIterations: tierToolLimits[tier] ?? fileConfig.agent.max_tool_calls,
-      enablePlanning: true,
-      enableScouting: true,
-      tierToolLimits,
-      tierMaxTokens,
-      behavioralRules: loadBehavioralRules(),
+      bashTimeoutMs: fileConfig.tools?.bash_timeout_ms ?? DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
+      maxOutputLength: fileConfig.tools?.max_output_length ?? DEFAULT_TOOLS_CONFIG.max_output_length,
     },
     graphd: {
-      enabled: fileConfig.graphd.enabled,
-      host: fileConfig.graphd.host,
-      port: fileConfig.graphd.port,
-      dbPath: fileConfig.graphd.db_path,
-      allowExport: fileConfig.graphd.allow_export,
-      indexIntervalS: fileConfig.graphd.index_interval_s,
-      maxResults: fileConfig.graphd.max_results,
+      enabled: fileConfig.graphd?.enabled ?? DEFAULT_GRAPHD_CONFIG.enabled,
+      host: fileConfig.graphd?.host ?? DEFAULT_GRAPHD_CONFIG.host,
+      port: fileConfig.graphd?.port ?? DEFAULT_GRAPHD_CONFIG.port,
+      dbPath: fileConfig.graphd?.db_path ?? DEFAULT_GRAPHD_CONFIG.db_path,
+    },
+    context: {
+      maxTokens: fileConfig.context?.max_tokens ?? DEFAULT_CONTEXT_CONFIG.max_tokens,
     },
     skills: {
-      enabled: fileConfig.skills.enabled,
-      skillsDir: fileConfig.skills.skills_dir,
+      enabled: fileConfig.skills?.enabled ?? DEFAULT_SKILLS_CONFIG.enabled,
+      directory: fileConfig.skills?.directory,
+      definitions: fileConfig.skills?.definitions ?? [],
     },
     hooks: {
-      enabled: fileConfig.hooks.enabled,
-      hooksDir: fileConfig.hooks.hooks_dir,
-      defaultFailOpen: fileConfig.hooks.default_fail_open,
+      enabled: fileConfig.hooks?.enabled ?? DEFAULT_HOOKS_CONFIG.enabled,
+      directory: fileConfig.hooks?.directory,
+      definitions: fileConfig.hooks?.definitions ?? [],
     },
-    router: {
-      enabled: fileConfig.router.enabled,
-      defaultTier: fileConfig.router.default_tier,
-    },
+    behavioralRules: loadBehavioralRules(),
   };
 }
 
 /**
- * Create config from environment variables only (legacy mode).
+ * Create config from environment variables only (fallback mode).
  */
 export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -334,56 +315,112 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
         `LLM_PROVIDER is '${provider}' but ${API_KEY_ENV_MAP[provider]} is not set.`
       );
     }
-  } else if (anthropicKey) {
-    provider = 'anthropic';
-    apiKey = anthropicKey;
   } else if (openaiKey) {
     provider = 'openai';
     apiKey = openaiKey;
+  } else if (anthropicKey) {
+    provider = 'anthropic';
+    apiKey = anthropicKey;
   } else {
     throw new Error(
-      'No API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY environment variable.'
+      'No API key found. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.'
     );
   }
 
-  const defaultModel = provider === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-4o';
+  const defaultModel = provider;
+
+  // Create minimal agent configs from env
+  const defaultLLM: ResolvedLLMConfig = {
+    provider,
+    model: process.env.LLM_MODEL ?? defaultModel,
+    apiKey,
+    maxTokens: 16000,
+    temperature: 0.7,
+    reasoning: { effort: 'none' },
+  };
+
+  const defaultBudget = {
+    maxIterations: 10,
+    maxToolCalls: 15,
+    maxDurationMs: 120000,
+  };
+
+  const agents: Record<string, ResolvedAgentConfig> = {
+    routing: {
+      llm: { ...defaultLLM, maxTokens: 100, temperature: 0.1 },
+      budget: { maxIterations: 1, maxToolCalls: 0, maxDurationMs: 3000 },
+      tools: [],
+    },
+    simple: {
+      llm: { ...defaultLLM, maxTokens: 4000, temperature: 0.5 },
+      budget: { maxIterations: 3, maxToolCalls: 5, maxDurationMs: 30000 },
+      tools: ['Read', 'Glob', 'Grep', 'Bash'],
+    },
+    explorer: {
+      llm: { ...defaultLLM, maxTokens: 8000, temperature: 0.3 },
+      budget: { maxIterations: 5, maxToolCalls: 20, maxDurationMs: 60000 },
+      tools: ['Read', 'Glob', 'Grep', 'Bash'],
+    },
+    runtime_script: {
+      llm: { ...defaultLLM, maxTokens: 16000, temperature: 0.5 },
+      budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 30000 },
+      tools: [],
+    },
+    standard: {
+      llm: defaultLLM,
+      budget: defaultBudget,
+      tools: DEFAULT_ENABLED_TOOLS,
+    },
+    complex: {
+      llm: { ...defaultLLM, maxTokens: 32000 },
+      budget: { ...defaultBudget, maxIterations: 15, maxToolCalls: 25, maxDurationMs: 180000 },
+      tools: DEFAULT_ENABLED_TOOLS,
+    },
+    debugger: {
+      llm: { ...defaultLLM, maxTokens: 16000, temperature: 0.5 },
+      budget: defaultBudget,
+      tools: DEFAULT_ENABLED_TOOLS,
+    },
+    context_compactor: {
+      llm: { ...defaultLLM, maxTokens: 200000, temperature: 0.3 },
+      budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 30000 },
+      tools: [],
+    },
+    web_crawler: {
+      llm: { ...defaultLLM, maxTokens: 8000, temperature: 0.5 },
+      budget: defaultBudget,
+      tools: ['WebFetch', 'WebSearch'],
+    },
+  };
 
   return {
-    llm: {
-      provider,
-      model: process.env.LLM_MODEL ?? defaultModel,
-      apiKey,
-      maxTokens: 4096,
-    },
-    llmConfigs: {},
+    agents,
+    defaultAgent: 'standard',
     tools: {
       workingDir: workingDir ?? process.cwd(),
-      enabledTools: DEFAULT_ENABLED_TOOLS,
-      bashTimeout: 30000,
-      maxOutputLength: 100000,
+      bashTimeoutMs: DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
+      maxOutputLength: DEFAULT_TOOLS_CONFIG.max_output_length,
     },
-    agent: {
-      maxIterations: 50,
-      enablePlanning: true,
-      enableScouting: true,
-      tierToolLimits: { ...DEFAULT_TIER_TOOL_LIMITS },
-      tierMaxTokens: { ...DEFAULT_TIER_MAX_TOKENS },
-      behavioralRules: loadBehavioralRules(),
+    graphd: {
+      enabled: DEFAULT_GRAPHD_CONFIG.enabled,
+      host: DEFAULT_GRAPHD_CONFIG.host,
+      port: DEFAULT_GRAPHD_CONFIG.port,
+      dbPath: DEFAULT_GRAPHD_CONFIG.db_path,
     },
-    graphd: { ...DEFAULT_GRAPHD_CONFIG },
+    context: {
+      maxTokens: DEFAULT_CONTEXT_CONFIG.max_tokens,
+    },
     skills: {
-      enabled: false,
-      skillsDir: 'config/skills',
+      enabled: DEFAULT_SKILLS_CONFIG.enabled,
+      directory: DEFAULT_SKILLS_CONFIG.directory,
+      definitions: [],
     },
     hooks: {
-      enabled: false,
-      hooksDir: 'config/hooks',
-      defaultFailOpen: true,
+      enabled: DEFAULT_HOOKS_CONFIG.enabled,
+      directory: DEFAULT_HOOKS_CONFIG.directory,
+      definitions: [],
     },
-    router: {
-      enabled: false,
-      defaultTier: 'standard',
-    },
+    behavioralRules: loadBehavioralRules(),
   };
 }
 
@@ -393,20 +430,15 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
 
 /**
  * Load full config: try file first, fallback to env-only.
- *
- * @param configPath - Optional explicit path to config file
- * @param workingDir - Working directory for tools
- * @param tier - Initial tier for LLM selection (default: 'standard')
  */
 export function loadConfig(
   configPath?: string,
-  workingDir?: string,
-  tier: Tier = 'standard'
+  workingDir?: string
 ): FullHarnessConfig {
   const fileConfig = loadConfigFile(configPath);
 
   if (fileConfig) {
-    return createConfigFromFile(fileConfig, tier, workingDir);
+    return createConfigFromFile(fileConfig, workingDir);
   }
 
   console.log('[config] No config file found, using environment-only mode');

@@ -3,115 +3,149 @@
  *
  * These types mirror the structure of config/harness_config.json
  * and provide type safety for config loading.
+ *
+ * The config is the SINGLE SOURCE OF TRUTH for:
+ * - Agent LLM assignments (provider, model, tokens, temperature)
+ * - Agent budgets (iterations, tool calls, duration)
+ * - Agent tool access
  */
 
 // ============================================
 // CORE TYPES
 // ============================================
 
-export type Tier = 'simple' | 'standard' | 'advanced';
+import type { StructuredOutputSchema } from '../types/llm.js';
+
+/** Supported LLM providers */
 export type LLMProvider = 'anthropic' | 'openai';
 
+/** Reasoning effort levels (provider-specific validation in loader) */
+export type ReasoningEffort =
+  | 'none'
+  | 'standard'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh';
+
+/** Reasoning config in harness_config.json (string or { effort }). */
+export type AgentReasoningConfig = ReasoningEffort | { effort: ReasoningEffort };
+
+/**
+ * Agent type is just a string - any agent can be defined in config.
+ * Common built-in types: 'routing', 'explorer', 'standard', 'complex'
+ */
+export type AgentType = string;
+
 // ============================================
-// LLM CONFIG (per-tier)
+// AGENT CONFIG (per-agent in config file)
 // ============================================
 
 /**
- * LLM configuration for a specific tier.
- * Matches llm_configs entries in harness_config.json.
+ * LLM configuration for an agent.
  */
-export interface TieredLLMConfig {
-  provider: string; // Allow any provider in config, filter at runtime
+export interface AgentLLMConfig {
+  provider: string;
   model: string;
   max_tokens: number;
   temperature?: number;
   api_base?: string;
-  failover_models?: TieredLLMConfig[];
+  reasoning?: AgentReasoningConfig;
 }
 
-// ============================================
-// CONFIG SECTIONS (from harness_config.json)
-// ============================================
-
-export interface RouterConfigSection {
-  enabled: boolean;
-  default_tier: Tier;
-  difficulty_tiers: Tier[];
-}
-
-export interface AgentConfigSection {
-  tier: Tier;
+/**
+ * Budget constraints for an agent.
+ */
+export interface AgentBudgetConfig {
+  max_iterations: number;
   max_tool_calls: number;
-  tool_timeout: number;
-  allow_code_execution: boolean;
-  allow_internet: boolean;
-  allow_bash: boolean;
-  tier_tool_limits: Record<string, number>;
-  tier_max_tokens: Record<string, number>;
+  max_duration_ms: number;
 }
 
+/**
+ * Full agent configuration from config file.
+ */
+export interface AgentConfigEntry {
+  llm: AgentLLMConfig;
+  budget: AgentBudgetConfig;
+  tools?: string[];
+  output_schema?: StructuredOutputSchema;
+}
+
+// ============================================
+// CONFIG FILE SECTIONS
+// ============================================
+
+/**
+ * Tools configuration section.
+ */
 export interface ToolsConfigSection {
-  enabled_tools: string[];
-  sandbox_bash: boolean;
-  sandbox_python: boolean;
+  bash_timeout_ms: number;
   max_output_length: number;
-  bash_timeout: number;
-  python_timeout: number;
 }
 
-export interface SkillsConfigSection {
-  enabled: boolean;
-  skills_dir: string;
-  semantic_enabled: boolean;
-  semantic_min_confidence: number;
-  semantic_llm_config: unknown;
-  max_candidates: number;
-  match_policy: 'best_score' | 'first_match';
-}
-
-export interface HooksConfigSection {
-  enabled: boolean;
-  hooks_dir: string;
-  default_fail_open: boolean;
-  max_exec_ms: number;
-}
-
+/**
+ * GraphD configuration section.
+ */
 export interface GraphDConfigSection {
   enabled: boolean;
-  enable_tools: boolean;
-  root_path: string | null;
-  db_path: string;
   host: string;
   port: number;
-  client_timeout_s: number;
-  index_interval_s: number;
-  debounce_s: number;
-  max_file_size_bytes: number;
-  max_files_per_scan: number;
-  derived_ttl_s: number;
-  derived_max_entries: number;
-  max_results: number;
-  enable_rg: boolean;
-  rg_path: string;
-  idle_refinement: boolean;
-  refine_max_files: number;
-  refine_max_symbols: number;
-  backpressure_when_active: boolean;
-  nice_level: number | null;
-  max_memory_mb: number | null;
-  allow_export: boolean;
-  ignore_file: string;
-  extra_ignore: string[];
-  vacuum_interval_cycles: number;
-  stats_log_interval_cycles: number;
+  db_path: string;
 }
 
-export interface LoggingConfigSection {
-  log_dir: string;
-  log_level: string;
-  log_to_file: boolean;
-  log_to_console: boolean;
-  structured_format: boolean;
+/**
+ * Context configuration section.
+ */
+export interface ContextConfigSection {
+  max_tokens: number;
+}
+
+/**
+ * Skill definition in config.
+ */
+export interface SkillConfigEntry {
+  id: string;
+  name: string;
+  description: string;
+  enabled?: boolean;
+  type?: string;
+  tags?: string[];
+  prompt?: string;
+}
+
+/**
+ * Hook definition in config.
+ */
+export interface HookConfigEntry {
+  id: string;
+  name: string;
+  description: string;
+  enabled?: boolean;
+  trigger: string;
+  priority?: number;
+  command?: string;
+}
+
+/**
+ * Skills configuration section.
+ * Supports both directory-based loading and inline definitions.
+ */
+export interface SkillsConfigSection {
+  enabled: boolean;
+  directory?: string;
+  definitions?: SkillConfigEntry[];
+}
+
+/**
+ * Hooks configuration section.
+ * Supports both directory-based loading and inline definitions.
+ */
+export interface HooksConfigSection {
+  enabled: boolean;
+  directory?: string;
+  definitions?: HookConfigEntry[];
 }
 
 // ============================================
@@ -119,67 +153,66 @@ export interface LoggingConfigSection {
 // ============================================
 
 /**
- * Complete structure of harness_config.json.
+ * Root structure of harness_config.json.
  */
 export interface HarnessConfigFile {
-  router: RouterConfigSection;
-  agent: AgentConfigSection;
+  agents: Record<string, AgentConfigEntry>;
   tools: ToolsConfigSection;
-  skills: SkillsConfigSection;
-  hooks: HooksConfigSection;
   graphd: GraphDConfigSection;
-  logging?: LoggingConfigSection;
-  llm_configs: Record<string, TieredLLMConfig>;
+  context: ContextConfigSection;
+  skills?: SkillsConfigSection;
+  hooks?: HooksConfigSection;
 }
 
 // ============================================
-// RUNTIME CONFIG (resolved)
+// RUNTIME CONFIG (resolved with API keys)
 // ============================================
 
 /**
- * Resolved LLM configuration with API key.
+ * Resolved LLM config with API key from environment.
  */
 export interface ResolvedLLMConfig {
   provider: LLMProvider;
   model: string;
   apiKey: string;
-  maxTokens?: number;
+  maxTokens: number;
   temperature?: number;
   baseUrl?: string;
+  reasoning?: {
+    effort: ReasoningEffort;
+  };
 }
 
 /**
- * Runtime configuration used by AgentHarness.
- * Contains resolved settings with defaults applied.
+ * Resolved agent config ready for runtime use.
+ */
+export interface ResolvedAgentConfig {
+  llm: ResolvedLLMConfig;
+  budget: {
+    maxIterations: number;
+    maxToolCalls: number;
+    maxDurationMs: number;
+  };
+  tools: string[];
+  outputSchema?: StructuredOutputSchema;
+}
+
+/**
+ * Full resolved harness config.
+ * This is what the harness uses at runtime.
  */
 export interface FullHarnessConfig {
-  /** Current LLM config (resolved for default tier) */
-  llm: ResolvedLLMConfig;
+  /** All agent configs, keyed by agent type */
+  agents: Record<string, ResolvedAgentConfig>;
 
-  /** All tier-keyed LLM configs for runtime switching */
-  llmConfigs: Record<string, TieredLLMConfig>;
+  /** Default agent for initial requests (usually 'standard') */
+  defaultAgent: string;
 
   /** Tool configuration */
   tools: {
     workingDir: string;
-    enabledTools: string[];
-    bashTimeout: number;
+    bashTimeoutMs: number;
     maxOutputLength: number;
-    enableDangerousCommands?: boolean;
-  };
-
-  /** Agent configuration */
-  agent: {
-    systemPrompt?: string;
-    enablePlanning?: boolean;
-    enableScouting?: boolean;
-    maxIterations?: number;
-    /** Maximum context window tokens (default: 200_000) */
-    maxContextTokens?: number;
-    tierToolLimits: Record<string, number>;
-    tierMaxTokens: Record<string, number>;
-    /** Behavioral rules loaded from config/behavioral_rules.md */
-    behavioralRules?: string;
   };
 
   /** GraphD configuration */
@@ -188,65 +221,68 @@ export interface FullHarnessConfig {
     host: string;
     port: number;
     dbPath: string;
-    allowExport?: boolean;
-    indexIntervalS?: number;
-    maxResults?: number;
+  };
+
+  /** Context window configuration */
+  context: {
+    maxTokens: number;
   };
 
   /** Skills configuration */
   skills: {
     enabled: boolean;
-    skillsDir: string;
+    directory?: string;
+    definitions: SkillConfigEntry[];
   };
 
   /** Hooks configuration */
   hooks: {
     enabled: boolean;
-    hooksDir: string;
-    defaultFailOpen: boolean;
+    directory?: string;
+    definitions: HookConfigEntry[];
   };
 
-  /** Router configuration */
-  router: {
-    enabled: boolean;
-    defaultTier: Tier;
-  };
-
-  /** Optional session key */
-  sessionKey?: string;
+  /** Behavioral rules loaded from config/behavioral_rules.md */
+  behavioralRules?: string;
 }
 
 // ============================================
 // DEFAULTS
 // ============================================
 
-export const DEFAULT_TIER_TOOL_LIMITS: Record<Tier, number> = {
-  simple: 1,
-  standard: 20,
-  advanced: 25,
+export const DEFAULT_TOOLS_CONFIG: ToolsConfigSection = {
+  bash_timeout_ms: 30000,
+  max_output_length: 10000,
 };
 
-export const DEFAULT_TIER_MAX_TOKENS: Record<Tier, number> = {
-  simple: 4098,
-  standard: 16000,
-  advanced: 32000,
+export const DEFAULT_GRAPHD_CONFIG: GraphDConfigSection = {
+  enabled: false,
+  host: 'localhost',
+  port: 9444,
+  db_path: '.graphd/graphd.db',
+};
+
+export const DEFAULT_CONTEXT_CONFIG: ContextConfigSection = {
+  max_tokens: 200_000,
 };
 
 export const DEFAULT_ENABLED_TOOLS = [
-  'Bash',
   'Read',
   'Write',
   'Edit',
-  'Grep',
   'Glob',
+  'Grep',
+  'Bash',
 ];
 
-export const DEFAULT_GRAPHD_CONFIG: FullHarnessConfig['graphd'] = {
+export const DEFAULT_SKILLS_CONFIG: SkillsConfigSection = {
   enabled: true,
-  host: '127.0.0.1',
-  port: 9444,
-  dbPath: '.graphd/graph.db',
-  allowExport: true,
-  indexIntervalS: 5.0,
-  maxResults: 200,
+  directory: 'config/skills',
+  definitions: [],
+};
+
+export const DEFAULT_HOOKS_CONFIG: HooksConfigSection = {
+  enabled: true,
+  directory: 'config/hooks',
+  definitions: [],
 };

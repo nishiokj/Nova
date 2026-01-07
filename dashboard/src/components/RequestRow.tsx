@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import type { AgentRequest, AgentRequestState, PlanStep } from '../domain/models'
+import type { AgentRequest, AgentRequestState, WorkItem } from '../domain/models'
 import { cn } from '../lib/utils'
 import { StatusBadge, StatusDot } from './StatusBadge'
 import type { StatusTone } from './StatusBadge'
@@ -10,7 +10,6 @@ import { ReflectionPanel } from './ReflectionPanel'
 import { formatDuration } from '../lib/time'
 import { ContextWindowWidget } from './ContextWindowWidget'
 import { UserPromptDisplay } from './UserPromptDisplay'
-import { PlanCarousel } from './PlanCarousel'
 import { ExecutionFlow } from './ExecutionFlow'
 
 function getRequestTone(state: AgentRequestState): StatusTone {
@@ -58,14 +57,14 @@ function extractFilesTouched(request: AgentRequest): string[] {
   return Array.from(files)
 }
 
-// Get the current/active step for running requests
-function getCurrentStep(steps: PlanStep[]): PlanStep | undefined {
-  return steps.find(s => s.status === 'in_progress')
+// Get the current/active work item for running requests
+function getCurrentWorkItem(items: WorkItem[]): WorkItem | undefined {
+  return items.find(w => w.status === 'in_progress')
 }
 
-// Get the failed step for error requests
-function getFailedStep(steps: PlanStep[]): PlanStep | undefined {
-  return steps.find(s => s.status === 'failed')
+// Get the failed work item for error requests
+function getFailedWorkItem(items: WorkItem[]): WorkItem | undefined {
+  return items.find(w => w.status === 'failed')
 }
 
 interface RequestRowProps {
@@ -77,7 +76,7 @@ export function RequestRow({ request, defaultExpanded = false }: RequestRowProps
   const [expanded, setExpanded] = useState(defaultExpanded)
   const tone = getRequestTone(request.state)
 
-  const hasSteps = request.plan && request.plan.steps.length > 0
+  const hasWorkItems = request.plan && request.plan.workItems.length > 0
   const duration = request.durationMs
     ? formatDuration(request.durationMs)
     : request.startedAt
@@ -86,16 +85,16 @@ export function RequestRow({ request, defaultExpanded = false }: RequestRowProps
 
   // Compute useful summary info
   const filesTouched = useMemo(() => extractFilesTouched(request), [request.toolCalls])
-  const currentStep = hasSteps ? getCurrentStep(request.plan!.steps) : undefined
-  const failedStep = hasSteps ? getFailedStep(request.plan!.steps) : undefined
+  const currentWorkItem = hasWorkItems ? getCurrentWorkItem(request.plan!.workItems) : undefined
+  const failedWorkItem = hasWorkItems ? getFailedWorkItem(request.plan!.workItems) : undefined
 
   // Build status line for collapsed view
   const statusLine = useMemo(() => {
-    if (request.state === 'running' && currentStep) {
-      return `Step ${currentStep.stepNum}: ${currentStep.objective}`
+    if (request.state === 'running' && currentWorkItem) {
+      return currentWorkItem.objective
     }
     if (request.state === 'error') {
-      if (failedStep?.error) return failedStep.error
+      if (failedWorkItem?.error) return failedWorkItem.error
       if (request.errorMessage) return request.errorMessage
       return 'Request failed - no error details available'
     }
@@ -103,14 +102,13 @@ export function RequestRow({ request, defaultExpanded = false }: RequestRowProps
       return request.reflection.reasoning.slice(0, 120)
     }
     return null
-  }, [request, currentStep, failedStep])
+  }, [request, currentWorkItem, failedWorkItem])
 
   // Check if we have any telemetry data
-  const hasTelemetry = hasSteps
+  const hasTelemetry = hasWorkItems
     || request.toolCalls.length > 0
     || request.reflection
     || request.llmCalls.length > 0
-    || request.planSnapshots.length > 0
     || request.userPrompts.length > 0
     || Boolean(request.contextWindow)
 
@@ -179,15 +177,15 @@ export function RequestRow({ request, defaultExpanded = false }: RequestRowProps
             {!expanded && (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
                 {/* Progress */}
-                {hasSteps && (
+                {hasWorkItems && (
                   <div className="flex items-center gap-1.5">
                     <SimpleProgress
-                      completed={request.stepsCompleted}
-                      total={request.stepsTotal}
+                      completed={request.workItemsCompleted}
+                      total={request.workItemsTotal}
                       hasError={request.state === 'error'}
                     />
                     <span className="text-xs text-[var(--text-muted)]">
-                      {request.stepsCompleted}/{request.stepsTotal} steps
+                      {request.workItemsCompleted}/{request.workItemsTotal} work items
                     </span>
                   </div>
                 )}
@@ -295,21 +293,21 @@ export function RequestRow({ request, defaultExpanded = false }: RequestRowProps
           )}
 
           {/* Execution plan */}
-          {(hasSteps || request.planSnapshots.length > 0) && (
+          {hasWorkItems && (
             <div className="pt-3">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
-                  Execution Plan
-                  {request.planSnapshots.length > 1 && ` (${request.planSnapshots.length} versions)`}
+                  Work Items ({request.plan!.workItems.length})
                 </span>
+                {request.plan?.systemContext && (
+                  <span className="text-xs text-[var(--text-muted)] font-mono">
+                    {request.plan.systemContext.languages.join(', ')}
+                  </span>
+                )}
               </div>
-              {request.planSnapshots.length > 0 ? (
-                <PlanCarousel snapshots={request.planSnapshots} />
-              ) : hasSteps && (
-                <div className="bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
-                  <VerticalTimeline steps={request.plan!.steps} />
-                </div>
-              )}
+              <div className="bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
+                <VerticalTimeline workItems={request.plan!.workItems} />
+              </div>
             </div>
           )}
 
