@@ -7,7 +7,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { WorkItem } from './work-item.js';
-import type { WorkerOutcome } from './worker.js';
+import type { AgentResult } from '../agent/types.js';
 
 /**
  * Status of a ledger entry.
@@ -34,7 +34,7 @@ export enum PatchDecision {
 export interface PatchRecord {
   patchId: string;
   proposedAt: number;
-  source: string; // "worker", "stagnation", "user"
+  source: string; // "worker", "user"
   patchType: string; // "insert", "remove", "replace", etc.
   targetSteps: number[];
   justification: string;
@@ -117,11 +117,15 @@ export class WorkLedger {
   /**
    * Record work dispatch. Returns entryId.
    */
-  recordDispatch(stepNum: number, workItem: WorkItem, workerId: string): string {
+  recordDispatch(workItem: WorkItem, workerId: string): string {
+    const stepNum = typeof workItem.stepNum === 'number' ? workItem.stepNum : 0;
+    const summary = typeof workItem.objective === 'string'
+      ? workItem.objective.slice(0, 100)
+      : '';
     const entry = createLedgerEntry({
       stepNum,
       workerId,
-      workItemSummary: workItem.objective.slice(0, 100),
+      workItemSummary: summary,
     });
 
     this.entries.push(entry);
@@ -180,18 +184,26 @@ export class WorkLedger {
   /**
    * Record completion of a dispatched work item.
    */
-  recordCompletion(entryId: string, outcome: WorkerOutcome): void {
+  recordCompletion(entryId: string, outcome: AgentResult): void {
     const entry = this.byId.get(entryId);
     if (!entry || entry.status !== EntryStatus.DISPATCHED) return;
 
+    const toolErrors = Array.isArray(outcome.toolErrors) ? outcome.toolErrors : [];
+    const summarySource = outcome.success
+      ? outcome.response
+      : outcome.error ?? outcome.terminationReason ?? outcome.response;
+    const metrics = outcome.metrics ?? { toolCallsMade: 0, llmCallsMade: 0, durationMs: 0 };
+
     entry.completedAt = Date.now();
     entry.status = outcome.success ? EntryStatus.COMPLETED : EntryStatus.FAILED;
-    entry.outcomeSummary = outcome.finalResponse?.slice(0, 200);
-    entry.observations = outcome.facts.slice(0, 10).map((f) => `${f.key}: ${f.value}`);
-    entry.entityRefs = [...outcome.entityRefs];
-    entry.toolCallsMade = outcome.metrics.toolCallsMade;
-    entry.llmCallsMade = outcome.metrics.llmCallsMade;
-    entry.durationMs = outcome.metrics.durationMs;
+    entry.outcomeSummary = summarySource ? summarySource.slice(0, 200) : undefined;
+    entry.observations = toolErrors.slice(0, 10);
+    entry.entityRefs = Array.isArray((outcome as { entityRefs?: string[] }).entityRefs)
+      ? [...(outcome as { entityRefs: string[] }).entityRefs]
+      : [];
+    entry.toolCallsMade = metrics.toolCallsMade ?? 0;
+    entry.llmCallsMade = metrics.llmCallsMade ?? 0;
+    entry.durationMs = metrics.durationMs ?? 0;
   }
 
   /**

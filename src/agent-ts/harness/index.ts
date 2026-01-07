@@ -4,12 +4,13 @@
 
 export { AgentHarness, createHarnessFromEnv } from './harness.js';
 export {
-  translateWizardEvent,
+  translateAgentEvent,
   createStreamEvent,
   createStatusEvent,
   createResponseEvent,
   createErrorEvent,
   createReadyEvent,
+  createUserPromptEvent,
 } from './event_translator.js';
 export type {
   AgentRunParams,
@@ -35,29 +36,37 @@ export { EventBus, type EventBusProtocol } from '../communication/event_bus.js';
 export {
   loadConfig,
   loadConfigFile,
-  getLLMConfigForTier,
+  getAgentConfig,
   createConfigFromFile,
   createConfigFromEnv,
   resolveApiKey,
 } from './config_loader.js';
 export type {
-  Tier as ConfigTier,
   LLMProvider,
-  TieredLLMConfig,
+  ReasoningEffort,
+  AgentType,
+  AgentLLMConfig,
+  AgentBudgetConfig,
+  AgentConfigEntry,
   HarnessConfigFile,
   FullHarnessConfig,
   ResolvedLLMConfig,
-  AgentConfigSection,
+  ResolvedAgentConfig,
   ToolsConfigSection,
   GraphDConfigSection,
+  ContextConfigSection,
   SkillsConfigSection,
   HooksConfigSection,
+  SkillConfigEntry,
+  HookConfigEntry,
 } from './config_types.js';
 export {
-  DEFAULT_TIER_TOOL_LIMITS,
-  DEFAULT_TIER_MAX_TOKENS,
-  DEFAULT_ENABLED_TOOLS,
+  DEFAULT_TOOLS_CONFIG,
   DEFAULT_GRAPHD_CONFIG,
+  DEFAULT_CONTEXT_CONFIG,
+  DEFAULT_ENABLED_TOOLS,
+  DEFAULT_SKILLS_CONFIG,
+  DEFAULT_HOOKS_CONFIG,
 } from './config_types.js';
 
 // Skills and hooks loading

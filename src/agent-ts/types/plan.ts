@@ -316,7 +316,7 @@ export type GoalType = 'question' | 'task' | 'creation' | 'search';
 /**
  * Estimated complexity classification.
  */
-export type ComplexityLevel = 'simple' | 'standard' | 'advanced';
+export type ComplexityLevel = 'simple' | 'standard' | 'complex';
 
 /**
  * An explicit execution plan created before running.

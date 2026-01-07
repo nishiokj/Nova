@@ -281,7 +281,7 @@ export class ContextWindow {
   }
 
   /**
-   * Append a pre-built context item (used by Wizard to merge Worker results).
+   * Append a pre-built context item (used by Orchestrator to merge Agent results).
    */
   appendItem(item: ContextItem): void {
     this._items.push(item);
@@ -289,7 +289,7 @@ export class ContextWindow {
   }
 
   /**
-   * Get read files as array (for Worker snapshot).
+   * Get read files as array (for Agent tracking).
    */
   getReadFilesArray(): string[] {
     return Array.from(this._readFiles);

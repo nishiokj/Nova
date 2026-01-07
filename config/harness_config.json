@@ -1,222 +1,1012 @@
 {
-  "router": {
-    "enabled": true,
-    "default_tier": "standard",
-    "difficulty_tiers": ["simple", "standard", "advanced"]
-  },
-  "service_rep": {
-    "enabled": true,
-    "voice_engine": "pyttsx3",
-    "voice_rate": 190,
-    "voice_volume": 0.65
-  },
-  "agent": {
-    "tier": "standard",
-    "max_tool_calls": 20,
-    "tool_timeout": 30,
-    "allow_code_execution": true,
-    "allow_internet": true,
-    "allow_bash": true,
-    "tier_tool_limits": {
-      "simple": 1,
-      "standard": 20,
-      "advanced": 25
+  "agents": {
+    "routing": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5-nano",
+        "max_tokens": 100,
+        "temperature": 0.1
+      },
+      "budget": {
+        "max_iterations": 1,
+        "max_tool_calls": 0,
+        "max_duration_ms": 3000
+      },
+      "output_schema": {
+        "name": "routing_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tier": {
+              "type": "string",
+              "enum": [
+                "simple",
+                "standard",
+                "complex"
+              ]
+            }
+          },
+          "required": [
+            "tier"
+          ]
+        },
+        "strict": true
+      }
     },
-    "tier_max_tokens": {
-      "simple": 4098,
-      "standard": 16000,
-      "advanced": 32000
-    }
-  },
-  "tools": {
-      "enabled_tools": [
+    "simple": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5-nano",
+        "max_tokens": 4000,
+        "temperature": 0.5
+      },
+      "budget": {
+        "max_iterations": 1,
+        "max_tool_calls": 0,
+        "max_duration_ms": 3000
+      },
+      "output_schema": {
+        "name": "agent_action_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "explorer": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "max_tokens": 8000,
+        "temperature": 0.3
+      },
+      "budget": {
+        "max_iterations": 2,
+        "max_tool_calls": 20,
+        "max_duration_ms": 60000
+      },
+      "tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash"
+      ],
+      "output_schema": {
+        "name": "explorer_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "packageManagers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "frameworks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "languages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "os": {
+              "type": "string"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "config",
+                      "source",
+                      "test",
+                      "doc",
+                      "other"
+                    ]
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "relevance": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "path",
+                  "type"
+                ]
+              }
+            },
+            "patterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt",
+            "packageManagers",
+            "frameworks",
+            "languages",
+            "os",
+            "artifacts",
+            "patterns"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "runtime_script": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5.2",
+        "max_tokens": 16000,
+        "temperature": 0.5,
+        "reasoning": {
+          "effort": "medium"
+        }
+      },
+      "budget": {
+        "max_iterations": 2,
+        "max_tool_calls": 15,
+        "max_duration_ms": 30000
+      },
+      "tools": [
+        "explorer"
+      ],
+      "output_schema": {
+        "name": "runtime_script_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "goal": {
+              "type": "string"
+            },
+            "workItems": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "objective": {
+                    "type": "string"
+                  },
+                  "delta": {
+                    "type": "string"
+                  },
+                  "agent": {
+                    "type": "string"
+                  },
+                  "dependencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "toolHint": {
+                    "type": "string"
+                  },
+                  "targetPaths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "params": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "id",
+                  "objective",
+                  "delta",
+                  "agent",
+                  "dependencies"
+                ]
+              }
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt",
+            "goal",
+            "workItems"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "standard": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "max_tokens": 16000,
+        "temperature": 0.7
+      },
+      "budget": {
+        "max_iterations": 10,
+        "max_tool_calls": 15,
+        "max_duration_ms": 120000
+      },
+      "tools": [
         "Read",
         "Write",
         "Edit",
-        "Bash",
         "Glob",
         "Grep",
-        "python_execute"
+        "Bash"
       ],
-    "sandbox_bash": true,
-    "sandbox_python": true,
-    "max_output_length": 10000,
-    "bash_timeout": 30,
-    "python_timeout": 60
+      "output_schema": {
+        "name": "agent_action_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "complex": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5.2",
+        "max_tokens": 32000,
+        "temperature": 0.7,
+        "reasoning": {
+          "effort": "high"
+        }
+      },
+      "budget": {
+        "max_iterations": 15,
+        "max_tool_calls": 50,
+        "max_duration_ms": 500000
+      },
+      "tools": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash",
+        "standard"
+      ],
+      "output_schema": {
+        "name": "agent_action_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "context_compactor": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5-nano",
+        "max_tokens": 200000,
+        "temperature": 0.3
+      },
+      "budget": {
+        "max_iterations": 2,
+        "max_tool_calls": 0,
+        "max_duration_ms": 30000
+      },
+      "output_schema": {
+        "name": "agent_action_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "debugger": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5.2",
+        "max_tokens": 16000,
+        "temperature": 0.5
+      },
+      "budget": {
+        "max_iterations": 10,
+        "max_tool_calls": 15,
+        "max_duration_ms": 120000
+      },
+      "tools": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash"
+      ],
+      "output_schema": {
+        "name": "agent_action_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "web_crawler": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "max_tokens": 8000,
+        "temperature": 0.5
+      },
+      "budget": {
+        "max_iterations": 10,
+        "max_tool_calls": 15,
+        "max_duration_ms": 120000
+      },
+      "tools": [
+        "WebFetch",
+        "WebSearch"
+      ],
+      "output_schema": {
+        "name": "agent_action_output",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "final",
+                "need_context",
+                "continue"
+              ]
+            },
+            "response": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user_prompt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "label"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context": {
+                      "type": "string"
+                    },
+                    "multiSelect": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "question"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "response",
+            "user_prompt"
+          ]
+        },
+        "strict": true
+      }
+    }
   },
-  "skills": {
-    "enabled": true,
-    "skills_dir": "config/skills",
-    "semantic_enabled": true,
-    "semantic_min_confidence": 0.82,
-    "semantic_llm_config": null,
-    "max_candidates": 8,
-    "match_policy": "best_score"
-  },
-  "hooks": {
-    "enabled": true,
-    "hooks_dir": "config/hooks",
-    "default_fail_open": true,
-    "max_exec_ms": 200
+  "tools": {
+    "bash_timeout_ms": 30000,
+    "max_output_length": 10000
   },
   "graphd": {
     "enabled": true,
-    "enable_tools": true,
-    "root_path": null,
-    "db_path": ".graphd/graphd.db",
     "host": "127.0.0.1",
     "port": 9444,
-    "client_timeout_s": 2,
-    "index_interval_s": 5.0,
-    "debounce_s": 0.25,
-    "max_file_size_bytes": 1000000,
-    "max_files_per_scan": 500,
-    "derived_ttl_s": 600,
-    "derived_max_entries": 1000,
-    "max_results": 200,
-    "enable_rg": true,
-    "rg_path": "rg",
-    "idle_refinement": true,
-    "refine_max_files": 3,
-    "refine_max_symbols": 5,
-    "backpressure_when_active": true,
-    "nice_level": null,
-    "max_memory_mb": null,
-    "allow_export": true,
-    "ignore_file": ".graphdignore",
-    "extra_ignore": [],
-    "vacuum_interval_cycles": 100,
-    "stats_log_interval_cycles": 20
+    "db_path": ".graphd/graphd.db"
   },
-  "nano_banana": {
+  "context": {
+    "max_tokens": 200000
+  },
+  "skills": {
     "enabled": true,
-    "model": "gemini-3-pro-image-preview",
-    "api_base": "https://generativelanguage.googleapis.com/v1beta",
-    "default_output_dir": ".",
-    "default_filename_pattern": "generated_{timestamp}.png",
-    "timeout": 60,
-    "max_retries": 3,
-    "helper_llm_provider": "openai",
-    "helper_llm_model": "gpt-5-mini",
-    "helper_max_tokens": 500
+    "directory": "config/skills"
   },
-  "logging": {
-    "log_dir": "logs",
-    "log_level": "INFO",
-    "log_to_file": true,
-    "log_to_console": true,
-    "structured_format": true
-  },
-  "llm_configs": {
-    "router": {
-      "provider": "openai",
-      "model": "gpt-5-nano",
-      "max_tokens": 100,
-      "temperature": 0.1,
-      "failover_models": [
-        {
-          "provider": "gemini",
-          "model": "gemini-2.0-flash-lite",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 100,
-          "temperature": 0.1
-        },
-        {
-          "provider": "gemini",
-          "model": "gemini-2.5-flash",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 100,
-          "temperature": 0.1
-        }
-      ]
-    },
-    "service_rep": {
-      "provider": "openai",
-      "model": "gpt-5-mini",
-      "max_tokens": 2048,
-      "temperature": 0.7,
-      "failover_models": [
-        {
-          "provider": "gemini",
-          "model": "gemini-2.0-flash",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 2048,
-          "temperature": 0.7
-        },
-        {
-          "provider": "gemini",
-          "model": "gemini-2.5-pro",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 2048,
-          "temperature": 0.7
-        }
-      ]
-    },
-    "simple": {
-      "provider": "openai",
-      "model": "gpt-5-nano",
-      "max_tokens": 4098,
-      "temperature": 0.7,
-      "failover_models": [
-        {
-          "provider": "gemini",
-          "model": "gemini-2.0-flash-lite",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 4098,
-          "temperature": 0.7
-        },
-        {
-          "provider": "gemini",
-          "model": "gemini-2.0-flash",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 4098,
-          "temperature": 0.7
-        }
-      ]
-    },
-    "standard": {
-      "provider": "openai",
-      "model": "gpt-5-mini",
-      "max_tokens": 16000,
-      "temperature": 0.7,
-      "failover_models": [
-        {
-          "provider": "gemini",
-          "model": "gemini-2.5-flash",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 16000,
-          "temperature": 0.7
-        },
-        {
-          "provider": "gemini",
-          "model": "gemini-2.5-pro",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 16000,
-          "temperature": 0.7
-        }
-      ]
-    },
-    "advanced": {
-      "provider": "openai",
-      "model": "gpt-5.2",
-      "max_tokens": 32000,
-      "temperature": 0.7,
-      "failover_models": [
-        {
-          "provider": "gemini",
-          "model": "gemini-2.5-pro",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 32000,
-          "temperature": 0.7
-        },
-        {
-          "provider": "gemini",
-          "model": "gemini-2.5-flash",
-          "api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
-          "max_tokens": 32000,
-          "temperature": 0.7
-        }
-      ]
-    }
+  "hooks": {
+    "enabled": true,
+    "directory": "config/hooks"
   }
 }

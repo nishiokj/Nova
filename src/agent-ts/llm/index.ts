@@ -5,7 +5,14 @@
  */
 
 // Re-export LLMAdapter type from types for convenience
-export type { LLMAdapter, LLMConfig, LLMResponse, LLMProvider, Message } from '../types/llm.js';
+export type {
+  LLMAdapter,
+  LLMRequestConfig,
+  LLMClientConfig,
+  LLMResponse,
+  LLMProvider,
+  Message,
+} from '../types/llm.js';
 
 // Retry and resilience
 export {
@@ -30,8 +37,5 @@ export {
 export {
   type AdapterLogger,
   consoleLogger,
-  BaseLLMAdapter,
-  AnthropicAdapter,
-  OpenAIAdapter,
   createAdapter,
 } from './adapter.js';

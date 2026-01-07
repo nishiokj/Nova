@@ -43,6 +43,8 @@ export interface Tool {
   description: string;
   /** Parameter schema */
   parameters: ToolDefinition['parameters'];
+  /** Whether to enforce strict schema mode */
+  strict?: boolean;
   /** Required parameter names */
   required: string[];
   /** Tool executor function */
@@ -78,6 +80,7 @@ export interface ToolRegistrationOptions {
   name: string;
   description: string;
   parameters: ToolDefinition['parameters'];
+  strict?: boolean;
   required: string[];
   executor: ToolExecutor;
   enabled?: boolean;
@@ -95,6 +98,7 @@ export function createTool(options: ToolRegistrationOptions): Tool {
     name: options.name,
     description: options.description,
     parameters: options.parameters,
+    strict: options.strict,
     required: options.required,
     executor: options.executor,
     enabled: options.enabled ?? true,

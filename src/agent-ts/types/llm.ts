@@ -128,17 +128,50 @@ export function getToolUseBlocks(message: Message): ToolUseContentBlock[] {
 export type LLMProvider = 'anthropic' | 'openai';
 
 /**
- * LLM configuration.
+ * Reasoning configuration.
  */
-export interface LLMConfig {
-  provider: LLMProvider;
+export type ReasoningEffort =
+  | 'none'
+  | 'standard'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh';
+
+export interface ReasoningConfig {
+  effort: ReasoningEffort;
+}
+
+/**
+ * Structured output schema for JSON responses.
+ */
+export interface StructuredOutputSchema {
+  name: string;
+  schema: Record<string, unknown>;
+  strict?: boolean;
+}
+
+/**
+ * Per-request LLM configuration.
+ */
+export interface LLMRequestConfig {
   model: string;
-  apiKey: string;
+  provider?: LLMProvider;
+  apiKey?: string;
   maxTokens?: number;
   temperature?: number;
-  topP?: number;
-  stopSequences?: string[];
-  baseUrl?: string; // For custom API endpoints
+  baseUrl?: string; // Optional override for custom API endpoints
+  reasoning?: ReasoningConfig;
+}
+
+/**
+ * Client-level configuration for the adapter.
+ */
+export interface LLMClientConfig {
+  apiKeys?: Partial<Record<LLMProvider, string>>;
+  baseUrls?: Partial<Record<LLMProvider, string>>;
+  modelRegistry?: Record<string, { provider: LLMProvider; baseUrl?: string }>;
 }
 
 // ============================================
@@ -195,6 +228,8 @@ export interface RespondParams {
   maxTokens?: number;
   temperature?: number;
   system?: string;
+  llm: LLMRequestConfig;
+  responseSchema?: StructuredOutputSchema;
   // Responses API specific parameters (OpenAI)
   promptCacheKey?: string;
   promptCacheRetention?: string;
@@ -215,8 +250,8 @@ export interface StreamParams extends RespondParams {
  * Abstracts provider differences.
  */
 export interface LLMAdapter {
-  readonly provider: LLMProvider;
-  readonly model: string;
+  readonly provider?: LLMProvider;
+  readonly model?: string;
 
   /**
    * Send a prompt and get a complete response.
@@ -228,6 +263,11 @@ export interface LLMAdapter {
    * Returns an async generator that yields chunks.
    */
   stream(params: StreamParams): AsyncGenerator<string, LLMResponse>;
+
+  /**
+   * Register a model mapping for provider/baseUrl resolution.
+   */
+  registerModel?(model: string, provider: LLMProvider, baseUrl?: string): void;
 }
 
 // ============================================

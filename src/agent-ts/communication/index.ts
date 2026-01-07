@@ -5,9 +5,7 @@
 export {
   EventBus,
   type EventBusProtocol,
-  type EventFilter,
-  createRequestEventStream,
-  completeRequestStream,
+  createEventEmitCallback,
 } from './event_bus.js';
 
 export {

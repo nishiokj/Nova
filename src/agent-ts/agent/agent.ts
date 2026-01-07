@@ -1,470 +1,847 @@
 /**
- * Agent - Main reasoning and tool execution agent.
- * Handles user requests with tool usage and LLM reasoning.
+ * Agent - Pure execution primitive.
  *
- * Architecture: Plan → Wizard → Synthesis
- * - Planner: Creates explicit execution plans with success criteria
- * - Wizard: Orchestrates steps and workers over a single context window
- * - Synthesizer: Produces the final response
- *
- * Ported from: src/harness/agent/agent.py
+ * Receives ContextWindow by value and mutates it locally during execution.
+ * Returns AgentResult with all outputs.
  */
 
-import type { LLMAdapter } from '../llm/index.js';
+import type { LLMAdapter, Message, LLMRequestConfig } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import type { WizardEvent } from '../types/events.js';
+import type { ToolDefinition } from '../types/tools.js';
+import type { ContextWindow } from '../types/context.js';
+import type { WorkItem } from '../wizard/work-item.js';
+import type {
+  AgentConfig,
+  AgentRunParams,
+  AgentResult,
+  AgentMetrics,
+  EventEmitCallback,
+} from './types.js';
+import { noopEmit } from './types.js';
+import type { AgentRegistry } from './agent-registry.js';
 import { createEvent } from '../types/events.js';
-import type { WizardPlan } from '../types/plans.js';
-import { StepStatus, StepPhase } from '../types/plans.js';
-import { ContextWindow } from '../types/context.js';
-import { Planner, type PlanBudget } from '../planner/index.js';
-import { Wizard, type WizardResult } from '../wizard/index.js';
-import { ResponseSynthesizer, type SynthesisInput, createSynthesisInput } from '../synthesis/index.js';
-import type { EventBusProtocol } from '../communication/event_bus.js';
+import { buildSystemMessage } from '../wizard/context.js';
+import { createWorkItem } from '../wizard/work-item.js';
+import { errorResult, successResult } from '../types/tools.js';
+import { coerceStructuredOutput } from '../shared/structured_output.js';
 
 /**
- * Agent configuration.
+ * Action markers in LLM response.
  */
-export interface AgentConfig {
-  systemPrompt?: string;
-  maxIterations?: number;
-  enablePlanning?: boolean;
-  enableScouting?: boolean;
-  /** Behavioral rules for worker prompts (loaded from config/behavioral_rules.md) */
-  behavioralRules?: string;
+enum AgentAction {
+  TOOL = 'tool',
+  FINAL = 'final',
+  NEED_CONTEXT = 'need_context',
+  CONTINUE = 'continue',
 }
 
-export const DEFAULT_AGENT_CONFIG: AgentConfig = {
-  systemPrompt: 'You are a helpful assistant that can use tools to accomplish tasks.',
-  maxIterations: 50,
-  enablePlanning: true,
-  enableScouting: true,
+const ACTION_MARKERS = {
+  FINAL: /\[FINAL\]/i,
+  NEED_CONTEXT: /\[NEED_CONTEXT\]/i,
+  CONTINUE: /\[CONTINUE\]/i,
 };
 
-/**
- * Response from the agent.
- */
-export interface AgentResponse {
-  content: string;
-  structuredAction?: string;
-  speechText?: string;
-  totalDurationMs: number;
-  toolsUsed: string[];
-  success: boolean;
-  error?: string;
-  metadata: Record<string, unknown>;
-  goalAchieved: boolean;
-  paused: boolean;
-  userPrompt?: Record<string, unknown>;
-}
+const REFUSAL_PATTERNS = [
+  /cannot be completed/i,
+  /can't be completed/i,
+  /cannot complete/i,
+  /unable to complete/i,
+  /exceeds? (?:the )?(?:budget|limit)/i,
+  /not (?:possible|achievable|feasible)/i,
+];
 
 /**
- * Logger protocol for Agent.
- */
-export interface AgentLogger {
-  info(msg: string, meta?: Record<string, unknown>): void;
-  debug(msg: string, meta?: Record<string, unknown>): void;
-  warning(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
-}
-
-/**
- * Main reasoning and execution agent.
- * Uses Wizard orchestration for plan execution.
- *
- * NOTE: Agent now receives ContextWindow from the caller (Harness).
- * ContextWindow is created/hydrated in Harness BEFORE Agent.run().
+ * Pure execution agent.
  */
 export class Agent {
   private config: AgentConfig;
-  private toolRegistry: ToolRegistry;
   private llm: LLMAdapter;
-  private planner: Planner;
-  private wizard: Wizard;
-  private synthesizer: ResponseSynthesizer;
-  private logger?: AgentLogger;
-  private eventBus?: EventBusProtocol;
-  /** Last context window for resume capability */
-  private lastContext?: ContextWindow;
+  private toolRegistry: ToolRegistry;
+  private emit: EventEmitCallback;
+  private requestId: string;
+  private agentRegistry?: AgentRegistry;
+  private llmConfig: LLMRequestConfig;
+  private lastRequestConfig: LLMRequestConfig | null = null;
 
   constructor(
     config: AgentConfig,
-    toolRegistry: ToolRegistry,
     llm: LLMAdapter,
-    logger?: AgentLogger,
-    eventBus?: EventBusProtocol
+    toolRegistry: ToolRegistry,
+    emit: EventEmitCallback = noopEmit,
+    requestId: string = '',
+    agentRegistry?: AgentRegistry,
+    llmConfig?: LLMRequestConfig
   ) {
-    this.config = { ...DEFAULT_AGENT_CONFIG, ...config };
-    this.toolRegistry = toolRegistry;
+    this.config = config;
     this.llm = llm;
-    this.logger = logger;
-    this.eventBus = eventBus;
-
-    // Initialize components - pass EventBus to all
-    this.planner = new Planner(llm, toolRegistry, { enableScouting: this.config.enableScouting }, eventBus);
-    this.wizard = new Wizard(
-      toolRegistry,
-      llm,
-      { maxIterations: this.config.maxIterations },
-      logger,
-      eventBus
-    );
-    this.synthesizer = new ResponseSynthesizer(llm);
-  }
-
-  private publish(event: WizardEvent): void {
-    if (this.eventBus) {
-      this.eventBus.publish(event);
-    }
-  }
-
-  private log(level: keyof AgentLogger, msg: string, meta?: Record<string, unknown>): void {
-    if (this.logger) {
-      this.logger[level](msg, { component: 'agent', ...meta });
-    }
+    this.toolRegistry = toolRegistry;
+    this.emit = emit;
+    this.requestId = requestId;
+    this.agentRegistry = agentRegistry;
+    this.llmConfig = llmConfig ?? { model: 'unknown' };
   }
 
   /**
-   * Emit llm_error event for error propagation.
+   * Execute the agent on a work item.
+   * Context is passed by value and mutated locally.
    */
-  private emitLlmErrorEvent(error: Error): void {
-    const message = error.message;
-    let errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown' = 'unknown';
-    let statusCode: number | undefined;
-
-    // Extract status code from error message
-    const statusMatch = message.match(/(\d{3}):/);
-    if (statusMatch) {
-      statusCode = parseInt(statusMatch[1], 10);
-    }
-
-    // Classify error type
-    if (message.includes('rate limit') || statusCode === 429) {
-      errorType = 'rate_limit';
-    } else if (message.includes('timeout') || message.includes('ETIMEDOUT')) {
-      errorType = 'timeout';
-    } else if (message.includes('circuit') || message.includes('Circuit')) {
-      errorType = 'circuit_open';
-    } else if (statusCode && statusCode >= 400 && statusCode < 500) {
-      errorType = 'validation';
-    } else if (statusCode && statusCode >= 500) {
-      errorType = 'api_error';
-    }
-
-    this.publish(createEvent('llm_error', {
-      agentType: 'wizard' as const, // Agent uses wizard type for consistency
-      provider: this.llm.provider,
-      model: this.llm.model,
-      error: message,
-      errorType,
-      statusCode,
-      circuitBreakerTriggered: message.includes('circuit'),
-      willRetry: false,
-    }));
-  }
-
-  /**
-   * Process a user request and return a response.
-   *
-   * @param userInput - The user's request
-   * @param context - The ContextWindow (created/hydrated by Harness)
-   * @param additionalContext - Optional additional context string for planning
-   * @param tier - Budget tier (simple, standard, complex)
-   * @param budget - Budget constraints
-   * @param onStreamChunk - Optional callback for streaming responses
-   */
-  async run(
-    userInput: string,
-    context: ContextWindow,
-    additionalContext?: string,
-    tier = 'standard',
-    budget?: PlanBudget,
-    onStreamChunk?: (chunk: string, index: number, isFinal: boolean) => void
-  ): Promise<AgentResponse> {
+  async run(params: AgentRunParams): Promise<AgentResult> {
+    const { context, workItem } = params;
     const startTime = Date.now();
 
-    this.log('info', `Processing request: ${userInput.slice(0, 100)}`);
+    const metrics: AgentMetrics = {
+      llmCallsMade: 0,
+      toolCallsMade: 0,
+      toolCallsSucceeded: 0,
+      toolCallsFailed: 0,
+      durationMs: 0,
+    };
 
-    // Add user input to context
-    context.addMessage('user', userInput);
-
-    // Pre-read @mentioned files before planning
-    for (const match of userInput.matchAll(/@(?:"([^"]+)"|(\S+))/g)) {
-      const filePath = match[1] || match[2];
-      if (filePath && !context.hasReadFile(filePath)) {
-        try {
-          const result = await this.toolRegistry.execute('Read', { path: filePath });
-          if (result.isSuccess && result.output) {
-            context.addFileContent(filePath, String(result.output));
-          }
-        } catch { /* ignore read failures */ }
-      }
-    }
-
-    // Store context for resume capability
-    this.lastContext = context;
+    const result: AgentResult = {
+      success: false,
+      response: '',
+      metrics,
+      filesRead: [],
+      invalidatedPaths: [],
+      toolErrors: [],
+      terminationReason: '',
+      needsUserInput: false,
+      isRefusal: false,
+    };
 
     try {
-      // Simple tier: single LLM call, no tools
-      if (tier === 'simple') {
-        return this.runSimpleTier(userInput, context, onStreamChunk);
-      }
-
-      // Create plan (pass ContextWindow for smarter planning)
-      let plan;
-      if (this.config.enablePlanning) {
-        plan = await this.planner.createPlan(userInput, additionalContext, tier, budget, context);
-
-        // Check for budget exceeded
-        if (plan.goal.startsWith('BUDGET_EXCEEDED')) {
-          return {
-            content: `I cannot complete this task within the current tier's budget. ${plan.steps[0]?.objective || ''}`,
-            totalDurationMs: Date.now() - startTime,
-            toolsUsed: [],
-            success: false,
-            error: 'Budget exceeded',
-            metadata: { tier, plan },
-            goalAchieved: false,
-            paused: false,
-          };
-        }
-      } else {
-        // Default single-step plan
-        plan = {
-          goal: userInput,
-          goalType: 'task',
-          steps: [
-            {
-              stepNum: 1,
-              objective: `Execute: ${userInput}`,
-              phase: StepPhase.EXECUTION,
-              status: StepStatus.PENDING,
-              dependsOn: [],
-              required: true,
-            },
-          ],
-        };
-      }
-
-      this.log('debug', `Created plan with ${plan.steps.length} steps`);
-
-      // Execute plan with Wizard (pass ContextWindow and behavioral rules)
-      const result = await this.wizard.execute(plan, context, this.config.behavioralRules ?? '');
-
-      // Synthesize response if needed
-      let finalContent = result.finalResponse;
-      if (!result.success && result.finalResponse.length < 50) {
-        const synthesisInput = this.buildSynthesisInput(result, plan.goal);
-        const synthesisResult = await this.synthesizer.synthesize(synthesisInput, onStreamChunk);
-        finalContent = synthesisResult.content;
-      } else if (onStreamChunk) {
-        this.synthesizer.streamContent(finalContent, onStreamChunk);
-      }
-
-      return {
-        content: finalContent,
-        structuredAction: plan.goal,
-        totalDurationMs: Date.now() - startTime,
-        toolsUsed: this.extractToolsUsed(result),
-        success: result.success,
-        error: result.success ? undefined : result.finalResponse,
-        metadata: {
-          tier,
-          plan,
-          iterations: result.totalIterations,
-          stepsCompleted: result.stepsCompleted,
-          stepsSkipped: result.stepsSkipped,
-          stepsFailed: result.stepsFailed,
-        },
-        goalAchieved: result.success,
-        paused: result.paused,
-        userPrompt: result.userPrompt,
-      };
+      await this.executeLoop(context, workItem, result, metrics, startTime);
     } catch (error) {
-      const errorObj = error instanceof Error ? error : new Error(String(error));
-      this.log('error', `Agent error: ${errorObj.message}`);
-
-      // Emit LLM error event for propagation
-      this.emitLlmErrorEvent(errorObj);
-
-      return {
-        content: `I encountered an error while processing your request: ${errorObj.message}`,
-        totalDurationMs: Date.now() - startTime,
-        toolsUsed: [],
-        success: false,
-        error: errorObj.message,
-        metadata: { tier },
-        goalAchieved: false,
-        paused: false,
-      };
+      const message = error instanceof Error ? error.message : String(error);
+      result.error = message;
+      result.terminationReason = `exception:${message}`;
+      this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
     }
+
+    metrics.durationMs = Date.now() - startTime;
+    return result;
   }
 
   /**
-   * Simple tier: single LLM call, no tools.
-   * Uses ContextWindow.getItemsForLLM() for messages.
+   * Main execution loop.
    */
-  private async runSimpleTier(
-    userInput: string,
+  private async executeLoop(
     context: ContextWindow,
-    onStreamChunk?: (chunk: string, index: number, isFinal: boolean) => void
-  ): Promise<AgentResponse> {
-    const startTime = Date.now();
+    workItem: WorkItem,
+    result: AgentResult,
+    metrics: AgentMetrics,
+    startTime: number
+  ): Promise<void> {
+    const maxIterations = Math.min(
+      this.config.budget.maxIterations,
+      workItem.bounds.maxLlmCalls
+    );
 
-    // Build messages from context window
-    const messages: Array<{ role: string; content: string }> = [];
+    const localReadFiles = new Set(context.getReadFilesArray());
 
-    // System message
-    if (this.config.systemPrompt) {
-      messages.push({ role: 'system', content: this.config.systemPrompt });
+    // Auto-read target files
+    if (workItem.targetPaths && workItem.targetPaths.length > 0) {
+      await this.autoReadTargetFiles(workItem.targetPaths, context, localReadFiles, metrics);
     }
 
-    // Add messages from context window
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      const elapsedMs = Date.now() - startTime;
+
+      if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
+        result.terminationReason = 'bounds:tool_calls';
+        result.error = 'Tool call limit reached';
+        break;
+      }
+
+      if (elapsedMs >= workItem.bounds.maxDurationMs) {
+        result.terminationReason = 'bounds:duration';
+        result.error = 'Duration limit reached';
+        break;
+      }
+
+      const systemMessage = this.buildSystemMessage(workItem);
+
+      const allTools = [
+        ...this.toolRegistry.getDefinitions(),
+        ...(this.agentRegistry?.listToolDefinitions() ?? []),
+      ];
+      const allowedTools = this.filterAllowedTools(allTools);
+
+      const messages = this.buildMessages(systemMessage, workItem, context);
+
+      const llmStartTime = Date.now();
+      this.lastRequestConfig = this.llmConfig;
+      const response = await this.llm.respond({
+        messages: messages as Message[],
+        tools: allowedTools.length > 0 ? allowedTools : undefined,
+        llm: this.llmConfig,
+        responseSchema: this.config.outputSchema,
+      });
+      const llmDurationMs = Date.now() - llmStartTime;
+      metrics.llmCallsMade++;
+
+      this.emitLlmCall(response, messages, llmDurationMs, allowedTools, workItem.workId);
+
+      const content = response.content ?? '';
+      const toolCalls = response.toolCalls ?? [];
+      const structuredOutput = this.parseStructuredOutput(content);
+      if (structuredOutput) {
+        result.structuredOutput = structuredOutput;
+      }
+
+      this.addAssistantMessage(context, content, toolCalls);
+
+      const action =
+        this.extractStructuredAction(structuredOutput) ?? this.extractAction(content);
+      const responseText = this.extractStructuredResponse(structuredOutput);
+      const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
+
+      if (toolCalls.length > 0) {
+        await this.processToolCalls(
+          toolCalls,
+          context,
+          localReadFiles,
+          result,
+          metrics,
+          workItem,
+          workItem.workId
+        );
+
+        if (result.needsUserInput) {
+          result.filesRead = Array.from(localReadFiles);
+          return;
+        }
+
+        if (action === AgentAction.FINAL) {
+          this.handleFinalAction(content, result, responseText);
+          result.filesRead = Array.from(localReadFiles);
+          return;
+        }
+
+        continue;
+      }
+
+      if (action === AgentAction.FINAL) {
+        this.handleFinalAction(content, result, responseText);
+        result.filesRead = Array.from(localReadFiles);
+        return;
+      }
+
+      if (action === AgentAction.NEED_CONTEXT) {
+        const prompt = structuredPrompt ?? this.extractUserPrompt(content);
+        if (prompt) {
+          result.needsUserInput = true;
+          result.userPrompt = prompt;
+          result.terminationReason = 'user_input_required';
+          result.filesRead = Array.from(localReadFiles);
+          return;
+        }
+        continue;
+      }
+
+      if (action === AgentAction.CONTINUE) {
+        continue;
+      }
+
+      const implicitCandidate = responseText ?? content;
+      if (this.config.allowImplicitFinals && implicitCandidate.length > 100) {
+        result.success = true;
+        result.response = implicitCandidate;
+        result.terminationReason = 'implicit_final';
+        result.filesRead = Array.from(localReadFiles);
+        return;
+      }
+
+      result.terminationReason = 'no_action';
+      result.error = 'LLM response has no tools and no action directive';
+      break;
+    }
+
+    if (!result.terminationReason) {
+      result.terminationReason = 'iterations_exhausted';
+      result.error = 'Maximum iterations reached';
+    }
+
+    // Always capture all assistant responses even without [FINAL] marker
+    if (!result.response) {
+      const messages = context.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
+      const assistantContents = messages
+        .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
+        .map(m => m.content as string);
+      if (assistantContents.length > 0) {
+        result.response = assistantContents.join('\n\n');
+      }
+    }
+
+    result.filesRead = Array.from(localReadFiles);
+  }
+
+  private buildSystemMessage(workItem: WorkItem): string {
+    const base = this.config.systemPrompt ? `${this.config.systemPrompt}\n\n` : '';
+    const contextInfo = buildSystemMessage(
+      workItem.goal,
+      workItem.objective,
+      undefined,
+      '',
+      this.toolRegistry.getWorkingDir()
+    );
+    return `${base}${contextInfo}`.trim();
+  }
+
+  private filterAllowedTools(allTools: ToolDefinition[]): ToolDefinition[] {
+    if (this.config.tools.length === 0) return [];
+    const allowed = new Set(this.config.tools.map((t) => t.toLowerCase()));
+    return allTools.filter((tool) => allowed.has(tool.name.toLowerCase()));
+  }
+
+  /**
+   * Build messages array for LLM call.
+   */
+  private buildMessages(
+    systemMessage: string,
+    workItem: WorkItem,
+    context: ContextWindow
+  ): Array<Record<string, unknown>> {
+    const messages: Array<Record<string, unknown>> = [
+      { role: 'system', content: systemMessage },
+    ];
+
     const contextItems = context.getItemsForLLM();
+
+    const hasUserInput = contextItems.some(
+      (item) => item.type === 'message' && (item as any).role === 'user'
+    );
+
+    if (!hasUserInput) {
+      messages.push({
+        role: 'user',
+        content: `Execute the following objective:\n\n${workItem.objective}`,
+      });
+    }
+
     for (const item of contextItems) {
       if (item.type === 'message') {
         messages.push({
-          role: String((item as Record<string, unknown>).role),
-          content: String((item as Record<string, unknown>).content),
+          role: (item as any).role,
+          content: (item as any).content,
         });
+      } else if (item.type === 'function_call') {
+        messages.push(item);
+      } else if (item.type === 'function_call_output') {
+        messages.push(item);
       }
     }
 
-    try {
-      const response = await this.llm.respond({ messages: messages as any });
-      const content = response.content ?? '';
+    return messages;
+  }
 
-      // Update context metrics
-      if (response.usage) {
-        context.updateMetrics(response.usage.promptTokens, response.usage.completionTokens);
+  /**
+   * Add assistant message to context.
+   */
+  private addAssistantMessage(
+    context: ContextWindow,
+    content: string,
+    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
+  ): void {
+    if (toolCalls.length > 0) {
+      if (content) {
+        context.addMessage('assistant', content);
       }
-
-      // Add assistant response to context
+      for (const tc of toolCalls) {
+        context.appendItem({
+          type: 'function_call',
+          callId: tc.id,
+          name: tc.name,
+          arguments: tc.arguments,
+          timestamp: Date.now(),
+        });
+      }
+    } else {
       context.addMessage('assistant', content);
-
-      if (onStreamChunk) {
-        this.synthesizer.streamContent(content, onStreamChunk);
-      }
-
-      return {
-        content,
-        totalDurationMs: Date.now() - startTime,
-        toolsUsed: [],
-        success: true,
-        metadata: { tier: 'simple' },
-        goalAchieved: true,
-        paused: false,
-      };
-    } catch (error) {
-      const errorObj = error instanceof Error ? error : new Error(String(error));
-
-      // Emit LLM error event for propagation
-      this.emitLlmErrorEvent(errorObj);
-
-      return {
-        content: `Error: ${errorObj.message}`,
-        totalDurationMs: Date.now() - startTime,
-        toolsUsed: [],
-        success: false,
-        error: errorObj.message,
-        metadata: { tier: 'simple' },
-        goalAchieved: false,
-        paused: false,
-      };
     }
   }
 
   /**
-   * Build synthesis input from wizard result.
+   * Process tool calls.
    */
-  private buildSynthesisInput(result: WizardResult, goal: string): SynthesisInput {
-    const toolOutputs: Array<{ tool: string; output: string }> = [];
-    const stepSummaries: string[] = [];
+  private async processToolCalls(
+    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+    context: ContextWindow,
+    localReadFiles: Set<string>,
+    result: AgentResult,
+    metrics: AgentMetrics,
+    workItem: WorkItem,
+    workItemId?: string
+  ): Promise<void> {
+    const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
 
-    // Extract from ledger
-    for (const entry of result.ledger.getRecentEntries(10)) {
-      if (entry.outcomeSummary) {
-        stepSummaries.push(entry.outcomeSummary);
+    for (const call of toolCalls) {
+      metrics.toolCallsMade++;
+
+      if (this.config.tools.length === 0 || !allowedTools.has(call.name.toLowerCase())) {
+        const errorMsg = `Tool "${call.name}" is not allowed for this agent`;
+        result.toolErrors.push(errorMsg);
+        metrics.toolCallsFailed++;
+        context.appendItem({
+          type: 'function_call_output',
+          callId: call.id,
+          output: errorMsg,
+          isError: true,
+          timestamp: Date.now(),
+        });
+        continue;
+      }
+
+      this.emit(createEvent('tool_call', {
+        toolName: call.name,
+        arguments: call.arguments,
+        phase: 'starting',
+      }, workItemId));
+
+      const toolStartTime = Date.now();
+
+      try {
+        const isAgentTool = this.agentRegistry?.has(call.name) ?? false;
+        const toolResult = isAgentTool
+          ? await this.executeAgentToolCall(call, workItem, context, localReadFiles, result)
+          : await this.toolRegistry.execute(call.name, call.arguments);
+        const toolDurationMs = Date.now() - toolStartTime;
+
+        if (toolResult.isSuccess) {
+          metrics.toolCallsSucceeded++;
+
+          const nameLower = call.name.toLowerCase();
+          if (nameLower === 'read' && call.arguments.path) {
+            localReadFiles.add(String(call.arguments.path));
+          }
+
+          if ((nameLower === 'write' || nameLower === 'edit') && call.arguments.path) {
+            result.invalidatedPaths.push(String(call.arguments.path));
+            localReadFiles.delete(String(call.arguments.path));
+          }
+        } else {
+          metrics.toolCallsFailed++;
+          if (toolResult.error) {
+            result.toolErrors.push(`${call.name}: ${toolResult.error}`);
+          }
+        }
+
+        this.emit(createEvent('tool_call', {
+          toolName: call.name,
+          arguments: call.arguments,
+          phase: 'completed',
+          result: toolResult.output?.slice(0, 10000),
+          success: toolResult.isSuccess,
+          durationMs: toolDurationMs,
+        }, workItemId));
+
+        context.appendItem({
+          type: 'function_call_output',
+          callId: call.id,
+          output: toolResult.output ?? '',
+          isError: !toolResult.isSuccess,
+          durationMs: toolDurationMs,
+          timestamp: Date.now(),
+        });
+
+        if (call.name === 'ask_user' && toolResult.isSuccess) {
+          try {
+            const parsed = JSON.parse(toolResult.output ?? '{}');
+            result.needsUserInput = true;
+            result.userPrompt = parsed;
+            result.terminationReason = 'user_input_required';
+            return;
+          } catch {
+            // Not a user prompt
+          }
+        }
+
+        if (isAgentTool && result.needsUserInput) {
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        metrics.toolCallsFailed++;
+        result.toolErrors.push(`${call.name}: ${message}`);
+
+        this.emit(createEvent('tool_call', {
+          toolName: call.name,
+          arguments: call.arguments,
+          phase: 'completed',
+          result: `Error: ${message}`,
+          success: false,
+          durationMs: Date.now() - toolStartTime,
+        }, workItemId));
+
+        context.appendItem({
+          type: 'function_call_output',
+          callId: call.id,
+          output: `Error: ${message}`,
+          isError: true,
+          timestamp: Date.now(),
+        });
+      }
+    }
+  }
+
+  private async executeAgentToolCall(
+    call: { id: string; name: string; arguments: Record<string, unknown> },
+    parentWorkItem: WorkItem,
+    context: ContextWindow,
+    localReadFiles: Set<string>,
+    result: AgentResult
+  ) {
+    if (!this.agentRegistry) {
+      return errorResult(call.name, 'Agent tool registry not available', 0);
+    }
+
+    let agentConfig: AgentConfig;
+    let llmConfig: LLMRequestConfig;
+    try {
+      const runtimeConfig = this.agentRegistry.getRuntimeConfig(call.name);
+      agentConfig = runtimeConfig.config;
+      llmConfig = runtimeConfig.llm;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResult(call.name, message, 0);
+    }
+
+    const args = call.arguments ?? {};
+    const objective = typeof args.objective === 'string' ? args.objective.trim() : '';
+    if (!objective) {
+      return errorResult(call.name, 'Missing required argument: objective', 0);
+    }
+
+    const goal =
+      typeof args.goal === 'string' && args.goal.trim().length > 0
+        ? args.goal.trim()
+        : parentWorkItem.goal;
+    const delta = typeof args.delta === 'string' ? args.delta : undefined;
+    const toolHint = typeof args.toolHint === 'string' ? args.toolHint : undefined;
+    const targetPaths = Array.isArray(args.targetPaths)
+      ? args.targetPaths.filter((p) => typeof p === 'string')
+      : undefined;
+    const params =
+      args.params && typeof args.params === 'object' && !Array.isArray(args.params)
+        ? (args.params as Record<string, unknown>)
+        : undefined;
+
+    const subWorkItem = createWorkItem({
+      goal,
+      objective,
+      delta,
+      toolHint,
+      targetPaths: targetPaths && targetPaths.length > 0 ? targetPaths : undefined,
+      params,
+      agent: agentConfig.type,
+    });
+
+    const agent = new Agent(
+      agentConfig,
+      this.llm,
+      this.toolRegistry,
+      this.emit,
+      this.requestId,
+      this.agentRegistry,
+      llmConfig
+    );
+
+    const subResult = await agent.run({ context, workItem: subWorkItem });
+
+    for (const path of subResult.filesRead) {
+      localReadFiles.add(path);
+    }
+    for (const path of subResult.invalidatedPaths) {
+      result.invalidatedPaths.push(path);
+      localReadFiles.delete(path);
+    }
+    if (subResult.toolErrors.length > 0) {
+      result.toolErrors.push(...subResult.toolErrors);
+    }
+
+    const payload = {
+      agent: agentConfig.type,
+      workId: subWorkItem.workId,
+      success: subResult.success,
+      response: subResult.response,
+      error: subResult.error,
+      needsUserInput: subResult.needsUserInput,
+      userPrompt: subResult.userPrompt,
+      metrics: subResult.metrics,
+    };
+
+    if (subResult.needsUserInput && subResult.userPrompt) {
+      result.needsUserInput = true;
+      result.userPrompt = subResult.userPrompt;
+      result.terminationReason = 'user_input_required';
+    }
+
+    if (subResult.success || subResult.needsUserInput) {
+      return successResult(call.name, JSON.stringify(payload), 0);
+    }
+
+    return errorResult(call.name, JSON.stringify(payload), 0);
+  }
+
+  /**
+   * Auto-read target files before execution.
+   */
+  private async autoReadTargetFiles(
+    targetPaths: readonly string[],
+    context: ContextWindow,
+    localReadFiles: Set<string>,
+    metrics: AgentMetrics
+  ): Promise<void> {
+    const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+    if (!allowedTools.has('read')) {
+      return;
+    }
+
+    for (const targetPath of targetPaths) {
+      if (localReadFiles.has(targetPath)) continue;
+
+      try {
+        metrics.toolCallsMade++;
+        const result = await this.toolRegistry.execute('Read', { path: targetPath });
+        if (result.isSuccess) {
+          localReadFiles.add(targetPath);
+          metrics.toolCallsSucceeded++;
+
+          const fileContent = typeof result.output === 'string'
+            ? result.output
+            : JSON.stringify(result.output);
+
+          context.addFileContent(targetPath, fileContent.slice(0, 10000));
+        } else {
+          metrics.toolCallsFailed++;
+        }
+      } catch {
+        metrics.toolCallsFailed++;
+      }
+    }
+  }
+
+  /**
+   * Parse structured output if configured.
+   */
+  private parseStructuredOutput(content: string): Record<string, unknown> | null {
+    const parsed = coerceStructuredOutput(content);
+    if (!this.config.outputSchema) {
+      if (parsed && typeof parsed.action === 'string') {
+        return parsed;
+      }
+      return null;
+    }
+    return parsed;
+  }
+
+  /**
+   * Extract action from structured output.
+   */
+  private extractStructuredAction(
+    structuredOutput: Record<string, unknown> | null
+  ): AgentAction | null {
+    if (!structuredOutput) return null;
+    const raw = structuredOutput.action;
+    if (typeof raw !== 'string') return null;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'final') return AgentAction.FINAL;
+    if (normalized === 'need_context' || normalized === 'need context') {
+      return AgentAction.NEED_CONTEXT;
+    }
+    if (normalized === 'continue') return AgentAction.CONTINUE;
+    return null;
+  }
+
+  /**
+   * Extract response text from structured output.
+   */
+  private extractStructuredResponse(
+    structuredOutput: Record<string, unknown> | null
+  ): string | undefined {
+    if (!structuredOutput) return undefined;
+    const raw = structuredOutput.response;
+    return typeof raw === 'string' ? raw : undefined;
+  }
+
+  /**
+   * Extract user prompt from structured output.
+   */
+  private extractStructuredUserPrompt(
+    structuredOutput: Record<string, unknown> | null
+  ): AgentResult['userPrompt'] | null {
+    if (!structuredOutput) return null;
+    const raw =
+      structuredOutput.user_prompt ??
+      structuredOutput.userPrompt;
+    return this.parseUserPromptValue(raw);
+  }
+
+  /**
+   * Parse user prompt payload safely.
+   */
+  private parseUserPromptValue(
+    value: unknown
+  ): AgentResult['userPrompt'] | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const data = value as Record<string, unknown>;
+    const question = typeof data.question === 'string' ? data.question.trim() : '';
+    if (!question) return null;
+
+    const optionsRaw = data.options;
+    let options: AgentResult['userPrompt']['options'] | undefined;
+    if (Array.isArray(optionsRaw)) {
+      const normalized = optionsRaw
+        .map((opt) => {
+          if (typeof opt === 'string') return opt;
+          if (opt && typeof opt === 'object' && !Array.isArray(opt)) {
+            const optObj = opt as Record<string, unknown>;
+            const label = typeof optObj.label === 'string' ? optObj.label : '';
+            if (!label) return null;
+            const description =
+              typeof optObj.description === 'string' ? optObj.description : undefined;
+            return description ? { label, description } : { label };
+          }
+          return null;
+        })
+        .filter((opt): opt is string | { label: string; description?: string } => opt !== null);
+      if (normalized.length > 0) {
+        options = normalized;
       }
     }
 
+    const context = typeof data.context === 'string' ? data.context : undefined;
+    const multiSelect =
+      typeof data.multiSelect === 'boolean' ? data.multiSelect : undefined;
+
     return {
-      ...createSynthesisInput(goal, toolOutputs, 'task'),
-      stepSummaries,
-      partialResponse: result.finalResponse,
+      question,
+      options,
+      context,
+      multiSelect,
     };
   }
 
   /**
-   * Extract tools used from wizard result.
+   * Extract action from content.
    */
-  private extractToolsUsed(result: WizardResult): string[] {
-    const tools = new Set<string>();
-    for (const entry of result.ledger.getRecentEntries(100)) {
-      // Extract tool names from work item summaries if available
-      const summary = entry.workItemSummary || '';
-      const toolMatch = summary.match(/using (\w+)/i);
-      if (toolMatch) {
-        tools.add(toolMatch[1]);
-      }
-    }
-    return Array.from(tools);
+  private extractAction(content: string): AgentAction | null {
+    if (ACTION_MARKERS.FINAL.test(content)) return AgentAction.FINAL;
+    if (ACTION_MARKERS.NEED_CONTEXT.test(content)) return AgentAction.NEED_CONTEXT;
+    if (ACTION_MARKERS.CONTINUE.test(content)) return AgentAction.CONTINUE;
+    return null;
   }
 
   /**
-   * Resume execution after user provides input.
-   *
-   * @param context - The ContextWindow (from Harness)
-   * @param userResponse - The user's response
-   * @param onStreamChunk - Optional callback for streaming responses
+   * Handle [FINAL] action.
    */
-  async resume(
-    context: ContextWindow,
-    userResponse: string,
-    onStreamChunk?: (chunk: string, index: number, isFinal: boolean) => void
-  ): Promise<AgentResponse> {
-    const startTime = Date.now();
-
-    // Store context for any future resume calls
-    this.lastContext = context;
-
-    try {
-      const result = await this.wizard.resume(
-        context,
-        userResponse,
-        this.config.behavioralRules ?? ''
-      );
-
-      let finalContent = result.finalResponse;
-      if (onStreamChunk) {
-        this.synthesizer.streamContent(finalContent, onStreamChunk);
-      }
-
-      return {
-        content: finalContent,
-        totalDurationMs: Date.now() - startTime,
-        toolsUsed: this.extractToolsUsed(result),
-        success: result.success,
-        metadata: {
-          iterations: result.totalIterations,
-          stepsCompleted: result.stepsCompleted,
-        },
-        goalAchieved: result.success,
-        paused: result.paused,
-        userPrompt: result.userPrompt,
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        content: `Error resuming: ${message}`,
-        totalDurationMs: Date.now() - startTime,
-        toolsUsed: [],
-        success: false,
-        error: message,
-        metadata: {},
-        goalAchieved: false,
-        paused: false,
-      };
+  private handleFinalAction(
+    content: string,
+    result: AgentResult,
+    responseText?: string
+  ): void {
+    const finalText = responseText ?? content.replace(/\[FINAL\]/gi, '').trim();
+    if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
+      result.isRefusal = true;
+      result.error = 'LLM refused to complete the task';
+      result.terminationReason = 'refusal';
+    } else {
+      result.success = true;
+      result.response = finalText;
+      result.terminationReason = 'final';
     }
+  }
+
+  /**
+   * Extract user prompt from NEED_CONTEXT content.
+   */
+  private extractUserPrompt(content: string): AgentResult['userPrompt'] | null {
+    const match = content.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return this.parseUserPromptValue(JSON.parse(match[0]));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Emit llm_call event.
+   */
+  private emitLlmCall(
+    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number }; model?: string },
+    messages: Array<Record<string, unknown>>,
+    durationMs: number,
+    tools: ToolDefinition[],
+    workItemId?: string
+  ): void {
+    const content = response.content ?? '';
+    const toolCalls = response.toolCalls ?? [];
+
+    this.emit(createEvent('llm_call', {
+      agentType: this.config.type,
+      promptPreview: this.getPromptPreview(messages),
+      responsePreview: content.slice(0, 4000) || this.buildToolCallPreview(toolCalls),
+      totalTokens: response.usage?.totalTokens ?? 0,
+      promptTokens: response.usage?.promptTokens ?? 0,
+      completionTokens: response.usage?.completionTokens ?? 0,
+      durationMs,
+      model: response.model ?? 'unknown',
+      toolCallsCount: toolCalls.length,
+      toolNames: tools.map((t) => t.name),
+      messageCount: messages.length,
+    }, workItemId));
+  }
+
+  /**
+   * Emit llm_error event.
+   */
+  private emitLlmError(error: Error, workItemId?: string): void {
+    const provider = this.lastRequestConfig?.provider ?? 'unknown';
+    const model = this.lastRequestConfig?.model ?? 'unknown';
+    this.emit(createEvent('llm_error', {
+      agentType: this.config.type,
+      provider,
+      model,
+      error: error.message,
+      errorType: this.classifyError(error),
+    }, workItemId));
+  }
+
+  /**
+   * Get preview from messages.
+   */
+  private getPromptPreview(messages: Array<Record<string, unknown>>): string {
+    if (!messages.length) return '';
+    const first = messages[0] as { role?: string; content?: string };
+    if (first.role === 'system' && typeof first.content === 'string') {
+      return first.content.slice(0, 4000);
+    }
+    return '';
+  }
+
+  /**
+   * Build preview from tool calls.
+   */
+  private buildToolCallPreview(
+    toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>
+  ): string {
+    if (!toolCalls.length) return '';
+    return `[Tools: ${toolCalls.map((tc) => tc.name).join(', ')}]`;
+  }
+
+  /**
+   * Classify error type.
+   */
+  private classifyError(error: Error): string {
+    const msg = error.message;
+    if (msg.includes('rate limit') || msg.includes('429')) return 'rate_limit';
+    if (msg.includes('timeout')) return 'timeout';
+    if (msg.includes('circuit')) return 'circuit_open';
+    return 'unknown';
   }
 }

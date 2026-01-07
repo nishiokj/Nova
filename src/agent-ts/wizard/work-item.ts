@@ -61,17 +61,25 @@ export interface WorkItem {
   /** Unique work item ID */
   readonly workId: string;
   /** Step number in the plan */
-  readonly stepNum: number;
+  readonly stepNum?: number;
   /** High-level goal of the plan */
   readonly goal: string;
   /** Objective to accomplish */
   readonly objective: string;
+  /** How this advances the goal */
+  readonly delta?: string;
+  /** Agent type to execute this work */
+  readonly agent: string;
+  /** Dependencies (work IDs) that must complete first */
+  readonly dependencies: readonly string[];
   /** Target file paths to operate on */
   readonly targetPaths: readonly string[];
   /** Suggested tool to use */
   readonly toolHint?: string;
   /** Suggested tool arguments */
   readonly toolArgsHint?: Record<string, unknown>;
+  /** Optional structured params */
+  readonly params?: Record<string, unknown>;
   /** Resource bounds */
   readonly bounds: WorkBounds;
   /** Success criteria */
@@ -84,24 +92,32 @@ export interface WorkItem {
  * Create a work item.
  */
 export function createWorkItem(params: {
-  stepNum: number;
+  stepNum?: number;
   goal: string;
   objective: string;
+  delta?: string;
+  agent?: string;
+  dependencies?: string[];
   targetPaths?: string[];
   toolHint?: string;
   toolArgsHint?: Record<string, unknown>;
   bounds?: Partial<WorkBounds>;
   successCriteria?: Partial<WorkItemCriteria>;
   preconditionsMet?: string[];
+  params?: Record<string, unknown>;
 }): WorkItem {
   return {
     workId: uuidv4().slice(0, 8),
     stepNum: params.stepNum,
     goal: params.goal,
     objective: params.objective,
+    delta: params.delta,
+    agent: params.agent ?? 'standard',
+    dependencies: Object.freeze(params.dependencies ?? []),
     targetPaths: Object.freeze(params.targetPaths ?? []),
     toolHint: params.toolHint,
     toolArgsHint: params.toolArgsHint,
+    params: params.params,
     bounds: { ...DEFAULT_WORK_BOUNDS, ...params.bounds },
     successCriteria: {
       description: params.successCriteria?.description ?? `Complete: ${params.objective}`,

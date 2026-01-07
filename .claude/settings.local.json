@@ -85,7 +85,9 @@
       "Bash(bun test:*)",
       "Bash(./node_modules/.bin/tsc:*)",
       "Bash(src/agent-ts/node_modules/.bin/tsc:*)",
-      "Bash(/Users/jevinnishioka/Desktop/jesus/src/agent-ts/node_modules/.bin/tsc:*)"
+      "Bash(/Users/jevinnishioka/Desktop/jesus/src/agent-ts/node_modules/.bin/tsc:*)",
+      "Bash(bun run dev:*)",
+      "Bash(git log:*)"
     ],
     "deny": []
   }

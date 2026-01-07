@@ -10,12 +10,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test';
-import {
-  OpenAIAdapter,
-  AnthropicAdapter,
-  createAdapter,
-} from './adapter.js';
-import type { LLMConfig } from '../types/llm.js';
+import { createAdapter } from './adapter.js';
+import type { LLMClientConfig, LLMRequestConfig } from '../types/llm.js';
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
@@ -29,16 +25,23 @@ function restoreFetch() {
 }
 
 describe('OpenAIAdapter', () => {
-  let adapter: OpenAIAdapter;
-  const baseConfig: LLMConfig = {
-    provider: 'openai',
+  let adapter: ReturnType<typeof createAdapter>;
+  const clientConfig: LLMClientConfig = {
+    apiKeys: { openai: 'test-key' },
+  };
+  const baseRequest: LLMRequestConfig = {
     model: 'gpt-4o',
-    apiKey: 'test-key',
-    maxTokens: 4096,
+    provider: 'openai',
   };
 
   beforeEach(() => {
-    adapter = new OpenAIAdapter(baseConfig);
+    adapter = createAdapter(clientConfig);
+    const baseRespond = adapter.respond.bind(adapter);
+    (adapter as any).respond = (params: Record<string, unknown>) =>
+      baseRespond({
+        ...params,
+        llm: { ...baseRequest, ...((params as { llm?: LLMRequestConfig }).llm ?? {}) },
+      });
   });
 
   afterEach(() => {
@@ -369,11 +372,6 @@ describe('OpenAIAdapter', () => {
 
   describe('supportsPromptCacheRetention', () => {
     it('should return false for gpt-5-nano', () => {
-      const nanoAdapter = new OpenAIAdapter({
-        ...baseConfig,
-        model: 'gpt-5-nano',
-      });
-
       mockFetch(async (url, options) => {
         const body = JSON.parse(options?.body as string);
         // Verify prompt_cache_retention is NOT included
@@ -386,9 +384,10 @@ describe('OpenAIAdapter', () => {
         }), { status: 200 });
       });
 
-      return nanoAdapter.respond({
+      return adapter.respond({
         messages: [{ role: 'user', content: 'Hello' }],
         promptCacheRetention: '1h',
+        llm: { model: 'gpt-5-nano' },
       });
     });
 
@@ -411,13 +410,35 @@ describe('OpenAIAdapter', () => {
     });
   });
 
-  describe('isReasoningModel', () => {
-    it('should force tool_choice required for o1 models', async () => {
-      const o1Adapter = new OpenAIAdapter({
-        ...baseConfig,
-        model: 'o1-preview',
+  describe('structured outputs', () => {
+    it('should include text.format when responseSchema is provided', async () => {
+      mockFetch(async (_url, options) => {
+        const body = JSON.parse(options?.body as string);
+        expect(body.text).toEqual({
+          format: {
+            type: 'json_schema',
+            name: 'test_schema',
+            schema: { type: 'object' },
+            strict: true,
+          },
+        });
+        return new Response(JSON.stringify({
+          id: 'resp_123',
+          status: 'completed',
+          output_text: '{"action":"final","response":"ok","user_prompt":null}',
+          usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+        }), { status: 200 });
       });
 
+      await adapter.respond({
+        messages: [{ role: 'user', content: 'Hello' }],
+        responseSchema: { name: 'test_schema', schema: { type: 'object' }, strict: true },
+      });
+    });
+  });
+
+  describe('isReasoningModel', () => {
+    it('should force tool_choice required for o1 models', async () => {
       mockFetch(async (url, options) => {
         const body = JSON.parse(options?.body as string);
         expect(body.tool_choice).toBe('required');
@@ -429,19 +450,14 @@ describe('OpenAIAdapter', () => {
         }), { status: 200 });
       });
 
-      await o1Adapter.respond({
+      await adapter.respond({
         messages: [{ role: 'user', content: 'Hello' }],
         tools: [{ name: 'test', description: 'test', parameters: { type: 'object', properties: {}, required: [] } }],
+        llm: { model: 'o1-preview' },
       });
     });
 
     it('should NOT set temperature for reasoning models', async () => {
-      const o3Adapter = new OpenAIAdapter({
-        ...baseConfig,
-        model: 'o3-mini',
-        temperature: 0.7,
-      });
-
       mockFetch(async (url, options) => {
         const body = JSON.parse(options?.body as string);
         // BUG CANDIDATE: Temperature should NOT be set for o3 models
@@ -454,8 +470,9 @@ describe('OpenAIAdapter', () => {
         }), { status: 200 });
       });
 
-      await o3Adapter.respond({
+      await adapter.respond({
         messages: [{ role: 'user', content: 'Hello' }],
+        llm: { model: 'o3-mini', temperature: 0.7 },
       });
     });
   });
@@ -531,16 +548,23 @@ describe('OpenAIAdapter', () => {
 });
 
 describe('AnthropicAdapter', () => {
-  let adapter: AnthropicAdapter;
-  const baseConfig: LLMConfig = {
-    provider: 'anthropic',
+  let adapter: ReturnType<typeof createAdapter>;
+  const clientConfig: LLMClientConfig = {
+    apiKeys: { anthropic: 'test-key' },
+  };
+  const baseRequest: LLMRequestConfig = {
     model: 'claude-3-opus',
-    apiKey: 'test-key',
-    maxTokens: 4096,
+    provider: 'anthropic',
   };
 
   beforeEach(() => {
-    adapter = new AnthropicAdapter(baseConfig);
+    adapter = createAdapter(clientConfig);
+    const baseRespond = adapter.respond.bind(adapter);
+    (adapter as any).respond = (params: Record<string, unknown>) =>
+      baseRespond({
+        ...params,
+        llm: { ...baseRequest, ...((params as { llm?: LLMRequestConfig }).llm ?? {}) },
+      });
   });
 
   afterEach(() => {
@@ -681,32 +705,10 @@ describe('AnthropicAdapter', () => {
 });
 
 describe('createAdapter factory', () => {
-  it('should throw for unknown provider', () => {
-    expect(() => createAdapter({
-      provider: 'unknown' as any,
-      model: 'test',
-      apiKey: 'key',
-      maxTokens: 1000,
-    })).toThrow(/Unknown LLM provider/);
-  });
-
-  it('should create OpenAIAdapter for openai provider', () => {
+  it('should create adapter with api key map', () => {
     const adapter = createAdapter({
-      provider: 'openai',
-      model: 'gpt-4',
-      apiKey: 'key',
-      maxTokens: 1000,
+      apiKeys: { openai: 'key', anthropic: 'key' },
     });
-    expect(adapter.provider).toBe('openai');
-  });
-
-  it('should create AnthropicAdapter for anthropic provider', () => {
-    const adapter = createAdapter({
-      provider: 'anthropic',
-      model: 'claude-3',
-      apiKey: 'key',
-      maxTokens: 1000,
-    });
-    expect(adapter.provider).toBe('anthropic');
+    expect(adapter).toBeTruthy();
   });
 });
