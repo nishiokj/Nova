@@ -22,6 +22,9 @@ export type AgentCoreEventType =
  * Orchestrator event types.
  */
 export type OrchestratorEventType =
+  | 'orchestration_started'
+  | 'iteration_started'
+  | 'iteration_completed'
   | 'runtime_script_created'
   | 'workitem_started'
   | 'workitem_completed'

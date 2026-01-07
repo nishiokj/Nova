@@ -194,6 +194,8 @@ export const DEFAULT_EXCLUDE_DIRS = new Set([
   '.ruff_cache',
   'htmlcov',
   'coverage',
+  'logs',
+  'log',
 ]);
 
 /**
@@ -209,6 +211,7 @@ export const DEFAULT_EXCLUDE_EXTENSIONS = new Set([
   '.dll',
   '.exe',
   '.class',
+  '.log',
 ]);
 
 /**

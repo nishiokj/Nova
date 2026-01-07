@@ -36,7 +36,10 @@ export class GraphDSubscriber {
   private config: Required<GraphDSubscriberConfig>;
   private unsubscribe: (() => void) | null = null;
   private eventBatch: AgentEvent<unknown>[] = [];
+  private pendingEvents: AgentEvent<unknown>[] = [];
+  private flushScheduled = false;
   private eventCount = 0;
+  private closed = false;
 
   constructor(
     eventBus: EventBusProtocol,
@@ -52,7 +55,7 @@ export class GraphDSubscriber {
       batchSize: config.batchSize ?? 50,
     };
 
-    this.unsubscribe = eventBus.subscribeAll((event) => this.handleEvent(event));
+    this.unsubscribe = eventBus.subscribeAll((event) => this.enqueueEvent(event));
   }
 
   /**
@@ -66,20 +69,50 @@ export class GraphDSubscriber {
    * Handle an event from the EventBus.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleEvent(event: AgentEvent<any>): void {
+  private enqueueEvent(event: AgentEvent<any>): void {
+    if (this.closed) return;
     if (this.config.eventTypes.length > 0 && !this.config.eventTypes.includes(event.type)) {
       return;
     }
 
     this.eventCount++;
+    this.pendingEvents.push(event);
+    if (!this.flushScheduled) {
+      this.flushScheduled = true;
+      queueMicrotask(() => this.flushPending());
+    }
+  }
+
+  private flushPending(force = false): void {
+    if (this.closed && !force) {
+      this.pendingEvents = [];
+      this.flushScheduled = false;
+      return;
+    }
+
+    const batch = this.pendingEvents;
+    this.pendingEvents = [];
+    this.flushScheduled = false;
 
     if (this.config.batchMode) {
-      this.eventBatch.push(event);
-      if (this.eventBatch.length >= this.config.batchSize) {
+      for (const event of batch) {
+        this.eventBatch.push(event);
+        if (this.eventBatch.length >= this.config.batchSize) {
+          this.flushBatch();
+        }
+      }
+      if (force && this.eventBatch.length > 0) {
         this.flushBatch();
       }
     } else {
-      this.persistEvent(event);
+      for (const event of batch) {
+        this.persistEvent(event);
+      }
+    }
+
+    if (this.pendingEvents.length > 0 && !this.flushScheduled && !this.closed) {
+      this.flushScheduled = true;
+      queueMicrotask(() => this.flushPending());
     }
   }
 
@@ -91,9 +124,12 @@ export class GraphDSubscriber {
     try {
       const formattedEvent = this.formatEventForDashboard(event);
 
-      this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
+      const result = this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
         agent_events: [formattedEvent],
       });
+      if ((result as { success?: boolean; error?: string }).success === false) {
+        console.error(`[GraphDSubscriber] Failed to persist event: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+      }
     } catch (error) {
       console.error(`[GraphDSubscriber] Failed to persist event: ${error}`);
     }
@@ -152,9 +188,12 @@ export class GraphDSubscriber {
         this.formatEventForDashboard(event)
       );
 
-      this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
+      const result = this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
         agent_events: formattedEvents,
       });
+      if ((result as { success?: boolean; error?: string }).success === false) {
+        console.error(`[GraphDSubscriber] Failed to flush batch: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+      }
 
       this.eventBatch = [];
     } catch (error) {
@@ -173,14 +212,12 @@ export class GraphDSubscriber {
    * Flush any remaining events and close the subscriber.
    */
   close(): void {
-    if (this.config.batchMode && this.eventBatch.length > 0) {
-      this.flushBatch();
-    }
-
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
     }
+    this.closed = true;
+    this.flushPending(true);
   }
 }
 

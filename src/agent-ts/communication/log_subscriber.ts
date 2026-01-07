@@ -20,6 +20,9 @@ export class LogSubscriber {
   private logger: Logger;
   private unsubscribe: (() => void) | null = null;
   private eventTypes: string[];
+  private pendingEvents: Array<AgentEvent<unknown>> = [];
+  private flushScheduled = false;
+  private closed = false;
 
   constructor(eventBus: EventBusProtocol, config: LogSubscriberConfig) {
     this.eventTypes = config.eventTypes ?? [];
@@ -29,15 +32,46 @@ export class LogSubscriber {
       path: config.logPath,
     });
 
-    this.unsubscribe = eventBus.subscribeAll((event) => this.handleEvent(event));
+    this.unsubscribe = eventBus.subscribeAll((event) => this.enqueueEvent(event));
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleEvent(event: AgentEvent<any>): void {
+  private enqueueEvent(event: AgentEvent<any>): void {
+    if (this.closed) return;
     if (this.eventTypes.length > 0 && !this.eventTypes.includes(event.type)) {
       return;
     }
 
+    this.pendingEvents.push(event);
+    if (!this.flushScheduled) {
+      this.flushScheduled = true;
+      queueMicrotask(() => this.flushPending());
+    }
+  }
+
+  private flushPending(force = false): void {
+    if (this.closed && !force) {
+      this.pendingEvents = [];
+      this.flushScheduled = false;
+      return;
+    }
+
+    const batch = this.pendingEvents;
+    this.pendingEvents = [];
+    this.flushScheduled = false;
+
+    for (const event of batch) {
+      this.logEvent(event);
+    }
+
+    if (this.pendingEvents.length > 0 && !this.flushScheduled && !this.closed) {
+      this.flushScheduled = true;
+      queueMicrotask(() => this.flushPending());
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private logEvent(event: AgentEvent<any>): void {
     const level = this.inferLevel(event.type);
     const suffix = event.workItemId ? ` workItem=${event.workItemId}` : '';
     const message = `[${event.type}]${suffix}`;
@@ -63,6 +97,8 @@ export class LogSubscriber {
       this.unsubscribe();
       this.unsubscribe = null;
     }
+    this.closed = true;
+    this.flushPending(true);
     this.logger.close();
   }
 }

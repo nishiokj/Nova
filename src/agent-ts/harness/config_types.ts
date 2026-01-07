@@ -65,12 +65,14 @@ export interface AgentBudgetConfig {
 
 /**
  * Full agent configuration from config file.
+ * output_schema can be a string reference to output_schemas.json or inline schema.
  */
 export interface AgentConfigEntry {
   llm: AgentLLMConfig;
   budget: AgentBudgetConfig;
   tools?: string[];
-  output_schema?: StructuredOutputSchema;
+  /** Schema name (string) referencing output_schemas.json, or inline StructuredOutputSchema */
+  output_schema?: string | StructuredOutputSchema;
 }
 
 // ============================================

@@ -161,7 +161,20 @@ export class GraphDManager {
         );
         this.running = true;
         this.reusingExisting = true;
-        // Don't open database - use HTTP API to talk to existing instance
+
+        // Open database for local writes so events are persisted to the shared DB.
+        try {
+          const dbDir = dirname(this.dbPath);
+          if (dbDir && !existsSync(dbDir)) {
+            mkdirSync(dbDir, { recursive: true });
+          }
+          this.store = new GraphStore(this.dbPath);
+          this.store.initialize();
+        } catch (err) {
+          console.warn('GraphD reuse: failed to open local store', err);
+          this.store = null;
+        }
+
         return true;
       }
 
@@ -239,8 +252,12 @@ export class GraphDManager {
     // Stop session cleanup timer
     this.stopSessionCleanupTimer();
 
-    // Don't stop if we're reusing an existing instance
+    // Don't stop the shared server if we're reusing an existing instance
     if (this.reusingExisting) {
+      if (this.store) {
+        this.store.close();
+        this.store = null;
+      }
       return;
     }
 

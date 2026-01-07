@@ -3,6 +3,8 @@
  */
 
 export { AgentHarness, createHarnessFromEnv } from './harness.js';
+export { BridgeGateway } from './bridge_gateway.js';
+export { HarnessDaemon, runHarnessDaemon } from './daemon.js';
 export {
   translateAgentEvent,
   createStreamEvent,

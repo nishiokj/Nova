@@ -197,6 +197,18 @@ export class ToolRegistry {
       workdirOverride: this.currentContext.workdirOverride ?? this.defaultWorkingDir,
     };
 
+    // Always inject cwd from our config (LLM doesn't know the real working dir)
+    const resolvedCwd = execContext.workdirOverride ?? this.defaultWorkingDir;
+    const argsWithCwd = {
+      ...args,
+      cwd: resolvedCwd,
+    };
+
+    // Debug: log if cwd looks suspicious
+    if (!resolvedCwd || resolvedCwd === '.' || resolvedCwd.length < 3) {
+      console.warn(`[ToolRegistry] Suspicious cwd for tool ${name}: "${resolvedCwd}" (defaultWorkingDir: "${this.defaultWorkingDir}")`);
+    }
+
     // Check allowed tools restriction
     if (
       execContext.allowedTools &&
@@ -215,7 +227,7 @@ export class ToolRegistry {
     let cacheKey: string | null = null;
 
     if (isCacheable) {
-      cacheKey = this.generateCacheKey(name, args);
+      cacheKey = this.generateCacheKey(name, argsWithCwd);
       const cached = this.getCachedResult(cacheKey);
       if (cached) {
         cached.metadata = { ...cached.metadata, cacheHit: true };
@@ -230,7 +242,7 @@ export class ToolRegistry {
     try {
       const result = await this.executeWithTimeout(
         tool,
-        args,
+        argsWithCwd,
         timeout,
         execContext
       );
@@ -245,7 +257,7 @@ export class ToolRegistry {
 
       // Invalidate caches for write operations
       if (result.isSuccess && (name === 'Write' || name === 'Edit')) {
-        const path = args.path as string;
+        const path = (argsWithCwd as Record<string, unknown>).path as string;
         if (path) {
           this.invalidateCacheForPath(path);
         }

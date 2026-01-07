@@ -198,8 +198,8 @@ export class WorkLedger {
     entry.status = outcome.success ? EntryStatus.COMPLETED : EntryStatus.FAILED;
     entry.outcomeSummary = summarySource ? summarySource.slice(0, 200) : undefined;
     entry.observations = toolErrors.slice(0, 10);
-    entry.entityRefs = Array.isArray((outcome as { entityRefs?: string[] }).entityRefs)
-      ? [...(outcome as { entityRefs: string[] }).entityRefs]
+    entry.entityRefs = Array.isArray((outcome as unknown as { entityRefs?: string[] }).entityRefs)
+      ? [...(outcome as unknown as { entityRefs: string[] }).entityRefs]
       : [];
     entry.toolCallsMade = metrics.toolCallsMade ?? 0;
     entry.llmCallsMade = metrics.llmCallsMade ?? 0;

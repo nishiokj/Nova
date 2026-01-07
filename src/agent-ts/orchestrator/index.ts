@@ -2,6 +2,7 @@
  * Orchestrator Module - Barrel Export
  */
 
+// Core orchestrator (loop-until-goal)
 export {
   Orchestrator,
   type OrchestratorConfig,
@@ -9,20 +10,15 @@ export {
   type OrchestratorResult,
   type OrchestratorMetrics,
   type OrchestratorLogger,
-  type Tier,
+  type TerminationReason,
 } from './orchestrator.js';
 
+// DAG executor (standalone, for future parallel execution)
 export {
-  type WorkItemStatus,
-  type WorkItemState,
-  WorkItemStateManager,
-  createWorkItemState,
-} from './workitem-state.js';
-
-export {
+  DAGExecutor,
+  type DAGExecutorConfig,
+  type DAGResult,
   type RuntimeScript,
-  type SystemContext,
-  type Artifact,
   type RuntimeScriptOutput,
   parseRuntimeScript,
-} from './runtime-script.js';
+} from './dag-executor.js';

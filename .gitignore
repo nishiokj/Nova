@@ -45,4 +45,10 @@ tui-ts/dist/
 # OS files
 .DS_Store
 *.DS_Store
-htmlcov
+htmlcovrepo-test/
+
+# ignore nested worktree
+/tui-ts/**/repo-test/
+
+# local worktrees
+/tui-ts/**/repo-test/

@@ -104,7 +104,9 @@ export interface AgentResult {
   userPrompt?: UserPromptInfo;
   /** Whether LLM refused to complete */
   isRefusal: boolean;
-  /** Parsed structured output (if available) */
+  /** Whether result is incomplete (e.g., iterations exhausted but has partial output) */
+  isIncomplete?: boolean;
+  /** Parsed structured output (if available). Shape defined by config, not TypeScript. */
   structuredOutput?: Record<string, unknown>;
 }
 

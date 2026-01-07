@@ -625,9 +625,10 @@ class LLMRouterAdapter implements LLMAdapter {
       }
 
       if (item.type === 'function_call_output') {
+        const outputCallId = (item.call_id ?? item.callId) as string;
         input.push({
           type: 'function_call_output',
-          call_id: item.call_id,
+          call_id: outputCallId,
           output: item.output,
         });
         continue;
@@ -681,14 +682,51 @@ class LLMRouterAdapter implements LLMAdapter {
 
     let content = '';
     for (const item of output) {
-      if (item.type === 'message') {
-        const contentBlocks = item.content as Array<Record<string, unknown>> | undefined;
-        if (!contentBlocks) continue;
+      if (!item || typeof item !== 'object') continue;
+
+      const itemType = item.type as string | undefined;
+
+      if (itemType === 'message') {
+        const contentBlocks = item.content as Array<Record<string, unknown>> | string | undefined;
+        if (typeof contentBlocks === 'string') {
+          content += contentBlocks;
+          continue;
+        }
+        if (!Array.isArray(contentBlocks)) continue;
+
         for (const block of contentBlocks) {
-          if (block.type === 'output_text') {
+          const blockType = block.type as string | undefined;
+          if (blockType === 'output_text' || blockType === 'text') {
             content += (block.text as string) ?? '';
+          } else if (blockType === 'output_json' || blockType === 'json') {
+            const jsonPayload = (block.json as Record<string, unknown> | undefined)
+              ?? (block.output as Record<string, unknown> | undefined);
+            if (jsonPayload) {
+              content += JSON.stringify(jsonPayload);
+            }
+          } else if (blockType === 'refusal') {
+            content += (block.refusal as string) ?? '';
           }
         }
+        continue;
+      }
+
+      if (itemType === 'output_text' || itemType === 'text') {
+        content += (item.text as string) ?? '';
+        continue;
+      }
+
+      if (itemType === 'output_json' || itemType === 'json') {
+        const jsonPayload = (item.json as Record<string, unknown> | undefined)
+          ?? (item.output as Record<string, unknown> | undefined);
+        if (jsonPayload) {
+          content += JSON.stringify(jsonPayload);
+        }
+        continue;
+      }
+
+      if (itemType === 'refusal') {
+        content += (item.refusal as string) ?? '';
       }
     }
 
@@ -702,6 +740,22 @@ class LLMRouterAdapter implements LLMAdapter {
     const toolCalls: ToolCall[] = [];
 
     for (const item of output) {
+      // Handle function_call items directly in output array (OpenAI Responses API format)
+      if (item.type === 'function_call') {
+        const callId = (item.call_id ?? item.id) as string;
+        const name = item.name as string;
+        const argsJson = item.arguments as string;
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(argsJson);
+        } catch {
+          args = {};
+        }
+        toolCalls.push({ id: callId, name, arguments: args });
+        continue;
+      }
+
+      // Handle nested tool_call blocks inside message items (legacy format)
       if (item.type !== 'message') continue;
       const contentBlocks = item.content as Array<Record<string, unknown>> | undefined;
       if (!contentBlocks) continue;
@@ -759,6 +813,11 @@ class LLMRouterAdapter implements LLMAdapter {
     }
 
     if (params.responseSchema) {
+      this.logger.debug('Response schema being sent', {
+        name: params.responseSchema.name,
+        schemaSize: JSON.stringify(params.responseSchema.schema).length,
+        schema: params.responseSchema.schema,
+      });
       body.text = {
         format: {
           type: 'json_schema',
@@ -821,7 +880,9 @@ class LLMRouterAdapter implements LLMAdapter {
       method: 'respond',
       endpoint: '/v1/responses',
       model: resolved.model,
+      maxOutputTokens: body.max_output_tokens,
       hasInstructions: !!body.instructions,
+      hasReasoning: !!body.reasoning,
       toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
       inputLength: inputArray.length,
       messageCount: params.messages.length,
@@ -852,8 +913,19 @@ class LLMRouterAdapter implements LLMAdapter {
     let data = (await response.json()) as Record<string, unknown>;
 
     const status = data.status as string;
+    const responseId = data.id as string | undefined;
+
+    this.logger.debug('OpenAI initial response', {
+      status,
+      responseId,
+      model: resolved.model,
+    });
+
+    this.logger.debug('OpenAI full response', {
+      data: JSON.stringify(data, null, 2),
+    });
+
     if (status === 'queued' || status === 'in_progress') {
-      const responseId = data.id as string;
       if (!responseId) {
         this.logger.error('OpenAI background response missing id', {
           method: 'respond',
@@ -914,11 +986,21 @@ class LLMRouterAdapter implements LLMAdapter {
     resolved: ResolvedRequestConfig,
     responseId: string,
     maxWaitMs: number = 300000,
-    pollIntervalMs: number = 500
+    pollIntervalMs: number = 2000
   ): Promise<Record<string, unknown>> {
     const startTime = Date.now();
+    let pollCount = 0;
+
+    this.logger.debug('Starting background poll', {
+      responseId,
+      model: resolved.model,
+      maxOutputTokens: resolved.maxTokens,
+      maxWaitMs,
+      pollIntervalMs,
+    });
 
     while (Date.now() - startTime < maxWaitMs) {
+      pollCount++;
       const response = await fetch(`${resolved.baseUrl}/v1/responses/${responseId}`, {
         method: 'GET',
         headers: {
@@ -941,11 +1023,25 @@ class LLMRouterAdapter implements LLMAdapter {
       const data = (await response.json()) as Record<string, unknown>;
       const status = data.status as string;
 
+      const incompleteDetails = data.incomplete_details as Record<string, unknown> | undefined;
+
+      this.logger.debug('Poll status', {
+        responseId,
+        pollCount,
+        status,
+        elapsedMs: Date.now() - startTime,
+        incompleteDetails,
+      });
+
       if (status === 'completed') {
+        this.logger.debug('Poll completed', { responseId, pollCount });
+        this.logger.debug('OpenAI poll result full response', {
+          data: JSON.stringify(data, null, 2),
+        });
         return data;
       }
 
-      if (status === 'failed' || status === 'cancelled') {
+      if (status === 'failed' || status === 'cancelled' || status === 'incomplete') {
         const error = data.error as Record<string, unknown> | undefined;
         const errorMessage = error?.message ?? `Response ${status}`;
         const errorCode = error?.code ?? 'unknown';
@@ -953,10 +1049,13 @@ class LLMRouterAdapter implements LLMAdapter {
           method: 'pollForCompletion',
           endpoint: `/v1/responses/${responseId}`,
           responseId,
+          model: resolved.model,
+          maxOutputTokens: resolved.maxTokens,
+          incompleteDetails,
           errorCode,
           errorMessage,
         });
-        throw new Error(`OpenAI Responses API ${status} [${errorCode}]: ${errorMessage}`);
+        throw new Error(`OpenAI Responses API ${status} [${errorCode}]: ${errorMessage} (model=${resolved.model}, maxOutputTokens=${resolved.maxTokens})`);
       }
 
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));

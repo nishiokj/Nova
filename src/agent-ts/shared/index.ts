@@ -7,3 +7,4 @@ export {
   type LoggerConfig,
   type LogLevel,
 } from './logger.js';
+export { coerceStructuredOutput } from './structured_output.js';

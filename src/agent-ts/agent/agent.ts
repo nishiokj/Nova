@@ -16,6 +16,7 @@ import type {
   AgentResult,
   AgentMetrics,
   EventEmitCallback,
+  UserPromptInfo,
 } from './types.js';
 import { noopEmit } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
@@ -27,11 +28,14 @@ import { coerceStructuredOutput } from '../shared/structured_output.js';
 
 /**
  * Action markers in LLM response.
+ * Supports both old (final/need_context/continue) and new (done/need_user_input/continue) schemas.
  */
 enum AgentAction {
   TOOL = 'tool',
-  FINAL = 'final',
-  NEED_CONTEXT = 'need_context',
+  FINAL = 'final',           // Old: task complete
+  DONE = 'done',             // New: goal achieved
+  NEED_CONTEXT = 'need_context',    // Old: needs user input
+  NEED_USER_INPUT = 'need_user_input', // New: needs user input
   CONTINUE = 'continue',
 }
 
@@ -159,7 +163,14 @@ export class Agent {
         break;
       }
 
-      const systemMessage = this.buildSystemMessage(workItem);
+      const systemMessage = this.buildSystemMessage(workItem, {
+        iteration: iteration + 1,
+        maxIterations,
+        toolCallsUsed: metrics.toolCallsMade,
+        maxToolCalls: workItem.bounds.maxToolCalls,
+        elapsedMs,
+        maxDurationMs: workItem.bounds.maxDurationMs,
+      });
 
       const allTools = [
         ...this.toolRegistry.getDefinitions(),
@@ -167,12 +178,19 @@ export class Agent {
       ];
       const allowedTools = this.filterAllowedTools(allTools);
 
+      // DEBUG: Log tool filtering for debugging config issues
+      if (this.config.type === 'simple' || this.config.type === 'routing') {
+        console.log(`[DEBUG] Agent ${this.config.type} config.tools:`, this.config.tools);
+        console.log(`[DEBUG] Agent ${this.config.type} allTools count:`, allTools.length);
+        console.log(`[DEBUG] Agent ${this.config.type} allowedTools count:`, allowedTools.length);
+      }
+
       const messages = this.buildMessages(systemMessage, workItem, context);
 
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
       const response = await this.llm.respond({
-        messages: messages as Message[],
+        messages: messages as unknown as Message[],
         tools: allowedTools.length > 0 ? allowedTools : undefined,
         llm: this.llmConfig,
         responseSchema: this.config.outputSchema,
@@ -191,10 +209,13 @@ export class Agent {
 
       this.addAssistantMessage(context, content, toolCalls);
 
-      const action =
+      let action =
         this.extractStructuredAction(structuredOutput) ?? this.extractAction(content);
       const responseText = this.extractStructuredResponse(structuredOutput);
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
+      if (!action && responseText && responseText.trim().length > 0) {
+        action = AgentAction.FINAL;
+      }
 
       if (toolCalls.length > 0) {
         await this.processToolCalls(
@@ -212,6 +233,18 @@ export class Agent {
           return;
         }
 
+        // Handle completion after tool calls
+        if (action === AgentAction.DONE) {
+          const goalReached = structuredOutput?.goalStateReached === true;
+          if (goalReached) {
+            result.success = true;
+            result.response = responseText ?? content;
+            result.terminationReason = 'goal_state_reached';
+            result.filesRead = Array.from(localReadFiles);
+            return;
+          }
+        }
+
         if (action === AgentAction.FINAL) {
           this.handleFinalAction(content, result, responseText);
           result.filesRead = Array.from(localReadFiles);
@@ -221,13 +254,29 @@ export class Agent {
         continue;
       }
 
+      // Handle DONE action (new schema - goal achieved)
+      if (action === AgentAction.DONE) {
+        const goalReached = structuredOutput?.goalStateReached === true;
+        if (goalReached) {
+          result.success = true;
+          result.response = responseText ?? content;
+          result.terminationReason = 'goal_state_reached';
+          result.filesRead = Array.from(localReadFiles);
+          return;
+        }
+        // goalStateReached not true - treat as continue
+        continue;
+      }
+
+      // Handle FINAL action (old schema - backwards compat)
       if (action === AgentAction.FINAL) {
         this.handleFinalAction(content, result, responseText);
         result.filesRead = Array.from(localReadFiles);
         return;
       }
 
-      if (action === AgentAction.NEED_CONTEXT) {
+      // Handle NEED_USER_INPUT (new schema) or NEED_CONTEXT (old schema)
+      if (action === AgentAction.NEED_USER_INPUT || action === AgentAction.NEED_CONTEXT) {
         const prompt = structuredPrompt ?? this.extractUserPrompt(content);
         if (prompt) {
           result.needsUserInput = true;
@@ -252,14 +301,15 @@ export class Agent {
         return;
       }
 
+      if (implicitCandidate.trim().length > 0) {
+        result.response = implicitCandidate;
+      }
       result.terminationReason = 'no_action';
-      result.error = 'LLM response has no tools and no action directive';
+      const preview = implicitCandidate.trim().slice(0, 1000);
+      result.error = preview
+        ? `LLM response has no tools and no action directive. Response preview: ${preview}`
+        : 'LLM response has no tools and no action directive';
       break;
-    }
-
-    if (!result.terminationReason) {
-      result.terminationReason = 'iterations_exhausted';
-      result.error = 'Maximum iterations reached';
     }
 
     // Always capture all assistant responses even without [FINAL] marker
@@ -273,17 +323,39 @@ export class Agent {
       }
     }
 
+    // Handle iterations exhausted - treat as partial success if we have content
+    if (!result.terminationReason) {
+      result.terminationReason = 'iterations_exhausted';
+      if (result.response) {
+        // We have content, mark as partial success rather than failure
+        result.success = true;
+        result.isIncomplete = true;
+      } else {
+        result.error = 'Maximum iterations reached with no output';
+      }
+    }
+
     result.filesRead = Array.from(localReadFiles);
   }
 
-  private buildSystemMessage(workItem: WorkItem): string {
+  private buildSystemMessage(
+    workItem: WorkItem,
+    constraints?: {
+      iteration?: number;
+      maxIterations?: number;
+      toolCallsUsed?: number;
+      maxToolCalls?: number;
+      elapsedMs?: number;
+      maxDurationMs?: number;
+    }
+  ): string {
     const base = this.config.systemPrompt ? `${this.config.systemPrompt}\n\n` : '';
     const contextInfo = buildSystemMessage(
       workItem.goal,
       workItem.objective,
       undefined,
-      '',
-      this.toolRegistry.getWorkingDir()
+      this.toolRegistry.getWorkingDir(),
+      constraints
     );
     return `${base}${contextInfo}`.trim();
   }
@@ -517,9 +589,13 @@ export class Agent {
         ? args.goal.trim()
         : parentWorkItem.goal;
     const delta = typeof args.delta === 'string' ? args.delta : undefined;
-    const toolHint = typeof args.toolHint === 'string' ? args.toolHint : undefined;
-    const targetPaths = Array.isArray(args.targetPaths)
-      ? args.targetPaths.filter((p) => typeof p === 'string')
+    const toolHint = typeof args.toolHint === 'string' || typeof args.tool_hint === 'string'
+      ? String(args.toolHint ?? args.tool_hint)
+      : undefined;
+    // Accept both camelCase and snake_case for targetPaths
+    const rawTargetPaths = args.targetPaths ?? args.target_paths;
+    const targetPaths = Array.isArray(rawTargetPaths)
+      ? rawTargetPaths.filter((p) => typeof p === 'string')
       : undefined;
     const params =
       args.params && typeof args.params === 'object' && !Array.isArray(args.params)
@@ -637,6 +713,7 @@ export class Agent {
 
   /**
    * Extract action from structured output.
+   * Supports both old (final/need_context/continue) and new (done/need_user_input/continue) schemas.
    */
   private extractStructuredAction(
     structuredOutput: Record<string, unknown> | null
@@ -645,6 +722,10 @@ export class Agent {
     const raw = structuredOutput.action;
     if (typeof raw !== 'string') return null;
     const normalized = raw.trim().toLowerCase();
+    // New schema
+    if (normalized === 'done') return AgentAction.DONE;
+    if (normalized === 'need_user_input') return AgentAction.NEED_USER_INPUT;
+    // Old schema (backwards compat during transition)
     if (normalized === 'final') return AgentAction.FINAL;
     if (normalized === 'need_context' || normalized === 'need context') {
       return AgentAction.NEED_CONTEXT;
@@ -691,7 +772,7 @@ export class Agent {
     if (!question) return null;
 
     const optionsRaw = data.options;
-    let options: AgentResult['userPrompt']['options'] | undefined;
+    let options: UserPromptInfo['options'] | undefined;
     if (Array.isArray(optionsRaw)) {
       const normalized = optionsRaw
         .map((opt) => {

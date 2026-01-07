@@ -1,392 +1,221 @@
 # rex
 
-[![PyPI version](https://badge.fury.io/py/rex.svg)](https://badge.fury.io/py/rex)
-[![CI](https://github.com/nishiokj/rex/actions/workflows/ci.yml/badge.svg)](https://github.com/nishiokj/rex/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/nishiokj/rex/branch/main/graph/badge.svg)](https://codecov.io/gh/nishiokj/rex)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-A production-ready multi-process voice agent system with STT, agent harness, TTS, and RL worker components.
-
-## Installation
-
-```bash
-# Basic installation (no audio dependencies)
-pip install rex
-
-# With audio support (macOS/Linux)
-pip install rex[audio]
-
-# Development dependencies
-pip install rex[dev]
-
-# Everything
-pip install rex[all]
-```
+A config-driven, multi-tier agent system with composable agent primitives, DAG-based task orchestration, and multi-provider LLM support.
 
 ## Features
 
-- **Multi-Process Architecture**: Scalable design with separate processes for audio, agent, and TTS
-- **Multiple STT Engines**: Whisper (local) and Google STT with GPU acceleration support
-- **Agent Harness**: Tiered agent system (simple/standard/advanced) with tool execution
-- **Custom Agents**: Bring your own agents via simple configuration
-- **RL Worker**: Optional reinforcement learning log creation
-- **Docker Support**: Production-ready containerization with CPU and GPU variants (using [uv](https://github.com/astral-sh/uv) for fast builds)
-- **Evaluation Framework**: 50+ evals using LLM-as-a-judge
-
-## Quick Start
-
-### Docker (Recommended for Linux)
-
-```bash
-# 1. Clone and setup
-git clone <repository-url>
-cd voice-agent-system
-cp .env.example .env
-# Edit .env and add your API keys (OPENAI_API_KEY or ANTHROPIC_API_KEY)
-
-# 2. Start with Docker Compose
-docker-compose up voice-agent
-
-# With GPU acceleration:
-docker-compose --profile gpu up voice-agent-gpu
-```
-
-See [docs/docker_deployment.md](docs/docker_deployment.md) for platform-specific instructions (macOS, Windows).
-
-### Native Installation (macOS, Linux, Windows)
-
-```bash
-# 1. Install system dependencies
-# macOS:
-brew install python@3.11 portaudio ffmpeg
-
-# Linux:
-sudo apt-get install python3.11 python3.11-venv portaudio19-dev ffmpeg espeak
-
-# 2. Setup Python environment
-./scripts/setup_env.sh
-source .venv/bin/activate
-
-# 3. Install package
-pip install -e .
-
-# 3a. Optional: add audio dependencies (PyAudio, TTS) if you plan to use a microphone
-pip install -e ".[audio]"
-
-# 4. Initialize configuration
-voice-agent --init-config
-# Edit ~/.config/voice-agent/.env and add API keys
-
-# 5. Run
-voice-agent
-```
-
-### Distribution via PyPI
-
-```bash
-pip install rex
-# Optional: include audio dependencies for microphone + TTS hardware
-pip install rex[audio]
-```
-
-`rex` installs the core runtime without OS-dependent audio packages, so headless environments avoid PortAudio/TTS headaches until you opt in.
-
-See [docs/environment_setup.md](docs/environment_setup.md) for detailed platform instructions.
-
-## Installation Options
-
-| Method | Best For | Setup Time | Notes |
-|--------|----------|------------|-------|
-| **Docker** | Linux production/dev | 5 min | Best audio support on Linux |
-| **Native** | macOS, Windows dev | 10 min | Direct hardware access |
-| **pip install** | Distribution | 2 min | `pip install rex` installs the core runtime; add audio helpers with `pip install rex[audio]` when you need PyAudio/TTS |
-
-## CLI Commands
-
-```bash
-# Version
-voice-agent --version
-
-# Initialize config (first-time setup)
-voice-agent --init-config
-
-# List audio devices
-voice-agent --list-devices
-
-# Validate configuration
-voice-agent --validate-config
-
-# Health check (for monitoring)
-voice-agent --health-check
-
-# Run with custom config
-voice-agent --config /path/to/config.json
-
-# Enable debug logging
-voice-agent --debug
-
-# Enable RL worker
-voice-agent --rl
-```
-
-## Ink TUI (TypeScript)
-
-The Ink-based TUI lives in `tui-ts/` and uses a Python bridge for JSONL
-communication with the existing EventBus and workers.
-
-Build artifacts are expected under `tui-ts/dist/`. The `run_tui.py` entrypoint
-will prefer the Ink TUI when `bun` and the build output are available, and will
-fallback to the Python robust TUI otherwise.
-
-Build and run:
-```bash
-cd tui-ts
-bun install
-bun run build
-python ../run_tui.py
-```
-
-### JSONL Protocol (UI <-> Bridge)
-
-All messages are JSON Lines with `{ "type": "...", "data": { ... } }`. Bridge
-stdout is reserved strictly for JSONL.
-
-UI -> Bridge commands:
-- `init`: `config_path?`, `log_dir?`, `enable_voice`, `client_version`, `log_transcripts?`
-- `send_text`: `text`, `client_request_id?`
-- `voice_start`: starts PTT recording (voice enabled + input empty)
-- `voice_stop`: stops recording and begins transcription
-- `get_config`: returns config summary for `/config`
-- `get_models`: returns API key status for `/models`
-- `get_status`: returns runtime status (workers, state, session key)
-- `shutdown`: stops workers and exits cleanly
-
-Bridge -> UI events:
-- `ready`: `session_key`, `log_dir`, `capabilities`, `config_summary`
-- `status`: `state` (`idle|recording|transcribing|sending|streaming|error`), `message`
-- `progress`: `request_id`, `message`, `tool_name?`, `step_number?`
-- `stream`: `request_id`, `chunk`, `chunk_index`, `is_final`
-- `response`: `request_id`, `success`, `content`, `spoken_response?`, `tools_used?`,
-  `duration_ms`, `error?`, `metadata?`
-- `transcription`: `text`, `request_id`, `duration_ms`
-- `error`: `message`, `detail?`, `fatal?`
-
-Responses to `/config`, `/models`, and `/status` are sent as `response` events
-with `metadata.kind` set to `config`, `models`, or `status`.
-
-## Configuration
-
-### Environment Variables
-
-The system supports configuration via environment variables (Docker-friendly):
-
-```bash
-# API Keys (required)
-OPENAI_API_KEY=sk-proj-...
-ANTHROPIC_API_KEY=sk-ant-...
-
-# STT Configuration
-STT_MODEL=base.en              # Whisper model (tiny.en, base.en, small.en, etc.)
-STT_DEVICE=auto                # Device (auto, cpu, cuda, mps)
-
-# Audio Configuration
-AUDIO_DEVICE_INDEX=0           # Specific microphone
-AUDIO_SAMPLE_RATE=32000        # Sample rate in Hz
-
-# Logging
-LOG_LEVEL=INFO                 # DEBUG, INFO, WARNING, ERROR
-LOG_DIR=logs
-```
-
-See [.env.example](.env.example) for full documentation.
-
-### Config Files
-
-- `config/app_config.json` - Application runtime and service configuration
-- `config/harness_config.json` - Agent tier, tools, and LLM configuration
-
-Config discovery follows XDG standard:
-1. `~/.config/voice-agent/` (user config)
-2. `./config/` (development)
-3. Bundled templates (fallback)
-
-## Custom Agents
-
-Bring your own agents by implementing the simple agent protocol:
-
-```python
-class MyAgent:
-    def __init__(self, llm_config, tool_registry):
-        self.llm_config = llm_config
-        self.tools = tool_registry
-
-    def run(self, user_input: str, context=None):
-        # Your implementation
-        return AgentResponse(text="...", success=True)
-```
-
-Configure in `src/evals/configs/agent_config.json`:
-
-```json
-{
-  "my_agent": {
-    "type": "CustomAgent",
-    "module": "my_agents.custom",
-    "class": "MyAgent"
-  }
-}
-```
-
-See [docs/custom_agents.md](docs/custom_agents.md) for detailed guide.
+- **Pure Agent Primitives**: Agents are composable functions with clear contracts
+- **Multi-Tier Routing**: Automatic task complexity classification (simple/standard/complex)
+- **DAG-Based Orchestration**: WorkItem dependency graphs with parallel execution
+- **Multi-Provider LLM**: OpenAI and Anthropic adapters with circuit breaker resilience
+- **Built-in Tools**: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
+- **Structured Output**: JSON schema validation for agent responses
+- **Config-Driven**: Agent models, budgets, and tool access defined in JSON
+- **Ink TUI**: React-based terminal interface
 
 ## Architecture
 
 ```
-┌─────────────┐
-│ Main Process│  Audio Capture + STT (Whisper/Google)
-└──────┬──────┘
-       │ EventBus (IPC)
-       ├───────────┐
-       │           │
-┌──────▼──────┐ ┌─▼────────┐
-│ServiceRep   │ │TTS Worker│
-│ Worker      │ │          │
-│ (Agent +    │ │ (pyttsx3)│
-│  Harness)   │ │          │
-└─────────────┘ └──────────┘
-       │
-  ┌────▼─────┐
-  │RL Worker │ (Optional)
-  └──────────┘
+Harness
+  |
+  +-- RoutingAgent(goal) --> tier classification
+  |
+  +-- [simple] --> Agent.run(context, workItem) --> response
+  |                No orchestration, single LLM call
+  |
+  +-- [standard|complex] --> Orchestrator.execute(context, goal)
+                              |
+                              +-- ExplorerAgent --> system context
+                              +-- RuntimeScriptAgent --> WorkItem DAG
+                              +-- Execute DAG --> parallel agent dispatch
 ```
 
-- **Main**: Audio capture (PyAudio) → STT (faster-whisper) → Event publishing
-- **ServiceRep**: Intent classification → Agent/Harness execution → Response
-- **TTS**: Text-to-speech synthesis
-- **RL Worker**: Episode logging for reinforcement learning
+**Key Principles:**
+- Agents receive `ContextWindow` by value and mutate locally
+- Event callback pattern (no direct EventBus coupling)
+- Single entry point: `agent.run({ context, workItem })`
+- Tool access controlled via config per agent type
+
+## Agent Types
+
+| Agent | Purpose | Tools | Budget |
+|-------|---------|-------|--------|
+| **routing** | Tier classification | None | 1 iteration |
+| **simple** | Direct response | None | 1 iteration |
+| **explorer** | Codebase discovery | Read, Glob, Grep, Bash | 2 iterations, 20 tool calls |
+| **runtime_script** | WorkItem DAG generation | explorer (sub-agent) | 2 iterations, 15 tool calls |
+| **standard** | Bounded execution | Read, Write, Edit, Glob, Grep, Bash | 10 iterations, 15 tool calls |
+| **complex** | Full orchestration | All + standard (sub-agent) | 15 iterations, 50 tool calls |
+| **context_compactor** | Context summarization | None | 2 iterations |
+| **debugger** | Debug execution | Read, Write, Edit, Glob, Grep, Bash | 10 iterations, 15 tool calls |
+| **web_crawler** | Web research | WebFetch, WebSearch | 10 iterations, 15 tool calls |
+
+## Quick Start
+
+```bash
+# 1. Clone and setup
+git clone <repository-url>
+cd rex
+
+# 2. Install dependencies
+cd src/agent-ts && npm install
+cd ../../tui-ts && bun install
+
+# 3. Build
+cd ../src/agent-ts && npm run build
+cd ../../tui-ts && bun run build
+
+# 4. Configure
+cp .env.example .env
+# Add your API keys:
+#   OPENAI_API_KEY=sk-...
+#   ANTHROPIC_API_KEY=sk-ant-...
+
+# 5. Run the TUI
+cd tui-ts && bun run start
+```
+
+## Project Structure
+
+```
+src/agent-ts/
+  agent/           # Pure agent primitive (Agent class)
+  orchestrator/    # Task orchestration (Orchestrator, RuntimeScript)
+  llm/             # Multi-provider LLM adapters (OpenAI, Anthropic)
+  tools/           # Tool registry + builtins
+    builtins/      # Bash, Read, Write, Edit, Glob, Grep
+  graphd/          # SQLite persistence layer
+  communication/   # Event bus & subscribers
+  harness/         # Config loader & integration
+  wizard/          # WorkItem, KnowledgeStore, WorkLedger
+  shared/          # Logging, structured output
+  types/           # Type definitions (ContextWindow, Events, Tools)
+
+tui-ts/            # Ink-based React terminal UI
+dashboard/         # Web dashboard (React)
+config/            # Configuration files
+  harness_config.json    # Agent LLM models, budgets, tools
+  behavioral_rules.md    # Agent behavioral constraints
+  skills/                # Custom skill definitions
+  hooks/                 # Hook definitions
+docs/              # Documentation & specs
+```
+
+## Configuration
+
+### harness_config.json
+
+Central configuration for all agent types:
+
+```json
+{
+  "agents": {
+    "standard": {
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "max_tokens": 16000,
+        "temperature": 0.7
+      },
+      "budget": {
+        "max_iterations": 10,
+        "max_tool_calls": 15,
+        "max_duration_ms": 120000
+      },
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      "output_schema": { ... }
+    }
+  },
+  "tools": {
+    "bash_timeout_ms": 30000,
+    "max_output_length": 10000
+  },
+  "graphd": {
+    "enabled": true,
+    "db_path": ".graphd/graphd.db"
+  },
+  "context": {
+    "max_tokens": 200000
+  }
+}
+```
+
+### Environment Variables
+
+```bash
+# Required - at least one
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional
+LOG_LEVEL=INFO
+LOG_DIR=logs
+```
+
+## Built-in Tools
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| **Bash** | Shell command execution | `command`, `cwd`, `timeout_ms` |
+| **Read** | File content reading | `path`, `cwd` |
+| **Write** | File creation/overwrite | `path`, `content`, `cwd` |
+| **Edit** | Targeted file editing | `path`, `edits[]`, `cwd` |
+| **Glob** | File pattern matching | `pattern`, `cwd` |
+| **Grep** | Content search with regex | `pattern`, `path`, `cwd` |
+| **WebFetch** | URL content fetching | `url` |
+| **WebSearch** | Web search queries | `query` |
 
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+# Build agent-ts
+cd src/agent-ts
+npm run build
 
-# Run tests
-pytest
+# Type check
+npm run lint
 
-# Run specific test file
-pytest tests/test_agent.py
+# Clean build artifacts
+npm run clean
 
-# Run with coverage
-pytest --cov=src
+# Build TUI
+cd tui-ts
+bun run build
 
-# Lint and format
-black src/ tests/
-isort src/ tests/
-ruff check src/ tests/
+# Run TUI in dev mode
+bun run dev
 
-# Pre-commit hooks
-pre-commit install
-pre-commit run --all-files
+# Run harness daemon (bus server)
+cd src/agent-ts
+bun run harness/daemon.ts
 ```
 
-## Evaluation
+## TUI Protocol (JSONL)
 
-Run the evaluation framework:
+The TUI communicates with the harness daemon via JSON Lines over TCP.
+Set `EVENT_BUS_HOST` and `EVENT_BUS_PORT` for both the daemon and TUI
+to point at the same bus endpoint (defaults: `127.0.0.1:9555`).
 
-```bash
-# Run all evals
-python scripts/run_eval.py
+**Commands (UI -> Bridge):**
+- `init` - Initialize session
+- `send_text` - Send user message
+- `get_config` - Get configuration
+- `get_status` - Get runtime status
+- `shutdown` - Clean shutdown
 
-# Run specific categories
-python scripts/run_eval.py --categories search code
-
-# Use custom agent
-python scripts/run_eval.py --agent-config my_agent
-
-# Generate visualization
-python scripts/run_eval.py --output results.json
-```
-
-## Docker Commands
-
-```bash
-# Build
-docker build -t voice-agent:latest .
-
-# Run with custom config
-docker run -it --rm \
-  --device /dev/snd:/dev/snd \
-  -v $(pwd)/config:/config:ro \
-  -v $(pwd)/logs:/app/logs \
-  --env-file .env \
-  voice-agent:latest
-
-# Run headless (no audio devices required; reads text from stdin if interactive)
-docker run -it --rm \
-  -e VOICE_AGENT_HEADLESS=1 \
-  -v $(pwd)/config:/config:ro \
-  -v $(pwd)/logs:/app/logs \
-  --env-file .env \
-  voice-agent:latest voice-agent --config /config/app_config.json --headless
-
-# Health check
-docker run --rm --device /dev/snd:/dev/snd voice-agent:latest voice-agent --health-check
-
-# Validate config
-docker run --rm -v $(pwd)/config:/config:ro voice-agent:latest voice-agent --validate-config
-```
+**Events (Bridge -> UI):**
+- `ready` - Session initialized
+- `status` - State change (idle/recording/transcribing/sending/streaming)
+- `progress` - Execution progress
+- `stream` - Response streaming
+- `response` - Final response
+- `error` - Error notification
 
 ## Documentation
 
-- [Docker Deployment Guide](docs/docker_deployment.md) - Platform-specific Docker setup
-- [Environment Setup](docs/environment_setup.md) - Native installation per OS
-- [Custom Agents](docs/custom_agents.md) - Bring your own agents
-- [Production Checklist](docs/production_checklist.md) - Deployment readiness
-
-## Troubleshooting
-
-**No audio devices found:**
-```bash
-# List devices
-voice-agent --list-devices
-
-# Check permissions (Linux)
-sudo usermod -a -G audio $USER
-
-# Docker: ensure device passthrough
-docker run --device /dev/snd:/dev/snd ...
-
-# Or run headless (no audio input required)
-docker run -e VOICE_AGENT_HEADLESS=1 voice-agent:latest voice-agent --headless
-```
-
-**API key errors:**
-```bash
-# Verify keys loaded
-env | grep API_KEY
-
-# Or check validation
-voice-agent --validate-config
-```
-
-**GPU not detected:**
-```bash
-# Check CUDA available
-python -c "import torch; print(torch.cuda.is_available())"
-
-# Force CPU
-export STT_DEVICE=cpu
-voice-agent
-```
-
-See [docs/docker_deployment.md#troubleshooting](docs/docker_deployment.md#troubleshooting) for more.
+- [Agent Refactor Specification](docs/AGENT_REFACTOR_SPEC.md) - Architecture details
+- [Behavioral Rules](config/behavioral_rules.md) - Agent constraints
 
 ## License
 
-UNLICENSED
-
-## Contributing
-
-See [Production Checklist](docs/production_checklist.md) for areas needing work.
+MIT

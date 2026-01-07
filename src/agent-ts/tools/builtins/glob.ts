@@ -29,6 +29,9 @@ const DEFAULT_IGNORE = [
   '**/htmlcov/**',
   '**/.tox/**',
   '**/.eggs/**',
+  '**/logs/**',
+  '**/log/**',
+  '**/*.log',
 ];
 
 /**

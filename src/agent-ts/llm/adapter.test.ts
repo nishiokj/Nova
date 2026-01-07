@@ -264,6 +264,30 @@ describe('OpenAIAdapter', () => {
 
       expect(response.content).toBe('From output array');
     });
+
+    it('should handle output_json blocks', async () => {
+      mockFetch(async () => {
+        return new Response(JSON.stringify({
+          id: 'resp_123',
+          status: 'completed',
+          output: [
+            {
+              type: 'message',
+              content: [
+                { type: 'output_json', json: { action: 'final', response: 'ok' } },
+              ],
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+        }), { status: 200 });
+      });
+
+      const response = await adapter.respond({
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      expect(response.content).toBe('{"action":"final","response":"ok"}');
+    });
   });
 
   describe('parseToolCalls edge cases', () => {

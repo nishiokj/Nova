@@ -24,6 +24,7 @@ import { ContextWindow, type ContextWindowSnapshot } from '../types/context.js';
 import { EventBus, type EventBusProtocol, GraphDSubscriber, LogSubscriber, createLogSubscriber, createEventEmitCallback } from '../communication/index.js';
 import { createWorkItem } from '../wizard/work-item.js';
 import path from 'path';
+import fs from 'fs';
 import { coerceStructuredOutput } from '../shared/structured_output.js';
 import {
   translateAgentEvent,
@@ -43,8 +44,23 @@ import { loadConfig, getAgentConfig } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
 import type { LLMRequestConfig, LLMClientConfig, LLMProvider } from '../types/llm.js';
 
-/** Tier classification for routing */
-type Tier = 'simple' | 'standard' | 'complex';
+/** Agent type for routing - maps to agent config */
+type AgentType = string;
+
+/**
+ * Extract @path references from text.
+ * Matches patterns like @src/foo.ts, @./relative/path.py, @/absolute/path.js
+ */
+function extractAtPaths(text: string): string[] {
+  // Match @followed by a path (no spaces, common file extensions)
+  const regex = /@((?:\.{0,2}\/)?[\w\-./]+\.[\w]+)/g;
+  const matches: string[] = [];
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    matches.push(match[1]);
+  }
+  return [...new Set(matches)]; // dedupe
+}
 
 function buildAgentRegistry(config: FullHarnessConfig): AgentRegistry {
   const agentConfigs: Array<{ config: AgentConfig; llm: LLMRequestConfig }> = Object.entries(config.agents).map(([agentType, resolved]) => {
@@ -127,14 +143,59 @@ interface HarnessLogger {
 }
 
 /**
- * Console logger implementation.
+ * File-based logger for TUI compatibility.
+ * Writes to logs/harness.log since console is captured by TUI.
  */
-const consoleLogger: HarnessLogger = {
-  info: (msg, meta) => console.log(`[INFO] ${msg}`, meta ?? ''),
-  debug: (msg, meta) => console.debug(`[DEBUG] ${msg}`, meta ?? ''),
-  warning: (msg, meta) => console.warn(`[WARN] ${msg}`, meta ?? ''),
-  error: (msg, meta) => console.error(`[ERROR] ${msg}`, meta ?? ''),
-};
+function createFileLogger(logDir: string = 'logs'): HarnessLogger {
+  const logPath = path.join(logDir, 'harness.log');
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+  } catch {
+    // Directory may already exist
+  }
+
+  const stream = fs.createWriteStream(logPath, { flags: 'a' });
+  stream.on('error', () => {
+    // Swallow log write errors to avoid disrupting the harness.
+  });
+  const pendingLines: string[] = [];
+  let flushScheduled = false;
+
+  const flush = () => {
+    flushScheduled = false;
+    if (pendingLines.length === 0) return;
+    const chunk = pendingLines.join('');
+    pendingLines.length = 0;
+    try {
+      stream.write(chunk);
+    } catch {
+      // Ignore logging failures
+    }
+  };
+
+  const scheduleFlush = () => {
+    if (flushScheduled) return;
+    flushScheduled = true;
+    queueMicrotask(flush);
+  };
+
+  const write = (level: string, msg: string, meta?: Record<string, unknown>) => {
+    const timestamp = new Date().toISOString();
+    const metaStr = meta ? ` ${JSON.stringify(meta)}` : '';
+    const line = `${timestamp} [${level}] ${msg}${metaStr}\n`;
+    pendingLines.push(line);
+    scheduleFlush();
+  };
+
+  return {
+    info: (msg, meta) => write('INFO', msg, meta),
+    debug: (msg, meta) => write('DEBUG', msg, meta),
+    warning: (msg, meta) => write('WARN', msg, meta),
+    error: (msg, meta) => write('ERROR', msg, meta),
+  };
+}
+
+const consoleLogger: HarnessLogger = createFileLogger();
 
 /**
  * AgentHarness - Wraps the TypeScript Agent for TUI integration.
@@ -168,7 +229,14 @@ export class AgentHarness {
     }
 
     const llmClientConfig: LLMClientConfig = { apiKeys, baseUrls };
-    this.llmAdapter = createAdapter(llmClientConfig);
+    // Adapt HarnessLogger to AdapterLogger (warning → warn)
+    const adapterLogger = {
+      debug: this.logger.debug.bind(this.logger),
+      info: this.logger.info.bind(this.logger),
+      warn: this.logger.warning.bind(this.logger),
+      error: this.logger.error.bind(this.logger),
+    };
+    this.llmAdapter = createAdapter(llmClientConfig, adapterLogger);
 
     for (const agent of Object.values(config.agents)) {
       this.llmAdapter.registerModel?.(
@@ -353,6 +421,25 @@ export class AgentHarness {
     }
 
     const contextWindow = this.getOrCreateContext(sessionKey);
+
+    // Extract @path references and inject file contents into context
+    const atPaths = extractAtPaths(inputText);
+    for (const atPath of atPaths) {
+      const fullPath = path.isAbsolute(atPath)
+        ? atPath
+        : path.resolve(this.config.tools.workingDir, atPath);
+      try {
+        if (fs.existsSync(fullPath)) {
+          const content = fs.readFileSync(fullPath, 'utf-8');
+          const ext = path.extname(fullPath).slice(1);
+          contextWindow.addFileContent(atPath, content.slice(0, 50000), ext);
+          this.logger.debug('Injected @path file into context', { path: atPath, size: content.length });
+        }
+      } catch (error) {
+        this.logger.warning('Failed to read @path file', { path: atPath, error: String(error) });
+      }
+    }
+
     contextWindow.addMessage('user', inputText);
 
     const emit = createEventEmitCallback(this.eventBus, requestId, runId);
@@ -366,14 +453,15 @@ export class AgentHarness {
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
-        // Route to determine tier if not specified
-        const tier = requestedTier ?? await this.route(inputText);
-
+        // Use explicitly requested agent type or default to 'standard'
+        const tier: AgentType = requestedTier || 'standard';
+      
         // Get the appropriate agent config (tier maps directly to agent type)
         const agentConfig = getAgentConfig(this.config, tier);
 
         this.logger.debug('Running with agent config', {
           tier,
+          requestedTier,
           model: agentConfig.llm.model,
           provider: agentConfig.llm.provider,
         });
@@ -393,9 +481,8 @@ export class AgentHarness {
 
         const llmAdapter = this.llmAdapter;
 
-        const result = tier === 'simple'
-          ? await this.runSingleAgent(tier, contextWindow, inputText, requestId, emit, llmAdapter, agentConfig)
-          : await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier);
+        // All requests go through orchestrator (loop-until-goal architecture)
+        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier);
 
         if (result.paused && result.userPrompt) {
           eventQueue.push(createUserPromptEvent(
@@ -450,17 +537,24 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
-        unsubscribe();
-        this.persistContext(contextWindow);
-
-        if (this.graphd && this.graphdStarted) {
+        queueMicrotask(() => {
           try {
-            this.graphd.setActive(false);
-          } catch {
-            // Ignore errors during cleanup
+            unsubscribe();
+            this.persistContext(contextWindow);
+
+            if (this.graphd && this.graphdStarted) {
+              try {
+                this.graphd.setActive(false);
+              } catch {
+                // Ignore errors during cleanup
+              }
+            }
+          } catch (error) {
+            this.logger.warning('Run cleanup failed', { error: String(error) });
+          } finally {
+            eventQueue.finish();
           }
-        }
-        eventQueue.finish();
+        });
       }
     })();
 
@@ -506,9 +600,10 @@ export class AgentHarness {
     llm: ReturnType<typeof createAdapter>,
     agentConfig: ResolvedAgentConfig
   ): Promise<AgentRunResult> {
-    // Get system prompt from prompts.ts, merge with behavioral rules
+    // Get system prompt from prompts.ts, merge with behavioral rules (skip for simple/routing)
     const basePrompt = getAgentPrompt(agentType);
-    const systemPrompt = this.config.behavioralRules
+    const skipBehavioralRules = agentType === 'simple' || agentType === 'routing';
+    const systemPrompt = (this.config.behavioralRules && !skipBehavioralRules)
       ? `${basePrompt}\n\n${this.config.behavioralRules}`
       : basePrompt;
 
@@ -518,6 +613,7 @@ export class AgentHarness {
       tools: agentConfig.tools,
       budget: agentConfig.budget,
       allowImplicitFinals: false,
+      outputSchema: agentConfig.outputSchema,
     };
 
     const llmConfig: LLMRequestConfig = {
@@ -614,7 +710,7 @@ export class AgentHarness {
   }
 
   /**
-   * Run standard/complex tiers via Orchestrator.
+   * Run via Orchestrator with specified agent type.
    */
   private async runOrchestrator(
     context: ContextWindow,
@@ -622,7 +718,7 @@ export class AgentHarness {
     requestId: string,
     emit: ReturnType<typeof createEventEmitCallback>,
     llm: ReturnType<typeof createAdapter>,
-    tier: Tier
+    agentType: AgentType = 'standard'
   ): Promise<AgentRunResult> {
     const orchestrator = new Orchestrator(
       {},
@@ -634,7 +730,7 @@ export class AgentHarness {
       this.agentRegistry
     );
 
-    const result = await orchestrator.execute(context, goal, tier === 'complex' ? 'complex' : 'standard');
+    const result = await orchestrator.execute(context, goal, agentType);
 
     return {
       requestId,
@@ -652,7 +748,7 @@ export class AgentHarness {
       } : undefined,
       toolsUsed: [],
       durationMs: result.metrics.durationMs,
-      metadata: { tier, metrics: result.metrics },
+      metadata: { agentType, metrics: result.metrics },
     };
   }
 
@@ -660,7 +756,8 @@ export class AgentHarness {
    * Route a request to determine tier.
    * Uses agents.routing config from harness_config.json.
    */
-  private async route(goal: string): Promise<Tier> {
+  private async route(goal: string, requestId?: string): Promise<AgentType> {
+    const startTime = Date.now();
     const routingAgentConfig = getAgentConfig(this.config, 'routing');
     const routingPrompt = getAgentPrompt('routing');
 
@@ -669,7 +766,11 @@ export class AgentHarness {
     this.logger.debug('Routing request', {
       provider: routingAgentConfig.llm.provider,
       model: routingAgentConfig.llm.model,
+      hasApiKey: !!routingAgentConfig.llm.apiKey,
+      apiKeyPrefix: routingAgentConfig.llm.apiKey?.slice(0, 8) ?? 'none',
     });
+
+    this.logger.debug('Calling LLM adapter...');
 
     const response = await routingAdapter.respond({
       messages: [
@@ -699,6 +800,19 @@ export class AgentHarness {
       model: response.model,
       stopReason: response.stopReason,
     });
+    this.eventBus.publish(createEvent('llm_call', {
+      agentType: 'routing',
+      promptPreview: routingPrompt.slice(0, 4000),
+      responsePreview: (tierValue || content).slice(0, 4000),
+      totalTokens: response.usage?.totalTokens ?? 0,
+      promptTokens: response.usage?.promptTokens ?? 0,
+      completionTokens: response.usage?.completionTokens ?? 0,
+      durationMs: Date.now() - startTime,
+      model: response.model ?? routingAgentConfig.llm.model,
+      toolCallsCount: response.toolCalls?.length ?? 0,
+      toolNames: [],
+      messageCount: 2,
+    }, undefined, requestId));
     if (tierValue.includes('simple') || content.includes('simple')) return 'simple';
     if (tierValue.includes('complex') || content.includes('complex')) return 'complex';
     return 'standard';

@@ -3,7 +3,7 @@
  *
  * Supports:
  * - Per-run subscriptions via subscribeRun(runId, handler)
- * - Microtask-based async fan-out
+ * - Microtask-queued async fan-out
  * - requestId tagging
  */
 
@@ -37,6 +37,12 @@ export class EventBus implements EventBusProtocol {
   private globalHandlers = new Set<(event: AnyEvent) => void>();
   private shutdownFlag = false;
   private readonly ALL_EVENTS = '__all__';
+  private pendingEvents: Array<{
+    event: AnyEvent;
+    runHandlers: Array<(event: AnyEvent) => void>;
+    globalHandlers: Array<(event: AnyEvent) => void>;
+  }> = [];
+  private flushScheduled = false;
 
   constructor() {
     this.emitter.setMaxListeners(100);
@@ -46,31 +52,73 @@ export class EventBus implements EventBusProtocol {
     if (this.shutdownFlag) return;
 
     const runId = (event as any).runId ?? event.requestId;
+    const runHandlers =
+      runId && this.runHandlers.has(runId)
+        ? Array.from(this.runHandlers.get(runId)!)
+        : [];
+    const globalHandlers = this.globalHandlers.size > 0
+      ? Array.from(this.globalHandlers)
+      : [];
 
-    if (runId && this.runHandlers.has(runId)) {
-      for (const handler of this.runHandlers.get(runId)!) {
-        queueMicrotask(() => {
-          try {
-            handler(event);
-          } catch (err) {
-            console.error('[EventBus] Handler error:', err);
-          }
-        });
+    this.pendingEvents.push({ event, runHandlers, globalHandlers });
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
+    queueMicrotask(() => this.flush());
+  }
+
+  private flush(): void {
+    if (this.shutdownFlag) {
+      this.pendingEvents = [];
+      this.flushScheduled = false;
+      return;
+    }
+
+    const batch = this.pendingEvents;
+    this.pendingEvents = [];
+    this.flushScheduled = false;
+
+    for (const pending of batch) {
+      this.dispatchEvent(pending);
+    }
+
+    if (this.pendingEvents.length > 0 && !this.flushScheduled) {
+      this.scheduleFlush();
+    }
+  }
+
+  private dispatchEvent(pending: {
+    event: AnyEvent;
+    runHandlers: Array<(event: AnyEvent) => void>;
+    globalHandlers: Array<(event: AnyEvent) => void>;
+  }): void {
+    const { event, runHandlers, globalHandlers } = pending;
+
+    try {
+      this.emitter.emit(event.type, event);
+      this.emitter.emit(this.ALL_EVENTS, event);
+    } catch (err) {
+      console.error('[EventBus] Handler error:', err);
+    }
+
+    for (const handler of runHandlers) {
+      try {
+        handler(event);
+      } catch (err) {
+        console.error('[EventBus] Handler error:', err);
       }
     }
 
-    for (const handler of this.globalHandlers) {
-      queueMicrotask(() => {
-        try {
-          handler(event);
-        } catch (err) {
-          console.error('[EventBus] Handler error:', err);
-        }
-      });
+    for (const handler of globalHandlers) {
+      try {
+        handler(event);
+      } catch (err) {
+        console.error('[EventBus] Handler error:', err);
+      }
     }
-
-    this.emitter.emit(event.type, event);
-    this.emitter.emit(this.ALL_EVENTS, event);
   }
 
   subscribe(type: AgentEventType, handler: (event: AnyEvent) => void): () => void {
@@ -104,6 +152,8 @@ export class EventBus implements EventBusProtocol {
   shutdown(): void {
     if (this.shutdownFlag) return;
     this.shutdownFlag = true;
+    this.pendingEvents = [];
+    this.flushScheduled = false;
     this.emitter.removeAllListeners();
     this.runHandlers.clear();
     this.globalHandlers.clear();

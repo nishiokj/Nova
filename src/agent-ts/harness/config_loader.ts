@@ -26,27 +26,42 @@ import {
 } from './config_types.js';
 
 const DEFAULT_CONFIG_PATH = 'config/harness_config.json';
+const OUTPUT_SCHEMAS_PATH = 'config/output_schemas.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
+
+/** Cached output schemas (loaded once) */
+let cachedOutputSchemas: OutputSchemasFile | null = null;
+
+/**
+ * Structure of output_schemas.json
+ */
+interface OutputSchemaDefinition {
+  name: string;
+  strict: boolean;
+  schema: Record<string, unknown>;
+}
+
+interface OutputSchemasFile {
+  schemas: Record<string, OutputSchemaDefinition>;
+}
 
 // ============================================
 // PATH RESOLUTION
 // ============================================
 
 /**
- * Find project root by looking for config/harness_config.json.
+ * Walk up the directory tree, yielding each parent directory.
  */
-function findProjectRoot(startDir: string): string {
+function* walkParents(startDir: string): Iterable<string> {
   let dir = startDir;
   const root = '/';
-  while (dir !== root) {
-    if (existsSync(resolve(dir, DEFAULT_CONFIG_PATH))) {
-      return dir;
-    }
+  while (true) {
+    yield dir;
+    if (dir === root) break;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return startDir;
 }
 
 // ============================================
@@ -57,23 +72,15 @@ function findProjectRoot(startDir: string): string {
  * Load behavioral rules from config/behavioral_rules.md.
  */
 export function loadBehavioralRules(): string {
-  const paths: string[] = [];
-  paths.push(resolve(process.cwd(), BEHAVIORAL_RULES_PATH));
-
-  const projectRoot = findProjectRoot(process.cwd());
-  if (projectRoot !== process.cwd()) {
-    paths.push(resolve(projectRoot, BEHAVIORAL_RULES_PATH));
-  }
-
-  for (const path of paths) {
-    if (existsSync(path)) {
-      try {
-        const content = readFileSync(path, 'utf-8');
-        console.log(`[config] Loaded behavioral rules from ${path}`);
-        return content;
-      } catch (e) {
-        console.warn(`[config] Failed to read behavioral rules from ${path}:`, e);
-      }
+  for (const dir of walkParents(process.cwd())) {
+    const path = resolve(dir, BEHAVIORAL_RULES_PATH);
+    if (!existsSync(path)) continue;
+    try {
+      const content = readFileSync(path, 'utf-8');
+      console.log(`[config] Loaded behavioral rules from ${path}`);
+      return content;
+    } catch (e) {
+      console.warn(`[config] Failed to read behavioral rules from ${path}:`, e);
     }
   }
 
@@ -88,33 +95,111 @@ export function loadBehavioralRules(): string {
  * Load config file from disk.
  */
 export function loadConfigFile(configPath?: string): HarnessConfigFile | null {
-  const paths: string[] = [];
-
   if (configPath) {
-    paths.push(resolve(configPath));
-  }
-
-  paths.push(resolve(process.cwd(), DEFAULT_CONFIG_PATH));
-
-  const projectRoot = findProjectRoot(process.cwd());
-  if (projectRoot !== process.cwd()) {
-    paths.push(resolve(projectRoot, DEFAULT_CONFIG_PATH));
-  }
-
-  for (const path of paths) {
-    if (existsSync(path)) {
+    const explicitPath = resolve(configPath);
+    if (existsSync(explicitPath)) {
       try {
-        const content = readFileSync(path, 'utf-8');
+        const content = readFileSync(explicitPath, 'utf-8');
         const parsed = JSON.parse(content) as HarnessConfigFile;
-        console.log(`[config] Loaded from ${path}`);
-        return parsed;
+        if (!parsed || typeof parsed !== 'object' || !('agents' in parsed)) {
+          console.warn(`[config] Skipping ${explicitPath}: missing agents section`);
+        } else {
+          console.log(`[config] Loaded from ${explicitPath}`);
+          return parsed;
+        }
       } catch (e) {
-        console.warn(`[config] Failed to parse ${path}:`, e);
+        console.warn(`[config] Failed to parse ${explicitPath}:`, e);
       }
     }
   }
 
+  for (const dir of walkParents(process.cwd())) {
+    const path = resolve(dir, DEFAULT_CONFIG_PATH);
+    if (!existsSync(path)) continue;
+
+    try {
+      const content = readFileSync(path, 'utf-8');
+      const parsed = JSON.parse(content) as HarnessConfigFile;
+      if (!parsed || typeof parsed !== 'object' || !('agents' in parsed)) {
+        console.warn(`[config] Skipping ${path}: missing agents section`);
+        continue;
+      }
+      console.log(`[config] Loaded from ${path}`);
+      return parsed;
+    } catch (e) {
+      console.warn(`[config] Failed to parse ${path}:`, e);
+    }
+  }
+
   return null;
+}
+
+// ============================================
+// OUTPUT SCHEMA LOADING
+// ============================================
+
+/**
+ * Load output schemas from config/output_schemas.json.
+ * Schemas are cached after first load.
+ */
+function loadOutputSchemas(): OutputSchemasFile | null {
+  if (cachedOutputSchemas) {
+    return cachedOutputSchemas;
+  }
+
+  for (const dir of walkParents(process.cwd())) {
+    const path = resolve(dir, OUTPUT_SCHEMAS_PATH);
+    if (!existsSync(path)) continue;
+
+    try {
+      const content = readFileSync(path, 'utf-8');
+      const parsed = JSON.parse(content) as OutputSchemasFile;
+      console.log(`[config] Loaded output schemas from ${path}`);
+      cachedOutputSchemas = parsed;
+      return parsed;
+    } catch (e) {
+      console.warn(`[config] Failed to parse output schemas ${path}:`, e);
+    }
+  }
+
+  console.warn('[config] No output_schemas.json found');
+  return null;
+}
+
+/**
+ * Resolve a schema reference (string) to the full schema definition.
+ * If already a full schema object, returns it as-is.
+ */
+function resolveOutputSchema(
+  schemaRef: string | { name: string; schema: Record<string, unknown>; strict?: boolean } | undefined
+): { name: string; schema: Record<string, unknown>; strict?: boolean } | undefined {
+  if (!schemaRef) {
+    return undefined;
+  }
+
+  // Already a full schema object
+  if (typeof schemaRef === 'object') {
+    return schemaRef;
+  }
+
+  // String reference - look up in output_schemas.json
+  const schemas = loadOutputSchemas();
+  if (!schemas) {
+    console.warn(`[config] Cannot resolve schema '${schemaRef}' - no output_schemas.json loaded`);
+    return undefined;
+  }
+
+  const definition = schemas.schemas[schemaRef];
+  if (!definition) {
+    console.warn(`[config] Schema '${schemaRef}' not found in output_schemas.json`);
+    return undefined;
+  }
+
+  return {
+    name: definition.name,
+    schema: definition.schema,
+    strict: definition.strict,
+  };
 }
 
 // ============================================
@@ -220,8 +305,8 @@ function resolveAgentConfig(entry: AgentConfigEntry): ResolvedAgentConfig {
       maxToolCalls: entry.budget.max_tool_calls,
       maxDurationMs: entry.budget.max_duration_ms,
     },
-    tools: entry.tools ?? DEFAULT_ENABLED_TOOLS,
-    outputSchema: entry.output_schema,
+    tools: entry.tools ?? [],
+    outputSchema: resolveOutputSchema(entry.output_schema),
   };
 }
 
@@ -255,7 +340,10 @@ export function createConfigFromFile(
   const agents: Record<string, ResolvedAgentConfig> = {};
   for (const [agentType, entry] of Object.entries(fileConfig.agents)) {
     try {
-      agents[agentType] = resolveAgentConfig(entry);
+      const resolved = resolveAgentConfig(entry);
+      agents[agentType] = resolved;
+      // DEBUG: Log tools for each agent
+      console.log(`[DEBUG config] Agent '${agentType}' tools: entry.tools=${JSON.stringify(entry.tools)}, resolved.tools=${JSON.stringify(resolved.tools)}`);
     } catch (e) {
       console.warn(`[config] Failed to resolve agent '${agentType}':`, e);
     }
@@ -269,7 +357,7 @@ export function createConfigFromFile(
     agents,
     defaultAgent: 'standard',
     tools: {
-      workingDir: workingDir ?? process.cwd(),
+      workingDir: resolve(workingDir ?? process.cwd()),
       bashTimeoutMs: fileConfig.tools?.bash_timeout_ms ?? DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
       maxOutputLength: fileConfig.tools?.max_output_length ?? DEFAULT_TOOLS_CONFIG.max_output_length,
     },
@@ -397,7 +485,7 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
     agents,
     defaultAgent: 'standard',
     tools: {
-      workingDir: workingDir ?? process.cwd(),
+      workingDir: resolve(workingDir ?? process.cwd()),
       bashTimeoutMs: DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
       maxOutputLength: DEFAULT_TOOLS_CONFIG.max_output_length,
     },
