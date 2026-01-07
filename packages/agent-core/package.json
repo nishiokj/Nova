@@ -1,5 +1,5 @@
 {
-  "name": "agent-ts",
+  "name": "agent-core",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,9 +14,9 @@
       "import": "./dist/types/index.js",
       "types": "./dist/types/index.d.ts"
     },
-    "./graphd": {
-      "import": "./dist/graphd/index.js",
-      "types": "./dist/graphd/index.d.ts"
+    "./shared": {
+      "import": "./dist/shared/index.js",
+      "types": "./dist/shared/index.d.ts"
     }
   },
   "scripts": {

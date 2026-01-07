@@ -92,9 +92,9 @@ const PROJECT_ROOT = (() => {
     return path.resolve(override);
   }
   if (path.basename(__dirname) === "dist") {
-    return path.resolve(__dirname, "..", "..");
+    return path.resolve(__dirname, "..", "..", "..");
   }
-  return path.resolve(__dirname, "..");
+  return path.resolve(__dirname, "..", "..");
 })();
 
 interface AppOptions {

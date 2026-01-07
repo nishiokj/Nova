@@ -31,14 +31,4 @@ export type {
   BusMessage,
 } from './bus_types.js';
 
-export {
-  LogSubscriber,
-  createLogSubscriber,
-  type LogSubscriberConfig,
-} from './log_subscriber.js';
-
-export {
-  GraphDSubscriber,
-  createGraphDSubscriber,
-  type GraphDSubscriberConfig,
-} from './graphd_subscriber.js';
+// LogSubscriber and GraphDSubscriber live in the harness daemon layer.

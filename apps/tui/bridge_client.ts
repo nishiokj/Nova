@@ -8,7 +8,7 @@ import {
   BRIDGE_COMMAND_CHANNEL,
   runChannel,
   sessionChannel,
-} from "../src/agent-ts/communication/index.js";
+} from "../../packages/comms-bus/src/index.js";
 import type { BridgeCommand, BridgeEvent, ReadyData, ResponseData } from "./types.js";
 
 export interface BridgeClientOptions {

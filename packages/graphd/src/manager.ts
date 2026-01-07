@@ -6,11 +6,65 @@
 
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, resolve, isAbsolute } from 'path';
+import { execSync } from 'child_process';
 import { GraphStore, SchemaVersionError } from './store.js';
 import { GraphDHTTPServer, checkHealthy } from './server.js';
 import { GRAPHD_VERSION, GRAPHD_SCHEMA_VERSION } from './schema.js';
 import type { GraphDStats, HealthResponse } from './types.js';
 import { normalizePath, generateSessionKey, nowSeconds } from './utils.js';
+
+/**
+ * Kill any process listening on the specified port.
+ * Returns true if a process was killed, false if no process was found.
+ */
+function killProcessOnPort(port: number): boolean {
+  try {
+    // Get PIDs of processes using this port
+    const platform = process.platform;
+    let pids: number[] = [];
+
+    if (platform === 'darwin' || platform === 'linux') {
+      // Use lsof to find processes on the port
+      const output = execSync(`lsof -ti :${port} 2>/dev/null || true`, {
+        encoding: 'utf-8',
+      }).trim();
+      if (output) {
+        pids = output.split('\n').map((p) => parseInt(p, 10)).filter((p) => !isNaN(p));
+      }
+    } else if (platform === 'win32') {
+      // Windows: use netstat to find the PID
+      const output = execSync(`netstat -ano | findstr :${port}`, {
+        encoding: 'utf-8',
+      }).trim();
+      const lines = output.split('\n');
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parseInt(parts[parts.length - 1], 10);
+        if (!isNaN(pid) && pid > 0) {
+          pids.push(pid);
+        }
+      }
+    }
+
+    if (pids.length === 0) {
+      return false;
+    }
+
+    // Kill each PID
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+        console.log(`Killed stale process ${pid} on port ${port}`);
+      } catch {
+        // Process may have already exited
+      }
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ============================================
 // CONFIGURATION
@@ -190,13 +244,38 @@ export class GraphDManager {
       this.running = true;
       this.reusingExisting = false;
 
-      // Start HTTP server
+      // Start HTTP server (with retry after killing stale process)
       this.server = new GraphDHTTPServer(
         this.config.host,
         this.config.port,
         this
       );
-      await this.server.start();
+
+      try {
+        await this.server.start();
+      } catch (err) {
+        // If EADDRINUSE but health check failed, there's a stale process holding the port
+        if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+          console.warn(`Port ${this.config.port} held by stale process, attempting cleanup...`);
+          const killed = killProcessOnPort(this.config.port);
+          if (killed) {
+            // Wait briefly for port to be released
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            // Retry once
+            this.server = new GraphDHTTPServer(
+              this.config.host,
+              this.config.port,
+              this
+            );
+            await this.server.start();
+            console.log(`Successfully started after killing stale process`);
+          } else {
+            throw err;
+          }
+        } else {
+          throw err;
+        }
+      }
 
       // Verify server started
       const healthy = await checkHealthy(

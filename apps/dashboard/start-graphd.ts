@@ -4,11 +4,11 @@
  * Run with: bun run start-graphd.ts
  */
 
-import { GraphDManager, createGraphDConfig } from '../src/agent-ts/graphd/index.js';
+import { GraphDManager, createGraphDConfig } from '../../packages/graphd/src/index.js';
 import path from 'path';
 
 // Dashboard runs from dashboard/ dir, but we want the project root
-const ROOT_PATH = path.resolve(process.cwd(), '..');
+const ROOT_PATH = path.resolve(process.cwd(), '..', '..');
 const PORT = 9444;
 
 async function main() {

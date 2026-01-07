@@ -268,12 +268,6 @@ export class Agent {
         continue;
       }
 
-      // Handle FINAL action (old schema - backwards compat)
-      if (action === AgentAction.FINAL) {
-        this.handleFinalAction(content, result, responseText);
-        result.filesRead = Array.from(localReadFiles);
-        return;
-      }
 
       // Handle NEED_USER_INPUT (new schema) or NEED_CONTEXT (old schema)
       if (action === AgentAction.NEED_USER_INPUT || action === AgentAction.NEED_CONTEXT) {
@@ -723,7 +717,7 @@ export class Agent {
     if (typeof raw !== 'string') return null;
     const normalized = raw.trim().toLowerCase();
     // New schema
-    if (normalized === 'done') return AgentAction.DONE;
+    if (normalized === 'goalStateReached') return AgentAction.DONE;
     if (normalized === 'need_user_input') return AgentAction.NEED_USER_INPUT;
     // Old schema (backwards compat during transition)
     if (normalized === 'final') return AgentAction.FINAL;

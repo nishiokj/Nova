@@ -58,12 +58,18 @@ git clone <repository-url>
 cd rex
 
 # 2. Install dependencies
-cd src/agent-ts && npm install
-cd ../../tui-ts && bun install
+cd packages/agent-core && npm install
+cd ../comms-bus && npm install
+cd ../graphd && npm install
+cd ../../apps/harness-daemon && npm install
+cd ../tui && bun install
 
 # 3. Build
-cd ../src/agent-ts && npm run build
-cd ../../tui-ts && bun run build
+cd ../../packages/agent-core && npm run build
+cd ../comms-bus && npm run build
+cd ../graphd && npm run build
+cd ../../apps/harness-daemon && npm run build
+cd ../tui && bun run build
 
 # 4. Configure
 cp .env.example .env
@@ -71,28 +77,27 @@ cp .env.example .env
 #   OPENAI_API_KEY=sk-...
 #   ANTHROPIC_API_KEY=sk-ant-...
 
-# 5. Run the TUI
-cd tui-ts && bun run start
+# 5. Run the harness daemon
+cd apps/harness-daemon && bun run start
+
+# 6. Run the TUI
+cd ../tui && bun run start
 ```
 
 ## Project Structure
 
 ```
-src/agent-ts/
-  agent/           # Pure agent primitive (Agent class)
-  orchestrator/    # Task orchestration (Orchestrator, RuntimeScript)
-  llm/             # Multi-provider LLM adapters (OpenAI, Anthropic)
-  tools/           # Tool registry + builtins
-    builtins/      # Bash, Read, Write, Edit, Glob, Grep
-  graphd/          # SQLite persistence layer
-  communication/   # Event bus & subscribers
-  harness/         # Config loader & integration
-  wizard/          # WorkItem, KnowledgeStore, WorkLedger
-  shared/          # Logging, structured output
-  types/           # Type definitions (ContextWindow, Events, Tools)
+apps/
+  harness-daemon/  # Harness runtime + TCP bus entrypoint
+  tui/             # Ink-based React terminal UI
+  dashboard/       # Web dashboard (React)
 
-tui-ts/            # Ink-based React terminal UI
-dashboard/         # Web dashboard (React)
+packages/
+  agent-core/      # Pure agent primitive + orchestration + tools + types
+  comms-bus/       # JSONL/TCP bus + in-process EventBus
+  graphd/          # SQLite persistence layer
+
+src/              # Python services, communication, RL helpers
 config/            # Configuration files
   harness_config.json    # Agent LLM models, budgets, tools
   behavioral_rules.md    # Agent behavioral constraints
@@ -168,8 +173,8 @@ LOG_DIR=logs
 ## Development
 
 ```bash
-# Build agent-ts
-cd src/agent-ts
+# Build agent core
+cd packages/agent-core
 npm run build
 
 # Type check
@@ -179,15 +184,15 @@ npm run lint
 npm run clean
 
 # Build TUI
-cd tui-ts
+cd ../../apps/tui
 bun run build
 
 # Run TUI in dev mode
 bun run dev
 
 # Run harness daemon (bus server)
-cd src/agent-ts
-bun run harness/daemon.ts
+cd ../harness-daemon
+bun run start
 ```
 
 ## TUI Protocol (JSONL)
@@ -201,7 +206,6 @@ to point at the same bus endpoint (defaults: `127.0.0.1:9555`).
 - `send_text` - Send user message
 - `get_config` - Get configuration
 - `get_status` - Get runtime status
-- `shutdown` - Clean shutdown
 
 **Events (Bridge -> UI):**
 - `ready` - Session initialized

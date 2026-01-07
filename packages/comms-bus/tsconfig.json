@@ -10,13 +10,12 @@
     "declaration": true,
     "declarationMap": true,
     "outDir": "./dist",
-    "rootDir": ".",
-    "types": ["node", "bun"],
+    "types": ["node"],
     "resolveJsonModule": true,
     "isolatedModules": true
   },
   "include": [
-    "**/*.ts"
+    "src/**/*.ts"
   ],
   "exclude": [
     "node_modules",

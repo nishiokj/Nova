@@ -3,13 +3,11 @@
  *
  * Structure:
  * - types/: Core type definitions
- * - graphd/: SQLite-backed persistence layer
  * - llm/: LLM adapter layer (Anthropic, OpenAI)
  * - tools/: Tool registry and execution
  * - agent/: Pure agent primitive
  * - orchestrator/: Orchestration runtime
  * - wizard/: Shared utilities (work-item, ledger, knowledge)
- * - harness/: TUI integration layer
  */
 
 // ============================================
@@ -108,11 +106,6 @@ export {
 } from './types/index.js';
 
 // ============================================
-// GRAPHD (persistence layer)
-// ============================================
-export * from './graphd/index.js';
-
-// ============================================
 // LLM (adapters - re-exports some types)
 // ============================================
 export {
@@ -200,7 +193,6 @@ export * from './orchestrator/index.js';
 
 // ============================================
 // AGENT (explicit exports to avoid duplicates)
-// Note: AgentType, UserPromptInfo, AgentRunParams also in harness/types
 // ============================================
 export { Agent } from './agent/agent.js';
 export { AgentRegistry } from './agent/agent-registry.js';
@@ -223,81 +215,3 @@ export {
   getAgentPrompt,
   buildAgentConfig,
 } from './agent/prompts.js';
-
-// ============================================
-// HARNESS (TUI integration layer - explicit exports)
-// Note: Avoid re-exporting AgentType, UserPromptInfo, AgentRunParams, LLMProvider
-// ============================================
-export { AgentHarness, createHarnessFromEnv } from './harness/harness.js';
-export {
-  translateAgentEvent,
-  createStreamEvent,
-  createStatusEvent,
-  createResponseEvent,
-  createErrorEvent,
-  createReadyEvent,
-  createUserPromptEvent,
-} from './harness/event_translator.js';
-export type {
-  AgentRunResult,
-  AgentRunHandle,
-  BridgeEvent,
-  BridgeEventType,
-  Tier,
-  StatusEventData,
-  ProgressEventData,
-  StreamEventData,
-  ResponseEventData,
-  ReadyEventData,
-  UserPromptEventData,
-  ErrorEventData,
-} from './harness/types.js';
-
-// Re-export EventBus for external subscribers
-export { EventBus, type EventBusProtocol } from './communication/event_bus.js';
-
-// Config loading
-export {
-  loadConfig,
-  loadConfigFile,
-  getAgentConfig,
-  createConfigFromFile,
-  createConfigFromEnv,
-  resolveApiKey,
-} from './harness/config_loader.js';
-export type {
-  LLMProvider,
-  ReasoningEffort,
-  AgentLLMConfig,
-  AgentBudgetConfig,
-  AgentConfigEntry,
-  HarnessConfigFile,
-  FullHarnessConfig,
-  ResolvedLLMConfig,
-  ResolvedAgentConfig,
-  ToolsConfigSection,
-  GraphDConfigSection,
-  ContextConfigSection,
-  SkillsConfigSection,
-  HooksConfigSection,
-  SkillConfigEntry,
-  HookConfigEntry,
-} from './harness/config_types.js';
-export {
-  DEFAULT_TOOLS_CONFIG,
-  DEFAULT_GRAPHD_CONFIG,
-  DEFAULT_CONTEXT_CONFIG,
-  DEFAULT_ENABLED_TOOLS,
-  DEFAULT_SKILLS_CONFIG,
-  DEFAULT_HOOKS_CONFIG,
-} from './harness/config_types.js';
-
-// Skills and hooks loading
-export {
-  loadSkillDefinitions,
-  loadHookDefinitions,
-} from './harness/skills_loader.js';
-export type {
-  SkillDefinitionStub,
-  HookDefinitionStub,
-} from './harness/skills_loader.js';
