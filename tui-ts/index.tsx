@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import path from "path";
 import { fileURLToPath } from "url";
-import { AgentClient } from "./agent_client.js";
+import { BridgeClient } from "./bridge_client.js";
 import { FileCache } from "./file_cache.js";
 import { Store } from "./store.js";
 import { HELP_LINES, parseSlashCommand } from "./commands.js";
@@ -49,6 +49,15 @@ function resolveGraphdUrl(): string {
   return `http://${host}:${port}`;
 }
 
+function resolveBusConfig(): { host: string; port: number } {
+  const host = process.env.EVENT_BUS_HOST ?? "127.0.0.1";
+  const portValue = Number(process.env.EVENT_BUS_PORT ?? "9555");
+  return {
+    host,
+    port: Number.isFinite(portValue) ? portValue : 9555,
+  };
+}
+
 async function fetchGraphdSessions(): Promise<GraphDSession[]> {
   const baseUrl = resolveGraphdUrl();
   const response = await fetch(`${baseUrl}/export?table=sessions`);
@@ -89,8 +98,6 @@ const PROJECT_ROOT = (() => {
 })();
 
 interface AppOptions {
-  configPath?: string;
-  logDir?: string;
   uiLogPath: string;
   enableVoice: boolean;
   redactLogs: boolean;
@@ -131,7 +138,7 @@ function App({ options }: { options: AppOptions }) {
   const store = useMemo(() => new Store(), []);
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
   const [statusTick, setStatusTick] = useState(0);
-  const clientRef = useRef<AgentClient | null>(null);
+  const clientRef = useRef<BridgeClient | null>(null);
   const loggerRef = useRef<UILogger | null>(null);
   const fileCacheRef = useRef<FileCache | null>(null);
   const deleteFlowRef = useRef<{
@@ -214,16 +221,13 @@ function App({ options }: { options: AppOptions }) {
         store.addMessage("system", "Autocomplete indexing failed.");
       });
 
-    // Create TypeScript agent client (replaces Python bridge)
-    const client = new AgentClient(PROJECT_ROOT);
+    // Create bridge client (remote harness connection)
+    const { host, port } = resolveBusConfig();
+    const client = new BridgeClient({ host, port });
     clientRef.current = client;
 
     client.on("event", (event: BridgeEvent) => {
       handleBridgeEvent(event);
-    });
-
-    client.on("exit", ({ code, signal }) => {
-      logger.info("Agent client exited", { code, signal });
     });
 
     client.on("error", (payload) => {
@@ -231,20 +235,25 @@ function App({ options }: { options: AppOptions }) {
       store.setError(message);
     });
 
-    client.send({
-      type: "init",
-      data: {
-        config_path: options.configPath,
-        log_dir: options.logDir,
-        enable_voice: options.enableVoice,
-        client_version: process.env.npm_package_version ?? "dev",
-        log_transcripts: options.logTranscripts,
-      },
-    });
+    void client
+      .connect()
+      .then(() => {
+        client.send({
+          type: "init",
+          data: {
+            enable_voice: options.enableVoice,
+            client_version: process.env.npm_package_version ?? "dev",
+            log_transcripts: options.logTranscripts,
+          },
+        });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        store.setError(message);
+      });
 
     // Cleanup function for both useEffect and signal handlers
     const cleanup = () => {
-      client.send({ type: "shutdown" });
       client.close();
       clearInterval(refreshInterval);
       logger.close();
@@ -594,7 +603,6 @@ function App({ options }: { options: AppOptions }) {
   };
 
   const handleQuit = () => {
-    sendCommand("shutdown");
     exit();
   };
 
@@ -1410,8 +1418,6 @@ function messageExists(history: MessageEntry[], requestId: string): boolean {
 }
 
 function parseArgs(argv: string[]): AppOptions {
-  let configPath: string | undefined;
-  let logDir: string | undefined;
   let uiLogPath = path.join(PROJECT_ROOT, "tui", "logs", "ink-ui.log");
   let enableVoice = true;
   let redactLogs = false;
@@ -1419,16 +1425,6 @@ function parseArgs(argv: string[]): AppOptions {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--config" && argv[i + 1]) {
-      configPath = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (arg === "--log-dir" && argv[i + 1]) {
-      logDir = argv[i + 1];
-      i += 1;
-      continue;
-    }
     if (arg === "--ui-log" && argv[i + 1]) {
       uiLogPath = argv[i + 1];
       i += 1;
@@ -1456,7 +1452,7 @@ function parseArgs(argv: string[]): AppOptions {
     logTranscripts = false;
   }
 
-  return { configPath, logDir, uiLogPath, enableVoice, redactLogs, logTranscripts };
+  return { uiLogPath, enableVoice, redactLogs, logTranscripts };
 }
 
 const options = parseArgs(process.argv.slice(2));

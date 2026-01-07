@@ -17,7 +17,6 @@ export type BridgeCommandType =
   | "hooks_create"
   | "hooks_update"
   | "hooks_delete"
-  | "shutdown"
   | "user_prompt_response";
 
 export type BridgeEventType =
