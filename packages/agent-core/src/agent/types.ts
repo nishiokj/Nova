@@ -44,8 +44,6 @@ export interface AgentConfig {
   tools: string[];
   /** Resource budget */
   budget: AgentBudget;
-  /** Whether to allow implicit finals (no action directive) */
-  allowImplicitFinals?: boolean;
   /** Structured output schema for responses */
   outputSchema?: StructuredOutputSchema;
 }

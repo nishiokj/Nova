@@ -243,22 +243,6 @@ export class Orchestrator {
         });
       }
 
-      // TERMINAL CHECK: Agent success with final (old schema backwards compat)
-      if (result.success && result.terminationReason === 'final') {
-        this.log('info', 'Agent completed with final', { response: result.response?.slice(0, 100) });
-        this.emit(createEvent('goal_achieved', {
-          goal,
-          completed: 1,
-          skipped: 0,
-        }));
-        return this.createResult({
-          success: true,
-          response: result.response,
-          terminationReason: 'goal_state_reached',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
-        });
-      }
-
       // TERMINAL CHECK: Agent refusal
       if (result.isRefusal) {
         this.log('warning', 'Agent refused', { response: result.response });

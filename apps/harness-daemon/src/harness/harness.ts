@@ -614,7 +614,6 @@ export class AgentHarness {
       systemPrompt,
       tools: agentConfig.tools,
       budget: agentConfig.budget,
-      allowImplicitFinals: false,
       outputSchema: agentConfig.outputSchema,
     };
 

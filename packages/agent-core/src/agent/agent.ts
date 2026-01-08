@@ -26,24 +26,9 @@ import { createWorkItem } from '../wizard/work-item.js';
 import { errorResult, successResult } from '../types/tools.js';
 import { coerceStructuredOutput } from '../shared/structured_output.js';
 
-/**
- * Action markers in LLM response.
- * Supports both old (final/need_context/continue) and new (done/need_user_input/continue) schemas.
- */
-enum AgentAction {
-  TOOL = 'tool',
-  FINAL = 'final',           // Old: task complete
-  DONE = 'done',             // New: goal achieved
-  NEED_CONTEXT = 'need_context',    // Old: needs user input
-  NEED_USER_INPUT = 'need_user_input', // New: needs user input
-  CONTINUE = 'continue',
-}
+type AgentAction = 'done' | 'need_user_input' | 'continue';
 
-const ACTION_MARKERS = {
-  FINAL: /\[FINAL\]/i,
-  NEED_CONTEXT: /\[NEED_CONTEXT\]/i,
-  CONTINUE: /\[CONTINUE\]/i,
-};
+const MAX_IDENTICAL_TOOL_CALLS = 2;
 
 const REFUSAL_PATTERNS = [
   /cannot be completed/i,
@@ -142,6 +127,11 @@ export class Agent {
     );
 
     const localReadFiles = new Set(context.getReadFilesArray());
+    const toolRepeatState = {
+      lastKey: '',
+      lastOutput: '',
+      repeats: 0,
+    };
 
     // Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
@@ -209,13 +199,9 @@ export class Agent {
 
       this.addAssistantMessage(context, content, toolCalls);
 
-      let action =
-        this.extractStructuredAction(structuredOutput) ?? this.extractAction(content);
+      const action = this.extractStructuredAction(structuredOutput);
       const responseText = this.extractStructuredResponse(structuredOutput);
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
-      if (!action && responseText && responseText.trim().length > 0) {
-        action = AgentAction.FINAL;
-      }
 
       if (toolCalls.length > 0) {
         await this.processToolCalls(
@@ -225,28 +211,33 @@ export class Agent {
           result,
           metrics,
           workItem,
-          workItem.workId
+          workItem.workId,
+          toolRepeatState
         );
 
-        if (result.needsUserInput) {
+        if (result.needsUserInput || result.terminationReason) {
           result.filesRead = Array.from(localReadFiles);
           return;
         }
 
         // Handle completion after tool calls
-        if (action === AgentAction.DONE) {
+        if (action === 'done') {
           const goalReached = structuredOutput?.goalStateReached === true;
-          if (goalReached) {
-            result.success = true;
-            result.response = responseText ?? content;
-            result.terminationReason = 'goal_state_reached';
-            result.filesRead = Array.from(localReadFiles);
-            return;
+          if (!goalReached) {
+            result.terminationReason = 'invalid_action';
+            result.error = 'Action "done" requires goalStateReached: true.';
+            break;
           }
-        }
-
-        if (action === AgentAction.FINAL) {
-          this.handleFinalAction(content, result, responseText);
+          const finalText = responseText ?? content;
+          if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
+            result.isRefusal = true;
+            result.error = 'LLM refused to complete the task';
+            result.terminationReason = 'refusal';
+          } else {
+            result.success = true;
+            result.response = finalText;
+            result.terminationReason = 'goal_state_reached';
+          }
           result.filesRead = Array.from(localReadFiles);
           return;
         }
@@ -254,59 +245,57 @@ export class Agent {
         continue;
       }
 
-      // Handle DONE action (new schema - goal achieved)
-      if (action === AgentAction.DONE) {
+      if (action === 'done') {
         const goalReached = structuredOutput?.goalStateReached === true;
-        if (goalReached) {
+        if (!goalReached) {
+          result.terminationReason = 'invalid_action';
+          result.error = 'Action "done" requires goalStateReached: true.';
+          break;
+        }
+        const finalText = responseText ?? content;
+        if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
+          result.isRefusal = true;
+          result.error = 'LLM refused to complete the task';
+          result.terminationReason = 'refusal';
+        } else {
           result.success = true;
-          result.response = responseText ?? content;
+          result.response = finalText;
           result.terminationReason = 'goal_state_reached';
-          result.filesRead = Array.from(localReadFiles);
-          return;
         }
-        // goalStateReached not true - treat as continue
-        continue;
-      }
-
-
-      // Handle NEED_USER_INPUT (new schema) or NEED_CONTEXT (old schema)
-      if (action === AgentAction.NEED_USER_INPUT || action === AgentAction.NEED_CONTEXT) {
-        const prompt = structuredPrompt ?? this.extractUserPrompt(content);
-        if (prompt) {
-          result.needsUserInput = true;
-          result.userPrompt = prompt;
-          result.terminationReason = 'user_input_required';
-          result.filesRead = Array.from(localReadFiles);
-          return;
-        }
-        continue;
-      }
-
-      if (action === AgentAction.CONTINUE) {
-        continue;
-      }
-
-      const implicitCandidate = responseText ?? content;
-      if (this.config.allowImplicitFinals && implicitCandidate.length > 100) {
-        result.success = true;
-        result.response = implicitCandidate;
-        result.terminationReason = 'implicit_final';
         result.filesRead = Array.from(localReadFiles);
         return;
       }
 
-      if (implicitCandidate.trim().length > 0) {
-        result.response = implicitCandidate;
+      if (action === 'need_user_input') {
+        if (!structuredPrompt) {
+          result.terminationReason = 'invalid_action';
+          result.error = 'Action "need_user_input" requires userPrompt.';
+          break;
+        }
+        result.needsUserInput = true;
+        result.userPrompt = structuredPrompt;
+        result.terminationReason = 'user_input_required';
+        result.filesRead = Array.from(localReadFiles);
+        return;
+      }
+
+      if (action === 'continue') {
+        continue;
+      }
+
+      const responseCandidate = responseText ?? content;
+      if (responseCandidate.trim().length > 0) {
+        result.response = responseCandidate;
       }
       result.terminationReason = 'no_action';
-      const preview = implicitCandidate.trim().slice(0, 1000);
+      const preview = responseCandidate.trim().slice(0, 1000);
       result.error = preview
         ? `LLM response has no tools and no action directive. Response preview: ${preview}`
         : 'LLM response has no tools and no action directive';
       break;
     }
 
-    // Always capture all assistant responses even without [FINAL] marker
+    // Always capture all assistant responses even without a terminal action.
     if (!result.response) {
       const messages = context.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
       const assistantContents = messages
@@ -437,7 +426,8 @@ export class Agent {
     result: AgentResult,
     metrics: AgentMetrics,
     workItem: WorkItem,
-    workItemId?: string
+    workItemId?: string,
+    toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
 
@@ -509,6 +499,29 @@ export class Agent {
           durationMs: toolDurationMs,
           timestamp: Date.now(),
         });
+
+        if (toolRepeatState) {
+          const argsKey = JSON.stringify(call.arguments ?? {});
+          const outputKey = toolResult.isSuccess
+            ? (toolResult.output ?? '')
+            : `error:${toolResult.error ?? ''}`;
+          const signature = `${call.name}:${argsKey}`;
+          const outputSample = outputKey.slice(0, 2000);
+
+          if (signature === toolRepeatState.lastKey && outputSample === toolRepeatState.lastOutput) {
+            toolRepeatState.repeats += 1;
+          } else {
+            toolRepeatState.lastKey = signature;
+            toolRepeatState.lastOutput = outputSample;
+            toolRepeatState.repeats = 0;
+          }
+
+          if (toolRepeatState.repeats >= MAX_IDENTICAL_TOOL_CALLS) {
+            result.terminationReason = 'stagnation:tool_repeat';
+            result.error = `Repeated identical tool call without progress: ${call.name}`;
+            return;
+          }
+        }
 
         if (call.name === 'ask_user' && toolResult.isSuccess) {
           try {
@@ -707,7 +720,6 @@ export class Agent {
 
   /**
    * Extract action from structured output.
-   * Supports both old (final/need_context/continue) and new (done/need_user_input/continue) schemas.
    */
   private extractStructuredAction(
     structuredOutput: Record<string, unknown> | null
@@ -716,15 +728,9 @@ export class Agent {
     const raw = structuredOutput.action;
     if (typeof raw !== 'string') return null;
     const normalized = raw.trim().toLowerCase();
-    // New schema
-    if (normalized === 'goalStateReached') return AgentAction.DONE;
-    if (normalized === 'need_user_input') return AgentAction.NEED_USER_INPUT;
-    // Old schema (backwards compat during transition)
-    if (normalized === 'final') return AgentAction.FINAL;
-    if (normalized === 'need_context' || normalized === 'need context') {
-      return AgentAction.NEED_CONTEXT;
-    }
-    if (normalized === 'continue') return AgentAction.CONTINUE;
+    if (normalized === 'done') return 'done';
+    if (normalized === 'need_user_input') return 'need_user_input';
+    if (normalized === 'continue') return 'continue';
     return null;
   }
 
@@ -746,10 +752,7 @@ export class Agent {
     structuredOutput: Record<string, unknown> | null
   ): AgentResult['userPrompt'] | null {
     if (!structuredOutput) return null;
-    const raw =
-      structuredOutput.user_prompt ??
-      structuredOutput.userPrompt;
-    return this.parseUserPromptValue(raw);
+    return this.parseUserPromptValue(structuredOutput.userPrompt);
   }
 
   /**
@@ -799,50 +802,6 @@ export class Agent {
     };
   }
 
-  /**
-   * Extract action from content.
-   */
-  private extractAction(content: string): AgentAction | null {
-    if (ACTION_MARKERS.FINAL.test(content)) return AgentAction.FINAL;
-    if (ACTION_MARKERS.NEED_CONTEXT.test(content)) return AgentAction.NEED_CONTEXT;
-    if (ACTION_MARKERS.CONTINUE.test(content)) return AgentAction.CONTINUE;
-    return null;
-  }
-
-  /**
-   * Handle [FINAL] action.
-   */
-  private handleFinalAction(
-    content: string,
-    result: AgentResult,
-    responseText?: string
-  ): void {
-    const finalText = responseText ?? content.replace(/\[FINAL\]/gi, '').trim();
-    if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
-      result.isRefusal = true;
-      result.error = 'LLM refused to complete the task';
-      result.terminationReason = 'refusal';
-    } else {
-      result.success = true;
-      result.response = finalText;
-      result.terminationReason = 'final';
-    }
-  }
-
-  /**
-   * Extract user prompt from NEED_CONTEXT content.
-   */
-  private extractUserPrompt(content: string): AgentResult['userPrompt'] | null {
-    const match = content.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        return this.parseUserPromptValue(JSON.parse(match[0]));
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
 
   /**
    * Emit llm_call event.
