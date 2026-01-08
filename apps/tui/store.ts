@@ -291,6 +291,16 @@ export class Store {
     return this.compact;
   }
 
+  /**
+   * Invalidates the history cache, forcing a full re-wrap on next render.
+   * Call this on terminal resize to ensure text is re-wrapped for new width.
+   */
+  invalidateHistoryCache(): void {
+    this.historyCache = null;
+    this.historyVersion += 1;
+    this.emit();
+  }
+
   setVoiceMode(enabled: boolean): void {
     this.voiceMode = enabled;
     this.emit();
@@ -916,7 +926,7 @@ function wrapText(text: string, width: number): string[] {
   }
 
   const lines: string[] = [];
-  const safeWidth = Math.max(1, width);
+  const safeWidth = Math.max(10, width);
 
   const rawLines = text.split("\n");
   for (const rawLine of rawLines) {
@@ -925,11 +935,25 @@ function wrapText(text: string, width: number): string[] {
       continue;
     }
 
-    let start = 0;
-    while (start < rawLine.length) {
-      const chunk = rawLine.slice(start, start + safeWidth);
-      lines.push(chunk);
-      start += safeWidth;
+    // Word-wrap: try to break at word boundaries
+    let remaining = rawLine;
+    while (remaining.length > 0) {
+      if (remaining.length <= safeWidth) {
+        lines.push(remaining);
+        break;
+      }
+
+      // Find last space within width
+      let breakPoint = remaining.lastIndexOf(" ", safeWidth);
+
+      // If no space found, or space is too early (less than half width), hard break
+      if (breakPoint === -1 || breakPoint < safeWidth / 2) {
+        breakPoint = safeWidth;
+      }
+
+      lines.push(remaining.slice(0, breakPoint));
+      // Skip the space if we broke at a space
+      remaining = remaining.slice(breakPoint).trimStart();
     }
   }
 

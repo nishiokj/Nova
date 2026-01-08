@@ -121,6 +121,7 @@ export class Agent {
     metrics: AgentMetrics,
     startTime: number
   ): Promise<void> {
+    console.error(`[AGENT DEBUG] executeLoop started: agent=${this.config.type}, workId=${workItem.workId}, bounds.maxToolCalls=${workItem.bounds.maxToolCalls}, bounds.maxLlmCalls=${workItem.bounds.maxLlmCalls}, config.budget.maxIterations=${this.config.budget.maxIterations}, config.budget.maxToolCalls=${this.config.budget.maxToolCalls}`);
     const maxIterations = Math.min(
       this.config.budget.maxIterations,
       workItem.bounds.maxLlmCalls
@@ -143,7 +144,8 @@ export class Agent {
 
       if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         result.terminationReason = 'bounds:tool_calls';
-        result.error = 'Tool call limit reached';
+        result.error = `Tool call limit reached (${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls})`;
+        console.error(`[AGENT DEBUG] Tool call limit hit: made=${metrics.toolCallsMade}, max=${workItem.bounds.maxToolCalls}, agent=${this.config.type}, workId=${workItem.workId}`);
         break;
       }
 
@@ -363,6 +365,18 @@ export class Agent {
 
     const contextItems = context.getItemsForLLM();
 
+    // Collect all callIds that have outputs - we only want to send function_calls
+    // that have matching outputs to avoid OpenAI's "No tool output found" error.
+    // This can happen when a sub-agent runs while the parent's function_call
+    // is in context but hasn't received its output yet.
+    const callIdsWithOutputs = new Set<string>();
+    for (const item of contextItems) {
+      if (item.type === 'function_call_output') {
+        const callId = (item as any).call_id;
+        if (callId) callIdsWithOutputs.add(callId);
+      }
+    }
+
     const hasUserInput = contextItems.some(
       (item) => item.type === 'message' && (item as any).role === 'user'
     );
@@ -381,7 +395,11 @@ export class Agent {
           content: (item as any).content,
         });
       } else if (item.type === 'function_call') {
-        messages.push(item);
+        // Only include function_calls that have matching outputs
+        const callId = (item as any).call_id;
+        if (callId && callIdsWithOutputs.has(callId)) {
+          messages.push(item);
+        }
       } else if (item.type === 'function_call_output') {
         messages.push(item);
       }
@@ -430,6 +448,12 @@ export class Agent {
     toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+
+    // Build a map from lowercase names to canonical names for case-insensitive lookup
+    const canonicalNames = new Map<string, string>();
+    for (const toolName of this.config.tools) {
+      canonicalNames.set(toolName.toLowerCase(), toolName);
+    }
     const pendingParallel: Array<{
       call: { id: string; name: string; arguments: Record<string, unknown> };
       promise: Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
@@ -556,12 +580,15 @@ export class Agent {
         continue;
       }
 
-      const isAgentTool = this.agentRegistry?.has(call.name) ?? false;
-      const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(call.name);
+      // Normalize tool name to canonical form for case-insensitive lookup
+      const canonicalName = canonicalNames.get(nameLower) ?? call.name;
+
+      const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
+      const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
 
       if (isParallelSafe) {
         this.emit(createEvent('tool_call', {
-          toolName: call.name,
+          toolName: canonicalName,
           arguments: call.arguments,
           phase: 'starting',
         }, workItemId));
@@ -569,11 +596,11 @@ export class Agent {
         const toolStartTime = Date.now();
         const promise = (async () => {
           try {
-            const toolResult = await this.toolRegistry.execute(call.name, call.arguments);
+            const toolResult = await this.toolRegistry.execute(canonicalName, call.arguments);
             return { toolResult, toolDurationMs: Date.now() - toolStartTime };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            const toolResult = errorResult(call.name, message, 0);
+            const toolResult = errorResult(canonicalName, message, 0);
             toolResult.output = `Error: ${message}`;
             return { toolResult, toolDurationMs: Date.now() - toolStartTime };
           }
@@ -587,7 +614,7 @@ export class Agent {
       if (shouldStop) return;
 
       this.emit(createEvent('tool_call', {
-        toolName: call.name,
+        toolName: canonicalName,
         arguments: call.arguments,
         phase: 'starting',
       }, workItemId));
@@ -595,9 +622,11 @@ export class Agent {
       const toolStartTime = Date.now();
 
       try {
+        // Use canonical name for execution, but pass original call for agent tools (which need call.id)
+        const normalizedCall = { ...call, name: canonicalName };
         const toolResult = isAgentTool
-          ? await this.executeAgentToolCall(call, workItem, context, localReadFiles, result)
-          : await this.toolRegistry.execute(call.name, call.arguments);
+          ? await this.executeAgentToolCall(normalizedCall, workItem, context, localReadFiles, result)
+          : await this.toolRegistry.execute(canonicalName, call.arguments);
         const toolDurationMs = Date.now() - toolStartTime;
 
         const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
@@ -605,10 +634,10 @@ export class Agent {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         metrics.toolCallsFailed++;
-        result.toolErrors.push(`${call.name}: ${message}`);
+        result.toolErrors.push(`${canonicalName}: ${message}`);
 
         this.emit(createEvent('tool_call', {
-          toolName: call.name,
+          toolName: canonicalName,
           arguments: call.arguments,
           phase: 'completed',
           result: `Error: ${message}`,
@@ -684,6 +713,12 @@ export class Agent {
       targetPaths: targetPaths && targetPaths.length > 0 ? targetPaths : undefined,
       params,
       agent: agentConfig.type,
+      // Use agent's configured budget as work item bounds
+      bounds: {
+        maxToolCalls: agentConfig.budget.maxToolCalls,
+        maxDurationMs: agentConfig.budget.maxDurationMs,
+        maxLlmCalls: agentConfig.budget.maxIterations,
+      },
     });
 
     const agent = new Agent(

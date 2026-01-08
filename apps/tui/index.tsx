@@ -113,6 +113,8 @@ function useTerminalSize() {
     columns: stdout?.columns ?? 80,
     rows: stdout?.rows ?? 24,
   });
+  // Force re-render counter - incrementing this triggers a full component tree re-render
+  const [, forceUpdate] = useState(0);
 
   useEffect(() => {
     if (!stdout) {
@@ -120,9 +122,18 @@ function useTerminalSize() {
     }
 
     const handler = () => {
-      // Clear screen and move cursor to home to prevent artifacts
-      stdout.write("\x1b[2J\x1b[H");
+      // Clear screen and reset cursor to force Ink to repaint everything
+      // \x1b[2J = clear entire screen
+      // \x1b[H = move cursor to home (1,1)
+      // \x1b[3J = clear scrollback buffer (helps with some terminals)
+      stdout.write("\x1b[2J\x1b[H\x1b[3J");
+
+      // Update size
       setSize({ columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+
+      // Force a full re-render by updating a counter
+      // This helps Ink recalculate its entire virtual buffer
+      forceUpdate((n) => n + 1);
     };
 
     stdout.on("resize", handler);
@@ -171,6 +182,18 @@ function App({ options }: { options: AppOptions }) {
   useEffect(() => {
     widthRef.current = width;
   }, [width]);
+
+  // Invalidate history cache on resize to force re-wrapping text
+  const prevSizeRef = useRef({ columns: size.columns, rows: size.rows });
+  useEffect(() => {
+    if (
+      prevSizeRef.current.columns !== size.columns ||
+      prevSizeRef.current.rows !== size.rows
+    ) {
+      store.invalidateHistoryCache();
+      prevSizeRef.current = { columns: size.columns, rows: size.rows };
+    }
+  }, [size.columns, size.rows, store]);
 
   const isBusy = snapshot.state !== "idle" && snapshot.state !== "error";
 

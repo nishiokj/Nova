@@ -308,7 +308,7 @@
                 "dependencies": { "type": "array", "items": { "type": "string" } },
                 "toolHint": { "type": ["string", "null"] },
                 "targetPaths": { "type": ["array", "null"], "items": { "type": "string" } },
-                "params": { "type": ["object", "null"], "additionalProperties": false, "properties": {}, "required": [] }
+                "params": { "type": ["object", "null"] }
               },
               "required": ["id", "objective", "delta", "agent", "dependencies", "toolHint", "targetPaths", "params"]
             }
