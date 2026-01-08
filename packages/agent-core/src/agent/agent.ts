@@ -7,7 +7,7 @@
 
 import type { LLMAdapter, Message, LLMRequestConfig } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import type { ToolDefinition } from '../types/tools.js';
+import type { ToolDefinition, ToolResult } from '../types/tools.js';
 import type { ContextWindow } from '../types/context.js';
 import type { WorkItem } from '../wizard/work-item.js';
 import type {
@@ -430,11 +430,119 @@ export class Agent {
     toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+    const pendingParallel: Array<{
+      call: { id: string; name: string; arguments: Record<string, unknown> };
+      promise: Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
+    }> = [];
+
+    const handleToolResult = (
+      call: { id: string; name: string; arguments: Record<string, unknown> },
+      toolResult: ToolResult,
+      toolDurationMs: number,
+      isAgentTool: boolean
+    ): boolean => {
+      if (toolResult.isSuccess) {
+        metrics.toolCallsSucceeded++;
+
+        const nameLower = call.name.toLowerCase();
+        if (nameLower === 'read' && call.arguments.path) {
+          localReadFiles.add(String(call.arguments.path));
+        }
+
+        if ((nameLower === 'write' || nameLower === 'edit') && call.arguments.path) {
+          result.invalidatedPaths.push(String(call.arguments.path));
+          localReadFiles.delete(String(call.arguments.path));
+        }
+      } else {
+        metrics.toolCallsFailed++;
+        if (toolResult.error) {
+          result.toolErrors.push(`${call.name}: ${toolResult.error}`);
+        }
+      }
+
+      this.emit(createEvent('tool_call', {
+        toolName: call.name,
+        arguments: call.arguments,
+        phase: 'completed',
+        result: toolResult.output?.slice(0, 10000),
+        success: toolResult.isSuccess,
+        durationMs: toolDurationMs,
+      }, workItemId));
+
+      context.appendItem({
+        type: 'function_call_output',
+        callId: call.id,
+        output: toolResult.output ?? '',
+        isError: !toolResult.isSuccess,
+        durationMs: toolDurationMs,
+        timestamp: Date.now(),
+      });
+
+      if (toolRepeatState) {
+        const argsKey = JSON.stringify(call.arguments ?? {});
+        const outputKey = toolResult.isSuccess
+          ? (toolResult.output ?? '')
+          : `error:${toolResult.error ?? ''}`;
+        const signature = `${call.name}:${argsKey}`;
+        const outputSample = outputKey.slice(0, 2000);
+
+        if (signature === toolRepeatState.lastKey && outputSample === toolRepeatState.lastOutput) {
+          toolRepeatState.repeats += 1;
+        } else {
+          toolRepeatState.lastKey = signature;
+          toolRepeatState.lastOutput = outputSample;
+          toolRepeatState.repeats = 0;
+        }
+
+        if (toolRepeatState.repeats >= MAX_IDENTICAL_TOOL_CALLS) {
+          result.terminationReason = 'stagnation:tool_repeat';
+          result.error = `Repeated identical tool call without progress: ${call.name}`;
+          return true;
+        }
+      }
+
+      if (call.name === 'ask_user' && toolResult.isSuccess) {
+        try {
+          const parsed = JSON.parse(toolResult.output ?? '{}');
+          result.needsUserInput = true;
+          result.userPrompt = parsed;
+          result.terminationReason = 'user_input_required';
+          return true;
+        } catch {
+          // Not a user prompt
+        }
+      }
+
+      if (isAgentTool && result.needsUserInput) {
+        return true;
+      }
+
+      return false;
+    };
+
+    const flushParallel = async (): Promise<boolean> => {
+      if (pendingParallel.length === 0) return false;
+      const batch = pendingParallel.splice(0, pendingParallel.length);
+      const results = await Promise.all(batch.map((item) => item.promise));
+      for (let i = 0; i < batch.length; i++) {
+        const { call } = batch[i];
+        const { toolResult, toolDurationMs } = results[i];
+        const shouldStop = handleToolResult(call, toolResult, toolDurationMs, false);
+        if (shouldStop) {
+          return true;
+        }
+      }
+      return false;
+    };
 
     for (const call of toolCalls) {
       metrics.toolCallsMade++;
+      const nameLower = call.name.toLowerCase();
 
-      if (this.config.tools.length === 0 || !allowedTools.has(call.name.toLowerCase())) {
+      if (this.config.tools.length === 0 || !allowedTools.has(nameLower)) {
+        const shouldStop = await flushParallel();
+        if (shouldStop) return;
+
         const errorMsg = `Tool "${call.name}" is not allowed for this agent`;
         result.toolErrors.push(errorMsg);
         metrics.toolCallsFailed++;
@@ -448,6 +556,36 @@ export class Agent {
         continue;
       }
 
+      const isAgentTool = this.agentRegistry?.has(call.name) ?? false;
+      const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(call.name);
+
+      if (isParallelSafe) {
+        this.emit(createEvent('tool_call', {
+          toolName: call.name,
+          arguments: call.arguments,
+          phase: 'starting',
+        }, workItemId));
+
+        const toolStartTime = Date.now();
+        const promise = (async () => {
+          try {
+            const toolResult = await this.toolRegistry.execute(call.name, call.arguments);
+            return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const toolResult = errorResult(call.name, message, 0);
+            toolResult.output = `Error: ${message}`;
+            return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+          }
+        })();
+
+        pendingParallel.push({ call, promise });
+        continue;
+      }
+
+      const shouldStop = await flushParallel();
+      if (shouldStop) return;
+
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
@@ -457,87 +595,13 @@ export class Agent {
       const toolStartTime = Date.now();
 
       try {
-        const isAgentTool = this.agentRegistry?.has(call.name) ?? false;
         const toolResult = isAgentTool
           ? await this.executeAgentToolCall(call, workItem, context, localReadFiles, result)
           : await this.toolRegistry.execute(call.name, call.arguments);
         const toolDurationMs = Date.now() - toolStartTime;
 
-        if (toolResult.isSuccess) {
-          metrics.toolCallsSucceeded++;
-
-          const nameLower = call.name.toLowerCase();
-          if (nameLower === 'read' && call.arguments.path) {
-            localReadFiles.add(String(call.arguments.path));
-          }
-
-          if ((nameLower === 'write' || nameLower === 'edit') && call.arguments.path) {
-            result.invalidatedPaths.push(String(call.arguments.path));
-            localReadFiles.delete(String(call.arguments.path));
-          }
-        } else {
-          metrics.toolCallsFailed++;
-          if (toolResult.error) {
-            result.toolErrors.push(`${call.name}: ${toolResult.error}`);
-          }
-        }
-
-        this.emit(createEvent('tool_call', {
-          toolName: call.name,
-          arguments: call.arguments,
-          phase: 'completed',
-          result: toolResult.output?.slice(0, 10000),
-          success: toolResult.isSuccess,
-          durationMs: toolDurationMs,
-        }, workItemId));
-
-        context.appendItem({
-          type: 'function_call_output',
-          callId: call.id,
-          output: toolResult.output ?? '',
-          isError: !toolResult.isSuccess,
-          durationMs: toolDurationMs,
-          timestamp: Date.now(),
-        });
-
-        if (toolRepeatState) {
-          const argsKey = JSON.stringify(call.arguments ?? {});
-          const outputKey = toolResult.isSuccess
-            ? (toolResult.output ?? '')
-            : `error:${toolResult.error ?? ''}`;
-          const signature = `${call.name}:${argsKey}`;
-          const outputSample = outputKey.slice(0, 2000);
-
-          if (signature === toolRepeatState.lastKey && outputSample === toolRepeatState.lastOutput) {
-            toolRepeatState.repeats += 1;
-          } else {
-            toolRepeatState.lastKey = signature;
-            toolRepeatState.lastOutput = outputSample;
-            toolRepeatState.repeats = 0;
-          }
-
-          if (toolRepeatState.repeats >= MAX_IDENTICAL_TOOL_CALLS) {
-            result.terminationReason = 'stagnation:tool_repeat';
-            result.error = `Repeated identical tool call without progress: ${call.name}`;
-            return;
-          }
-        }
-
-        if (call.name === 'ask_user' && toolResult.isSuccess) {
-          try {
-            const parsed = JSON.parse(toolResult.output ?? '{}');
-            result.needsUserInput = true;
-            result.userPrompt = parsed;
-            result.terminationReason = 'user_input_required';
-            return;
-          } catch {
-            // Not a user prompt
-          }
-        }
-
-        if (isAgentTool && result.needsUserInput) {
-          return;
-        }
+        const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
+        if (stop) return;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         metrics.toolCallsFailed++;
@@ -561,6 +625,9 @@ export class Agent {
         });
       }
     }
+
+    const shouldStop = await flushParallel();
+    if (shouldStop) return;
   }
 
   private async executeAgentToolCall(

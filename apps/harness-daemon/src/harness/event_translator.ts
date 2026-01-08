@@ -10,6 +10,8 @@ import type {
   ProgressEventData,
   StatusEventData,
   UserPromptEventData,
+  EventLevel,
+  EventKind,
 } from './types.js';
 
 /**
@@ -28,6 +30,8 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         data: {
           state: 'sending',
           message: `Planning: ${goalData.goal?.slice(0, 50) || 'request'}...`,
+          level: 'info',
+          kind: 'planning',
         } satisfies StatusEventData,
       };
     }
@@ -39,12 +43,14 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         data: {
           request_id: requestId,
           message: itemData.objective ? `Starting: ${itemData.objective}` : 'Starting work item...',
+          level: 'info',
+          kind: 'work',
         } satisfies ProgressEventData,
       };
     }
 
     case 'workitem_completed': {
-      const itemData = data as { objective?: string };
+      const itemData = data as { objective?: string; durationMs?: number };
       return {
         type: 'progress',
         data: {
@@ -52,6 +58,9 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
           message: itemData.objective
             ? `Completed: ${itemData.objective}`
             : 'Work item completed',
+          level: 'success',
+          kind: 'work',
+          duration_ms: itemData.durationMs,
         } satisfies ProgressEventData,
       };
     }
@@ -63,6 +72,8 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         data: {
           request_id: requestId,
           message: `Failed: ${itemData.error || itemData.objective || 'work item failed'}`,
+          level: 'error',
+          kind: 'work',
         } satisfies ProgressEventData,
       };
     }
@@ -74,6 +85,8 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         data: {
           request_id: requestId,
           message: `Skipped: ${itemData.reason || itemData.objective || 'work item skipped'}`,
+          level: 'warning',
+          kind: 'work',
         } satisfies ProgressEventData,
       };
     }
@@ -87,8 +100,10 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         durationMs?: number;
       };
       const phase = toolData.phase ?? 'starting';
+      const isCompleted = phase === 'completed';
+      const level: EventLevel = !isCompleted ? 'info' : toolData.success ? 'success' : 'error';
       let message: string;
-      if (phase === 'starting') {
+      if (!isCompleted) {
         message = `Using ${toolData.toolName || 'tool'}...`;
       } else {
         const status = toolData.success ? '✓' : '✗';
@@ -100,6 +115,10 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         data: {
           request_id: requestId,
           message,
+          level,
+          kind: 'tool',
+          tool_name: toolData.toolName,
+          duration_ms: isCompleted ? toolData.durationMs : undefined,
         } satisfies ProgressEventData,
       };
     }
@@ -125,8 +144,33 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
       };
     }
 
-    case 'goal_achieved':
-    case 'goal_not_achieved':
+    case 'goal_achieved': {
+      const goalData = data as { goal?: string; completed?: number; skipped?: number };
+      return {
+        type: 'status',
+        data: {
+          state: 'idle',
+          message: goalData.goal ? `Goal achieved: ${goalData.goal.slice(0, 50)}` : 'Goal achieved',
+          level: 'success',
+          kind: 'system',
+        } satisfies StatusEventData,
+      };
+    }
+
+    case 'goal_not_achieved': {
+      const goalData = data as { goal?: string; reason?: string; failed?: number };
+      const reason = goalData.reason || 'unknown';
+      return {
+        type: 'status',
+        data: {
+          state: 'error',
+          message: `Goal not achieved: ${reason}`,
+          level: 'error',
+          kind: 'system',
+        } satisfies StatusEventData,
+      };
+    }
+
     case 'llm_call':
       return null;
 

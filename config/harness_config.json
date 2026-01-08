@@ -68,10 +68,10 @@
       },
       "budget": {
         "max_iterations": 10,
-        "max_tool_calls": 15,
+        "max_tool_calls": 150,
         "max_duration_ms": 120000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "coding-agent", "explorer", "runtime_script"],
       "output_schema": "goal_driven"
     },
     "coding-agent": {

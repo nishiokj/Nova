@@ -22,8 +22,8 @@ export interface AgentBudget {
 }
 
 export const DEFAULT_AGENT_BUDGET: AgentBudget = {
-  maxIterations: 10,
-  maxToolCalls: 15,
+  maxIterations: 20,
+  maxToolCalls: 150,
   maxDurationMs: 120_000,
 };
 

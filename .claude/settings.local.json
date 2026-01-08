@@ -89,7 +89,9 @@
       "Bash(bun run dev:*)",
       "Bash(git log:*)",
       "Bash(xargs:*)",
-      "Bash(bun run:*)"
+      "Bash(bun run:*)",
+      "Bash(bunx tsc:*)",
+      "Bash(bun build:*)"
     ],
     "deny": []
   }

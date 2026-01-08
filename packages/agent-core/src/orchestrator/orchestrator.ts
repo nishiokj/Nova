@@ -335,10 +335,23 @@ export class Orchestrator {
   }
 
   private createWorkItem(goal: string): WorkItem {
+    // Get agent's budget from registry, fallback to orchestrator config
+    let agentBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
+    try {
+      agentBudget = this.agentRegistry?.getRuntimeConfig(this.agentType)?.config.budget;
+    } catch {
+      // Agent not in registry, use orchestrator defaults
+    }
+
     return createWorkItem({
       goal,
       objective: goal,
       agent: this.agentType,
+      bounds: {
+        maxToolCalls: agentBudget?.maxToolCalls ?? this.config.maxToolCalls,
+        maxDurationMs: agentBudget?.maxDurationMs ?? this.config.maxDurationMs,
+        maxLlmCalls: agentBudget?.maxIterations ?? this.config.maxIterations,
+      },
     });
   }
 

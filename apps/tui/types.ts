@@ -47,6 +47,12 @@ export type TUIState =
   | "streaming"
   | "error";
 
+/** Semantic level for coloring/priority */
+export type EventLevel = "info" | "success" | "warning" | "error";
+
+/** Event kind for categorization */
+export type EventKind = "work" | "tool" | "planning" | "system";
+
 export type Role = "user" | "agent" | "system" | "status";
 
 export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question";
@@ -67,6 +73,12 @@ export interface ProgressData {
   message?: string;
   tool_name?: string;
   step_number?: number;
+  /** Semantic level for TUI coloring */
+  level?: EventLevel;
+  /** Event kind for categorization */
+  kind?: EventKind;
+  /** Duration in milliseconds (for completed operations) */
+  duration_ms?: number;
 }
 
 export interface StreamData {
@@ -90,6 +102,10 @@ export interface ResponseData {
 export interface StatusData {
   state?: TUIState;
   message?: string;
+  /** Semantic level for TUI coloring */
+  level?: EventLevel;
+  /** Event kind for categorization */
+  kind?: EventKind;
 }
 
 export interface ReadyData {
@@ -112,6 +128,8 @@ export interface ErrorData {
   message?: string;
   detail?: unknown;
   fatal?: boolean;
+  /** Error code for programmatic handling */
+  code?: string;
 }
 
 // Box styling for message containers

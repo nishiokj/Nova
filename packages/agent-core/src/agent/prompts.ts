@@ -198,7 +198,28 @@ When a search returns empty, your FIRST response should be to try \`../\` prefix
 - Empty: \`**/orchestrator.ts\`
 - Try: \`../**/orchestrator.ts\`, \`../../**/orchestrator.ts\`
 
-Paths returned from tools are relative to cwd. If you searched \`../packages/foo.ts\`, use \`../packages/foo.ts\` for Read too.`;
+Paths returned from tools are relative to cwd. If you searched \`../packages/foo.ts\`, use \`../packages/foo.ts\` for Read too.
+
+## Agent Tools (COST: HIGH)
+
+You have access to specialized agents as tools. **Agents are expensive** - each agent call spawns a full LLM loop with its own context and iterations.
+
+Use agents sparingly when delegation makes sense. Agents run in parallel with your main thread, so use them to delegate work that can be done alongside your work. Do not scope their work too large as you are dependent on them finishing.
+
+### When to Use Agent Tools
+
+**explorer** - Use to answer many questions about the environment or state. Resolves ambiguity without filling your context window with every piece of content the explorer parsed. Ideal when you need to understand codebase structure, find patterns, or gather context without consuming your own token budget.
+
+**coding-agent** - Delegate a focused chunk of expert programming work. Use when a task is self-contained and can be executed independently while you continue other work.
+
+**runtime_script** - Generate an executable plan (WorkItem DAG) when you need to parallelize multiple independent tasks. Use for complex multi-step orchestration where work can be dispatched concurrently.
+
+### Guidelines
+
+- **Keep scope small**: Agents must complete before you can use their results. Don't assign large, open-ended tasks.
+- **Parallel execution**: Launch agents for work that can proceed while you handle other tasks.
+- **Context efficiency**: Agents return summaries, not the raw data they processed. Use this to your advantage.
+- **Avoid for trivial work**: If a task takes 1-2 tool calls, do it yourself rather than paying the agent overhead.`;
 
 /**
  * Map of agent types to their system prompts.
