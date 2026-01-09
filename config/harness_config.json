@@ -143,7 +143,7 @@
     "enabled": true,
     "host": "127.0.0.1",
     "port": 9444,
-    "db_path": ".graphd/graphd.db"
+    "db_path": "~/.graphd/graphd.db"
   },
   "context": {
     "max_tokens": 200000
