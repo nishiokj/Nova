@@ -358,7 +358,6 @@ export function createConfigFromFile(
       const resolved = resolveAgentConfig(entry);
       agents[agentType] = resolved;
       // DEBUG: Log tools for each agent
-      console.log(`[DEBUG config] Agent '${agentType}' tools: entry.tools=${JSON.stringify(entry.tools)}, resolved.tools=${JSON.stringify(resolved.tools)}`);
     } catch (e) {
       console.warn(`[config] Failed to resolve agent '${agentType}':`, e);
     }
@@ -547,18 +546,14 @@ export function loadConfig(
   const fileConfig = loadConfigFile(configPath);
 
   if (fileConfig) {
-    console.error(`[CONFIG DEBUG] Loaded config file successfully. Agents: ${Object.keys(fileConfig.agents).join(', ')}`);
     const result = createConfigFromFile(fileConfig, workingDir);
     for (const [agentType, agent] of Object.entries(result.agents)) {
-      console.error(`[CONFIG DEBUG] Agent "${agentType}": maxToolCalls=${agent.budget.maxToolCalls}, maxIterations=${agent.budget.maxIterations}`);
     }
     return result;
   }
 
-  console.error('[CONFIG DEBUG] No config file found, using environment-only mode with HARDCODED DEFAULTS');
   const result = createConfigFromEnv(workingDir);
   for (const [agentType, agent] of Object.entries(result.agents)) {
-    console.error(`[CONFIG DEBUG] Agent "${agentType}" (DEFAULT): maxToolCalls=${agent.budget.maxToolCalls}, maxIterations=${agent.budget.maxIterations}`);
   }
   return result;
 }
