@@ -14,18 +14,18 @@ import { v4 as uuidv4 } from 'uuid';
  * budgets per step, but these are sensible defaults for most work.
  */
 export interface WorkBounds {
-  /** Max tool calls per step (default: 15) */
+  /** Max tool calls per step (default: 150) */
   maxToolCalls: number;
   /** Max duration in ms (default: 120000 = 2 minutes) */
   maxDurationMs: number;
-  /** Max LLM calls per step (default: 8) */
+  /** Max LLM calls per step (default: 20) */
   maxLlmCalls: number;
 }
 
 export const DEFAULT_WORK_BOUNDS: WorkBounds = {
-  maxToolCalls: 15,
+  maxToolCalls: 150,
   maxDurationMs: 120_000,
-  maxLlmCalls: 8,
+  maxLlmCalls: 20,
 };
 
 /**

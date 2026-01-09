@@ -7,6 +7,7 @@ import { resolve } from 'path';
 import type { ToolResult } from '../../types/tools.js';
 import { successResult, errorResult } from '../../types/tools.js';
 import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
+import { canUseRipgrep, runRipgrepLines } from './ripgrep.js';
 
 /** Default ignore patterns for common non-source directories */
 const DEFAULT_IGNORE = [
@@ -34,6 +35,54 @@ const DEFAULT_IGNORE = [
   '**/*.log',
 ];
 
+const RIPGREP_IGNORE_ARGS = DEFAULT_IGNORE.flatMap((pattern) => [
+  '--glob',
+  `!${pattern}`,
+]);
+
+function shouldUseRipgrep(pattern: string): boolean {
+  if (pattern.startsWith('!')) return false;
+  if (pattern.startsWith('/')) return false;
+  if (pattern.endsWith('/')) return false;
+  if (pattern.includes('{') || pattern.includes('}')) return false;
+  const lastSegment = pattern.split('/').pop() ?? '';
+  if (!lastSegment || lastSegment === '.' || lastSegment === '..') return false;
+  return lastSegment.includes('.');
+}
+
+async function tryRipgrepGlob(
+  pattern: string,
+  resolvedCwd: string,
+  includeHidden: boolean,
+  maxDepth: number
+): Promise<string[] | null> {
+  if (!shouldUseRipgrep(pattern)) return null;
+  if (!(await canUseRipgrep())) return null;
+
+  const args = [
+    '--files',
+    '--color',
+    'never',
+    '--no-ignore',
+    '--max-depth',
+    String(maxDepth),
+    ...(includeHidden ? ['--hidden'] : []),
+    ...RIPGREP_IGNORE_ARGS,
+    '--glob',
+    pattern,
+  ];
+
+  try {
+    const rgResult = await runRipgrepLines(args, { cwd: resolvedCwd });
+    if (rgResult.exitCode === 2) {
+      return null;
+    }
+    return rgResult.lines;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Find files matching a glob pattern using fast-glob.
  */
@@ -51,7 +100,13 @@ export async function executeGlob(
   const resolvedCwd = resolve(cwd);
 
   try {
-    const matches = await fg(pattern, {
+    const rgMatches = await tryRipgrepGlob(
+      pattern,
+      resolvedCwd,
+      includeHidden,
+      maxDepth
+    );
+    const matches = rgMatches ?? (await fg(pattern, {
       cwd: resolvedCwd,
       dot: includeHidden,
       onlyFiles: false,
@@ -60,14 +115,14 @@ export async function executeGlob(
       suppressErrors: true,
       deep: maxDepth,
       ignore: DEFAULT_IGNORE,
-    });
+    }));
 
     const durationMs = Date.now() - startTime;
 
     if (matches.length === 0) {
       return successResult(
         'Glob',
-        `No files found matching pattern: ${pattern}`,
+        `No files found matching pattern: ${pattern} (try ../pattern or ../../pattern for sibling directories)`,
         durationMs
       );
     }

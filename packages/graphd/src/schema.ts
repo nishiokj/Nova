@@ -14,10 +14,11 @@
  * v1: Initial schema (files, symbols, module_edges, exports, run_artifacts)
  * v2: Added session management tables (sessions, conversation_messages, context_snapshots)
  * v3: Added session_events table for real-time event persistence
+ * v4: Added SIAS kernel persistence tables
  *
  * MUST match Python GRAPH_D_SCHEMA_VERSION
  */
-export const GRAPHD_SCHEMA_VERSION = 'v3';
+export const GRAPHD_SCHEMA_VERSION = 'v4';
 
 /**
  * GraphD version string.
@@ -146,6 +147,114 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_key);
 CREATE INDEX IF NOT EXISTS idx_events_session_request ON session_events(session_key, request_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON session_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON session_events(timestamp DESC);
+
+-- SIAS tables (v4)
+CREATE TABLE IF NOT EXISTS sias_sessions (
+    session_id TEXT PRIMARY KEY,
+    started_at REAL NOT NULL,
+    last_checkpoint_at REAL NOT NULL,
+    iteration_count INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sias_checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    iteration INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    payload_json TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sias_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sias_patches (
+    patch_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    iteration INTEGER NOT NULL,
+    timestamp REAL NOT NULL,
+    objective TEXT,
+    reasoning TEXT,
+    files_changed_json TEXT,
+    diff_summary TEXT,
+    status TEXT NOT NULL,
+    rollback_reason TEXT,
+    benchmark_before_json TEXT,
+    benchmark_after_json TEXT,
+    test_summary_json TEXT,
+    FOREIGN KEY (session_id) REFERENCES sias_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sias_decisions (
+    decision_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    iteration INTEGER NOT NULL,
+    agent TEXT NOT NULL,
+    decision_type TEXT NOT NULL,
+    reasoning TEXT,
+    outcome TEXT,
+    related_decisions_json TEXT,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sias_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sias_principal_context (
+    session_id TEXT PRIMARY KEY,
+    patch_summary TEXT,
+    current_focus TEXT,
+    learned_constraints_json TEXT,
+    horizon_objectives_json TEXT,
+    last_updated REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sias_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sias_health_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    captured_at REAL NOT NULL,
+    metrics_json TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sias_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sias_benchmark_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    completed_at REAL NOT NULL,
+    score REAL NOT NULL,
+    result_json TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sias_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sias_worktrees (
+    version TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    promoted_at REAL,
+    archived_at REAL,
+    iterations_run INTEGER,
+    benchmark_score REAL,
+    failure_count INTEGER,
+    failure_reason TEXT,
+    failure_iteration INTEGER,
+    git_commit TEXT,
+    patches_included_json TEXT,
+    benchmark_scores_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sias_decision_embeddings (
+    decision_id TEXT PRIMARY KEY,
+    embedding_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sias_checkpoints_session ON sias_checkpoints(session_id);
+CREATE INDEX IF NOT EXISTS idx_sias_patches_session ON sias_patches(session_id);
+CREATE INDEX IF NOT EXISTS idx_sias_decisions_session ON sias_decisions(session_id);
+CREATE INDEX IF NOT EXISTS idx_sias_health_session ON sias_health_snapshots(session_id);
+CREATE INDEX IF NOT EXISTS idx_sias_bench_session ON sias_benchmark_runs(session_id);
 `;
 
 /**
@@ -175,6 +284,15 @@ export const EXPORTABLE_TABLES = new Set([
   'sessions',
   'conversation_messages',
   'session_events',
+  'sias_sessions',
+  'sias_checkpoints',
+  'sias_patches',
+  'sias_decisions',
+  'sias_principal_context',
+  'sias_health_snapshots',
+  'sias_benchmark_runs',
+  'sias_worktrees',
+  'sias_decision_embeddings',
 ]);
 
 /**

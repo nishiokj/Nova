@@ -246,7 +246,17 @@ export class DAGExecutor {
       runtime.llm
     );
 
-    return agent.run({ context, workItem });
+    // Override work item bounds with agent's configured budget
+    const workItemWithBudget: WorkItem = {
+      ...workItem,
+      bounds: {
+        maxToolCalls: runtime.config.budget.maxToolCalls,
+        maxDurationMs: runtime.config.budget.maxDurationMs,
+        maxLlmCalls: runtime.config.budget.maxIterations,
+      },
+    };
+
+    return agent.run({ context, workItem: workItemWithBudget });
   }
 
   private getReady(): WorkItemState[] {

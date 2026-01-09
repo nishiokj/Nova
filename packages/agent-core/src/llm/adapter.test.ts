@@ -274,7 +274,7 @@ describe('OpenAIAdapter', () => {
             {
               type: 'message',
               content: [
-                { type: 'output_json', json: { action: 'final', response: 'ok' } },
+                { type: 'output_json', json: { action: 'done', response: 'ok', goalStateReached: true, userPrompt: null } },
               ],
             },
           ],
@@ -286,7 +286,7 @@ describe('OpenAIAdapter', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      expect(response.content).toBe('{"action":"final","response":"ok"}');
+      expect(response.content).toBe('{"action":"done","response":"ok","goalStateReached":true,"userPrompt":null}');
     });
   });
 
@@ -449,7 +449,7 @@ describe('OpenAIAdapter', () => {
         return new Response(JSON.stringify({
           id: 'resp_123',
           status: 'completed',
-          output_text: '{"action":"final","response":"ok","user_prompt":null}',
+          output_text: '{"action":"done","response":"ok","goalStateReached":true,"userPrompt":null}',
           usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
         }), { status: 200 });
       });

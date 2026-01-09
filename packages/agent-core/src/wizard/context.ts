@@ -36,9 +36,11 @@
   ${behavioralRules}${constraintsInfo ? `\n${constraintsInfo}` : ''}
 
   IMPORTANT RESPONSE ACTIONS:
-  - Set action to "final" when the objective is complete and provide your response
-  - Set action to "need_context" when you need user input and include user_prompt details
+  - Set action to "done" when the objective is complete and provide your response
+  - Set action to "need_user_input" when you need user input and include userPrompt details
   - Set action to "continue" when you need another iteration and explain next steps
+  - Set goalStateReached: true only when the objective is complete
+  - Do not repeat the same tool call with identical arguments after you already received its output
 
   Always be concise and focused on the objective.`;
   }

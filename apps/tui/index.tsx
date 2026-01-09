@@ -113,6 +113,8 @@ function useTerminalSize() {
     columns: stdout?.columns ?? 80,
     rows: stdout?.rows ?? 24,
   });
+  // Force re-render counter - incrementing this triggers a full component tree re-render
+  const [, forceUpdate] = useState(0);
 
   useEffect(() => {
     if (!stdout) {
@@ -120,7 +122,18 @@ function useTerminalSize() {
     }
 
     const handler = () => {
+      // Clear screen and reset cursor to force Ink to repaint everything
+      // \x1b[2J = clear entire screen
+      // \x1b[H = move cursor to home (1,1)
+      // \x1b[3J = clear scrollback buffer (helps with some terminals)
+      stdout.write("\x1b[2J\x1b[H\x1b[3J");
+
+      // Update size
       setSize({ columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+
+      // Force a full re-render by updating a counter
+      // This helps Ink recalculate its entire virtual buffer
+      forceUpdate((n) => n + 1);
     };
 
     stdout.on("resize", handler);
@@ -169,6 +182,18 @@ function App({ options }: { options: AppOptions }) {
   useEffect(() => {
     widthRef.current = width;
   }, [width]);
+
+  // Invalidate history cache on resize to force re-wrapping text
+  const prevSizeRef = useRef({ columns: size.columns, rows: size.rows });
+  useEffect(() => {
+    if (
+      prevSizeRef.current.columns !== size.columns ||
+      prevSizeRef.current.rows !== size.rows
+    ) {
+      store.invalidateHistoryCache();
+      prevSizeRef.current = { columns: size.columns, rows: size.rows };
+    }
+  }, [size.columns, size.rows, store]);
 
   const isBusy = snapshot.state !== "idle" && snapshot.state !== "error";
 
@@ -369,7 +394,7 @@ function App({ options }: { options: AppOptions }) {
       return;
     }
     const message = data.tool_name ? `${data.tool_name}: ${data.message}` : data.message;
-    store.setProgress(message);
+    store.setProgress(message, data.level, data.kind);
   };
 
   const handleStream = (data?: StreamData) => {
@@ -1233,18 +1258,24 @@ function App({ options }: { options: AppOptions }) {
     ? STATUS_SPINNER_FRAMES[statusTick % STATUS_SPINNER_FRAMES.length]
     : "";
   const statusText = statusSpinner ? `${statusSpinner} ${statusLine}` : statusLine;
+  // Use progress level for coloring when available
+  const statusColor = snapshot.progressMessage
+    ? levelColor(snapshot.progressLevel)
+    : undefined;
   const scrollInfo = snapshot.scrollOffset > 0
     ? `Scroll: ${snapshot.scrollOffset} lines up`
     : "At bottom";
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
 
-  const headerLines = [
-    `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}`,
-    `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}`,
-    `Status: ${statusText}`,
-    `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`,
-    "-".repeat(width),
+  // Header lines with optional color for status
+  const headerConfig: Array<{ text: string; color?: string }> = [
+    { text: `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}` },
+    { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}` },
+    { text: `Status: ${statusText}`, color: statusColor },
+    { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}` },
+    { text: "-".repeat(width) },
   ];
+  const headerLines = headerConfig.map((h) => h.text);
 
   const inputLayout = computeInputLayout(snapshot.inputText.split(""), snapshot.cursor, width - 2, prompt);
   const inputVisibleLines = Math.min(DEFAULT_MAX_INPUT_LINES, inputLayout.lines.length);
@@ -1356,8 +1387,8 @@ function App({ options }: { options: AppOptions }) {
 
   return (
     <Box flexDirection="column" width={width}>
-      {headerLines.map((line, index) => (
-        <Text key={`header-${index}`}>{line.slice(0, width)}</Text>
+      {headerConfig.map((item, index) => (
+        <Text key={`header-${index}`} color={item.color}>{item.text.slice(0, width)}</Text>
       ))}
       <Box flexDirection="column" height={historyHeight}>
         {visibleHistoryLines.map((line, index) => (
@@ -1408,6 +1439,22 @@ function roleColor(role?: Role): string | undefined {
       return "yellow";
     case "status":
       return "magenta";
+    default:
+      return undefined;
+  }
+}
+
+/** Maps event level to display color */
+function levelColor(level?: string | null): string | undefined {
+  switch (level) {
+    case "success":
+      return "green";
+    case "error":
+      return "red";
+    case "warning":
+      return "yellow";
+    case "info":
+      return "cyan";
     default:
       return undefined;
   }

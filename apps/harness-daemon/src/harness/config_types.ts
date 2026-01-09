@@ -213,6 +213,7 @@ export interface FullHarnessConfig {
   /** Tool configuration */
   tools: {
     workingDir: string;
+    repoRoot: string;
     bashTimeoutMs: number;
     maxOutputLength: number;
   };

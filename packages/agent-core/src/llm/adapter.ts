@@ -809,7 +809,7 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (params.tools && params.tools.length > 0) {
       body.tools = this.formatOpenAITools(params.tools);
-      body.tool_choice = isReasoningModel(resolved.model) ? 'required' : 'auto';
+      body.tool_choice = 'auto';
     }
 
     if (params.responseSchema) {
@@ -1094,7 +1094,7 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (params.tools && params.tools.length > 0) {
       body.tools = this.formatOpenAITools(params.tools);
-      body.tool_choice = isReasoningModel(resolved.model) ? 'required' : 'auto';
+      body.tool_choice = 'auto';
     }
 
     if (params.responseSchema) {

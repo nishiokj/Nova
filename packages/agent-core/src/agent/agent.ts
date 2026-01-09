@@ -7,7 +7,7 @@
 
 import type { LLMAdapter, Message, LLMRequestConfig } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import type { ToolDefinition } from '../types/tools.js';
+import type { ToolDefinition, ToolResult } from '../types/tools.js';
 import type { ContextWindow } from '../types/context.js';
 import type { WorkItem } from '../wizard/work-item.js';
 import type {
@@ -26,24 +26,9 @@ import { createWorkItem } from '../wizard/work-item.js';
 import { errorResult, successResult } from '../types/tools.js';
 import { coerceStructuredOutput } from '../shared/structured_output.js';
 
-/**
- * Action markers in LLM response.
- * Supports both old (final/need_context/continue) and new (done/need_user_input/continue) schemas.
- */
-enum AgentAction {
-  TOOL = 'tool',
-  FINAL = 'final',           // Old: task complete
-  DONE = 'done',             // New: goal achieved
-  NEED_CONTEXT = 'need_context',    // Old: needs user input
-  NEED_USER_INPUT = 'need_user_input', // New: needs user input
-  CONTINUE = 'continue',
-}
+type AgentAction = 'done' | 'need_user_input' | 'continue';
 
-const ACTION_MARKERS = {
-  FINAL: /\[FINAL\]/i,
-  NEED_CONTEXT: /\[NEED_CONTEXT\]/i,
-  CONTINUE: /\[CONTINUE\]/i,
-};
+const MAX_IDENTICAL_TOOL_CALLS = 2;
 
 const REFUSAL_PATTERNS = [
   /cannot be completed/i,
@@ -136,12 +121,18 @@ export class Agent {
     metrics: AgentMetrics,
     startTime: number
   ): Promise<void> {
+    console.error(`[AGENT DEBUG] executeLoop started: agent=${this.config.type}, workId=${workItem.workId}, bounds.maxToolCalls=${workItem.bounds.maxToolCalls}, bounds.maxLlmCalls=${workItem.bounds.maxLlmCalls}, config.budget.maxIterations=${this.config.budget.maxIterations}, config.budget.maxToolCalls=${this.config.budget.maxToolCalls}`);
     const maxIterations = Math.min(
       this.config.budget.maxIterations,
       workItem.bounds.maxLlmCalls
     );
 
     const localReadFiles = new Set(context.getReadFilesArray());
+    const toolRepeatState = {
+      lastKey: '',
+      lastOutput: '',
+      repeats: 0,
+    };
 
     // Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
@@ -153,13 +144,14 @@ export class Agent {
 
       if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         result.terminationReason = 'bounds:tool_calls';
-        result.error = 'Tool call limit reached';
+        // Don't set error - gracefully complete with what we have
+        console.error(`[AGENT DEBUG] Tool call limit hit: made=${metrics.toolCallsMade}, max=${workItem.bounds.maxToolCalls}, agent=${this.config.type}, workId=${workItem.workId}`);
         break;
       }
 
       if (elapsedMs >= workItem.bounds.maxDurationMs) {
         result.terminationReason = 'bounds:duration';
-        result.error = 'Duration limit reached';
+        // Don't set error - gracefully complete with what we have
         break;
       }
 
@@ -209,13 +201,9 @@ export class Agent {
 
       this.addAssistantMessage(context, content, toolCalls);
 
-      let action =
-        this.extractStructuredAction(structuredOutput) ?? this.extractAction(content);
+      const action = this.extractStructuredAction(structuredOutput);
       const responseText = this.extractStructuredResponse(structuredOutput);
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
-      if (!action && responseText && responseText.trim().length > 0) {
-        action = AgentAction.FINAL;
-      }
 
       if (toolCalls.length > 0) {
         await this.processToolCalls(
@@ -225,28 +213,33 @@ export class Agent {
           result,
           metrics,
           workItem,
-          workItem.workId
+          workItem.workId,
+          toolRepeatState
         );
 
-        if (result.needsUserInput) {
+        if (result.needsUserInput || result.terminationReason) {
           result.filesRead = Array.from(localReadFiles);
           return;
         }
 
         // Handle completion after tool calls
-        if (action === AgentAction.DONE) {
+        if (action === 'done') {
           const goalReached = structuredOutput?.goalStateReached === true;
-          if (goalReached) {
-            result.success = true;
-            result.response = responseText ?? content;
-            result.terminationReason = 'goal_state_reached';
-            result.filesRead = Array.from(localReadFiles);
-            return;
+          if (!goalReached) {
+            result.terminationReason = 'invalid_action';
+            result.error = 'Action "done" requires goalStateReached: true.';
+            break;
           }
-        }
-
-        if (action === AgentAction.FINAL) {
-          this.handleFinalAction(content, result, responseText);
+          const finalText = responseText ?? content;
+          if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
+            result.isRefusal = true;
+            result.error = 'LLM refused to complete the task';
+            result.terminationReason = 'refusal';
+          } else {
+            result.success = true;
+            result.response = finalText;
+            result.terminationReason = 'goal_state_reached';
+          }
           result.filesRead = Array.from(localReadFiles);
           return;
         }
@@ -254,59 +247,51 @@ export class Agent {
         continue;
       }
 
-      // Handle DONE action (new schema - goal achieved)
-      if (action === AgentAction.DONE) {
+      if (action === 'done') {
         const goalReached = structuredOutput?.goalStateReached === true;
-        if (goalReached) {
+        if (!goalReached) {
+          result.terminationReason = 'invalid_action';
+          result.error = 'Action "done" requires goalStateReached: true.';
+          break;
+        }
+        const finalText = responseText ?? content;
+        if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
+          result.isRefusal = true;
+          result.error = 'LLM refused to complete the task';
+          result.terminationReason = 'refusal';
+        } else {
           result.success = true;
-          result.response = responseText ?? content;
+          result.response = finalText;
           result.terminationReason = 'goal_state_reached';
-          result.filesRead = Array.from(localReadFiles);
-          return;
         }
-        // goalStateReached not true - treat as continue
-        continue;
-      }
-
-
-      // Handle NEED_USER_INPUT (new schema) or NEED_CONTEXT (old schema)
-      if (action === AgentAction.NEED_USER_INPUT || action === AgentAction.NEED_CONTEXT) {
-        const prompt = structuredPrompt ?? this.extractUserPrompt(content);
-        if (prompt) {
-          result.needsUserInput = true;
-          result.userPrompt = prompt;
-          result.terminationReason = 'user_input_required';
-          result.filesRead = Array.from(localReadFiles);
-          return;
-        }
-        continue;
-      }
-
-      if (action === AgentAction.CONTINUE) {
-        continue;
-      }
-
-      const implicitCandidate = responseText ?? content;
-      if (this.config.allowImplicitFinals && implicitCandidate.length > 100) {
-        result.success = true;
-        result.response = implicitCandidate;
-        result.terminationReason = 'implicit_final';
         result.filesRead = Array.from(localReadFiles);
         return;
       }
 
-      if (implicitCandidate.trim().length > 0) {
-        result.response = implicitCandidate;
+      if (action === 'need_user_input') {
+        // SIAS mode: don't stop for user input, continue execution
+        // Log the request but keep going with what we have
+        console.error(`[AGENT DEBUG] User input requested but continuing (SIAS mode): ${structuredPrompt?.question ?? 'no question'}`);
+        continue;
+      }
+
+      if (action === 'continue') {
+        continue;
+      }
+
+      const responseCandidate = responseText ?? content;
+      if (responseCandidate.trim().length > 0) {
+        result.response = responseCandidate;
       }
       result.terminationReason = 'no_action';
-      const preview = implicitCandidate.trim().slice(0, 1000);
+      const preview = responseCandidate.trim().slice(0, 1000);
       result.error = preview
         ? `LLM response has no tools and no action directive. Response preview: ${preview}`
         : 'LLM response has no tools and no action directive';
       break;
     }
 
-    // Always capture all assistant responses even without [FINAL] marker
+    // Always capture all assistant responses even without a terminal action.
     if (!result.response) {
       const messages = context.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
       const assistantContents = messages
@@ -317,15 +302,24 @@ export class Agent {
       }
     }
 
-    // Handle iterations exhausted - treat as partial success if we have content
+    // Handle exhausted resources - treat as partial success if we have content
     if (!result.terminationReason) {
       result.terminationReason = 'iterations_exhausted';
+    }
+
+    // For any bounds-related termination, mark as partial success if we have content
+    const isBoundsTermination =
+      result.terminationReason === 'iterations_exhausted' ||
+      result.terminationReason === 'bounds:tool_calls' ||
+      result.terminationReason === 'bounds:duration';
+
+    if (isBoundsTermination) {
       if (result.response) {
         // We have content, mark as partial success rather than failure
         result.success = true;
         result.isIncomplete = true;
       } else {
-        result.error = 'Maximum iterations reached with no output';
+        result.error = `${result.terminationReason}: no output captured`;
       }
     }
 
@@ -374,6 +368,18 @@ export class Agent {
 
     const contextItems = context.getItemsForLLM();
 
+    // Collect all callIds that have outputs - we only want to send function_calls
+    // that have matching outputs to avoid OpenAI's "No tool output found" error.
+    // This can happen when a sub-agent runs while the parent's function_call
+    // is in context but hasn't received its output yet.
+    const callIdsWithOutputs = new Set<string>();
+    for (const item of contextItems) {
+      if (item.type === 'function_call_output') {
+        const callId = (item as any).call_id;
+        if (callId) callIdsWithOutputs.add(callId);
+      }
+    }
+
     const hasUserInput = contextItems.some(
       (item) => item.type === 'message' && (item as any).role === 'user'
     );
@@ -392,7 +398,11 @@ export class Agent {
           content: (item as any).content,
         });
       } else if (item.type === 'function_call') {
-        messages.push(item);
+        // Only include function_calls that have matching outputs
+        const callId = (item as any).call_id;
+        if (callId && callIdsWithOutputs.has(callId)) {
+          messages.push(item);
+        }
       } else if (item.type === 'function_call_output') {
         messages.push(item);
       }
@@ -437,14 +447,126 @@ export class Agent {
     result: AgentResult,
     metrics: AgentMetrics,
     workItem: WorkItem,
-    workItemId?: string
+    workItemId?: string,
+    toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
 
+    // Build a map from lowercase names to canonical names for case-insensitive lookup
+    const canonicalNames = new Map<string, string>();
+    for (const toolName of this.config.tools) {
+      canonicalNames.set(toolName.toLowerCase(), toolName);
+    }
+    const pendingParallel: Array<{
+      call: { id: string; name: string; arguments: Record<string, unknown> };
+      promise: Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
+    }> = [];
+
+    const handleToolResult = (
+      call: { id: string; name: string; arguments: Record<string, unknown> },
+      toolResult: ToolResult,
+      toolDurationMs: number,
+      isAgentTool: boolean
+    ): boolean => {
+      if (toolResult.isSuccess) {
+        metrics.toolCallsSucceeded++;
+
+        const nameLower = call.name.toLowerCase();
+        if (nameLower === 'read' && call.arguments.path) {
+          localReadFiles.add(String(call.arguments.path));
+        }
+
+        if ((nameLower === 'write' || nameLower === 'edit') && call.arguments.path) {
+          result.invalidatedPaths.push(String(call.arguments.path));
+          localReadFiles.delete(String(call.arguments.path));
+        }
+      } else {
+        metrics.toolCallsFailed++;
+        if (toolResult.error) {
+          result.toolErrors.push(`${call.name}: ${toolResult.error}`);
+        }
+      }
+
+      this.emit(createEvent('tool_call', {
+        toolName: call.name,
+        arguments: call.arguments,
+        phase: 'completed',
+        result: toolResult.output?.slice(0, 10000),
+        success: toolResult.isSuccess,
+        durationMs: toolDurationMs,
+      }, workItemId));
+
+      context.appendItem({
+        type: 'function_call_output',
+        callId: call.id,
+        output: toolResult.output ?? '',
+        isError: !toolResult.isSuccess,
+        durationMs: toolDurationMs,
+        timestamp: Date.now(),
+      });
+
+      if (toolRepeatState) {
+        const argsKey = JSON.stringify(call.arguments ?? {});
+        const outputKey = toolResult.isSuccess
+          ? (toolResult.output ?? '')
+          : `error:${toolResult.error ?? ''}`;
+        const signature = `${call.name}:${argsKey}`;
+        const outputSample = outputKey.slice(0, 2000);
+
+        if (signature === toolRepeatState.lastKey && outputSample === toolRepeatState.lastOutput) {
+          toolRepeatState.repeats += 1;
+        } else {
+          toolRepeatState.lastKey = signature;
+          toolRepeatState.lastOutput = outputSample;
+          toolRepeatState.repeats = 0;
+        }
+
+        if (toolRepeatState.repeats >= MAX_IDENTICAL_TOOL_CALLS) {
+          result.terminationReason = 'stagnation:tool_repeat';
+          result.error = `Repeated identical tool call without progress: ${call.name}`;
+          return true;
+        }
+      }
+
+      // SIAS mode: don't stop for ask_user tool, just log and continue
+      if (call.name === 'ask_user' && toolResult.isSuccess) {
+        console.error(`[AGENT DEBUG] ask_user tool called but continuing (SIAS mode)`);
+        // Don't stop execution - just continue with the tool result in context
+      }
+
+      // SIAS mode: don't propagate sub-agent user input requests
+      if (isAgentTool && result.needsUserInput) {
+        console.error(`[AGENT DEBUG] Sub-agent requested user input but continuing (SIAS mode)`);
+        result.needsUserInput = false;
+        result.userPrompt = undefined;
+      }
+
+      return false;
+    };
+
+    const flushParallel = async (): Promise<boolean> => {
+      if (pendingParallel.length === 0) return false;
+      const batch = pendingParallel.splice(0, pendingParallel.length);
+      const results = await Promise.all(batch.map((item) => item.promise));
+      for (let i = 0; i < batch.length; i++) {
+        const { call } = batch[i];
+        const { toolResult, toolDurationMs } = results[i];
+        const shouldStop = handleToolResult(call, toolResult, toolDurationMs, false);
+        if (shouldStop) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     for (const call of toolCalls) {
       metrics.toolCallsMade++;
+      const nameLower = call.name.toLowerCase();
 
-      if (this.config.tools.length === 0 || !allowedTools.has(call.name.toLowerCase())) {
+      if (this.config.tools.length === 0 || !allowedTools.has(nameLower)) {
+        const shouldStop = await flushParallel();
+        if (shouldStop) return;
+
         const errorMsg = `Tool "${call.name}" is not allowed for this agent`;
         result.toolErrors.push(errorMsg);
         metrics.toolCallsFailed++;
@@ -458,8 +580,41 @@ export class Agent {
         continue;
       }
 
+      // Normalize tool name to canonical form for case-insensitive lookup
+      const canonicalName = canonicalNames.get(nameLower) ?? call.name;
+
+      const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
+      const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
+
+      if (isParallelSafe) {
+        this.emit(createEvent('tool_call', {
+          toolName: canonicalName,
+          arguments: call.arguments,
+          phase: 'starting',
+        }, workItemId));
+
+        const toolStartTime = Date.now();
+        const promise = (async () => {
+          try {
+            const toolResult = await this.toolRegistry.execute(canonicalName, call.arguments);
+            return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const toolResult = errorResult(canonicalName, message, 0);
+            toolResult.output = `Error: ${message}`;
+            return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+          }
+        })();
+
+        pendingParallel.push({ call, promise });
+        continue;
+      }
+
+      const shouldStop = await flushParallel();
+      if (shouldStop) return;
+
       this.emit(createEvent('tool_call', {
-        toolName: call.name,
+        toolName: canonicalName,
         arguments: call.arguments,
         phase: 'starting',
       }, workItemId));
@@ -467,71 +622,22 @@ export class Agent {
       const toolStartTime = Date.now();
 
       try {
-        const isAgentTool = this.agentRegistry?.has(call.name) ?? false;
+        // Use canonical name for execution, but pass original call for agent tools (which need call.id)
+        const normalizedCall = { ...call, name: canonicalName };
         const toolResult = isAgentTool
-          ? await this.executeAgentToolCall(call, workItem, context, localReadFiles, result)
-          : await this.toolRegistry.execute(call.name, call.arguments);
+          ? await this.executeAgentToolCall(normalizedCall, workItem, context, localReadFiles, result)
+          : await this.toolRegistry.execute(canonicalName, call.arguments);
         const toolDurationMs = Date.now() - toolStartTime;
 
-        if (toolResult.isSuccess) {
-          metrics.toolCallsSucceeded++;
-
-          const nameLower = call.name.toLowerCase();
-          if (nameLower === 'read' && call.arguments.path) {
-            localReadFiles.add(String(call.arguments.path));
-          }
-
-          if ((nameLower === 'write' || nameLower === 'edit') && call.arguments.path) {
-            result.invalidatedPaths.push(String(call.arguments.path));
-            localReadFiles.delete(String(call.arguments.path));
-          }
-        } else {
-          metrics.toolCallsFailed++;
-          if (toolResult.error) {
-            result.toolErrors.push(`${call.name}: ${toolResult.error}`);
-          }
-        }
-
-        this.emit(createEvent('tool_call', {
-          toolName: call.name,
-          arguments: call.arguments,
-          phase: 'completed',
-          result: toolResult.output?.slice(0, 10000),
-          success: toolResult.isSuccess,
-          durationMs: toolDurationMs,
-        }, workItemId));
-
-        context.appendItem({
-          type: 'function_call_output',
-          callId: call.id,
-          output: toolResult.output ?? '',
-          isError: !toolResult.isSuccess,
-          durationMs: toolDurationMs,
-          timestamp: Date.now(),
-        });
-
-        if (call.name === 'ask_user' && toolResult.isSuccess) {
-          try {
-            const parsed = JSON.parse(toolResult.output ?? '{}');
-            result.needsUserInput = true;
-            result.userPrompt = parsed;
-            result.terminationReason = 'user_input_required';
-            return;
-          } catch {
-            // Not a user prompt
-          }
-        }
-
-        if (isAgentTool && result.needsUserInput) {
-          return;
-        }
+        const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
+        if (stop) return;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         metrics.toolCallsFailed++;
-        result.toolErrors.push(`${call.name}: ${message}`);
+        result.toolErrors.push(`${canonicalName}: ${message}`);
 
         this.emit(createEvent('tool_call', {
-          toolName: call.name,
+          toolName: canonicalName,
           arguments: call.arguments,
           phase: 'completed',
           result: `Error: ${message}`,
@@ -548,6 +654,9 @@ export class Agent {
         });
       }
     }
+
+    const shouldStop = await flushParallel();
+    if (shouldStop) return;
   }
 
   private async executeAgentToolCall(
@@ -604,6 +713,12 @@ export class Agent {
       targetPaths: targetPaths && targetPaths.length > 0 ? targetPaths : undefined,
       params,
       agent: agentConfig.type,
+      // Use agent's configured budget as work item bounds
+      bounds: {
+        maxToolCalls: agentConfig.budget.maxToolCalls,
+        maxDurationMs: agentConfig.budget.maxDurationMs,
+        maxLlmCalls: agentConfig.budget.maxIterations,
+      },
     });
 
     const agent = new Agent(
@@ -640,10 +755,10 @@ export class Agent {
       metrics: subResult.metrics,
     };
 
+    // SIAS mode: don't propagate sub-agent user input requests
     if (subResult.needsUserInput && subResult.userPrompt) {
-      result.needsUserInput = true;
-      result.userPrompt = subResult.userPrompt;
-      result.terminationReason = 'user_input_required';
+      console.error(`[AGENT DEBUG] Sub-agent ${agentConfig.type} requested user input but ignoring (SIAS mode): ${subResult.userPrompt.question}`);
+      // Don't propagate - continue with what we have
     }
 
     if (subResult.success || subResult.needsUserInput) {
@@ -707,7 +822,6 @@ export class Agent {
 
   /**
    * Extract action from structured output.
-   * Supports both old (final/need_context/continue) and new (done/need_user_input/continue) schemas.
    */
   private extractStructuredAction(
     structuredOutput: Record<string, unknown> | null
@@ -716,15 +830,9 @@ export class Agent {
     const raw = structuredOutput.action;
     if (typeof raw !== 'string') return null;
     const normalized = raw.trim().toLowerCase();
-    // New schema
-    if (normalized === 'goalStateReached') return AgentAction.DONE;
-    if (normalized === 'need_user_input') return AgentAction.NEED_USER_INPUT;
-    // Old schema (backwards compat during transition)
-    if (normalized === 'final') return AgentAction.FINAL;
-    if (normalized === 'need_context' || normalized === 'need context') {
-      return AgentAction.NEED_CONTEXT;
-    }
-    if (normalized === 'continue') return AgentAction.CONTINUE;
+    if (normalized === 'done') return 'done';
+    if (normalized === 'need_user_input') return 'need_user_input';
+    if (normalized === 'continue') return 'continue';
     return null;
   }
 
@@ -746,10 +854,7 @@ export class Agent {
     structuredOutput: Record<string, unknown> | null
   ): AgentResult['userPrompt'] | null {
     if (!structuredOutput) return null;
-    const raw =
-      structuredOutput.user_prompt ??
-      structuredOutput.userPrompt;
-    return this.parseUserPromptValue(raw);
+    return this.parseUserPromptValue(structuredOutput.userPrompt);
   }
 
   /**
@@ -799,50 +904,6 @@ export class Agent {
     };
   }
 
-  /**
-   * Extract action from content.
-   */
-  private extractAction(content: string): AgentAction | null {
-    if (ACTION_MARKERS.FINAL.test(content)) return AgentAction.FINAL;
-    if (ACTION_MARKERS.NEED_CONTEXT.test(content)) return AgentAction.NEED_CONTEXT;
-    if (ACTION_MARKERS.CONTINUE.test(content)) return AgentAction.CONTINUE;
-    return null;
-  }
-
-  /**
-   * Handle [FINAL] action.
-   */
-  private handleFinalAction(
-    content: string,
-    result: AgentResult,
-    responseText?: string
-  ): void {
-    const finalText = responseText ?? content.replace(/\[FINAL\]/gi, '').trim();
-    if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
-      result.isRefusal = true;
-      result.error = 'LLM refused to complete the task';
-      result.terminationReason = 'refusal';
-    } else {
-      result.success = true;
-      result.response = finalText;
-      result.terminationReason = 'final';
-    }
-  }
-
-  /**
-   * Extract user prompt from NEED_CONTEXT content.
-   */
-  private extractUserPrompt(content: string): AgentResult['userPrompt'] | null {
-    const match = content.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        return this.parseUserPromptValue(JSON.parse(match[0]));
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
 
   /**
    * Emit llm_call event.

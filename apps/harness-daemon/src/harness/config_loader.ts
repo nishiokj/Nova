@@ -64,6 +64,21 @@ function* walkParents(startDir: string): Iterable<string> {
   }
 }
 
+/**
+ * Resolve the repository root by walking up from startDir looking for .git.
+ * Falls back to startDir if no .git is found.
+ */
+export function resolveRepoRoot(startDir: string): string {
+  const resolved = resolve(startDir);
+  for (const dir of walkParents(resolved)) {
+    const gitPath = resolve(dir, '.git');
+    if (existsSync(gitPath)) {
+      return dir;
+    }
+  }
+  return resolved;
+}
+
 // ============================================
 // BEHAVIORAL RULES LOADING
 // ============================================
@@ -353,11 +368,14 @@ export function createConfigFromFile(
     throw new Error('No valid agent configs found in config file');
   }
 
+  const resolvedWorkingDir = resolve(workingDir ?? process.cwd());
+
   return {
     agents,
     defaultAgent: 'standard',
     tools: {
-      workingDir: resolve(workingDir ?? process.cwd()),
+      workingDir: resolvedWorkingDir,
+      repoRoot: resolveRepoRoot(resolvedWorkingDir),
       bashTimeoutMs: fileConfig.tools?.bash_timeout_ms ?? DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
       maxOutputLength: fileConfig.tools?.max_output_length ?? DEFAULT_TOOLS_CONFIG.max_output_length,
     },
@@ -481,11 +499,14 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
     },
   };
 
+  const resolvedWorkingDir = resolve(workingDir ?? process.cwd());
+
   return {
     agents,
     defaultAgent: 'standard',
     tools: {
-      workingDir: resolve(workingDir ?? process.cwd()),
+      workingDir: resolvedWorkingDir,
+      repoRoot: resolveRepoRoot(resolvedWorkingDir),
       bashTimeoutMs: DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
       maxOutputLength: DEFAULT_TOOLS_CONFIG.max_output_length,
     },
@@ -526,9 +547,18 @@ export function loadConfig(
   const fileConfig = loadConfigFile(configPath);
 
   if (fileConfig) {
-    return createConfigFromFile(fileConfig, workingDir);
+    console.error(`[CONFIG DEBUG] Loaded config file successfully. Agents: ${Object.keys(fileConfig.agents).join(', ')}`);
+    const result = createConfigFromFile(fileConfig, workingDir);
+    for (const [agentType, agent] of Object.entries(result.agents)) {
+      console.error(`[CONFIG DEBUG] Agent "${agentType}": maxToolCalls=${agent.budget.maxToolCalls}, maxIterations=${agent.budget.maxIterations}`);
+    }
+    return result;
   }
 
-  console.log('[config] No config file found, using environment-only mode');
-  return createConfigFromEnv(workingDir);
+  console.error('[CONFIG DEBUG] No config file found, using environment-only mode with HARDCODED DEFAULTS');
+  const result = createConfigFromEnv(workingDir);
+  for (const [agentType, agent] of Object.entries(result.agents)) {
+    console.error(`[CONFIG DEBUG] Agent "${agentType}" (DEFAULT): maxToolCalls=${agent.budget.maxToolCalls}, maxIterations=${agent.budget.maxIterations}`);
+  }
+  return result;
 }

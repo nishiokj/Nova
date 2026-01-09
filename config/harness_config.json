@@ -62,22 +62,22 @@
     "standard": {
       "llm": {
         "provider": "openai",
-        "model": "gpt-5-mini",
+        "model": "gpt-5.2",
         "max_tokens": 16000,
         "temperature": 0.7
       },
       "budget": {
         "max_iterations": 10,
-        "max_tool_calls": 15,
+        "max_tool_calls": 150,
         "max_duration_ms": 120000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "coding-agent", "explorer", "runtime_script"],
       "output_schema": "goal_driven"
     },
     "coding-agent": {
       "llm": {
         "provider": "openai",
-        "model": "gpt-5.2-codex",
+        "model": "gpt-5.1-codex",
         "max_tokens": 128000,
         "temperature": 0.7,
         "reasoning": { "effort": "high" }

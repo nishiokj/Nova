@@ -614,7 +614,6 @@ export class AgentHarness {
       systemPrompt,
       tools: agentConfig.tools,
       budget: agentConfig.budget,
-      allowImplicitFinals: false,
       outputSchema: agentConfig.outputSchema,
     };
 
@@ -638,11 +637,18 @@ export class AgentHarness {
       llmConfig
     );
 
+    console.error(`[HARNESS DEBUG] Creating workItem: agentType=${agentType}, budget.maxToolCalls=${agentConfig.budget.maxToolCalls}, budget.maxIterations=${agentConfig.budget.maxIterations}`);
     const workItem = createWorkItem({
       goal,
       objective: goal,
       agent: agentType,
+      bounds: {
+        maxToolCalls: agentConfig.budget.maxToolCalls,
+        maxDurationMs: agentConfig.budget.maxDurationMs,
+        maxLlmCalls: agentConfig.budget.maxIterations,
+      },
     });
+    console.error(`[HARNESS DEBUG] Created workItem: workId=${workItem.workId}, bounds.maxToolCalls=${workItem.bounds.maxToolCalls}`);
 
     emit(createEvent('workitem_started', {
       workId: workItem.workId,

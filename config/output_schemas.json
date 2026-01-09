@@ -68,10 +68,11 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["final", "need_context", "continue"]
+            "enum": ["done", "need_user_input", "continue"]
           },
           "response": { "type": ["string", "null"] },
-          "user_prompt": {
+          "goalStateReached": { "type": ["boolean", "null"] },
+          "userPrompt": {
             "anyOf": [
               {
                 "type": "object",
@@ -109,7 +110,7 @@
             ]
           }
         },
-        "required": ["action", "response", "user_prompt"]
+        "required": ["action", "response", "goalStateReached", "userPrompt"]
       }
     },
 
@@ -178,10 +179,11 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["final", "need_context", "continue"]
+            "enum": ["done", "need_user_input", "continue"]
           },
           "response": { "type": ["string", "null"] },
-          "user_prompt": {
+          "goalStateReached": { "type": ["boolean", "null"] },
+          "userPrompt": {
             "anyOf": [
               {
                 "type": "object",
@@ -238,7 +240,7 @@
           },
           "patterns": { "type": "array", "items": { "type": "string" } }
         },
-        "required": ["action", "response", "user_prompt", "packageManagers", "frameworks", "languages", "os", "artifacts", "patterns"]
+        "required": ["action", "response", "goalStateReached", "userPrompt", "packageManagers", "frameworks", "languages", "os", "artifacts", "patterns"]
       }
     },
 
@@ -251,10 +253,11 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["final", "need_context", "continue"]
+            "enum": ["done", "need_user_input", "continue"]
           },
           "response": { "type": ["string", "null"] },
-          "user_prompt": {
+          "goalStateReached": { "type": ["boolean", "null"] },
+          "userPrompt": {
             "anyOf": [
               {
                 "type": "object",
@@ -305,13 +308,13 @@
                 "dependencies": { "type": "array", "items": { "type": "string" } },
                 "toolHint": { "type": ["string", "null"] },
                 "targetPaths": { "type": ["array", "null"], "items": { "type": "string" } },
-                "params": { "type": ["object", "null"], "additionalProperties": false, "properties": {}, "required": [] }
+                "params": { "type": ["object", "null"] }
               },
               "required": ["id", "objective", "delta", "agent", "dependencies", "toolHint", "targetPaths", "params"]
             }
           }
         },
-        "required": ["action", "response", "user_prompt", "goal", "workItems"]
+        "required": ["action", "response", "goalStateReached", "userPrompt", "goal", "workItems"]
       }
     }
   }

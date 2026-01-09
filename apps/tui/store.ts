@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
@@ -19,6 +19,10 @@ export interface StoreSnapshot {
   state: TUIState;
   statusMessage: string;
   progressMessage: string;
+  /** Semantic level of current progress for coloring */
+  progressLevel: EventLevel | null;
+  /** Kind of current progress for categorization */
+  progressKind: EventKind | null;
   inputText: string;
   cursor: number;
   inputScrollOffset: number;
@@ -72,6 +76,8 @@ export class Store {
   private state: TUIState = "idle";
   private statusMessage = "Ready";
   private progressMessage = "";
+  private progressLevel: EventLevel | null = null;
+  private progressKind: EventKind | null = null;
   private history: MessageEntry[] = [];
   private streamingText = "";
   private streamingRequestId: string | null = null;
@@ -129,6 +135,8 @@ export class Store {
       state: this.state,
       statusMessage: this.statusMessage,
       progressMessage: this.progressMessage,
+      progressLevel: this.progressLevel,
+      progressKind: this.progressKind,
       inputText: this.inputBuffer.getText(),
       cursor: this.inputBuffer.getCursor(),
       inputScrollOffset: this.inputScrollOffset,
@@ -248,13 +256,17 @@ export class Store {
     this.emit();
   }
 
-  setProgress(message: string): void {
+  setProgress(message: string, level?: EventLevel, kind?: EventKind): void {
     this.progressMessage = message;
+    this.progressLevel = level ?? null;
+    this.progressKind = kind ?? null;
     this.emit();
   }
 
   clearProgress(): void {
     this.progressMessage = "";
+    this.progressLevel = null;
+    this.progressKind = null;
     this.emit();
   }
 
@@ -277,6 +289,16 @@ export class Store {
     this.historyCache = null;
     this.emit();
     return this.compact;
+  }
+
+  /**
+   * Invalidates the history cache, forcing a full re-wrap on next render.
+   * Call this on terminal resize to ensure text is re-wrapped for new width.
+   */
+  invalidateHistoryCache(): void {
+    this.historyCache = null;
+    this.historyVersion += 1;
+    this.emit();
   }
 
   setVoiceMode(enabled: boolean): void {
@@ -904,7 +926,7 @@ function wrapText(text: string, width: number): string[] {
   }
 
   const lines: string[] = [];
-  const safeWidth = Math.max(1, width);
+  const safeWidth = Math.max(10, width);
 
   const rawLines = text.split("\n");
   for (const rawLine of rawLines) {
@@ -913,11 +935,25 @@ function wrapText(text: string, width: number): string[] {
       continue;
     }
 
-    let start = 0;
-    while (start < rawLine.length) {
-      const chunk = rawLine.slice(start, start + safeWidth);
-      lines.push(chunk);
-      start += safeWidth;
+    // Word-wrap: try to break at word boundaries
+    let remaining = rawLine;
+    while (remaining.length > 0) {
+      if (remaining.length <= safeWidth) {
+        lines.push(remaining);
+        break;
+      }
+
+      // Find last space within width
+      let breakPoint = remaining.lastIndexOf(" ", safeWidth);
+
+      // If no space found, or space is too early (less than half width), hard break
+      if (breakPoint === -1 || breakPoint < safeWidth / 2) {
+        breakPoint = safeWidth;
+      }
+
+      lines.push(remaining.slice(0, breakPoint));
+      // Skip the space if we broke at a space
+      remaining = remaining.slice(breakPoint).trimStart();
     }
   }
 

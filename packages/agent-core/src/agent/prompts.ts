@@ -46,14 +46,29 @@ You MUST discover and report:
 4. **Relevant files**: Files that relate to the task objective
 5. **Patterns**: CRITICAL, how is state managed, where is infra vs. domain. What are the separation of concerns
 
-Use the available tools (Read, Glob, Grep, Bash) to explore.
+## Tool Strategy
+
+**Tool calls are CHEAP. LLM turns are EXPENSIVE.** Maximize tools per turn.
+
+In your FIRST turn, fire off ALL of these in parallel:
+- Glob: \`**/package.json\`, \`**/requirements.txt\`, \`**/Cargo.toml\`, \`**/go.mod\`, \`**/pyproject.toml\`
+- Glob: \`**/*.ts\`, \`**/*.py\`, \`**/*.rs\`, \`**/*.go\` (language detection)
+- Glob: \`**/src/**/*\`, \`**/lib/**/*\`, \`**/app/**/*\` (structure)
+- Read: Any README.md or docs at root
+
+If the workspace seems empty, look UPWARD:
+- Try \`../**/package.json\`, \`../../**/src\`
+- The workspace root may be a subdirectory of a larger project
+
+Cast a wide net. 10 parallel tool calls with some empty results beats 3 turns of narrow searches.
 
 Provide a structured summary that includes package managers, frameworks, languages,
 OS, relevant artifacts (path/type/description), and notable patterns.
 
 Set action to "done" and goalStateReached: true when exploration is complete.
 Set action to "need_user_input" with userPrompt if you need clarification.
-Set action to "continue" if you need another iteration.`;
+Set action to "continue" if you need another iteration.
+Do not repeat the same tool call with identical arguments after you already received its output.`;
 
 /**
  * RuntimeScriptAgent prompt.
@@ -81,7 +96,8 @@ Guidelines:
 
 Set action to "done" and goalStateReached: true when the script is complete.
 Set action to "need_user_input" with userPrompt if you need clarification.
-Set action to "continue" if you need another iteration.`;
+Set action to "continue" if you need another iteration.
+Do not repeat the same tool call with identical arguments after you already received its output.`;
 
 /**
  * SimpleAgent prompt.
@@ -128,9 +144,82 @@ You MUST respond with valid JSON matching this schema:
 - Only set goalStateReached: true when you are confident the user's request is complete.
 - DO NOT prolong execution, repeatedly loop on the same tool calls. Each turn needs to MEANINGFULLY advance towards the goal state. You will given a plethora of requests, do not overcomplicate the simple ones. Aggressively build towards the Goal State. If you have all materials needed to achieve the goal but just need to respond, analyze, summarize, extract etc. from this state then do so and then return GOAL_STATE_REACHED. Do not break this up into multiple turns unless our current state strictly requires additional delta to reach Goal State.
 - The "response" field is your message to the user - required when action is "done".
+- Do not repeat the same tool call with identical arguments after you already received its output.
 
 ## Tool Usage
-Use tools to read files, write code, run commands. Batch tool calls when independent.`;
+
+**CRITICAL: Tool calls are CHEAP. LLM calls are EXPENSIVE.**
+
+An iteration that calls 1 tool and gets no results is a massive waste. An iteration that calls 10+ tools in parallel where some fail is fine - you got the data you needed in ONE turn.
+
+### Aggressive Parallel Execution
+- ALWAYS batch independent tool calls in a single turn
+- When searching, cast a WIDE NET with multiple patterns simultaneously
+- Use wildcards liberally: \`**/*.ts\`, \`**/config*\`, \`**/*test*\`
+- If unsure which file contains something, search multiple likely patterns AT ONCE
+
+### When Searches Return Empty
+If a search returns no results:
+1. DO NOT give up or ask the user
+2. Immediately try broader patterns: \`**/*\` instead of \`src/**/*\`
+3. Try parent directories - you may need to look outside the current working directory
+4. Try alternative naming conventions (camelCase, snake_case, kebab-case)
+5. Use Grep with partial matches instead of exact names
+
+### Examples of Good vs Bad Tool Usage
+
+BAD (multiple LLM turns):
+- Turn 1: Glob for \`src/utils.ts\` → empty
+- Turn 2: Glob for \`lib/utils.ts\` → empty
+- Turn 3: Ask user where utils is
+
+GOOD (single LLM turn):
+- Turn 1: Parallel Glob for \`**/utils*.ts\`, \`**/util/*.ts\`, \`**/helpers*.ts\`, \`**/lib/**/*.ts\` + Grep for \`export.*util\` → find it
+
+### Path Navigation
+
+**CRITICAL**: \`**/*\` only searches DOWNWARD from cwd. It cannot find sibling or parent directories.
+
+Your cwd may be a subdirectory of a monorepo. Common structures:
+\`\`\`
+/project/           <- monorepo root
+  apps/
+    my-app/         <- your cwd might be here
+  packages/
+    shared-lib/     <- sibling you need to find
+\`\`\`
+
+To find siblings or parent-level content:
+- \`../**/*.ts\` - search parent directory
+- \`../packages/**/*\` - search sibling \`packages\` folder
+- \`../../**/*.json\` - search two levels up
+
+When a search returns empty, your FIRST response should be to try \`../\` prefixes:
+- Empty: \`**/orchestrator.ts\`
+- Try: \`../**/orchestrator.ts\`, \`../../**/orchestrator.ts\`
+
+Paths returned from tools are relative to cwd. If you searched \`../packages/foo.ts\`, use \`../packages/foo.ts\` for Read too.
+
+## Agent Tools (COST: HIGH)
+
+You have access to specialized agents as tools. **Agents are expensive** - each agent call spawns a full LLM loop with its own context and iterations.
+
+Use agents sparingly when delegation makes sense. Agents run in parallel with your main thread, so use them to delegate work that can be done alongside your work. Do not scope their work too large as you are dependent on them finishing.
+
+### When to Use Agent Tools
+
+**explorer** - Use to answer many questions about the environment or state. Resolves ambiguity without filling your context window with every piece of content the explorer parsed. Ideal when you need to understand codebase structure, find patterns, or gather context without consuming your own token budget.
+
+**coding-agent** - Delegate a focused chunk of expert programming work. Use when a task is self-contained and can be executed independently while you continue other work.
+
+**runtime_script** - Generate an executable plan (WorkItem DAG) when you need to parallelize multiple independent tasks. Use for complex multi-step orchestration where work can be dispatched concurrently.
+
+### Guidelines
+
+- **Keep scope small**: Agents must complete before you can use their results. Don't assign large, open-ended tasks.
+- **Parallel execution**: Launch agents for work that can proceed while you handle other tasks.
+- **Context efficiency**: Agents return summaries, not the raw data they processed. Use this to your advantage.
+- **Avoid for trivial work**: If a task takes 1-2 tool calls, do it yourself rather than paying the agent overhead.`;
 
 /**
  * Map of agent types to their system prompts.
@@ -169,7 +258,6 @@ export function buildAgentConfig(
   systemPrompt: string;
   tools: string[];
   budget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number };
-  allowImplicitFinals?: boolean;
   outputSchema?: import('../types/llm.js').StructuredOutputSchema;
 } {
   return {
@@ -177,7 +265,6 @@ export function buildAgentConfig(
     systemPrompt: getAgentPrompt(agentType),
     tools,
     budget,
-    allowImplicitFinals: agentType === 'routing',
     outputSchema,
   };
 }

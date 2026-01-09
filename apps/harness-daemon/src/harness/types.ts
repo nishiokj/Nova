@@ -75,11 +75,25 @@ export interface AgentRunHandle {
 }
 
 /**
+ * Semantic level for coloring/priority.
+ */
+export type EventLevel = 'info' | 'success' | 'warning' | 'error';
+
+/**
+ * Event kind for categorization.
+ */
+export type EventKind = 'work' | 'tool' | 'planning' | 'system';
+
+/**
  * Status data for status events.
  */
 export interface StatusEventData {
   state: 'idle' | 'sending' | 'streaming' | 'error';
   message?: string;
+  /** Semantic level for TUI coloring */
+  level?: EventLevel;
+  /** Event kind for categorization */
+  kind?: EventKind;
 }
 
 /**
@@ -90,6 +104,12 @@ export interface ProgressEventData {
   message?: string;
   tool_name?: string;
   step_number?: number;
+  /** Semantic level for TUI coloring */
+  level?: EventLevel;
+  /** Event kind for categorization */
+  kind?: EventKind;
+  /** Duration in milliseconds (for completed operations) */
+  duration_ms?: number;
 }
 
 /**
@@ -145,4 +165,6 @@ export interface ErrorEventData {
   message?: string;
   detail?: unknown;
   fatal?: boolean;
+  /** Error code for programmatic handling */
+  code?: string;
 }
