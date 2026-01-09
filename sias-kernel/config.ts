@@ -82,14 +82,14 @@ const DEFAULT_CONFIG: KernelConfig = {
   upgradeSignalFile: '/tmp/sias-upgrade-signal',
   checkpointEveryIterations: 5,
   log: {
-    backend: 'file',
+    backend: 'console',
     format: 'pretty',
     level: 'info',
     path: 'logs/sias-kernel.log',
     maxSizeBytes: 50 * 1024 * 1024,
   },
   orchestrator: {
-    maxIterations: 40,
+    maxIterations: 10,
     maxToolCalls: 250,
     maxDurationMs: 1200000,
   },
@@ -102,27 +102,27 @@ const DEFAULT_CONFIG: KernelConfig = {
     principal: {
       provider: 'openai',
       model: 'gpt-5.2',
-      maxTokens: 128000,
+      maxTokens: 8000,
       temperature: 0.4,
       reasoning: {effort: 'high'}
     },
     oncall: {
       provider: 'openai',
       model: 'gpt-5.2',
-      maxTokens: 128000,
+      maxTokens: 8000,
       temperature: 0.4,
       reasoning: {effort: 'medium'}
     },
     testing: {
       provider: 'openai',
       model: 'gpt-5-mini',
-      maxTokens: 128000,
+      maxTokens: 8000,
       temperature: 0.2,
     },
     coding: {
       provider: 'openai',
-      model: 'gpt-5.1-codex-max',
-      maxTokens: 128000,
+      model: 'gpt-5.2-codex',
+      maxTokens: 8000,
       temperature: 0.6,
       reasoning: { effort: 'high' },
     },
