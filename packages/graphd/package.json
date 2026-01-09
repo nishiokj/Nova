@@ -7,7 +7,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "lint": "tsc --noEmit",
+    "lint": "npx tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "devDependencies": {

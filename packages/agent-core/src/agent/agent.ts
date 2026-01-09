@@ -144,14 +144,14 @@ export class Agent {
 
       if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         result.terminationReason = 'bounds:tool_calls';
-        result.error = `Tool call limit reached (${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls})`;
+        // Don't set error - gracefully complete with what we have
         console.error(`[AGENT DEBUG] Tool call limit hit: made=${metrics.toolCallsMade}, max=${workItem.bounds.maxToolCalls}, agent=${this.config.type}, workId=${workItem.workId}`);
         break;
       }
 
       if (elapsedMs >= workItem.bounds.maxDurationMs) {
         result.terminationReason = 'bounds:duration';
-        result.error = 'Duration limit reached';
+        // Don't set error - gracefully complete with what we have
         break;
       }
 
@@ -269,16 +269,10 @@ export class Agent {
       }
 
       if (action === 'need_user_input') {
-        if (!structuredPrompt) {
-          result.terminationReason = 'invalid_action';
-          result.error = 'Action "need_user_input" requires userPrompt.';
-          break;
-        }
-        result.needsUserInput = true;
-        result.userPrompt = structuredPrompt;
-        result.terminationReason = 'user_input_required';
-        result.filesRead = Array.from(localReadFiles);
-        return;
+        // SIAS mode: don't stop for user input, continue execution
+        // Log the request but keep going with what we have
+        console.error(`[AGENT DEBUG] User input requested but continuing (SIAS mode): ${structuredPrompt?.question ?? 'no question'}`);
+        continue;
       }
 
       if (action === 'continue') {
@@ -308,15 +302,24 @@ export class Agent {
       }
     }
 
-    // Handle iterations exhausted - treat as partial success if we have content
+    // Handle exhausted resources - treat as partial success if we have content
     if (!result.terminationReason) {
       result.terminationReason = 'iterations_exhausted';
+    }
+
+    // For any bounds-related termination, mark as partial success if we have content
+    const isBoundsTermination =
+      result.terminationReason === 'iterations_exhausted' ||
+      result.terminationReason === 'bounds:tool_calls' ||
+      result.terminationReason === 'bounds:duration';
+
+    if (isBoundsTermination) {
       if (result.response) {
         // We have content, mark as partial success rather than failure
         result.success = true;
         result.isIncomplete = true;
       } else {
-        result.error = 'Maximum iterations reached with no output';
+        result.error = `${result.terminationReason}: no output captured`;
       }
     }
 
@@ -525,20 +528,17 @@ export class Agent {
         }
       }
 
+      // SIAS mode: don't stop for ask_user tool, just log and continue
       if (call.name === 'ask_user' && toolResult.isSuccess) {
-        try {
-          const parsed = JSON.parse(toolResult.output ?? '{}');
-          result.needsUserInput = true;
-          result.userPrompt = parsed;
-          result.terminationReason = 'user_input_required';
-          return true;
-        } catch {
-          // Not a user prompt
-        }
+        console.error(`[AGENT DEBUG] ask_user tool called but continuing (SIAS mode)`);
+        // Don't stop execution - just continue with the tool result in context
       }
 
+      // SIAS mode: don't propagate sub-agent user input requests
       if (isAgentTool && result.needsUserInput) {
-        return true;
+        console.error(`[AGENT DEBUG] Sub-agent requested user input but continuing (SIAS mode)`);
+        result.needsUserInput = false;
+        result.userPrompt = undefined;
       }
 
       return false;
@@ -755,10 +755,10 @@ export class Agent {
       metrics: subResult.metrics,
     };
 
+    // SIAS mode: don't propagate sub-agent user input requests
     if (subResult.needsUserInput && subResult.userPrompt) {
-      result.needsUserInput = true;
-      result.userPrompt = subResult.userPrompt;
-      result.terminationReason = 'user_input_required';
+      console.error(`[AGENT DEBUG] Sub-agent ${agentConfig.type} requested user input but ignoring (SIAS mode): ${subResult.userPrompt.question}`);
+      // Don't propagate - continue with what we have
     }
 
     if (subResult.success || subResult.needsUserInput) {

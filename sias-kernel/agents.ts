@@ -66,7 +66,7 @@ function buildPrincipalSchema(): StructuredOutputSchema {
                 constraints: { type: 'array', items: { type: 'string' } },
                 delegate_to: { type: 'string' },
               },
-              required: ['goal', 'success_criteria', 'constraints', 'delegate_to'],
+              required: ['goal', 'success_criteria', 'target_files', 'constraints', 'delegate_to'],
             },
             { type: 'null' },
           ],

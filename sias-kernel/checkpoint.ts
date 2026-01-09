@@ -40,7 +40,14 @@ export async function restoreCheckpoint(
     currentFocus: 'Initialize kernel objectives',
     patchSummary: 'No patches applied yet.',
     learnedConstraints: [],
-    horizonObjectives: [],
+    horizonObjectives: [
+      'Initialize kernel objectives',
+      'Establish health metrics, anomaly detection, and recovery',
+      'Define benchmark tiers and isolated runner',
+      'Wire agent specifications and structured outputs',
+      'Implement worktree lifecycle and upgrade flow',
+      'Enable flip-flop detection and decision embeddings',
+    ],
     lastUpgradeIteration: 0,
   };
 }

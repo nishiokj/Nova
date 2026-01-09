@@ -100,25 +100,27 @@ const DEFAULT_CONFIG: KernelConfig = {
       model: 'gpt-5.2',
       maxTokens: 128000,
       temperature: 0.4,
+      reasoning: {effort: 'high'}
     },
     oncall: {
       provider: 'openai',
       model: 'gpt-5.2',
       maxTokens: 128000,
       temperature: 0.4,
+      reasoning: {effort: 'medium'}
     },
     testing: {
       provider: 'openai',
       model: 'gpt-5-mini',
-      maxTokens: 100000,
+      maxTokens: 128000,
       temperature: 0.2,
     },
     coding: {
       provider: 'openai',
-      model: 'gpt-5.1-codex',
-      maxTokens: 12800,
+      model: 'gpt-5.1-codex-max',
+      maxTokens: 128000,
       temperature: 0.6,
-      reasoning: { effort: 'xhigh' },
+      reasoning: { effort: 'high' },
     },
   },
 };
