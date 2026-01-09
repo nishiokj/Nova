@@ -9,7 +9,7 @@ import { EmptyState } from './components/EmptyState'
 import { StatusDot } from './components/StatusBadge'
 
 export default function App() {
-  const { sessions: fetchedSessions, state, hasRunningRequests } = useSessions()
+  const { sessions: fetchedSessions, state, error, refetch, hasRunningRequests } = useSessions()
   const [deletedSessions, setDeletedSessions] = useState<Set<string>>(new Set())
 
   // Use fetched data when available, fallback to mock only on error
@@ -67,7 +67,9 @@ export default function App() {
               <p className="mt-1 text-sm text-[var(--text-muted)]">
                 Execution telemetry and task insights
                 {showMockWarning && (
-                  <span className="ml-2 text-[var(--warning)]">(mock data - API unavailable)</span>
+                  <span className="ml-2 text-[var(--error)]" title={error ?? undefined}>
+                    Connection failed: {error ?? 'API unavailable'}
+                  </span>
                 )}
               </p>
             </div>
@@ -145,6 +147,29 @@ export default function App() {
             )}
           </div>
         </header>
+
+        {/* Error Banner */}
+        {state === 'error' && (
+          <div className="mb-4 p-4 rounded-lg bg-[var(--error)]/10 border border-[var(--error)]/30">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <svg className="h-5 w-5 text-[var(--error)] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <div>
+                  <p className="text-sm font-medium text-[var(--error)]">Connection Error</p>
+                  <p className="text-xs text-[var(--text-muted)]">{error ?? 'Failed to connect to backend'}</p>
+                </div>
+              </div>
+              <button
+                onClick={refetch}
+                className="px-3 py-1.5 text-xs font-medium rounded bg-[var(--error)]/20 text-[var(--error)] hover:bg-[var(--error)]/30 transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Content */}
         <main className="space-y-3">

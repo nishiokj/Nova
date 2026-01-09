@@ -7,19 +7,21 @@
 import { GraphDManager, createGraphDConfig } from '../../packages/graphd/src/index.js';
 import path from 'path';
 
-// Dashboard runs from dashboard/ dir, but we want the project root
+// Dashboard runs from dashboard/ dir - use harness-daemon's database
 const ROOT_PATH = path.resolve(process.cwd(), '..', '..');
+const HARNESS_DB_PATH = path.resolve(process.cwd(), '..', 'harness-daemon', '.graphd', 'graphd.db');
 const PORT = 9444;
 
 async function main() {
   console.log('Starting GraphD server...');
   console.log(`  Root: ${ROOT_PATH}`);
   console.log(`  Port: ${PORT}`);
+  console.log(`  DB: ${HARNESS_DB_PATH}`);
 
   const config = createGraphDConfig(ROOT_PATH, {
     port: PORT,
     host: '127.0.0.1',
-    dbPath: '.graphd/graphd.db',  // Match the harness config
+    dbPath: HARNESS_DB_PATH,  // Use harness-daemon's database
   });
 
   console.log(`  DB Path: ${config.dbPath}`);

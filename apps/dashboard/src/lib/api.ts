@@ -24,8 +24,14 @@ export async function fetchAPI<T>(
     return res.json()
   } catch (err) {
     clearTimeout(timeoutId)
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('Request timeout - server not responding')
+    if (err instanceof Error) {
+      if (err.name === 'AbortError') {
+        throw new Error('Request timeout - server not responding')
+      }
+      // Connection refused / network error
+      if (err.message === 'Failed to fetch' || err.name === 'TypeError') {
+        throw new Error(`Cannot connect to GraphD at ${API_BASE} - is the server running?`)
+      }
     }
     throw err
   }
