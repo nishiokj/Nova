@@ -21,6 +21,7 @@ export interface KernelConfig {
     format: 'pretty' | 'json';
     level: 'debug' | 'info' | 'warn' | 'error';
     path?: string;
+    maxSizeBytes?: number;
   };
   orchestrator: {
     maxIterations: number;
@@ -64,6 +65,7 @@ const DEFAULT_THRESHOLDS: AnomalyThresholds = {
   max_consecutive_regressions: 2,
   graphd_latency_max_ms: 5000,
   checkpoint_staleness_max_ms: 10 * 60 * 1000,
+  log_file_max_bytes: 50 * 1024 * 1024,
 };
 
 const DEFAULT_UPGRADE_POLICY: UpgradePolicy = {
@@ -80,14 +82,16 @@ const DEFAULT_CONFIG: KernelConfig = {
   upgradeSignalFile: '/tmp/sias-upgrade-signal',
   checkpointEveryIterations: 5,
   log: {
-    backend: 'console',
+    backend: 'file',
     format: 'pretty',
     level: 'info',
+    path: 'logs/sias-kernel.log',
+    maxSizeBytes: 50 * 1024 * 1024,
   },
   orchestrator: {
-    maxIterations: 10,
-    maxToolCalls: 150,
-    maxDurationMs: 120000,
+    maxIterations: 40,
+    maxToolCalls: 250,
+    maxDurationMs: 1200000,
   },
   health: {
     thresholds: DEFAULT_THRESHOLDS,

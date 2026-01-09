@@ -164,9 +164,9 @@
               { "type": "null" }
             ]
           },
-          "reasoning": { "type": ["string", "null"] }
+          "work_done": { "type": ["string", "null"], "description": "Concrete work completed this turn: files read, edits made, commands run. NOT plans or intentions." }
         },
-        "required": ["action", "response", "goalStateReached", "userPrompt", "reasoning"]
+        "required": ["action", "response", "goalStateReached", "userPrompt", "work_done"]
       }
     },
 

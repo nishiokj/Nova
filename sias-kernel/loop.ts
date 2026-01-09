@@ -40,6 +40,7 @@ interface KernelDependencies {
   checkpointHandler: () => Promise<void>;
   rollbackHandler: () => Promise<void>;
   pauseHandler: () => Promise<void>;
+  rotateLogsHandler: () => Promise<void>;
 }
 
 export async function runIteration(state: SIASState, deps: KernelDependencies): Promise<IterationResult> {
@@ -74,6 +75,7 @@ export async function runIteration(state: SIASState, deps: KernelDependencies): 
           }
         },
         haltFatal: deps.pauseHandler,
+        rotateLogs: deps.rotateLogsHandler,
       },
       deps.logger
     );

@@ -36,7 +36,7 @@ export class BusClient extends EventEmitter {
 
     this.connected = true;
     this.socket.setEncoding('utf8');
-    this.socket.on('data', (chunk) => this.handleData(chunk));
+    this.socket.on('data', (chunk: string) => this.handleData(chunk));
     this.socket.on('close', () => this.handleClose());
     this.socket.on('error', (error) => {
       this.emit('error', { message: 'bus_client_error', detail: String(error) });

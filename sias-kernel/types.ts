@@ -105,6 +105,10 @@ export interface HealthMetrics {
     graphd_latency_ms: number;
     graphd_available: boolean;
   };
+  logging: {
+    file_path: string | null;
+    file_size_bytes: number;
+  };
 }
 
 export interface AnomalyThresholds {
@@ -119,6 +123,7 @@ export interface AnomalyThresholds {
   max_consecutive_regressions: number;
   graphd_latency_max_ms: number;
   checkpoint_staleness_max_ms: number;
+  log_file_max_bytes: number;
 }
 
 export type AnomalyType =
@@ -132,7 +137,8 @@ export type AnomalyType =
   | 'benchmark_regression'
   | 'graphd_latency'
   | 'graphd_unavailable'
-  | 'checkpoint_stale';
+  | 'checkpoint_stale'
+  | 'log_file_overflow';
 
 export interface Anomaly {
   type: AnomalyType;
@@ -152,7 +158,8 @@ export type RecoveryAction =
   | { type: 'rollback_version' }
   | { type: 'pause_iteration_loop' }
   | { type: 'escalate_to_oncall' }
-  | { type: 'halt_fatal' };
+  | { type: 'halt_fatal' }
+  | { type: 'rotate_logs' };
 
 export interface RecoveryPlan {
   anomalies: Anomaly[];

@@ -108,7 +108,7 @@ export class BusServer {
     this.connections.set(connectionId, connection);
 
     socket.setEncoding('utf8');
-    socket.on('data', (chunk) => this.handleData(connection, chunk));
+    socket.on('data', (chunk: string) => this.handleData(connection, chunk));
     socket.on('close', () => this.handleClose(connection));
     socket.on('error', () => {
       // Connection errors are handled via close event.

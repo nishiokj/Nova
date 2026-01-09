@@ -92,7 +92,13 @@
       "Bash(bun run:*)",
       "Bash(bunx tsc:*)",
       "Bash(bun build:*)",
-      "Bash(npm run lint)"
+      "Bash(npm run lint)",
+      "Bash(nvim:*)",
+      "Bash(wt ls:*)",
+      "Bash(wt go:*)",
+      "Bash(git worktree list:*)",
+      "Bash(/usr/bin/awk:*)",
+      "Bash(brew list:*)"
     ],
     "deny": []
   }
