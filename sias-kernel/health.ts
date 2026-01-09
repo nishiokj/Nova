@@ -68,6 +68,10 @@ export class HealthCollector {
         graphd_latency_ms: 0,
         graphd_available: true,
       },
+      logging: {
+        file_path: null,
+        file_size_bytes: 0,
+      },
     };
   }
 
@@ -160,6 +164,11 @@ export class HealthCollector {
     this.graphdLatencyMs = latencyMs;
     this.metrics.persistence.graphd_latency_ms = latencyMs;
     this.metrics.persistence.graphd_available = available;
+  }
+
+  recordLogFile(filePath: string | null, sizeBytes: number): void {
+    this.metrics.logging.file_path = filePath;
+    this.metrics.logging.file_size_bytes = sizeBytes;
   }
 
   incrementRestart(reason?: string): void {
@@ -281,6 +290,17 @@ export function detectAnomalies(metrics: HealthMetrics, thresholds: AnomalyThres
     });
   }
 
+  if (metrics.logging.file_size_bytes > thresholds.log_file_max_bytes) {
+    anomalies.push({
+      type: 'log_file_overflow',
+      severity: metrics.logging.file_size_bytes > thresholds.log_file_max_bytes * 1.5 ? 'critical' : 'warning',
+      detected_at: Date.now(),
+      metric_value: metrics.logging.file_size_bytes,
+      threshold_value: thresholds.log_file_max_bytes,
+      context: { file_path: metrics.logging.file_path },
+    });
+  }
+
   return anomalies;
 }
 
@@ -305,6 +325,7 @@ const RECOVERY_MATRIX: Record<AnomalyType, (anomaly: Anomaly) => RecoveryAction[
   graphd_latency: () => [{ type: 'checkpoint_now' }],
   graphd_unavailable: () => [{ type: 'pause_iteration_loop' }],
   checkpoint_stale: () => [{ type: 'checkpoint_now' }],
+  log_file_overflow: () => [{ type: 'rotate_logs' }],
 };
 
 export function buildRecoveryPlan(anomalies: Anomaly[]): RecoveryPlan {
@@ -325,6 +346,7 @@ export interface RecoveryHandlers {
   pauseIterationLoop: () => Promise<void>;
   escalateToOnCall: () => Promise<void>;
   haltFatal: () => Promise<void>;
+  rotateLogs: () => Promise<void>;
 }
 
 export async function executeRecovery(
@@ -366,6 +388,9 @@ export async function executeRecovery(
         break;
       case 'restart_hard_same_version':
         await handlers.restartSoft();
+        break;
+      case 'rotate_logs':
+        await handlers.rotateLogs();
         break;
     }
   }

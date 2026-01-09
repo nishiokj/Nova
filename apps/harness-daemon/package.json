@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/index.ts",
-    "lint": "npx tsc --noEmit",
-    "build": "tsc"
+    "lint": "tsc --noEmit",
+    "build": "tsc",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

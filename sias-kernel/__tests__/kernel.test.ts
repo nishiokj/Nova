@@ -147,6 +147,10 @@ function createBaseMetrics(): HealthMetrics {
       graphd_latency_ms: 10,
       graphd_available: true,
     },
+    logging: {
+      file_path: null,
+      file_size_bytes: 0,
+    },
   };
 }
 

@@ -277,11 +277,13 @@ export class AgentHarness {
     }
 
     // Initialize GraphD if enabled
+    // Note: config.graphd.dbPath is already an absolute path (resolved in config_loader.ts)
+    // rootPath is used for file path normalization in search/index operations
     if (config.graphd.enabled) {
-      const graphdConfig = createGraphDConfig(workingDir, {
+      const graphdConfig = createGraphDConfig(config.tools.repoRoot, {
         host: config.graphd.host,
         port: config.graphd.port,
-        dbPath: config.graphd.dbPath,
+        dbPath: config.graphd.dbPath, // Already absolute - resolved relative to config file location
       });
       this.graphd = new GraphDManager(graphdConfig);
     }
@@ -637,7 +639,6 @@ export class AgentHarness {
       llmConfig
     );
 
-    console.error(`[HARNESS DEBUG] Creating workItem: agentType=${agentType}, budget.maxToolCalls=${agentConfig.budget.maxToolCalls}, budget.maxIterations=${agentConfig.budget.maxIterations}`);
     const workItem = createWorkItem({
       goal,
       objective: goal,

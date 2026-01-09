@@ -34,7 +34,7 @@ start_kernel() {
     return 1
   fi
 
-  if ! bun check "$kernel_path/sias-kernel.ts" 2>/dev/null; then
+  if ! bun build "$kernel_path/sias-kernel.ts" --target bun --outfile /dev/null 2>/dev/null; then
     echo "[launcher] ERROR: Kernel failed syntax check"
     return 1
   fi

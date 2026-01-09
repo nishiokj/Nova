@@ -22,6 +22,7 @@ async function main(): Promise<void> {
     format: config.log.format,
     level: config.log.level,
     path: config.log.path,
+    maxSizeBytes: config.log.maxSizeBytes,
   });
 
   const store = new GraphStore(config.graphdDbPath);
@@ -144,6 +145,19 @@ async function main(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 1000));
   };
 
+  const rotateLogsHandler = async () => {
+    logger.info('[kernel] Rotating logs');
+    if (logger.forceRotate) {
+      logger.forceRotate();
+    }
+  };
+
+  const updateLogMetrics = () => {
+    const filePath = logger.getFilePath?.() ?? null;
+    const fileSize = logger.getFileSizeBytes?.() ?? 0;
+    health.recordLogFile(filePath, fileSize);
+  };
+
   while (!shuttingDown) {
     try {
       const iterationResult = await runIteration(state, {
@@ -161,9 +175,11 @@ async function main(): Promise<void> {
         checkpointHandler,
         rollbackHandler,
         pauseHandler,
+        rotateLogsHandler,
       });
 
       await updateHealthWorktree();
+      updateLogMetrics();
 
       state.iteration = iterationResult.iteration;
       if (iterationResult.status === 'upgraded') {

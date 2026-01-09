@@ -21,6 +21,7 @@ export interface KernelConfig {
     format: 'pretty' | 'json';
     level: 'debug' | 'info' | 'warn' | 'error';
     path?: string;
+    maxSizeBytes?: number;
   };
   orchestrator: {
     maxIterations: number;
@@ -64,6 +65,7 @@ const DEFAULT_THRESHOLDS: AnomalyThresholds = {
   max_consecutive_regressions: 2,
   graphd_latency_max_ms: 5000,
   checkpoint_staleness_max_ms: 10 * 60 * 1000,
+  log_file_max_bytes: 50 * 1024 * 1024,
 };
 
 const DEFAULT_UPGRADE_POLICY: UpgradePolicy = {
@@ -83,11 +85,13 @@ const DEFAULT_CONFIG: KernelConfig = {
     backend: 'console',
     format: 'pretty',
     level: 'info',
+    path: 'logs/sias-kernel.log',
+    maxSizeBytes: 50 * 1024 * 1024,
   },
   orchestrator: {
     maxIterations: 10,
-    maxToolCalls: 150,
-    maxDurationMs: 120000,
+    maxToolCalls: 250,
+    maxDurationMs: 1200000,
   },
   health: {
     thresholds: DEFAULT_THRESHOLDS,
@@ -98,27 +102,27 @@ const DEFAULT_CONFIG: KernelConfig = {
     principal: {
       provider: 'openai',
       model: 'gpt-5.2',
-      maxTokens: 128000,
+      maxTokens: 8000,
       temperature: 0.4,
       reasoning: {effort: 'high'}
     },
     oncall: {
       provider: 'openai',
       model: 'gpt-5.2',
-      maxTokens: 128000,
+      maxTokens: 8000,
       temperature: 0.4,
       reasoning: {effort: 'medium'}
     },
     testing: {
       provider: 'openai',
       model: 'gpt-5-mini',
-      maxTokens: 128000,
+      maxTokens: 8000,
       temperature: 0.2,
     },
     coding: {
       provider: 'openai',
-      model: 'gpt-5.1-codex-max',
-      maxTokens: 128000,
+      model: 'gpt-5.2-codex',
+      maxTokens: 8000,
       temperature: 0.6,
       reasoning: { effort: 'high' },
     },

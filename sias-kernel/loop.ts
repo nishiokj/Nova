@@ -40,6 +40,7 @@ interface KernelDependencies {
   checkpointHandler: () => Promise<void>;
   rollbackHandler: () => Promise<void>;
   pauseHandler: () => Promise<void>;
+  rotateLogsHandler: () => Promise<void>;
 }
 
 export async function runIteration(state: SIASState, deps: KernelDependencies): Promise<IterationResult> {
@@ -74,6 +75,7 @@ export async function runIteration(state: SIASState, deps: KernelDependencies): 
           }
         },
         haltFatal: deps.pauseHandler,
+        rotateLogs: deps.rotateLogsHandler,
       },
       deps.logger
     );
@@ -145,6 +147,26 @@ export async function runIteration(state: SIASState, deps: KernelDependencies): 
     principal_output: principalOutput ?? undefined,
     status: shouldUpgradeNow ? 'upgraded' : 'success',
   };
+
+  // Persist benchmark score to current worktree if available to keep summary in sync
+  const currentWorktree = deps.store.getSiasWorktree(state.version);
+  if (currentWorktree) {
+    const prevScores = currentWorktree.benchmarkScores ?? [];
+    deps.store.upsertSiasWorktree({
+      ...currentWorktree,
+      benchmarkScore: benchmarkResult.score,
+      benchmarkScores: [
+        ...prevScores,
+        {
+          iteration: iterationNumber,
+          score: benchmarkResult.score,
+          tier: benchmarkResult.tier,
+          passed: benchmarkResult.passed_count,
+          failed: benchmarkResult.failed_count,
+        },
+      ],
+    });
+  }
 
   if (principalOutput?.decision.type === 'escalate') {
     const oncallOutput = await runOnCall(deps, state, anomalies);

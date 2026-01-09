@@ -7,6 +7,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
+import { homedir } from 'os';
 import type {
   LLMProvider,
   AgentConfigEntry,
@@ -107,9 +108,21 @@ export function loadBehavioralRules(): string {
 // ============================================
 
 /**
- * Load config file from disk.
+ * Result of loading a config file - includes the directory where it was found.
+ * This is critical for resolving relative paths consistently.
  */
-export function loadConfigFile(configPath?: string): HarnessConfigFile | null {
+interface LoadedConfigFile {
+  config: HarnessConfigFile;
+  /** Directory where config file was found (repo root) - use this for resolving relative paths */
+  configDir: string;
+}
+
+/**
+ * Load config file from disk.
+ * Returns both the config and the directory where it was found.
+ * Relative paths in the config should be resolved relative to configDir.
+ */
+export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
   if (configPath) {
     const explicitPath = resolve(configPath);
     if (existsSync(explicitPath)) {
@@ -120,7 +133,9 @@ export function loadConfigFile(configPath?: string): HarnessConfigFile | null {
           console.warn(`[config] Skipping ${explicitPath}: missing agents section`);
         } else {
           console.log(`[config] Loaded from ${explicitPath}`);
-          return parsed;
+          // Config dir is parent of 'config/' directory (i.e., repo root)
+          const configDir = dirname(dirname(explicitPath));
+          return { config: parsed, configDir };
         }
       } catch (e) {
         console.warn(`[config] Failed to parse ${explicitPath}:`, e);
@@ -140,7 +155,8 @@ export function loadConfigFile(configPath?: string): HarnessConfigFile | null {
         continue;
       }
       console.log(`[config] Loaded from ${path}`);
-      return parsed;
+      // dir is the repo root (where config/ directory lives)
+      return { config: parsed, configDir: dir };
     } catch (e) {
       console.warn(`[config] Failed to parse ${path}:`, e);
     }
@@ -341,14 +357,53 @@ export function getAgentConfig(
 }
 
 // ============================================
+// PATH RESOLUTION HELPERS
+// ============================================
+
+/**
+ * Expand ~ to user home directory.
+ */
+function expandHome(pathStr: string): string {
+  if (pathStr.startsWith('~/')) {
+    return pathStr.replace('~', homedir());
+  }
+  if (pathStr === '~') {
+    return homedir();
+  }
+  return pathStr;
+}
+
+/**
+ * Resolve a path relative to a base directory.
+ * - Paths starting with ~ are expanded to home directory
+ * - Absolute paths are returned as-is
+ * - Relative paths are resolved relative to basePath
+ * This ensures consistent path resolution regardless of process.cwd().
+ */
+function resolvePathRelativeTo(basePath: string, relativePath: string): string {
+  if (!relativePath) return relativePath;
+  // Expand ~ to home directory
+  const expanded = expandHome(relativePath);
+  // If absolute (including expanded home paths), return as-is
+  if (expanded.startsWith('/')) return expanded;
+  return resolve(basePath, expanded);
+}
+
+// ============================================
 // CONFIG CREATION
 // ============================================
 
 /**
  * Create FullHarnessConfig from file config.
+ *
+ * IMPORTANT: configDir is where the config file was found (repo root).
+ * All relative paths in the config are resolved relative to configDir,
+ * NOT relative to process.cwd(). This ensures consistent behavior
+ * regardless of where the harness is started from.
  */
 export function createConfigFromFile(
   fileConfig: HarnessConfigFile,
+  configDir: string,
   workingDir?: string
 ): FullHarnessConfig {
   // Resolve all agent configs
@@ -357,8 +412,6 @@ export function createConfigFromFile(
     try {
       const resolved = resolveAgentConfig(entry);
       agents[agentType] = resolved;
-      // DEBUG: Log tools for each agent
-      console.log(`[DEBUG config] Agent '${agentType}' tools: entry.tools=${JSON.stringify(entry.tools)}, resolved.tools=${JSON.stringify(resolved.tools)}`);
     } catch (e) {
       console.warn(`[config] Failed to resolve agent '${agentType}':`, e);
     }
@@ -368,14 +421,40 @@ export function createConfigFromFile(
     throw new Error('No valid agent configs found in config file');
   }
 
-  const resolvedWorkingDir = resolve(workingDir ?? process.cwd());
+  // workingDir can be overridden (e.g., for tool execution context)
+  // but defaults to configDir (repo root) for consistency
+  const resolvedWorkingDir = resolve(workingDir ?? configDir);
+
+  // Resolve all relative paths in config relative to configDir (repo root)
+  // This is the KEY fix - paths are deterministic regardless of cwd
+  const rawDbPath = fileConfig.graphd?.db_path ?? DEFAULT_GRAPHD_CONFIG.db_path;
+  const resolvedDbPath = resolvePathRelativeTo(configDir, rawDbPath);
+
+  const rawSkillsDir = fileConfig.skills?.directory;
+  const resolvedSkillsDir = rawSkillsDir
+    ? resolvePathRelativeTo(configDir, rawSkillsDir)
+    : undefined;
+
+  const rawHooksDir = fileConfig.hooks?.directory;
+  const resolvedHooksDir = rawHooksDir
+    ? resolvePathRelativeTo(configDir, rawHooksDir)
+    : undefined;
+
+  console.log(`[config] Resolved paths relative to ${configDir}:`);
+  console.log(`[config]   graphd.dbPath: ${rawDbPath} -> ${resolvedDbPath}`);
+  if (resolvedSkillsDir) {
+    console.log(`[config]   skills.directory: ${rawSkillsDir} -> ${resolvedSkillsDir}`);
+  }
+  if (resolvedHooksDir) {
+    console.log(`[config]   hooks.directory: ${rawHooksDir} -> ${resolvedHooksDir}`);
+  }
 
   return {
     agents,
     defaultAgent: 'standard',
     tools: {
       workingDir: resolvedWorkingDir,
-      repoRoot: resolveRepoRoot(resolvedWorkingDir),
+      repoRoot: configDir, // configDir IS the repo root (where config/ lives)
       bashTimeoutMs: fileConfig.tools?.bash_timeout_ms ?? DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
       maxOutputLength: fileConfig.tools?.max_output_length ?? DEFAULT_TOOLS_CONFIG.max_output_length,
     },
@@ -383,19 +462,19 @@ export function createConfigFromFile(
       enabled: fileConfig.graphd?.enabled ?? DEFAULT_GRAPHD_CONFIG.enabled,
       host: fileConfig.graphd?.host ?? DEFAULT_GRAPHD_CONFIG.host,
       port: fileConfig.graphd?.port ?? DEFAULT_GRAPHD_CONFIG.port,
-      dbPath: fileConfig.graphd?.db_path ?? DEFAULT_GRAPHD_CONFIG.db_path,
+      dbPath: resolvedDbPath, // NOW AN ABSOLUTE PATH
     },
     context: {
       maxTokens: fileConfig.context?.max_tokens ?? DEFAULT_CONTEXT_CONFIG.max_tokens,
     },
     skills: {
       enabled: fileConfig.skills?.enabled ?? DEFAULT_SKILLS_CONFIG.enabled,
-      directory: fileConfig.skills?.directory,
+      directory: resolvedSkillsDir, // NOW AN ABSOLUTE PATH (if set)
       definitions: fileConfig.skills?.definitions ?? [],
     },
     hooks: {
       enabled: fileConfig.hooks?.enabled ?? DEFAULT_HOOKS_CONFIG.enabled,
-      directory: fileConfig.hooks?.directory,
+      directory: resolvedHooksDir, // NOW AN ABSOLUTE PATH (if set)
       definitions: fileConfig.hooks?.definitions ?? [],
     },
     behavioralRules: loadBehavioralRules(),
@@ -539,26 +618,26 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
 
 /**
  * Load full config: try file first, fallback to env-only.
+ *
+ * Path resolution is BULLETPROOF:
+ * - All relative paths in config are resolved relative to where the config file was found
+ * - This works correctly regardless of process.cwd() or where the harness is started from
+ * - workingDir only affects tool execution context, not path resolution
  */
 export function loadConfig(
   configPath?: string,
   workingDir?: string
 ): FullHarnessConfig {
-  const fileConfig = loadConfigFile(configPath);
+  const loaded = loadConfigFile(configPath);
 
-  if (fileConfig) {
-    console.error(`[CONFIG DEBUG] Loaded config file successfully. Agents: ${Object.keys(fileConfig.agents).join(', ')}`);
-    const result = createConfigFromFile(fileConfig, workingDir);
-    for (const [agentType, agent] of Object.entries(result.agents)) {
-      console.error(`[CONFIG DEBUG] Agent "${agentType}": maxToolCalls=${agent.budget.maxToolCalls}, maxIterations=${agent.budget.maxIterations}`);
-    }
+  if (loaded) {
+    // configDir is where the config file was found (repo root)
+    // All relative paths in config will be resolved relative to this
+    const { config: fileConfig, configDir } = loaded;
+    const result = createConfigFromFile(fileConfig, configDir, workingDir);
     return result;
   }
 
-  console.error('[CONFIG DEBUG] No config file found, using environment-only mode with HARDCODED DEFAULTS');
   const result = createConfigFromEnv(workingDir);
-  for (const [agentType, agent] of Object.entries(result.agents)) {
-    console.error(`[CONFIG DEBUG] Agent "${agentType}" (DEFAULT): maxToolCalls=${agent.budget.maxToolCalls}, maxIterations=${agent.budget.maxIterations}`);
-  }
   return result;
 }

@@ -52,3 +52,4 @@ htmlcovrepo-test/
 
 # local worktrees
 /tui-ts/**/repo-test/
+.claude

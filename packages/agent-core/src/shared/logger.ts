@@ -16,6 +16,9 @@ export interface Logger {
   warn(msg: string, fields?: Record<string, unknown>): void;
   error(msg: string, fields?: Record<string, unknown>): void;
   close(): void;
+  getFileSizeBytes?(): number;
+  getFilePath?(): string | null;
+  forceRotate?(): void;
 }
 
 export interface LoggerConfig {
@@ -23,6 +26,7 @@ export interface LoggerConfig {
   format: "pretty" | "json";
   path?: string;
   level?: LogLevel;
+  maxSizeBytes?: number;
 }
 
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
@@ -95,16 +99,26 @@ class FileLogger implements Logger {
   private stream: fs.WriteStream | null = null;
   private minLevel: number;
   private formatter: (level: LogLevel, msg: string, fields?: Record<string, unknown>) => string;
+  private filePath: string | null = null;
+  private maxSizeBytes: number;
+  private currentSizeBytes = 0;
+  private rotateInProgress = false;
 
   constructor(config: LoggerConfig) {
     this.minLevel = LEVEL_PRIORITY[config.level ?? "debug"];
     this.formatter = config.format === "json" ? formatJson : formatPretty;
+    this.maxSizeBytes = config.maxSizeBytes ?? 50 * 1024 * 1024; // 50MB default
 
     if (config.path) {
+      this.filePath = config.path;
       try {
         const dir = path.dirname(config.path);
         fs.mkdirSync(dir, { recursive: true });
         this.stream = fs.createWriteStream(config.path, { flags: "a" });
+        // Get initial file size
+        if (fs.existsSync(config.path)) {
+          this.currentSizeBytes = fs.statSync(config.path).size;
+        }
       } catch {
         this.stream = null;
       }
@@ -117,9 +131,54 @@ class FileLogger implements Logger {
 
     try {
       const line = this.formatter(level, msg, fields);
+      const bytes = Buffer.byteLength(line + "\n", "utf8");
       this.stream.write(line + "\n");
+      this.currentSizeBytes += bytes;
+
+      // Check if rotation needed
+      if (this.currentSizeBytes >= this.maxSizeBytes && !this.rotateInProgress) {
+        this.rotate();
+      }
     } catch {
       // Swallow to avoid disrupting the system
+    }
+  }
+
+  private rotate(): void {
+    if (!this.filePath || this.rotateInProgress) return;
+    this.rotateInProgress = true;
+
+    try {
+      this.stream?.end();
+
+      // Read file, keep last 60% of lines (trim oldest 40%)
+      const content = fs.readFileSync(this.filePath, "utf8");
+      const lines = content.split("\n");
+      const keepFrom = Math.floor(lines.length * 0.4);
+      const trimmedContent = lines.slice(keepFrom).join("\n");
+
+      fs.writeFileSync(this.filePath, trimmedContent);
+      this.currentSizeBytes = Buffer.byteLength(trimmedContent, "utf8");
+
+      this.stream = fs.createWriteStream(this.filePath, { flags: "a" });
+    } catch {
+      // If rotation fails, just continue
+    } finally {
+      this.rotateInProgress = false;
+    }
+  }
+
+  getFileSizeBytes(): number {
+    return this.currentSizeBytes;
+  }
+
+  getFilePath(): string | null {
+    return this.filePath;
+  }
+
+  forceRotate(): void {
+    if (this.currentSizeBytes > 0) {
+      this.rotate();
     }
   }
 
