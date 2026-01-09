@@ -262,7 +262,7 @@ export const DEFAULT_GRAPHD_CONFIG: GraphDConfigSection = {
   enabled: false,
   host: 'localhost',
   port: 9444,
-  db_path: '.graphd/graphd.db',
+  db_path: '~/.graphd/graphd.db', // Global database in user home directory
 };
 
 export const DEFAULT_CONTEXT_CONFIG: ContextConfigSection = {

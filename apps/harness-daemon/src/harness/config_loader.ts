@@ -7,6 +7,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
+import { homedir } from 'os';
 import type {
   LLMProvider,
   AgentConfigEntry,
@@ -360,15 +361,32 @@ export function getAgentConfig(
 // ============================================
 
 /**
+ * Expand ~ to user home directory.
+ */
+function expandHome(pathStr: string): string {
+  if (pathStr.startsWith('~/')) {
+    return pathStr.replace('~', homedir());
+  }
+  if (pathStr === '~') {
+    return homedir();
+  }
+  return pathStr;
+}
+
+/**
  * Resolve a path relative to a base directory.
- * If the path is already absolute, returns it as-is.
+ * - Paths starting with ~ are expanded to home directory
+ * - Absolute paths are returned as-is
+ * - Relative paths are resolved relative to basePath
  * This ensures consistent path resolution regardless of process.cwd().
  */
 function resolvePathRelativeTo(basePath: string, relativePath: string): string {
   if (!relativePath) return relativePath;
-  // If already absolute, return as-is
-  if (relativePath.startsWith('/')) return relativePath;
-  return resolve(basePath, relativePath);
+  // Expand ~ to home directory
+  const expanded = expandHome(relativePath);
+  // If absolute (including expanded home paths), return as-is
+  if (expanded.startsWith('/')) return expanded;
+  return resolve(basePath, expanded);
 }
 
 // ============================================
