@@ -106,7 +106,7 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
       if (!isCompleted) {
         message = `Using ${toolData.toolName || 'tool'}...`;
       } else {
-        const status = toolData.success ? '✓' : '✗';
+        const status = toolData.success ? 'OK' : 'ERR';
         const duration = toolData.durationMs !== undefined ? ` (${toolData.durationMs}ms)` : '';
         message = `${status} ${toolData.toolName || 'tool'}${duration}`;
       }

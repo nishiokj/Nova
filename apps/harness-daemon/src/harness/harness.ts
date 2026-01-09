@@ -637,7 +637,6 @@ export class AgentHarness {
       llmConfig
     );
 
-    console.error(`[HARNESS DEBUG] Creating workItem: agentType=${agentType}, budget.maxToolCalls=${agentConfig.budget.maxToolCalls}, budget.maxIterations=${agentConfig.budget.maxIterations}`);
     const workItem = createWorkItem({
       goal,
       objective: goal,

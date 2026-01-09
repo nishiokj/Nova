@@ -105,33 +105,49 @@ export class GraphStore {
 
   /**
    * Initialize database schema and verify version compatibility.
+   *
+   * Schema versions are additive - each version adds new tables without
+   * modifying existing ones. This allows safe forward migration by running
+   * the DDL (which uses CREATE TABLE IF NOT EXISTS).
    */
   initialize(): void {
-    // Check if metadata table exists (indicates existing database)
     const metadataExists = this.db
       .query(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='graphd_metadata';"
       )
       .get();
 
+    let existingVersion: string | null = null;
     if (metadataExists) {
-      // Verify schema version
       const row = this.db
         .query("SELECT value FROM graphd_metadata WHERE key = 'schema_version';")
         .get() as { value: string } | null;
-
-      if (row && row.value !== GRAPHD_SCHEMA_VERSION) {
-        throw new SchemaVersionError(row.value, GRAPHD_SCHEMA_VERSION, this.dbPath);
-      }
+      existingVersion = row?.value ?? null;
     }
 
-    // Create all tables (IF NOT EXISTS is idempotent)
-    this.db.exec(GRAPHD_SCHEMA_DDL);
+    // Parse version numbers (e.g., "v4" -> 4)
+    const parseVersion = (v: string | null): number => {
+      if (!v) return 0;
+      const match = v.match(/^v(\d+)$/);
+      return match ? parseInt(match[1], 10) : 0;
+    };
 
-    // Enable foreign key enforcement
+    const existingNum = parseVersion(existingVersion);
+    const expectedNum = parseVersion(GRAPHD_SCHEMA_VERSION);
+
+    // Only error on downgrades - forward migrations are safe since schema is additive
+    if (existingVersion && existingNum > expectedNum) {
+      throw new SchemaVersionError(existingVersion, GRAPHD_SCHEMA_VERSION, this.dbPath);
+    }
+
+    // Create all tables (IF NOT EXISTS is idempotent) - safely adds new tables
+    this.db.exec(GRAPHD_SCHEMA_DDL);
     this.db.exec(ENABLE_FOREIGN_KEYS);
 
-    // Store schema version (upsert)
+    // Update schema version
+    if (existingVersion && existingNum < expectedNum) {
+      console.log(`GraphD: migrated schema ${existingVersion} -> ${GRAPHD_SCHEMA_VERSION}`);
+    }
     this.db
       .query(
         'INSERT OR REPLACE INTO graphd_metadata (key, value) VALUES (?, ?);'
