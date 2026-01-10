@@ -256,6 +256,7 @@ export class DAGExecutor {
       },
     };
 
+    // Agent clones context internally - each parallel agent works on isolated copy
     return agent.run({ context, workItem: workItemWithBudget });
   }
 

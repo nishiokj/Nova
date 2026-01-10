@@ -705,6 +705,22 @@ export class ContextWindow {
     return context;
   }
 
+  /**
+   * Create an independent copy of this context window.
+   * Used for agent isolation - agents work on clones, not the original.
+   */
+  clone(): ContextWindow {
+    return ContextWindow.deserialize(this.serialize());
+  }
+
+  /**
+   * Check if context is near capacity based on token usage.
+   * @param threshold - Fraction of maxTokens (0.0 to 1.0), default 0.8
+   */
+  isNearFull(threshold: number = 0.8): boolean {
+    return this._metrics.percentageUsed >= threshold;
+  }
+
   // =========================================================================
   // Telemetry
   // =========================================================================
