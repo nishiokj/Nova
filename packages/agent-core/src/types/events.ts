@@ -16,7 +16,8 @@ import type { AgentType as CoreAgentType } from '../agent/types.js';
 export type AgentCoreEventType =
   | 'tool_call'
   | 'llm_call'
-  | 'llm_error';
+  | 'llm_error'
+  | 'agent_bounds_hit';
 
 /**
  * Orchestrator event types.

@@ -1,11 +1,8 @@
 /**
  * Wizard Module - Barrel Export
  *
- * Shared utilities for work items, context, knowledge, and ledger.
+ * Shared utilities for work items, knowledge, and ledger.
  */
-
-// Context utilities (NOTE: ContextWindow class is in types/context.ts)
-export { buildSystemMessage } from './context.js';
 
 // Work Item
 export type { WorkBounds, WorkItem, WorkItemCriteria } from './work-item.js';

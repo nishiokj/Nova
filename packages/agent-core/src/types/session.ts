@@ -46,20 +46,28 @@ export interface Session {
 
 /**
  * Context window metrics.
+ *
+ * Tracks actual token usage from API responses (source of truth).
+ * - inputTokens: Current context size (from last API call)
+ * - peakInputTokens: High-water mark for context size
+ * - outputTokens: Completion tokens from last request
+ * - totalOutputTokens: Cumulative completion tokens across all requests
  */
 export interface ContextWindowMetrics {
-  /** Peak prompt tokens (actual context window usage) */
-  contextTokens: number;
-  /** Cumulative completion tokens */
+  /** Current context size - tokens in window (from last API response) */
+  inputTokens: number;
+  /** Peak context size - highest inputTokens seen */
+  peakInputTokens: number;
+  /** Completion tokens from last request */
   outputTokens: number;
+  /** Cumulative completion tokens across all requests */
+  totalOutputTokens: number;
   /** Maximum context window size (default 200000) */
   maxTokens: number;
-  /** contextTokens / maxTokens */
+  /** inputTokens / maxTokens - current window usage */
   percentageUsed: number;
   /** Number of messages in context */
   messageCount: number;
-  /** Legacy: contextTokens + outputTokens */
-  totalTokens: number;
 }
 
 /**
@@ -69,17 +77,21 @@ export function createContextWindowMetrics(
   maxTokens = 200000
 ): ContextWindowMetrics {
   return {
-    contextTokens: 0,
+    inputTokens: 0,
+    peakInputTokens: 0,
     outputTokens: 0,
+    totalOutputTokens: 0,
     maxTokens,
     percentageUsed: 0,
     messageCount: 0,
-    totalTokens: 0,
   };
 }
 
 /**
  * Update context window metrics after an LLM call.
+ *
+ * Sets inputTokens to current value (not max) for accurate post-compaction tracking.
+ * Tracks peak separately in peakInputTokens.
  */
 export function updateContextMetrics(
   metrics: ContextWindowMetrics,
@@ -87,15 +99,14 @@ export function updateContextMetrics(
   completionTokens: number,
   messageCount: number
 ): ContextWindowMetrics {
-  const contextTokens = Math.max(metrics.contextTokens, promptTokens);
-  const outputTokens = metrics.outputTokens + completionTokens;
   return {
-    contextTokens,
-    outputTokens,
+    inputTokens: promptTokens,
+    peakInputTokens: Math.max(metrics.peakInputTokens, promptTokens),
+    outputTokens: completionTokens,
+    totalOutputTokens: metrics.totalOutputTokens + completionTokens,
     maxTokens: metrics.maxTokens,
-    percentageUsed: contextTokens / metrics.maxTokens,
+    percentageUsed: promptTokens / metrics.maxTokens,
     messageCount,
-    totalTokens: contextTokens + outputTokens,
   };
 }
 

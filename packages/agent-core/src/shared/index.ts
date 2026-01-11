@@ -8,3 +8,4 @@ export {
   type LogLevel,
 } from './logger.js';
 export { coerceStructuredOutput } from './structured_output.js';
+export { createMicroQueue, type MicroQueue, type MicroQueueOptions } from './microqueue.js';

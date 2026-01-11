@@ -7,10 +7,10 @@
  * - Context is truth - no separate state machine
  */
 
-import type { LLMAdapter, LLMRequestConfig } from '../llm/index.js';
+import type { LLMAdapter } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import type { ContextWindow } from '../types/context.js';
-import type { AgentResult, EventEmitCallback, UserPromptInfo } from '../agent/types.js';
+import type { ContextWindow } from '../context/index.js';
+import type { EventEmitCallback, UserPromptInfo } from '../agent/types.js';
 import { Agent } from '../agent/agent.js';
 import type { AgentRegistry } from '../agent/agent-registry.js';
 import { createWorkItem, type WorkItem } from '../wizard/work-item.js';
@@ -133,6 +133,9 @@ export class Orchestrator {
     let totalLlmCalls = 0;
     let totalToolCalls = 0;
 
+    // Hysteresis gate for compaction: compact at 80%, don't compact again until below 70%
+    let compactedRecently = false;
+
     // Create agent for this goal
     const agent = this.createAgent(agentType);
     if (!agent) {
@@ -148,22 +151,33 @@ export class Orchestrator {
     // Create work item representing the goal
     const workItem = this.createWorkItem(goal);
 
+    // Local helper to emit goal_not_achieved events (reduces duplication)
+    const emitGoalNotAchieved = (reason: string, failed = 0) =>
+      this.emit(createEvent('goal_not_achieved', { goal, reason, completed: 0, failed, skipped: 0 }));
+
     this.log('info', 'Starting orchestration', { goal, agentType });
     this.emit(createEvent('orchestration_started', { goal, agentType, requestId: this.requestId }));
 
     while (true) {
       iteration++;
-      const elapsed = Date.now() - startTime;
+      // Cache timestamp once per iteration for consistent metrics
+      const now = Date.now();
+      const elapsed = now - startTime;
 
-      // AUTO-COMPACT: If context is 80%+ full, compact before next iteration
-      if (context.isNearFull(0.8)) {
+      // AUTO-COMPACT with hysteresis: compact at 80%, don't re-compact until below 70%
+      const percentUsed = context.metrics.percentageUsed;
+      if (percentUsed < 0.7) {
+        compactedRecently = false;
+      }
+      if (!compactedRecently && percentUsed >= 0.8) {
         const compactResult = context.compact({
           deduplicateByPath: true,
           maxFileContentCount: 20,
           truncateOutputsTo: 5000,
         });
+        compactedRecently = true;
         this.log('info', 'Auto-compacted context', {
-          percentUsed: context.metrics.percentageUsed,
+          percentUsed,
           itemsRemoved: compactResult.itemsRemoved,
           bytesRecovered: compactResult.bytesRecovered,
         });
@@ -172,13 +186,7 @@ export class Orchestrator {
       // BOUND CHECK: Iterations
       if (iteration > this.config.maxIterations) {
         this.log('warning', 'Max iterations exceeded', { iteration });
-        this.emit(createEvent('goal_not_achieved', {
-          goal,
-          reason: 'max_iterations_exceeded',
-          completed: 0,
-          failed: 0,
-          skipped: 0,
-        }));
+        emitGoalNotAchieved('max_iterations_exceeded');
         return this.createResult({
           success: false,
           response: '',
@@ -190,13 +198,7 @@ export class Orchestrator {
       // BOUND CHECK: Duration
       if (elapsed > this.config.maxDurationMs) {
         this.log('warning', 'Max duration exceeded', { elapsed });
-        this.emit(createEvent('goal_not_achieved', {
-          goal,
-          reason: 'max_duration_exceeded',
-          completed: 0,
-          failed: 0,
-          skipped: 0,
-        }));
+        emitGoalNotAchieved('max_duration_exceeded');
         return this.createResult({
           success: false,
           response: '',
@@ -208,17 +210,38 @@ export class Orchestrator {
       this.log('info', `Iteration ${iteration}`, { totalToolCalls, totalLlmCalls });
       this.emit(createEvent('iteration_started', { iteration, goal, requestId: this.requestId }));
 
-      // AGENT EXECUTION - agent works on its own clone, doesn't mutate global context
-      const result = await agent.run({ context, workItem });
+      // AGENT EXECUTION - agent reads from global context, writes to its own local context
+      const result = await agent.run({ globalContext: context, workItem });
 
       totalLlmCalls += result.metrics.llmCallsMade;
       totalToolCalls += result.metrics.toolCallsMade;
 
+      // Merge token metrics from agent's local context into global context
+      const localMetrics = result.localContext.metrics;
+      context.updateMetrics(localMetrics.inputTokens, localMetrics.outputTokens);
+
+      // BOUND CHECK: Total tool calls (moved earlier for cheaper early exit)
+      if (totalToolCalls >= this.config.maxToolCalls) {
+        this.log('warning', 'Max tool calls exceeded', { totalToolCalls });
+        emitGoalNotAchieved('max_tool_calls_exceeded');
+        context.addAgentResultContext(result);
+        return this.createResult({
+          success: false,
+          response: result.response,
+          terminationReason: 'max_tool_calls_exceeded',
+          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+        });
+      }
+
+      // Emit iteration_completed with optimized slicing (only slice if needed)
+      const responsePreview = result.response && result.response.length > 200
+        ? result.response.slice(0, 200)
+        : result.response;
       this.emit(createEvent('iteration_completed', {
         iteration,
         result: {
           success: result.success,
-          response: result.response?.slice(0, 200),
+          response: responsePreview,
           toolCalls: result.metrics.toolCallsMade,
           llmCalls: result.metrics.llmCallsMade,
         },
@@ -234,7 +257,7 @@ export class Orchestrator {
           paused: true,
           userPrompt: result.userPrompt,
           terminationReason: 'user_input_required',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
+          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         });
       }
 
@@ -248,40 +271,26 @@ export class Orchestrator {
           completed: 1,
           skipped: 0,
         }));
-        const structuredResponse = typeof structured?.response === 'string' ? structured.response : '';
-        const responseText = result.response || structuredResponse;
-        // Add response to global context
-        if (responseText) {
-          context.addMessage('assistant', responseText);
-        }
+        context.addAgentResultContext(result);
         return this.createResult({
           success: true,
-          response: responseText,
+          response: result.response,
           terminationReason: 'goal_state_reached',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
+          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         });
       }
 
       // TERMINAL CHECK: Agent refusal
       if (result.isRefusal) {
         this.log('warning', 'Agent refused', { response: result.response });
-        this.emit(createEvent('goal_not_achieved', {
-          goal,
-          reason: 'refusal',
-          completed: 0,
-          failed: 1,
-          skipped: 0,
-        }));
-        // Add refusal response to global context
-        if (result.response) {
-          context.addMessage('assistant', result.response);
-        }
+        emitGoalNotAchieved('refusal', 1);
+        context.addAgentResultContext(result);
         return this.createResult({
           success: false,
           response: result.response,
           error: result.response,
           terminationReason: 'refusal',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
+          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         });
       }
 
@@ -289,48 +298,18 @@ export class Orchestrator {
       const actionIsContinue = structured?.action === 'continue';
       if (result.error && !result.success && !actionIsContinue) {
         this.log('error', 'Agent error', { error: result.error });
-        this.emit(createEvent('goal_not_achieved', {
-          goal,
-          reason: result.error,
-          completed: 0,
-          failed: 1,
-          skipped: 0,
-        }));
+        emitGoalNotAchieved(result.error, 1);
         return this.createResult({
           success: false,
           response: result.response,
           error: result.error,
           terminationReason: 'agent_error',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
+          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         });
       }
 
-      // BOUND CHECK: Total tool calls
-      if (totalToolCalls >= this.config.maxToolCalls) {
-        this.log('warning', 'Max tool calls exceeded', { totalToolCalls });
-        this.emit(createEvent('goal_not_achieved', {
-          goal,
-          reason: 'max_tool_calls_exceeded',
-          completed: 0,
-          failed: 0,
-          skipped: 0,
-        }));
-        // Add partial response to global context
-        if (result.response) {
-          context.addMessage('assistant', result.response);
-        }
-        return this.createResult({
-          success: false,
-          response: result.response,
-          terminationReason: 'max_tool_calls_exceeded',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
-        });
-      }
-
-      // Continue loop - add response to global context for next iteration
-      if (result.response) {
-        context.addMessage('assistant', result.response);
-      }
+      // Continue loop - merge agent result for next iteration
+      context.addAgentResultContext(result);
       this.log('info', `Continuing to iteration ${iteration + 1}`);
     }
   }
@@ -350,7 +329,11 @@ export class Orchestrator {
   // --- Private helpers ---
 
   private createAgent(agentType: string): Agent | null {
-    const runtime = this.agentRegistry?.getRuntimeConfig(agentType);
+    // Try requested type first, then fallback to 'standard' if different
+    let runtime = this.agentRegistry?.getRuntimeConfig(agentType);
+    if (!runtime && agentType !== 'standard') {
+      runtime = this.agentRegistry?.getRuntimeConfig('standard');
+    }
     if (!runtime) return null;
 
     return new Agent(

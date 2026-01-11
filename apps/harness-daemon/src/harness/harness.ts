@@ -20,7 +20,8 @@ import { ToolRegistry } from '../../../../packages/agent-core/src/tools/registry
 import { builtinToolOptions } from '../../../../packages/agent-core/src/tools/builtins/index.js';
 import { GraphDManager, createGraphDConfig } from '../../../../packages/graphd/src/index.js';
 import { createEvent, type AgentEvent } from '../../../../packages/agent-core/src/types/events.js';
-import { ContextWindow, type ContextWindowSnapshot } from '../../../../packages/agent-core/src/types/context.js';
+import { ContextWindow } from '../../../../packages/agent-core/src/context/index.js';
+import type { ContextWindowSnapshot } from '../../../../packages/agent-core/src/types/context.js';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from '../../../../packages/comms-bus/src/index.js';
 import { createWorkItem } from '../../../../packages/agent-core/src/wizard/work-item.js';
 import { GraphDSubscriber } from '../subscribers/graphd_subscriber.js';

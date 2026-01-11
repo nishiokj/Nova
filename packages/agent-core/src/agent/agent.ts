@@ -8,7 +8,7 @@
 import type { LLMAdapter, Message, LLMRequestConfig } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ToolDefinition, ToolResult } from '../types/tools.js';
-import type { ContextWindow } from '../types/context.js';
+import { ContextWindow } from '../context/index.js';
 import type { WorkItem } from '../wizard/work-item.js';
 import type {
   AgentConfig,
@@ -21,10 +21,11 @@ import type {
 import { noopEmit } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { createEvent } from '../types/events.js';
-import { buildSystemMessage } from '../wizard/context.js';
+import { buildSystemMessage } from '../context/index.js';
 import { createWorkItem } from '../wizard/work-item.js';
 import { errorResult, successResult } from '../types/tools.js';
 import { coerceStructuredOutput } from '../shared/structured_output.js';
+import { createMicroQueue } from '../shared/microqueue.js';
 
 type AgentAction = 'done' | 'need_user_input' | 'continue';
 
@@ -72,14 +73,17 @@ export class Agent {
 
   /**
    * Execute the agent on a work item.
-   * Agent clones the input context and works on the clone.
-   * The input context is never mutated.
+   * Agent reads from globalContext, writes to its own localContext.
+   * GlobalContext is never mutated.
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
-    const { context: inputContext, workItem } = params;
+    const { globalContext, workItem } = params;
 
-    // Clone context - agent works on isolated copy
-    const context = inputContext.clone();
+    // Create fresh local context for this agent's work
+    const localContext = new ContextWindow(
+      `${globalContext.sessionKey}:${this.config.type}:${workItem.workId}`,
+      globalContext.maxTokens
+    );
 
     const startTime = Date.now();
 
@@ -101,10 +105,11 @@ export class Agent {
       terminationReason: '',
       needsUserInput: false,
       isRefusal: false,
+      localContext,
     };
 
     try {
-      await this.executeLoop(context, workItem, result, metrics, startTime);
+      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.error = message;
@@ -114,9 +119,6 @@ export class Agent {
 
     metrics.durationMs = Date.now() - startTime;
 
-    // Include local context snapshot for caller (currently ignored by orchestrator)
-    result.localContext = context.serialize();
-
     return result;
   }
 
@@ -124,19 +126,19 @@ export class Agent {
    * Main execution loop.
    */
   private async executeLoop(
-    context: ContextWindow,
+    globalContext: ContextWindow,
+    localContext: ContextWindow,
     workItem: WorkItem,
     result: AgentResult,
     metrics: AgentMetrics,
     startTime: number
   ): Promise<void> {
-    console.error(`[AGENT DEBUG] executeLoop started: agent=${this.config.type}, workId=${workItem.workId}, bounds.maxToolCalls=${workItem.bounds.maxToolCalls}, bounds.maxLlmCalls=${workItem.bounds.maxLlmCalls}, config.budget.maxIterations=${this.config.budget.maxIterations}, config.budget.maxToolCalls=${this.config.budget.maxToolCalls}`);
     const maxIterations = Math.min(
       this.config.budget.maxIterations,
       workItem.bounds.maxLlmCalls
     );
 
-    const localReadFiles = new Set(context.getReadFilesArray());
+    const localReadFiles = new Set(globalContext.getReadFilesArray());
     const toolRepeatState = {
       lastKey: '',
       lastOutput: '',
@@ -145,7 +147,7 @@ export class Agent {
 
     // Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
-      await this.autoReadTargetFiles(workItem.targetPaths, context, localReadFiles, metrics);
+      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics);
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -153,14 +155,23 @@ export class Agent {
 
       if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         result.terminationReason = 'bounds:tool_calls';
-        // Don't set error - gracefully complete with what we have
-        console.error(`[AGENT DEBUG] Tool call limit hit: made=${metrics.toolCallsMade}, max=${workItem.bounds.maxToolCalls}, agent=${this.config.type}, workId=${workItem.workId}`);
+        this.emit(createEvent('agent_bounds_hit', {
+          agentType: this.config.type,
+          boundType: 'tool_calls',
+          current: metrics.toolCallsMade,
+          max: workItem.bounds.maxToolCalls,
+        }, workItem.workId));
         break;
       }
 
       if (elapsedMs >= workItem.bounds.maxDurationMs) {
         result.terminationReason = 'bounds:duration';
-        // Don't set error - gracefully complete with what we have
+        this.emit(createEvent('agent_bounds_hit', {
+          agentType: this.config.type,
+          boundType: 'duration',
+          current: elapsedMs,
+          max: workItem.bounds.maxDurationMs,
+        }, workItem.workId));
         break;
       }
 
@@ -179,14 +190,7 @@ export class Agent {
       ];
       const allowedTools = this.filterAllowedTools(allTools);
 
-      // DEBUG: Log tool filtering for debugging config issues
-      if (this.config.type === 'simple' || this.config.type === 'routing') {
-        console.log(`[DEBUG] Agent ${this.config.type} config.tools:`, this.config.tools);
-        console.log(`[DEBUG] Agent ${this.config.type} allTools count:`, allTools.length);
-        console.log(`[DEBUG] Agent ${this.config.type} allowedTools count:`, allowedTools.length);
-      }
-
-      const messages = this.buildMessages(systemMessage, workItem, context);
+      const messages = this.buildMessages(systemMessage, workItem, globalContext, localContext);
 
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
@@ -201,6 +205,14 @@ export class Agent {
 
       this.emitLlmCall(response, messages, llmDurationMs, allowedTools, workItem.workId);
 
+      // Update local context metrics with actual token usage from LLM
+      if (response.usage) {
+        localContext.updateMetrics(
+          response.usage.promptTokens ?? 0,
+          response.usage.completionTokens ?? 0
+        );
+      }
+
       const content = response.content ?? '';
       const toolCalls = response.toolCalls ?? [];
       const structuredOutput = this.parseStructuredOutput(content);
@@ -208,7 +220,7 @@ export class Agent {
         result.structuredOutput = structuredOutput;
       }
 
-      this.addAssistantMessage(context, content, toolCalls);
+      this.addAssistantMessage(localContext, content, toolCalls);
 
       const action = this.extractStructuredAction(structuredOutput);
       const responseText = this.extractStructuredResponse(structuredOutput);
@@ -217,7 +229,8 @@ export class Agent {
       if (toolCalls.length > 0) {
         await this.processToolCalls(
           toolCalls,
-          context,
+          globalContext,
+          localContext,
           localReadFiles,
           result,
           metrics,
@@ -253,6 +266,15 @@ export class Agent {
           return;
         }
 
+        // Handle user input request after tool calls
+        if (action === 'need_user_input' && structuredPrompt) {
+          result.needsUserInput = true;
+          result.userPrompt = structuredPrompt;
+          result.terminationReason = 'user_input_required';
+          result.filesRead = Array.from(localReadFiles);
+          return;
+        }
+
         continue;
       }
 
@@ -278,9 +300,14 @@ export class Agent {
       }
 
       if (action === 'need_user_input') {
-        // SIAS mode: don't stop for user input, continue execution
-        // Log the request but keep going with what we have
-        console.error(`[AGENT DEBUG] User input requested but continuing (SIAS mode): ${structuredPrompt?.question ?? 'no question'}`);
+        if (structuredPrompt) {
+          result.needsUserInput = true;
+          result.userPrompt = structuredPrompt;
+          result.terminationReason = 'user_input_required';
+          result.filesRead = Array.from(localReadFiles);
+          return;
+        }
+        // No valid userPrompt provided, continue execution
         continue;
       }
 
@@ -302,7 +329,7 @@ export class Agent {
 
     // Always capture all assistant responses even without a terminal action.
     if (!result.response) {
-      const messages = context.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
+      const messages = localContext.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
       const assistantContents = messages
         .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
         .map(m => m.content as string);
@@ -365,31 +392,34 @@ export class Agent {
 
   /**
    * Build messages array for LLM call.
+   * Merges global context (historical) with local context (this turn's work).
    */
   private buildMessages(
     systemMessage: string,
     workItem: WorkItem,
-    context: ContextWindow
+    globalContext: ContextWindow,
+    localContext: ContextWindow
   ): Array<Record<string, unknown>> {
     const messages: Array<Record<string, unknown>> = [
       { role: 'system', content: systemMessage },
     ];
 
-    const contextItems = context.getItemsForLLM();
+    // Merge global (historical) + local (this turn) items
+    const globalItems = globalContext.getItemsForLLM();
+    const localItems = localContext.getItemsForLLM();
+    const allItems = [...globalItems, ...localItems];
 
     // Collect all callIds that have outputs - we only want to send function_calls
     // that have matching outputs to avoid OpenAI's "No tool output found" error.
-    // This can happen when a sub-agent runs while the parent's function_call
-    // is in context but hasn't received its output yet.
     const callIdsWithOutputs = new Set<string>();
-    for (const item of contextItems) {
+    for (const item of allItems) {
       if (item.type === 'function_call_output') {
         const callId = (item as any).call_id;
         if (callId) callIdsWithOutputs.add(callId);
       }
     }
 
-    const hasUserInput = contextItems.some(
+    const hasUserInput = globalItems.some(
       (item) => item.type === 'message' && (item as any).role === 'user'
     );
 
@@ -400,7 +430,7 @@ export class Agent {
       });
     }
 
-    for (const item of contextItems) {
+    for (const item of allItems) {
       if (item.type === 'message') {
         messages.push({
           role: (item as any).role,
@@ -451,7 +481,8 @@ export class Agent {
    */
   private async processToolCalls(
     toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
-    context: ContextWindow,
+    globalContext: ContextWindow,
+    localContext: ContextWindow,
     localReadFiles: Set<string>,
     result: AgentResult,
     metrics: AgentMetrics,
@@ -459,6 +490,7 @@ export class Agent {
     workItemId?: string,
     toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
   ): Promise<void> {
+    const mq = createMicroQueue();
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
 
     // Build a map from lowercase names to canonical names for case-insensitive lookup
@@ -505,7 +537,7 @@ export class Agent {
         durationMs: toolDurationMs,
       }, workItemId));
 
-      context.appendItem({
+      localContext.appendItem({
         type: 'function_call_output',
         callId: call.id,
         output: toolResult.output ?? '',
@@ -537,15 +569,8 @@ export class Agent {
         }
       }
 
-      // SIAS mode: don't stop for ask_user tool, just log and continue
-      if (call.name === 'ask_user' && toolResult.isSuccess) {
-        console.error(`[AGENT DEBUG] ask_user tool called but continuing (SIAS mode)`);
-        // Don't stop execution - just continue with the tool result in context
-      }
-
       // SIAS mode: don't propagate sub-agent user input requests
       if (isAgentTool && result.needsUserInput) {
-        console.error(`[AGENT DEBUG] Sub-agent requested user input but continuing (SIAS mode)`);
         result.needsUserInput = false;
         result.userPrompt = undefined;
       }
@@ -564,6 +589,7 @@ export class Agent {
         if (shouldStop) {
           return true;
         }
+        await mq.yieldIfNeeded();
       }
       return false;
     };
@@ -579,7 +605,7 @@ export class Agent {
         const errorMsg = `Tool "${call.name}" is not allowed for this agent`;
         result.toolErrors.push(errorMsg);
         metrics.toolCallsFailed++;
-        context.appendItem({
+        localContext.appendItem({
           type: 'function_call_output',
           callId: call.id,
           output: errorMsg,
@@ -634,7 +660,7 @@ export class Agent {
         // Use canonical name for execution, but pass original call for agent tools (which need call.id)
         const normalizedCall = { ...call, name: canonicalName };
         const toolResult = isAgentTool
-          ? await this.executeAgentToolCall(normalizedCall, workItem, context)
+          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext)
           : await this.toolRegistry.execute(canonicalName, call.arguments);
         const toolDurationMs = Date.now() - toolStartTime;
 
@@ -654,7 +680,7 @@ export class Agent {
           durationMs: Date.now() - toolStartTime,
         }, workItemId));
 
-        context.appendItem({
+        localContext.appendItem({
           type: 'function_call_output',
           callId: call.id,
           output: `Error: ${message}`,
@@ -671,7 +697,7 @@ export class Agent {
   private async executeAgentToolCall(
     call: { id: string; name: string; arguments: Record<string, unknown> },
     parentWorkItem: WorkItem,
-    context: ContextWindow
+    globalContext: ContextWindow
   ) {
     if (!this.agentRegistry) {
       return errorResult(call.name, 'Agent tool registry not available', 0);
@@ -738,9 +764,9 @@ export class Agent {
       llmConfig
     );
 
-    // Sub-agent works on its own clone (via run() cloning)
+    // Sub-agent sees only globalContext (Option A: parent's local work is invisible)
     // Sub-agent's internal execution is opaque - we only extract the response
-    const subResult = await agent.run({ context, workItem: subWorkItem });
+    const subResult = await agent.run({ globalContext, workItem: subWorkItem });
 
     const payload = {
       agent: agentConfig.type,
@@ -752,12 +778,6 @@ export class Agent {
       userPrompt: subResult.userPrompt,
       metrics: subResult.metrics,
     };
-
-    // SIAS mode: don't propagate sub-agent user input requests
-    if (subResult.needsUserInput && subResult.userPrompt) {
-      console.error(`[AGENT DEBUG] Sub-agent ${agentConfig.type} requested user input but ignoring (SIAS mode): ${subResult.userPrompt.question}`);
-      // Don't propagate - continue with what we have
-    }
 
     if (subResult.success || subResult.needsUserInput) {
       return successResult(call.name, JSON.stringify(payload), 0);
@@ -771,7 +791,7 @@ export class Agent {
    */
   private async autoReadTargetFiles(
     targetPaths: readonly string[],
-    context: ContextWindow,
+    localContext: ContextWindow,
     localReadFiles: Set<string>,
     metrics: AgentMetrics
   ): Promise<void> {
@@ -794,7 +814,7 @@ export class Agent {
             ? result.output
             : JSON.stringify(result.output);
 
-          context.addFileContent(targetPath, fileContent.slice(0, 10000));
+          localContext.addFileContent(targetPath, fileContent.slice(0, 10000));
         } else {
           metrics.toolCallsFailed++;
         }

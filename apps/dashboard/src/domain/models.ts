@@ -109,12 +109,20 @@ export interface UserPrompt {
 // ============================================
 
 export interface ContextWindowMetrics {
-  contextTokens: number; // Peak prompt tokens (actual context window usage)
-  outputTokens: number; // Cumulative completion tokens
+  /** Current context size - tokens in window (from last API response) */
+  inputTokens: number;
+  /** Peak context size - highest inputTokens seen */
+  peakInputTokens: number;
+  /** Completion tokens from last request */
+  outputTokens: number;
+  /** Cumulative completion tokens across all requests */
+  totalOutputTokens: number;
+  /** Maximum context window size */
   maxTokens: number;
-  percentageUsed: number; // contextTokens / maxTokens
+  /** inputTokens / maxTokens - current window usage */
+  percentageUsed: number;
+  /** Number of messages in context */
   messageCount: number;
-  totalTokens: number; // Legacy: contextTokens + outputTokens
   timestamp: ISODateTime;
 }
 

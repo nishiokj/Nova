@@ -1,4 +1,4 @@
-import { ContextWindow } from '../packages/agent-core/src/types/context.js';
+import { ContextWindow } from '../packages/agent-core/src/context/index.js';
 import type { AgentType } from './types.js';
 
 export interface ContextPolicy {

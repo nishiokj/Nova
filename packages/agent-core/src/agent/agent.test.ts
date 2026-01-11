@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'bun:test';
 import { Agent } from './agent.js';
 import type { AgentConfig } from './types.js';
-import { ContextWindow } from '../types/context.js';
+import { ContextWindow } from '../context/index.js';
 import { createWorkItem } from '../wizard/work-item.js';
 import type { LLMAdapter, LLMResponse } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -25,6 +25,7 @@ function createMockToolRegistry(): ToolRegistry {
   return {
     getDefinitions: () => [],
     getWorkingDir: () => process.cwd(),
+    isParallelSafe: () => false,
     execute: async () => ({
       toolName: 'Read',
       status: 'error',
@@ -40,6 +41,7 @@ function createReadToolRegistry(output: string): ToolRegistry {
   return {
     getDefinitions: () => [],
     getWorkingDir: () => process.cwd(),
+    isParallelSafe: () => false,
     execute: async (name: string) => {
       if (name.toLowerCase() !== 'read') {
         return {
@@ -91,7 +93,7 @@ describe('Agent', () => {
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
-    const result = await agent.run({ context, workItem });
+    const result = await agent.run({ globalContext: context, workItem });
 
     expect(result.success).toBe(true);
     expect(result.response).toBe('done');
@@ -143,7 +145,7 @@ describe('Agent', () => {
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
-    const result = await agent.run({ context, workItem });
+    const result = await agent.run({ globalContext: context, workItem });
 
     expect(result.success).toBe(false);
     expect(result.terminationReason).toBe('stagnation:tool_repeat');

@@ -1,4 +1,4 @@
-import type { ContextWindow, ContextWindowSnapshot } from '../types/context.js';
+import type { ContextWindow } from '../context/index.js';
 import type { WorkItem } from '../wizard/work-item.js';
 import type { AgentEvent } from '../types/events.js';
 import type { StructuredOutputSchema } from '../types/llm.js';
@@ -53,8 +53,8 @@ export interface AgentConfig {
  * Minimal interface - all config is at construction.
  */
 export interface AgentRunParams {
-  /** Context window - agent clones this and works on the clone */
-  context: ContextWindow;
+  /** Global context window - read-only reference, agent writes to its own local context */
+  globalContext: ContextWindow;
   /** Work item defining the objective */
   workItem: WorkItem;
 }
@@ -106,8 +106,8 @@ export interface AgentResult {
   isIncomplete?: boolean;
   /** Parsed structured output (if available). Shape defined by config, not TypeScript. */
   structuredOutput?: Record<string, unknown>;
-  /** Agent's execution context snapshot (for future use, currently discarded by orchestrator) */
-  localContext?: ContextWindowSnapshot;
+  /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
+  localContext: ContextWindow;
 }
 
 /**

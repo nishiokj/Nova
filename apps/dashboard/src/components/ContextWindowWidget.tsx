@@ -16,7 +16,7 @@ function formatTokens(tokens: number): string {
 export function ContextWindowWidget({ metrics, className }: ContextWindowWidgetProps) {
   if (!metrics) return null
 
-  const { contextTokens, outputTokens, maxTokens, percentageUsed } = metrics
+  const { inputTokens, peakInputTokens, outputTokens, totalOutputTokens, maxTokens, percentageUsed } = metrics
   const pct = Math.min(100, percentageUsed * 100)
 
   const barColor = pct > 90
@@ -34,8 +34,8 @@ export function ContextWindowWidget({ metrics, className }: ContextWindowWidgetP
         className
       )}
     >
-      {/* Context window usage (prompt tokens) */}
-      <span className="text-[var(--text-muted)]">CTX</span>
+      {/* Current context window size (from last API response) */}
+      <span className="text-[var(--text-muted)]" title="Current tokens in context window">IN</span>
       <div className="w-16 h-1.5 bg-[var(--bg-surface)] rounded-full overflow-hidden">
         <div
           className="h-full transition-all duration-300"
@@ -43,15 +43,37 @@ export function ContextWindowWidget({ metrics, className }: ContextWindowWidgetP
         />
       </div>
       <span className="text-[var(--text-secondary)] tabular-nums">
-        {formatTokens(contextTokens)}/{formatTokens(maxTokens)}
+        {formatTokens(inputTokens)}/{formatTokens(maxTokens)}
       </span>
       <span className="text-[var(--text-muted)]">({pct.toFixed(0)}%)</span>
-      {/* Output tokens (completion tokens) */}
+
+      {/* Peak context size indicator (only show if different from current) */}
+      {peakInputTokens > inputTokens && (
+        <>
+          <span className="text-[var(--border-subtle)]">|</span>
+          <span className="text-[var(--text-muted)]" title="Peak context window size">PEAK</span>
+          <span className="text-[var(--text-secondary)] tabular-nums">
+            {formatTokens(peakInputTokens)}
+          </span>
+        </>
+      )}
+
+      {/* Last request output tokens */}
       <span className="text-[var(--border-subtle)]">|</span>
-      <span className="text-[var(--text-muted)]">OUT</span>
+      <span className="text-[var(--text-muted)]" title="Output tokens from last request">OUT</span>
       <span className="text-[var(--text-secondary)] tabular-nums">
         {formatTokens(outputTokens)}
       </span>
+
+      {/* Total output tokens (only show if different from last request) */}
+      {totalOutputTokens > outputTokens && (
+        <>
+          <span className="text-[var(--border-subtle)]">/</span>
+          <span className="text-[var(--text-secondary)] tabular-nums" title="Total output tokens across all requests">
+            {formatTokens(totalOutputTokens)}
+          </span>
+        </>
+      )}
     </div>
   )
 }

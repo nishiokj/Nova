@@ -409,6 +409,26 @@ function createRequestFromEvents(
   const workItemsCompleted = workItemsArray.filter(w => w.status === 'completed').length
   const workItemsTotal = workItemsArray.length
 
+  // Aggregate token metrics from LLM calls
+  if (llmCalls.length > 0) {
+    const lastCall = llmCalls[llmCalls.length - 1]
+    const inputTokens = lastCall?.promptTokens ?? 0 // Current context size (from last call)
+    const peakInputTokens = Math.max(...llmCalls.map(c => c.promptTokens), 0)
+    const outputTokens = lastCall?.completionTokens ?? 0 // Last request output
+    const totalOutputTokens = llmCalls.reduce((sum, c) => sum + c.completionTokens, 0)
+    const maxTokens = 200000 // Default context window size
+    contextWindow = {
+      inputTokens,
+      peakInputTokens,
+      outputTokens,
+      totalOutputTokens,
+      maxTokens,
+      percentageUsed: inputTokens / maxTokens,
+      messageCount: llmCalls.length,
+      timestamp: lastCall?.timestamp ?? lastEventTime,
+    }
+  }
+
   return {
     id: `${sessionKey}-${requestId}`,
     sessionId: sessionKey,

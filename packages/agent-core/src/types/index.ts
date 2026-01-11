@@ -17,8 +17,6 @@ export type {
   ContextWindowTelemetry,
 } from './context.js';
 
-export { ContextWindow } from './context.js';
-
 // ============================================
 // EVENTS
 // ============================================

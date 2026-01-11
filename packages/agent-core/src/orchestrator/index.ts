@@ -12,13 +12,3 @@ export {
   type OrchestratorLogger,
   type TerminationReason,
 } from './orchestrator.js';
-
-// DAG executor (standalone, for future parallel execution)
-export {
-  DAGExecutor,
-  type DAGExecutorConfig,
-  type DAGResult,
-  type RuntimeScript,
-  type RuntimeScriptOutput,
-  parseRuntimeScript,
-} from './dag-executor.js';

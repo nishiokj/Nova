@@ -1,38 +1,79 @@
 # Context Window Isolation
 
-Agents now work on isolated context clones instead of mutating global state.
+Agents read from global context, write to their own local context, return it. Orchestrator decides what to merge.
 
 ## Architecture
 
-- **Orchestrator** owns global context, only it mutates it
-- **Agents** clone input context, work on clone, return result
-- **Sub-agents** are opaque - parent only sees response, not internal execution
+- **Orchestrator** owns global context, passes it by reference (read-only to agents)
+- **Agents** create fresh local context, work on it, return it in `AgentResult.localContext`
+- **Sub-agents** see only global context (parent's local work is invisible)
+- **Merge** via `context.addAgentResultContext(result)` - single point of control
 
-## Changes
+## API Contract
 
-### `src/types/context.ts`
-- `clone()` - creates independent copy
-- `isNearFull(threshold)` - checks capacity
+### ContextWindow
 
-### `src/agent/types.ts`
-- `AgentResult.localContext` - agent's execution snapshot (for future use)
+```typescript
+// Mutation
+addMessage(role, content): void
+addFunctionCall(callId, name, args): void
+addFunctionCallOutput(callId, output, isError?, durationMs?): void
+addReasoning(content): void
+addFileContent(path, content, language?): string
+appendItem(item): void
+addAgentResultContext(result): void  // Merge agent result
 
-### `src/agent/agent.ts`
-- `run()` clones context at start, returns `localContext`
-- `executeAgentToolCall()` no longer merges sub-agent context back
+// Compaction
+compact(options): CompactResult
+ejectFileContentByPath(path): EjectResult
+ejectFileContentById(id): EjectResult
 
-### `src/orchestrator/orchestrator.ts`
-- Auto-compact at 80% fullness before each iteration
-- Adds agent response to global context after terminal states
+// Query
+isNearFull(threshold?): boolean  // Uses content estimation
+estimateTokenUsage(): number     // ~4 chars/token heuristic
 
-### `src/orchestrator/dag-executor.ts`
-- Comment noting agents clone internally
+// LLM Integration
+getItemsForLLM(): Array<Record<string, unknown>>
+getItemsForAnthropic(): Array<Record<string, unknown>>
+
+// Persistence
+serialize(): ContextWindowSnapshot
+static deserialize(snapshot): ContextWindow
+```
+
+### AgentRunParams
+
+```typescript
+interface AgentRunParams {
+  globalContext: ContextWindow;  // Read-only reference
+  workItem: WorkItem;
+}
+```
+
+### AgentResult
+
+```typescript
+interface AgentResult {
+  success: boolean;
+  response: string;
+  localContext: ContextWindow;  // Agent's execution context
+  // ... other fields
+}
+```
 
 ## Behavior
 
-| Aspect | Before | After |
-|--------|--------|-------|
-| Agent context | Mutates input | Works on clone |
-| Sub-agent | Merges back | Opaque, response only |
-| Compaction | Manual | Auto at 80% |
-| Persisted | All tool calls | Responses only |
+| Aspect | Implementation |
+|--------|----------------|
+| Global context | Read-only reference passed to agent |
+| Local context | Fresh ContextWindow per agent run |
+| Sub-agent visibility | Global only (Option A) |
+| Merge strategy | `addAgentResultContext()` - ejects stale files, merges filesRead, merges tool calls, adds response |
+| Auto-compact | Triggers at 80% estimated capacity |
+| Token estimation | ~4 chars per token heuristic |
+
+## Events
+
+- `agent_bounds_hit` - Emitted when agent hits tool call or duration limits
+- `tool_call` - Tool execution lifecycle
+- `llm_call` - LLM request/response

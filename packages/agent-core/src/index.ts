@@ -82,7 +82,6 @@ export type {
 } from './types/index.js';
 
 export {
-  ContextWindow,
   createEvent,
   eventToDict,
   successResult,
@@ -104,6 +103,8 @@ export {
   getKnowledge,
   clearExpiredKnowledge,
 } from './types/index.js';
+
+export { ContextWindow, buildSystemMessage } from './context/index.js';
 
 // ============================================
 // LLM (adapters - re-exports some types)
@@ -168,7 +169,6 @@ export {
 // WIZARD (shared utilities)
 // ============================================
 export {
-  buildSystemMessage,
   type WorkBounds,
   type WorkItem,
   type WorkItemCriteria,
