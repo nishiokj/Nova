@@ -14,6 +14,7 @@ import { persistCheckpoint, restoreCheckpoint } from './checkpoint.js';
 import { runIteration } from './loop.js';
 import { prepareUpgrade, triggerUpgrade } from './upgrade.js';
 import { WorktreeManager } from './worktree.js';
+import { persistSessionObjectiveMetadata, ensureInitializationDecision } from './session.js';
 
 async function main(): Promise<void> {
   const config = loadKernelConfig();
@@ -47,6 +48,9 @@ async function main(): Promise<void> {
 
   const currentVersion = await worktreeManager.getCurrentVersion();
   let state = await restoreCheckpoint(store, sessionId, currentVersion);
+  // Ensure session metadata and an initialization decision are persisted for objective tracking
+  persistSessionObjectiveMetadata(store as any, sessionId, state as any);
+  ensureInitializationDecision(store as any, state as any);
 
   const toolRegistry = new ToolRegistry({
     enabledTools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash'],
@@ -101,6 +105,7 @@ async function main(): Promise<void> {
 
   const checkpointHandler = async () => {
     await persistCheckpoint(store, state);
+    persistSessionObjectiveMetadata(store as any, state.sessionId, state as any);
     const checkpoints = store.listSiasCheckpoints(state.sessionId, 1);
     health.recordCheckpoint(Date.now(), checkpoints.length, store.listSiasPatches(state.sessionId).length, store.listSiasDecisions(state.sessionId).length);
   };
@@ -182,6 +187,7 @@ async function main(): Promise<void> {
       updateLogMetrics();
 
       state.iteration = iterationResult.iteration;
+      persistSessionObjectiveMetadata(store as any, state.sessionId, state as any);
       if (iterationResult.status === 'upgraded') {
         state.lastUpgradeIteration = state.iteration;
         await persistCheckpoint(store, state);

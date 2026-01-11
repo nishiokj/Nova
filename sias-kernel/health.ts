@@ -290,14 +290,17 @@ export function detectAnomalies(metrics: HealthMetrics, thresholds: AnomalyThres
     });
   }
 
-  if (metrics.logging.file_size_bytes > thresholds.log_file_max_bytes) {
+  const logSize = metrics.logging?.file_size_bytes ?? 0;
+  const logPath = metrics.logging?.file_path ?? null;
+
+  if (logSize > thresholds.log_file_max_bytes) {
     anomalies.push({
       type: 'log_file_overflow',
-      severity: metrics.logging.file_size_bytes > thresholds.log_file_max_bytes * 1.5 ? 'critical' : 'warning',
+      severity: logSize > thresholds.log_file_max_bytes * 1.5 ? 'critical' : 'warning',
       detected_at: Date.now(),
-      metric_value: metrics.logging.file_size_bytes,
+      metric_value: logSize,
       threshold_value: thresholds.log_file_max_bytes,
-      context: { file_path: metrics.logging.file_path },
+      context: { file_path: logPath },
     });
   }
 

@@ -271,8 +271,8 @@ export function createKernelAgentRegistry(config: KernelConfig): AgentRegistry {
   const principalConfig = createAgentConfig(
     'principal',
     PRINCIPAL_PROMPT,
-    ['Read', 'Glob', 'Grep'],
-    buildBudget(1, 20, 300000),
+    [],
+    buildBudget(1, 0, 300000),
     buildPrincipalSchema()
   );
 

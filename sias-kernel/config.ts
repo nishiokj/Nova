@@ -89,6 +89,7 @@ const DEFAULT_CONFIG: KernelConfig = {
     maxSizeBytes: 50 * 1024 * 1024,
   },
   orchestrator: {
+    // Default iterations kept low to encourage frequent checkpoints early on
     maxIterations: 10,
     maxToolCalls: 250,
     maxDurationMs: 1200000,
@@ -102,27 +103,27 @@ const DEFAULT_CONFIG: KernelConfig = {
     principal: {
       provider: 'openai',
       model: 'gpt-5.2',
-      maxTokens: 8000,
+      maxTokens: 128000,
       temperature: 0.4,
       reasoning: {effort: 'high'}
     },
     oncall: {
       provider: 'openai',
       model: 'gpt-5.2',
-      maxTokens: 8000,
+      maxTokens: 128000,
       temperature: 0.4,
       reasoning: {effort: 'medium'}
     },
     testing: {
       provider: 'openai',
       model: 'gpt-5-mini',
-      maxTokens: 8000,
+      maxTokens: 128000,
       temperature: 0.2,
     },
     coding: {
       provider: 'openai',
-      model: 'gpt-5.2-codex',
-      maxTokens: 8000,
+      model: 'gpt-5.1-codex',
+      maxTokens: 128000,
       temperature: 0.6,
       reasoning: { effort: 'high' },
     },
