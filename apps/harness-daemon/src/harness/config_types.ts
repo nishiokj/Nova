@@ -17,7 +17,7 @@
 import type { StructuredOutputSchema } from '../../../../packages/agent-core/src/types/llm.js';
 
 /** Supported LLM providers */
-export type LLMProvider = 'anthropic' | 'openai';
+export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat';
 
 /** Reasoning effort levels (provider-specific validation in loader) */
 export type ReasoningEffort =

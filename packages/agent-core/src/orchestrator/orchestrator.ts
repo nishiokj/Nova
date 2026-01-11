@@ -155,6 +155,20 @@ export class Orchestrator {
       iteration++;
       const elapsed = Date.now() - startTime;
 
+      // AUTO-COMPACT: If context is 80%+ full, compact before next iteration
+      if (context.isNearFull(0.8)) {
+        const compactResult = context.compact({
+          deduplicateByPath: true,
+          maxFileContentCount: 20,
+          truncateOutputsTo: 5000,
+        });
+        this.log('info', 'Auto-compacted context', {
+          percentUsed: context.metrics.percentageUsed,
+          itemsRemoved: compactResult.itemsRemoved,
+          bytesRecovered: compactResult.bytesRecovered,
+        });
+      }
+
       // BOUND CHECK: Iterations
       if (iteration > this.config.maxIterations) {
         this.log('warning', 'Max iterations exceeded', { iteration });
@@ -194,7 +208,7 @@ export class Orchestrator {
       this.log('info', `Iteration ${iteration}`, { totalToolCalls, totalLlmCalls });
       this.emit(createEvent('iteration_started', { iteration, goal, requestId: this.requestId }));
 
-      // AGENT EXECUTION
+      // AGENT EXECUTION - agent works on its own clone, doesn't mutate global context
       const result = await agent.run({ context, workItem });
 
       totalLlmCalls += result.metrics.llmCallsMade;
@@ -235,9 +249,14 @@ export class Orchestrator {
           skipped: 0,
         }));
         const structuredResponse = typeof structured?.response === 'string' ? structured.response : '';
+        const responseText = result.response || structuredResponse;
+        // Add response to global context
+        if (responseText) {
+          context.addMessage('assistant', responseText);
+        }
         return this.createResult({
           success: true,
-          response: result.response || structuredResponse,
+          response: responseText,
           terminationReason: 'goal_state_reached',
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
         });
@@ -253,6 +272,10 @@ export class Orchestrator {
           failed: 1,
           skipped: 0,
         }));
+        // Add refusal response to global context
+        if (result.response) {
+          context.addMessage('assistant', result.response);
+        }
         return this.createResult({
           success: false,
           response: result.response,
@@ -292,6 +315,10 @@ export class Orchestrator {
           failed: 0,
           skipped: 0,
         }));
+        // Add partial response to global context
+        if (result.response) {
+          context.addMessage('assistant', result.response);
+        }
         return this.createResult({
           success: false,
           response: result.response,
@@ -300,7 +327,10 @@ export class Orchestrator {
         });
       }
 
-      // Continue loop - agent will see accumulated context
+      // Continue loop - add response to global context for next iteration
+      if (result.response) {
+        context.addMessage('assistant', result.response);
+      }
       this.log('info', `Continuing to iteration ${iteration + 1}`);
     }
   }

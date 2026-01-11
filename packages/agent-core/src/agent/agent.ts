@@ -72,10 +72,15 @@ export class Agent {
 
   /**
    * Execute the agent on a work item.
-   * Context is passed by value and mutated locally.
+   * Agent clones the input context and works on the clone.
+   * The input context is never mutated.
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
-    const { context, workItem } = params;
+    const { context: inputContext, workItem } = params;
+
+    // Clone context - agent works on isolated copy
+    const context = inputContext.clone();
+
     const startTime = Date.now();
 
     const metrics: AgentMetrics = {
@@ -108,6 +113,10 @@ export class Agent {
     }
 
     metrics.durationMs = Date.now() - startTime;
+
+    // Include local context snapshot for caller (currently ignored by orchestrator)
+    result.localContext = context.serialize();
+
     return result;
   }
 
@@ -625,7 +634,7 @@ export class Agent {
         // Use canonical name for execution, but pass original call for agent tools (which need call.id)
         const normalizedCall = { ...call, name: canonicalName };
         const toolResult = isAgentTool
-          ? await this.executeAgentToolCall(normalizedCall, workItem, context, localReadFiles, result)
+          ? await this.executeAgentToolCall(normalizedCall, workItem, context)
           : await this.toolRegistry.execute(canonicalName, call.arguments);
         const toolDurationMs = Date.now() - toolStartTime;
 
@@ -662,9 +671,7 @@ export class Agent {
   private async executeAgentToolCall(
     call: { id: string; name: string; arguments: Record<string, unknown> },
     parentWorkItem: WorkItem,
-    context: ContextWindow,
-    localReadFiles: Set<string>,
-    result: AgentResult
+    context: ContextWindow
   ) {
     if (!this.agentRegistry) {
       return errorResult(call.name, 'Agent tool registry not available', 0);
@@ -731,18 +738,9 @@ export class Agent {
       llmConfig
     );
 
+    // Sub-agent works on its own clone (via run() cloning)
+    // Sub-agent's internal execution is opaque - we only extract the response
     const subResult = await agent.run({ context, workItem: subWorkItem });
-
-    for (const path of subResult.filesRead) {
-      localReadFiles.add(path);
-    }
-    for (const path of subResult.invalidatedPaths) {
-      result.invalidatedPaths.push(path);
-      localReadFiles.delete(path);
-    }
-    if (subResult.toolErrors.length > 0) {
-      result.toolErrors.push(...subResult.toolErrors);
-    }
 
     const payload = {
       agent: agentConfig.type,
