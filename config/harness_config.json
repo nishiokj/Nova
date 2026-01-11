@@ -30,9 +30,9 @@
     },
     "explorer": {
       "llm": {
-        "provider": "openai-compat",
-        "model": "glm-4.7",
-        "max_tokens": 128000,
+        "provider": "cerebras",
+        "model": "zai-glm-4.7",
+        "max_tokens": 64000,
         "temperature": 0.3
       },
       "budget": {

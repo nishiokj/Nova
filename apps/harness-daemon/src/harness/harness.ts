@@ -81,7 +81,21 @@ function buildAgentRegistry(config: FullHarnessConfig): AgentRegistry {
     };
   });
 
-  return new AgentRegistry(agentConfigs);
+  const registry = new AgentRegistry(agentConfigs);
+
+  // Validate agent tool references - warn if an agent references another agent that isn't loaded
+  const builtinTools = new Set(['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch']);
+  const registeredAgentTypes = new Set(agentConfigs.map(c => c.config.type));
+  for (const agentConf of agentConfigs) {
+    for (const tool of agentConf.config.tools) {
+      const toolLower = tool.toLowerCase();
+      if (!builtinTools.has(tool) && !registeredAgentTypes.has(tool) && !registeredAgentTypes.has(toolLower)) {
+        console.warn(`[harness] Agent '${agentConf.config.type}' references tool '${tool}' which is not available`);
+      }
+    }
+  }
+
+  return registry;
 }
 
 /**

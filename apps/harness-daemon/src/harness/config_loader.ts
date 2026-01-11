@@ -242,6 +242,19 @@ const API_KEY_ENV_MAP: Record<string, string> = {
   openai: 'OPENAI_API_KEY',
   'openai-compat': 'OPENAI_COMPAT_API_KEY',
   gemini: 'GOOGLE_API_KEY',
+  // OpenAI-compatible providers with their own API keys
+  cerebras: 'CEREBRAS_API_KEY',
+  together: 'TOGETHER_API_KEY',
+  groq: 'GROQ_API_KEY',
+  fireworks: 'FIREWORKS_API_KEY',
+};
+
+/** Base URLs for OpenAI-compatible providers */
+const OPENAI_COMPAT_BASE_URLS: Record<string, string> = {
+  cerebras: 'https://api.cerebras.ai/v1',
+  together: 'https://api.together.xyz/v1',
+  groq: 'https://api.groq.com/openai/v1',
+  fireworks: 'https://api.fireworks.ai/inference/v1',
 };
 
 const OPENAI_REASONING_EFFORTS = new Set<ReasoningEffort>([
@@ -258,6 +271,9 @@ const ANTHROPIC_REASONING_EFFORTS = new Set<ReasoningEffort>([
   'standard',
 ]);
 
+/** Providers that use OpenAI-compatible API */
+const OPENAI_COMPAT_PROVIDERS = new Set(['openai-compat', 'cerebras', 'together', 'groq', 'fireworks']);
+
 /**
  * Resolve API key from environment based on provider.
  */
@@ -265,8 +281,11 @@ export function resolveApiKey(provider: string): string {
   const envVar = API_KEY_ENV_MAP[provider] ?? `${provider.toUpperCase()}_API_KEY`;
   const key = process.env[envVar];
   if (!key) {
+    const canonicalHint = OPENAI_COMPAT_PROVIDERS.has(provider) && provider !== 'openai-compat'
+      ? ` (routes to openai-compat adapter)`
+      : '';
     throw new Error(
-      `API key not found for provider '${provider}'. Set ${envVar} environment variable.`
+      `API key not found for provider '${provider}'${canonicalHint}. Set ${envVar} environment variable.`
     );
   }
   return key;
@@ -276,7 +295,26 @@ export function resolveApiKey(provider: string): string {
  * Check if a provider is supported.
  */
 function isSupportedProvider(provider: string): provider is LLMProvider {
-  return provider === 'anthropic' || provider === 'openai' || provider === 'openai-compat';
+  return provider === 'anthropic' || provider === 'openai' || OPENAI_COMPAT_PROVIDERS.has(provider);
+}
+
+/**
+ * Get the canonical provider type for adapter routing.
+ * Named providers like 'cerebras' map to 'openai-compat' for the adapter.
+ */
+function getCanonicalProvider(provider: string): LLMProvider {
+  if (OPENAI_COMPAT_PROVIDERS.has(provider) && provider !== 'openai-compat') {
+    return 'openai-compat';
+  }
+  return provider as LLMProvider;
+}
+
+/**
+ * Get the base URL for a provider, using built-in registry for known providers.
+ */
+function getProviderBaseUrl(provider: string, configBaseUrl?: string): string | undefined {
+  if (configBaseUrl) return configBaseUrl;
+  return OPENAI_COMPAT_BASE_URLS[provider];
 }
 
 function normalizeReasoningEffort(
@@ -309,24 +347,33 @@ function normalizeReasoningEffort(
  * Resolve a single agent config entry to runtime format.
  */
 function resolveAgentConfig(entry: AgentConfigEntry): ResolvedAgentConfig {
-  const provider = entry.llm.provider;
+  const configProvider = entry.llm.provider;
 
-  if (!isSupportedProvider(provider)) {
-    throw new Error(`Unsupported LLM provider: ${provider}`);
+  if (!isSupportedProvider(configProvider)) {
+    throw new Error(`Unsupported LLM provider: ${configProvider}`);
   }
+
+  // Use original provider name for API key lookup (e.g., 'cerebras' -> CEREBRAS_API_KEY)
+  const apiKey = resolveApiKey(configProvider);
+
+  // Map to canonical provider for adapter routing (e.g., 'cerebras' -> 'openai-compat')
+  const canonicalProvider = getCanonicalProvider(configProvider);
+
+  // Get base URL: config > provider registry > default
+  const baseUrl = getProviderBaseUrl(configProvider, entry.llm.api_base);
 
   const rawReasoning = entry.llm.reasoning;
   const rawEffort =
     typeof rawReasoning === 'string' ? rawReasoning : rawReasoning?.effort;
-  const reasoningEffort = normalizeReasoningEffort(provider, rawEffort);
+  const reasoningEffort = normalizeReasoningEffort(canonicalProvider, rawEffort);
 
   const llm: ResolvedLLMConfig = {
-    provider,
+    provider: canonicalProvider,
     model: entry.llm.model,
-    apiKey: resolveApiKey(provider),
+    apiKey,
     maxTokens: entry.llm.max_tokens,
     temperature: entry.llm.temperature,
-    baseUrl: entry.llm.api_base,
+    baseUrl,
     reasoning: { effort: reasoningEffort },
   };
 

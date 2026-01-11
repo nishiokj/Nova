@@ -152,6 +152,7 @@ export class Agent {
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       const elapsedMs = Date.now() - startTime;
+      console.error(`[AGENT DEBUG] Starting iteration ${iteration}/${maxIterations}, elapsed=${elapsedMs}ms, toolCallsMade=${metrics.toolCallsMade}, agent=${this.config.type}`);
 
       if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         result.terminationReason = 'bounds:tool_calls';
@@ -227,6 +228,7 @@ export class Agent {
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
 
       if (toolCalls.length > 0) {
+        console.error(`[AGENT DEBUG] Processing ${toolCalls.length} tool calls, iteration=${iteration}, agent=${this.config.type}`);
         await this.processToolCalls(
           toolCalls,
           globalContext,
@@ -239,7 +241,10 @@ export class Agent {
           toolRepeatState
         );
 
+        console.error(`[AGENT DEBUG] After processToolCalls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}, toolCallsMade=${metrics.toolCallsMade}, maxToolCalls=${workItem.bounds.maxToolCalls}`);
+
         if (result.needsUserInput || result.terminationReason) {
+          console.error(`[AGENT DEBUG] Early exit after tool calls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}`);
           result.filesRead = Array.from(localReadFiles);
           return;
         }
@@ -333,6 +338,7 @@ export class Agent {
       const assistantContents = messages
         .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
         .map(m => m.content as string);
+      console.error(`[AGENT DEBUG] Fallback response capture: found ${assistantContents.length} assistant messages, agent=${this.config.type}, terminationReason=${result.terminationReason}`);
       if (assistantContents.length > 0) {
         result.response = assistantContents.join('\n\n');
       }

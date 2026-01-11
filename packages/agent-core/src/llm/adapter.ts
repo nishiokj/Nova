@@ -327,34 +327,36 @@ class LLMRouterAdapter implements LLMAdapter {
     messages: Message[]
   ): Array<{ role: string; content: string | unknown[] }> {
     return messages
-      .filter((m) => m.role !== 'system')
+      .filter((m) => m && m.role !== 'system' && m.content != null)
       .map((m) => ({
         role: m.role,
         content:
           typeof m.content === 'string'
             ? m.content
-            : m.content.map((block) => {
-                if (block.type === 'text') {
-                  return { type: 'text', text: block.text };
-                }
-                if (block.type === 'tool_use') {
-                  return {
-                    type: 'tool_use',
-                    id: block.id,
-                    name: block.name,
-                    input: block.input,
-                  };
-                }
-                if (block.type === 'tool_result') {
-                  return {
-                    type: 'tool_result',
-                    tool_use_id: block.toolUseId,
-                    content: block.content,
-                    is_error: block.isError,
-                  };
-                }
-                return block;
-              }),
+            : Array.isArray(m.content)
+              ? m.content.filter(block => block != null).map((block) => {
+                  if (block.type === 'text') {
+                    return { type: 'text', text: block.text };
+                  }
+                  if (block.type === 'tool_use') {
+                    return {
+                      type: 'tool_use',
+                      id: block.id,
+                      name: block.name,
+                      input: block.input,
+                    };
+                  }
+                  if (block.type === 'tool_result') {
+                    return {
+                      type: 'tool_result',
+                      tool_use_id: block.toolUseId,
+                      content: block.content,
+                      is_error: block.isError,
+                    };
+                  }
+                  return block;
+                })
+              : [], // Fallback to empty array for non-string, non-array content
       }));
   }
 
@@ -616,6 +618,9 @@ class LLMRouterAdapter implements LLMAdapter {
     const input: Array<Record<string, unknown>> = [];
 
     for (const msg of messages) {
+      // Skip undefined/null messages
+      if (!msg) continue;
+
       const item = msg as unknown as Record<string, unknown>;
       const callId = (item.call_id ?? item.id ?? item.callId) as string;
 
@@ -639,15 +644,20 @@ class LLMRouterAdapter implements LLMAdapter {
         continue;
       }
 
+      // Skip messages with no content
+      if (msg.content === undefined || msg.content === null) {
+        continue;
+      }
+
       if (typeof msg.content === 'string') {
         input.push({
           role: msg.role,
           content: msg.content,
         });
-      } else {
+      } else if (Array.isArray(msg.content)) {
         input.push({
           role: msg.role,
-          content: msg.content.map((block) => {
+          content: msg.content.filter(block => block != null).map((block) => {
             if (block.type === 'text') {
               return { type: 'text', text: block.text };
             }
@@ -1317,19 +1327,30 @@ class LLMRouterAdapter implements LLMAdapter {
     }
 
     for (const msg of messages) {
-      // Skip system messages - we handle them separately
-      if (msg.role === 'system') continue;
+      // Skip undefined/null messages and system messages
+      if (!msg || msg.role === 'system') continue;
 
+      // Handle string content
       if (typeof msg.content === 'string') {
         result.push({ role: msg.role, content: msg.content });
         continue;
       }
 
-      // Handle content blocks
+      // Handle undefined/null content - skip or use empty string
+      if (!msg.content) {
+        continue;
+      }
+
+      // Handle content blocks (must be an array at this point)
+      if (!Array.isArray(msg.content)) {
+        continue;
+      }
+
       const textParts: string[] = [];
       const toolCalls: Array<Record<string, unknown>> = [];
 
       for (const block of msg.content) {
+        if (!block) continue;
         if (block.type === 'text') {
           textParts.push(block.text);
         } else if (block.type === 'tool_use') {
@@ -1398,6 +1419,18 @@ class LLMRouterAdapter implements LLMAdapter {
       body.tool_choice = 'auto';
     }
 
+    // Add structured output support for providers that support it (Cerebras, Groq, Together, etc.)
+    if (params.responseSchema) {
+      body.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: params.responseSchema.name,
+          schema: params.responseSchema.schema,
+          strict: params.responseSchema.strict ?? true,
+        },
+      };
+    }
+
     this.logger.debug('OpenAI-compat API request', {
       method: 'respond',
       endpoint: '/chat/completions',
@@ -1405,6 +1438,8 @@ class LLMRouterAdapter implements LLMAdapter {
       maxTokens: body.max_tokens,
       messageCount: (body.messages as unknown[]).length,
       toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+      hasResponseFormat: !!body.response_format,
+      responseSchemaName: params.responseSchema?.name,
     });
 
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
@@ -1528,6 +1563,18 @@ class LLMRouterAdapter implements LLMAdapter {
     if (params.tools && params.tools.length > 0) {
       body.tools = this.formatOpenAICompatTools(params.tools);
       body.tool_choice = 'auto';
+    }
+
+    // Add structured output support for providers that support it
+    if (params.responseSchema) {
+      body.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: params.responseSchema.name,
+          schema: params.responseSchema.schema,
+          strict: params.responseSchema.strict ?? true,
+        },
+      };
     }
 
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {

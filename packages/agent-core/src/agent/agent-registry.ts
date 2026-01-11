@@ -8,10 +8,10 @@ import type { ToolDefinition } from '../types/tools.js';
 
 const DEFAULT_AGENT_TOOL_DESCRIPTIONS: Record<string, string> = {
   routing: 'Classify a request into simple/standard/complex.',
-  explorer: 'COST: HIGH. Explore codebase to answer questions about environment/state. Resolves ambiguity without filling your context with raw data.',
-  runtime_script: 'COST: HIGH. Generate an executable WorkItem DAG for parallelizing multiple independent tasks.',
+  explorer: 'Discover codebase structure, find files, and understand project layout. USE THIS when: (1) you need to find where something is implemented, (2) you need to understand how components connect, (3) searching with Glob/Grep returned too many or zero results. Returns a structured summary of findings.',
+  runtime_script: 'Generate an executable WorkItem DAG for parallelizing multiple independent tasks. Use when you have 3+ independent subtasks that can run concurrently.',
   standard: 'Execute a focused task using available tools.',
-  'coding-agent': 'COST: HIGH. Delegate focused expert programming work. Use for self-contained tasks that can execute independently.',
+  'coding-agent': 'Delegate a self-contained programming task that can execute independently. Use for substantial coding work (new features, refactors) that doesn\'t require your intermediate results.',
   context_compactor: 'Compact conversation context to fit limits.',
   debugger: 'Diagnose and fix bugs or failures in the task.',
   web_crawler: 'Fetch and summarize information from the web.',
