@@ -240,6 +240,7 @@ function resolveOutputSchema(
 const API_KEY_ENV_MAP: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
+  'openai-compat': 'OPENAI_COMPAT_API_KEY',
   gemini: 'GOOGLE_API_KEY',
 };
 
@@ -275,7 +276,7 @@ export function resolveApiKey(provider: string): string {
  * Check if a provider is supported.
  */
 function isSupportedProvider(provider: string): provider is LLMProvider {
-  return provider === 'anthropic' || provider === 'openai';
+  return provider === 'anthropic' || provider === 'openai' || provider === 'openai-compat';
 }
 
 function normalizeReasoningEffort(

@@ -125,7 +125,7 @@ export function getToolUseBlocks(message: Message): ToolUseContentBlock[] {
 /**
  * LLM provider type.
  */
-export type LLMProvider = 'anthropic' | 'openai';
+export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat';
 
 /**
  * Reasoning configuration.

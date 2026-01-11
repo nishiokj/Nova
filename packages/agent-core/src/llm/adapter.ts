@@ -106,6 +106,7 @@ function parseApiError(
 const DEFAULT_PROVIDER_BASE_URLS: Record<LLMProvider, string> = {
   openai: 'https://api.openai.com',
   anthropic: 'https://api.anthropic.com',
+  'openai-compat': 'https://api.openai.com',
 };
 
 type ModelRegistryEntry = { provider: LLMProvider; baseUrl: string };
@@ -282,6 +283,8 @@ class LLMRouterAdapter implements LLMAdapter {
           return this.respondOpenAI(params, resolved);
         case 'anthropic':
           return this.respondAnthropic(params, resolved);
+        case 'openai-compat':
+          return this.respondOpenAICompat(params, resolved);
         default:
           throw new Error(`Unsupported provider: ${resolved.provider}`);
       }
@@ -296,6 +299,8 @@ class LLMRouterAdapter implements LLMAdapter {
         return yield* this.streamOpenAI(params, resolved);
       case 'anthropic':
         return yield* this.streamAnthropic(params, resolved);
+      case 'openai-compat':
+        return yield* this.streamOpenAICompat(params, resolved);
       default:
         throw new Error(`Unsupported provider: ${resolved.provider}`);
     }
@@ -1278,6 +1283,417 @@ class LLMRouterAdapter implements LLMAdapter {
       model,
       durationMs: Date.now() - startTime,
       responseId,
+    };
+  }
+
+  // ============================================
+  // OPENAI-COMPAT (Chat Completions API)
+  // ============================================
+
+  private formatOpenAICompatTools(tools: ToolDefinition[]): Record<string, unknown>[] {
+    return tools.map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: {
+          type: 'object',
+          properties: t.parameters.properties,
+          required: t.parameters.required,
+        },
+      },
+    }));
+  }
+
+  private formatOpenAICompatMessages(
+    messages: Message[],
+    systemPrompt?: string
+  ): Array<Record<string, unknown>> {
+    const result: Array<Record<string, unknown>> = [];
+
+    // Add system message if provided
+    if (systemPrompt) {
+      result.push({ role: 'system', content: systemPrompt });
+    }
+
+    for (const msg of messages) {
+      // Skip system messages - we handle them separately
+      if (msg.role === 'system') continue;
+
+      if (typeof msg.content === 'string') {
+        result.push({ role: msg.role, content: msg.content });
+        continue;
+      }
+
+      // Handle content blocks
+      const textParts: string[] = [];
+      const toolCalls: Array<Record<string, unknown>> = [];
+
+      for (const block of msg.content) {
+        if (block.type === 'text') {
+          textParts.push(block.text);
+        } else if (block.type === 'tool_use') {
+          // Assistant message with tool calls
+          toolCalls.push({
+            id: block.id,
+            type: 'function',
+            function: {
+              name: block.name,
+              arguments: JSON.stringify(block.input),
+            },
+          });
+        } else if (block.type === 'tool_result') {
+          // Tool result becomes a separate 'tool' role message
+          result.push({
+            role: 'tool',
+            tool_call_id: block.toolUseId,
+            content: block.content,
+          });
+        }
+      }
+
+      // If we have tool calls, this is an assistant message with tool_calls
+      if (toolCalls.length > 0) {
+        result.push({
+          role: 'assistant',
+          content: textParts.join('\n') || null,
+          tool_calls: toolCalls,
+        });
+      } else if (textParts.length > 0) {
+        result.push({
+          role: msg.role,
+          content: textParts.join('\n'),
+        });
+      }
+    }
+
+    return result;
+  }
+
+  private async respondOpenAICompat(
+    params: RespondParams,
+    resolved: ResolvedRequestConfig
+  ): Promise<LLMResponse> {
+    const startTime = Date.now();
+
+    const systemMessage = params.messages.find((m) => m.role === 'system');
+    const systemPrompt =
+      params.system ??
+      (systemMessage && typeof systemMessage.content === 'string'
+        ? systemMessage.content
+        : undefined);
+
+    const body: Record<string, unknown> = {
+      model: resolved.model,
+      messages: this.formatOpenAICompatMessages(params.messages, systemPrompt),
+      max_tokens: params.maxTokens ?? resolved.maxTokens ?? 4096,
+    };
+
+    if (params.temperature ?? resolved.temperature) {
+      body.temperature = params.temperature ?? resolved.temperature;
+    }
+
+    if (params.tools && params.tools.length > 0) {
+      body.tools = this.formatOpenAICompatTools(params.tools);
+      body.tool_choice = 'auto';
+    }
+
+    this.logger.debug('OpenAI-compat API request', {
+      method: 'respond',
+      endpoint: '/chat/completions',
+      model: resolved.model,
+      maxTokens: body.max_tokens,
+      messageCount: (body.messages as unknown[]).length,
+      toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+    });
+
+    const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${resolved.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      this.logger.error('OpenAI-compat API request failed', {
+        method: 'respond',
+        endpoint: '/chat/completions',
+        status: response.status,
+        model: resolved.model,
+        errorPreview: errorText.slice(0, 200),
+      });
+      throw parseApiError('OpenAI-compat', response.status, errorText);
+    }
+
+    const data = (await response.json()) as {
+      id: string;
+      object: string;
+      created: number;
+      model: string;
+      choices: Array<{
+        index: number;
+        message: {
+          role: string;
+          content: string | null;
+          tool_calls?: Array<{
+            id: string;
+            type: string;
+            function: {
+              name: string;
+              arguments: string;
+            };
+          }>;
+        };
+        finish_reason: string;
+      }>;
+      usage: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+      };
+    };
+
+    const choice = data.choices[0];
+    const content = choice?.message?.content ?? '';
+
+    const toolCalls: ToolCall[] = [];
+    if (choice?.message?.tool_calls) {
+      for (const tc of choice.message.tool_calls) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.function.arguments);
+        } catch {
+          args = {};
+        }
+        toolCalls.push({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: args,
+        });
+      }
+    }
+
+    const stopReasonMap: Record<string, StopReason> = {
+      stop: 'end_turn',
+      length: 'max_tokens',
+      tool_calls: 'tool_use',
+      content_filter: 'end_turn',
+    };
+    const stopReason: StopReason =
+      stopReasonMap[choice?.finish_reason ?? 'stop'] ?? 'end_turn';
+
+    const usage: TokenUsage = {
+      promptTokens: data.usage?.prompt_tokens ?? 0,
+      completionTokens: data.usage?.completion_tokens ?? 0,
+      totalTokens: data.usage?.total_tokens ?? 0,
+    };
+
+    return {
+      content,
+      stopReason,
+      usage,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      model: data.model ?? resolved.model,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private async *streamOpenAICompat(
+    params: StreamParams,
+    resolved: ResolvedRequestConfig
+  ): AsyncGenerator<string, LLMResponse> {
+    const startTime = Date.now();
+
+    const systemMessage = params.messages.find((m) => m.role === 'system');
+    const systemPrompt =
+      params.system ??
+      (systemMessage && typeof systemMessage.content === 'string'
+        ? systemMessage.content
+        : undefined);
+
+    const body: Record<string, unknown> = {
+      model: resolved.model,
+      messages: this.formatOpenAICompatMessages(params.messages, systemPrompt),
+      max_tokens: params.maxTokens ?? resolved.maxTokens ?? 4096,
+      stream: true,
+    };
+
+    if (params.temperature ?? resolved.temperature) {
+      body.temperature = params.temperature ?? resolved.temperature;
+    }
+
+    if (params.tools && params.tools.length > 0) {
+      body.tools = this.formatOpenAICompatTools(params.tools);
+      body.tool_choice = 'auto';
+    }
+
+    const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${resolved.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok || !response.body) {
+      const errorText = await response.text();
+      this.logger.error('OpenAI-compat API stream request failed', {
+        method: 'stream',
+        endpoint: '/chat/completions',
+        status: response.status,
+        model: resolved.model,
+        errorPreview: errorText.slice(0, 200),
+      });
+      throw parseApiError('OpenAI-compat', response.status, errorText);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    let fullContent = '';
+    let stopReason: StopReason = 'end_turn';
+    let usage: TokenUsage = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    const toolCalls: ToolCall[] = [];
+    const toolCallBuilders: Map<number, { id: string; name: string; arguments: string }> = new Map();
+    let model = resolved.model;
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6);
+          if (data === '[DONE]') continue;
+
+          try {
+            const event = JSON.parse(data) as {
+              id?: string;
+              object?: string;
+              model?: string;
+              choices?: Array<{
+                index: number;
+                delta: {
+                  role?: string;
+                  content?: string;
+                  tool_calls?: Array<{
+                    index: number;
+                    id?: string;
+                    type?: string;
+                    function?: {
+                      name?: string;
+                      arguments?: string;
+                    };
+                  }>;
+                };
+                finish_reason?: string;
+              }>;
+              usage?: {
+                prompt_tokens: number;
+                completion_tokens: number;
+                total_tokens: number;
+              };
+            };
+
+            if (event.model) {
+              model = event.model;
+            }
+
+            const choice = event.choices?.[0];
+            if (choice) {
+              // Handle content delta
+              if (choice.delta?.content) {
+                fullContent += choice.delta.content;
+                params.onChunk?.(choice.delta.content);
+                yield choice.delta.content;
+              }
+
+              // Handle tool calls delta
+              if (choice.delta?.tool_calls) {
+                for (const tc of choice.delta.tool_calls) {
+                  if (!toolCallBuilders.has(tc.index)) {
+                    toolCallBuilders.set(tc.index, {
+                      id: tc.id ?? '',
+                      name: tc.function?.name ?? '',
+                      arguments: '',
+                    });
+                  }
+                  const builder = toolCallBuilders.get(tc.index)!;
+                  if (tc.id) builder.id = tc.id;
+                  if (tc.function?.name) builder.name = tc.function.name;
+                  if (tc.function?.arguments) builder.arguments += tc.function.arguments;
+                }
+              }
+
+              // Handle finish reason
+              if (choice.finish_reason) {
+                const stopReasonMap: Record<string, StopReason> = {
+                  stop: 'end_turn',
+                  length: 'max_tokens',
+                  tool_calls: 'tool_use',
+                  content_filter: 'end_turn',
+                };
+                stopReason = stopReasonMap[choice.finish_reason] ?? 'end_turn';
+              }
+            }
+
+            // Handle usage (some providers send this at the end)
+            if (event.usage) {
+              usage = {
+                promptTokens: event.usage.prompt_tokens ?? 0,
+                completionTokens: event.usage.completion_tokens ?? 0,
+                totalTokens: event.usage.total_tokens ?? 0,
+              };
+            }
+          } catch {
+            // Skip malformed events
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    // Convert tool call builders to final tool calls
+    for (const builder of toolCallBuilders.values()) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(builder.arguments);
+      } catch {
+        args = {};
+      }
+      toolCalls.push({
+        id: builder.id,
+        name: builder.name,
+        arguments: args,
+      });
+    }
+
+    if (toolCalls.length > 0) {
+      stopReason = 'tool_use';
+    }
+
+    return {
+      content: fullContent,
+      stopReason,
+      usage,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      model,
+      durationMs: Date.now() - startTime,
     };
   }
 }
