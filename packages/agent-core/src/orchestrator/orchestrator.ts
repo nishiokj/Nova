@@ -251,6 +251,8 @@ export class Orchestrator {
       // TERMINAL CHECK: User input needed
       if (result.needsUserInput && result.userPrompt) {
         this.log('info', 'Pausing for user input', { question: result.userPrompt.question });
+        // Merge agent's localContext so the question is preserved for resume
+        context.addAgentResultContext(result);
         return this.createResult({
           success: false,
           response: '',

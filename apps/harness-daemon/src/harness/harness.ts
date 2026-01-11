@@ -207,6 +207,7 @@ export class AgentHarness {
   private config: FullHarnessConfig;
   private toolRegistry: ToolRegistry;
   private contextWindows = new Map<string, ContextWindow>();
+  private pausedState = new Map<string, { goal: string; agentType: string }>();
   private logger: HarnessLogger;
   private isShutdown = false;
   private graphd: GraphDManager | null = null;
@@ -660,7 +661,7 @@ export class AgentHarness {
       dependencies: [...workItem.dependencies],
     }, workItem.workId));
 
-    const result = await agent.run({ context, workItem });
+    const result = await agent.run({ globalContext: context, workItem });
 
     if (!result.needsUserInput) {
       if (result.success) {
@@ -741,6 +742,13 @@ export class AgentHarness {
     );
 
     const result = await orchestrator.execute(context, goal, agentType);
+
+    // Store paused state for resume, or clear it on completion
+    if (result.paused) {
+      this.pausedState.set(context.sessionKey, { goal, agentType });
+    } else {
+      this.pausedState.delete(context.sessionKey);
+    }
 
     return {
       requestId,
@@ -831,16 +839,18 @@ export class AgentHarness {
   /**
    * Resume agent execution after user provides input.
    */
-  resume(requestId: string, _answer: string, sessionKey: string): AgentRunHandle {
+  resume(requestId: string, answer: string, sessionKey: string): AgentRunHandle {
     const eventQueue = new AsyncEventQueue();
-    eventQueue.push(createStatusEvent('sending', 'Resume is not supported in this refactor.'));
+    const runId = requestId;
 
-    const resultPromise = (async (): Promise<AgentRunResult> => {
-      const errorMessage = 'Resume not implemented for orchestrator runs.';
+    eventQueue.push(createStatusEvent('sending', 'Resuming with user input...'));
+
+    const paused = this.pausedState.get(sessionKey);
+    if (!paused) {
+      const errorMessage = 'No paused session found for this sessionKey';
       eventQueue.push(createErrorEvent(errorMessage, true));
       eventQueue.push(createStatusEvent('error', errorMessage));
-      eventQueue.finish();
-      return {
+      const resultPromise = Promise.resolve({
         requestId,
         sessionKey,
         success: false,
@@ -849,7 +859,85 @@ export class AgentHarness {
         paused: false,
         toolsUsed: [],
         durationMs: 0,
-      };
+      } as AgentRunResult);
+      queueMicrotask(() => eventQueue.finish());
+      return { result: resultPromise, events: eventQueue };
+    }
+
+    const contextWindow = this.getOrCreateContext(sessionKey);
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId);
+
+    const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
+      const bridgeEvent = translateAgentEvent(event);
+      if (bridgeEvent) {
+        eventQueue.push(bridgeEvent);
+      }
+    });
+
+    const resultPromise = (async (): Promise<AgentRunResult> => {
+      try {
+        // Add user's response to context
+        contextWindow.addMessage('user', answer);
+
+        // Re-run orchestrator with the stored goal/agentType
+        const result = await this.runOrchestrator(
+          contextWindow,
+          paused.goal,
+          requestId,
+          emit,
+          this.llmAdapter,
+          paused.agentType
+        );
+
+        if (result.paused && result.userPrompt) {
+          eventQueue.push(createUserPromptEvent(
+            result.userPrompt.requestId,
+            result.userPrompt.question,
+            result.userPrompt.options,
+            result.userPrompt.context,
+            result.userPrompt.multiSelect
+          ));
+        }
+
+        eventQueue.push(
+          createResponseEvent(
+            requestId,
+            result.success,
+            result.finalText,
+            result.toolsUsed,
+            result.durationMs,
+            result.errorMessage,
+            result.metadata
+          )
+        );
+
+        eventQueue.push(createStatusEvent('idle'));
+        this.persistContext(contextWindow);
+
+        return result;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.logger.error('Resume failed', { error: errorMessage, requestId });
+
+        eventQueue.push(createErrorEvent(errorMessage, false));
+        eventQueue.push(createStatusEvent('error', errorMessage));
+
+        return {
+          requestId,
+          sessionKey,
+          success: false,
+          finalText: '',
+          errorMessage,
+          paused: false,
+          toolsUsed: [],
+          durationMs: 0,
+        };
+      } finally {
+        queueMicrotask(() => {
+          unsubscribe();
+          eventQueue.finish();
+        });
+      }
     })();
 
     return { result: resultPromise, events: eventQueue };

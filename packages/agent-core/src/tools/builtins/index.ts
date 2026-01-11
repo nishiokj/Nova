@@ -12,8 +12,10 @@ export { executeRead, readToolOptions } from './read.js';
 export {
   executeWrite,
   executeEdit,
+  executeBatchEdit,
   writeToolOptions,
   editToolOptions,
+  batchEditToolOptions,
 } from './write.js';
 
 // Grep
@@ -25,7 +27,7 @@ export { executeGlob, globToolOptions } from './glob.js';
 // Re-export all tool options for easy registration
 import { bashToolOptions } from './bash.js';
 import { readToolOptions } from './read.js';
-import { writeToolOptions, editToolOptions } from './write.js';
+import { writeToolOptions, editToolOptions, batchEditToolOptions } from './write.js';
 import { grepToolOptions } from './grep.js';
 import { globToolOptions } from './glob.js';
 
@@ -37,6 +39,7 @@ export const builtinToolOptions = [
   readToolOptions,
   writeToolOptions,
   editToolOptions,
+  batchEditToolOptions,
   grepToolOptions,
   globToolOptions,
 ];

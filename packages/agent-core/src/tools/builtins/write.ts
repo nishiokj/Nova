@@ -286,3 +286,209 @@ export const editToolOptions: ToolRegistrationOptions = {
   parallelizable: false,
   costHint: 'standard',
 };
+
+// ============================================
+// BATCH EDIT
+// ============================================
+
+interface EditOperation {
+  path: string;
+  oldString: string;
+  newString: string;
+  replaceAll?: boolean;
+}
+
+interface ValidationError {
+  index: number;
+  path: string;
+  error: string;
+}
+
+function countOccurrences(content: string, search: string): number {
+  let count = 0;
+  let idx = 0;
+  while ((idx = content.indexOf(search, idx)) !== -1) {
+    count++;
+    idx += search.length;
+  }
+  return count;
+}
+
+/**
+ * Apply multiple edits atomically. All edits succeed or all fail.
+ */
+export async function executeBatchEdit(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Promise<ToolResult> {
+  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
+  const edits = args.edits as EditOperation[];
+
+  if (!edits || !Array.isArray(edits) || edits.length === 0) {
+    return errorResult('BatchEdit', 'Must provide non-empty edits array', 0);
+  }
+
+  const startTime = Date.now();
+
+  // Phase 1: Read all files and validate all edits
+  const fileContents = new Map<string, string>();
+  const validationErrors: ValidationError[] = [];
+
+  for (let i = 0; i < edits.length; i++) {
+    const edit = edits[i];
+    if (!edit.path || !edit.oldString || edit.newString === undefined) {
+      validationErrors.push({
+        index: i,
+        path: edit.path ?? '<missing>',
+        error: 'Missing required fields (path, oldString, newString)',
+      });
+      continue;
+    }
+
+    const resolvedPath = resolve(cwd, edit.path);
+
+    // Cache file reads
+    if (!fileContents.has(resolvedPath)) {
+      try {
+        fileContents.set(resolvedPath, await readFile(resolvedPath, 'utf-8'));
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+          validationErrors.push({ index: i, path: edit.path, error: 'File not found' });
+        } else {
+          validationErrors.push({
+            index: i,
+            path: edit.path,
+            error: `Read error: ${(e as Error).message}`,
+          });
+        }
+        continue;
+      }
+    }
+
+    const content = fileContents.get(resolvedPath)!;
+    const count = countOccurrences(content, edit.oldString);
+
+    if (count === 0) {
+      validationErrors.push({ index: i, path: edit.path, error: 'oldString not found' });
+    } else if (count > 1 && !edit.replaceAll) {
+      validationErrors.push({
+        index: i,
+        path: edit.path,
+        error: `oldString found ${count} times - not unique`,
+      });
+    }
+  }
+
+  // If any validation failed, return errors without applying anything
+  if (validationErrors.length > 0) {
+    return errorResult(
+      'BatchEdit',
+      'Validation failed',
+      Date.now() - startTime,
+      { success: false, details: validationErrors }
+    );
+  }
+
+  // Phase 2: Apply all edits (grouped by file, in order)
+  const editsByFile = new Map<string, { edit: EditOperation; index: number }[]>();
+  for (let i = 0; i < edits.length; i++) {
+    const resolvedPath = resolve(cwd, edits[i].path);
+    if (!editsByFile.has(resolvedPath)) {
+      editsByFile.set(resolvedPath, []);
+    }
+    editsByFile.get(resolvedPath)!.push({ edit: edits[i], index: i });
+  }
+
+  const results: { path: string; replacements: number }[] = [];
+  let totalReplacements = 0;
+
+  for (const [resolvedPath, fileEdits] of editsByFile) {
+    let content = fileContents.get(resolvedPath)!;
+
+    for (const { edit } of fileEdits) {
+      const replaceAll = edit.replaceAll ?? false;
+      if (replaceAll) {
+        const count = countOccurrences(content, edit.oldString);
+        content = content.split(edit.oldString).join(edit.newString);
+        totalReplacements += count;
+        results.push({ path: edit.path, replacements: count });
+      } else {
+        content = content.replace(edit.oldString, edit.newString);
+        totalReplacements += 1;
+        results.push({ path: edit.path, replacements: 1 });
+      }
+    }
+
+    // Atomic write
+    const dirPath = dirname(resolvedPath);
+    const tmpPath = resolve(dirPath, `.tmp_batch_${randomBytes(8).toString('hex')}.tmp`);
+
+    try {
+      await writeFile(tmpPath, content, 'utf-8');
+      await rename(tmpPath, resolvedPath);
+    } catch (e) {
+      try {
+        await unlink(tmpPath);
+      } catch {
+        // Ignore cleanup errors
+      }
+      return errorResult(
+        'BatchEdit',
+        `Write failed for ${resolvedPath}: ${(e as Error).message}`,
+        Date.now() - startTime
+      );
+    }
+  }
+
+  return {
+    ...successResult(
+      'BatchEdit',
+      `Applied ${edits.length} edits to ${editsByFile.size} file(s)`,
+      Date.now() - startTime
+    ),
+    metadata: {
+      success: true,
+      filesModified: editsByFile.size,
+      totalReplacements,
+      edits: results,
+    },
+  };
+}
+
+/**
+ * BatchEdit tool registration options.
+ */
+export const batchEditToolOptions: ToolRegistrationOptions = {
+  name: 'BatchEdit',
+  description: 'Apply multiple edits atomically. Plan all changes, execute in one call.',
+  parameters: {
+    type: 'object',
+    properties: {
+      cwd: {
+        type: 'string',
+        description: 'Working directory to resolve relative paths against',
+      },
+      edits: {
+        type: 'array',
+        description: 'Array of edit operations to apply atomically',
+        items: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path' },
+            oldString: { type: 'string', description: 'Exact string to find' },
+            newString: { type: 'string', description: 'Replacement string' },
+            replaceAll: { type: 'boolean', description: 'Replace all occurrences' },
+          },
+          required: ['path', 'oldString', 'newString'],
+        },
+      },
+    },
+    required: ['cwd', 'edits'],
+  },
+  required: ['cwd', 'edits'],
+  executor: executeBatchEdit,
+  timeoutMs: 30000,
+  readOnly: false,
+  parallelizable: false,
+  costHint: 'standard',
+};

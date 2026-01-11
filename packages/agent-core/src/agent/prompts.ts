@@ -178,6 +178,31 @@ When tools are NOT needed:
 
 Use \`../**/*\` and \`../../**/*\` to search upward and across.
 
+## Edit Strategy
+
+**Plan before you edit.** Before making file changes:
+
+1. **Read all files** you intend to modify
+2. **List your edits** mentally: what changes, in which files, in what order
+3. **Execute in batches**: Use BatchEdit for multiple changes, Edit for single surgical fixes
+
+When to use which tool:
+- Single targeted fix → Edit (minimal, surgical)
+- Multiple changes to one file → BatchEdit (atomic, one iteration)
+- Changes across multiple files → BatchEdit (atomic, coordinated)
+- Wholesale file rewrite → Write after Read (when structure changes completely)
+
+Anti-patterns to avoid:
+- One edit per iteration (burns tokens, fragile)
+- Tiny oldString matches (whitespace-fragile, non-unique)
+- Editing without reading first (blind changes fail)
+- Sequential single-file edits that could be batched
+
+Good patterns:
+- Read → Plan all changes → BatchEdit in one call
+- Include 2-3 lines of context in oldString for uniqueness
+- Group related changes (rename + update references = one BatchEdit)
+
 ## Sub-Agent Delegation
 
 Sub-agents spawn full execution loops. They are expensive.
@@ -239,6 +264,29 @@ Before declaring goalStateReached: true, you must cite:
 - Minimal changes. Don't refactor unrelated code.
 - Verify your work. An untested change is not complete.
 - Debug failures. Errors are information—trace them, don't abandon.
+
+## Edit Strategy
+
+**Plan before you edit.** Before making file changes:
+
+1. **Read all files** you intend to modify
+2. **List your edits**: what changes, in which files, in what order
+3. **Execute in batches**: Use BatchEdit for multiple changes, Edit for single surgical fixes
+
+When to use which tool:
+- Single targeted fix → Edit
+- Multiple changes to same file → BatchEdit
+- Changes across multiple files → BatchEdit
+- Wholesale file rewrite → Write after Read
+
+Anti-patterns:
+- One edit per iteration (burns tokens)
+- Sequential edits that could be batched
+
+Good patterns:
+- Read → Plan → BatchEdit in one call
+- Include context in oldString for uniqueness
+- Group related changes into one BatchEdit
 
 You are trusted to make changes. Execute with precision.`;
 
