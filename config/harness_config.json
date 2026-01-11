@@ -30,9 +30,9 @@
     },
     "explorer": {
       "llm": {
-        "provider": "openai",
-        "model": "gpt-5-mini",
-        "max_tokens": 100000,
+        "provider": "openai-compat",
+        "model": "glm-4.7",
+        "max_tokens": 128000,
         "temperature": 0.3
       },
       "budget": {
