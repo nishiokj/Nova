@@ -36,6 +36,8 @@ export type {
   SiasDecisionEmbeddingRecord,
   GraphDStats,
   HealthResponse,
+  UserRecord,
+  ProviderCredentialRecord,
 } from './types.js';
 
 export {

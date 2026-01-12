@@ -4,8 +4,9 @@
 
 import { pathToFileURL } from 'url';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
-import { BusServer } from '../../../../packages/comms-bus/src/bus_server.js';
+import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
+import { createAuthServiceFromEnv, type AuthService } from './auth_service.js';
 
 export interface HarnessDaemonOptions {
   host?: string;
@@ -22,6 +23,7 @@ export class HarnessDaemon {
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
   private gateway: BridgeGateway | null = null;
+  private authService: AuthService | null = null;
 
   constructor(options: HarnessDaemonOptions = {}) {
     this.host = options.host ?? process.env.EVENT_BUS_HOST ?? '127.0.0.1';
@@ -37,6 +39,14 @@ export class HarnessDaemon {
       await this.harness.start();
     }
 
+    // Initialize auth service (optional - depends on env vars)
+    if (!this.authService) {
+      this.authService = createAuthServiceFromEnv();
+      if (this.authService) {
+        console.log('[harness-daemon] Auth service initialized');
+      }
+    }
+
     if (!this.bus) {
       this.bus = new BusServer({
         host: this.host,
@@ -45,7 +55,7 @@ export class HarnessDaemon {
           this.gateway?.handlePublish(connectionId, channel, payload),
         onDisconnect: (connectionId) => this.gateway?.handleDisconnect(connectionId),
       });
-      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir);
+      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
     }
 
     return this.bus.start();
@@ -55,6 +65,11 @@ export class HarnessDaemon {
     if (this.bus) {
       await this.bus.stop();
       this.bus = null;
+    }
+
+    if (this.authService) {
+      this.authService.close();
+      this.authService = null;
     }
 
     if (this.harness) {

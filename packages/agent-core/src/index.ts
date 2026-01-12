@@ -7,7 +7,7 @@
  * - tools/: Tool registry and execution
  * - agent/: Pure agent primitive
  * - orchestrator/: Orchestration runtime
- * - wizard/: Shared utilities (work-item, ledger, knowledge)
+ * - work/: Work items, ledger, and knowledge utilities
  */
 
 // ============================================
@@ -60,6 +60,7 @@ export type {
   ImageContentBlock,
   ContentBlock,
   Message,
+  LLMProvider,
   LLMRequestConfig,
   LLMClientConfig,
   StopReason,
@@ -79,6 +80,7 @@ export type {
   ContextSnapshot,
   KnowledgeEntry,
   KnowledgeStore as TypesKnowledgeStore,
+  StructuredOutputSchema,
 } from './types/index.js';
 
 export {
@@ -166,7 +168,7 @@ export {
 } from './tools/index.js';
 
 // ============================================
-// WIZARD (shared utilities)
+// WORK (work items, knowledge, ledger)
 // ============================================
 export {
   type WorkBounds,
@@ -184,7 +186,7 @@ export {
   type PatchRecord,
   type LedgerEntry,
   WorkLedger,
-} from './wizard/index.js';
+} from './work/index.js';
 
 // ============================================
 // ORCHESTRATOR
@@ -204,7 +206,7 @@ export type {
   EventEmitCallback,
 } from './agent/types.js';
 // Re-export AgentType from agent module as the canonical source
-export type { AgentType, UserPromptInfo, AgentRunParams } from './agent/types.js';
+export type { AgentType, UserPromptInfo, AgentRunParams, AgentHooks, ToolHookResult } from './agent/types.js';
 export { DEFAULT_AGENT_BUDGET, noopEmit } from './agent/types.js';
 export {
   ROUTING_PROMPT,

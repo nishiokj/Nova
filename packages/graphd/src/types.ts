@@ -395,6 +395,61 @@ export interface SiasDecisionEmbeddingRecord {
 }
 
 // ============================================
+// AUTH TYPES (v5)
+// ============================================
+
+/**
+ * User record from Google OAuth.
+ */
+export interface UserRecord {
+  id: string; // Google 'sub' claim
+  email: string;
+  name: string | null;
+  pictureUrl: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * User session (device login token).
+ */
+export interface UserSessionRecord {
+  id: string; // Random UUID
+  userId: string;
+  deviceName: string | null;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number | null;
+  revoked: boolean;
+}
+
+/**
+ * Encrypted provider credential (API key).
+ */
+export interface ProviderCredentialRecord {
+  id: string; // Random UUID
+  userId: string;
+  provider: string; // 'anthropic', 'openai', 'cerebras', etc.
+  encryptedKey: string; // AES-256-GCM encrypted
+  iv: string; // Initialization vector (base64)
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Supported provider types for API keys.
+ */
+export type ProviderType =
+  | 'anthropic'
+  | 'openai'
+  | 'openai-compat'
+  | 'gemini'
+  | 'cerebras'
+  | 'together'
+  | 'groq'
+  | 'fireworks';
+
+// ============================================
 // STATS
 // ============================================
 

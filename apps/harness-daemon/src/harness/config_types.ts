@@ -14,7 +14,7 @@
 // CORE TYPES
 // ============================================
 
-import type { StructuredOutputSchema } from '../../../../packages/agent-core/src/types/llm.js';
+import type { StructuredOutputSchema } from 'agent-core';
 
 /** Supported LLM providers */
 export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat';
@@ -150,6 +150,31 @@ export interface HooksConfigSection {
   definitions?: HookConfigEntry[];
 }
 
+/**
+ * Auth configuration section.
+ */
+export interface AuthConfigSection {
+  enabled: boolean;
+  host: string;
+  port: number;
+  session_expiry_days?: number | null; // null = never expires
+}
+
+/**
+ * Provider API key configuration.
+ * Stores API keys directly in config file for local use.
+ */
+export interface ProvidersConfigSection {
+  anthropic?: string;
+  openai?: string;
+  cerebras?: string;
+  together?: string;
+  groq?: string;
+  fireworks?: string;
+  gemini?: string;
+  [key: string]: string | undefined;
+}
+
 // ============================================
 // FULL CONFIG FILE STRUCTURE
 // ============================================
@@ -164,6 +189,9 @@ export interface HarnessConfigFile {
   context: ContextConfigSection;
   skills?: SkillsConfigSection;
   hooks?: HooksConfigSection;
+  auth?: AuthConfigSection;
+  /** API keys for LLM providers (config file takes precedence over env vars) */
+  providers?: ProvidersConfigSection;
 }
 
 // ============================================
@@ -245,8 +273,22 @@ export interface FullHarnessConfig {
     definitions: HookConfigEntry[];
   };
 
+  /** Auth configuration */
+  auth: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    sessionExpiryDays: number | null;
+  };
+
   /** Behavioral rules loaded from config/behavioral_rules.md */
   behavioralRules?: string;
+
+  /** Provider API keys (from config file) */
+  providers: ProvidersConfigSection;
+
+  /** Path to the config file (needed for updating providers) */
+  configPath?: string;
 }
 
 // ============================================
@@ -288,4 +330,11 @@ export const DEFAULT_HOOKS_CONFIG: HooksConfigSection = {
   enabled: true,
   directory: 'config/hooks',
   definitions: [],
+};
+
+export const DEFAULT_AUTH_CONFIG: AuthConfigSection = {
+  enabled: true,
+  host: '127.0.0.1',
+  port: 9556,
+  session_expiry_days: null, // Never expires
 };

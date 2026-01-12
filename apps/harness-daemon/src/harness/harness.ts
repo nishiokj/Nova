@@ -10,25 +10,32 @@
  * SINGLE SOURCE OF TRUTH for agent LLM assignments, budgets, and tools.
  */
 
-import { Agent } from '../../../../packages/agent-core/src/agent/agent.js';
-import { AgentRegistry } from '../../../../packages/agent-core/src/agent/agent-registry.js';
-import type { AgentConfig } from '../../../../packages/agent-core/src/agent/types.js';
-import { getAgentPrompt, buildAgentConfig } from '../../../../packages/agent-core/src/agent/prompts.js';
-import { Orchestrator } from '../../../../packages/agent-core/src/orchestrator/orchestrator.js';
-import { createAdapter } from '../../../../packages/agent-core/src/llm/adapter.js';
-import { ToolRegistry } from '../../../../packages/agent-core/src/tools/registry.js';
-import { builtinToolOptions } from '../../../../packages/agent-core/src/tools/builtins/index.js';
-import { GraphDManager, createGraphDConfig } from '../../../../packages/graphd/src/index.js';
-import { createEvent, type AgentEvent } from '../../../../packages/agent-core/src/types/events.js';
-import { ContextWindow } from '../../../../packages/agent-core/src/context/index.js';
-import type { ContextWindowSnapshot } from '../../../../packages/agent-core/src/types/context.js';
-import { EventBus, type EventBusProtocol, createEventEmitCallback } from '../../../../packages/comms-bus/src/index.js';
-import { createWorkItem } from '../../../../packages/agent-core/src/wizard/work-item.js';
+import {
+  Agent,
+  AgentRegistry,
+  type AgentConfig,
+  type AgentHooks,
+  type ToolHookResult,
+  type ToolResult,
+  getAgentPrompt,
+  buildAgentConfig,
+  Orchestrator,
+  createAdapter,
+  ToolRegistry,
+  builtinToolOptions,
+  createEvent,
+  type AgentEvent,
+  ContextWindow,
+  type ContextWindowSnapshot,
+  createWorkItem,
+} from 'agent-core';
+import { coerceStructuredOutput } from 'agent-core/shared';
+import { GraphDManager, createGraphDConfig } from 'graphd';
+import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { GraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
 import path from 'path';
 import fs from 'fs';
-import { coerceStructuredOutput } from '../../../../packages/agent-core/src/shared/structured_output.js';
 import {
   translateAgentEvent,
   createStatusEvent,
@@ -45,25 +52,13 @@ import type {
 } from './types.js';
 import { loadConfig, getAgentConfig } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
-import type { LLMRequestConfig, LLMClientConfig, LLMProvider } from '../../../../packages/agent-core/src/types/llm.js';
+import type { LLMRequestConfig, LLMClientConfig, LLMProvider } from 'agent-core';
+import { HookExecutor } from './hook_executor.js';
+import type { HookContext } from './skills_loader.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
 
-/**
- * Extract @path references from text.
- * Matches patterns like @src/foo.ts, @./relative/path.py, @/absolute/path.js
- */
-function extractAtPaths(text: string): string[] {
-  // Match @followed by a path (no spaces, common file extensions)
-  const regex = /@((?:\.{0,2}\/)?[\w\-./]+\.[\w]+)/g;
-  const matches: string[] = [];
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    matches.push(match[1]);
-  }
-  return [...new Set(matches)]; // dedupe
-}
 
 function buildAgentRegistry(config: FullHarnessConfig): AgentRegistry {
   const agentConfigs: Array<{ config: AgentConfig; llm: LLMRequestConfig }> = Object.entries(config.agents).map(([agentType, resolved]) => {
@@ -221,7 +216,7 @@ export class AgentHarness {
   private config: FullHarnessConfig;
   private toolRegistry: ToolRegistry;
   private contextWindows = new Map<string, ContextWindow>();
-  private pausedState = new Map<string, { goal: string; agentType: string }>();
+  private pausedState = new Map<string, { goal: string; agentType: string; workingDir: string }>();
   private logger: HarnessLogger;
   private isShutdown = false;
   private graphd: GraphDManager | null = null;
@@ -231,6 +226,7 @@ export class AgentHarness {
   private logSubscriber: LogSubscriber | null = null;
   private agentRegistry: AgentRegistry;
   private llmAdapter: ReturnType<typeof createAdapter>;
+  private hookExecutor: HookExecutor | null = null;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
@@ -302,6 +298,13 @@ export class AgentHarness {
         dbPath: config.graphd.dbPath, // Already absolute - resolved relative to config file location
       });
       this.graphd = new GraphDManager(graphdConfig);
+    }
+
+    // Initialize HookExecutor if hooks are enabled
+    if (config.hooks.enabled && config.hooks.directory) {
+      const hooksDir = path.resolve(workingDir, config.hooks.directory);
+      this.hookExecutor = new HookExecutor(hooksDir, workingDir);
+      this.logger.info('HookExecutor initialized', { hooksDir });
     }
 
     const defaultAgent = config.agents[config.defaultAgent];
@@ -413,7 +416,7 @@ export class AgentHarness {
    * Run the agent with the given parameters.
    */
   run(params: AgentRunParams): AgentRunHandle {
-    const { requestId, inputText, tier: requestedTier, sessionKey } = params;
+    const { requestId, inputText, tier: requestedTier, sessionKey, workingDir } = params;
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
 
@@ -442,23 +445,8 @@ export class AgentHarness {
 
     const contextWindow = this.getOrCreateContext(sessionKey);
 
-    // Extract @path references and inject file contents into context
-    const atPaths = extractAtPaths(inputText);
-    for (const atPath of atPaths) {
-      const fullPath = path.isAbsolute(atPath)
-        ? atPath
-        : path.resolve(this.config.tools.workingDir, atPath);
-      try {
-        if (fs.existsSync(fullPath)) {
-          const content = fs.readFileSync(fullPath, 'utf-8');
-          const ext = path.extname(fullPath).slice(1);
-          contextWindow.addFileContent(atPath, content.slice(0, 50000), ext);
-          this.logger.debug('Injected @path file into context', { path: atPath, size: content.length });
-        }
-      } catch (error) {
-        this.logger.warning('Failed to read @path file', { path: atPath, error: String(error) });
-      }
-    }
+    // NOTE: Per min_patch_spec.md, we no longer auto-inject @path references into context.
+    // Users should use explicit tools (Read/Glob/Grep) to bring file contents into context.
 
     contextWindow.addMessage('user', inputText);
 
@@ -473,6 +461,31 @@ export class AgentHarness {
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
+        // Run UserPromptSubmit hooks before processing
+        if (this.hookExecutor) {
+          const hookContext: HookContext = {
+            event: 'UserPromptSubmit',
+            sessionKey,
+            requestId,
+            workingDir,
+          };
+          const hookResult = await this.hookExecutor.execute('UserPromptSubmit', hookContext);
+          if (hookResult.action === 'block') {
+            eventQueue.push(createErrorEvent(hookResult.message || 'Request blocked by hook', false));
+            eventQueue.push(createStatusEvent('idle'));
+            return {
+              requestId,
+              sessionKey,
+              success: false,
+              finalText: hookResult.message || 'Request blocked by hook',
+              errorMessage: hookResult.message,
+              paused: false,
+              toolsUsed: [],
+              durationMs: 0,
+            };
+          }
+        }
+
         // Use explicitly requested agent type or default to 'standard'
         const tier: AgentType = requestedTier || 'standard';
       
@@ -502,7 +515,7 @@ export class AgentHarness {
         const llmAdapter = this.llmAdapter;
 
         // All requests go through orchestrator (loop-until-goal architecture)
-        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier);
+        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir);
 
         if (result.paused && result.userPrompt) {
           eventQueue.push(createUserPromptEvent(
@@ -557,6 +570,19 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
+        // Run Stop hooks
+        if (this.hookExecutor) {
+          const hookContext: HookContext = {
+            event: 'Stop',
+            sessionKey,
+            requestId,
+            workingDir,
+          };
+          await this.hookExecutor.execute('Stop', hookContext).catch((err) => {
+            this.logger.warning('Stop hook failed', { error: String(err) });
+          });
+        }
+
         queueMicrotask(() => {
           try {
             unsubscribe();
@@ -618,7 +644,8 @@ export class AgentHarness {
     requestId: string,
     emit: ReturnType<typeof createEventEmitCallback>,
     llm: ReturnType<typeof createAdapter>,
-    agentConfig: ResolvedAgentConfig
+    agentConfig: ResolvedAgentConfig,
+    workingDir?: string
   ): Promise<AgentRunResult> {
     // Get system prompt from prompts.ts, merge with behavioral rules (skip for simple/routing)
     const basePrompt = getAgentPrompt(agentType);
@@ -665,7 +692,6 @@ export class AgentHarness {
         maxLlmCalls: agentConfig.budget.maxIterations,
       },
     });
-    console.error(`[HARNESS DEBUG] Created workItem: workId=${workItem.workId}, bounds.maxToolCalls=${workItem.bounds.maxToolCalls}`);
 
     emit(createEvent('workitem_started', {
       workId: workItem.workId,
@@ -675,7 +701,8 @@ export class AgentHarness {
       dependencies: [...workItem.dependencies],
     }, workItem.workId));
 
-    const result = await agent.run({ globalContext: context, workItem });
+    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    const result = await agent.run({ globalContext: context, workItem, cwd: effectiveWorkingDir });
 
     if (!result.needsUserInput) {
       if (result.success) {
@@ -735,6 +762,53 @@ export class AgentHarness {
   }
 
   /**
+   * Create AgentHooks that delegate to HookExecutor.
+   */
+  private createAgentHooks(sessionKey: string, requestId: string): AgentHooks | undefined {
+    if (!this.hookExecutor) return undefined;
+
+    const executor = this.hookExecutor;
+    const workingDir = this.config.tools.workingDir;
+
+    return {
+      preToolUse: async (toolName: string, args: Record<string, unknown>): Promise<ToolHookResult> => {
+        const context: HookContext = {
+          event: 'PreToolUse',
+          toolName,
+          toolParams: args,
+          sessionKey,
+          requestId,
+          workingDir,
+        };
+        const result = await executor.execute('PreToolUse', context);
+        return {
+          action: result.action,
+          message: result.message,
+          modifiedArgs: result.modified as Record<string, unknown> | undefined,
+        };
+      },
+
+      postToolUse: async (toolName: string, args: Record<string, unknown>, toolResult: ToolResult): Promise<ToolHookResult> => {
+        const context: HookContext = {
+          event: 'PostToolUse',
+          toolName,
+          toolParams: args,
+          toolResult,
+          sessionKey,
+          requestId,
+          workingDir,
+        };
+        const result = await executor.execute('PostToolUse', context);
+        return {
+          action: result.action,
+          message: result.message,
+          modifiedResult: result.modified as ToolResult | undefined,
+        };
+      },
+    };
+  }
+
+  /**
    * Run via Orchestrator with specified agent type.
    */
   private async runOrchestrator(
@@ -743,8 +817,11 @@ export class AgentHarness {
     requestId: string,
     emit: ReturnType<typeof createEventEmitCallback>,
     llm: ReturnType<typeof createAdapter>,
-    agentType: AgentType = 'standard'
+    agentType: AgentType = 'standard',
+    workingDir?: string
   ): Promise<AgentRunResult> {
+    const hooks = this.createAgentHooks(context.sessionKey, requestId);
+
     const orchestrator = new Orchestrator(
       {},
       this.toolRegistry,
@@ -752,14 +829,17 @@ export class AgentHarness {
       emit,
       requestId,
       this.logger,
-      this.agentRegistry
+      this.agentRegistry,
+      hooks
     );
 
-    const result = await orchestrator.execute(context, goal, agentType);
+    // Execute with session-specific working directory (passed explicitly for concurrent-safety)
+    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    const result = await orchestrator.execute(context, goal, agentType, effectiveWorkingDir);
 
     // Store paused state for resume, or clear it on completion
     if (result.paused) {
-      this.pausedState.set(context.sessionKey, { goal, agentType });
+      this.pausedState.set(context.sessionKey, { goal, agentType, workingDir: effectiveWorkingDir });
     } else {
       this.pausedState.delete(context.sessionKey);
     }
@@ -853,7 +933,7 @@ export class AgentHarness {
   /**
    * Resume agent execution after user provides input.
    */
-  resume(requestId: string, answer: string, sessionKey: string): AgentRunHandle {
+  resume(requestId: string, answer: string, sessionKey: string, workingDir?: string): AgentRunHandle {
     const eventQueue = new AsyncEventQueue();
     const runId = requestId;
 
@@ -893,14 +973,16 @@ export class AgentHarness {
         // Add user's response to context
         contextWindow.addMessage('user', answer);
 
-        // Re-run orchestrator with the stored goal/agentType
+        // Re-run orchestrator with the stored goal/agentType/workingDir
+        const effectiveWorkingDir = workingDir ?? paused.workingDir;
         const result = await this.runOrchestrator(
           contextWindow,
           paused.goal,
           requestId,
           emit,
           this.llmAdapter,
-          paused.agentType
+          paused.agentType,
+          effectiveWorkingDir
         );
 
         if (result.paused && result.userPrompt) {
@@ -947,6 +1029,19 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
+        // Run Stop hooks
+        if (this.hookExecutor) {
+          const hookContext: HookContext = {
+            event: 'Stop',
+            sessionKey,
+            requestId,
+            workingDir: workingDir ?? paused.workingDir,
+          };
+          await this.hookExecutor.execute('Stop', hookContext).catch((err) => {
+            this.logger.warning('Stop hook failed', { error: String(err) });
+          });
+        }
+
         queueMicrotask(() => {
           unsubscribe();
           eventQueue.finish();

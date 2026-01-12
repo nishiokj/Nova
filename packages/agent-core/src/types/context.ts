@@ -100,9 +100,13 @@ export interface ArtifactItem {
   name: string;
   /** Signature or definition (e.g., "async function run(params: RunParams): Promise<Result>") */
   signature?: string;
-  /** Human-readable description of what this does */
-  description: string;
-  /** Relevance score 0.0-1.0 (how relevant to the current query) */
+  /** What state/data this modifies (side effects) */
+  modifies?: string[];
+  /** Non-trivial functions this calls (exclude basic utils, logging, etc.) */
+  calls?: string[];
+  /** Punchy insight - non-obvious behavior, gotchas, or goal-relevant info. Skip if name is self-explanatory. */
+  insight?: string;
+  /** Relevance score 0.0-1.0 (internal use - not sent to LLM) */
   relevance: number;
   /** Which agent/tool discovered this */
   discoveredBy: string;

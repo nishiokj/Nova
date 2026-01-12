@@ -95,6 +95,7 @@ export type {
   StreamParams,
   LLMAdapter,
   ConversationContext,
+  StructuredOutputSchema,
 } from './llm.js';
 
 export {

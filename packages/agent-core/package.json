@@ -1,7 +1,7 @@
 {
   "name": "agent-core",
   "version": "0.1.0",
-  "private": true,
+  "description": "Composable agent primitives: Agent, Orchestrator, ContextWindow, ToolRegistry, and LLM adapters",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,6 +24,15 @@
     "lint": "npx tsc --noEmit",
     "clean": "rm -rf dist"
   },
+  "keywords": [
+    "agent",
+    "llm",
+    "orchestrator",
+    "ai",
+    "anthropic",
+    "openai"
+  ],
+  "license": "MIT",
   "dependencies": {
     "@types/uuid": "^11.0.0",
     "fast-glob": "^3.3.3",

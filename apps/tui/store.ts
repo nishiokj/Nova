@@ -59,6 +59,8 @@ export interface StoreSnapshot {
   // Paste state
   pasteInProgress: boolean;
   pasteBytesReceived: number;
+  // Theme selection
+  themeCursor: number;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -111,6 +113,9 @@ export class Store {
   // Paste state
   private pasteInProgress = false;
   private pasteBytesReceived = 0;
+
+  // Theme selection
+  private themeCursor = 0;
 
   private historyCache: {
     width: number;
@@ -170,6 +175,8 @@ export class Store {
       // Paste state
       pasteInProgress: this.pasteInProgress,
       pasteBytesReceived: this.pasteBytesReceived,
+      // Theme selection
+      themeCursor: this.themeCursor,
     };
   }
 
@@ -743,6 +750,33 @@ export class Store {
     this.questionSelection = [];
     this.questionCursor = 0;
     this.questionInput = "";
+    this.uiMode = "chat";
+    this.emit();
+  }
+
+  // ==================== Theme Selection Methods ====================
+
+  /**
+   * Enters theme selection mode with cursor at current theme.
+   */
+  enterThemeMode(currentIndex: number): void {
+    this.themeCursor = currentIndex;
+    this.uiMode = "theme";
+    this.emit();
+  }
+
+  /**
+   * Moves theme cursor up or down.
+   */
+  moveThemeCursor(delta: number, total: number): void {
+    this.themeCursor = (this.themeCursor + delta + total) % total;
+    this.emit();
+  }
+
+  /**
+   * Exits theme mode and returns to chat.
+   */
+  exitThemeMode(): void {
     this.uiMode = "chat";
     this.emit();
   }

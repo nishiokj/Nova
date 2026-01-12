@@ -10,8 +10,11 @@
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
+  "dependencies": {
+    "agent-core": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.9.3"
   }
 }

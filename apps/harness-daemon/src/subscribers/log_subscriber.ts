@@ -6,9 +6,9 @@
  */
 
 import path from 'path';
-import type { EventBusProtocol } from '../../../../packages/comms-bus/src/event_bus.js';
-import type { AgentEvent } from '../../../../packages/agent-core/src/types/events.js';
-import { createLogger, type Logger, type LogLevel } from '../../../../packages/agent-core/src/shared/logger.js';
+import type { EventBusProtocol } from 'comms-bus';
+import type { AgentEvent } from 'agent-core';
+import { createLogger, type Logger, type LogLevel } from 'agent-core/shared';
 
 export interface LogSubscriberConfig {
   logPath: string;

@@ -7,6 +7,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import type {
   LLMProvider,
@@ -16,6 +17,7 @@ import type {
   ResolvedAgentConfig,
   ResolvedLLMConfig,
   ReasoningEffort,
+  ProvidersConfigSection,
 } from './config_types.js';
 import {
   DEFAULT_TOOLS_CONFIG,
@@ -24,11 +26,26 @@ import {
   DEFAULT_ENABLED_TOOLS,
   DEFAULT_SKILLS_CONFIG,
   DEFAULT_HOOKS_CONFIG,
+  DEFAULT_AUTH_CONFIG,
 } from './config_types.js';
 
 const DEFAULT_CONFIG_PATH = 'config/harness_config.json';
 const OUTPUT_SCHEMAS_PATH = 'config/output_schemas.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
+
+/**
+ * Get the package root directory from this module's location.
+ * Works regardless of where the process is started from.
+ *
+ * In dev:  apps/harness-daemon/src/harness/config_loader.ts -> ../../../../
+ * In dist: apps/harness-daemon/dist/harness/config_loader.js -> ../../../../
+ */
+function getPackageRoot(): string {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  // Always 4 levels up: harness/ -> (src|dist)/ -> harness-daemon/ -> apps/ -> root
+  return resolve(__dirname, '..', '..', '..', '..');
+}
 
 /** Cached output schemas (loaded once) */
 let cachedOutputSchemas: OutputSchemasFile | null = null;
@@ -88,6 +105,7 @@ export function resolveRepoRoot(startDir: string): string {
  * Load behavioral rules from config/behavioral_rules.md.
  */
 export function loadBehavioralRules(): string {
+  // Check cwd parents first (development)
   for (const dir of walkParents(process.cwd())) {
     const path = resolve(dir, BEHAVIORAL_RULES_PATH);
     if (!existsSync(path)) continue;
@@ -97,6 +115,18 @@ export function loadBehavioralRules(): string {
       return content;
     } catch (e) {
       console.warn(`[config] Failed to read behavioral rules from ${path}:`, e);
+    }
+  }
+
+  // Check package location (fallback for global installs)
+  const packagePath = resolve(getPackageRoot(), BEHAVIORAL_RULES_PATH);
+  if (existsSync(packagePath)) {
+    try {
+      const content = readFileSync(packagePath, 'utf-8');
+      console.log(`[config] Loaded behavioral rules from package: ${packagePath}`);
+      return content;
+    } catch (e) {
+      console.warn(`[config] Failed to read behavioral rules from package ${packagePath}:`, e);
     }
   }
 
@@ -115,6 +145,8 @@ interface LoadedConfigFile {
   config: HarnessConfigFile;
   /** Directory where config file was found (repo root) - use this for resolving relative paths */
   configDir: string;
+  /** Full path to the config file */
+  configPath: string;
 }
 
 /**
@@ -123,6 +155,7 @@ interface LoadedConfigFile {
  * Relative paths in the config should be resolved relative to configDir.
  */
 export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
+  // 1. Check explicit path if provided (highest priority)
   if (configPath) {
     const explicitPath = resolve(configPath);
     if (existsSync(explicitPath)) {
@@ -135,7 +168,7 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
           console.log(`[config] Loaded from ${explicitPath}`);
           // Config dir is parent of 'config/' directory (i.e., repo root)
           const configDir = dirname(dirname(explicitPath));
-          return { config: parsed, configDir };
+          return { config: parsed, configDir, configPath: explicitPath };
         }
       } catch (e) {
         console.warn(`[config] Failed to parse ${explicitPath}:`, e);
@@ -143,6 +176,7 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
     }
   }
 
+  // 2. Walk up from cwd (development mode / local project configs)
   for (const dir of walkParents(process.cwd())) {
     const path = resolve(dir, DEFAULT_CONFIG_PATH);
     if (!existsSync(path)) continue;
@@ -156,9 +190,25 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
       }
       console.log(`[config] Loaded from ${path}`);
       // dir is the repo root (where config/ directory lives)
-      return { config: parsed, configDir: dir };
+      return { config: parsed, configDir: dir, configPath: path };
     } catch (e) {
       console.warn(`[config] Failed to parse ${path}:`, e);
+    }
+  }
+
+  // 3. Check relative to package install location (fallback for globally installed packages)
+  const packageRoot = getPackageRoot();
+  const packageConfigPath = resolve(packageRoot, DEFAULT_CONFIG_PATH);
+  if (existsSync(packageConfigPath)) {
+    try {
+      const content = readFileSync(packageConfigPath, 'utf-8');
+      const parsed = JSON.parse(content) as HarnessConfigFile;
+      if (parsed && typeof parsed === 'object' && 'agents' in parsed) {
+        console.log(`[config] Loaded from package: ${packageConfigPath}`);
+        return { config: parsed, configDir: packageRoot, configPath: packageConfigPath };
+      }
+    } catch (e) {
+      console.warn(`[config] Failed to parse package config ${packageConfigPath}:`, e);
     }
   }
 
@@ -178,6 +228,7 @@ function loadOutputSchemas(): OutputSchemasFile | null {
     return cachedOutputSchemas;
   }
 
+  // Check cwd parents first (development)
   for (const dir of walkParents(process.cwd())) {
     const path = resolve(dir, OUTPUT_SCHEMAS_PATH);
     if (!existsSync(path)) continue;
@@ -190,6 +241,20 @@ function loadOutputSchemas(): OutputSchemasFile | null {
       return parsed;
     } catch (e) {
       console.warn(`[config] Failed to parse output schemas ${path}:`, e);
+    }
+  }
+
+  // Check package location (fallback for global installs)
+  const packagePath = resolve(getPackageRoot(), OUTPUT_SCHEMAS_PATH);
+  if (existsSync(packagePath)) {
+    try {
+      const content = readFileSync(packagePath, 'utf-8');
+      const parsed = JSON.parse(content) as OutputSchemasFile;
+      console.log(`[config] Loaded output schemas from package: ${packagePath}`);
+      cachedOutputSchemas = parsed;
+      return parsed;
+    } catch (e) {
+      console.warn(`[config] Failed to parse package output schemas ${packagePath}:`, e);
     }
   }
 
@@ -274,10 +339,35 @@ const ANTHROPIC_REASONING_EFFORTS = new Set<ReasoningEffort>([
 /** Providers that use OpenAI-compatible API */
 const OPENAI_COMPAT_PROVIDERS = new Set(['openai-compat', 'cerebras', 'together', 'groq', 'fireworks']);
 
+/** Module-level providers cache (set by createConfigFromFile) */
+let configProviders: ProvidersConfigSection = {};
+
 /**
- * Resolve API key from environment based on provider.
+ * Set providers from config file (called during config loading).
  */
-export function resolveApiKey(provider: string): string {
+export function setConfigProviders(providers: ProvidersConfigSection): void {
+  configProviders = providers;
+}
+
+/**
+ * Get the current config providers.
+ */
+export function getConfigProviders(): ProvidersConfigSection {
+  return configProviders;
+}
+
+/**
+ * Resolve API key from config file or environment.
+ * Config file takes precedence over environment variables.
+ */
+export function resolveApiKey(provider: string, providers?: ProvidersConfigSection): string {
+  // Check config file providers first (passed directly or from module cache)
+  const configKey = (providers ?? configProviders)[provider];
+  if (configKey) {
+    return configKey;
+  }
+
+  // Fall back to environment variable
   const envVar = API_KEY_ENV_MAP[provider] ?? `${provider.toUpperCase()}_API_KEY`;
   const key = process.env[envVar];
   if (!key) {
@@ -285,7 +375,8 @@ export function resolveApiKey(provider: string): string {
       ? ` (routes to openai-compat adapter)`
       : '';
     throw new Error(
-      `API key not found for provider '${provider}'${canonicalHint}. Set ${envVar} environment variable.`
+      `API key not found for provider '${provider}'${canonicalHint}. ` +
+      `Set in ~/.rex/config.json providers section or ${envVar} environment variable.`
     );
   }
   return key;
@@ -452,8 +543,12 @@ function resolvePathRelativeTo(basePath: string, relativePath: string): string {
 export function createConfigFromFile(
   fileConfig: HarnessConfigFile,
   configDir: string,
-  workingDir?: string
+  workingDir?: string,
+  configPath?: string
 ): FullHarnessConfig {
+  // Set providers at module level for API key resolution
+  const providers = fileConfig.providers ?? {};
+  setConfigProviders(providers);
   // Resolve all agent configs
   const agents: Record<string, ResolvedAgentConfig> = {};
   for (const [agentType, entry] of Object.entries(fileConfig.agents)) {
@@ -525,7 +620,17 @@ export function createConfigFromFile(
       directory: resolvedHooksDir, // NOW AN ABSOLUTE PATH (if set)
       definitions: fileConfig.hooks?.definitions ?? [],
     },
+    auth: {
+      enabled: fileConfig.auth?.enabled ?? DEFAULT_AUTH_CONFIG.enabled,
+      host: fileConfig.auth?.host ?? DEFAULT_AUTH_CONFIG.host,
+      port: fileConfig.auth?.port ?? DEFAULT_AUTH_CONFIG.port,
+      sessionExpiryDays: fileConfig.auth?.session_expiry_days !== undefined
+        ? fileConfig.auth.session_expiry_days
+        : (DEFAULT_AUTH_CONFIG.session_expiry_days ?? null),
+    },
     behavioralRules: loadBehavioralRules(),
+    providers,
+    configPath,
   };
 }
 
@@ -656,7 +761,15 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
       directory: DEFAULT_HOOKS_CONFIG.directory,
       definitions: [],
     },
+    auth: {
+      enabled: DEFAULT_AUTH_CONFIG.enabled,
+      host: DEFAULT_AUTH_CONFIG.host,
+      port: DEFAULT_AUTH_CONFIG.port,
+      sessionExpiryDays: DEFAULT_AUTH_CONFIG.session_expiry_days ?? null,
+    },
     behavioralRules: loadBehavioralRules(),
+    providers: {},
+    configPath: undefined,
   };
 }
 
@@ -681,8 +794,8 @@ export function loadConfig(
   if (loaded) {
     // configDir is where the config file was found (repo root)
     // All relative paths in config will be resolved relative to this
-    const { config: fileConfig, configDir } = loaded;
-    const result = createConfigFromFile(fileConfig, configDir, workingDir);
+    const { config: fileConfig, configDir, configPath: loadedConfigPath } = loaded;
+    const result = createConfigFromFile(fileConfig, configDir, workingDir, loadedConfigPath);
     return result;
   }
 

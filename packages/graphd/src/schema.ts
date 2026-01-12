@@ -15,10 +15,11 @@
  * v2: Added session management tables (sessions, conversation_messages, context_snapshots)
  * v3: Added session_events table for real-time event persistence
  * v4: Added SIAS kernel persistence tables
+ * v5: Added auth tables (users, user_sessions, provider_credentials)
  *
  * MUST match Python GRAPH_D_SCHEMA_VERSION
  */
-export const GRAPHD_SCHEMA_VERSION = 'v4';
+export const GRAPHD_SCHEMA_VERSION = 'v5';
 
 /**
  * GraphD version string.
@@ -255,6 +256,50 @@ CREATE INDEX IF NOT EXISTS idx_sias_patches_session ON sias_patches(session_id);
 CREATE INDEX IF NOT EXISTS idx_sias_decisions_session ON sias_decisions(session_id);
 CREATE INDEX IF NOT EXISTS idx_sias_health_session ON sias_health_snapshots(session_id);
 CREATE INDEX IF NOT EXISTS idx_sias_bench_session ON sias_benchmark_runs(session_id);
+
+-- Auth tables (v5)
+
+-- Users table (Google OAuth)
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    picture_url TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+-- Device sessions (persistent login tokens)
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    device_name TEXT,
+    created_at REAL NOT NULL,
+    last_used_at REAL NOT NULL,
+    expires_at REAL,
+    revoked INTEGER DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Encrypted provider credentials (API keys)
+CREATE TABLE IF NOT EXISTS provider_credentials (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    encrypted_key TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, provider)
+);
+
+-- Auth indexes
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_revoked ON user_sessions(revoked);
+CREATE INDEX IF NOT EXISTS idx_provider_credentials_user_id ON provider_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_provider_credentials_user_provider ON provider_credentials(user_id, provider);
 `;
 
 /**
@@ -293,6 +338,9 @@ export const EXPORTABLE_TABLES = new Set([
   'sias_benchmark_runs',
   'sias_worktrees',
   'sias_decision_embeddings',
+  'users',
+  'user_sessions',
+  'provider_credentials',
 ]);
 
 /**

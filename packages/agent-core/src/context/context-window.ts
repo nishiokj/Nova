@@ -17,10 +17,58 @@ import type {
   ContextWindowTelemetry,
   MessageItem,
   FileContentItem,
+  ArtifactItem,
   EjectResult,
   CompactOptions,
   CompactResult,
 } from '../types/context.js';
+
+// =========================================================================
+// Artifact Formatting
+// =========================================================================
+
+/**
+ * Format an artifact for LLM consumption - compact, no fluff.
+ * Only includes actionable information: signature, side effects, call graph, non-obvious insights.
+ */
+function formatArtifactForLLM(artifact: ArtifactItem): string {
+  const kindAbbrev: Record<string, string> = {
+    function: 'fn',
+    class: 'class',
+    interface: 'iface',
+    import: 'import',
+    export: 'export',
+    constant: 'const',
+    pattern: 'pattern',
+    summary: 'summary',
+  };
+
+  const parts: string[] = [];
+
+  // Header: [kind] path:line name or signature
+  const loc = artifact.line ? `${artifact.sourcePath}:${artifact.line}` : artifact.sourcePath;
+  const header = artifact.signature
+    ? `[${kindAbbrev[artifact.kind] ?? artifact.kind}] ${loc}\n${artifact.signature}`
+    : `[${kindAbbrev[artifact.kind] ?? artifact.kind}] ${loc} ${artifact.name}`;
+  parts.push(header);
+
+  // Side effects
+  if (artifact.modifies?.length) {
+    parts.push(`→ modifies: ${artifact.modifies.join(', ')}`);
+  }
+
+  // Call graph (non-trivial calls only)
+  if (artifact.calls?.length) {
+    parts.push(`→ calls: ${artifact.calls.join(', ')}`);
+  }
+
+  // Non-obvious insight (skip if redundant with name)
+  if (artifact.insight) {
+    parts.push(`→ ${artifact.insight}`);
+  }
+
+  return parts.join('\n');
+}
 
 // =========================================================================
 // System Message Builder
@@ -561,6 +609,15 @@ export class ContextWindow {
             content: `[File: ${item.path}]\n\`\`\`${item.language ?? ''}\n${item.content}\n\`\`\``,
           });
           break;
+
+        case 'artifact':
+          // Artifacts are semantic code discoveries - compact format, no fluff
+          result.push({
+            type: 'message',
+            role: 'user',
+            content: formatArtifactForLLM(item as import('../types/context.js').ArtifactItem),
+          });
+          break;
       }
     }
 
@@ -639,6 +696,14 @@ export class ContextWindow {
           result.push({
             role: 'user',
             content: `[File: ${item.path}]\n\`\`\`${item.language ?? ''}\n${item.content}\n\`\`\``,
+          });
+          break;
+
+        case 'artifact':
+          // Artifacts are semantic code discoveries - compact format, no fluff
+          result.push({
+            role: 'user',
+            content: formatArtifactForLLM(item as import('../types/context.js').ArtifactItem),
           });
           break;
       }

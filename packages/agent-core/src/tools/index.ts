@@ -29,7 +29,7 @@ export {
 } from './types.js';
 
 // Registry
-export { ToolRegistry } from './registry.js';
+export { ToolRegistry, type ToolExecuteOptions } from './registry.js';
 
 // Built-in tools
 export {

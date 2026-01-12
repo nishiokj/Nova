@@ -10,10 +10,10 @@
 import type { LLMAdapter } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ContextWindow } from '../context/index.js';
-import type { EventEmitCallback, UserPromptInfo } from '../agent/types.js';
+import type { EventEmitCallback, UserPromptInfo, AgentHooks } from '../agent/types.js';
 import { Agent } from '../agent/agent.js';
 import type { AgentRegistry } from '../agent/agent-registry.js';
-import { createWorkItem, type WorkItem } from '../wizard/work-item.js';
+import { createWorkItem, type WorkItem } from '../work/work-item.js';
 import { createEvent } from '../types/events.js';
 
 // --- Types ---
@@ -94,10 +94,12 @@ export class Orchestrator {
   private requestId: string;
   private logger?: OrchestratorLogger;
   private agentRegistry?: AgentRegistry;
+  private hooks?: AgentHooks;
 
   // State for resume
   private goal: string = '';
   private agentType: string = 'standard';
+  private cwd: string = '';
 
   constructor(
     config: Partial<OrchestratorConfig>,
@@ -106,7 +108,8 @@ export class Orchestrator {
     emit: EventEmitCallback,
     requestId: string,
     logger?: OrchestratorLogger,
-    agentRegistry?: AgentRegistry
+    agentRegistry?: AgentRegistry,
+    hooks?: AgentHooks
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
@@ -115,18 +118,26 @@ export class Orchestrator {
     this.requestId = requestId;
     this.logger = logger;
     this.agentRegistry = agentRegistry;
+    this.hooks = hooks;
   }
 
   /**
    * Main entry point: Execute until goal is reached or bounds exceeded.
+   *
+   * @param context - The context window for the session
+   * @param goal - The goal to achieve
+   * @param agentType - The type of agent to use
+   * @param cwd - Working directory for tool execution (required for concurrent-safe operation)
    */
   async execute(
     context: ContextWindow,
     goal: string,
-    agentType: string = 'standard'
+    agentType: string = 'standard',
+    cwd: string
   ): Promise<OrchestratorResult> {
     this.goal = goal;
     this.agentType = agentType;
+    this.cwd = cwd;
 
     const startTime = Date.now();
     let iteration = 0;
@@ -211,7 +222,7 @@ export class Orchestrator {
       this.emit(createEvent('iteration_started', { iteration, goal, requestId: this.requestId }));
 
       // AGENT EXECUTION - agent reads from global context, writes to its own local context
-      const result = await agent.run({ globalContext: context, workItem });
+      const result = await agent.run({ globalContext: context, workItem, cwd });
 
       totalLlmCalls += result.metrics.llmCallsMade;
       totalToolCalls += result.metrics.toolCallsMade;
@@ -324,8 +335,8 @@ export class Orchestrator {
     context.addMessage('user', userResponse);
     this.log('info', 'Resuming after user input');
 
-    // Re-enter loop with stored goal and agent type
-    return this.execute(context, this.goal, this.agentType);
+    // Re-enter loop with stored goal, agent type, and working directory
+    return this.execute(context, this.goal, this.agentType, this.cwd);
   }
 
   // --- Private helpers ---
@@ -345,7 +356,8 @@ export class Orchestrator {
       this.emit,
       this.requestId,
       this.agentRegistry,
-      runtime.llm
+      runtime.llm,
+      this.hooks
     );
   }
 

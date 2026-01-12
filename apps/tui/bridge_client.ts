@@ -8,7 +8,7 @@ import {
   BRIDGE_COMMAND_CHANNEL,
   runChannel,
   sessionChannel,
-} from "../../packages/comms-bus/src/index.js";
+} from "comms-bus";
 import type { BridgeCommand, BridgeEvent, ReadyData, ResponseData } from "./types.js";
 
 export interface BridgeClientOptions {
@@ -84,6 +84,136 @@ export class BridgeClient extends EventEmitter {
     this.sessionKey = null;
     this.activeRuns.clear();
     this.bus.close();
+  }
+
+  // =========================================================================
+  // Auth Commands
+  // =========================================================================
+
+  /**
+   * Start OAuth flow. Returns auth URL and state token.
+   */
+  async authStart(deviceName?: string): Promise<{
+    success: boolean;
+    authUrl?: string;
+    stateToken?: string;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('auth_start', { device: deviceName });
+  }
+
+  /**
+   * Poll for completed OAuth session.
+   */
+  async authPoll(stateToken: string): Promise<{
+    success: boolean;
+    pending?: boolean;
+    sessionToken?: string;
+    userId?: string;
+    email?: string;
+    name?: string | null;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('auth_poll', { stateToken });
+  }
+
+  /**
+   * Verify a session token.
+   */
+  async authVerify(sessionToken: string): Promise<{
+    success: boolean;
+    valid?: boolean;
+    user?: { id: string; email: string; name: string | null };
+    error?: string;
+  }> {
+    return this.sendAuthCommand('auth_verify', { sessionToken });
+  }
+
+  /**
+   * Logout (revoke session).
+   */
+  async authLogout(sessionToken: string): Promise<{ success: boolean }> {
+    return this.sendAuthCommand('auth_logout', { sessionToken });
+  }
+
+  /**
+   * List configured providers.
+   * @param sessionToken Optional for local providers (no auth required)
+   */
+  async providersList(sessionToken?: string): Promise<{
+    success: boolean;
+    providers?: Array<{ provider: string; configured: boolean; updatedAt?: number }>;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('providers_list', sessionToken ? { sessionToken } : {});
+  }
+
+  /**
+   * Save a provider API key.
+   * @param sessionToken Optional for local providers (no auth required)
+   */
+  async providersSave(provider: string, apiKey: string, sessionToken?: string): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    const data: Record<string, string> = { provider, apiKey };
+    if (sessionToken) data.sessionToken = sessionToken;
+    return this.sendAuthCommand('providers_save', data);
+  }
+
+  /**
+   * Delete a provider API key.
+   * @param sessionToken Optional for local providers (no auth required)
+   */
+  async providersDelete(provider: string, sessionToken?: string): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    const data: Record<string, string> = { provider };
+    if (sessionToken) data.sessionToken = sessionToken;
+    return this.sendAuthCommand('providers_delete', data);
+  }
+
+  /**
+   * Test a provider API key.
+   * @param sessionToken Optional for local providers (no auth required)
+   */
+  async providersTest(provider: string, sessionToken?: string): Promise<{
+    success: boolean;
+    valid?: boolean;
+    error?: string;
+  }> {
+    const data: Record<string, string> = { provider };
+    if (sessionToken) data.sessionToken = sessionToken;
+    return this.sendAuthCommand('providers_test', data);
+  }
+
+  private sendAuthCommand<T extends Record<string, unknown>>(
+    type: string,
+    data: Record<string, unknown>
+  ): Promise<T> {
+    return new Promise((resolve) => {
+      const handler = (event: BridgeEvent) => {
+        if (event.type === 'response') {
+          const responseData = event.data as ResponseData;
+          const metadata = responseData?.metadata as { kind?: string; payload?: unknown } | undefined;
+          if (metadata?.kind === type) {
+            this.off('event', handler);
+            resolve((metadata.payload ?? { success: false }) as T);
+          }
+        }
+      };
+
+      this.on('event', handler);
+
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        this.off('event', handler);
+        resolve({ success: false, error: 'Request timeout' } as T);
+      }, 30000);
+
+      this.send({ type, data });
+    });
   }
 
   private handleBusEvent(payload: unknown): void {

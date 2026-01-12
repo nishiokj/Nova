@@ -22,8 +22,24 @@ import { createTool, DEFAULT_CACHE_CONFIG, DEFAULT_TOOL_CONFIG } from './types.j
 // ============================================
 
 /**
+ * Options for tool execution.
+ */
+export interface ToolExecuteOptions {
+  /** Working directory for the tool */
+  cwd?: string;
+  /** Timeout override in milliseconds */
+  timeout?: number;
+  /** Allowed tools restriction (for skill-based filtering) */
+  allowedTools?: Set<string>;
+}
+
+/**
  * Registry for tools available to the agent.
  * Manages tool registration, execution, caching, and lifecycle.
+ *
+ * This registry is stateless with respect to execution context - all context
+ * is passed per-call via ToolExecuteOptions. This makes it safe to share
+ * one registry across concurrent sessions.
  */
 export class ToolRegistry {
   private tools = new Map<string, Tool>();
@@ -31,7 +47,6 @@ export class ToolRegistry {
   private cacheConfig: CacheConfig;
   private cache = new Map<string, CachedToolResult>();
   private defaultWorkingDir: string;
-  private currentContext: ToolExecutionContext = {};
 
   constructor(
     config: Partial<ToolRegistryConfig> = {},
@@ -135,14 +150,14 @@ export class ToolRegistry {
   }
 
   // ============================================
-  // CONTEXT MANAGEMENT
+  // WORKING DIRECTORY
   // ============================================
 
   /**
-   * Get the current working directory.
+   * Get the default working directory.
    */
   getWorkingDir(): string {
-    return this.currentContext.workdirOverride ?? this.defaultWorkingDir;
+    return this.defaultWorkingDir;
   }
 
   /**
@@ -152,33 +167,20 @@ export class ToolRegistry {
     this.defaultWorkingDir = dir;
   }
 
-  /**
-   * Execute with a specific context.
-   */
-  async withContext<T>(
-    context: ToolExecutionContext,
-    fn: () => Promise<T>
-  ): Promise<T> {
-    const previous = this.currentContext;
-    this.currentContext = { ...previous, ...context };
-    try {
-      return await fn();
-    } finally {
-      this.currentContext = previous;
-    }
-  }
-
   // ============================================
   // EXECUTION
   // ============================================
 
   /**
    * Execute a tool by name.
+   *
+   * All execution context (cwd, allowedTools) is passed explicitly via options.
+   * This makes the registry stateless and safe for concurrent use.
    */
   async execute(
     name: string,
     args: Record<string, unknown>,
-    timeoutOverride?: number
+    options?: ToolExecuteOptions
   ): Promise<ToolResult> {
     const tool = this.tools.get(name);
 
@@ -190,15 +192,8 @@ export class ToolRegistry {
       return errorResult(name, `Tool '${name}' is disabled`, 0);
     }
 
-    // Build execution context with defaultWorkingDir as fallback
-    // This ensures tools always have a consistent workspace root
-    const execContext: ToolExecutionContext = {
-      ...this.currentContext,
-      workdirOverride: this.currentContext.workdirOverride ?? this.defaultWorkingDir,
-    };
-
-    // Always inject cwd from our config (LLM doesn't know the real working dir)
-    const resolvedCwd = execContext.workdirOverride ?? this.defaultWorkingDir;
+    // Resolve cwd: explicit option > defaultWorkingDir
+    const resolvedCwd = options?.cwd ?? this.defaultWorkingDir;
     const argsWithCwd = {
       ...args,
       cwd: resolvedCwd,
@@ -210,10 +205,7 @@ export class ToolRegistry {
     }
 
     // Check allowed tools restriction
-    if (
-      execContext.allowedTools &&
-      !execContext.allowedTools.has(name)
-    ) {
+    if (options?.allowedTools && !options.allowedTools.has(name)) {
       return errorResult(
         name,
         `Tool '${name}' not allowed by active skill`,
@@ -235,8 +227,14 @@ export class ToolRegistry {
       }
     }
 
-    // Execute with timeout, passing the merged context
-    const timeout = timeoutOverride ?? tool.timeoutMs;
+    // Build execution context for the tool executor
+    const execContext: ToolExecutionContext = {
+      workdirOverride: resolvedCwd,
+      allowedTools: options?.allowedTools,
+    };
+
+    // Execute with timeout
+    const timeout = options?.timeout ?? tool.timeoutMs;
     const startTime = Date.now();
 
     try {

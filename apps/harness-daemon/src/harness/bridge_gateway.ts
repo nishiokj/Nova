@@ -3,12 +3,28 @@
  */
 
 import path from 'path';
-import type { BusServer } from '../../../../packages/comms-bus/src/bus_server.js';
-import { BRIDGE_COMMAND_CHANNEL, runChannel, sessionChannel } from '../../../../packages/comms-bus/src/bus_channels.js';
+import { type BusServer, BRIDGE_COMMAND_CHANNEL, runChannel, sessionChannel } from 'comms-bus';
 import type { AgentRunHandle, BridgeEvent } from './types.js';
 import { createErrorEvent } from './event_translator.js';
 import type { FullHarnessConfig } from './config_types.js';
-import { loadHookDefinitions, loadSkillDefinitions } from './skills_loader.js';
+import {
+  loadHookDefinitions,
+  loadSkillDefinitions,
+  getSkillDefinition,
+  getHookDefinition,
+  createSkill,
+  createHook,
+  updateSkill,
+  updateHook,
+  deleteSkill,
+  deleteHook,
+  setSkillEnabled,
+  setHookEnabled,
+  type SkillInput,
+  type HookInput,
+} from './skills_loader.js';
+import type { AuthService } from './auth_service.js';
+import { LocalProviderManager } from './local_providers.js';
 
 interface BridgeCommand {
   type: string;
@@ -21,9 +37,10 @@ interface HarnessLike {
     inputText: string;
     tier?: 'simple' | 'standard' | 'complex';
     sessionKey: string;
+    workingDir: string;
     context?: string;
   }): AgentRunHandle;
-  resume(requestId: string, answer: string, sessionKey: string): AgentRunHandle;
+  resume(requestId: string, answer: string, sessionKey: string, workingDir: string): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
   getConfig(): FullHarnessConfig;
   isShuttingDown(): boolean;
@@ -32,6 +49,7 @@ interface HarnessLike {
 
 interface ConnectionState {
   sessionKey: string | null;
+  workingDir: string | null;
   activeRequestId: string | null;
 }
 
@@ -39,14 +57,17 @@ export class BridgeGateway {
   private readonly bus: BusServer;
   private readonly harness: HarnessLike;
   private readonly workingDir: string;
+  private readonly authService: AuthService | null;
+  private readonly localProviders: LocalProviderManager | null;
   private skillsDir: string;
   private hooksDir: string;
   private connections = new Map<string, ConnectionState>();
 
-  constructor(bus: BusServer, harness: HarnessLike, workingDir: string) {
+  constructor(bus: BusServer, harness: HarnessLike, workingDir: string, authService?: AuthService | null) {
     this.bus = bus;
     this.harness = harness;
     this.workingDir = workingDir;
+    this.authService = authService ?? null;
 
     const config = harness.getConfig();
     this.skillsDir = config.skills.directory
@@ -55,6 +76,13 @@ export class BridgeGateway {
     this.hooksDir = config.hooks.directory
       ? path.resolve(this.workingDir, config.hooks.directory)
       : path.resolve(this.workingDir, 'config/hooks');
+
+    // Initialize local provider manager (always available, no auth required)
+    if (config.configPath) {
+      this.localProviders = new LocalProviderManager(config.configPath, config.providers);
+    } else {
+      this.localProviders = null;
+    }
   }
 
   handleDisconnect(connectionId: string): void {
@@ -102,10 +130,25 @@ export class BridgeGateway {
           this.handleSkillsList(connectionId);
           return;
         case 'skills_get':
+          this.handleSkillsGet(connectionId, command.data);
+          return;
         case 'skills_create':
+          this.handleSkillsCreate(connectionId, command.data);
+          return;
         case 'skills_update':
+          this.handleSkillsUpdate(connectionId, command.data);
+          return;
         case 'skills_delete':
+          this.handleSkillsDelete(connectionId, command.data);
+          return;
+        case 'skills_enable':
+          this.handleSkillsEnable(connectionId, command.data, true);
+          return;
+        case 'skills_disable':
+          this.handleSkillsEnable(connectionId, command.data, false);
+          return;
         case 'skills_run':
+          // Skills run is deferred - skills are instructions injected into prompts
           this.handleDeferredResponse(connectionId, command.type);
           return;
         case 'voice_start':
@@ -119,10 +162,47 @@ export class BridgeGateway {
           this.handleHooksList(connectionId);
           return;
         case 'hooks_get':
+          this.handleHooksGet(connectionId, command.data);
+          return;
         case 'hooks_create':
+          this.handleHooksCreate(connectionId, command.data);
+          return;
         case 'hooks_update':
+          this.handleHooksUpdate(connectionId, command.data);
+          return;
         case 'hooks_delete':
-          this.handleDeferredResponse(connectionId, command.type);
+          this.handleHooksDelete(connectionId, command.data);
+          return;
+        case 'hooks_enable':
+          this.handleHooksEnable(connectionId, command.data, true);
+          return;
+        case 'hooks_disable':
+          this.handleHooksEnable(connectionId, command.data, false);
+          return;
+        // Auth commands
+        case 'auth_start':
+          this.handleAuthStart(connectionId, command.data);
+          return;
+        case 'auth_poll':
+          this.handleAuthPoll(connectionId, command.data);
+          return;
+        case 'auth_verify':
+          this.handleAuthVerify(connectionId, command.data);
+          return;
+        case 'auth_logout':
+          this.handleAuthLogout(connectionId, command.data);
+          return;
+        case 'providers_list':
+          this.handleProvidersList(connectionId, command.data);
+          return;
+        case 'providers_save':
+          this.handleProvidersSave(connectionId, command.data);
+          return;
+        case 'providers_delete':
+          this.handleProvidersDelete(connectionId, command.data);
+          return;
+        case 'providers_test':
+          void this.handleProvidersTest(connectionId, command.data);
           return;
         case 'shutdown':
           this.sendError(connectionId, 'Shutdown is not supported via bridge');
@@ -148,6 +228,13 @@ export class BridgeGateway {
         : generateSessionKey();
     state.sessionKey = sessionKey;
 
+    // Store working directory from client (where TUI was launched)
+    const requestedWorkingDir = data?.working_dir;
+    state.workingDir =
+      typeof requestedWorkingDir === 'string' && requestedWorkingDir.length > 0
+        ? requestedWorkingDir
+        : this.workingDir; // fallback to daemon's working dir
+
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
   }
@@ -162,6 +249,8 @@ export class BridgeGateway {
       this.sendError(connectionId, 'Session not initialized. Call init first.');
       return;
     }
+
+    const workingDir = state.workingDir ?? this.workingDir;
 
     const text = String(data?.text ?? '');
     if (!text.trim()) {
@@ -184,6 +273,7 @@ export class BridgeGateway {
       inputText: text,
       ...(tier ? { tier: tier as 'simple' | 'standard' | 'complex' } : {}),
       sessionKey,
+      workingDir,
     });
 
     this.streamRunEvents(clientRequestId, handle);
@@ -200,6 +290,8 @@ export class BridgeGateway {
       return;
     }
 
+    const workingDir = state.workingDir ?? this.workingDir;
+
     const requestId = String(data?.request_id ?? state.activeRequestId ?? '');
     const answer = String(data?.answer ?? '');
     if (!requestId) {
@@ -211,7 +303,7 @@ export class BridgeGateway {
       return;
     }
 
-    const handle = this.harness.resume(requestId, answer, sessionKey);
+    const handle = this.harness.resume(requestId, answer, sessionKey, workingDir);
     this.streamRunEvents(requestId, handle);
   }
 
@@ -315,6 +407,160 @@ export class BridgeGateway {
     }
   }
 
+  // =========================================================================
+  // Skills CRUD Handlers
+  // =========================================================================
+
+  private handleSkillsGet(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    if (!id) {
+      this.sendSkillsResponse(connectionId, 'get', { success: false, error: 'Missing skill id' });
+      return;
+    }
+
+    const skill = getSkillDefinition(this.skillsDir, id);
+    if (!skill) {
+      this.sendSkillsResponse(connectionId, 'get', { success: false, error: `Skill '${id}' not found` });
+      return;
+    }
+
+    this.sendSkillsResponse(connectionId, 'get', { success: true, skill });
+  }
+
+  private handleSkillsCreate(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const skill = data?.skill as SkillInput | undefined;
+    if (!skill?.name || !skill?.instructions) {
+      this.sendSkillsResponse(connectionId, 'create', { success: false, error: 'Missing required fields: name, instructions' });
+      return;
+    }
+
+    const result = createSkill(this.skillsDir, skill);
+    this.sendSkillsResponse(connectionId, 'create', result);
+  }
+
+  private handleSkillsUpdate(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    const updates = data?.updates as Partial<SkillInput> | undefined;
+
+    if (!id) {
+      this.sendSkillsResponse(connectionId, 'update', { success: false, error: 'Missing skill id' });
+      return;
+    }
+
+    const result = updateSkill(this.skillsDir, id, updates ?? {});
+    this.sendSkillsResponse(connectionId, 'update', result);
+  }
+
+  private handleSkillsDelete(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    if (!id) {
+      this.sendSkillsResponse(connectionId, 'delete', { success: false, error: 'Missing skill id' });
+      return;
+    }
+
+    const result = deleteSkill(this.skillsDir, id);
+    this.sendSkillsResponse(connectionId, 'delete', result);
+  }
+
+  private handleSkillsEnable(connectionId: string, data: Record<string, unknown> | undefined, enabled: boolean): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    if (!id) {
+      this.sendSkillsResponse(connectionId, enabled ? 'enable' : 'disable', { success: false, error: 'Missing skill id' });
+      return;
+    }
+
+    const result = setSkillEnabled(this.skillsDir, id, enabled);
+    this.sendSkillsResponse(connectionId, enabled ? 'enable' : 'disable', result);
+  }
+
+  private sendSkillsResponse(connectionId: string, action: string, payload: Record<string, unknown>): void {
+    this.sendEvent(connectionId, {
+      type: 'response',
+      data: {
+        success: true,
+        content: '',
+        metadata: { kind: 'skills', payload: { action, ...payload } },
+      },
+    });
+  }
+
+  // =========================================================================
+  // Hooks CRUD Handlers
+  // =========================================================================
+
+  private handleHooksGet(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    if (!id) {
+      this.sendHooksResponse(connectionId, 'get', { success: false, error: 'Missing hook id' });
+      return;
+    }
+
+    const hook = getHookDefinition(this.hooksDir, id);
+    if (!hook) {
+      this.sendHooksResponse(connectionId, 'get', { success: false, error: `Hook '${id}' not found` });
+      return;
+    }
+
+    this.sendHooksResponse(connectionId, 'get', { success: true, hook });
+  }
+
+  private handleHooksCreate(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const hook = data?.hook as HookInput | undefined;
+    if (!hook?.name || !hook?.trigger || !hook?.hooks) {
+      this.sendHooksResponse(connectionId, 'create', { success: false, error: 'Missing required fields: name, trigger, hooks' });
+      return;
+    }
+
+    const result = createHook(this.hooksDir, hook);
+    this.sendHooksResponse(connectionId, 'create', result);
+  }
+
+  private handleHooksUpdate(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    const updates = data?.updates as Partial<HookInput> | undefined;
+
+    if (!id) {
+      this.sendHooksResponse(connectionId, 'update', { success: false, error: 'Missing hook id' });
+      return;
+    }
+
+    const result = updateHook(this.hooksDir, id, updates ?? {});
+    this.sendHooksResponse(connectionId, 'update', result);
+  }
+
+  private handleHooksDelete(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    if (!id) {
+      this.sendHooksResponse(connectionId, 'delete', { success: false, error: 'Missing hook id' });
+      return;
+    }
+
+    const result = deleteHook(this.hooksDir, id);
+    this.sendHooksResponse(connectionId, 'delete', result);
+  }
+
+  private handleHooksEnable(connectionId: string, data: Record<string, unknown> | undefined, enabled: boolean): void {
+    const id = typeof data?.id === 'string' ? data.id : '';
+    if (!id) {
+      this.sendHooksResponse(connectionId, enabled ? 'enable' : 'disable', { success: false, error: 'Missing hook id' });
+      return;
+    }
+
+    const result = setHookEnabled(this.hooksDir, id, enabled);
+    this.sendHooksResponse(connectionId, enabled ? 'enable' : 'disable', result);
+  }
+
+  private sendHooksResponse(connectionId: string, action: string, payload: Record<string, unknown>): void {
+    this.sendEvent(connectionId, {
+      type: 'response',
+      data: {
+        success: true,
+        content: '',
+        metadata: { kind: 'hooks', payload: { action, ...payload } },
+      },
+    });
+  }
+
   private handleDeferredResponse(connectionId: string, commandType: string): void {
     this.sendEvent(connectionId, {
       type: 'response',
@@ -322,6 +568,197 @@ export class BridgeGateway {
         success: true,
         content: '',
         metadata: { kind: commandType, payload: null },
+      },
+    });
+  }
+
+  // =========================================================================
+  // Auth Handlers
+  // =========================================================================
+
+  private handleAuthStart(connectionId: string, data: Record<string, unknown> | undefined): void {
+    if (!this.authService) {
+      this.sendAuthResponse(connectionId, 'auth_start', {
+        success: false,
+        error: 'Auth service not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.',
+      });
+      return;
+    }
+
+    const deviceName = typeof data?.device === 'string' ? data.device : undefined;
+    const result = this.authService.startAuth(deviceName);
+
+    this.sendAuthResponse(connectionId, 'auth_start', {
+      success: true,
+      authUrl: result.authUrl,
+      stateToken: result.stateToken,
+    });
+  }
+
+  private handleAuthPoll(connectionId: string, data: Record<string, unknown> | undefined): void {
+    if (!this.authService) {
+      this.sendAuthResponse(connectionId, 'auth_poll', { success: false, error: 'Auth not configured' });
+      return;
+    }
+
+    const stateToken = typeof data?.stateToken === 'string' ? data.stateToken : '';
+    if (!stateToken) {
+      this.sendAuthResponse(connectionId, 'auth_poll', { success: false, error: 'Missing stateToken' });
+      return;
+    }
+
+    const result = this.authService.pollSession(stateToken);
+    this.sendAuthResponse(connectionId, 'auth_poll', { success: true, ...result });
+  }
+
+  private handleAuthVerify(connectionId: string, data: Record<string, unknown> | undefined): void {
+    if (!this.authService) {
+      this.sendAuthResponse(connectionId, 'auth_verify', { success: false, valid: false });
+      return;
+    }
+
+    const sessionToken = typeof data?.sessionToken === 'string' ? data.sessionToken : '';
+    if (!sessionToken) {
+      this.sendAuthResponse(connectionId, 'auth_verify', { success: false, valid: false });
+      return;
+    }
+
+    const result = this.authService.verifySession(sessionToken);
+    this.sendAuthResponse(connectionId, 'auth_verify', { success: true, ...result });
+  }
+
+  private handleAuthLogout(connectionId: string, data: Record<string, unknown> | undefined): void {
+    if (!this.authService) {
+      this.sendAuthResponse(connectionId, 'auth_logout', { success: false });
+      return;
+    }
+
+    const sessionToken = typeof data?.sessionToken === 'string' ? data.sessionToken : '';
+    const loggedOut = sessionToken ? this.authService.logout(sessionToken) : false;
+    this.sendAuthResponse(connectionId, 'auth_logout', { success: loggedOut });
+  }
+
+  private handleProvidersList(connectionId: string, _data: Record<string, unknown> | undefined): void {
+    // Use local provider manager (no auth required)
+    if (this.localProviders) {
+      const result = this.localProviders.listProviders();
+      this.sendAuthResponse(connectionId, 'providers_list', result);
+      return;
+    }
+
+    // Fallback to auth service if configured
+    if (this.authService) {
+      const sessionToken = typeof _data?.sessionToken === 'string' ? _data.sessionToken : '';
+      if (!sessionToken) {
+        this.sendAuthResponse(connectionId, 'providers_list', { success: false, error: 'Missing sessionToken' });
+        return;
+      }
+      const result = this.authService.listProviders(sessionToken);
+      this.sendAuthResponse(connectionId, 'providers_list', result);
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'providers_list', { success: false, error: 'Provider management not configured' });
+  }
+
+  private handleProvidersSave(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const provider = typeof data?.provider === 'string' ? data.provider : '';
+    const apiKey = typeof data?.apiKey === 'string' ? data.apiKey : '';
+
+    if (!provider || !apiKey) {
+      this.sendAuthResponse(connectionId, 'providers_save', { success: false, error: 'Missing provider or apiKey' });
+      return;
+    }
+
+    // Use local provider manager (no auth required)
+    if (this.localProviders) {
+      const result = this.localProviders.saveProviderKey(provider, apiKey);
+      this.sendAuthResponse(connectionId, 'providers_save', result);
+      return;
+    }
+
+    // Fallback to auth service if configured
+    if (this.authService) {
+      const sessionToken = typeof data?.sessionToken === 'string' ? data.sessionToken : '';
+      if (!sessionToken) {
+        this.sendAuthResponse(connectionId, 'providers_save', { success: false, error: 'Missing sessionToken' });
+        return;
+      }
+      const result = this.authService.saveProviderKey(sessionToken, provider, apiKey);
+      this.sendAuthResponse(connectionId, 'providers_save', result);
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'providers_save', { success: false, error: 'Provider management not configured' });
+  }
+
+  private handleProvidersDelete(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const provider = typeof data?.provider === 'string' ? data.provider : '';
+
+    if (!provider) {
+      this.sendAuthResponse(connectionId, 'providers_delete', { success: false, error: 'Missing provider' });
+      return;
+    }
+
+    // Use local provider manager (no auth required)
+    if (this.localProviders) {
+      const result = this.localProviders.deleteProviderKey(provider);
+      this.sendAuthResponse(connectionId, 'providers_delete', result);
+      return;
+    }
+
+    // Fallback to auth service if configured
+    if (this.authService) {
+      const sessionToken = typeof data?.sessionToken === 'string' ? data.sessionToken : '';
+      if (!sessionToken) {
+        this.sendAuthResponse(connectionId, 'providers_delete', { success: false, error: 'Missing sessionToken' });
+        return;
+      }
+      const result = this.authService.deleteProviderKey(sessionToken, provider);
+      this.sendAuthResponse(connectionId, 'providers_delete', result);
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'providers_delete', { success: false, error: 'Provider management not configured' });
+  }
+
+  private async handleProvidersTest(connectionId: string, data: Record<string, unknown> | undefined): Promise<void> {
+    const provider = typeof data?.provider === 'string' ? data.provider : '';
+
+    if (!provider) {
+      this.sendAuthResponse(connectionId, 'providers_test', { success: false, error: 'Missing provider' });
+      return;
+    }
+
+    // Use local provider manager (no auth required)
+    if (this.localProviders) {
+      const result = await this.localProviders.testProviderKey(provider);
+      this.sendAuthResponse(connectionId, 'providers_test', result);
+      return;
+    }
+
+    // Fallback to auth service if configured
+    if (this.authService) {
+      const sessionToken = typeof data?.sessionToken === 'string' ? data.sessionToken : '';
+      if (!sessionToken) {
+        this.sendAuthResponse(connectionId, 'providers_test', { success: false, error: 'Missing sessionToken' });
+        return;
+      }
+      const result = await this.authService.testProviderKey(sessionToken, provider);
+      this.sendAuthResponse(connectionId, 'providers_test', { success: true, ...result });
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'providers_test', { success: false, error: 'Provider management not configured' });
+  }
+
+  private sendAuthResponse(connectionId: string, kind: string, payload: Record<string, unknown>): void {
+    this.sendEvent(connectionId, {
+      type: 'response',
+      data: {
+        success: true,
+        content: '',
+        metadata: { kind, payload },
       },
     });
   }
@@ -350,7 +787,7 @@ export class BridgeGateway {
   private getOrCreateConnectionState(connectionId: string): ConnectionState {
     const existing = this.connections.get(connectionId);
     if (existing) return existing;
-    const state: ConnectionState = { sessionKey: null, activeRequestId: null };
+    const state: ConnectionState = { sessionKey: null, workingDir: null, activeRequestId: null };
     this.connections.set(connectionId, state);
     return state;
   }

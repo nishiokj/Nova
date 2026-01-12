@@ -1,4 +1,13 @@
 {
+  "providers": {
+    "cerebras": "csk-kw59kmyywpdhxvnxfck5x92kn4dn8dy25jhnptjfnvry999f\u001b",
+    "openai": "",
+    "anthropic": "",
+    "together": "",
+    "groq": "",
+    "fireworks": "",
+    "gemini": ""
+  },
   "agents": {
     "routing": {
       "llm": {
@@ -40,7 +49,12 @@
         "max_tool_calls": 40,
         "max_duration_ms": 30000
       },
-      "tools": ["Read", "Glob", "Grep", "Bash"],
+      "tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash"
+      ],
       "output_schema": "explorer"
     },
     "runtime_script": {
@@ -49,21 +63,27 @@
         "model": "gpt-5.2",
         "max_tokens": 16000,
         "temperature": 0.5,
-        "reasoning": { "effort": "medium" }
+        "reasoning": {
+          "effort": "medium"
+        }
       },
       "budget": {
         "max_iterations": 2,
         "max_tool_calls": 15,
         "max_duration_ms": 30000
       },
-      "tools": ["explorer", "standard", "coding-agent"],
+      "tools": [
+        "explorer",
+        "standard",
+        "coding-agent"
+      ],
       "output_schema": "runtime_script"
     },
     "standard": {
       "llm": {
-        "provider": "openai",
-        "model": "gpt-5.2",
-        "max_tokens": 16000,
+        "provider": "cerebras",
+        "model": "zai-glm-4.7",
+        "max_tokens": 64000,
         "temperature": 0.7
       },
       "budget": {
@@ -71,7 +91,17 @@
         "max_tool_calls": 150,
         "max_duration_ms": 120000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "coding-agent", "explorer", "runtime_script"],
+      "tools": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash",
+        "coding-agent",
+        "explorer",
+        "runtime_script"
+      ],
       "output_schema": "goal_driven"
     },
     "coding-agent": {
@@ -80,14 +110,24 @@
         "model": "gpt-5.1-codex",
         "max_tokens": 128000,
         "temperature": 0.7,
-        "reasoning": { "effort": "high" }
+        "reasoning": {
+          "effort": "high"
+        }
       },
       "budget": {
         "max_iterations": 20,
         "max_tool_calls": 100,
         "max_duration_ms": 5000000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "standard"],
+      "tools": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash",
+        "standard"
+      ],
       "output_schema": "goal_driven"
     },
     "context_compactor": {
@@ -116,7 +156,14 @@
         "max_tool_calls": 15,
         "max_duration_ms": 120000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      "tools": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash"
+      ],
       "output_schema": "agent_action"
     },
     "web_crawler": {
@@ -131,7 +178,10 @@
         "max_tool_calls": 15,
         "max_duration_ms": 120000
       },
-      "tools": ["WebFetch", "WebSearch"],
+      "tools": [
+        "WebFetch",
+        "WebSearch"
+      ],
       "output_schema": "agent_action"
     }
   },

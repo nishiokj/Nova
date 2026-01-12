@@ -17,7 +17,15 @@ export type BridgeCommandType =
   | "hooks_create"
   | "hooks_update"
   | "hooks_delete"
-  | "user_prompt_response";
+  | "user_prompt_response"
+  | "auth_start"
+  | "auth_poll"
+  | "auth_verify"
+  | "auth_logout"
+  | "providers_list"
+  | "providers_save"
+  | "providers_delete"
+  | "providers_test";
 
 export type BridgeEventType =
   | "ready"
@@ -55,7 +63,7 @@ export type EventKind = "work" | "tool" | "planning" | "system";
 
 export type Role = "user" | "agent" | "system" | "status";
 
-export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question";
+export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme";
 export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {

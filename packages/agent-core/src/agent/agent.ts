@@ -9,7 +9,7 @@ import type { LLMAdapter, Message, LLMRequestConfig } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ToolDefinition, ToolResult } from '../types/tools.js';
 import { ContextWindow } from '../context/index.js';
-import type { WorkItem } from '../wizard/work-item.js';
+import type { WorkItem } from '../work/work-item.js';
 import type {
   AgentConfig,
   AgentRunParams,
@@ -17,12 +17,13 @@ import type {
   AgentMetrics,
   EventEmitCallback,
   UserPromptInfo,
+  AgentHooks,
 } from './types.js';
 import { noopEmit } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { createEvent } from '../types/events.js';
 import { buildSystemMessage } from '../context/index.js';
-import { createWorkItem } from '../wizard/work-item.js';
+import { createWorkItem } from '../work/work-item.js';
 import { errorResult, successResult } from '../types/tools.js';
 import { coerceStructuredOutput } from '../shared/structured_output.js';
 import { createMicroQueue } from '../shared/microqueue.js';
@@ -52,6 +53,7 @@ export class Agent {
   private agentRegistry?: AgentRegistry;
   private llmConfig: LLMRequestConfig;
   private lastRequestConfig: LLMRequestConfig | null = null;
+  private hooks?: AgentHooks;
 
   constructor(
     config: AgentConfig,
@@ -60,7 +62,8 @@ export class Agent {
     emit: EventEmitCallback = noopEmit,
     requestId: string = '',
     agentRegistry?: AgentRegistry,
-    llmConfig?: LLMRequestConfig
+    llmConfig?: LLMRequestConfig,
+    hooks?: AgentHooks
   ) {
     this.config = config;
     this.llm = llm;
@@ -69,6 +72,7 @@ export class Agent {
     this.requestId = requestId;
     this.agentRegistry = agentRegistry;
     this.llmConfig = llmConfig ?? { model: 'unknown' };
+    this.hooks = hooks;
   }
 
   /**
@@ -77,7 +81,7 @@ export class Agent {
    * GlobalContext is never mutated.
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
-    const { globalContext, workItem } = params;
+    const { globalContext, workItem, cwd } = params;
 
     // Create fresh local context for this agent's work
     const localContext = new ContextWindow(
@@ -109,7 +113,7 @@ export class Agent {
     };
 
     try {
-      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime);
+      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.error = message;
@@ -131,7 +135,8 @@ export class Agent {
     workItem: WorkItem,
     result: AgentResult,
     metrics: AgentMetrics,
-    startTime: number
+    startTime: number,
+    cwd: string
   ): Promise<void> {
     const maxIterations = Math.min(
       this.config.budget.maxIterations,
@@ -147,7 +152,7 @@ export class Agent {
 
     // Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
-      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics);
+      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics, cwd);
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -252,6 +257,7 @@ export class Agent {
           result,
           metrics,
           workItem,
+          cwd,
           workItem.workId,
           toolRepeatState
         );
@@ -549,6 +555,7 @@ export class Agent {
     result: AgentResult,
     metrics: AgentMetrics,
     workItem: WorkItem,
+    cwd: string,
     workItemId?: string,
     toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
   ): Promise<void> {
@@ -684,16 +691,42 @@ export class Agent {
       const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
 
       if (isParallelSafe) {
+        // PreToolUse hook
+        let effectiveArgs = call.arguments;
+        if (this.hooks?.preToolUse) {
+          const hookResult = await this.hooks.preToolUse(canonicalName, call.arguments);
+          if (hookResult.action === 'block') {
+            const toolResult = errorResult(canonicalName, hookResult.message ?? 'Blocked by hook', 0);
+            const toolDurationMs = 0;
+            const stop = handleToolResult(call, toolResult, toolDurationMs, false);
+            if (stop) return;
+            continue;
+          }
+          if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
+            effectiveArgs = hookResult.modifiedArgs;
+          }
+        }
+
         this.emit(createEvent('tool_call', {
           toolName: canonicalName,
-          arguments: call.arguments,
+          arguments: effectiveArgs,
           phase: 'starting',
         }, workItemId));
 
         const toolStartTime = Date.now();
+        const capturedArgs = effectiveArgs;
         const promise = (async () => {
           try {
-            const toolResult = await this.toolRegistry.execute(canonicalName, call.arguments);
+            let toolResult = await this.toolRegistry.execute(canonicalName, capturedArgs, { cwd });
+
+            // PostToolUse hook
+            if (this.hooks?.postToolUse) {
+              const hookResult = await this.hooks.postToolUse(canonicalName, capturedArgs, toolResult);
+              if (hookResult.action === 'modify' && hookResult.modifiedResult) {
+                toolResult = hookResult.modifiedResult;
+              }
+            }
+
             return { toolResult, toolDurationMs: Date.now() - toolStartTime };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -710,9 +743,24 @@ export class Agent {
       const shouldStop = await flushParallel();
       if (shouldStop) return;
 
+      // PreToolUse hook for sequential execution
+      let effectiveArgs = call.arguments;
+      if (this.hooks?.preToolUse) {
+        const hookResult = await this.hooks.preToolUse(canonicalName, call.arguments);
+        if (hookResult.action === 'block') {
+          const toolResult = errorResult(canonicalName, hookResult.message ?? 'Blocked by hook', 0);
+          const stop = handleToolResult(call, toolResult, 0, isAgentTool);
+          if (stop) return;
+          continue;
+        }
+        if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
+          effectiveArgs = hookResult.modifiedArgs;
+        }
+      }
+
       this.emit(createEvent('tool_call', {
         toolName: canonicalName,
-        arguments: call.arguments,
+        arguments: effectiveArgs,
         phase: 'starting',
       }, workItemId));
 
@@ -720,11 +768,19 @@ export class Agent {
 
       try {
         // Use canonical name for execution, but pass original call for agent tools (which need call.id)
-        const normalizedCall = { ...call, name: canonicalName };
-        const toolResult = isAgentTool
-          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext, localContext)
-          : await this.toolRegistry.execute(canonicalName, call.arguments);
+        const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
+        let toolResult = isAgentTool
+          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext, localContext, cwd)
+          : await this.toolRegistry.execute(canonicalName, effectiveArgs, { cwd });
         const toolDurationMs = Date.now() - toolStartTime;
+
+        // PostToolUse hook
+        if (this.hooks?.postToolUse) {
+          const hookResult = await this.hooks.postToolUse(canonicalName, effectiveArgs, toolResult);
+          if (hookResult.action === 'modify' && hookResult.modifiedResult) {
+            toolResult = hookResult.modifiedResult;
+          }
+        }
 
         const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
         if (stop) return;
@@ -735,7 +791,7 @@ export class Agent {
 
         this.emit(createEvent('tool_call', {
           toolName: canonicalName,
-          arguments: call.arguments,
+          arguments: effectiveArgs,
           phase: 'completed',
           result: `Error: ${message}`,
           success: false,
@@ -760,7 +816,8 @@ export class Agent {
     call: { id: string; name: string; arguments: Record<string, unknown> },
     parentWorkItem: WorkItem,
     globalContext: ContextWindow,
-    parentLocalContext: ContextWindow
+    parentLocalContext: ContextWindow,
+    cwd: string
   ) {
     if (!this.agentRegistry) {
       return errorResult(call.name, 'Agent tool registry not available', 0);
@@ -824,12 +881,13 @@ export class Agent {
       this.emit,
       this.requestId,
       this.agentRegistry,
-      llmConfig
+      llmConfig,
+      this.hooks
     );
 
     // Sub-agent sees only globalContext (Option A: parent's local work is invisible)
     // Sub-agent's internal execution is opaque - we only extract the response
-    const subResult = await agent.run({ globalContext, workItem: subWorkItem });
+    const subResult = await agent.run({ globalContext, workItem: subWorkItem, cwd });
 
     // Extract key findings from sub-agent's tool outputs to include in response
     let enhancedResponse = subResult.response;
@@ -934,7 +992,8 @@ export class Agent {
     targetPaths: readonly string[],
     localContext: ContextWindow,
     localReadFiles: Set<string>,
-    metrics: AgentMetrics
+    metrics: AgentMetrics,
+    cwd: string
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
     if (!allowedTools.has('read')) {
@@ -946,7 +1005,7 @@ export class Agent {
 
       try {
         metrics.toolCallsMade++;
-        const result = await this.toolRegistry.execute('Read', { path: targetPath });
+        const result = await this.toolRegistry.execute('Read', { path: targetPath }, { cwd });
         if (result.isSuccess) {
           localReadFiles.add(targetPath);
           metrics.toolCallsSucceeded++;

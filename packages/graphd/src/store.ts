@@ -36,6 +36,9 @@ import type {
   SiasWorktreeRecord,
   SiasDecisionEmbeddingRecord,
   GraphDStats,
+  UserRecord,
+  UserSessionRecord,
+  ProviderCredentialRecord,
 } from './types.js';
 import { nowSeconds, safeJsonParse } from './utils.js';
 
@@ -1584,5 +1587,310 @@ export class GraphStore {
 
     record.embedding = safeJsonParse(record.embeddingJson, []);
     return record;
+  }
+
+  // =========================================================================
+  // User Management Methods (v5)
+  // =========================================================================
+
+  /**
+   * Create or update a user (from Google OAuth).
+   */
+  upsertUser(
+    id: string,
+    email: string,
+    name?: string,
+    pictureUrl?: string
+  ): UserRecord {
+    const now = nowSeconds();
+    const existing = this.getUser(id);
+
+    if (existing) {
+      this.db
+        .query(
+          `UPDATE users SET email = ?, name = ?, picture_url = ?, updated_at = ?
+           WHERE id = ?;`
+        )
+        .run(email, name ?? null, pictureUrl ?? null, now, id);
+    } else {
+      this.db
+        .query(
+          `INSERT INTO users (id, email, name, picture_url, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?);`
+        )
+        .run(id, email, name ?? null, pictureUrl ?? null, now, now);
+    }
+
+    return this.getUser(id)!;
+  }
+
+  /**
+   * Get a user by ID.
+   */
+  getUser(id: string): UserRecord | null {
+    const row = this.db
+      .query('SELECT * FROM users WHERE id = ?;')
+      .get(id) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id as string,
+      email: row.email as string,
+      name: row.name as string | null,
+      pictureUrl: row.picture_url as string | null,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  /**
+   * Get a user by email.
+   */
+  getUserByEmail(email: string): UserRecord | null {
+    const row = this.db
+      .query('SELECT * FROM users WHERE email = ?;')
+      .get(email) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id as string,
+      email: row.email as string,
+      name: row.name as string | null,
+      pictureUrl: row.picture_url as string | null,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  /**
+   * Delete a user and all associated data (cascades to sessions and credentials).
+   */
+  deleteUser(id: string): boolean {
+    const result = this.db.query('DELETE FROM users WHERE id = ?;').run(id);
+    return result.changes > 0;
+  }
+
+  // =========================================================================
+  // User Session Methods (v5)
+  // =========================================================================
+
+  /**
+   * Create a new user session (device login).
+   */
+  createUserSession(
+    id: string,
+    userId: string,
+    deviceName?: string,
+    expiresAt?: number
+  ): UserSessionRecord {
+    const now = nowSeconds();
+    this.db
+      .query(
+        `INSERT INTO user_sessions (id, user_id, device_name, created_at, last_used_at, expires_at, revoked)
+         VALUES (?, ?, ?, ?, ?, ?, 0);`
+      )
+      .run(id, userId, deviceName ?? null, now, now, expiresAt ?? null);
+
+    return this.getUserSession(id)!;
+  }
+
+  /**
+   * Get a user session by ID.
+   */
+  getUserSession(id: string): UserSessionRecord | null {
+    const row = this.db
+      .query('SELECT * FROM user_sessions WHERE id = ?;')
+      .get(id) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id as string,
+      userId: row.user_id as string,
+      deviceName: row.device_name as string | null,
+      createdAt: row.created_at as number,
+      lastUsedAt: row.last_used_at as number,
+      expiresAt: row.expires_at as number | null,
+      revoked: (row.revoked as number) === 1,
+    };
+  }
+
+  /**
+   * Validate a user session (check if active and not expired/revoked).
+   * Updates last_used_at on success.
+   */
+  validateUserSession(id: string): UserSessionRecord | null {
+    const session = this.getUserSession(id);
+    if (!session) return null;
+
+    // Check if revoked
+    if (session.revoked) return null;
+
+    // Check if expired
+    const now = nowSeconds();
+    if (session.expiresAt && session.expiresAt < now) return null;
+
+    // Update last used timestamp
+    this.db
+      .query('UPDATE user_sessions SET last_used_at = ? WHERE id = ?;')
+      .run(now, id);
+
+    return { ...session, lastUsedAt: now };
+  }
+
+  /**
+   * Revoke a user session.
+   */
+  revokeUserSession(id: string): boolean {
+    const result = this.db
+      .query('UPDATE user_sessions SET revoked = 1 WHERE id = ?;')
+      .run(id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Revoke all sessions for a user.
+   */
+  revokeAllUserSessions(userId: string): number {
+    const result = this.db
+      .query('UPDATE user_sessions SET revoked = 1 WHERE user_id = ?;')
+      .run(userId);
+    return result.changes;
+  }
+
+  /**
+   * List all sessions for a user.
+   */
+  listUserSessions(userId: string, includeRevoked = false): UserSessionRecord[] {
+    let query = 'SELECT * FROM user_sessions WHERE user_id = ?';
+    if (!includeRevoked) {
+      query += ' AND revoked = 0';
+    }
+    query += ' ORDER BY last_used_at DESC;';
+
+    const rows = this.db.query(query).all(userId) as Record<string, unknown>[];
+
+    return rows.map((row) => ({
+      id: row.id as string,
+      userId: row.user_id as string,
+      deviceName: row.device_name as string | null,
+      createdAt: row.created_at as number,
+      lastUsedAt: row.last_used_at as number,
+      expiresAt: row.expires_at as number | null,
+      revoked: (row.revoked as number) === 1,
+    }));
+  }
+
+  /**
+   * Clean up expired sessions.
+   */
+  cleanupExpiredUserSessions(): number {
+    const now = nowSeconds();
+    const result = this.db
+      .query('DELETE FROM user_sessions WHERE expires_at IS NOT NULL AND expires_at < ?;')
+      .run(now);
+    return result.changes;
+  }
+
+  // =========================================================================
+  // Provider Credential Methods (v5)
+  // =========================================================================
+
+  /**
+   * Store an encrypted provider credential.
+   */
+  upsertProviderCredential(
+    id: string,
+    userId: string,
+    provider: string,
+    encryptedKey: string,
+    iv: string
+  ): ProviderCredentialRecord {
+    const now = nowSeconds();
+
+    // Check if exists for this user/provider combo
+    const existing = this.getProviderCredential(userId, provider);
+
+    if (existing) {
+      this.db
+        .query(
+          `UPDATE provider_credentials
+           SET encrypted_key = ?, iv = ?, updated_at = ?
+           WHERE user_id = ? AND provider = ?;`
+        )
+        .run(encryptedKey, iv, now, userId, provider);
+      return this.getProviderCredential(userId, provider)!;
+    }
+
+    this.db
+      .query(
+        `INSERT INTO provider_credentials (id, user_id, provider, encrypted_key, iv, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?);`
+      )
+      .run(id, userId, provider, encryptedKey, iv, now, now);
+
+    return this.getProviderCredential(userId, provider)!;
+  }
+
+  /**
+   * Get a provider credential for a user.
+   */
+  getProviderCredential(userId: string, provider: string): ProviderCredentialRecord | null {
+    const row = this.db
+      .query('SELECT * FROM provider_credentials WHERE user_id = ? AND provider = ?;')
+      .get(userId, provider) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id as string,
+      userId: row.user_id as string,
+      provider: row.provider as string,
+      encryptedKey: row.encrypted_key as string,
+      iv: row.iv as string,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  /**
+   * List all provider credentials for a user.
+   */
+  listProviderCredentials(userId: string): ProviderCredentialRecord[] {
+    const rows = this.db
+      .query('SELECT * FROM provider_credentials WHERE user_id = ? ORDER BY provider ASC;')
+      .all(userId) as Record<string, unknown>[];
+
+    return rows.map((row) => ({
+      id: row.id as string,
+      userId: row.user_id as string,
+      provider: row.provider as string,
+      encryptedKey: row.encrypted_key as string,
+      iv: row.iv as string,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    }));
+  }
+
+  /**
+   * Delete a provider credential.
+   */
+  deleteProviderCredential(userId: string, provider: string): boolean {
+    const result = this.db
+      .query('DELETE FROM provider_credentials WHERE user_id = ? AND provider = ?;')
+      .run(userId, provider);
+    return result.changes > 0;
+  }
+
+  /**
+   * Check if a user has a credential for a specific provider.
+   */
+  hasProviderCredential(userId: string, provider: string): boolean {
+    const row = this.db
+      .query('SELECT 1 FROM provider_credentials WHERE user_id = ? AND provider = ? LIMIT 1;')
+      .get(userId, provider);
+    return row !== undefined;
   }
 }

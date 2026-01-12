@@ -8,9 +8,9 @@
  * the session metadata so the dashboard mapper can parse them.
  */
 
-import type { EventBusProtocol } from '../../../../packages/comms-bus/src/event_bus.js';
-import type { AgentEvent } from '../../../../packages/agent-core/src/types/events.js';
-import type { GraphDManager } from '../../../../packages/graphd/src/index.js';
+import type { EventBusProtocol } from 'comms-bus';
+import type { AgentEvent } from 'agent-core';
+import type { GraphDManager } from 'graphd';
 
 /**
  * Configuration for GraphDSubscriber.
@@ -51,7 +51,7 @@ export class GraphDSubscriber {
       sessionKey: config.sessionKey,
       requestId: config.requestId ?? '',
       eventTypes: config.eventTypes ?? [],
-      batchMode: config.batchMode ?? false,
+      batchMode: config.batchMode ?? true,
       batchSize: config.batchSize ?? 50,
     };
 

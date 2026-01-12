@@ -1,7 +1,8 @@
 import type { ContextWindow } from '../context/index.js';
-import type { WorkItem } from '../wizard/work-item.js';
+import type { WorkItem } from '../work/work-item.js';
 import type { AgentEvent } from '../types/events.js';
 import type { StructuredOutputSchema } from '../types/llm.js';
+import type { ToolResult } from '../types/tools.js';
 
 /**
  * Agent type identifier - any string, defined via config.
@@ -57,6 +58,8 @@ export interface AgentRunParams {
   globalContext: ContextWindow;
   /** Work item defining the objective */
   workItem: WorkItem;
+  /** Working directory for tool execution. Required for concurrent-safe operation. */
+  cwd: string;
 }
 
 /**
@@ -130,3 +133,46 @@ export type EventEmitCallback = (event: AgentEvent) => void;
  * Noop emit callback for testing or when events aren't needed.
  */
 export const noopEmit: EventEmitCallback = () => {};
+
+// ============================================
+// TOOL HOOKS
+// ============================================
+
+/**
+ * Result from a tool hook execution.
+ */
+export interface ToolHookResult {
+  /** Action to take: allow, block, or modify */
+  action: 'allow' | 'block' | 'modify';
+  /** Message explaining the action */
+  message?: string;
+  /** Modified arguments (for PreToolUse with action: 'modify') */
+  modifiedArgs?: Record<string, unknown>;
+  /** Modified result (for PostToolUse with action: 'modify') */
+  modifiedResult?: ToolResult;
+}
+
+/**
+ * Hooks for tool execution lifecycle.
+ * These are optional callbacks that can block or modify tool execution.
+ */
+export interface AgentHooks {
+  /**
+   * Called before a tool is executed.
+   * Can block execution or modify arguments.
+   */
+  preToolUse?: (
+    toolName: string,
+    args: Record<string, unknown>
+  ) => Promise<ToolHookResult>;
+
+  /**
+   * Called after a tool is executed.
+   * Can modify the result before it's added to context.
+   */
+  postToolUse?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    result: ToolResult
+  ) => Promise<ToolHookResult>;
+}
