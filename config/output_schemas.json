@@ -226,21 +226,28 @@
           "os": { "type": "string" },
           "artifacts": {
             "type": "array",
+            "description": "Semantic code artifacts extracted from source files",
             "items": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "path": { "type": "string" },
-                "type": { "type": "string", "enum": ["config", "source", "test", "doc", "other"] },
-                "description": { "type": ["string", "null"] },
-                "relevance": { "type": ["number", "null"] }
+                "sourcePath": { "type": "string", "description": "File path where this artifact was found" },
+                "line": { "type": ["integer", "null"], "description": "Line number for navigation" },
+                "kind": {
+                  "type": "string",
+                  "enum": ["function", "class", "interface", "import", "export", "constant", "pattern", "summary"],
+                  "description": "What type of code construct this represents"
+                },
+                "name": { "type": "string", "description": "Name of the artifact (function name, class name, etc.)" },
+                "signature": { "type": ["string", "null"], "description": "Signature or definition (e.g., 'async function run(params: RunParams): Promise<Result>')" },
+                "description": { "type": "string", "description": "Human-readable description of what this does" },
+                "relevance": { "type": "number", "description": "Relevance score 0.0-1.0 (how relevant to the current query)" }
               },
-              "required": ["path", "type", "description", "relevance"]
+              "required": ["sourcePath", "line", "kind", "name", "signature", "description", "relevance"]
             }
-          },
-          "patterns": { "type": "array", "items": { "type": "string" } }
+          }
         },
-        "required": ["action", "response", "goalStateReached", "userPrompt", "packageManagers", "frameworks", "languages", "os", "artifacts", "patterns"]
+        "required": ["action", "response", "goalStateReached", "userPrompt", "packageManagers", "frameworks", "languages", "os", "artifacts"]
       }
     },
 

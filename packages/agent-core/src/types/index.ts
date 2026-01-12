@@ -12,6 +12,8 @@ export type {
   FunctionCallOutputItem,
   ReasoningItem,
   FileContentItem,
+  ArtifactKind,
+  ArtifactItem,
   ContextItem,
   ContextWindowSnapshot,
   ContextWindowTelemetry,

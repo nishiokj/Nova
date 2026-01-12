@@ -193,11 +193,24 @@ export class Agent {
 
       const messages = this.buildMessages(systemMessage, workItem, globalContext, localContext);
 
+      // On the last iteration OR when approaching bounds, don't provide tools to force synthesis
+      // This ensures the LLM produces structured output instead of more tool calls
+      const isLastIteration = iteration === maxIterations - 1;
+      const toolBudgetNearlyExhausted = metrics.toolCallsMade >= workItem.bounds.maxToolCalls * 0.8;
+      const timeBudgetNearlyExhausted = elapsedMs >= workItem.bounds.maxDurationMs * 0.8;
+      const shouldWithholdTools = isLastIteration || toolBudgetNearlyExhausted || timeBudgetNearlyExhausted;
+
+      const toolsForThisCall = shouldWithholdTools ? undefined : (allowedTools.length > 0 ? allowedTools : undefined);
+
+      if (shouldWithholdTools && allowedTools.length > 0) {
+        console.error(`[AGENT DEBUG] Withholding tools to force synthesis: iteration=${iteration}/${maxIterations}, toolCalls=${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls}, elapsed=${elapsedMs}/${workItem.bounds.maxDurationMs}ms, agent=${this.config.type}`);
+      }
+
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
       const response = await this.llm.respond({
         messages: messages as unknown as Message[],
-        tools: allowedTools.length > 0 ? allowedTools : undefined,
+        tools: toolsForThisCall,
         llm: this.llmConfig,
         responseSchema: this.config.outputSchema,
       });
@@ -226,6 +239,8 @@ export class Agent {
       const action = this.extractStructuredAction(structuredOutput);
       const responseText = this.extractStructuredResponse(structuredOutput);
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
+
+      console.error(`[AGENT DEBUG] LLM response: iteration=${iteration}, agent=${this.config.type}, action=${action}, hasResponseText=${!!responseText}, responseTextLength=${responseText?.length ?? 0}, toolCallCount=${toolCalls.length}, contentLength=${content.length}`);
 
       if (toolCalls.length > 0) {
         console.error(`[AGENT DEBUG] Processing ${toolCalls.length} tool calls, iteration=${iteration}, agent=${this.config.type}`);
@@ -280,6 +295,11 @@ export class Agent {
           return;
         }
 
+        // Capture partial response even when continuing (in case we hit bounds later)
+        if (responseText && responseText.trim().length > 0) {
+          result.response = responseText;
+        }
+
         continue;
       }
 
@@ -317,6 +337,10 @@ export class Agent {
       }
 
       if (action === 'continue') {
+        // Capture partial response even when continuing (in case we hit bounds later)
+        if (responseText && responseText.trim().length > 0) {
+          result.response = responseText;
+        }
         continue;
       }
 
@@ -339,8 +363,33 @@ export class Agent {
         .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
         .map(m => m.content as string);
       console.error(`[AGENT DEBUG] Fallback response capture: found ${assistantContents.length} assistant messages, agent=${this.config.type}, terminationReason=${result.terminationReason}`);
-      if (assistantContents.length > 0) {
+
+      // Try to extract structured response from assistant content
+      for (const content of assistantContents) {
+        const parsed = coerceStructuredOutput(content);
+        if (parsed && typeof parsed.response === 'string' && parsed.response.trim().length > 0) {
+          result.response = parsed.response;
+          break;
+        }
+      }
+
+      // If still no response, use raw content
+      if (!result.response && assistantContents.length > 0) {
         result.response = assistantContents.join('\n\n');
+      }
+
+      // Last resort: summarize tool calls made if we have any
+      if (!result.response) {
+        const toolCalls = localContext.getItemsByType('function_call') as Array<{ name: string }>;
+        const toolOutputs = localContext.getItemsByType('function_call_output') as Array<{ output: string; isError?: boolean }>;
+        if (toolCalls.length > 0) {
+          const toolNames = toolCalls.map(t => t.name);
+          const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
+          const summary = `Exploration incomplete. Tools called: ${toolNames.join(', ')}. ` +
+            `${successfulOutputs.length} successful results obtained but not synthesized.`;
+          result.response = summary;
+          console.error(`[AGENT DEBUG] Using tool call summary as fallback response for ${this.config.type}`);
+        }
       }
     }
 
@@ -436,6 +485,9 @@ export class Agent {
       });
     }
 
+    let functionCallCount = 0;
+    let functionOutputCount = 0;
+
     for (const item of allItems) {
       if (item.type === 'message') {
         messages.push({
@@ -447,11 +499,15 @@ export class Agent {
         const callId = (item as any).call_id;
         if (callId && callIdsWithOutputs.has(callId)) {
           messages.push(item);
+          functionCallCount++;
         }
       } else if (item.type === 'function_call_output') {
         messages.push(item);
+        functionOutputCount++;
       }
     }
+
+    console.error(`[AGENT DEBUG] buildMessages: agent=${this.config.type}, messageCount=${messages.length}, functionCalls=${functionCallCount}, functionOutputs=${functionOutputCount}`);
 
     return messages;
   }
@@ -666,7 +722,7 @@ export class Agent {
         // Use canonical name for execution, but pass original call for agent tools (which need call.id)
         const normalizedCall = { ...call, name: canonicalName };
         const toolResult = isAgentTool
-          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext)
+          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext, localContext)
           : await this.toolRegistry.execute(canonicalName, call.arguments);
         const toolDurationMs = Date.now() - toolStartTime;
 
@@ -703,7 +759,8 @@ export class Agent {
   private async executeAgentToolCall(
     call: { id: string; name: string; arguments: Record<string, unknown> },
     parentWorkItem: WorkItem,
-    globalContext: ContextWindow
+    globalContext: ContextWindow,
+    parentLocalContext: ContextWindow
   ) {
     if (!this.agentRegistry) {
       return errorResult(call.name, 'Agent tool registry not available', 0);
@@ -774,11 +831,89 @@ export class Agent {
     // Sub-agent's internal execution is opaque - we only extract the response
     const subResult = await agent.run({ globalContext, workItem: subWorkItem });
 
+    // Extract key findings from sub-agent's tool outputs to include in response
+    let enhancedResponse = subResult.response;
+    if (!enhancedResponse && subResult.localContext) {
+      // If no response but we have tool outputs, try to extract useful info
+      const toolOutputs = subResult.localContext.getItemsByType('function_call_output') as Array<{
+        output: string;
+        isError?: boolean;
+        callId?: string;
+      }>;
+      const toolCalls = subResult.localContext.getItemsByType('function_call') as Array<{
+        name: string;
+        callId?: string;
+        arguments?: Record<string, unknown>;
+      }>;
+
+      if (toolOutputs.length > 0) {
+        // Build a summary of what was found
+        const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
+        const outputSummaries: string[] = [];
+
+        for (let i = 0; i < Math.min(successfulOutputs.length, 5); i++) {
+          const output = successfulOutputs[i];
+          // Find the corresponding tool call to know what tool was used
+          const matchingCall = toolCalls.find(tc => tc.callId === output.callId);
+          const toolName = matchingCall?.name ?? 'unknown';
+          const truncatedOutput = output.output.length > 2000
+            ? output.output.slice(0, 2000) + '... [truncated]'
+            : output.output;
+          outputSummaries.push(`[${toolName}]: ${truncatedOutput}`);
+        }
+
+        if (outputSummaries.length > 0) {
+          enhancedResponse = `Sub-agent exploration results (${successfulOutputs.length} tool outputs):\n\n${outputSummaries.join('\n\n')}`;
+          if (successfulOutputs.length > 5) {
+            enhancedResponse += `\n\n... and ${successfulOutputs.length - 5} more results`;
+          }
+        }
+      }
+    }
+
+    // Extract artifacts from structured output and add to parent's local context
+    const artifacts = subResult.structuredOutput?.artifacts;
+    if (Array.isArray(artifacts) && artifacts.length > 0) {
+      const validArtifacts = artifacts.filter((a): a is {
+        sourcePath: string;
+        line?: number;
+        kind: string;
+        name: string;
+        signature?: string;
+        description: string;
+        relevance: number;
+      } => (
+        typeof a === 'object' &&
+        a !== null &&
+        typeof a.sourcePath === 'string' &&
+        typeof a.kind === 'string' &&
+        typeof a.name === 'string' &&
+        typeof a.description === 'string' &&
+        typeof a.relevance === 'number'
+      ));
+
+      if (validArtifacts.length > 0) {
+        parentLocalContext.addArtifacts(validArtifacts.map(a => ({
+          sourcePath: a.sourcePath,
+          line: typeof a.line === 'number' ? a.line : undefined,
+          kind: a.kind as import('../types/context.js').ArtifactKind,
+          name: a.name,
+          signature: typeof a.signature === 'string' ? a.signature : undefined,
+          description: a.description,
+          relevance: a.relevance,
+          discoveredBy: agentConfig.type,
+        })));
+      }
+    }
+
+    // Include full structured output so calling agent can see artifacts, patterns, etc.
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
       success: subResult.success,
-      response: subResult.response,
+      response: enhancedResponse,
+      structuredOutput: subResult.structuredOutput,
+      artifactsAdded: Array.isArray(artifacts) ? artifacts.length : 0,
       error: subResult.error,
       needsUserInput: subResult.needsUserInput,
       userPrompt: subResult.userPrompt,

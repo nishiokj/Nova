@@ -197,6 +197,51 @@ export class ContextWindow {
     return id;
   }
 
+  private _artifactCounter = 0;
+
+  /**
+   * Add a semantic artifact to context. Returns the generated ID.
+   */
+  addArtifact(artifact: Omit<import('../types/context.js').ArtifactItem, 'type' | 'id' | 'timestamp'>): string {
+    const id = `art_${this.sessionKey.slice(0, 4)}_${++this._artifactCounter}`;
+    this._items.push({
+      type: 'artifact',
+      id,
+      ...artifact,
+      timestamp: Date.now(),
+    });
+    this._version++;
+    return id;
+  }
+
+  /**
+   * Add multiple artifacts at once.
+   */
+  addArtifacts(artifacts: Array<Omit<import('../types/context.js').ArtifactItem, 'type' | 'id' | 'timestamp'>>): string[] {
+    return artifacts.map(a => this.addArtifact(a));
+  }
+
+  /**
+   * Get all artifacts in context.
+   */
+  getArtifacts(): import('../types/context.js').ArtifactItem[] {
+    return this._items.filter((i): i is import('../types/context.js').ArtifactItem => i.type === 'artifact');
+  }
+
+  /**
+   * Get artifacts for a specific source path.
+   */
+  getArtifactsByPath(sourcePath: string): import('../types/context.js').ArtifactItem[] {
+    return this.getArtifacts().filter(a => a.sourcePath === sourcePath);
+  }
+
+  /**
+   * Get artifacts by kind (function, class, etc.).
+   */
+  getArtifactsByKind(kind: import('../types/context.js').ArtifactKind): import('../types/context.js').ArtifactItem[] {
+    return this.getArtifacts().filter(a => a.kind === kind);
+  }
+
   /**
    * Update metrics after an LLM response.
    */
@@ -723,6 +768,7 @@ export class ContextWindow {
       function_call_output: 0,
       reasoning: 0,
       file_content: 0,
+      artifact: 0,
     };
 
     for (const item of this._items) {

@@ -1326,9 +1326,55 @@ class LLMRouterAdapter implements LLMAdapter {
       result.push({ role: 'system', content: systemPrompt });
     }
 
+    // Collect function_call items to batch them into assistant messages with tool_calls
+    const functionCalls: Array<{ callId: string; name: string; argumentsStr: string }> = [];
+
     for (const msg of messages) {
       // Skip undefined/null messages and system messages
       if (!msg || msg.role === 'system') continue;
+
+      const item = msg as unknown as Record<string, unknown>;
+
+      // Handle function_call items (from agent's tool call processing)
+      if (item.type === 'function_call') {
+        const callId = (item.call_id ?? item.callId) as string;
+        const name = item.name as string;
+        // arguments may be already stringified by getItemsForLLM() or may be an object
+        const args = item.arguments;
+        const argsStr = typeof args === 'string' ? args : JSON.stringify(args);
+        functionCalls.push({ callId, name, argumentsStr: argsStr });
+        continue;
+      }
+
+      // Handle function_call_output items (tool results from agent processing)
+      if (item.type === 'function_call_output') {
+        // First, flush any pending function calls as an assistant message
+        if (functionCalls.length > 0) {
+          result.push({
+            role: 'assistant',
+            content: '',  // Some providers don't accept null
+            tool_calls: functionCalls.map((fc) => ({
+              id: fc.callId,
+              type: 'function',
+              function: {
+                name: fc.name,
+                arguments: fc.argumentsStr,
+              },
+            })),
+          });
+          functionCalls.length = 0;
+        }
+
+        // Then add the tool result
+        const callId = (item.call_id ?? item.callId) as string;
+        const output = item.output as string;
+        result.push({
+          role: 'tool',
+          tool_call_id: callId,
+          content: output,
+        });
+        continue;
+      }
 
       // Handle string content
       if (typeof msg.content === 'string') {
@@ -1377,7 +1423,7 @@ class LLMRouterAdapter implements LLMAdapter {
       if (toolCalls.length > 0) {
         result.push({
           role: 'assistant',
-          content: textParts.join('\n') || null,
+          content: textParts.join('\n') || '',  // Some providers don't accept null
           tool_calls: toolCalls,
         });
       } else if (textParts.length > 0) {
@@ -1386,6 +1432,22 @@ class LLMRouterAdapter implements LLMAdapter {
           content: textParts.join('\n'),
         });
       }
+    }
+
+    // Flush any remaining function calls (shouldn't happen in normal flow, but be safe)
+    if (functionCalls.length > 0) {
+      result.push({
+        role: 'assistant',
+        content: '',  // Some providers don't accept null
+        tool_calls: functionCalls.map((fc) => ({
+          id: fc.callId,
+          type: 'function',
+          function: {
+            name: fc.name,
+            arguments: fc.argumentsStr,
+          },
+        })),
+      });
     }
 
     return result;
@@ -1431,16 +1493,31 @@ class LLMRouterAdapter implements LLMAdapter {
       };
     }
 
+    const formattedMessages = body.messages as Array<Record<string, unknown>>;
+    const messageTypes = formattedMessages.map(m => {
+      if (m.role === 'tool') return 'tool';
+      if (m.role === 'assistant' && m.tool_calls) return 'assistant+tools';
+      return m.role;
+    });
+
     this.logger.debug('OpenAI-compat API request', {
       method: 'respond',
       endpoint: '/chat/completions',
       model: resolved.model,
       maxTokens: body.max_tokens,
-      messageCount: (body.messages as unknown[]).length,
+      messageCount: formattedMessages.length,
+      messageTypes: messageTypes.join(', '),
       toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
       hasResponseFormat: !!body.response_format,
       responseSchemaName: params.responseSchema?.name,
     });
+
+    // Debug: log full message structure when there are tool-related messages
+    if (messageTypes.includes('tool') || messageTypes.includes('assistant+tools')) {
+      this.logger.debug('OpenAI-compat messages with tools', {
+        messages: JSON.stringify(formattedMessages.slice(-6), null, 2),  // Last 6 messages
+      });
+    }
 
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -1493,6 +1570,16 @@ class LLMRouterAdapter implements LLMAdapter {
 
     const choice = data.choices[0];
     const content = choice?.message?.content ?? '';
+
+    this.logger.debug('OpenAI-compat response received', {
+      model: resolved.model,
+      finishReason: choice?.finish_reason,
+      hasContent: !!content,
+      contentLength: content?.length ?? 0,
+      contentPreview: content?.slice(0, 200),
+      hasToolCalls: !!choice?.message?.tool_calls,
+      toolCallCount: choice?.message?.tool_calls?.length ?? 0,
+    });
 
     const toolCalls: ToolCall[] = [];
     if (choice?.message?.tool_calls) {
