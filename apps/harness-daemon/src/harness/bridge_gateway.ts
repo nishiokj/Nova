@@ -40,11 +40,15 @@ interface HarnessLike {
     workingDir: string;
     context?: string;
   }): AgentRunHandle;
-  resume(requestId: string, answer: string, sessionKey: string, workingDir: string): AgentRunHandle;
+  resume(requestId: string, answer: unknown, sessionKey: string, workingDir?: string): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
   getConfig(): FullHarnessConfig;
   isShuttingDown(): boolean;
   shutdown(): Promise<void>;
+  updateApiKey?(provider: string, apiKey: string): void;
+  resetCircuitBreaker?(): void;
+  forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
+  compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
 }
 
 interface ConnectionState {
@@ -77,9 +81,9 @@ export class BridgeGateway {
       ? path.resolve(this.workingDir, config.hooks.directory)
       : path.resolve(this.workingDir, 'config/hooks');
 
-    // Initialize local provider manager (always available, no auth required)
-    if (config.configPath) {
-      this.localProviders = new LocalProviderManager(config.configPath, config.providers);
+    // Initialize local provider manager using GraphD for storage
+    if (config.graphd.enabled && config.graphd.dbPath) {
+      this.localProviders = new LocalProviderManager(config.graphd.dbPath);
     } else {
       this.localProviders = null;
     }
@@ -204,6 +208,12 @@ export class BridgeGateway {
         case 'providers_test':
           void this.handleProvidersTest(connectionId, command.data);
           return;
+        case 'session_fork':
+          this.handleSessionFork(connectionId, state);
+          return;
+        case 'compact_context':
+          this.handleCompactContext(connectionId, state);
+          return;
         case 'shutdown':
           this.sendError(connectionId, 'Shutdown is not supported via bridge');
           return;
@@ -293,12 +303,12 @@ export class BridgeGateway {
     const workingDir = state.workingDir ?? this.workingDir;
 
     const requestId = String(data?.request_id ?? state.activeRequestId ?? '');
-    const answer = String(data?.answer ?? '');
+    const answer = data?.answer;
     if (!requestId) {
       this.sendError(connectionId, 'Missing request_id');
       return;
     }
-    if (!answer) {
+    if (answer === undefined || answer === null || answer === '') {
       this.sendError(connectionId, 'Empty answer');
       return;
     }
@@ -673,6 +683,15 @@ export class BridgeGateway {
     // Use local provider manager (no auth required)
     if (this.localProviders) {
       const result = this.localProviders.saveProviderKey(provider, apiKey);
+
+      // If save succeeded, also update the running LLM adapter
+      if (result.success && this.harness.updateApiKey) {
+        // Map to canonical provider for adapter (e.g., 'cerebras' -> 'openai-compat')
+        const openaiCompatProviders = new Set(['cerebras', 'together', 'groq', 'fireworks']);
+        const canonicalProvider = openaiCompatProviders.has(provider) ? 'openai-compat' : provider;
+        this.harness.updateApiKey(canonicalProvider, apiKey);
+      }
+
       this.sendAuthResponse(connectionId, 'providers_save', result);
       return;
     }
@@ -685,6 +704,14 @@ export class BridgeGateway {
         return;
       }
       const result = this.authService.saveProviderKey(sessionToken, provider, apiKey);
+
+      // If save succeeded, also update the running LLM adapter
+      if (result.success && this.harness.updateApiKey) {
+        const openaiCompatProviders = new Set(['cerebras', 'together', 'groq', 'fireworks']);
+        const canonicalProvider = openaiCompatProviders.has(provider) ? 'openai-compat' : provider;
+        this.harness.updateApiKey(canonicalProvider, apiKey);
+      }
+
       this.sendAuthResponse(connectionId, 'providers_save', result);
       return;
     }
@@ -760,6 +787,71 @@ export class BridgeGateway {
         content: '',
         metadata: { kind, payload },
       },
+    });
+  }
+
+  // =========================================================================
+  // Session Fork Handler
+  // =========================================================================
+
+  private handleSessionFork(connectionId: string, state: ConnectionState): void {
+    const sourceSessionKey = state.sessionKey;
+    if (!sourceSessionKey) {
+      this.sendAuthResponse(connectionId, 'session_fork', {
+        success: false,
+        error: 'No active session to fork',
+      });
+      return;
+    }
+
+    if (!this.harness.forkSession) {
+      this.sendAuthResponse(connectionId, 'session_fork', {
+        success: false,
+        error: 'Fork not supported by harness',
+      });
+      return;
+    }
+
+    const newSessionKey = generateSessionKey();
+    const result = this.harness.forkSession(sourceSessionKey, newSessionKey);
+
+    this.sendAuthResponse(connectionId, 'session_fork', {
+      success: result.success,
+      sourceSessionKey,
+      newSessionKey: result.success ? newSessionKey : undefined,
+      error: result.error,
+    });
+  }
+
+  // =========================================================================
+  // Context Compaction Handler
+  // =========================================================================
+
+  private handleCompactContext(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'compact_context', {
+        success: false,
+        error: 'No active session to compact',
+      });
+      return;
+    }
+
+    if (!this.harness.compactContext) {
+      this.sendAuthResponse(connectionId, 'compact_context', {
+        success: false,
+        error: 'Context compaction not supported by harness',
+      });
+      return;
+    }
+
+    const result = this.harness.compactContext(sessionKey);
+
+    this.sendAuthResponse(connectionId, 'compact_context', {
+      success: result.success,
+      itemsRemoved: result.itemsRemoved,
+      bytesRecovered: result.bytesRecovered,
+      error: result.error,
     });
   }
 

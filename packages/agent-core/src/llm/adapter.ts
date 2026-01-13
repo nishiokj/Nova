@@ -16,6 +16,7 @@ import type {
   TokenUsage,
   StopReason,
   LLMRequestConfig,
+  FallbackConfig,
 } from '../types/llm.js';
 import type { ToolDefinition } from '../types/tools.js';
 import {
@@ -96,6 +97,40 @@ function parseApiError(
       ? responseText.slice(0, 500) + '...'
       : responseText;
     return new Error(`${provider} API error ${status}: ${truncated}`);
+  }
+}
+
+// ============================================
+// PARTIAL STREAM ERROR
+// ============================================
+
+/**
+ * Error thrown when a streaming request fails mid-stream.
+ * Preserves partial content so callers can recover work done before the error.
+ */
+export class PartialStreamError extends Error {
+  public readonly partialContent: string;
+  public readonly partialToolCalls: ToolCall[];
+  public readonly cause: Error;
+
+  constructor(
+    message: string,
+    cause: Error,
+    partialContent: string,
+    partialToolCalls: ToolCall[] = []
+  ) {
+    super(`${message}: ${cause.message}`);
+    this.name = 'PartialStreamError';
+    this.cause = cause;
+    this.partialContent = partialContent;
+    this.partialToolCalls = partialToolCalls;
+  }
+
+  /**
+   * Check if an error is a PartialStreamError with recoverable content.
+   */
+  static hasPartialContent(error: unknown): error is PartialStreamError {
+    return error instanceof PartialStreamError && error.partialContent.length > 0;
   }
 }
 
@@ -190,6 +225,7 @@ class LLMRouterAdapter implements LLMAdapter {
   private circuitState: CircuitBreakerState;
   private resilienceConfig: ResilienceConfig;
   private logger: AdapterLogger;
+  private fallbackConfig?: FallbackConfig;
 
   constructor(config: LLMClientConfig = {}, logger?: AdapterLogger) {
     this.apiKeys = config.apiKeys ?? {};
@@ -207,12 +243,42 @@ class LLMRouterAdapter implements LLMAdapter {
       initialBackoffMs: 1000,
     };
     this.logger = logger ?? consoleLogger;
+    this.fallbackConfig = config.fallback;
   }
 
   registerModel(model: string, provider: LLMProvider, baseUrl?: string): void {
     const resolvedBaseUrl =
       baseUrl ?? this.baseUrls[provider] ?? DEFAULT_PROVIDER_BASE_URLS[provider];
     this.modelRegistry.register(model, provider, resolvedBaseUrl);
+  }
+
+  /**
+   * Update or add an API key for a provider at runtime.
+   * Also resets the circuit breaker to allow immediate retries.
+   */
+  updateApiKey(provider: LLMProvider, apiKey: string): void {
+    this.apiKeys[provider] = apiKey;
+    // Reset circuit breaker to allow requests with new key
+    this.circuitState = createCircuitState();
+    this.logger.info('Updated API key and reset circuit breaker', { provider });
+  }
+
+  /**
+   * Reset the circuit breaker state (e.g., after fixing configuration).
+   */
+  resetCircuitBreaker(): void {
+    this.circuitState = createCircuitState();
+    this.logger.info('Circuit breaker reset');
+  }
+
+  /**
+   * Update the global fallback configuration at runtime.
+   */
+  updateFallback(fallback: FallbackConfig | undefined): void {
+    this.fallbackConfig = fallback;
+    this.logger.info('Updated fallback configuration', {
+      fallback: fallback ? { provider: fallback.provider, model: fallback.model } : 'disabled',
+    });
   }
 
   private resolveRequestConfig(llm: LLMRequestConfig): ResolvedRequestConfig {
@@ -238,6 +304,20 @@ class LLMRouterAdapter implements LLMAdapter {
       DEFAULT_PROVIDER_BASE_URLS[provider];
 
     const apiKey = llm.apiKey ?? this.apiKeys[provider];
+
+    // Debug logging for API key resolution
+    const keySource = llm.apiKey ? 'per-request' : 'stored';
+    const keyPreview = apiKey ? `${apiKey.slice(0, 8)}...` : 'MISSING';
+    this.logger.debug('Resolving request config', {
+      model: llm.model,
+      provider,
+      baseUrl,
+      keySource,
+      keyPreview,
+      hasStoredKey: !!this.apiKeys[provider],
+      storedProviders: Object.keys(this.apiKeys).filter(k => !!this.apiKeys[k as LLMProvider]),
+    });
+
     if (!apiKey) {
       throw new Error(`API key not configured for provider '${provider}'`);
     }
@@ -277,32 +357,134 @@ class LLMRouterAdapter implements LLMAdapter {
   async respond(params: RespondParams): Promise<LLMResponse> {
     const resolved = this.resolveRequestConfig(params.llm);
 
-    return this.withResilience(resolved.provider, resolved.model, async () => {
-      switch (resolved.provider) {
-        case 'openai':
-          return this.respondOpenAI(params, resolved);
-        case 'anthropic':
-          return this.respondAnthropic(params, resolved);
-        case 'openai-compat':
-          return this.respondOpenAICompat(params, resolved);
-        default:
-          throw new Error(`Unsupported provider: ${resolved.provider}`);
+    try {
+      return await this.withResilience(resolved.provider, resolved.model, async () => {
+        switch (resolved.provider) {
+          case 'openai':
+            return this.respondOpenAI(params, resolved);
+          case 'anthropic':
+            return this.respondAnthropic(params, resolved);
+          case 'openai-compat':
+            return this.respondOpenAICompat(params, resolved);
+          default:
+            throw new Error(`Unsupported provider: ${resolved.provider}`);
+        }
+      });
+    } catch (error) {
+      // Check for fallback config (per-request takes precedence over global)
+      const fallback = params.llm.fallback ?? this.fallbackConfig;
+      if (fallback) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        this.logger.warn('Primary model failed, falling back to backup', {
+          primary: { provider: resolved.provider, model: resolved.model },
+          fallback: { provider: fallback.provider, model: fallback.model },
+          error: errorMsg,
+        });
+
+        // Create fallback params without chaining fallbacks
+        const fallbackLlm: LLMRequestConfig = {
+          model: fallback.model,
+          provider: fallback.provider,
+          baseUrl: fallback.baseUrl,
+          apiKey: fallback.apiKey,
+          maxTokens: params.llm.maxTokens,
+          temperature: params.llm.temperature,
+          reasoning: params.llm.reasoning,
+          // Don't chain fallbacks - prevent infinite loops
+        };
+
+        const fallbackResolved = this.resolveRequestConfig(fallbackLlm);
+
+        // Attempt with fallback (no retry wrapping - single attempt)
+        let response: LLMResponse;
+        switch (fallbackResolved.provider) {
+          case 'openai':
+            response = await this.respondOpenAI({ ...params, llm: fallbackLlm }, fallbackResolved);
+            break;
+          case 'anthropic':
+            response = await this.respondAnthropic({ ...params, llm: fallbackLlm }, fallbackResolved);
+            break;
+          case 'openai-compat':
+            response = await this.respondOpenAICompat({ ...params, llm: fallbackLlm }, fallbackResolved);
+            break;
+          default:
+            throw new Error(`Unsupported fallback provider: ${fallbackResolved.provider}`);
+        }
+
+        // Mark that fallback was used
+        return { ...response, usedFallback: true };
       }
-    });
+
+      throw error;
+    }
   }
 
   async *stream(params: StreamParams): AsyncGenerator<string, LLMResponse> {
     const resolved = this.resolveRequestConfig(params.llm);
 
-    switch (resolved.provider) {
-      case 'openai':
-        return yield* this.streamOpenAI(params, resolved);
-      case 'anthropic':
-        return yield* this.streamAnthropic(params, resolved);
-      case 'openai-compat':
-        return yield* this.streamOpenAICompat(params, resolved);
-      default:
-        throw new Error(`Unsupported provider: ${resolved.provider}`);
+    try {
+      let generator: AsyncGenerator<string, LLMResponse>;
+      switch (resolved.provider) {
+        case 'openai':
+          generator = this.streamOpenAI(params, resolved);
+          break;
+        case 'anthropic':
+          generator = this.streamAnthropic(params, resolved);
+          break;
+        case 'openai-compat':
+          generator = this.streamOpenAICompat(params, resolved);
+          break;
+        default:
+          throw new Error(`Unsupported provider: ${resolved.provider}`);
+      }
+
+      // Delegate to the provider generator
+      return yield* generator;
+    } catch (error) {
+      // Check for fallback config (per-request takes precedence over global)
+      const fallback = params.llm.fallback ?? this.fallbackConfig;
+      if (fallback) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        this.logger.warn('Primary model stream failed, falling back to backup', {
+          primary: { provider: resolved.provider, model: resolved.model },
+          fallback: { provider: fallback.provider, model: fallback.model },
+          error: errorMsg,
+        });
+
+        // Create fallback params without chaining fallbacks
+        const fallbackLlm: LLMRequestConfig = {
+          model: fallback.model,
+          provider: fallback.provider,
+          baseUrl: fallback.baseUrl,
+          apiKey: fallback.apiKey,
+          maxTokens: params.llm.maxTokens,
+          temperature: params.llm.temperature,
+          reasoning: params.llm.reasoning,
+        };
+
+        const fallbackResolved = this.resolveRequestConfig(fallbackLlm);
+
+        let fallbackGenerator: AsyncGenerator<string, LLMResponse>;
+        switch (fallbackResolved.provider) {
+          case 'openai':
+            fallbackGenerator = this.streamOpenAI({ ...params, llm: fallbackLlm }, fallbackResolved);
+            break;
+          case 'anthropic':
+            fallbackGenerator = this.streamAnthropic({ ...params, llm: fallbackLlm }, fallbackResolved);
+            break;
+          case 'openai-compat':
+            fallbackGenerator = this.streamOpenAICompat({ ...params, llm: fallbackLlm }, fallbackResolved);
+            break;
+          default:
+            throw new Error(`Unsupported fallback provider: ${fallbackResolved.provider}`);
+        }
+
+        // Yield from fallback generator and mark result as using fallback
+        const response = yield* fallbackGenerator;
+        return { ...response, usedFallback: true };
+      }
+
+      throw error;
     }
   }
 
@@ -1798,6 +1980,39 @@ class LLMRouterAdapter implements LLMAdapter {
           }
         }
       }
+    } catch (streamError) {
+      // Mid-stream error (rate limit, connection drop, etc.)
+      // Preserve partial work in a PartialStreamError
+      const partialToolCalls: ToolCall[] = [];
+      for (const builder of toolCallBuilders.values()) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(builder.arguments);
+        } catch {
+          args = {};
+        }
+        partialToolCalls.push({
+          id: builder.id,
+          name: builder.name,
+          arguments: args,
+        });
+      }
+
+      const cause = streamError instanceof Error ? streamError : new Error(String(streamError));
+      this.logger.warn('Stream interrupted mid-response', {
+        method: 'stream',
+        model: resolved.model,
+        partialContentLength: fullContent.length,
+        partialToolCalls: partialToolCalls.length,
+        error: cause.message,
+      });
+
+      throw new PartialStreamError(
+        'Stream interrupted',
+        cause,
+        fullContent,
+        partialToolCalls
+      );
     } finally {
       reader.releaseLock();
     }

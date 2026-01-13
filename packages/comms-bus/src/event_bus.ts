@@ -37,11 +37,8 @@ export class EventBus implements EventBusProtocol {
   private globalHandlers = new Set<(event: AnyEvent) => void>();
   private shutdownFlag = false;
   private readonly ALL_EVENTS = '__all__';
-  private pendingEvents: Array<{
-    event: AnyEvent;
-    runHandlers: Array<(event: AnyEvent) => void>;
-    globalHandlers: Array<(event: AnyEvent) => void>;
-  }> = [];
+
+  private pendingEvents: Array<AnyEvent> = [];
   private flushScheduled = false;
 
   constructor() {
@@ -51,16 +48,7 @@ export class EventBus implements EventBusProtocol {
   publish(event: AnyEvent): void {
     if (this.shutdownFlag) return;
 
-    const runId = (event as any).runId ?? event.requestId;
-    const runHandlers =
-      runId && this.runHandlers.has(runId)
-        ? Array.from(this.runHandlers.get(runId)!)
-        : [];
-    const globalHandlers = this.globalHandlers.size > 0
-      ? Array.from(this.globalHandlers)
-      : [];
-
-    this.pendingEvents.push({ event, runHandlers, globalHandlers });
+    this.pendingEvents.push(event);
     this.scheduleFlush();
   }
 
@@ -81,8 +69,8 @@ export class EventBus implements EventBusProtocol {
     this.pendingEvents = [];
     this.flushScheduled = false;
 
-    for (const pending of batch) {
-      this.dispatchEvent(pending);
+    for (const event of batch) {
+      this.dispatchEvent(event);
     }
 
     if (this.pendingEvents.length > 0 && !this.flushScheduled) {
@@ -90,12 +78,11 @@ export class EventBus implements EventBusProtocol {
     }
   }
 
-  private dispatchEvent(pending: {
-    event: AnyEvent;
-    runHandlers: Array<(event: AnyEvent) => void>;
-    globalHandlers: Array<(event: AnyEvent) => void>;
-  }): void {
-    const { event, runHandlers, globalHandlers } = pending;
+  private dispatchEvent(event: AnyEvent): void {
+    // Snapshot handlers at dispatch time so subscription changes affect the next event,
+    // and we avoid allocating arrays at publish-time.
+    const runId = (event as any).runId ?? event.requestId;
+    const runHandlers = runId ? this.runHandlers.get(runId) : undefined;
 
     try {
       this.emitter.emit(event.type, event);
@@ -104,19 +91,23 @@ export class EventBus implements EventBusProtocol {
       console.error('[EventBus] Handler error:', err);
     }
 
-    for (const handler of runHandlers) {
-      try {
-        handler(event);
-      } catch (err) {
-        console.error('[EventBus] Handler error:', err);
+    if (runHandlers && runHandlers.size) {
+      for (const handler of runHandlers) {
+        try {
+          handler(event);
+        } catch (err) {
+          console.error('[EventBus] Handler error:', err);
+        }
       }
     }
 
-    for (const handler of globalHandlers) {
-      try {
-        handler(event);
-      } catch (err) {
-        console.error('[EventBus] Handler error:', err);
+    if (this.globalHandlers.size) {
+      for (const handler of this.globalHandlers) {
+        try {
+          handler(event);
+        } catch (err) {
+          console.error('[EventBus] Handler error:', err);
+        }
       }
     }
   }

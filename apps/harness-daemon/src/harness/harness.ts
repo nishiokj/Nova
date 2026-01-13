@@ -242,6 +242,17 @@ export class AgentHarness {
       }
     }
 
+    // Log initial API keys from config
+    for (const [provider, key] of Object.entries(apiKeys)) {
+      if (key) {
+        this.logger.info('Initial API key from config', {
+          provider,
+          keyPrefix: key.slice(0, 8),
+          keyLength: key.length,
+        });
+      }
+    }
+
     const llmClientConfig: LLMClientConfig = { apiKeys, baseUrls };
     // Adapt HarnessLogger to AdapterLogger (warning → warn)
     const adapterLogger = {
@@ -322,6 +333,23 @@ export class AgentHarness {
    */
   getEventBus(): EventBusProtocol {
     return this.eventBus;
+  }
+
+  /**
+   * Update an API key at runtime and reset the circuit breaker.
+   * Called when a provider key is saved via /providers.
+   */
+  updateApiKey(provider: LLMProvider, apiKey: string): void {
+    this.llmAdapter.updateApiKey?.(provider, apiKey);
+    this.logger.info('Updated API key in harness', { provider });
+  }
+
+  /**
+   * Reset the circuit breaker state.
+   */
+  resetCircuitBreaker(): void {
+    this.llmAdapter.resetCircuitBreaker?.();
+    this.logger.info('Reset circuit breaker in harness');
   }
 
   /**
@@ -933,7 +961,7 @@ export class AgentHarness {
   /**
    * Resume agent execution after user provides input.
    */
-  resume(requestId: string, answer: string, sessionKey: string, workingDir?: string): AgentRunHandle {
+  resume(requestId: string, answer: unknown, sessionKey: string, workingDir?: string): AgentRunHandle {
     const eventQueue = new AsyncEventQueue();
     const runId = requestId;
 
@@ -970,8 +998,9 @@ export class AgentHarness {
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
-        // Add user's response to context
-        contextWindow.addMessage('user', answer);
+        // Add user's response to context (serialize if structured)
+        const answerText = typeof answer === 'string' ? answer : JSON.stringify(answer);
+        contextWindow.addMessage('user', answerText);
 
         // Re-run orchestrator with the stored goal/agentType/workingDir
         const effectiveWorkingDir = workingDir ?? paused.workingDir;
@@ -1068,6 +1097,78 @@ export class AgentHarness {
    */
   getConfig(): FullHarnessConfig {
     return this.config;
+  }
+
+  /**
+   * Fork a session: clone context in GraphD and pre-populate in-memory cache.
+   */
+  forkSession(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string } {
+    if (!this.graphd || !this.graphdStarted) {
+      return { success: false, error: 'GraphD not available' };
+    }
+
+    const result = this.graphd.sessionFork(sourceSessionKey, targetSessionKey);
+
+    if (result.success) {
+      // Pre-populate in-memory cache with cloned context
+      const sourceContext = this.contextWindows.get(sourceSessionKey);
+      if (sourceContext) {
+        const clonedSnapshot = sourceContext.serialize();
+        clonedSnapshot.sessionKey = targetSessionKey;
+        const clonedContext = ContextWindow.deserialize(clonedSnapshot);
+        this.contextWindows.set(targetSessionKey, clonedContext);
+        this.logger.info('Forked session with in-memory context', {
+          sourceSessionKey,
+          targetSessionKey,
+          contextItems: clonedContext.items.length,
+        });
+      } else {
+        this.logger.info('Forked session (no in-memory context to clone)', {
+          sourceSessionKey,
+          targetSessionKey,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Manually compact context for a session.
+   * This triggers immediate compaction regardless of current context usage.
+   */
+  compactContext(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string } {
+    const context = this.contextWindows.get(sessionKey);
+    if (!context) {
+      return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: 'No context found for session' };
+    }
+
+    try {
+      const result = context.compact({
+        deduplicateByPath: true,
+        maxFileContentCount: 15,
+        truncateOutputsTo: 3000,
+      });
+
+      this.logger.info('Manual context compaction', {
+        sessionKey,
+        itemsRemoved: result.itemsRemoved,
+        bytesRecovered: result.bytesRecovered,
+      });
+
+      // Persist the compacted context
+      this.persistContext(context);
+
+      return {
+        success: true,
+        itemsRemoved: result.itemsRemoved,
+        bytesRecovered: result.bytesRecovered,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error('Context compaction failed', { sessionKey, error: message });
+      return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: message };
+    }
   }
 
   /**

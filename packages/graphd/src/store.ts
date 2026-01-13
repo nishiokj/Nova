@@ -99,6 +99,14 @@ export class GraphStore {
   }
 
   /**
+   * Checkpoint the WAL to flush writes to the main database file.
+   * This makes writes visible to other processes reading the database.
+   */
+  checkpoint(): void {
+    this.db.exec('PRAGMA wal_checkpoint(PASSIVE);');
+  }
+
+  /**
    * Run a set of operations inside a single transaction.
    */
   withTransaction<T>(fn: () => T): T {
@@ -1892,5 +1900,84 @@ export class GraphStore {
       .query('SELECT 1 FROM provider_credentials WHERE user_id = ? AND provider = ? LIMIT 1;')
       .get(userId, provider);
     return row !== undefined;
+  }
+
+  // =========================================================================
+  // Session Fork Methods
+  // =========================================================================
+
+  /**
+   * Fork a session: atomically copy session, context snapshot, and messages.
+   */
+  forkSession(
+    sourceSessionKey: string,
+    targetSessionKey: string,
+    clientType?: string
+  ): { success: boolean; error?: string } {
+    const sourceSession = this.getSession(sourceSessionKey);
+    if (!sourceSession) {
+      return { success: false, error: `Source session '${sourceSessionKey}' not found` };
+    }
+
+    const now = nowSeconds();
+    const effectiveClientType = clientType ?? sourceSession.clientType;
+
+    const transaction = this.db.transaction(() => {
+      // 1. Create new session record
+      this.db
+        .query(
+          `INSERT INTO sessions (session_key, client_type, created_at, last_accessed_at,
+                                 expires_at, working_dir, status, metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, 'active', ?);`
+        )
+        .run(
+          targetSessionKey,
+          effectiveClientType,
+          now,
+          now,
+          sourceSession.expiresAt,
+          sourceSession.workingDir,
+          sourceSession.metadataJson
+        );
+
+      // 2. Copy latest context snapshot
+      const latestSnapshot = this.getLatestContextSnapshot(sourceSessionKey);
+      if (latestSnapshot && latestSnapshot.contextJson) {
+        this.db
+          .query(
+            `INSERT INTO context_snapshots (session_key, snapshot_version, created_at, context_json)
+             VALUES (?, 1, ?, ?);`
+          )
+          .run(targetSessionKey, now, latestSnapshot.contextJson);
+      }
+
+      // 3. Copy conversation messages (re-index starting from 0)
+      const messages = this.getMessages(sourceSessionKey, 10000, 0);
+      const insertMsg = this.db.query(
+        `INSERT INTO conversation_messages
+         (session_key, message_index, role, content, request_id, created_at, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?);`
+      );
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        insertMsg.run(
+          targetSessionKey,
+          i,
+          msg.role,
+          msg.content,
+          msg.requestId,
+          msg.createdAt,
+          msg.metadataJson
+        );
+      }
+    });
+
+    try {
+      transaction();
+      return { success: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { success: false, error: message };
+    }
   }
 }

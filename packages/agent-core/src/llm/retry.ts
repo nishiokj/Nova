@@ -116,6 +116,7 @@ export function isRetryableError(error: unknown): boolean {
     // Rate limits, timeouts, server errors
     if (
       message.includes('rate') ||
+      message.includes('429') ||
       message.includes('timeout') ||
       message.includes('overloaded') ||
       message.includes('503') ||

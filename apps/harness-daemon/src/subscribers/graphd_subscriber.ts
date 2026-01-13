@@ -129,6 +129,9 @@ export class GraphDSubscriber {
       });
       if ((result as { success?: boolean; error?: string }).success === false) {
         console.error(`[GraphDSubscriber] Failed to persist event: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+      } else {
+        // Checkpoint to make writes visible to dashboard
+        this.graphd.checkpoint();
       }
     } catch (error) {
       console.error(`[GraphDSubscriber] Failed to persist event: ${error}`);
@@ -193,6 +196,9 @@ export class GraphDSubscriber {
       });
       if ((result as { success?: boolean; error?: string }).success === false) {
         console.error(`[GraphDSubscriber] Failed to flush batch: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+      } else {
+        // Checkpoint to make writes visible to dashboard
+        this.graphd.checkpoint();
       }
 
       this.eventBatch = [];

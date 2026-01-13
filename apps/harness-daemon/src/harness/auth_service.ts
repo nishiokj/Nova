@@ -5,7 +5,7 @@
  * Integrated directly into the daemon - no separate service needed.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { homedir } from 'os';
@@ -24,7 +24,6 @@ export interface AuthServiceConfig {
   callbackPort: number;
   google: {
     clientId: string;
-    clientSecret: string;
     redirectUri: string;
   };
 }
@@ -33,6 +32,8 @@ interface PendingAuthState {
   stateToken: string;
   createdAt: number;
   deviceName?: string;
+  // PKCE code verifier (stored for token exchange)
+  codeVerifier?: string;
   // Populated after successful callback
   sessionToken?: string;
   userId?: string;
@@ -216,14 +217,19 @@ export class AuthService {
   // =========================================================================
 
   /**
-   * Start the OAuth flow. Returns auth URL and state token.
+   * Start the OAuth flow with PKCE. Returns auth URL and state token.
+   * Uses PKCE (Proof Key for Code Exchange) - no client secret required.
    */
   startAuth(deviceName?: string): { authUrl: string; stateToken: string } {
     const stateToken = this.generateStateToken();
+    const codeVerifier = this.generateCodeVerifier();
+    const codeChallenge = this.generateCodeChallenge(codeVerifier);
+
     this.pendingAuthStates.set(stateToken, {
       stateToken,
       createdAt: Date.now(),
       deviceName,
+      codeVerifier, // Store for token exchange
     });
 
     const params = new URLSearchParams({
@@ -234,6 +240,9 @@ export class AuthService {
       state: stateToken,
       access_type: 'offline',
       prompt: 'consent',
+      // PKCE parameters
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
     });
 
     return {
@@ -255,11 +264,14 @@ export class AuthService {
     if (!pendingState) {
       return { success: false, error: 'Invalid or expired state token' };
     }
+    if (!pendingState.codeVerifier) {
+      return { success: false, error: 'Missing PKCE code verifier' };
+    }
     this.pendingAuthStates.delete(state);
 
     try {
-      // Exchange code for tokens
-      const tokens = await this.exchangeCodeForTokens(code);
+      // Exchange code for tokens using PKCE
+      const tokens = await this.exchangeCodeForTokens(code, pendingState.codeVerifier);
 
       // Fetch user info
       const userInfo = await this.fetchUserInfo(tokens.access_token);
@@ -482,16 +494,17 @@ export class AuthService {
   // Private Helpers
   // =========================================================================
 
-  private async exchangeCodeForTokens(code: string): Promise<GoogleTokenResponse> {
+  private async exchangeCodeForTokens(code: string, codeVerifier: string): Promise<GoogleTokenResponse> {
     const response = await fetch(GOOGLE_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         code,
         client_id: this.config.google.clientId,
-        client_secret: this.config.google.clientSecret,
         redirect_uri: this.config.google.redirectUri,
         grant_type: 'authorization_code',
+        // PKCE: use code_verifier instead of client_secret
+        code_verifier: codeVerifier,
       }).toString(),
     });
 
@@ -642,6 +655,27 @@ export class AuthService {
     return randomBytes(16).toString('hex');
   }
 
+  /**
+   * Generate a cryptographically random code verifier for PKCE.
+   * Must be 43-128 characters, using unreserved URI characters.
+   */
+  private generateCodeVerifier(): string {
+    // 32 bytes = 43 base64url characters
+    return randomBytes(32)
+      .toString('base64url')
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .slice(0, 43);
+  }
+
+  /**
+   * Generate code challenge from verifier using S256 method.
+   */
+  private generateCodeChallenge(verifier: string): string {
+    return createHash('sha256')
+      .update(verifier)
+      .digest('base64url');
+  }
+
   private cleanupPendingStates(): void {
     const now = Date.now();
     const maxAge = 10 * 60 * 1000; // 10 minutes
@@ -654,14 +688,23 @@ export class AuthService {
 }
 
 /**
+ * Default Google OAuth client ID for Rex CLI.
+ * This is a "Desktop" type OAuth client - no secret required with PKCE.
+ *
+ * To use your own client ID, set GOOGLE_CLIENT_ID environment variable.
+ * Create a "Desktop" type OAuth client in Google Cloud Console.
+ */
+const DEFAULT_GOOGLE_CLIENT_ID = process.env.REX_GOOGLE_CLIENT_ID ?? '380690977483-43jcgqd6g58ev7514pr1onk5diaiikqb.apps.googleusercontent.com';
+
+/**
  * Create auth service from environment.
+ * Uses PKCE flow - no client secret required.
  */
 export function createAuthServiceFromEnv(): AuthService | null {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const clientId = process.env.GOOGLE_CLIENT_ID ?? DEFAULT_GOOGLE_CLIENT_ID;
 
-  if (!clientId || !clientSecret) {
-    console.log('[auth-service] Google OAuth not configured (GOOGLE_CLIENT_ID/SECRET missing)');
+  if (!clientId) {
+    console.log('[auth-service] Google OAuth not configured (no GOOGLE_CLIENT_ID)');
     return null;
   }
 
@@ -676,6 +719,6 @@ export function createAuthServiceFromEnv(): AuthService | null {
     masterKeyPath,
     callbackHost: host,
     callbackPort: parseInt(port, 10),
-    google: { clientId, clientSecret, redirectUri },
+    google: { clientId, redirectUri },
   });
 }

@@ -30,6 +30,7 @@ import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
 import { QuestionPrompt } from "./components/QuestionPrompt.js";
 import { ProvidersView } from "./components/ProvidersView.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
+import { spawnForkedSession } from "./utils/fork-spawn.js";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
@@ -104,6 +105,7 @@ interface AppOptions {
   enableVoice: boolean;
   redactLogs: boolean;
   logTranscripts: boolean;
+  sessionKey: string | null;
 }
 
 // Skills and hooks are read-only in the TUI.
@@ -265,14 +267,18 @@ function App({ options }: { options: AppOptions }) {
     void client
       .connect()
       .then(() => {
+        const initData: Record<string, unknown> = {
+          enable_voice: options.enableVoice,
+          client_version: process.env.npm_package_version ?? "dev",
+          log_transcripts: options.logTranscripts,
+          working_dir: process.cwd(),
+        };
+        if (options.sessionKey) {
+          initData.session_key = options.sessionKey;
+        }
         client.send({
           type: "init",
-          data: {
-            enable_voice: options.enableVoice,
-            client_version: process.env.npm_package_version ?? "dev",
-            log_transcripts: options.logTranscripts,
-            working_dir: process.cwd(),
-          },
+          data: initData,
         });
       })
       .catch((error) => {
@@ -514,6 +520,20 @@ function App({ options }: { options: AppOptions }) {
       store.setState("idle");
       return;
     }
+    if (kind === "compact_context") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.success) {
+        const itemsRemoved = payload.itemsRemoved ?? 0;
+        const bytesRecovered = payload.bytesRecovered ?? 0;
+        store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
+      } else {
+        const errorMsg = payload?.error ?? "Unknown error";
+        store.addMessage("system", `Context compaction failed: ${errorMsg}`);
+      }
+      store.clearProgress();
+      store.setState("idle");
+      return;
+    }
 
     const requestId = data.request_id ?? undefined;
     const metaLines: string[] = [];
@@ -648,6 +668,40 @@ function App({ options }: { options: AppOptions }) {
 
   const handleQuit = () => {
     exit();
+  };
+
+  const handleFork = async () => {
+    const client = clientRef.current;
+    if (!client) {
+      store.addMessage("system", "Fork failed: Bridge not connected");
+      return;
+    }
+
+    store.addMessage("system", "Forking session...");
+
+    const result = await client.sessionFork();
+
+    if (!result.success) {
+      store.addMessage("system", `Fork failed: ${result.error ?? "Unknown error"}`);
+      return;
+    }
+
+    const workingDir = process.cwd();
+    const launcherPath = path.join(PROJECT_ROOT, "apps", "launcher", "index.ts");
+    const spawnResult = spawnForkedSession(result.newSessionKey!, workingDir, launcherPath);
+
+    if (spawnResult.autoSpawned) {
+      store.addMessage("system", `Fork successful: ${spawnResult.message}`);
+    } else {
+      store.addMessage("system", `Fork successful: ${spawnResult.message}`);
+      if (spawnResult.error) {
+        store.addMessage("system", `tmux error: ${spawnResult.error}`);
+      }
+      if (spawnResult.command) {
+        store.addMessage("system", `Run in new terminal: ${spawnResult.command}`);
+      }
+      store.addMessage("system", "TIP: Run inside tmux for automatic fork spawning");
+    }
   };
 
   // Skills and hooks commands - read-only listing
@@ -1178,9 +1232,13 @@ function App({ options }: { options: AppOptions }) {
       case "/trash":
         void startDeleteFlow(arg);
         return;
-      case "/compact": {
+      case "/compact":
+        store.addMessage("system", "Compacting conversation context...");
+        sendCommand("compact_context");
+        return;
+      case "/dense": {
         const enabled = store.toggleCompact();
-        store.addMessage("system", `Compact mode ${enabled ? "enabled" : "disabled"}.`);
+        store.addMessage("system", `Dense display ${enabled ? "enabled" : "disabled"}.`);
         return;
       }
       case "/theme": {
@@ -1190,6 +1248,9 @@ function App({ options }: { options: AppOptions }) {
         store.enterThemeMode(Math.max(0, currentIndex));
         return;
       }
+      case "/fork":
+        void handleFork();
+        return;
       case "/voice": {
         const enabled = !snapshot.voiceMode;
         if (enabled && !snapshot.capabilities.voiceAvailable) {
@@ -1662,11 +1723,17 @@ function parseArgs(argv: string[]): AppOptions {
   let enableVoice = true;
   let redactLogs = false;
   let logTranscripts = true;
+  let sessionKey: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--ui-log" && argv[i + 1]) {
       uiLogPath = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--session" && argv[i + 1]) {
+      sessionKey = argv[i + 1];
       i += 1;
       continue;
     }
@@ -1692,7 +1759,7 @@ function parseArgs(argv: string[]): AppOptions {
     logTranscripts = false;
   }
 
-  return { uiLogPath, enableVoice, redactLogs, logTranscripts };
+  return { uiLogPath, enableVoice, redactLogs, logTranscripts, sessionKey };
 }
 
 const options = parseArgs(process.argv.slice(2));

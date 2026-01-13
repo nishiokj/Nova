@@ -1,36 +1,41 @@
+import { useState } from 'react';
+import type { Session } from '@shared/domain/models';
 import { useSessions } from './hooks/useSessions';
-import { SessionTable } from './components/SessionTable';
+import { Sidebar } from './components/Sidebar';
+import { Stage } from './components/Stage';
+import { SessionSummary } from './components/SessionSummary';
 
 export default function App() {
-  const { sessions, state, error, refetch } = useSessions();
+  const { sessions, state, error } = useSessions(1000);
+  const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+
+  if (state === 'loading') {
+    return (
+      <div className="app-layout">
+        <div className="stage-empty">Loading sessions...</div>
+      </div>
+    );
+  }
+
+  if (state === 'error') {
+    return (
+      <div className="app-layout">
+        <div className="stage-empty" style={{ color: 'var(--red)' }}>
+          {error}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="container">
-      <header>
-        <h1>Sessions</h1>
-        <button
-          onClick={refetch}
-          style={{
-            background: 'transparent',
-            border: '1px solid var(--border)',
-            color: 'var(--text)',
-            padding: '4px 12px',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '11px',
-          }}
-        >
-          Refresh
-        </button>
-      </header>
-      {state === 'loading' && (
-        <div className="loading">Loading sessions...</div>
-      )}
-      {state === 'error' && (
-        <div className="error">{error}</div>
-      )}
-      {state === 'success' && (
-        <SessionTable sessions={sessions} loading={false} />
+    <div className="app-layout">
+      <Sidebar sessions={sessions} onSelectSession={setSelectedSession} />
+      <Stage sessions={sessions} onExpandSession={setSelectedSession} />
+      {selectedSession && (
+        <SessionSummary
+          session={selectedSession}
+          onClose={() => setSelectedSession(null)}
+        />
       )}
     </div>
   );

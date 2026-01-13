@@ -188,6 +188,18 @@ export class BridgeClient extends EventEmitter {
     return this.sendAuthCommand('providers_test', data);
   }
 
+  /**
+   * Fork the current session.
+   */
+  async sessionFork(): Promise<{
+    success: boolean;
+    newSessionKey?: string;
+    sourceSessionKey?: string;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('session_fork', {});
+  }
+
   private sendAuthCommand<T extends Record<string, unknown>>(
     type: string,
     data: Record<string, unknown>

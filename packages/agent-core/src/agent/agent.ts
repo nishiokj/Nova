@@ -119,6 +119,13 @@ export class Agent {
       result.error = message;
       result.terminationReason = `exception:${message}`;
       this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
+
+      // Synthesize response from accumulated work if we have any
+      // This preserves partial progress when rate limits or other errors interrupt execution
+      const accumulatedResponse = this.synthesizePartialResponse(localContext, result.response);
+      if (accumulatedResponse) {
+        result.response = `${accumulatedResponse}\n\n[Execution interrupted: ${message}]`;
+      }
     }
 
     metrics.durationMs = Date.now() - startTime;
@@ -1186,6 +1193,47 @@ export class Agent {
   ): string {
     if (!toolCalls.length) return '';
     return `[Tools: ${toolCalls.map((tc) => tc.name).join(', ')}]`;
+  }
+
+  /**
+   * Synthesize a response from accumulated work in the context.
+   * Returns the best available content: existing response, last assistant message, or tool outputs.
+   */
+  private synthesizePartialResponse(localContext: ContextWindow, existingResponse: string): string {
+    // If we already have a response from previous iterations, use it
+    if (existingResponse && existingResponse.trim().length > 0) {
+      return existingResponse;
+    }
+
+    // Try to extract the last assistant message
+    const messages = localContext.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
+    const assistantMessages = messages.filter(m => m.role === 'assistant');
+    if (assistantMessages.length > 0) {
+      const lastAssistant = assistantMessages[assistantMessages.length - 1];
+      const content = typeof lastAssistant.content === 'string'
+        ? lastAssistant.content
+        : JSON.stringify(lastAssistant.content);
+      if (content && content.trim().length > 0) {
+        return content;
+      }
+    }
+
+    // Fall back to summarizing tool outputs
+    const toolOutputs = localContext.getItemsByType('function_call_output') as Array<{ name?: string; output: string; isError?: boolean }>;
+    if (toolOutputs.length > 0) {
+      const successfulOutputs = toolOutputs.filter(o => !o.isError);
+      if (successfulOutputs.length > 0) {
+        // Return the last few tool outputs as context
+        const recentOutputs = successfulOutputs.slice(-3);
+        const summary = recentOutputs.map(o => {
+          const preview = o.output.length > 500 ? o.output.slice(0, 500) + '...' : o.output;
+          return `${o.name ?? 'tool'}: ${preview}`;
+        }).join('\n\n');
+        return `Work completed before interruption:\n${summary}`;
+      }
+    }
+
+    return '';
   }
 
   /**
