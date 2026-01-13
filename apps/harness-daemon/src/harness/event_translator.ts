@@ -4,7 +4,7 @@
  * Translates the agent's internal event format to the TUI-compatible format.
  */
 
-import type { AgentEvent, AgentEventType } from '../../../../packages/agent-core/src/types/events.js';
+import type { AgentEvent, AgentEventType } from 'agent-core';
 import type {
   BridgeEvent,
   ProgressEventData,

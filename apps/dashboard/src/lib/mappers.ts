@@ -471,6 +471,10 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
       ? 'error'
       : mapStatus(raw.status, raw.last_accessed_at)
 
+  // Extract description from metadata or first request
+  const description = meta.description as string | undefined
+    ?? (requests[0]?.userInput?.slice(0, 80) || undefined)
+
   const partialSession = {
     id: raw.session_key,
     userId: meta.user_id ?? 'anonymous',
@@ -483,6 +487,7 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
     meta: {
       clientType: raw.client_type,
       workingDir: raw.working_dir ?? undefined,
+      description,
       ...meta,
     },
     requests,

@@ -4,24 +4,34 @@
 
 import { pathToFileURL } from 'url';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
-import { BusServer } from '../../../../packages/comms-bus/src/bus_server.js';
+import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
+import { createAuthServiceFromEnv, type AuthService } from './auth_service.js';
 
 export interface HarnessDaemonOptions {
   host?: string;
   port?: number;
   workingDir?: string;
   configPath?: string;
+  /** Idle timeout in ms before daemon shuts down when no clients connected. Set to 0 to disable. */
+  idleTimeoutMs?: number;
 }
+
+// Default idle timeout: 30 seconds
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 
 export class HarnessDaemon {
   private readonly host: string;
   private readonly port: number;
   private readonly workingDir: string;
   private readonly configPath?: string;
+  private readonly idleTimeoutMs: number;
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
   private gateway: BridgeGateway | null = null;
+  private authService: AuthService | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private shutdownRequested = false;
 
   constructor(options: HarnessDaemonOptions = {}) {
     this.host = options.host ?? process.env.EVENT_BUS_HOST ?? '127.0.0.1';
@@ -29,12 +39,91 @@ export class HarnessDaemon {
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
     this.workingDir = options.workingDir ?? process.env.HARNESS_WORKING_DIR ?? process.cwd();
     this.configPath = options.configPath ?? process.env.HARNESS_CONFIG_PATH;
+    this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  }
+
+  private cancelIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  private startIdleTimer(): void {
+    if (this.idleTimeoutMs <= 0 || this.shutdownRequested) return;
+
+    this.cancelIdleTimer();
+    console.log(`[harness-daemon] No clients connected, will shutdown in ${this.idleTimeoutMs / 1000}s`);
+
+    this.idleTimer = setTimeout(() => {
+      if (this.bus && this.bus.getConnectionCount() === 0) {
+        console.log('[harness-daemon] Idle timeout reached, shutting down');
+        this.shutdownRequested = true;
+        void this.stop().then(() => process.exit(0));
+      }
+    }, this.idleTimeoutMs);
+  }
+
+  private handleConnect(connectionId: string): void {
+    console.log(`[harness-daemon] Client connected: ${connectionId}`);
+    this.cancelIdleTimer();
+  }
+
+  private handleDisconnect(connectionId: string): void {
+    this.gateway?.handleDisconnect(connectionId);
+
+    const remaining = this.bus?.getConnectionCount() ?? 0;
+    console.log(`[harness-daemon] Client disconnected: ${connectionId}, remaining: ${remaining}`);
+
+    if (remaining === 0) {
+      this.startIdleTimer();
+    }
   }
 
   async start(): Promise<{ host: string; port: number }> {
     if (!this.harness) {
       this.harness = createHarnessFromEnv(this.workingDir, this.configPath);
       await this.harness.start();
+
+      // Load provider keys from GraphD and update the LLM adapter
+      const config = this.harness.getConfig();
+      if (config.graphd.enabled && config.graphd.dbPath) {
+        console.log(`[harness-daemon] Loading provider keys from GraphD at ${config.graphd.dbPath}`);
+        const { LocalProviderManager } = await import('./local_providers.js');
+        const providerManager = new LocalProviderManager(config.graphd.dbPath);
+        const providers = providerManager.getProviders();
+
+        console.log(`[harness-daemon] GraphD returned providers: ${JSON.stringify(Object.keys(providers))}`);
+
+        // Update adapter with each provider key
+        for (const [provider, apiKey] of Object.entries(providers)) {
+          if (apiKey) {
+            // Map to canonical provider for adapter
+            const openaiCompatProviders = new Set(['cerebras', 'together', 'groq', 'fireworks']);
+            const canonicalProvider = openaiCompatProviders.has(provider) ? 'openai-compat' : provider;
+            console.log(`[harness-daemon] Updating adapter: ${provider} -> ${canonicalProvider}, key: ${apiKey.slice(0, 8)}...`);
+            this.harness.updateApiKey(canonicalProvider as import('agent-core').LLMProvider, apiKey);
+          }
+        }
+
+        if (Object.keys(providers).length > 0) {
+          console.log(`[harness-daemon] Loaded ${Object.keys(providers).length} provider key(s) from GraphD`);
+        } else {
+          console.log(`[harness-daemon] No provider keys found in GraphD - using config file keys`);
+        }
+
+        providerManager.close();
+      } else {
+        console.log(`[harness-daemon] GraphD disabled or no dbPath - using config file keys only`);
+      }
+    }
+
+    // Initialize auth service (optional - depends on env vars)
+    if (!this.authService) {
+      this.authService = createAuthServiceFromEnv();
+      if (this.authService) {
+        console.log('[harness-daemon] Auth service initialized');
+      }
     }
 
     if (!this.bus) {
@@ -43,18 +132,27 @@ export class HarnessDaemon {
         port: this.port,
         onPublish: (connectionId, channel, payload) =>
           this.gateway?.handlePublish(connectionId, channel, payload),
-        onDisconnect: (connectionId) => this.gateway?.handleDisconnect(connectionId),
+        onConnect: (connectionId) => this.handleConnect(connectionId),
+        onDisconnect: (connectionId) => this.handleDisconnect(connectionId),
       });
-      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir);
+      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
     }
 
     return this.bus.start();
   }
 
   async stop(): Promise<void> {
+    this.cancelIdleTimer();
+    this.shutdownRequested = true;
+
     if (this.bus) {
       await this.bus.stop();
       this.bus = null;
+    }
+
+    if (this.authService) {
+      this.authService.close();
+      this.authService = null;
     }
 
     if (this.harness) {

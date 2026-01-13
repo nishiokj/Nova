@@ -6,7 +6,7 @@ import { describe, it, expect } from 'bun:test';
 import { Agent } from './agent.js';
 import type { AgentConfig } from './types.js';
 import { ContextWindow } from '../context/index.js';
-import { createWorkItem } from '../wizard/work-item.js';
+import { createWorkItem } from '../work/work-item.js';
 import type { LLMAdapter, LLMResponse } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { successResult } from '../types/tools.js';
@@ -26,7 +26,7 @@ function createMockToolRegistry(): ToolRegistry {
     getDefinitions: () => [],
     getWorkingDir: () => process.cwd(),
     isParallelSafe: () => false,
-    execute: async () => ({
+    execute: async (_name: string, _args: Record<string, unknown>, _options?: { cwd?: string }) => ({
       toolName: 'Read',
       status: 'error',
       output: '',
@@ -42,7 +42,7 @@ function createReadToolRegistry(output: string): ToolRegistry {
     getDefinitions: () => [],
     getWorkingDir: () => process.cwd(),
     isParallelSafe: () => false,
-    execute: async (name: string) => {
+    execute: async (name: string, _args: Record<string, unknown>, _options?: { cwd?: string }) => {
       if (name.toLowerCase() !== 'read') {
         return {
           toolName: name,
@@ -93,7 +93,7 @@ describe('Agent', () => {
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
-    const result = await agent.run({ globalContext: context, workItem });
+    const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
 
     expect(result.success).toBe(true);
     expect(result.response).toBe('done');
@@ -145,7 +145,7 @@ describe('Agent', () => {
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
-    const result = await agent.run({ globalContext: context, workItem });
+    const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
 
     expect(result.success).toBe(false);
     expect(result.terminationReason).toBe('stagnation:tool_repeat');

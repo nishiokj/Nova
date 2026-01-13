@@ -38,4 +38,5 @@ export {
   type AdapterLogger,
   consoleLogger,
   createAdapter,
+  PartialStreamError,
 } from './adapter.js';

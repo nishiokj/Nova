@@ -15,6 +15,7 @@ export interface AgentRunParams {
   inputText: string;
   tier?: Tier;
   sessionKey: string;
+  workingDir: string;
   context?: string;
 }
 

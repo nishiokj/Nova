@@ -4,7 +4,7 @@
  * Run with: bun run start-graphd.ts
  */
 
-import { GraphDManager, createGraphDConfig } from '../../packages/graphd/src/index.js';
+import { GraphDManager, createGraphDConfig } from 'graphd';
 import path from 'path';
 import { homedir } from 'os';
 

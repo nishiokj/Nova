@@ -1,10 +1,10 @@
 import { Box, Text } from "ink";
 import type { AgentQuestion, QuestionType } from "../types.js";
-import { BOX_CHARS } from "../types.js";
+import { getColors } from "../theme.js";
 import { SingleSelect } from "./SingleSelect.js";
 import { MultiSelect } from "./MultiSelect.js";
 import { TextInputField } from "./TextInputField.js";
-import { wrapText } from "../utils/textWrap.js";
+import { wrapText, padText } from "../utils/textWrap.js";
 
 interface QuestionPromptProps {
   question: AgentQuestion;
@@ -14,18 +14,20 @@ interface QuestionPromptProps {
   width: number;
 }
 
-function getHelpText(type: QuestionType): string {
+function getQuestionTypeLabel(type: QuestionType): { label: string; icon: string } {
   switch (type) {
     case "multiple_choice":
+      return { label: "Choose one", icon: "○" };
     case "yes_no":
-      return "↑↓ navigate  Enter select  Esc cancel";
+      return { label: "Yes / No", icon: "◐" };
     case "multi_select":
-      return "↑↓ navigate  Space toggle  Enter confirm  Esc cancel";
+      return { label: "Select multiple", icon: "☰" };
     case "fill_in_blank":
+      return { label: "Type answer", icon: "▸" };
     case "free_text":
-      return "Type your answer  Enter submit  Esc cancel";
+      return { label: "Free response", icon: "▸" };
     default:
-      return "";
+      return { label: "Question", icon: "?" };
   }
 }
 
@@ -36,30 +38,43 @@ export function QuestionPrompt({
   inputText,
   width,
 }: QuestionPromptProps): JSX.Element {
-  const chars = BOX_CHARS.rounded;
-  const contentWidth = Math.min(70, width - 4);
-  const innerWidth = contentWidth - 4; // Account for borders and padding
+  // Fixed width box for consistent alignment
+  const boxWidth = Math.min(70, width - 4);
+  const innerWidth = boxWidth - 4; // 2 for borders, 2 for padding
 
-  // Wrap the question text
   const questionLines = wrapText(question.question, innerWidth);
   const contextLines = question.context ? wrapText(question.context, innerWidth) : [];
+  const typeInfo = getQuestionTypeLabel(question.type);
 
-  // Build the box
-  const headerText = " Agent Question ";
-  const topFill = contentWidth - headerText.length - 2;
-  const topLeftFill = Math.max(0, Math.floor(topFill / 4));
-  const topRightFill = Math.max(0, topFill - topLeftFill);
-  const topBorder =
-    chars.tl + chars.h.repeat(topLeftFill) + headerText + chars.h.repeat(topRightFill) + chars.tr;
+  // Simple box characters
+  const TOP_LEFT = "┌";
+  const TOP_RIGHT = "┐";
+  const BOT_LEFT = "└";
+  const BOT_RIGHT = "┘";
+  const HORIZ = "─";
+  const VERT = "│";
+  const TEE_LEFT = "├";
+  const TEE_RIGHT = "┤";
 
-  const bottomBorder = chars.bl + chars.h.repeat(contentWidth - 2) + chars.br;
-  const emptyLine = chars.v + " ".repeat(contentWidth - 2) + chars.v;
+  // Build fixed-width strings
+  const headerLabel = " ? Agent Question ";
+  const headerPadding = boxWidth - 2 - headerLabel.length;
+  const topBorder = TOP_LEFT + HORIZ.repeat(2) + headerLabel + HORIZ.repeat(headerPadding) + TOP_RIGHT;
+  const bottomBorder = BOT_LEFT + HORIZ.repeat(boxWidth - 2) + BOT_RIGHT;
+  const emptyLine = VERT + " ".repeat(boxWidth - 2) + VERT;
 
-  const helpText = getHelpText(question.type);
-  const helpPadded =
-    chars.v + " " + helpText.padEnd(contentWidth - 4) + " " + chars.v;
+  // Type label separator
+  const typeLabel = ` ${typeInfo.icon} ${typeInfo.label} `;
+  const sepPadLeft = Math.floor((boxWidth - 2 - typeLabel.length) / 2);
+  const sepPadRight = boxWidth - 2 - typeLabel.length - sepPadLeft;
+  const separator = TEE_LEFT + HORIZ.repeat(sepPadLeft) + typeLabel + HORIZ.repeat(sepPadRight) + TEE_RIGHT;
 
-  // Render the appropriate input component based on question type
+  // Render a content line with fixed width
+  const renderLine = (text: string) => {
+    const padded = padText(text, innerWidth, "left");
+    return VERT + " " + padded + " " + VERT;
+  };
+
   const renderQuestionBody = () => {
     switch (question.type) {
       case "multiple_choice":
@@ -99,50 +114,67 @@ export function QuestionPrompt({
     }
   };
 
+  // Use theme colors
+  const colors = getColors();
+  const borderColor = colors.border;
+  const textColor = colors.agent;
+  const dimColor = colors.muted;
+
   return (
     <Box flexDirection="column" marginY={1}>
-      {/* Top border with header */}
-      <Text color="cyanBright" bold>
+      {/* Top border */}
+      <Text color={borderColor} bold>
         {topBorder}
       </Text>
 
-      {/* Empty line for spacing */}
-      <Text color="cyan">{emptyLine}</Text>
-
       {/* Question text */}
       {questionLines.map((line, i) => (
-        <Text key={`q-${i}`} color="cyan">
-          {chars.v} {line.padEnd(contentWidth - 4)} {chars.v}
+        <Text key={`q-${i}`}>
+          <Text color={borderColor}>{VERT}</Text>
+          <Text color={textColor} bold={i === 0}>
+            {" " + padText(line, innerWidth, "left") + " "}
+          </Text>
+          <Text color={borderColor}>{VERT}</Text>
         </Text>
       ))}
 
-      {/* Context (if any) */}
+      {/* Context (if any) - dimmed */}
       {contextLines.length > 0 && (
         <>
-          <Text color="cyan">{emptyLine}</Text>
+          <Text color={borderColor}>{emptyLine}</Text>
           {contextLines.map((line, i) => (
-            <Text key={`c-${i}`} color="cyan" dimColor>
-              {chars.v} {line.padEnd(contentWidth - 4)} {chars.v}
+            <Text key={`c-${i}`}>
+              <Text color={borderColor}>{VERT}</Text>
+              <Text color={dimColor}>
+                {" " + padText(line, innerWidth, "left") + " "}
+              </Text>
+              <Text color={borderColor}>{VERT}</Text>
             </Text>
           ))}
         </>
       )}
 
-      {/* Options/Input area */}
-      <Box paddingLeft={2} paddingRight={2}>
+      {/* Separator with type badge */}
+      <Text color={borderColor}>{separator}</Text>
+
+      {/* Input area - outside the strict box for flexibility */}
+      <Box paddingLeft={1}>
         {renderQuestionBody()}
       </Box>
 
-      {/* Empty line for spacing */}
-      <Text color="cyan">{emptyLine}</Text>
-
-      {/* Help text */}
-      <Text color="cyan" dimColor>
-        {helpPadded}
-      </Text>
-
       {/* Bottom border */}
-      <Text color="cyan">{bottomBorder}</Text>
+      <Text color={borderColor}>{bottomBorder}</Text>
+
+      {/* Controls hint */}
+      <Box marginTop={1} paddingLeft={1}>
+        <Text color={dimColor}>
+          {"  "}
+          <Text color={colors.success}>Enter</Text>
+          {" submit  "}
+          <Text color={colors.error}>Esc</Text>
+          {" cancel"}
+        </Text>
+      </Box>
     </Box>
   );
 }

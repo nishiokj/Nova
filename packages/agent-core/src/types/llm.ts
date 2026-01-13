@@ -144,6 +144,17 @@ export interface ReasoningConfig {
 }
 
 /**
+ * Fallback model configuration for resilience.
+ * Used when primary model fails (circuit breaker trip or exhausted retries).
+ */
+export interface FallbackConfig {
+  provider: LLMProvider;
+  model: string;
+  baseUrl?: string;
+  apiKey?: string;
+}
+
+/**
  * Structured output schema for JSON responses.
  */
 export interface StructuredOutputSchema {
@@ -163,6 +174,7 @@ export interface LLMRequestConfig {
   temperature?: number;
   baseUrl?: string; // Optional override for custom API endpoints
   reasoning?: ReasoningConfig;
+  fallback?: FallbackConfig; // Fallback model if primary fails
 }
 
 /**
@@ -172,6 +184,7 @@ export interface LLMClientConfig {
   apiKeys?: Partial<Record<LLMProvider, string>>;
   baseUrls?: Partial<Record<LLMProvider, string>>;
   modelRegistry?: Record<string, { provider: LLMProvider; baseUrl?: string }>;
+  fallback?: FallbackConfig; // Global fallback model if primary fails
 }
 
 // ============================================
@@ -213,6 +226,7 @@ export interface LLMResponse {
   model: string;
   durationMs: number;
   responseId?: string; // OpenAI Responses API response ID
+  usedFallback?: boolean; // True if fallback model was used due to primary failure
 }
 
 // ============================================
@@ -268,6 +282,22 @@ export interface LLMAdapter {
    * Register a model mapping for provider/baseUrl resolution.
    */
   registerModel?(model: string, provider: LLMProvider, baseUrl?: string): void;
+
+  /**
+   * Update or add an API key for a provider at runtime.
+   * Also resets the circuit breaker to allow immediate retries.
+   */
+  updateApiKey?(provider: LLMProvider, apiKey: string): void;
+
+  /**
+   * Reset the circuit breaker state.
+   */
+  resetCircuitBreaker?(): void;
+
+  /**
+   * Update the global fallback configuration at runtime.
+   */
+  updateFallback?(fallback: FallbackConfig | undefined): void;
 }
 
 // ============================================

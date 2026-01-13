@@ -15,6 +15,7 @@ export interface BusServerOptions {
   host: string;
   port: number;
   onPublish: BusPublishHandler;
+  onConnect?: (connectionId: string) => void;
   onDisconnect?: (connectionId: string) => void;
 }
 
@@ -32,12 +33,14 @@ export class BusServer {
   private readonly host: string;
   private readonly port: number;
   private readonly onPublish: BusPublishHandler;
+  private readonly onConnect?: (connectionId: string) => void;
   private readonly onDisconnect?: (connectionId: string) => void;
 
   constructor(options: BusServerOptions) {
     this.host = options.host;
     this.port = options.port;
     this.onPublish = options.onPublish;
+    this.onConnect = options.onConnect;
     this.onDisconnect = options.onDisconnect;
   }
 
@@ -97,6 +100,13 @@ export class BusServer {
     return { host: address.address, port: address.port };
   }
 
+  /**
+   * Get the current number of connected clients.
+   */
+  getConnectionCount(): number {
+    return this.connections.size;
+  }
+
   private handleConnection(socket: Socket): void {
     const connectionId = `conn_${this.nextId++}`;
     const connection: ConnectionState = {
@@ -106,6 +116,10 @@ export class BusServer {
       subscriptions: new Set(),
     };
     this.connections.set(connectionId, connection);
+
+    if (this.onConnect) {
+      this.onConnect(connectionId);
+    }
 
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => this.handleData(connection, chunk));

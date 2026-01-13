@@ -408,6 +408,16 @@ export class GraphDManager {
     this.paused = paused;
   }
 
+  /**
+   * Checkpoint the WAL to flush writes to the main database file.
+   * This makes writes visible to other processes (like the dashboard).
+   */
+  checkpoint(): void {
+    if (this.store) {
+      this.store.checkpoint();
+    }
+  }
+
   // =========================================================================
   // HTTP API Handlers
   // =========================================================================
@@ -962,6 +972,35 @@ export class GraphDManager {
     } catch (err) {
       console.warn('Events delete failed:', err);
       return { deleted_count: 0, error: (err as Error).message };
+    }
+  }
+
+  // =========================================================================
+  // Session Fork
+  // =========================================================================
+
+  /**
+   * Fork a session, duplicating context snapshot and messages.
+   */
+  sessionFork(
+    sourceSessionKey: string,
+    targetSessionKey?: string
+  ): { success: boolean; newSessionKey?: string; error?: string } {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
+
+    const newKey = targetSessionKey ?? generateSessionKey();
+
+    try {
+      const result = this.store.forkSession(sourceSessionKey, newKey);
+      if (result.success) {
+        return { success: true, newSessionKey: newKey };
+      }
+      return { success: false, error: result.error };
+    } catch (err) {
+      console.warn('Session fork failed:', err);
+      return { success: false, error: (err as Error).message };
     }
   }
 

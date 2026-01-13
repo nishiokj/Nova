@@ -12,6 +12,8 @@ export type {
   FunctionCallOutputItem,
   ReasoningItem,
   FileContentItem,
+  ArtifactKind,
+  ArtifactItem,
   ContextItem,
   ContextWindowSnapshot,
   ContextWindowTelemetry,
@@ -93,6 +95,7 @@ export type {
   StreamParams,
   LLMAdapter,
   ConversationContext,
+  StructuredOutputSchema,
 } from './llm.js';
 
 export {

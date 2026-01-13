@@ -28,6 +28,9 @@ import { computeInputLayout } from "./buffer.js";
 import { useMouse } from "./useMouse.js";
 import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
 import { QuestionPrompt } from "./components/QuestionPrompt.js";
+import { ProvidersView } from "./components/ProvidersView.js";
+import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
+import { spawnForkedSession } from "./utils/fork-spawn.js";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
@@ -102,6 +105,7 @@ interface AppOptions {
   enableVoice: boolean;
   redactLogs: boolean;
   logTranscripts: boolean;
+  sessionKey: string | null;
 }
 
 // Skills and hooks are read-only in the TUI.
@@ -263,13 +267,18 @@ function App({ options }: { options: AppOptions }) {
     void client
       .connect()
       .then(() => {
+        const initData: Record<string, unknown> = {
+          enable_voice: options.enableVoice,
+          client_version: process.env.npm_package_version ?? "dev",
+          log_transcripts: options.logTranscripts,
+          working_dir: process.cwd(),
+        };
+        if (options.sessionKey) {
+          initData.session_key = options.sessionKey;
+        }
         client.send({
           type: "init",
-          data: {
-            enable_voice: options.enableVoice,
-            client_version: process.env.npm_package_version ?? "dev",
-            log_transcripts: options.logTranscripts,
-          },
+          data: initData,
         });
       })
       .catch((error) => {
@@ -355,7 +364,7 @@ function App({ options }: { options: AppOptions }) {
     }
   };
 
-  const handleReady = (data?: ReadyData) => {
+  const handleReady = async (data?: ReadyData) => {
     store.addMessage("system", "Bridge ready.");
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
@@ -372,6 +381,22 @@ function App({ options }: { options: AppOptions }) {
     }
     if (data?.config_summary) {
       store.addMessage("system", data.config_summary);
+    }
+
+    // Check if any API keys are configured and prompt user if not
+    try {
+      const result = await clientRef.current.providersList();
+      if (result.success && result.providers) {
+        const configuredProviders = result.providers.filter((p) => p.configured);
+        if (configuredProviders.length === 0) {
+          store.addMessage(
+            "system",
+            "No API keys configured. Run /providers to set up your LLM provider keys."
+          );
+        }
+      }
+    } catch {
+      // Ignore errors checking providers on startup
     }
   };
 
@@ -491,6 +516,20 @@ function App({ options }: { options: AppOptions }) {
     if (kind === "hooks") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
       handleHooksPayload(payload, content);
+      store.clearProgress();
+      store.setState("idle");
+      return;
+    }
+    if (kind === "compact_context") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.success) {
+        const itemsRemoved = payload.itemsRemoved ?? 0;
+        const bytesRecovered = payload.bytesRecovered ?? 0;
+        store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
+      } else {
+        const errorMsg = payload?.error ?? "Unknown error";
+        store.addMessage("system", `Context compaction failed: ${errorMsg}`);
+      }
       store.clearProgress();
       store.setState("idle");
       return;
@@ -631,6 +670,40 @@ function App({ options }: { options: AppOptions }) {
     exit();
   };
 
+  const handleFork = async () => {
+    const client = clientRef.current;
+    if (!client) {
+      store.addMessage("system", "Fork failed: Bridge not connected");
+      return;
+    }
+
+    store.addMessage("system", "Forking session...");
+
+    const result = await client.sessionFork();
+
+    if (!result.success) {
+      store.addMessage("system", `Fork failed: ${result.error ?? "Unknown error"}`);
+      return;
+    }
+
+    const workingDir = process.cwd();
+    const launcherPath = path.join(PROJECT_ROOT, "apps", "launcher", "index.ts");
+    const spawnResult = spawnForkedSession(result.newSessionKey!, workingDir, launcherPath);
+
+    if (spawnResult.autoSpawned) {
+      store.addMessage("system", `Fork successful: ${spawnResult.message}`);
+    } else {
+      store.addMessage("system", `Fork successful: ${spawnResult.message}`);
+      if (spawnResult.error) {
+        store.addMessage("system", `tmux error: ${spawnResult.error}`);
+      }
+      if (spawnResult.command) {
+        store.addMessage("system", `Run in new terminal: ${spawnResult.command}`);
+      }
+      store.addMessage("system", "TIP: Run inside tmux for automatic fork spawning");
+    }
+  };
+
   // Skills and hooks commands - read-only listing
   const handleSkillsCommand = (arg?: string) => {
     const parts = (arg ?? "").trim().split(/\s+/).filter(Boolean);
@@ -672,12 +745,45 @@ function App({ options }: { options: AppOptions }) {
       return;
     }
 
-    // Skills/hooks list modes - escape to return to chat
-    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks") {
+    // Skills/hooks/providers list modes - escape to return to chat
+    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks" || snapshot.uiMode === "providers") {
       if (key.escape) {
         store.setUIMode("chat");
         return;
       }
+    }
+
+    // Theme selection mode
+    if (snapshot.uiMode === "theme") {
+      const themeNames = getThemeNames();
+
+      if (key.escape) {
+        store.exitThemeMode();
+        return;
+      }
+
+      if (key.upArrow) {
+        store.moveThemeCursor(-1, themeNames.length);
+        return;
+      }
+
+      if (key.downArrow) {
+        store.moveThemeCursor(1, themeNames.length);
+        return;
+      }
+
+      if (key.return) {
+        const selectedTheme = themeNames[snapshot.themeCursor];
+        if (selectedTheme) {
+          setTheme(selectedTheme);
+          store.addMessage("system", `Theme set to "${themes[selectedTheme].name}".`);
+        }
+        store.exitThemeMode();
+        return;
+      }
+
+      // Consume all other input in theme mode
+      return;
     }
 
     // Question mode input handling
@@ -1113,6 +1219,9 @@ function App({ options }: { options: AppOptions }) {
       case "/status":
         sendCommand("get_status");
         return;
+      case "/providers":
+        store.setUIMode("providers");
+        return;
       case "/skills":
         handleSkillsCommand(arg);
         return;
@@ -1123,11 +1232,25 @@ function App({ options }: { options: AppOptions }) {
       case "/trash":
         void startDeleteFlow(arg);
         return;
-      case "/compact": {
+      case "/compact":
+        store.addMessage("system", "Compacting conversation context...");
+        sendCommand("compact_context");
+        return;
+      case "/dense": {
         const enabled = store.toggleCompact();
-        store.addMessage("system", `Compact mode ${enabled ? "enabled" : "disabled"}.`);
+        store.addMessage("system", `Dense display ${enabled ? "enabled" : "disabled"}.`);
         return;
       }
+      case "/theme": {
+        // Enter interactive theme selection mode
+        const themeNames = getThemeNames();
+        const currentIndex = themeNames.indexOf(getCurrentThemeName());
+        store.enterThemeMode(Math.max(0, currentIndex));
+        return;
+      }
+      case "/fork":
+        void handleFork();
+        return;
       case "/voice": {
         const enabled = !snapshot.voiceMode;
         if (enabled && !snapshot.capabilities.voiceAvailable) {
@@ -1253,6 +1376,7 @@ function App({ options }: { options: AppOptions }) {
     sendCommand("voice_stop");
   };
 
+  const colors = getColors();
   const statusLine = snapshot.progressMessage || snapshot.statusMessage;
   const statusSpinner = isBusy
     ? STATUS_SPINNER_FRAMES[statusTick % STATUS_SPINNER_FRAMES.length]
@@ -1261,19 +1385,19 @@ function App({ options }: { options: AppOptions }) {
   // Use progress level for coloring when available
   const statusColor = snapshot.progressMessage
     ? levelColor(snapshot.progressLevel)
-    : undefined;
+    : colors.muted;
   const scrollInfo = snapshot.scrollOffset > 0
     ? `Scroll: ${snapshot.scrollOffset} lines up`
     : "At bottom";
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
 
-  // Header lines with optional color for status
-  const headerConfig: Array<{ text: string; color?: string }> = [
-    { text: `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}` },
-    { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}` },
+  // Header lines with theme colors
+  const headerConfig: Array<{ text: string; color?: string; bold?: boolean }> = [
+    { text: `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}`, color: colors.agent, bold: true },
+    { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}`, color: colors.muted },
     { text: `Status: ${statusText}`, color: statusColor },
-    { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}` },
-    { text: "-".repeat(width) },
+    { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
+    { text: "-".repeat(width), color: colors.border },
   ];
   const headerLines = headerConfig.map((h) => h.text);
 
@@ -1374,30 +1498,74 @@ function App({ options }: { options: AppOptions }) {
   if (snapshot.helpVisible) {
     return (
       <Box flexDirection="column" paddingLeft={2} paddingTop={1} width={width}>
-        {HELP_LINES.map((line, index) => (
-          <Text key={`help-${index}`}>{line}</Text>
-        ))}
-        <Text>Press Esc, Enter, or Ctrl+K to close.</Text>
+        {HELP_LINES.map((line, index) => {
+          // Section headers (lines ending with :)
+          const isHeader = line.endsWith(":");
+          // Command lines (starting with spaces and /)
+          const isCommand = line.trimStart().startsWith("/");
+          const color = isHeader ? colors.agent : isCommand ? colors.user : colors.muted;
+          return <Text key={`help-${index}`} color={color} bold={isHeader}>{line}</Text>;
+        })}
+        <Text color={colors.muted}>Press Esc, Enter, or Ctrl+K to close.</Text>
       </Box>
     );
   }
 
   // Question mode: show QuestionPrompt instead of input box
   const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
+  const isThemeMode = snapshot.uiMode === "theme";
+  const isProvidersMode = snapshot.uiMode === "providers";
+
+  // Theme selector rendering
+  const renderThemeSelector = () => {
+    const themeNames = getThemeNames();
+    const colors = getColors();
+    return (
+      <Box flexDirection="column" paddingX={2} paddingY={1}>
+        <Text bold color={colors.agent}>Select Theme</Text>
+        <Text color={colors.muted}>Use ↑↓ to navigate, Enter to select, Esc to cancel</Text>
+        <Text> </Text>
+        {themeNames.map((name, index) => {
+          const t = themes[name];
+          const isSelected = index === snapshot.themeCursor;
+          const isCurrent = name === getCurrentThemeName();
+          const pointer = isSelected ? "▸ " : "  ";
+          const marker = isCurrent ? " (current)" : "";
+          return (
+            <Text key={name}>
+              <Text color={isSelected ? colors.user : colors.muted}>{pointer}</Text>
+              <Text color={isSelected ? colors.agent : colors.muted} bold={isSelected}>
+                {t.name}
+              </Text>
+              <Text color={colors.muted}> - {t.description}{marker}</Text>
+            </Text>
+          );
+        })}
+      </Box>
+    );
+  };
 
   return (
     <Box flexDirection="column" width={width}>
       {headerConfig.map((item, index) => (
-        <Text key={`header-${index}`} color={item.color}>{item.text.slice(0, width)}</Text>
+        <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, width)}</Text>
       ))}
       <Box flexDirection="column" height={historyHeight}>
         {visibleHistoryLines.map((line, index) => (
-          <Text key={`hist-${index}`} color={roleColor(line.role)}>
-            {line.text}
+          <Text key={`hist-${index}`}>
+            <StyledLine text={line.text} baseColor={roleColor(line.role)} />
           </Text>
         ))}
       </Box>
-      {isQuestionMode ? (
+      {isProvidersMode ? (
+        <ProvidersView
+          width={width}
+          bridgeClient={clientRef.current}
+          onClose={() => store.setUIMode("chat")}
+        />
+      ) : isThemeMode ? (
+        renderThemeSelector()
+      ) : isQuestionMode ? (
         <QuestionPrompt
           question={snapshot.activeQuestion!}
           cursor={snapshot.questionCursor}
@@ -1407,20 +1575,23 @@ function App({ options }: { options: AppOptions }) {
         />
       ) : (
         <>
-          <Text>{borderTop}</Text>
+          <Text color={colors.border}>{borderTop}</Text>
           {inputLines.map((line, index) => (
-            <Text key={`input-${index}`}>{`|${line}|`}</Text>
+            <Text key={`input-${index}`} color={colors.user}><Text color={colors.border}>|</Text>{line}<Text color={colors.border}>|</Text></Text>
           ))}
-          <Text>{borderBottom}</Text>
+          <Text color={colors.border}>{borderBottom}</Text>
           {snapshot.autocomplete.active ? (
             <Box flexDirection="column" width={width}>
-              <Text>{"-".repeat(width)}</Text>
-              {snapshot.autocomplete.suggestions.map((suggestion, index) => (
-                <Text key={`ac-${index}`}>
-                  {index === snapshot.autocomplete.selected ? "> " : "  "}
-                  {suggestion}
-                </Text>
-              ))}
+              <Text color={colors.border}>{"-".repeat(width)}</Text>
+              {snapshot.autocomplete.suggestions.map((suggestion, index) => {
+                const isSelected = index === snapshot.autocomplete.selected;
+                return (
+                  <Text key={`ac-${index}`} color={isSelected ? colors.user : colors.muted}>
+                    {isSelected ? "▸ " : "  "}
+                    {suggestion}
+                  </Text>
+                );
+              })}
             </Box>
           ) : null}
         </>
@@ -1430,15 +1601,16 @@ function App({ options }: { options: AppOptions }) {
 }
 
 function roleColor(role?: Role): string | undefined {
+  const colors = getColors();
   switch (role) {
     case "user":
-      return "green";
+      return colors.user;
     case "agent":
-      return "cyan";
+      return colors.agent;
     case "system":
-      return "yellow";
+      return colors.system;
     case "status":
-      return "magenta";
+      return colors.status;
     default:
       return undefined;
   }
@@ -1446,18 +1618,100 @@ function roleColor(role?: Role): string | undefined {
 
 /** Maps event level to display color */
 function levelColor(level?: string | null): string | undefined {
+  const colors = getColors();
   switch (level) {
     case "success":
-      return "green";
+      return colors.success;
     case "error":
-      return "red";
+      return colors.error;
     case "warning":
-      return "yellow";
+      return colors.warning;
     case "info":
-      return "cyan";
+      return colors.info;
     default:
       return undefined;
   }
+}
+
+/** Syntax highlight patterns - use color keys, resolved at runtime */
+type ColorKey = "code" | "url" | "path" | "number";
+const syntaxPatterns: Array<{ pattern: RegExp; colorKey: ColorKey; bold?: boolean }> = [
+  { pattern: /`[^`]+`/g, colorKey: "code", bold: true },               // inline code
+  { pattern: /```[\s\S]*?```/g, colorKey: "code" },                    // code blocks
+  { pattern: /https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },          // URLs
+  { pattern: /\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },           // file paths
+  { pattern: /\b\d+(?:\.\d+)?\s*(?:ms|s|sec|min|m|h|hr)s?\b/gi, colorKey: "number" }, // durations
+  { pattern: /\[[a-z_][a-z0-9_]*\]/gi, colorKey: "code", bold: true }, // [tool_name]
+];
+
+interface TextSegment {
+  text: string;
+  color?: string;
+  bold?: boolean;
+}
+
+/** Parse text into styled segments for syntax highlighting */
+function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
+  const colors = getColors();
+  const segments: TextSegment[] = [];
+
+  // Find all matches with positions
+  const matches: Array<{ start: number; end: number; text: string; color: string; bold?: boolean }> = [];
+
+  for (const { pattern, colorKey, bold } of syntaxPatterns) {
+    const regex = new RegExp(pattern.source, pattern.flags);
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+      matches.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        text: m[0],
+        color: colors[colorKey],
+        bold,
+      });
+    }
+  }
+
+  // Sort by position and filter overlaps
+  matches.sort((a, b) => a.start - b.start);
+  const filtered: typeof matches = [];
+  let lastEnd = 0;
+  for (const m of matches) {
+    if (m.start >= lastEnd) {
+      filtered.push(m);
+      lastEnd = m.end;
+    }
+  }
+
+  // Build segments
+  let pos = 0;
+  for (const m of filtered) {
+    if (m.start > pos) {
+      segments.push({ text: text.slice(pos, m.start), color: baseColor });
+    }
+    segments.push({ text: m.text, color: m.color, bold: m.bold });
+    pos = m.end;
+  }
+  if (pos < text.length) {
+    segments.push({ text: text.slice(pos), color: baseColor });
+  }
+
+  return segments.length > 0 ? segments : [{ text, color: baseColor }];
+}
+
+/** Render text with syntax highlighting */
+function StyledLine({ text, baseColor }: { text: string; baseColor?: string }): JSX.Element {
+  const segments = parseTextSegments(text, baseColor);
+
+  return (
+    <>
+      {segments.map((seg, i) => (
+        <Text key={i} color={seg.color} bold={seg.bold}>
+          {seg.text}
+        </Text>
+      ))}
+    </>
+  );
 }
 
 function messageExists(history: MessageEntry[], requestId: string): boolean {
@@ -1469,11 +1723,17 @@ function parseArgs(argv: string[]): AppOptions {
   let enableVoice = true;
   let redactLogs = false;
   let logTranscripts = true;
+  let sessionKey: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--ui-log" && argv[i + 1]) {
       uiLogPath = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--session" && argv[i + 1]) {
+      sessionKey = argv[i + 1];
       i += 1;
       continue;
     }
@@ -1499,7 +1759,7 @@ function parseArgs(argv: string[]): AppOptions {
     logTranscripts = false;
   }
 
-  return { uiLogPath, enableVoice, redactLogs, logTranscripts };
+  return { uiLogPath, enableVoice, redactLogs, logTranscripts, sessionKey };
 }
 
 const options = parseArgs(process.argv.slice(2));

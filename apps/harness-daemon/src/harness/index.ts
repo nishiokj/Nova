@@ -32,7 +32,7 @@ export type {
 } from './types.js';
 
 // Re-export EventBus for external subscribers
-export { EventBus, type EventBusProtocol } from '../../../../packages/comms-bus/src/event_bus.js';
+export { EventBus, type EventBusProtocol } from 'comms-bus';
 
 // Config loading
 export {

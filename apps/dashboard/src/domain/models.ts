@@ -199,6 +199,9 @@ export type SessionInsights = {
   requestsFailed: number;
   requestsCompleted: number;
   avgQuality?: number;
+  // Token metrics
+  totalInputTokens: number;
+  totalOutputTokens: number;
 };
 
 export type Session = {
@@ -272,6 +275,16 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
     ? qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length
     : undefined;
 
+  // Compute total token counts across all requests
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  for (const r of s.requests) {
+    for (const call of r.llmCalls) {
+      totalInputTokens += call.promptTokens;
+      totalOutputTokens += call.completionTokens;
+    }
+  }
+
   return {
     durationMs,
     errorRate,
@@ -286,6 +299,8 @@ export function computeSessionInsights(s: Omit<Session, 'insights'>): SessionIns
     requestsFailed,
     requestsCompleted,
     avgQuality,
+    totalInputTokens,
+    totalOutputTokens,
   };
 }
 

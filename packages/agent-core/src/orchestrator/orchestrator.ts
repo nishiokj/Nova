@@ -10,10 +10,10 @@
 import type { LLMAdapter } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ContextWindow } from '../context/index.js';
-import type { EventEmitCallback, UserPromptInfo } from '../agent/types.js';
+import type { EventEmitCallback, UserPromptInfo, AgentHooks, AgentResult } from '../agent/types.js';
 import { Agent } from '../agent/agent.js';
 import type { AgentRegistry } from '../agent/agent-registry.js';
-import { createWorkItem, type WorkItem } from '../wizard/work-item.js';
+import { createWorkItem, type WorkItem } from '../work/work-item.js';
 import { createEvent } from '../types/events.js';
 
 // --- Types ---
@@ -94,10 +94,12 @@ export class Orchestrator {
   private requestId: string;
   private logger?: OrchestratorLogger;
   private agentRegistry?: AgentRegistry;
+  private hooks?: AgentHooks;
 
-  // State for resume
-  private goal: string = '';
-  private agentType: string = 'standard';
+  // Work queue state for DAG-based execution
+  private workQueue: WorkItem[] = [];
+  private completedWork: Map<string, AgentResult> = new Map();
+  private initialWorkId: string = '';
 
   constructor(
     config: Partial<OrchestratorConfig>,
@@ -106,7 +108,8 @@ export class Orchestrator {
     emit: EventEmitCallback,
     requestId: string,
     logger?: OrchestratorLogger,
-    agentRegistry?: AgentRegistry
+    agentRegistry?: AgentRegistry,
+    hooks?: AgentHooks
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
@@ -115,18 +118,43 @@ export class Orchestrator {
     this.requestId = requestId;
     this.logger = logger;
     this.agentRegistry = agentRegistry;
+    this.hooks = hooks;
+  }
+
+  /**
+   * Enqueue a work item for processing.
+   * Items with dependencies will wait until all dependencies are completed.
+   *
+   * @param item - The work item to enqueue
+   * @returns The work item's ID
+   */
+  enqueue(item: WorkItem): string {
+    this.workQueue.push(item);
+    return item.workId;
   }
 
   /**
    * Main entry point: Execute until goal is reached or bounds exceeded.
+   *
+   * @param context - The context window for the session
+   * @param goal - The goal to achieve
+   * @param agentType - The type of agent to use
+   * @param cwd - Working directory for tool execution (required for concurrent-safe operation)
    */
   async execute(
     context: ContextWindow,
     goal: string,
-    agentType: string = 'standard'
+    agentType: string = 'standard',
+    cwd: string
   ): Promise<OrchestratorResult> {
-    this.goal = goal;
-    this.agentType = agentType;
+    // Clear work queue state for fresh execution
+    this.workQueue = [];
+    this.completedWork.clear();
+
+    // Enqueue initial work item
+    const initialItem = this.createWorkItem(goal, agentType);
+    this.initialWorkId = initialItem.workId;
+    this.enqueue(initialItem);
 
     const startTime = Date.now();
     let iteration = 0;
@@ -136,21 +164,6 @@ export class Orchestrator {
     // Hysteresis gate for compaction: compact at 80%, don't compact again until below 70%
     let compactedRecently = false;
 
-    // Create agent for this goal
-    const agent = this.createAgent(agentType);
-    if (!agent) {
-      return this.createResult({
-        success: false,
-        response: '',
-        error: `Unknown agent type: ${agentType}`,
-        terminationReason: 'agent_error',
-        metrics: { iterations: 0, totalLlmCalls: 0, totalToolCalls: 0, durationMs: 0 },
-      });
-    }
-
-    // Create work item representing the goal
-    const workItem = this.createWorkItem(goal);
-
     // Local helper to emit goal_not_achieved events (reduces duplication)
     const emitGoalNotAchieved = (reason: string, failed = 0) =>
       this.emit(createEvent('goal_not_achieved', { goal, reason, completed: 0, failed, skipped: 0 }));
@@ -158,7 +171,57 @@ export class Orchestrator {
     this.log('info', 'Starting orchestration', { goal, agentType });
     this.emit(createEvent('orchestration_started', { goal, agentType, requestId: this.requestId }));
 
-    while (true) {
+    // Track current work item and its agent
+    let currentItem: WorkItem | null = null;
+    let currentAgent: Agent | null = null;
+
+    // Process work queue
+    while (this.workQueue.length > 0 || currentItem !== null) {
+      // Dequeue next item if we don't have a current one
+      if (currentItem === null) {
+        currentItem = this.dequeueNext();
+        if (!currentItem) {
+          // All remaining items blocked on dependencies - deadlock or waiting
+          this.log('warning', 'Work queue deadlock - all items blocked on dependencies');
+          break;
+        }
+
+        // Create agent for this work item
+        currentAgent = this.createAgent(currentItem.agent);
+        if (!currentAgent) {
+          // Mark as failed with a synthetic error result
+          const errorResult: AgentResult = {
+            success: false,
+            response: '',
+            error: `Unknown agent type: ${currentItem.agent}`,
+            metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
+            filesRead: [],
+            invalidatedPaths: [],
+            toolErrors: [],
+            terminationReason: 'agent_error',
+            needsUserInput: false,
+            isRefusal: false,
+            localContext: context, // Placeholder - not used
+          };
+          this.completedWork.set(currentItem.workId, errorResult);
+
+          // If this was the initial item, return error immediately
+          if (currentItem.workId === this.initialWorkId) {
+            return this.createResult({
+              success: false,
+              response: '',
+              error: `Unknown agent type: ${currentItem.agent}`,
+              terminationReason: 'agent_error',
+              metrics: { iterations: 0, totalLlmCalls: 0, totalToolCalls: 0, durationMs: 0 },
+            });
+          }
+
+          currentItem = null;
+          currentAgent = null;
+          continue;
+        }
+      }
+
       iteration++;
       // Cache timestamp once per iteration for consistent metrics
       const now = Date.now();
@@ -207,11 +270,11 @@ export class Orchestrator {
         });
       }
 
-      this.log('info', `Iteration ${iteration}`, { totalToolCalls, totalLlmCalls });
-      this.emit(createEvent('iteration_started', { iteration, goal, requestId: this.requestId }));
+      this.log('info', `Iteration ${iteration}`, { totalToolCalls, totalLlmCalls, workItem: currentItem.workId });
+      this.emit(createEvent('iteration_started', { iteration, goal: currentItem.goal, requestId: this.requestId }));
 
       // AGENT EXECUTION - agent reads from global context, writes to its own local context
-      const result = await agent.run({ globalContext: context, workItem });
+      const result = await currentAgent!.run({ globalContext: context, workItem: currentItem, cwd });
 
       totalLlmCalls += result.metrics.llmCallsMade;
       totalToolCalls += result.metrics.toolCallsMade;
@@ -267,19 +330,31 @@ export class Orchestrator {
       const structured = result.structuredOutput;
       const goalStateReached = structured?.goalStateReached === true;
       if (goalStateReached || result.terminationReason === 'goal_state_reached') {
-        this.log('info', 'Goal state reached', { response: result.response?.slice(0, 100) });
-        this.emit(createEvent('goal_achieved', {
-          goal,
-          completed: 1,
-          skipped: 0,
-        }));
+        this.log('info', 'Goal state reached', { workItem: currentItem.workId, response: result.response?.slice(0, 100) });
+
+        // Mark this work item as complete
+        this.completedWork.set(currentItem.workId, result);
         context.addAgentResultContext(result);
-        return this.createResult({
-          success: true,
-          response: result.response,
-          terminationReason: 'goal_state_reached',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
-        });
+
+        // If this was the initial item and queue is empty, return success
+        if (currentItem.workId === this.initialWorkId && this.workQueue.length === 0) {
+          this.emit(createEvent('goal_achieved', {
+            goal,
+            completed: this.completedWork.size,
+            skipped: 0,
+          }));
+          return this.createResult({
+            success: true,
+            response: result.response,
+            terminationReason: 'goal_state_reached',
+            metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+          });
+        }
+
+        // More work items to process - continue to next
+        currentItem = null;
+        currentAgent = null;
+        continue;
       }
 
       // TERMINAL CHECK: Agent refusal
@@ -301,6 +376,8 @@ export class Orchestrator {
       if (result.error && !result.success && !actionIsContinue) {
         this.log('error', 'Agent error', { error: result.error });
         emitGoalNotAchieved(result.error, 1);
+        // Merge context to preserve any accumulated work before the error
+        context.addAgentResultContext(result);
         return this.createResult({
           success: false,
           response: result.response,
@@ -314,21 +391,51 @@ export class Orchestrator {
       context.addAgentResultContext(result);
       this.log('info', `Continuing to iteration ${iteration + 1}`);
     }
-  }
 
-  /**
-   * Resume after user input pause.
-   */
-  async resume(context: ContextWindow, userResponse: string): Promise<OrchestratorResult> {
-    // Inject user response into context
-    context.addMessage('user', userResponse);
-    this.log('info', 'Resuming after user input');
+    // Queue is empty - aggregate and return results
+    const initialResult = this.completedWork.get(this.initialWorkId);
+    if (initialResult) {
+      this.emit(createEvent('goal_achieved', {
+        goal,
+        completed: this.completedWork.size,
+        skipped: 0,
+      }));
+      return this.createResult({
+        success: initialResult.success,
+        response: initialResult.response,
+        error: initialResult.error,
+        terminationReason: 'goal_state_reached',
+        metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
+      });
+    }
 
-    // Re-enter loop with stored goal and agent type
-    return this.execute(context, this.goal, this.agentType);
+    // Edge case: queue emptied without completing initial item (shouldn't happen in normal flow)
+    return this.createResult({
+      success: false,
+      response: '',
+      error: 'Work queue exhausted without completing initial goal',
+      terminationReason: 'agent_error',
+      metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
+    });
   }
 
   // --- Private helpers ---
+
+  /**
+   * Dequeue the next ready work item (all dependencies satisfied).
+   * Returns null if all items are blocked on dependencies.
+   */
+  private dequeueNext(): WorkItem | null {
+    for (let i = 0; i < this.workQueue.length; i++) {
+      const item = this.workQueue[i];
+      const ready = item.dependencies.every(d => this.completedWork.has(d));
+      if (ready) {
+        this.workQueue.splice(i, 1);
+        return item;
+      }
+    }
+    return null;
+  }
 
   private createAgent(agentType: string): Agent | null {
     // Try requested type first, then fallback to 'standard' if different
@@ -345,15 +452,16 @@ export class Orchestrator {
       this.emit,
       this.requestId,
       this.agentRegistry,
-      runtime.llm
+      runtime.llm,
+      this.hooks
     );
   }
 
-  private createWorkItem(goal: string): WorkItem {
+  private createWorkItem(goal: string, agentType: string): WorkItem {
     // Get agent's budget from registry, fallback to orchestrator config
     let agentBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
     try {
-      agentBudget = this.agentRegistry?.getRuntimeConfig(this.agentType)?.config.budget;
+      agentBudget = this.agentRegistry?.getRuntimeConfig(agentType)?.config.budget;
     } catch {
       // Agent not in registry, use orchestrator defaults
     }
@@ -361,7 +469,7 @@ export class Orchestrator {
     return createWorkItem({
       goal,
       objective: goal,
-      agent: this.agentType,
+      agent: agentType,
       bounds: {
         maxToolCalls: agentBudget?.maxToolCalls ?? this.config.maxToolCalls,
         maxDurationMs: agentBudget?.maxDurationMs ?? this.config.maxDurationMs,

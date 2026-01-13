@@ -9,7 +9,7 @@ import type { LLMAdapter, Message, LLMRequestConfig } from '../llm/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { ToolDefinition, ToolResult } from '../types/tools.js';
 import { ContextWindow } from '../context/index.js';
-import type { WorkItem } from '../wizard/work-item.js';
+import type { WorkItem } from '../work/work-item.js';
 import type {
   AgentConfig,
   AgentRunParams,
@@ -17,12 +17,13 @@ import type {
   AgentMetrics,
   EventEmitCallback,
   UserPromptInfo,
+  AgentHooks,
 } from './types.js';
 import { noopEmit } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { createEvent } from '../types/events.js';
 import { buildSystemMessage } from '../context/index.js';
-import { createWorkItem } from '../wizard/work-item.js';
+import { createWorkItem } from '../work/work-item.js';
 import { errorResult, successResult } from '../types/tools.js';
 import { coerceStructuredOutput } from '../shared/structured_output.js';
 import { createMicroQueue } from '../shared/microqueue.js';
@@ -52,6 +53,7 @@ export class Agent {
   private agentRegistry?: AgentRegistry;
   private llmConfig: LLMRequestConfig;
   private lastRequestConfig: LLMRequestConfig | null = null;
+  private hooks?: AgentHooks;
 
   constructor(
     config: AgentConfig,
@@ -60,7 +62,8 @@ export class Agent {
     emit: EventEmitCallback = noopEmit,
     requestId: string = '',
     agentRegistry?: AgentRegistry,
-    llmConfig?: LLMRequestConfig
+    llmConfig?: LLMRequestConfig,
+    hooks?: AgentHooks
   ) {
     this.config = config;
     this.llm = llm;
@@ -69,6 +72,7 @@ export class Agent {
     this.requestId = requestId;
     this.agentRegistry = agentRegistry;
     this.llmConfig = llmConfig ?? { model: 'unknown' };
+    this.hooks = hooks;
   }
 
   /**
@@ -77,7 +81,7 @@ export class Agent {
    * GlobalContext is never mutated.
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
-    const { globalContext, workItem } = params;
+    const { globalContext, workItem, cwd } = params;
 
     // Create fresh local context for this agent's work
     const localContext = new ContextWindow(
@@ -109,12 +113,19 @@ export class Agent {
     };
 
     try {
-      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime);
+      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.error = message;
       result.terminationReason = `exception:${message}`;
       this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
+
+      // Synthesize response from accumulated work if we have any
+      // This preserves partial progress when rate limits or other errors interrupt execution
+      const accumulatedResponse = this.synthesizePartialResponse(localContext, result.response);
+      if (accumulatedResponse) {
+        result.response = `${accumulatedResponse}\n\n[Execution interrupted: ${message}]`;
+      }
     }
 
     metrics.durationMs = Date.now() - startTime;
@@ -131,7 +142,8 @@ export class Agent {
     workItem: WorkItem,
     result: AgentResult,
     metrics: AgentMetrics,
-    startTime: number
+    startTime: number,
+    cwd: string
   ): Promise<void> {
     const maxIterations = Math.min(
       this.config.budget.maxIterations,
@@ -147,7 +159,7 @@ export class Agent {
 
     // Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
-      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics);
+      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics, cwd);
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -193,11 +205,24 @@ export class Agent {
 
       const messages = this.buildMessages(systemMessage, workItem, globalContext, localContext);
 
+      // On the last iteration OR when approaching bounds, don't provide tools to force synthesis
+      // This ensures the LLM produces structured output instead of more tool calls
+      const isLastIteration = iteration === maxIterations - 1;
+      const toolBudgetNearlyExhausted = metrics.toolCallsMade >= workItem.bounds.maxToolCalls * 0.8;
+      const timeBudgetNearlyExhausted = elapsedMs >= workItem.bounds.maxDurationMs * 0.8;
+      const shouldWithholdTools = isLastIteration || toolBudgetNearlyExhausted || timeBudgetNearlyExhausted;
+
+      const toolsForThisCall = shouldWithholdTools ? undefined : (allowedTools.length > 0 ? allowedTools : undefined);
+
+      if (shouldWithholdTools && allowedTools.length > 0) {
+        console.error(`[AGENT DEBUG] Withholding tools to force synthesis: iteration=${iteration}/${maxIterations}, toolCalls=${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls}, elapsed=${elapsedMs}/${workItem.bounds.maxDurationMs}ms, agent=${this.config.type}`);
+      }
+
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
       const response = await this.llm.respond({
         messages: messages as unknown as Message[],
-        tools: allowedTools.length > 0 ? allowedTools : undefined,
+        tools: toolsForThisCall,
         llm: this.llmConfig,
         responseSchema: this.config.outputSchema,
       });
@@ -227,6 +252,8 @@ export class Agent {
       const responseText = this.extractStructuredResponse(structuredOutput);
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
 
+      console.error(`[AGENT DEBUG] LLM response: iteration=${iteration}, agent=${this.config.type}, action=${action}, hasResponseText=${!!responseText}, responseTextLength=${responseText?.length ?? 0}, toolCallCount=${toolCalls.length}, contentLength=${content.length}`);
+
       if (toolCalls.length > 0) {
         console.error(`[AGENT DEBUG] Processing ${toolCalls.length} tool calls, iteration=${iteration}, agent=${this.config.type}`);
         await this.processToolCalls(
@@ -237,6 +264,7 @@ export class Agent {
           result,
           metrics,
           workItem,
+          cwd,
           workItem.workId,
           toolRepeatState
         );
@@ -280,6 +308,11 @@ export class Agent {
           return;
         }
 
+        // Capture partial response even when continuing (in case we hit bounds later)
+        if (responseText && responseText.trim().length > 0) {
+          result.response = responseText;
+        }
+
         continue;
       }
 
@@ -317,6 +350,10 @@ export class Agent {
       }
 
       if (action === 'continue') {
+        // Capture partial response even when continuing (in case we hit bounds later)
+        if (responseText && responseText.trim().length > 0) {
+          result.response = responseText;
+        }
         continue;
       }
 
@@ -339,8 +376,33 @@ export class Agent {
         .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
         .map(m => m.content as string);
       console.error(`[AGENT DEBUG] Fallback response capture: found ${assistantContents.length} assistant messages, agent=${this.config.type}, terminationReason=${result.terminationReason}`);
-      if (assistantContents.length > 0) {
+
+      // Try to extract structured response from assistant content
+      for (const content of assistantContents) {
+        const parsed = coerceStructuredOutput(content);
+        if (parsed && typeof parsed.response === 'string' && parsed.response.trim().length > 0) {
+          result.response = parsed.response;
+          break;
+        }
+      }
+
+      // If still no response, use raw content
+      if (!result.response && assistantContents.length > 0) {
         result.response = assistantContents.join('\n\n');
+      }
+
+      // Last resort: summarize tool calls made if we have any
+      if (!result.response) {
+        const toolCalls = localContext.getItemsByType('function_call') as Array<{ name: string }>;
+        const toolOutputs = localContext.getItemsByType('function_call_output') as Array<{ output: string; isError?: boolean }>;
+        if (toolCalls.length > 0) {
+          const toolNames = toolCalls.map(t => t.name);
+          const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
+          const summary = `Exploration incomplete. Tools called: ${toolNames.join(', ')}. ` +
+            `${successfulOutputs.length} successful results obtained but not synthesized.`;
+          result.response = summary;
+          console.error(`[AGENT DEBUG] Using tool call summary as fallback response for ${this.config.type}`);
+        }
       }
     }
 
@@ -436,6 +498,9 @@ export class Agent {
       });
     }
 
+    let functionCallCount = 0;
+    let functionOutputCount = 0;
+
     for (const item of allItems) {
       if (item.type === 'message') {
         messages.push({
@@ -447,11 +512,15 @@ export class Agent {
         const callId = (item as any).call_id;
         if (callId && callIdsWithOutputs.has(callId)) {
           messages.push(item);
+          functionCallCount++;
         }
       } else if (item.type === 'function_call_output') {
         messages.push(item);
+        functionOutputCount++;
       }
     }
+
+    console.error(`[AGENT DEBUG] buildMessages: agent=${this.config.type}, messageCount=${messages.length}, functionCalls=${functionCallCount}, functionOutputs=${functionOutputCount}`);
 
     return messages;
   }
@@ -493,6 +562,7 @@ export class Agent {
     result: AgentResult,
     metrics: AgentMetrics,
     workItem: WorkItem,
+    cwd: string,
     workItemId?: string,
     toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
   ): Promise<void> {
@@ -628,16 +698,42 @@ export class Agent {
       const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
 
       if (isParallelSafe) {
+        // PreToolUse hook
+        let effectiveArgs = call.arguments;
+        if (this.hooks?.preToolUse) {
+          const hookResult = await this.hooks.preToolUse(canonicalName, call.arguments);
+          if (hookResult.action === 'block') {
+            const toolResult = errorResult(canonicalName, hookResult.message ?? 'Blocked by hook', 0);
+            const toolDurationMs = 0;
+            const stop = handleToolResult(call, toolResult, toolDurationMs, false);
+            if (stop) return;
+            continue;
+          }
+          if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
+            effectiveArgs = hookResult.modifiedArgs;
+          }
+        }
+
         this.emit(createEvent('tool_call', {
           toolName: canonicalName,
-          arguments: call.arguments,
+          arguments: effectiveArgs,
           phase: 'starting',
         }, workItemId));
 
         const toolStartTime = Date.now();
+        const capturedArgs = effectiveArgs;
         const promise = (async () => {
           try {
-            const toolResult = await this.toolRegistry.execute(canonicalName, call.arguments);
+            let toolResult = await this.toolRegistry.execute(canonicalName, capturedArgs, { cwd });
+
+            // PostToolUse hook
+            if (this.hooks?.postToolUse) {
+              const hookResult = await this.hooks.postToolUse(canonicalName, capturedArgs, toolResult);
+              if (hookResult.action === 'modify' && hookResult.modifiedResult) {
+                toolResult = hookResult.modifiedResult;
+              }
+            }
+
             return { toolResult, toolDurationMs: Date.now() - toolStartTime };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -654,9 +750,24 @@ export class Agent {
       const shouldStop = await flushParallel();
       if (shouldStop) return;
 
+      // PreToolUse hook for sequential execution
+      let effectiveArgs = call.arguments;
+      if (this.hooks?.preToolUse) {
+        const hookResult = await this.hooks.preToolUse(canonicalName, call.arguments);
+        if (hookResult.action === 'block') {
+          const toolResult = errorResult(canonicalName, hookResult.message ?? 'Blocked by hook', 0);
+          const stop = handleToolResult(call, toolResult, 0, isAgentTool);
+          if (stop) return;
+          continue;
+        }
+        if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
+          effectiveArgs = hookResult.modifiedArgs;
+        }
+      }
+
       this.emit(createEvent('tool_call', {
         toolName: canonicalName,
-        arguments: call.arguments,
+        arguments: effectiveArgs,
         phase: 'starting',
       }, workItemId));
 
@@ -664,11 +775,19 @@ export class Agent {
 
       try {
         // Use canonical name for execution, but pass original call for agent tools (which need call.id)
-        const normalizedCall = { ...call, name: canonicalName };
-        const toolResult = isAgentTool
-          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext)
-          : await this.toolRegistry.execute(canonicalName, call.arguments);
+        const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
+        let toolResult = isAgentTool
+          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext, localContext, cwd)
+          : await this.toolRegistry.execute(canonicalName, effectiveArgs, { cwd });
         const toolDurationMs = Date.now() - toolStartTime;
+
+        // PostToolUse hook
+        if (this.hooks?.postToolUse) {
+          const hookResult = await this.hooks.postToolUse(canonicalName, effectiveArgs, toolResult);
+          if (hookResult.action === 'modify' && hookResult.modifiedResult) {
+            toolResult = hookResult.modifiedResult;
+          }
+        }
 
         const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
         if (stop) return;
@@ -679,7 +798,7 @@ export class Agent {
 
         this.emit(createEvent('tool_call', {
           toolName: canonicalName,
-          arguments: call.arguments,
+          arguments: effectiveArgs,
           phase: 'completed',
           result: `Error: ${message}`,
           success: false,
@@ -703,7 +822,9 @@ export class Agent {
   private async executeAgentToolCall(
     call: { id: string; name: string; arguments: Record<string, unknown> },
     parentWorkItem: WorkItem,
-    globalContext: ContextWindow
+    globalContext: ContextWindow,
+    parentLocalContext: ContextWindow,
+    cwd: string
   ) {
     if (!this.agentRegistry) {
       return errorResult(call.name, 'Agent tool registry not available', 0);
@@ -767,18 +888,97 @@ export class Agent {
       this.emit,
       this.requestId,
       this.agentRegistry,
-      llmConfig
+      llmConfig,
+      this.hooks
     );
 
     // Sub-agent sees only globalContext (Option A: parent's local work is invisible)
     // Sub-agent's internal execution is opaque - we only extract the response
-    const subResult = await agent.run({ globalContext, workItem: subWorkItem });
+    const subResult = await agent.run({ globalContext, workItem: subWorkItem, cwd });
 
+    // Extract key findings from sub-agent's tool outputs to include in response
+    let enhancedResponse = subResult.response;
+    if (!enhancedResponse && subResult.localContext) {
+      // If no response but we have tool outputs, try to extract useful info
+      const toolOutputs = subResult.localContext.getItemsByType('function_call_output') as Array<{
+        output: string;
+        isError?: boolean;
+        callId?: string;
+      }>;
+      const toolCalls = subResult.localContext.getItemsByType('function_call') as Array<{
+        name: string;
+        callId?: string;
+        arguments?: Record<string, unknown>;
+      }>;
+
+      if (toolOutputs.length > 0) {
+        // Build a summary of what was found
+        const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
+        const outputSummaries: string[] = [];
+
+        for (let i = 0; i < Math.min(successfulOutputs.length, 5); i++) {
+          const output = successfulOutputs[i];
+          // Find the corresponding tool call to know what tool was used
+          const matchingCall = toolCalls.find(tc => tc.callId === output.callId);
+          const toolName = matchingCall?.name ?? 'unknown';
+          const truncatedOutput = output.output.length > 2000
+            ? output.output.slice(0, 2000) + '... [truncated]'
+            : output.output;
+          outputSummaries.push(`[${toolName}]: ${truncatedOutput}`);
+        }
+
+        if (outputSummaries.length > 0) {
+          enhancedResponse = `Sub-agent exploration results (${successfulOutputs.length} tool outputs):\n\n${outputSummaries.join('\n\n')}`;
+          if (successfulOutputs.length > 5) {
+            enhancedResponse += `\n\n... and ${successfulOutputs.length - 5} more results`;
+          }
+        }
+      }
+    }
+
+    // Extract artifacts from structured output and add to parent's local context
+    const artifacts = subResult.structuredOutput?.artifacts;
+    if (Array.isArray(artifacts) && artifacts.length > 0) {
+      const validArtifacts = artifacts.filter((a): a is {
+        sourcePath: string;
+        line?: number;
+        kind: string;
+        name: string;
+        signature?: string;
+        description: string;
+        relevance: number;
+      } => (
+        typeof a === 'object' &&
+        a !== null &&
+        typeof a.sourcePath === 'string' &&
+        typeof a.kind === 'string' &&
+        typeof a.name === 'string' &&
+        typeof a.description === 'string' &&
+        typeof a.relevance === 'number'
+      ));
+
+      if (validArtifacts.length > 0) {
+        parentLocalContext.addArtifacts(validArtifacts.map(a => ({
+          sourcePath: a.sourcePath,
+          line: typeof a.line === 'number' ? a.line : undefined,
+          kind: a.kind as import('../types/context.js').ArtifactKind,
+          name: a.name,
+          signature: typeof a.signature === 'string' ? a.signature : undefined,
+          description: a.description,
+          relevance: a.relevance,
+          discoveredBy: agentConfig.type,
+        })));
+      }
+    }
+
+    // Include full structured output so calling agent can see artifacts, patterns, etc.
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
       success: subResult.success,
-      response: subResult.response,
+      response: enhancedResponse,
+      structuredOutput: subResult.structuredOutput,
+      artifactsAdded: Array.isArray(artifacts) ? artifacts.length : 0,
       error: subResult.error,
       needsUserInput: subResult.needsUserInput,
       userPrompt: subResult.userPrompt,
@@ -799,7 +999,8 @@ export class Agent {
     targetPaths: readonly string[],
     localContext: ContextWindow,
     localReadFiles: Set<string>,
-    metrics: AgentMetrics
+    metrics: AgentMetrics,
+    cwd: string
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
     if (!allowedTools.has('read')) {
@@ -811,7 +1012,7 @@ export class Agent {
 
       try {
         metrics.toolCallsMade++;
-        const result = await this.toolRegistry.execute('Read', { path: targetPath });
+        const result = await this.toolRegistry.execute('Read', { path: targetPath }, { cwd });
         if (result.isSuccess) {
           localReadFiles.add(targetPath);
           metrics.toolCallsSucceeded++;
@@ -992,6 +1193,47 @@ export class Agent {
   ): string {
     if (!toolCalls.length) return '';
     return `[Tools: ${toolCalls.map((tc) => tc.name).join(', ')}]`;
+  }
+
+  /**
+   * Synthesize a response from accumulated work in the context.
+   * Returns the best available content: existing response, last assistant message, or tool outputs.
+   */
+  private synthesizePartialResponse(localContext: ContextWindow, existingResponse: string): string {
+    // If we already have a response from previous iterations, use it
+    if (existingResponse && existingResponse.trim().length > 0) {
+      return existingResponse;
+    }
+
+    // Try to extract the last assistant message
+    const messages = localContext.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
+    const assistantMessages = messages.filter(m => m.role === 'assistant');
+    if (assistantMessages.length > 0) {
+      const lastAssistant = assistantMessages[assistantMessages.length - 1];
+      const content = typeof lastAssistant.content === 'string'
+        ? lastAssistant.content
+        : JSON.stringify(lastAssistant.content);
+      if (content && content.trim().length > 0) {
+        return content;
+      }
+    }
+
+    // Fall back to summarizing tool outputs
+    const toolOutputs = localContext.getItemsByType('function_call_output') as Array<{ name?: string; output: string; isError?: boolean }>;
+    if (toolOutputs.length > 0) {
+      const successfulOutputs = toolOutputs.filter(o => !o.isError);
+      if (successfulOutputs.length > 0) {
+        // Return the last few tool outputs as context
+        const recentOutputs = successfulOutputs.slice(-3);
+        const summary = recentOutputs.map(o => {
+          const preview = o.output.length > 500 ? o.output.slice(0, 500) + '...' : o.output;
+          return `${o.name ?? 'tool'}: ${preview}`;
+        }).join('\n\n');
+        return `Work completed before interruption:\n${summary}`;
+      }
+    }
+
+    return '';
   }
 
   /**

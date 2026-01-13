@@ -17,10 +17,58 @@ import type {
   ContextWindowTelemetry,
   MessageItem,
   FileContentItem,
+  ArtifactItem,
   EjectResult,
   CompactOptions,
   CompactResult,
 } from '../types/context.js';
+
+// =========================================================================
+// Artifact Formatting
+// =========================================================================
+
+/**
+ * Format an artifact for LLM consumption - compact, no fluff.
+ * Only includes actionable information: signature, side effects, call graph, non-obvious insights.
+ */
+function formatArtifactForLLM(artifact: ArtifactItem): string {
+  const kindAbbrev: Record<string, string> = {
+    function: 'fn',
+    class: 'class',
+    interface: 'iface',
+    import: 'import',
+    export: 'export',
+    constant: 'const',
+    pattern: 'pattern',
+    summary: 'summary',
+  };
+
+  const parts: string[] = [];
+
+  // Header: [kind] path:line name or signature
+  const loc = artifact.line ? `${artifact.sourcePath}:${artifact.line}` : artifact.sourcePath;
+  const header = artifact.signature
+    ? `[${kindAbbrev[artifact.kind] ?? artifact.kind}] ${loc}\n${artifact.signature}`
+    : `[${kindAbbrev[artifact.kind] ?? artifact.kind}] ${loc} ${artifact.name}`;
+  parts.push(header);
+
+  // Side effects
+  if (artifact.modifies?.length) {
+    parts.push(`→ modifies: ${artifact.modifies.join(', ')}`);
+  }
+
+  // Call graph (non-trivial calls only)
+  if (artifact.calls?.length) {
+    parts.push(`→ calls: ${artifact.calls.join(', ')}`);
+  }
+
+  // Non-obvious insight (skip if redundant with name)
+  if (artifact.insight) {
+    parts.push(`→ ${artifact.insight}`);
+  }
+
+  return parts.join('\n');
+}
 
 // =========================================================================
 // System Message Builder
@@ -195,6 +243,51 @@ export class ContextWindow {
     this._readFiles.add(path);
     this._version++;
     return id;
+  }
+
+  private _artifactCounter = 0;
+
+  /**
+   * Add a semantic artifact to context. Returns the generated ID.
+   */
+  addArtifact(artifact: Omit<import('../types/context.js').ArtifactItem, 'type' | 'id' | 'timestamp'>): string {
+    const id = `art_${this.sessionKey.slice(0, 4)}_${++this._artifactCounter}`;
+    this._items.push({
+      type: 'artifact',
+      id,
+      ...artifact,
+      timestamp: Date.now(),
+    });
+    this._version++;
+    return id;
+  }
+
+  /**
+   * Add multiple artifacts at once.
+   */
+  addArtifacts(artifacts: Array<Omit<import('../types/context.js').ArtifactItem, 'type' | 'id' | 'timestamp'>>): string[] {
+    return artifacts.map(a => this.addArtifact(a));
+  }
+
+  /**
+   * Get all artifacts in context.
+   */
+  getArtifacts(): import('../types/context.js').ArtifactItem[] {
+    return this._items.filter((i): i is import('../types/context.js').ArtifactItem => i.type === 'artifact');
+  }
+
+  /**
+   * Get artifacts for a specific source path.
+   */
+  getArtifactsByPath(sourcePath: string): import('../types/context.js').ArtifactItem[] {
+    return this.getArtifacts().filter(a => a.sourcePath === sourcePath);
+  }
+
+  /**
+   * Get artifacts by kind (function, class, etc.).
+   */
+  getArtifactsByKind(kind: import('../types/context.js').ArtifactKind): import('../types/context.js').ArtifactItem[] {
+    return this.getArtifacts().filter(a => a.kind === kind);
   }
 
   /**
@@ -516,6 +609,15 @@ export class ContextWindow {
             content: `[File: ${item.path}]\n\`\`\`${item.language ?? ''}\n${item.content}\n\`\`\``,
           });
           break;
+
+        case 'artifact':
+          // Artifacts are semantic code discoveries - compact format, no fluff
+          result.push({
+            type: 'message',
+            role: 'user',
+            content: formatArtifactForLLM(item as import('../types/context.js').ArtifactItem),
+          });
+          break;
       }
     }
 
@@ -594,6 +696,14 @@ export class ContextWindow {
           result.push({
             role: 'user',
             content: `[File: ${item.path}]\n\`\`\`${item.language ?? ''}\n${item.content}\n\`\`\``,
+          });
+          break;
+
+        case 'artifact':
+          // Artifacts are semantic code discoveries - compact format, no fluff
+          result.push({
+            role: 'user',
+            content: formatArtifactForLLM(item as import('../types/context.js').ArtifactItem),
           });
           break;
       }
@@ -723,6 +833,7 @@ export class ContextWindow {
       function_call_output: 0,
       reasoning: 0,
       file_content: 0,
+      artifact: 0,
     };
 
     for (const item of this._items) {

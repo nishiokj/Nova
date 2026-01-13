@@ -3,9 +3,7 @@
  */
 
 import { describe, it, expect } from 'bun:test';
-import { BusServer } from '../../../../packages/comms-bus/src/bus_server.js';
-import { BusClient } from '../../../../packages/comms-bus/src/bus_client.js';
-import { BRIDGE_COMMAND_CHANNEL, runChannel } from '../../../../packages/comms-bus/src/bus_channels.js';
+import { BusServer, BusClient, BRIDGE_COMMAND_CHANNEL, runChannel } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createReadyEvent } from './event_translator.js';
 import type { AgentRunHandle, BridgeEvent } from './types.js';
