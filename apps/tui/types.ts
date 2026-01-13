@@ -11,12 +11,16 @@ export type BridgeCommandType =
   | "skills_create"
   | "skills_update"
   | "skills_delete"
+  | "skills_enable"
+  | "skills_disable"
   | "skills_run"
   | "hooks_list"
   | "hooks_get"
   | "hooks_create"
   | "hooks_update"
   | "hooks_delete"
+  | "hooks_enable"
+  | "hooks_disable"
   | "user_prompt_response"
   | "auth_start"
   | "auth_poll"
@@ -25,7 +29,9 @@ export type BridgeCommandType =
   | "providers_list"
   | "providers_save"
   | "providers_delete"
-  | "providers_test";
+  | "providers_test"
+  | "session_fork"
+  | "compact_context";
 
 export type BridgeEventType =
   | "ready"
