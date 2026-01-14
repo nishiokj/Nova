@@ -8,7 +8,7 @@
  */
 
 import { EventEmitter } from 'events';
-import type { AgentEvent, AgentEventType } from 'agent-core';
+import type { AgentEvent, AgentEventType } from 'types';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyEvent = AgentEvent<any>;

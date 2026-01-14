@@ -226,7 +226,7 @@
           "os": { "type": "string" },
           "artifacts": {
             "type": "array",
-            "description": "Semantic code artifacts extracted from source files",
+            "description": "Semantic code artifacts extracted from source files. Each artifact must specify which uncertainty category it reduces.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -241,9 +241,14 @@
                 "name": { "type": "string", "description": "Name of the artifact (function name, class name, etc.)" },
                 "signature": { "type": ["string", "null"], "description": "Signature or definition (e.g., 'async function run(params: RunParams): Promise<Result>')" },
                 "description": { "type": "string", "description": "Human-readable description of what this does" },
-                "relevance": { "type": "number", "description": "Relevance score 0.0-1.0 (how relevant to the current query)" }
+                "relevance": { "type": "number", "description": "Relevance score 0.0-1.0 (how relevant to the current query)" },
+                "reduces": {
+                  "type": "string",
+                  "enum": ["structural", "relational", "behavioral", "contractual"],
+                  "description": "Which uncertainty category this artifact reduces: structural (what exists), relational (what connects), behavioral (what happens), contractual (what's promised)"
+                }
               },
-              "required": ["sourcePath", "line", "kind", "name", "signature", "description", "relevance"]
+              "required": ["sourcePath", "line", "kind", "name", "signature", "description", "relevance", "reduces"]
             }
           }
         },

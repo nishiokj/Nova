@@ -1,6 +1,6 @@
 {
   "providers": {
-    "cerebras": "csk-kw59kmyywpdhxvnxfck5x92kn4dn8dy25jhnptjfnvry999f",
+    "cerebras": "",
     "openai": "",
     "anthropic": "",
     "together": "",
@@ -47,7 +47,14 @@
       "budget": {
         "max_iterations": 3,
         "max_tool_calls": 40,
-        "max_duration_ms": 30000
+        "max_duration_ms": 30000,
+        "uncertainty_targets": {
+          "structural": 0.8,
+          "relational": 0.8,
+          "behavioral": 0.6,
+          "contractual": 0.5
+        },
+        "overshoot_factor": 1.2
       },
       "tools": [
         "Read",
@@ -81,10 +88,14 @@
     },
     "standard": {
       "llm": {
-        "provider": "openai",
-        "model": "gpt-5.2",
+        "provider": "cerebras",
+        "model": "zai-glm-4.7",
         "max_tokens": 64000,
-        "temperature": 0.7
+        "temperature": 0.6,
+        "fallback": {
+          "provider": "openai",
+          "model": "gpt-5.2"
+        }
       },
       "budget": {
         "max_iterations": 10,

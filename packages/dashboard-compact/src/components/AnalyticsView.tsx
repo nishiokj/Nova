@@ -1,0 +1,232 @@
+import { useMemo } from 'react';
+import type { Session, LLMCall } from '@shared/domain/models';
+import { formatTokens } from './formatters';
+
+interface AnalyticsViewProps {
+  sessions: Session[];
+}
+
+interface ProviderStats {
+  provider: string;
+  today: number;
+  week: number;
+  month: number;
+}
+
+interface Metrics {
+  requestsPerDay: number;
+  llmCallsPerRequest: number;
+  // Per request averages
+  inputPerRequest: number;
+  outputPerRequest: number;
+  // Per LLM call averages
+  inputPerCall: number;
+  outputPerCall: number;
+  // Totals
+  totalRequests: number;
+  totalLlmCalls: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+}
+
+function isWithinDays(timestamp: string, days: number): boolean {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  return diffDays <= days;
+}
+
+function computeAnalytics(sessions: Session[]): { byProvider: ProviderStats[]; metrics: Metrics } {
+  const allLlmCalls: LLMCall[] = sessions.flatMap(s => s.requests.flatMap(r => r.llmCalls));
+
+  // Group by provider and time bucket
+  const providerMap = new Map<string, { today: number; week: number; month: number }>();
+
+  for (const call of allLlmCalls) {
+    const provider = call.provider || 'unknown';
+    const tokens = call.promptTokens + call.completionTokens;
+
+    if (!providerMap.has(provider)) {
+      providerMap.set(provider, { today: 0, week: 0, month: 0 });
+    }
+
+    const stats = providerMap.get(provider)!;
+    if (isWithinDays(call.timestamp, 1)) {
+      stats.today += tokens;
+    }
+    if (isWithinDays(call.timestamp, 7)) {
+      stats.week += tokens;
+    }
+    if (isWithinDays(call.timestamp, 30)) {
+      stats.month += tokens;
+    }
+  }
+
+  const byProvider = Array.from(providerMap.entries())
+    .map(([provider, stats]) => ({ provider, ...stats }))
+    .sort((a, b) => b.month - a.month);
+
+  // Compute metrics
+  const totalRequests = sessions.reduce((sum, s) => sum + s.requests.length, 0);
+  const totalLlmCalls = allLlmCalls.length;
+
+  // Calculate days span from oldest to newest session
+  const timestamps = sessions.map(s => new Date(s.createdAt).getTime());
+  const oldestMs = Math.min(...timestamps);
+  const newestMs = Math.max(...timestamps);
+  const daySpan = Math.max(1, (newestMs - oldestMs) / (1000 * 60 * 60 * 24));
+
+  const requestsPerDay = totalRequests / daySpan;
+  const llmCallsPerRequest = totalRequests > 0 ? totalLlmCalls / totalRequests : 0;
+
+  const totalInputTokens = allLlmCalls.reduce((sum, c) => sum + c.promptTokens, 0);
+  const totalOutputTokens = allLlmCalls.reduce((sum, c) => sum + c.completionTokens, 0);
+
+  // Per request averages
+  const inputPerRequest = totalRequests > 0 ? totalInputTokens / totalRequests : 0;
+  const outputPerRequest = totalRequests > 0 ? totalOutputTokens / totalRequests : 0;
+
+  // Per LLM call averages
+  const inputPerCall = totalLlmCalls > 0 ? totalInputTokens / totalLlmCalls : 0;
+  const outputPerCall = totalLlmCalls > 0 ? totalOutputTokens / totalLlmCalls : 0;
+
+  return {
+    byProvider,
+    metrics: {
+      requestsPerDay,
+      llmCallsPerRequest,
+      inputPerRequest,
+      outputPerRequest,
+      inputPerCall,
+      outputPerCall,
+      totalRequests,
+      totalLlmCalls,
+      totalInputTokens,
+      totalOutputTokens,
+    },
+  };
+}
+
+export function AnalyticsView({ sessions }: AnalyticsViewProps) {
+  const { byProvider, metrics } = useMemo(() => computeAnalytics(sessions), [sessions]);
+
+  if (sessions.length === 0) {
+    return (
+      <div className="analytics-view">
+        <div className="analytics-empty">No data available</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="analytics-view">
+      <div className="analytics-section">
+        <div className="analytics-section-title">Tokens by Provider</div>
+        <table className="analytics-table">
+          <thead>
+            <tr>
+              <th className="analytics-th">Provider</th>
+              <th className="analytics-th analytics-num">Today</th>
+              <th className="analytics-th analytics-num">Week</th>
+              <th className="analytics-th analytics-num">Month</th>
+            </tr>
+          </thead>
+          <tbody>
+            {byProvider.map((row) => (
+              <tr key={row.provider} className="analytics-row">
+                <td className="analytics-td">{row.provider}</td>
+                <td className="analytics-td analytics-num">{formatTokens(row.today)}</td>
+                <td className="analytics-td analytics-num">{formatTokens(row.week)}</td>
+                <td className="analytics-td analytics-num">{formatTokens(row.month)}</td>
+              </tr>
+            ))}
+            {byProvider.length === 0 && (
+              <tr>
+                <td colSpan={4} className="analytics-td text-muted">No LLM calls</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="analytics-section">
+        <div className="analytics-section-title">Per Request</div>
+        <table className="analytics-table">
+          <thead>
+            <tr>
+              <th className="analytics-th">Metric</th>
+              <th className="analytics-th analytics-num text-cyan">Input</th>
+              <th className="analytics-th analytics-num text-green">Output</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="analytics-row">
+              <td className="analytics-td">Tokens/req</td>
+              <td className="analytics-td analytics-num text-cyan">{formatTokens(metrics.inputPerRequest)}</td>
+              <td className="analytics-td analytics-num text-green">{formatTokens(metrics.outputPerRequest)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="analytics-section">
+        <div className="analytics-section-title">Per LLM Call</div>
+        <table className="analytics-table">
+          <thead>
+            <tr>
+              <th className="analytics-th">Metric</th>
+              <th className="analytics-th analytics-num text-cyan">Input</th>
+              <th className="analytics-th analytics-num text-green">Output</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="analytics-row">
+              <td className="analytics-td">Tokens/call</td>
+              <td className="analytics-td analytics-num text-cyan">{formatTokens(metrics.inputPerCall)}</td>
+              <td className="analytics-td analytics-num text-green">{formatTokens(metrics.outputPerCall)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="analytics-section">
+        <div className="analytics-section-title">Activity</div>
+        <table className="analytics-table">
+          <tbody>
+            <tr className="analytics-row">
+              <td className="analytics-td">Requests/day</td>
+              <td className="analytics-td analytics-num">{metrics.requestsPerDay.toFixed(1)}</td>
+            </tr>
+            <tr className="analytics-row">
+              <td className="analytics-td">LLM calls/req</td>
+              <td className="analytics-td analytics-num">{metrics.llmCallsPerRequest.toFixed(1)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="analytics-section">
+        <div className="analytics-section-title">Totals</div>
+        <div className="analytics-totals">
+          <div className="analytics-total">
+            <span className="analytics-total-value">{metrics.totalRequests}</span>
+            <span className="analytics-total-label">requests</span>
+          </div>
+          <div className="analytics-total">
+            <span className="analytics-total-value">{metrics.totalLlmCalls}</span>
+            <span className="analytics-total-label">LLM calls</span>
+          </div>
+          <div className="analytics-total">
+            <span className="analytics-total-value text-cyan">{formatTokens(metrics.totalInputTokens)}</span>
+            <span className="analytics-total-label">input tokens</span>
+          </div>
+          <div className="analytics-total">
+            <span className="analytics-total-value text-green">{formatTokens(metrics.totalOutputTokens)}</span>
+            <span className="analytics-total-label">output tokens</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

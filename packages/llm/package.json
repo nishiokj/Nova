@@ -1,20 +1,28 @@
 {
-  "name": "comms-bus",
+  "name": "llm",
   "version": "0.1.0",
-  "private": true,
+  "description": "LLM adapter layer with resilience",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "types": "workspace:*"
+    "types": "workspace:*",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/bun": "^1.0.0",
     "@types/node": "^20.10.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.3.3"
   }
 }
