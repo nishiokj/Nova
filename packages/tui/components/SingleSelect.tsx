@@ -15,9 +15,9 @@ export function SingleSelect({
   selected,
 }: SingleSelectProps): JSX.Element {
   const colors = getColors();
-  const accentColor = colors.user;
+  const accentColor = colors.accent;
   const selectedColor = colors.success;
-  const textColor = colors.agent;
+  const textColor = colors.text;
   const dimColor = colors.muted;
 
   return (

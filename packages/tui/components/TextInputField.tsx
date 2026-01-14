@@ -20,9 +20,9 @@ export function TextInputField({
   const showPlaceholder = displayValue.length === 0 && placeholder;
 
   const colors = getColors();
-  const textColor = colors.user;
+  const textColor = colors.text;
   const placeholderColor = colors.muted;
-  const cursorColor = colors.info;
+  const cursorColor = colors.accent;
 
   // Multiline with newlines
   if (multiline && displayValue.includes("\n")) {

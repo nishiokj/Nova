@@ -21,7 +21,7 @@ export function QuestionPrompt({
   width,
 }: QuestionPromptProps): JSX.Element {
   const colors = getColors();
-  const questionColor = colors.info;
+  const questionColor = colors.accent;
   const dimColor = colors.muted;
 
   const renderQuestionBody = () => {
