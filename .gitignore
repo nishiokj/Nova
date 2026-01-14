@@ -31,6 +31,14 @@ evals/results/*/*/*
 # Graphd database (local cache, not shared)
 .graphd/
 
+# Release binaries
+dist/binaries/
+*.exe
+rex-linux-*
+rex-darwin-*
+rex-windows-*
+latest-version.txt
+
 # Node.js / TypeScript
 node_modules/
 *.lock

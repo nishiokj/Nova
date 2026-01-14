@@ -1,0 +1,32 @@
+{
+  "name": "orchestrator",
+  "version": "0.1.0",
+  "description": "Orchestration runtime for agent system",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "types": "workspace:*",
+    "agent": "workspace:*",
+    "llm": "workspace:*",
+    "tools": "workspace:*",
+    "context": "workspace:*",
+    "work": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}
