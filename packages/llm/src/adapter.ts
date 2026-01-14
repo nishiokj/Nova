@@ -229,6 +229,13 @@ class LLMRouterAdapter implements LLMAdapter {
   }
 
   /**
+   * Check if an API key exists for a provider.
+   */
+  hasApiKey(provider: LLMProvider): boolean {
+    return !!this.apiKeys[provider];
+  }
+
+  /**
    * Reset the circuit breaker state (e.g., after fixing configuration).
    */
   resetCircuitBreaker(): void {

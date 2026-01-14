@@ -56,6 +56,7 @@ const SUPPORTED_PROVIDERS = [
   'groq',
   'fireworks',
   'gemini',
+  'replicate',
 ];
 
 // Fixed user ID for local (non-OAuth) use
@@ -380,6 +381,12 @@ export class LocalProviderManager {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
         );
+        return response.ok;
+      }
+      case 'replicate': {
+        const response = await fetch('https://api.replicate.com/v1/models', {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        });
         return response.ok;
       }
       default:

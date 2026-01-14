@@ -29,10 +29,7 @@ export const OrchestratorEventTypeSchema = z.enum([
   'iteration_started',
   'iteration_completed',
   'runtime_script_created',
-  'workitem_started',
-  'workitem_completed',
-  'workitem_failed',
-  'workitem_skipped',
+  'workitem_status',
   'goal_achieved',
   'goal_not_achieved',
 ]);
@@ -156,17 +153,6 @@ export const RuntimeScriptCreatedDataSchema = z.object({
 });
 
 /**
- * Data for workitem_started events.
- */
-export const WorkItemStartedDataSchema = z.object({
-  workId: z.string(),
-  objective: z.string(),
-  delta: z.string().optional(),
-  agent: z.string(),
-  dependencies: z.array(z.string()),
-});
-
-/**
  * Metrics for completed work items.
  */
 export const WorkItemMetricsSchema = z.object({
@@ -176,33 +162,29 @@ export const WorkItemMetricsSchema = z.object({
 });
 
 /**
- * Data for workitem_completed events.
+ * Work item status values.
  */
-export const WorkItemCompletedDataSchema = z.object({
-  workId: z.string(),
-  objective: z.string(),
-  response: z.string(),
-  metrics: WorkItemMetricsSchema,
-});
+export const WorkItemStatusValueSchema = z.enum(['started', 'completed', 'failed', 'skipped']);
 
 /**
- * Data for workitem_failed events.
+ * Unified data for workitem_status events.
  */
-export const WorkItemFailedDataSchema = z.object({
+export const WorkItemStatusDataSchema = z.object({
   workId: z.string(),
   objective: z.string(),
-  error: z.string(),
+  delta: z.string().optional(),
+  agent: z.string(),
+  dependencies: z.array(z.string()),
+  status: WorkItemStatusValueSchema,
+  // Fields for 'completed' status
+  response: z.string().optional(),
+  metrics: WorkItemMetricsSchema.optional(),
+  // Fields for 'failed' status
+  error: z.string().optional(),
   toolErrors: z.array(z.string()).optional(),
-  terminationReason: z.string(),
-});
-
-/**
- * Data for workitem_skipped events.
- */
-export const WorkItemSkippedDataSchema = z.object({
-  workId: z.string(),
-  objective: z.string(),
-  reason: z.string(),
+  terminationReason: z.string().optional(),
+  // Fields for 'skipped' status
+  reason: z.string().optional(),
 });
 
 /**
@@ -294,35 +276,11 @@ export const RuntimeScriptCreatedEventSchema = BaseEventFieldsSchema.extend({
 });
 
 /**
- * Work item started event.
+ * Unified work item status event.
  */
-export const WorkItemStartedEventSchema = BaseEventFieldsSchema.extend({
-  type: z.literal('workitem_started'),
-  data: WorkItemStartedDataSchema,
-});
-
-/**
- * Work item completed event.
- */
-export const WorkItemCompletedEventSchema = BaseEventFieldsSchema.extend({
-  type: z.literal('workitem_completed'),
-  data: WorkItemCompletedDataSchema,
-});
-
-/**
- * Work item failed event.
- */
-export const WorkItemFailedEventSchema = BaseEventFieldsSchema.extend({
-  type: z.literal('workitem_failed'),
-  data: WorkItemFailedDataSchema,
-});
-
-/**
- * Work item skipped event.
- */
-export const WorkItemSkippedEventSchema = BaseEventFieldsSchema.extend({
-  type: z.literal('workitem_skipped'),
-  data: WorkItemSkippedDataSchema,
+export const WorkItemStatusEventSchema = BaseEventFieldsSchema.extend({
+  type: z.literal('workitem_status'),
+  data: WorkItemStatusDataSchema,
 });
 
 /**
@@ -353,10 +311,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
   IterationStartedEventSchema,
   IterationCompletedEventSchema,
   RuntimeScriptCreatedEventSchema,
-  WorkItemStartedEventSchema,
-  WorkItemCompletedEventSchema,
-  WorkItemFailedEventSchema,
-  WorkItemSkippedEventSchema,
+  WorkItemStatusEventSchema,
   GoalAchievedEventSchema,
   GoalNotAchievedEventSchema,
 ]);
@@ -375,10 +330,8 @@ export type ToolCallData = z.infer<typeof ToolCallDataSchema>;
 export type LLMCallData = z.infer<typeof LLMCallDataSchema>;
 export type LLMErrorData = z.infer<typeof LLMErrorDataSchema>;
 export type RuntimeScriptCreatedData = z.infer<typeof RuntimeScriptCreatedDataSchema>;
-export type WorkItemStartedData = z.infer<typeof WorkItemStartedDataSchema>;
-export type WorkItemCompletedData = z.infer<typeof WorkItemCompletedDataSchema>;
-export type WorkItemFailedData = z.infer<typeof WorkItemFailedDataSchema>;
-export type WorkItemSkippedData = z.infer<typeof WorkItemSkippedDataSchema>;
+export type WorkItemStatusValue = z.infer<typeof WorkItemStatusValueSchema>;
+export type WorkItemStatusData = z.infer<typeof WorkItemStatusDataSchema>;
 export type GoalAchievedData = z.infer<typeof GoalAchievedDataSchema>;
 export type GoalNotAchievedData = z.infer<typeof GoalNotAchievedDataSchema>;
 

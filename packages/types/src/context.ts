@@ -92,11 +92,8 @@ export type UncertaintyCategory =
   | 'behavioral'    // What happens? (mutations, side effects, control flow)
   | 'contractual';  // What's promised? (interfaces, invariants, preconditions)
 
-/** Semantic code artifact - extracted from source files */
-export interface ArtifactItem {
-  type: 'artifact';
-  /** Unique identifier for this artifact */
-  id: string;
+/** LLM-facing artifact payload - what gets formatted for the model */
+export interface ArtifactPayload {
   /** Source file path */
   sourcePath: string;
   /** Line number in source (for navigation) */
@@ -113,6 +110,13 @@ export interface ArtifactItem {
   calls?: string[];
   /** Punchy insight - non-obvious behavior, gotchas, or goal-relevant info. Skip if name is self-explanatory. */
   insight?: string;
+}
+
+/** Full artifact item = payload + system fields */
+export interface ArtifactItem extends ArtifactPayload {
+  type: 'artifact';
+  /** Unique identifier for this artifact */
+  id: string;
   /** Which uncertainty category this artifact reduces */
   reduces?: UncertaintyCategory;
   /** Relevance score 0.0-1.0 (internal use - not sent to LLM) */

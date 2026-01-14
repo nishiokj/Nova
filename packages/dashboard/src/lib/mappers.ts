@@ -254,17 +254,32 @@ function createRequestFromEvents(
         break
       }
 
-      case 'workitem_started': {
+      case 'workitem_status': {
         const workId = (data.work_id as string)
           ?? (data.workId as string)
           ?? (e.work_item_id as string)
           ?? (e.workItemId as string)
+        const status = data.status as 'started' | 'completed' | 'failed' | 'skipped'
+
         if (workId) {
           const existing = workItemMap.get(workId)
           if (existing) {
-            existing.status = 'in_progress'
+            // Map 'started' to 'in_progress' for domain model
+            existing.status = status === 'started' ? 'in_progress' : status
             existing.objective = (data.objective as string) ?? existing.objective
             if (data.delta) existing.delta = data.delta as string
+
+            // Update status-specific fields
+            if (status === 'completed') {
+              const metrics = data.metrics as Record<string, unknown> | undefined
+              existing.durationMs = (metrics?.durationMs as number) ?? (metrics?.duration_ms as number)
+            } else if (status === 'failed') {
+              existing.error = (data.error as string)
+                ?? (data.termination_reason as string)
+                ?? (data.terminationReason as string)
+            } else if (status === 'skipped') {
+              existing.error = (data.reason as string) ?? (data.error as string)
+            }
           } else {
             workItemMap.set(workId, {
               workId,
@@ -273,61 +288,18 @@ function createRequestFromEvents(
               delta: (data.delta as string) ?? undefined,
               dependencies: (data.dependencies as string[]) ?? [],
               agent: (data.agent as AgentType) ?? 'standard',
-              status: 'in_progress',
+              status: status === 'started' ? 'in_progress' : status,
             })
           }
         }
-        if (state === 'queued') {
-          state = 'running'
-        }
-        break
-      }
 
-      case 'workitem_completed': {
-        const workId = (data.work_id as string)
-          ?? (data.workId as string)
-          ?? (e.work_item_id as string)
-          ?? (e.workItemId as string)
-        if (workId && workItemMap.has(workId)) {
-          const item = workItemMap.get(workId)!
-          item.status = 'completed'
-          const metrics = data.metrics as Record<string, unknown> | undefined
-          item.durationMs = (metrics?.durationMs as number) ?? (metrics?.duration_ms as number) ?? (data.duration_ms as number)
-        }
-        if (state === 'queued') {
+        if (state === 'queued' && status === 'started') {
           state = 'running'
-        }
-        break
-      }
-
-      case 'workitem_failed': {
-        const workId = (data.work_id as string)
-          ?? (data.workId as string)
-          ?? (e.work_item_id as string)
-          ?? (e.workItemId as string)
-        if (workId && workItemMap.has(workId)) {
-          const item = workItemMap.get(workId)!
-          item.status = 'failed'
-          item.error = (data.error as string)
+        } else if (status === 'failed') {
+          state = 'error'
+          errorMessage = (data.error as string)
             ?? (data.termination_reason as string)
             ?? (data.terminationReason as string)
-        }
-        state = 'error'
-        errorMessage = (data.error as string)
-          ?? (data.termination_reason as string)
-          ?? (data.terminationReason as string)
-        break
-      }
-
-      case 'workitem_skipped': {
-        const workId = (data.work_id as string)
-          ?? (data.workId as string)
-          ?? (e.work_item_id as string)
-          ?? (e.workItemId as string)
-        if (workId && workItemMap.has(workId)) {
-          const item = workItemMap.get(workId)!
-          item.status = 'skipped'
-          item.error = (data.reason as string) ?? (data.error as string)
         }
         break
       }

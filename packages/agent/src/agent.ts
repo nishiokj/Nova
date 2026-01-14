@@ -30,6 +30,11 @@ type AgentAction = 'done' | 'need_user_input' | 'continue';
 
 const MAX_IDENTICAL_TOOL_CALLS = 2;
 const MAX_TOOL_OUTPUT_LENGTH = 8000;
+const MAX_FILE_READ_OUTPUT_LENGTH = 30000;
+
+function getMaxOutputLength(toolName: string): number {
+  return toolName.toLowerCase() === 'read' ? MAX_FILE_READ_OUTPUT_LENGTH : MAX_TOOL_OUTPUT_LENGTH;
+}
 
 const REFUSAL_PATTERNS = [
   /cannot be completed/i,
@@ -54,24 +59,23 @@ export class Agent {
   private lastRequestConfig: LLMRequestConfig | null = null;
   private hooks?: AgentHooks;
 
-  constructor(
-    config: AgentConfig,
-    llm: LLMAdapter,
-    toolRegistry: ToolRegistry,
-    emit: EventEmitCallback = noopEmit,
-    requestId: string = '',
-    agentRegistry?: AgentRegistry,
-    llmConfig?: LLMRequestConfig,
-    hooks?: AgentHooks
-  ) {
+  constructor(config: AgentConfig, runtime: {
+    llm: LLMAdapter;
+    toolRegistry: ToolRegistry;
+    emit?: EventEmitCallback;
+    requestId?: string;
+    agentRegistry?: AgentRegistry;
+    llmConfig?: LLMRequestConfig;
+    hooks?: AgentHooks;
+  }) {
     this.config = config;
-    this.llm = llm;
-    this.toolRegistry = toolRegistry;
-    this.emit = emit;
-    this.requestId = requestId;
-    this.agentRegistry = agentRegistry;
-    this.llmConfig = llmConfig ?? { model: 'unknown' };
-    this.hooks = hooks;
+    this.llm = runtime.llm;
+    this.toolRegistry = runtime.toolRegistry;
+    this.emit = runtime.emit ?? noopEmit;
+    this.requestId = runtime.requestId ?? '';
+    this.agentRegistry = runtime.agentRegistry;
+    this.llmConfig = runtime.llmConfig ?? { model: 'unknown' };
+    this.hooks = runtime.hooks;
   }
 
   /**
@@ -190,7 +194,7 @@ export class Agent {
         break;
       }
 
-      const systemMessage = this.buildSystemMessage(workItem, {
+      const systemMessage = this.buildSystemMessage(workItem, cwd, {
         iteration: iteration + 1,
         maxIterations,
         toolCallsUsed: metrics.toolCallsMade,
@@ -443,6 +447,7 @@ export class Agent {
 
   private buildSystemMessage(
     workItem: WorkItem,
+    cwd: string,
     constraints?: {
       iteration?: number;
       maxIterations?: number;
@@ -457,7 +462,7 @@ export class Agent {
       workItem.goal,
       workItem.objective,
       undefined,
-      this.toolRegistry.getWorkingDir(),
+      cwd, // Use per-request cwd, not registry default
       constraints
     );
     return `${base}${contextInfo}`.trim();
@@ -625,9 +630,11 @@ export class Agent {
       }, workItemId));
 
       // Truncate tool outputs at storage to reduce context size
+      // File reads get higher limit (30KB) vs general tools (8KB)
       const rawOutput = toolResult.output ?? '';
-      const truncatedOutput = rawOutput.length > MAX_TOOL_OUTPUT_LENGTH
-        ? rawOutput.slice(0, MAX_TOOL_OUTPUT_LENGTH) + `\n... [truncated ${rawOutput.length - MAX_TOOL_OUTPUT_LENGTH} chars]`
+      const maxLen = getMaxOutputLength(call.name);
+      const truncatedOutput = rawOutput.length > maxLen
+        ? rawOutput.slice(0, maxLen) + `\n... [truncated ${rawOutput.length - maxLen} chars]`
         : rawOutput;
 
       localContext.appendItem({
@@ -1005,16 +1012,15 @@ export class Agent {
       },
     });
 
-    const agent = new Agent(
-      agentConfig,
-      this.llm,
-      this.toolRegistry,
-      this.emit,
-      this.requestId,
-      this.agentRegistry,
+    const agent = new Agent(agentConfig, {
+      llm: this.llm,
+      toolRegistry: this.toolRegistry,
+      emit: this.emit,
+      requestId: this.requestId,
+      agentRegistry: this.agentRegistry,
       llmConfig,
-      this.hooks
-    );
+      hooks: this.hooks,
+    });
 
     // Create merged context for sub-agent: combines global context with parent's discoveries
     // This enables sub-agents to see artifacts and file content from parent without re-discovery
@@ -1159,7 +1165,11 @@ export class Agent {
             ? result.output
             : JSON.stringify(result.output);
 
-          localContext.addFileContent(targetPath, fileContent.slice(0, 10000));
+          // Truncate file content at context storage (30KB limit for reads)
+          const truncated = fileContent.length > MAX_FILE_READ_OUTPUT_LENGTH
+            ? fileContent.slice(0, MAX_FILE_READ_OUTPUT_LENGTH) + `\n... [truncated ${fileContent.length - MAX_FILE_READ_OUTPUT_LENGTH} chars]`
+            : fileContent;
+          localContext.addFileContent(targetPath, truncated);
         } else {
           metrics.toolCallsFailed++;
         }

@@ -15,6 +15,8 @@ import { Agent } from 'agent';
 import type { AgentRegistry } from 'agent';
 import { createWorkItem, type WorkItem } from 'work';
 import { createEvent } from 'types';
+import type { ArtifactKind, ArtifactDiscoveredData } from 'types';
+import type { EventBusProtocol } from 'comms-bus';
 
 // --- Types ---
 
@@ -28,12 +30,24 @@ export interface OrchestratorConfig {
   maxToolCalls: number;
   /** Maximum duration in milliseconds */
   maxDurationMs: number;
+  /** Percent context usage that triggers compaction (default 0.8) */
+  compactTriggerPercent: number;
+  /** Percent context usage to reset compaction hysteresis (default 0.7) */
+  compactResetPercent: number;
+  /** Max file content items to keep during compaction */
+  compactMaxFileCount: number;
+  /** Max chars per tool output during compaction */
+  compactTruncateTo: number;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   maxIterations: 50,
   maxToolCalls: 200,
   maxDurationMs: 300_000, // 5 minutes
+  compactTriggerPercent: 0.8,
+  compactResetPercent: 0.7,
+  compactMaxFileCount: 20,
+  compactTruncateTo: 5000,
 };
 
 /**
@@ -105,6 +119,7 @@ export class Orchestrator {
   private agentRegistry?: AgentRegistry;
   private hooks?: AgentHooks;
   private planModeOptions?: PlanModeOptions;
+  private eventBus?: EventBusProtocol;
 
   // Work queue state for DAG-based execution
   private workQueue: WorkItem[] = [];
@@ -120,7 +135,8 @@ export class Orchestrator {
     logger?: OrchestratorLogger,
     agentRegistry?: AgentRegistry,
     hooks?: AgentHooks,
-    planModeOptions?: PlanModeOptions
+    planModeOptions?: PlanModeOptions,
+    eventBus?: EventBusProtocol
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
@@ -131,6 +147,7 @@ export class Orchestrator {
     this.agentRegistry = agentRegistry;
     this.hooks = hooks;
     this.planModeOptions = planModeOptions;
+    this.eventBus = eventBus;
   }
 
   /**
@@ -157,6 +174,38 @@ export class Orchestrator {
     context: ContextWindow,
     goal: string,
     agentType: string = 'standard',
+    cwd: string
+  ): Promise<OrchestratorResult> {
+    // Subscribe to artifact events for real-time stitching into global context
+    // Dedupe is handled internally by addArtifact() - O(1)
+    const unsubscribe = this.eventBus?.subscribe('artifact_discovered', (event) => {
+      const data = event.data as ArtifactDiscoveredData;
+      context.addArtifact({
+        sourcePath: data.artifact.sourcePath,
+        line: data.artifact.line,
+        kind: data.artifact.kind as ArtifactKind,
+        name: data.artifact.name,
+        signature: data.artifact.signature,
+        insight: data.artifact.insight,
+        relevance: data.artifact.relevance,
+        discoveredBy: data.agentType,
+      });
+    });
+
+    try {
+      return await this.executeInner(context, goal, agentType, cwd);
+    } finally {
+      unsubscribe?.();
+    }
+  }
+
+  /**
+   * Inner execution logic, wrapped by execute() for cleanup.
+   */
+  private async executeInner(
+    context: ContextWindow,
+    goal: string,
+    agentType: string,
     cwd: string
   ): Promise<OrchestratorResult> {
     // Clear work queue state for fresh execution
@@ -238,16 +287,16 @@ export class Orchestrator {
       const now = Date.now();
       const elapsed = now - startTime;
 
-      // AUTO-COMPACT with hysteresis: compact at 80%, don't re-compact until below 70%
+      // AUTO-COMPACT with hysteresis
       const percentUsed = context.metrics.percentageUsed;
-      if (percentUsed < 0.7) {
+      if (percentUsed < this.config.compactResetPercent) {
         compactedRecently = false;
       }
-      if (!compactedRecently && percentUsed >= 0.8) {
+      if (!compactedRecently && percentUsed >= this.config.compactTriggerPercent) {
         const compactResult = context.compact({
           deduplicateByPath: true,
-          maxFileContentCount: 20,
-          truncateOutputsTo: 5000,
+          maxFileContentCount: this.config.compactMaxFileCount,
+          truncateOutputsTo: this.config.compactTruncateTo,
         });
         compactedRecently = true;
         this.log('info', 'Auto-compacted context', {
@@ -259,11 +308,13 @@ export class Orchestrator {
 
       // BOUND CHECK: Iterations
       if (iteration > this.config.maxIterations) {
-        this.log('warning', 'Max iterations exceeded', { iteration });
+        this.log('warning', 'Max iterations exceeded', { iteration, completedWork: this.completedWork.size });
         emitGoalNotAchieved('max_iterations_exceeded');
+        const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_iterations_exceeded');
+        const hasContent = this.completedWork.size > 0;
         return this.createResult({
-          success: false,
-          response: '',
+          success: hasContent, // Partial success if we have any completed work
+          response: harvestedResponse,
           terminationReason: 'max_iterations_exceeded',
           metrics: { iterations: iteration - 1, totalLlmCalls, totalToolCalls, durationMs: elapsed },
         });
@@ -271,11 +322,13 @@ export class Orchestrator {
 
       // BOUND CHECK: Duration
       if (elapsed > this.config.maxDurationMs) {
-        this.log('warning', 'Max duration exceeded', { elapsed });
+        this.log('warning', 'Max duration exceeded', { elapsed, completedWork: this.completedWork.size });
         emitGoalNotAchieved('max_duration_exceeded');
+        const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_duration_exceeded');
+        const hasContent = this.completedWork.size > 0;
         return this.createResult({
-          success: false,
-          response: '',
+          success: hasContent, // Partial success if we have any completed work
+          response: harvestedResponse,
           terminationReason: 'max_duration_exceeded',
           metrics: { iterations: iteration - 1, totalLlmCalls, totalToolCalls, durationMs: elapsed },
         });
@@ -380,12 +433,15 @@ export class Orchestrator {
 
           // BOUND CHECK: Total tool calls
           if (totalToolCalls >= this.config.maxToolCalls) {
-            this.log('warning', 'Max tool calls exceeded', { totalToolCalls });
+            this.log('warning', 'Max tool calls exceeded', { totalToolCalls, completedWork: this.completedWork.size });
             emitGoalNotAchieved('max_tool_calls_exceeded');
             context.addAgentResultContext(result);
+            // Use result.response if available, otherwise harvest completed work
+            const response = result.response || this.harvestCompletedWork(inProgress, 'max_tool_calls_exceeded');
+            const hasContent = !!result.response || this.completedWork.size > 0;
             terminalResult = this.createResult({
-              success: false,
-              response: result.response,
+              success: hasContent, // Partial success if we have any content
+              response,
               terminationReason: 'max_tool_calls_exceeded',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
@@ -519,16 +575,15 @@ export class Orchestrator {
       };
     }
 
-    return new Agent(
-      config,
-      this.llm,
-      this.toolRegistry,
-      this.emit,
-      this.requestId,
-      this.agentRegistry,
-      runtime.llm,
-      this.hooks
-    );
+    return new Agent(config, {
+      llm: this.llm,
+      toolRegistry: this.toolRegistry,
+      emit: this.emit,
+      requestId: this.requestId,
+      agentRegistry: this.agentRegistry,
+      llmConfig: runtime.llm,
+      hooks: this.hooks,
+    });
   }
 
   private createWorkItem(goal: string, agentType: string): WorkItem {
@@ -568,5 +623,54 @@ export class Orchestrator {
 
   private log(level: keyof OrchestratorLogger, msg: string, meta?: Record<string, unknown>): void {
     this.logger?.[level](msg, { component: 'orchestrator', requestId: this.requestId, ...meta });
+  }
+
+  /**
+   * Harvest responses from completed work items and build a combined response.
+   * Used when bounds are exceeded to return partial progress instead of empty.
+   */
+  private harvestCompletedWork(
+    inProgress: Map<string, { item: WorkItem; agent: Agent }>,
+    reason: string
+  ): string {
+    const parts: string[] = [];
+
+    // Collect responses from completed work items
+    if (this.completedWork.size > 0) {
+      parts.push(`## Completed Work (${this.completedWork.size} items)`);
+      for (const [workId, result] of this.completedWork) {
+        if (result.response && result.response.trim().length > 0) {
+          const preview = result.response.length > 2000
+            ? result.response.slice(0, 2000) + '... [truncated]'
+            : result.response;
+          parts.push(`\n### ${workId}\n${preview}`);
+        }
+      }
+    }
+
+    // Note any work still in progress
+    if (inProgress.size > 0) {
+      parts.push(`\n## Work In Progress (${inProgress.size} items)`);
+      for (const [workId, { item }] of inProgress) {
+        parts.push(`- ${workId}: ${item.objective.slice(0, 100)}${item.objective.length > 100 ? '...' : ''}`);
+      }
+    }
+
+    // Note any queued work that didn't start
+    if (this.workQueue.length > 0) {
+      parts.push(`\n## Queued Work (${this.workQueue.length} items not started)`);
+      for (const item of this.workQueue.slice(0, 5)) {
+        parts.push(`- ${item.workId}: ${item.objective.slice(0, 100)}${item.objective.length > 100 ? '...' : ''}`);
+      }
+      if (this.workQueue.length > 5) {
+        parts.push(`... and ${this.workQueue.length - 5} more`);
+      }
+    }
+
+    if (parts.length === 0) {
+      return `Execution terminated (${reason}) with no completed work to report.`;
+    }
+
+    return `**Execution terminated: ${reason}**\n\n${parts.join('\n')}`;
   }
 }

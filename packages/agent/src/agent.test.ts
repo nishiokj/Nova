@@ -81,15 +81,11 @@ describe('Agent', () => {
       outputSchema: { name: 'agent_action_output', schema: { type: 'object' }, strict: true },
     };
 
-    const agent = new Agent(
-      config,
+    const agent = new Agent(config, {
       llm,
-      createMockToolRegistry(),
-      undefined,
-      '',
-      undefined,
-      { model: 'test-model', provider: 'openai', apiKey: 'test-key' }
-    );
+      toolRegistry: createMockToolRegistry(),
+      llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+    });
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
@@ -109,9 +105,8 @@ describe('Agent', () => {
       outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true },
     };
 
-    const agent = new Agent(
-      config,
-      {
+    const agent = new Agent(config, {
+      llm: {
         respond: async () => ({
           content: '',
           toolCalls: [
@@ -136,12 +131,9 @@ describe('Agent', () => {
           };
         },
       } as LLMAdapter,
-      createReadToolRegistry('file contents'),
-      undefined,
-      '',
-      undefined,
-      { model: 'test-model', provider: 'openai', apiKey: 'test-key' }
-    );
+      toolRegistry: createReadToolRegistry('file contents'),
+      llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+    });
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 

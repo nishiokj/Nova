@@ -19,7 +19,9 @@ export type AgentCoreEventType =
   | 'llm_call'
   | 'llm_error'
   | 'agent_bounds_hit'
-  | 'agent_message';
+  | 'agent_message'
+  | 'artifact_discovered'
+  | 'agent_progress';
 
 /**
  * Orchestrator event types.
@@ -29,10 +31,7 @@ export type OrchestratorEventType =
   | 'iteration_started'
   | 'iteration_completed'
   | 'runtime_script_created'
-  | 'workitem_started'
-  | 'workitem_completed'
-  | 'workitem_failed'
-  | 'workitem_skipped'
+  | 'workitem_status'
   | 'goal_achieved'
   | 'goal_not_achieved';
 
@@ -125,48 +124,33 @@ export interface RuntimeScriptCreatedData {
 }
 
 /**
- * Data for workitem_started event.
+ * Work item status values.
  */
-export interface WorkItemStartedData {
+export type WorkItemStatusValue = 'started' | 'completed' | 'failed' | 'skipped';
+
+/**
+ * Unified data for workitem_status event.
+ */
+export interface WorkItemStatusData {
   workId: string;
   objective: string;
   delta?: string;
   agent: AgentType;
   dependencies: string[];
-}
-
-/**
- * Data for workitem_completed event.
- */
-export interface WorkItemCompletedData {
-  workId: string;
-  objective: string;
-  response: string;
-  metrics: {
+  status: WorkItemStatusValue;
+  // Fields for 'completed' status
+  response?: string;
+  metrics?: {
     llmCallsMade: number;
     toolCallsMade: number;
     durationMs: number;
   };
-}
-
-/**
- * Data for workitem_failed event.
- */
-export interface WorkItemFailedData {
-  workId: string;
-  objective: string;
-  error: string;
+  // Fields for 'failed' status
+  error?: string;
   toolErrors?: string[];
-  terminationReason: string;
-}
-
-/**
- * Data for workitem_skipped event.
- */
-export interface WorkItemSkippedData {
-  workId: string;
-  objective: string;
-  reason: string;
+  terminationReason?: string;
+  // Fields for 'skipped' status
+  reason?: string;
 }
 
 /**
@@ -233,6 +217,36 @@ export interface LLMErrorData {
   model: string;
   error: string;
   errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown';
+}
+
+/**
+ * Data for artifact_discovered event.
+ * Emitted in real-time when an agent discovers artifacts.
+ */
+export interface ArtifactDiscoveredData {
+  artifact: {
+    id: string;
+    sourcePath: string;
+    line?: number;
+    kind: string;
+    name: string;
+    signature?: string;
+    insight?: string;
+    relevance: number;
+  };
+  agentType: string;
+  artifactCount: number;
+}
+
+/**
+ * Data for agent_progress event.
+ * Emitted at key milestones for TUI progress display.
+ */
+export interface AgentProgressData {
+  message: string;
+  agentType: string;
+  category?: 'search' | 'analysis' | 'discovery' | 'synthesis';
+  count?: { current: number; total?: number; label: string };
 }
 
 // ============================================

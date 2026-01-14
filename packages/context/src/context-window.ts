@@ -17,6 +17,7 @@ import type {
   ContextWindowTelemetry,
   MessageItem,
   FileContentItem,
+  ArtifactPayload,
   ArtifactItem,
   EjectResult,
   CompactOptions,
@@ -31,7 +32,7 @@ import type {
  * Format an artifact for LLM consumption - compact, no fluff.
  * Only includes actionable information: signature, side effects, call graph, non-obvious insights.
  */
-function formatArtifactForLLM(artifact: ArtifactItem): string {
+function formatArtifactForLLM(artifact: ArtifactPayload): string {
   const kindAbbrev: Record<string, string> = {
     function: 'fn',
     class: 'class',

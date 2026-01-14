@@ -6,7 +6,8 @@
     "together": "",
     "groq": "",
     "fireworks": "",
-    "gemini": ""
+    "gemini": "",
+    "replicate": ""
   },
   "agents": {
     "routing": {

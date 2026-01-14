@@ -48,6 +48,8 @@ interface HarnessLike {
   shutdown(): Promise<void>;
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
+  hasApiKey(provider: import('types').LLMProvider): boolean;
+  getGraphD?(): import('graphd').GraphDManager | null;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
 }
@@ -216,6 +218,12 @@ export class BridgeGateway {
         case 'compact_context':
           this.handleCompactContext(connectionId, state);
           return;
+        case 'set_model':
+          this.handleSetModel(connectionId, command.data, state);
+          return;
+        case 'get_model':
+          this.handleGetModel(connectionId, state);
+          return;
         case 'shutdown':
           this.sendError(connectionId, 'Shutdown is not supported via bridge');
           return;
@@ -262,7 +270,11 @@ export class BridgeGateway {
       return;
     }
 
-    const workingDir = state.workingDir ?? this.workingDir;
+    // Per-request working_dir takes precedence over init-time state, which takes precedence over daemon default
+    const requestWorkingDir = typeof data?.working_dir === 'string' && data.working_dir.length > 0
+      ? data.working_dir
+      : null;
+    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
 
     const text = String(data?.text ?? '');
     if (!text.trim()) {
@@ -307,7 +319,11 @@ export class BridgeGateway {
       return;
     }
 
-    const workingDir = state.workingDir ?? this.workingDir;
+    // Per-request working_dir takes precedence (same pattern as handleSendText)
+    const requestWorkingDir = typeof data?.working_dir === 'string' && data.working_dir.length > 0
+      ? data.working_dir
+      : null;
+    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
 
     const requestId = String(data?.request_id ?? state.activeRequestId ?? '');
     const answer = data?.answer;
@@ -866,6 +882,124 @@ export class BridgeGateway {
       itemsRemoved: result.itemsRemoved,
       bytesRecovered: result.bytesRecovered,
       error: result.error,
+    });
+  }
+
+  // =========================================================================
+  // Model Override Handlers
+  // =========================================================================
+
+  private handleSetModel(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'set_model', {
+        success: false,
+        error: 'No active session',
+      });
+      return;
+    }
+
+    const provider = typeof data?.provider === 'string' ? data.provider : null;
+    const model = typeof data?.model === 'string' ? data.model : null;
+    const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : undefined;
+
+    // Handle reset to default
+    if (data?.reset === true || (!provider && !model)) {
+      const graphd = this.harness.getGraphD?.();
+      if (graphd) {
+        graphd.sessionUpdateMetadata(sessionKey, { model_override: null });
+      }
+      this.sendAuthResponse(connectionId, 'set_model', {
+        success: true,
+        model_override: null,
+        message: 'Model reset to config default',
+      });
+      return;
+    }
+
+    if (!provider) {
+      this.sendAuthResponse(connectionId, 'set_model', {
+        success: false,
+        error: 'Provider is required',
+      });
+      return;
+    }
+
+    // Check if we have an API key for this provider
+    const hasKey = this.harness.hasApiKey(provider as import('types').LLMProvider);
+    if (!hasKey) {
+      // Emit provider_key_required event - TUI will route to providers screen
+      this.sendEvent(connectionId, {
+        type: 'provider_key_required',
+        data: {
+          provider,
+          model,
+          reasoning,
+        },
+      });
+      this.sendAuthResponse(connectionId, 'set_model', {
+        success: false,
+        error: `No API key configured for provider: ${provider}`,
+        provider_key_required: true,
+        provider,
+      });
+      return;
+    }
+
+    // Store model override in session metadata
+    const modelOverride = { provider, model, reasoning };
+    const graphd = this.harness.getGraphD?.();
+    if (graphd) {
+      graphd.sessionUpdateMetadata(sessionKey, { model_override: modelOverride });
+    }
+
+    // Emit model_changed event
+    this.sendEvent(connectionId, {
+      type: 'model_changed',
+      data: modelOverride,
+    });
+
+    this.sendAuthResponse(connectionId, 'set_model', {
+      success: true,
+      model_override: modelOverride,
+    });
+  }
+
+  private handleGetModel(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'get_model', {
+        success: false,
+        error: 'No active session',
+      });
+      return;
+    }
+
+    // Get current model override from GraphD session metadata
+    const graphd = this.harness.getGraphD?.();
+    let modelOverride = null;
+    if (graphd) {
+      const session = graphd.sessionGet(sessionKey);
+      modelOverride = session?.metadata?.model_override ?? null;
+    }
+
+    // Get config default
+    const config = this.harness.getConfig();
+    const defaultAgent = config.agents[config.defaultAgent];
+    const configDefault = defaultAgent ? {
+      provider: defaultAgent.llm.provider,
+      model: defaultAgent.llm.model,
+    } : null;
+
+    this.sendAuthResponse(connectionId, 'get_model', {
+      success: true,
+      model_override: modelOverride,
+      config_default: configDefault,
+      active: modelOverride ?? configDefault,
     });
   }
 

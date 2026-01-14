@@ -48,10 +48,15 @@ export interface ThemeColors {
   func: string;
   url: string;
   number: string;
+  // Markdown formatting
+  header: string;
+  bold: string;
+  italic: string;
   // UI chrome
   muted: string;
   border: string;
   accent: string;
+  userBg: string;  // Background color for user message blocks
   // Status levels
   success: string;
   error: string;
@@ -82,9 +87,13 @@ export const themes: Record<string, Theme> = {
       func: "#89b4fa",      // Blue
       url: "#89dceb",       // Sky
       number: "#f5c2e7",    // Pink
+      header: "#cba6f7",    // Mauve - markdown headers
+      bold: "#f5e0dc",      // Rosewater - bold text
+      italic: "#b4befe",    // Lavender - italic text
       muted: "#6c7086",     // Overlay0
       border: "#45475a",    // Surface1
       accent: "#cba6f7",    // Mauve - for headers/UI
+      userBg: "#45475a",    // Surface1 - user message background (more visible)
       success: "#a6e3a1",   // Green
       error: "#f38ba8",     // Red
       warning: "#f9e2af",   // Yellow
@@ -103,9 +112,13 @@ export const themes: Record<string, Theme> = {
       func: "#8caaee",      // Blue
       url: "#99d1db",       // Sky
       number: "#f4b8e4",    // Pink
+      header: "#ca9ee6",    // Mauve - markdown headers
+      bold: "#f2d5cf",      // Rosewater - bold text
+      italic: "#babbf1",    // Lavender - italic text
       muted: "#737994",     // Overlay0
       border: "#51576d",    // Surface1
       accent: "#ca9ee6",    // Mauve
+      userBg: "#51576d",    // Surface1 - user message background (more visible)
       success: "#a6d189",   // Green
       error: "#e78284",     // Red
       warning: "#e5c890",   // Yellow
@@ -125,9 +138,13 @@ export const themes: Record<string, Theme> = {
       func: "#9ccfd8",      // Foam
       url: "#c4a7e7",       // Iris
       number: "#eb6f92",    // Love
+      header: "#c4a7e7",    // Iris - markdown headers
+      bold: "#e0def4",      // Text - bold
+      italic: "#908caa",    // Subtle - italic
       muted: "#6e6a86",     // Muted
       border: "#403d52",    // Highlight med
       accent: "#c4a7e7",    // Iris
+      userBg: "#403d52",    // Highlight med - user message background (more visible)
       success: "#31748f",   // Pine
       error: "#eb6f92",     // Love
       warning: "#f6c177",   // Gold
@@ -146,9 +163,13 @@ export const themes: Record<string, Theme> = {
       func: "#9ccfd8",      // Foam
       url: "#c4a7e7",       // Iris
       number: "#eb6f92",    // Love
+      header: "#c4a7e7",    // Iris - markdown headers
+      bold: "#e0def4",      // Text - bold
+      italic: "#908caa",    // Subtle - italic
       muted: "#6e6a86",     // Muted
       border: "#44415a",    // Highlight med
       accent: "#c4a7e7",    // Iris
+      userBg: "#44415a",    // Highlight med - user message background (more visible)
       success: "#3e8fb0",   // Pine
       error: "#eb6f92",     // Love
       warning: "#f6c177",   // Gold
@@ -168,9 +189,13 @@ export const themes: Record<string, Theme> = {
       func: "#7aa2f7",      // Blue
       url: "#7dcfff",       // Cyan
       number: "#ff9e64",    // Orange
+      header: "#bb9af7",    // Purple - markdown headers
+      bold: "#c0caf5",      // Foreground - bold
+      italic: "#9aa5ce",    // Foreground dim - italic
       muted: "#565f89",     // Comment
       border: "#3b4261",    // Border
       accent: "#bb9af7",    // Purple
+      userBg: "#3b4261",    // Border - user message background (more visible)
       success: "#9ece6a",   // Green
       error: "#f7768e",     // Red
       warning: "#e0af68",   // Yellow
@@ -190,9 +215,13 @@ export const themes: Record<string, Theme> = {
       func: "#88C0D0",      // Nord8 - Bright accent
       url: "#81A1C1",       // Nord9 - Blue
       number: "#B48EAD",    // Nord15 - Purple
+      header: "#88C0D0",    // Nord8 - markdown headers
+      bold: "#ECEFF4",      // Nord6 - bold
+      italic: "#D8DEE9",    // Nord4 - italic
       muted: "#4C566A",     // Nord3 - Bright black
       border: "#3B4252",    // Nord1 - Dark
       accent: "#88C0D0",    // Nord8
+      userBg: "#4C566A",    // Nord3 - user message background (more visible)
       success: "#A3BE8C",   // Nord14 - Green
       error: "#BF616A",     // Nord11 - Red
       warning: "#EBCB8B",   // Nord13 - Yellow
@@ -212,9 +241,13 @@ export const themes: Record<string, Theme> = {
       func: "#83a598",      // Bright blue
       url: "#83a598",       // Bright blue
       number: "#d3869b",    // Bright purple
+      header: "#d3869b",    // Bright purple - markdown headers
+      bold: "#fbf1c7",      // Light0 - bold
+      italic: "#d5c4a1",    // Light2 - italic
       muted: "#665c54",     // Dark3
       border: "#504945",    // Dark2
       accent: "#d3869b",    // Bright purple
+      userBg: "#504945",    // Dark2 - user message background (more visible)
       success: "#b8bb26",   // Bright green
       error: "#fb4934",     // Bright red
       warning: "#fabd2f",   // Bright yellow
@@ -234,9 +267,13 @@ export const themes: Record<string, Theme> = {
       func: "#7E9CD8",      // Crystal blue
       url: "#A3D4D5",       // Light blue
       number: "#D27E99",    // Sakura pink
+      header: "#957FB8",    // Oni violet - markdown headers
+      bold: "#DCD7BA",      // Fuji white - bold
+      italic: "#C8C093",    // Old white - italic
       muted: "#727169",     // Fuji gray
       border: "#54546D",    // Sumi ink6
       accent: "#957FB8",    // Oni violet
+      userBg: "#54546D",    // Sumi ink6 - user message background (more visible)
       success: "#76946A",   // Autumn green
       error: "#E82424",     // Samurai red
       warning: "#FF9E3B",   // Ronin yellow
@@ -256,9 +293,13 @@ export const themes: Record<string, Theme> = {
       func: "#7fbbb3",      // Aqua
       url: "#7fbbb3",       // Aqua
       number: "#d699b6",    // Purple
+      header: "#a7c080",    // Green - markdown headers
+      bold: "#d3c6aa",      // Foreground - bold
+      italic: "#9da9a0",    // Gray2 - italic
       muted: "#7a8478",     // Gray1
       border: "#4f5b58",    // Gray0 dim
       accent: "#a7c080",    // Green
+      userBg: "#4f5b58",    // Gray0 dim - user message background (more visible)
       success: "#a7c080",   // Bright green
       error: "#e67e80",     // Red
       warning: "#dbbc7f",   // Yellow
@@ -278,9 +319,13 @@ export const themes: Record<string, Theme> = {
       func: "#61afef",      // Blue
       url: "#61afef",       // Blue
       number: "#c678dd",    // Purple
+      header: "#c678dd",    // Purple - markdown headers
+      bold: "#abb2bf",      // Foreground - bold
+      italic: "#848b98",    // Comment bright - italic
       muted: "#5c6370",     // Comment gray
       border: "#3e4451",    // Gutter gray
       accent: "#c678dd",    // Purple
+      userBg: "#3e4451",    // Gutter gray - user message background (more visible)
       success: "#98c379",   // Green
       error: "#e06c75",     // Red
       warning: "#e5c07b",   // Yellow

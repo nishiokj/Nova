@@ -18,8 +18,8 @@ export interface HarnessDaemonOptions {
   idleTimeoutMs?: number;
 }
 
-// Default idle timeout: 30 seconds
-const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+// Default idle timeout: 5 seconds
+const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
 
 export class HarnessDaemon {
   private readonly host: string;

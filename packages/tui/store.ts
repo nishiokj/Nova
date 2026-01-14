@@ -13,6 +13,8 @@ export interface AutocompleteState {
 export interface HistoryLine {
   text: string;
   role?: Role;
+  isBlockStart?: boolean;  // First line of a message block
+  isBlockEnd?: boolean;    // Last line of a message block (before separator)
 }
 
 export interface StoreSnapshot {
@@ -924,22 +926,28 @@ function buildHistoryLines(
     const label = roleLabel(entry.role);
     const prefix = `${label}: `;
     const wrapped = wrapText(entry.text || "", safeWidth - prefix.length);
+    const blockStartIndex = lines.length;
 
     wrapped.forEach((line, index) => {
       const text = index === 0 ? `${prefix}${line}` : `${" ".repeat(prefix.length)}${line}`;
-      lines.push({ text, role: entry.role });
+      lines.push({ text, role: entry.role, isBlockStart: index === 0 });
     });
 
     if (entry.meta) {
       const metaLines = wrapText(entry.meta, safeWidth - prefix.length);
-      metaLines.forEach((line, index) => {
-        const text = index === 0 ? `${prefix}${line}` : `${" ".repeat(prefix.length)}${line}`;
+      metaLines.forEach((line) => {
+        const text = `${" ".repeat(prefix.length)}${line}`;
         lines.push({ text, role: entry.role });
       });
     }
 
+    // Mark the last content line as block end
+    if (lines.length > blockStartIndex) {
+      lines[lines.length - 1].isBlockEnd = true;
+    }
+
     if (!compact) {
-      lines.push({ text: "" });
+      lines.push({ text: "" });  // Separator line (no role)
     }
   }
 
@@ -949,8 +957,11 @@ function buildHistoryLines(
     const wrapped = wrapText(streamingText, safeWidth - prefix.length);
     wrapped.forEach((line, index) => {
       const text = index === 0 ? `${prefix}${line}` : `${" ".repeat(prefix.length)}${line}`;
-      lines.push({ text, role: "agent" });
+      lines.push({ text, role: "agent", isBlockStart: index === 0 });
     });
+    if (lines.length > 0 && lines[lines.length - 1].role === "agent") {
+      lines[lines.length - 1].isBlockEnd = true;
+    }
   }
 
   return lines;

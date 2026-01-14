@@ -25,8 +25,8 @@ const DAEMON_STARTUP_TIMEOUT = 5000; // 5 seconds to wait for daemon
 
 // Paths - resolve relative to launcher location
 const getProjectRoot = () => {
-  // In development: apps/launcher/index.ts -> project root is ../..
-  // In dist: apps/launcher/dist/index.js -> project root is ../../..
+  // In development: packages/launcher/index.ts -> project root is ../..
+  // In dist: packages/launcher/dist/index.js -> project root is ../../..
   if (__dirname.includes('/dist')) {
     return path.resolve(__dirname, '..', '..', '..');
   }
@@ -36,8 +36,8 @@ const getProjectRoot = () => {
 const getDaemonPath = () => {
   const root = getProjectRoot();
   // Check for dist first, then src
-  const distPath = path.join(root, 'apps', 'harness-daemon', 'dist', 'index.js');
-  const srcPath = path.join(root, 'apps', 'harness-daemon', 'src', 'index.ts');
+  const distPath = path.join(root, 'packages', 'harness-daemon', 'dist', 'index.js');
+  const srcPath = path.join(root, 'packages', 'harness-daemon', 'src', 'index.ts');
   try {
     Bun.file(distPath);
     return distPath;
@@ -49,8 +49,8 @@ const getDaemonPath = () => {
 const getTuiPath = () => {
   const root = getProjectRoot();
   // Check for dist first, then src
-  const distPath = path.join(root, 'apps', 'tui', 'dist', 'index.js');
-  const srcPath = path.join(root, 'apps', 'tui', 'index.tsx');
+  const distPath = path.join(root, 'packages', 'tui', 'dist', 'index.js');
+  const srcPath = path.join(root, 'packages', 'tui', 'index.tsx');
   try {
     Bun.file(distPath);
     return distPath;

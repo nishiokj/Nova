@@ -149,6 +149,7 @@ interface HarnessLogger {
   debug(msg: string, meta?: Record<string, unknown>): void;
   warning(msg: string, meta?: Record<string, unknown>): void;
   error(msg: string, meta?: Record<string, unknown>): void;
+  flush?(): void;
 }
 
 /**
@@ -201,6 +202,7 @@ function createFileLogger(logDir: string = 'logs'): HarnessLogger {
     debug: (msg, meta) => write('DEBUG', msg, meta),
     warning: (msg, meta) => write('WARN', msg, meta),
     error: (msg, meta) => write('ERROR', msg, meta),
+    flush,
   };
 }
 
@@ -236,17 +238,6 @@ export class AgentHarness {
       apiKeys[agent.llm.provider] = agent.llm.apiKey;
       if (agent.llm.baseUrl) {
         baseUrls[agent.llm.provider] = agent.llm.baseUrl;
-      }
-    }
-
-    // Log initial API keys from config
-    for (const [provider, key] of Object.entries(apiKeys)) {
-      if (key) {
-        this.logger.info('Initial API key from config', {
-          provider,
-          keyPrefix: key.slice(0, 8),
-          keyLength: key.length,
-        });
       }
     }
 
@@ -333,6 +324,13 @@ export class AgentHarness {
   }
 
   /**
+   * Check if GraphD is initialized and running.
+   */
+  private isGraphDReady(): boolean {
+    return !!(this.graphd && this.graphdStarted);
+  }
+
+  /**
    * Update an API key at runtime and reset the circuit breaker.
    * Called when a provider key is saved via /providers.
    */
@@ -347,6 +345,13 @@ export class AgentHarness {
   resetCircuitBreaker(): void {
     this.llmAdapter.resetCircuitBreaker?.();
     this.logger.info('Reset circuit breaker in harness');
+  }
+
+  /**
+   * Check if an API key exists for a provider.
+   */
+  hasApiKey(provider: LLMProvider): boolean {
+    return this.llmAdapter.hasApiKey?.(provider) ?? false;
   }
 
   /**
@@ -383,9 +388,9 @@ export class AgentHarness {
     }
 
     // Try to hydrate from GraphD
-    if (this.graphd && this.graphdStarted) {
+    if (this.isGraphDReady()) {
       try {
-        const result = this.graphd.contextGet(sessionKey) as {
+        const result = this.graphd!.contextGet(sessionKey) as {
           snapshot?: { context?: ContextWindowSnapshot };
           error?: string;
         };
@@ -419,11 +424,11 @@ export class AgentHarness {
    * Persist a ContextWindow to GraphD.
    */
   private persistContext(context: ContextWindow): void {
-    if (!this.graphd || !this.graphdStarted) return;
+    if (!this.isGraphDReady()) return;
 
     try {
       const snapshot = context.serialize();
-      this.graphd.contextSave(context.sessionKey, { context: snapshot });
+      this.graphd!.contextSave(context.sessionKey, { context: snapshot });
       this.logger.debug('Persisted context to GraphD', {
         sessionKey: context.sessionKey,
         itemCount: context.items.length,
@@ -447,14 +452,14 @@ export class AgentHarness {
 
     eventQueue.push(createStatusEvent('sending', 'Processing request...'));
 
-    if (this.graphd && this.graphdStarted) {
+    if (this.isGraphDReady()) {
       try {
-        this.graphd.sessionTouch(sessionKey, this.config.tools.workingDir);
-        this.graphd.setActive(true);
+        this.graphd!.sessionTouch(sessionKey, this.config.tools.workingDir);
+        this.graphd!.setActive(true);
 
         let subscriber = this.graphdSubscribers.get(sessionKey);
         if (!subscriber) {
-          subscriber = new GraphDSubscriber(this.eventBus, this.graphd, {
+          subscriber = new GraphDSubscriber(this.eventBus, this.graphd!, {
             sessionKey,
             requestId,
           });
@@ -524,9 +529,9 @@ export class AgentHarness {
           provider: agentConfig.llm.provider,
         });
 
-        if (this.graphd && this.graphdStarted) {
+        if (this.isGraphDReady()) {
           try {
-            this.graphd.sessionUpdateMetadata(sessionKey, {
+            this.graphd!.sessionUpdateMetadata(sessionKey, {
               user_id: 'local-user',
               tier,
               model: agentConfig.llm.model,
@@ -619,9 +624,9 @@ export class AgentHarness {
               subscriber.flush();
             }
 
-            if (this.graphd && this.graphdStarted) {
+            if (this.isGraphDReady()) {
               try {
-                this.graphd.setActive(false);
+                this.graphd!.setActive(false);
               } catch {
                 // Ignore errors during cleanup
               }
@@ -648,14 +653,14 @@ export class AgentHarness {
     assistantResponse: string,
     durationMs: number
   ): void {
-    if (!this.graphd || !this.graphdStarted) return;
+    if (!this.isGraphDReady()) return;
 
     try {
-      this.graphd.messageAdd(sessionKey, 'user', userInput, requestId);
-      this.graphd.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
+      this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      this.graphd!.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
         duration_ms: durationMs,
       });
-      this.graphd.sessionUpdateMetadata(sessionKey, {
+      this.graphd!.sessionUpdateMetadata(sessionKey, {
         last_request_id: requestId,
         last_duration_ms: durationMs,
       });
@@ -704,15 +709,14 @@ export class AgentHarness {
       fallback: agentConfig.llm.fallback,
     };
 
-    const agent = new Agent(
-      config,
+    const agent = new Agent(config, {
       llm,
-      this.toolRegistry,
+      toolRegistry: this.toolRegistry,
       emit,
       requestId,
-      this.agentRegistry,
-      llmConfig
-    );
+      agentRegistry: this.agentRegistry,
+      llmConfig,
+    });
 
     const workItem = createWorkItem({
       goal,
@@ -725,12 +729,13 @@ export class AgentHarness {
       },
     });
 
-    emit(createEvent('workitem_started', {
+    emit(createEvent('workitem_status', {
       workId: workItem.workId,
       objective: workItem.objective,
       delta: workItem.delta,
       agent: workItem.agent,
       dependencies: [...workItem.dependencies],
+      status: 'started',
     }, workItem.workId));
 
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
@@ -738,9 +743,13 @@ export class AgentHarness {
 
     if (!result.needsUserInput) {
       if (result.success) {
-        emit(createEvent('workitem_completed', {
+        emit(createEvent('workitem_status', {
           workId: workItem.workId,
           objective: workItem.objective,
+          delta: workItem.delta,
+          agent: workItem.agent,
+          dependencies: [...workItem.dependencies],
+          status: 'completed',
           response: result.response,
           metrics: {
             llmCallsMade: result.metrics.llmCallsMade,
@@ -755,9 +764,13 @@ export class AgentHarness {
           skipped: 0,
         }));
       } else {
-        emit(createEvent('workitem_failed', {
+        emit(createEvent('workitem_status', {
           workId: workItem.workId,
           objective: workItem.objective,
+          delta: workItem.delta,
+          agent: workItem.agent,
+          dependencies: [...workItem.dependencies],
+          status: 'failed',
           error: result.error ?? 'Unknown error',
           toolErrors: result.toolErrors,
           terminationReason: result.terminationReason,
@@ -879,7 +892,8 @@ export class AgentHarness {
       this.logger,
       this.agentRegistry,
       hooks,
-      planModeOptions
+      planModeOptions,
+      this.eventBus
     );
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
@@ -923,15 +937,6 @@ export class AgentHarness {
     const routingPrompt = getAgentPrompt('routing');
 
     const routingAdapter = this.llmAdapter;
-
-    this.logger.debug('Routing request', {
-      provider: routingAgentConfig.llm.provider,
-      model: routingAgentConfig.llm.model,
-      hasApiKey: !!routingAgentConfig.llm.apiKey,
-      apiKeyPrefix: routingAgentConfig.llm.apiKey?.slice(0, 8) ?? 'none',
-    });
-
-    this.logger.debug('Calling LLM adapter...');
 
     const response = await routingAdapter.respond({
       messages: [
@@ -1133,11 +1138,11 @@ export class AgentHarness {
    * Fork a session: clone context in GraphD and pre-populate in-memory cache.
    */
   forkSession(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string } {
-    if (!this.graphd || !this.graphdStarted) {
+    if (!this.isGraphDReady()) {
       return { success: false, error: 'GraphD not available' };
     }
 
-    const result = this.graphd.sessionFork(sourceSessionKey, targetSessionKey);
+    const result = this.graphd!.sessionFork(sourceSessionKey, targetSessionKey);
 
     if (result.success) {
       // Pre-populate in-memory cache with cloned context
@@ -1220,10 +1225,10 @@ export class AgentHarness {
     }
     this.graphdSubscribers.clear();
 
-    if (this.graphd && this.graphdStarted) {
+    if (this.isGraphDReady()) {
       for (const sessionKey of sessionKeysToClose) {
         try {
-          this.graphd.sessionClose(sessionKey);
+          this.graphd!.sessionClose(sessionKey);
           this.logger.debug('Closed GraphD session', { sessionKey });
         } catch (error) {
           this.logger.warning('GraphD session close failed', { sessionKey, error: String(error) });
@@ -1242,9 +1247,9 @@ export class AgentHarness {
 
     this.eventBus.shutdown();
 
-    if (this.graphd && this.graphdStarted) {
+    if (this.isGraphDReady()) {
       try {
-        await this.graphd.stop();
+        await this.graphd!.stop();
         this.logger.info('GraphD stopped');
       } catch (error) {
         this.logger.warning('GraphD stop failed', { error: String(error) });
@@ -1254,6 +1259,7 @@ export class AgentHarness {
     this.contextWindows.clear();
     this.toolRegistry.clearCache();
     this.logger.info('AgentHarness shutdown');
+    this.logger.flush?.();
   }
 
   /**

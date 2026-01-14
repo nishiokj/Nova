@@ -36,59 +36,59 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
       };
     }
 
-    case 'workitem_started': {
-      const itemData = data as { objective?: string };
-      return {
-        type: 'progress',
-        data: {
-          request_id: requestId,
-          message: itemData.objective ? `Starting: ${itemData.objective}` : 'Starting work item...',
-          level: 'info',
-          kind: 'work',
-        } satisfies ProgressEventData,
+    case 'workitem_status': {
+      const itemData = data as {
+        objective?: string;
+        status: 'started' | 'completed' | 'failed' | 'skipped';
+        error?: string;
+        reason?: string;
+        metrics?: { durationMs?: number };
       };
-    }
+      const { status, objective } = itemData;
 
-    case 'workitem_completed': {
-      const itemData = data as { objective?: string; durationMs?: number };
-      return {
-        type: 'progress',
-        data: {
-          request_id: requestId,
-          message: itemData.objective
-            ? `Completed: ${itemData.objective}`
-            : 'Work item completed',
-          level: 'success',
-          kind: 'work',
-          duration_ms: itemData.durationMs,
-        } satisfies ProgressEventData,
-      };
-    }
-
-    case 'workitem_failed': {
-      const itemData = data as { objective?: string; error?: string };
-      return {
-        type: 'progress',
-        data: {
-          request_id: requestId,
-          message: `Failed: ${itemData.error || itemData.objective || 'work item failed'}`,
-          level: 'error',
-          kind: 'work',
-        } satisfies ProgressEventData,
-      };
-    }
-
-    case 'workitem_skipped': {
-      const itemData = data as { objective?: string; reason?: string };
-      return {
-        type: 'progress',
-        data: {
-          request_id: requestId,
-          message: `Skipped: ${itemData.reason || itemData.objective || 'work item skipped'}`,
-          level: 'warning',
-          kind: 'work',
-        } satisfies ProgressEventData,
-      };
+      switch (status) {
+        case 'started':
+          return {
+            type: 'progress',
+            data: {
+              request_id: requestId,
+              message: objective ? `Starting: ${objective}` : 'Starting work item...',
+              level: 'info',
+              kind: 'work',
+            } satisfies ProgressEventData,
+          };
+        case 'completed':
+          return {
+            type: 'progress',
+            data: {
+              request_id: requestId,
+              message: objective ? `Completed: ${objective}` : 'Work item completed',
+              level: 'success',
+              kind: 'work',
+              duration_ms: itemData.metrics?.durationMs,
+            } satisfies ProgressEventData,
+          };
+        case 'failed':
+          return {
+            type: 'progress',
+            data: {
+              request_id: requestId,
+              message: `Failed: ${itemData.error || objective || 'work item failed'}`,
+              level: 'error',
+              kind: 'work',
+            } satisfies ProgressEventData,
+          };
+        case 'skipped':
+          return {
+            type: 'progress',
+            data: {
+              request_id: requestId,
+              message: `Skipped: ${itemData.reason || objective || 'work item skipped'}`,
+              level: 'warning',
+              kind: 'work',
+            } satisfies ProgressEventData,
+          };
+      }
     }
 
     case 'tool_call': {
@@ -185,6 +185,48 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
           chunk_index: -1,  // intermediate, not part of final response indexing
           is_final: false,
         },
+      };
+    }
+
+    case 'artifact_discovered': {
+      const artData = data as {
+        artifact: { name?: string; kind?: string };
+        agentType?: string;
+        artifactCount?: number;
+      };
+      return {
+        type: 'progress',
+        data: {
+          request_id: requestId,
+          message: `Found: ${artData.artifact?.name || 'artifact'} (${artData.artifact?.kind || 'unknown'})`,
+          level: 'info',
+          kind: 'thinking',
+        } satisfies ProgressEventData,
+      };
+    }
+
+    case 'agent_progress': {
+      const progressData = data as {
+        message?: string;
+        agentType?: string;
+        category?: string;
+        count?: { current: number; total?: number; label: string };
+      };
+      let message = progressData.message || 'Processing...';
+      if (progressData.count) {
+        const { current, total, label } = progressData.count;
+        message = total
+          ? `${message} (${current}/${total} ${label})`
+          : `${message} (${current} ${label})`;
+      }
+      return {
+        type: 'progress',
+        data: {
+          request_id: requestId,
+          message,
+          level: 'info',
+          kind: 'thinking',
+        } satisfies ProgressEventData,
       };
     }
 

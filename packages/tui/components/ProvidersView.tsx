@@ -38,6 +38,7 @@ const SUPPORTED_PROVIDERS = [
   { id: "groq", name: "Groq" },
   { id: "fireworks", name: "Fireworks AI" },
   { id: "gemini", name: "Google Gemini" },
+  { id: "replicate", name: "Replicate" },
 ];
 
 /** Strip bracketed paste escape sequences from input */

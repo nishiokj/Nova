@@ -14,6 +14,7 @@ export type {
   FileContentItem,
   ArtifactKind,
   UncertaintyCategory,
+  ArtifactPayload,
   ArtifactItem,
   ContextItem,
   ContextWindowSnapshot,
@@ -33,16 +34,16 @@ export type {
   AgentEvent,
   AgentType,
   RuntimeScriptCreatedData,
-  WorkItemStartedData,
-  WorkItemCompletedData,
-  WorkItemFailedData,
-  WorkItemSkippedData,
+  WorkItemStatusValue,
+  WorkItemStatusData,
   GoalAchievedData,
   GoalNotAchievedData,
   ToolCallData,
   ToolCallPhase,
   LLMCallData,
   LLMErrorData,
+  ArtifactDiscoveredData,
+  AgentProgressData,
   EventCallback,
 } from './events.js';
 
@@ -57,8 +58,8 @@ export {
   ToolCallEventSchema,
   LLMCallEventSchema,
   LLMErrorEventSchema,
-  WorkItemStartedEventSchema,
-  WorkItemCompletedEventSchema,
+  WorkItemStatusEventSchema,
+  WorkItemStatusDataSchema,
   ToolCallDataSchema,
   LLMCallDataSchema,
   LLMErrorDataSchema,
@@ -152,3 +153,28 @@ export {
   getKnowledge,
   clearExpiredKnowledge,
 } from './session.js';
+
+// ============================================
+// DESIGN SPEC
+// ============================================
+export type {
+  ColorPalette,
+  TypographySpec,
+  TypographyFull,
+  SpacingScale,
+  AestheticPreset,
+  LayoutType,
+  LayoutRegion,
+  ComponentSpec,
+  PageSpec,
+  StateFlow,
+  DesignSpec,
+  ImageGenParams,
+  ImageGenResult,
+  DesignPromptParams,
+  GalleryImage,
+  SelectionResult,
+  ScaffoldConfig,
+  GeneratedFile,
+  ScaffoldResult,
+} from './design-spec.js';

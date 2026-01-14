@@ -290,6 +290,11 @@ export interface LLMAdapter {
   updateApiKey?(provider: LLMProvider, apiKey: string): void;
 
   /**
+   * Check if an API key exists for a provider.
+   */
+  hasApiKey?(provider: LLMProvider): boolean;
+
+  /**
    * Reset the circuit breaker state.
    */
   resetCircuitBreaker?(): void;

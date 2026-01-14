@@ -129,10 +129,9 @@ export class GraphDSubscriber {
       });
       if ((result as { success?: boolean; error?: string }).success === false) {
         console.error(`[GraphDSubscriber] Failed to persist event: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
-      } else {
-        // Checkpoint to make writes visible to dashboard
-        this.graphd.checkpoint();
       }
+      // NOTE: No checkpoint needed - SQLite WAL commits are immediately visible to readers.
+      // Checkpointing only merges WAL to main file for space reclamation, not visibility.
     } catch (error) {
       console.error(`[GraphDSubscriber] Failed to persist event: ${error}`);
     }
@@ -196,10 +195,8 @@ export class GraphDSubscriber {
       });
       if ((result as { success?: boolean; error?: string }).success === false) {
         console.error(`[GraphDSubscriber] Failed to flush batch: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
-      } else {
-        // Checkpoint to make writes visible to dashboard
-        this.graphd.checkpoint();
       }
+      // NOTE: No checkpoint needed - SQLite WAL commits are immediately visible to readers.
 
       this.eventBatch = [];
     } catch (error) {
@@ -233,6 +230,8 @@ export class GraphDSubscriber {
     }
     this.closed = true;
     this.flushPending(true);
+    // Single checkpoint on close for WAL space reclamation (not visibility)
+    this.graphd.checkpoint();
   }
 }
 

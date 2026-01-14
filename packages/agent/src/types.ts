@@ -1,6 +1,8 @@
 import type { ContextWindow } from 'context';
 import type { WorkItem } from 'work';
-import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem } from 'types';
+import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMRequestConfig } from 'types';
+import type { LLMAdapter } from 'llm';
+import type { ToolRegistry } from 'tools';
 
 /**
  * Agent type identifier - any string, defined via config.
@@ -175,4 +177,36 @@ export interface AgentHooks {
     args: Record<string, unknown>,
     result: ToolResult
   ) => Promise<ToolHookResult>;
+}
+
+// ============================================
+// AGENT RUNTIME CONFIG
+// ============================================
+
+// Forward declaration for AgentRegistry to avoid circular import
+export interface AgentRegistry {
+  has(agentType: string): boolean;
+  getRuntimeConfig(agentType: string): { config: AgentConfig; llm: LLMRequestConfig };
+  listToolDefinitions(): Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
+}
+
+/**
+ * Runtime configuration for Agent.
+ * Groups all runtime dependencies into a single object.
+ */
+export interface AgentRuntimeConfig {
+  /** LLM adapter for inference */
+  llm: LLMAdapter;
+  /** Tool registry for tool execution */
+  toolRegistry: ToolRegistry;
+  /** Event emit callback */
+  emit: EventEmitCallback;
+  /** Request ID for correlation */
+  requestId: string;
+  /** Optional agent registry for agent-as-tool */
+  agentRegistry?: AgentRegistry;
+  /** LLM configuration for this agent */
+  llmConfig?: LLMRequestConfig;
+  /** Optional lifecycle hooks */
+  hooks?: AgentHooks;
 }

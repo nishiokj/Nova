@@ -705,7 +705,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (!client) {
       return;
     }
-    client.send({ type, data });
+    // Always include working_dir with requests that trigger agent execution
+    // This ensures tools run in the correct directory regardless of where daemon was started
+    const needsWorkingDir = type === "send_text" || type === "user_prompt_response";
+    const payload = needsWorkingDir
+      ? { ...data, working_dir: process.cwd() }
+      : data;
+    client.send({ type, data: payload });
   };
 
   const handleQuit = () => {
@@ -1611,11 +1617,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, width)}</Text>
       ))}
       <Box flexDirection="column" height={historyHeight}>
-        {visibleHistoryLines.map((line, index) => (
-          <Text key={`hist-${index}`}>
-            <StyledLine text={line.text} baseColor={roleColor(line.role)} />
-          </Text>
-        ))}
+        {visibleHistoryLines.map((line, index) => {
+          const isUserLine = line.role === "user";
+          const bgColor = isUserLine ? colors.userBg : undefined;
+          // Pad user lines to full width for consistent background
+          const paddedText = isUserLine ? line.text.padEnd(width, " ") : line.text;
+          return (
+            <Text key={`hist-${index}`} backgroundColor={bgColor}>
+              <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
+            </Text>
+          );
+        })}
       </Box>
       {isProvidersMode ? (
         <ProvidersView
@@ -1692,22 +1704,39 @@ function levelColor(level?: string | null): string | undefined {
 }
 
 /** Syntax highlight patterns - use color keys, resolved at runtime */
-type ColorKey = "code" | "url" | "path" | "number" | "func";
-const syntaxPatterns: Array<{ pattern: RegExp; colorKey: ColorKey; bold?: boolean }> = [
-  { pattern: /`[^`]+`/g, colorKey: "code", bold: true },               // inline code
-  { pattern: /```[\s\S]*?```/g, colorKey: "code" },                    // code blocks
-  { pattern: /https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },          // URLs
-  { pattern: /\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },           // file paths
-  { pattern: /\b\d+(?:\.\d+)?\s*(?:ms|s|sec|min|m|h|hr)s?\b/gi, colorKey: "number" }, // durations
-  { pattern: /\[[a-z_][a-z0-9_]*\]/gi, colorKey: "func", bold: true }, // [tool_name]
-  { pattern: /\b[A-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)*\(\)/g, colorKey: "func" }, // ClassName.method()
-  { pattern: /\b[a-z_][a-zA-Z0-9_]*\(\)/g, colorKey: "func" },         // function_name()
+type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic";
+const syntaxPatterns: Array<{ pattern: RegExp; colorKey: ColorKey; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
+  // Markdown headers (### Header text) - strip the hashes and bold
+  { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
+  // Bold text (**text** or __text__)
+  { pattern: /\*\*[^*]+\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
+  { pattern: /__[^_]+__/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
+  // Italic text (*text* or _text_) - single asterisk/underscore, not followed by another
+  { pattern: /(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
+  { pattern: /(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
+  // Inline code
+  { pattern: /`[^`]+`/g, colorKey: "code", bold: true },
+  // Code blocks (```...```)
+  { pattern: /```[\s\S]*?```/g, colorKey: "code" },
+  // URLs
+  { pattern: /https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },
+  // File paths
+  { pattern: /\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },
+  // Durations
+  { pattern: /\b\d+(?:\.\d+)?\s*(?:ms|s|sec|min|m|h|hr)s?\b/gi, colorKey: "number" },
+  // [tool_name]
+  { pattern: /\[[a-z_][a-z0-9_]*\]/gi, colorKey: "func", bold: true },
+  // ClassName.method()
+  { pattern: /\b[A-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)*\(\)/g, colorKey: "func" },
+  // function_name()
+  { pattern: /\b[a-z_][a-zA-Z0-9_]*\(\)/g, colorKey: "func" },
 ];
 
 interface TextSegment {
   text: string;
   color?: string;
   bold?: boolean;
+  italic?: boolean;
 }
 
 /** Parse text into styled segments for syntax highlighting */
@@ -1716,18 +1745,22 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
   const segments: TextSegment[] = [];
 
   // Find all matches with positions
-  const matches: Array<{ start: number; end: number; text: string; color: string; bold?: boolean }> = [];
+  const matches: Array<{ start: number; end: number; text: string; displayText: string; color: string; bold?: boolean; italic?: boolean }> = [];
 
-  for (const { pattern, colorKey, bold } of syntaxPatterns) {
+  for (const { pattern, colorKey, bold, italic, transform } of syntaxPatterns) {
     const regex = new RegExp(pattern.source, pattern.flags);
     let m;
     while ((m = regex.exec(text)) !== null) {
+      const matchedText = m[0];
+      const displayText = transform ? transform(matchedText) : matchedText;
       matches.push({
         start: m.index,
-        end: m.index + m[0].length,
-        text: m[0],
+        end: m.index + matchedText.length,
+        text: matchedText,
+        displayText,
         color: colors[colorKey],
         bold,
+        italic,
       });
     }
   }
@@ -1749,7 +1782,7 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
     if (m.start > pos) {
       segments.push({ text: text.slice(pos, m.start), color: baseColor });
     }
-    segments.push({ text: m.text, color: m.color, bold: m.bold });
+    segments.push({ text: m.displayText, color: m.color, bold: m.bold, italic: m.italic });
     pos = m.end;
   }
   if (pos < text.length) {
@@ -1766,7 +1799,7 @@ function StyledLine({ text, baseColor }: { text: string; baseColor?: string }): 
   return (
     <>
       {segments.map((seg, i) => (
-        <Text key={i} color={seg.color} bold={seg.bold}>
+        <Text key={i} color={seg.color} bold={seg.bold} italic={seg.italic}>
           {seg.text}
         </Text>
       ))}

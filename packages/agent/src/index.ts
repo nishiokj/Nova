@@ -15,6 +15,7 @@ export type {
   EventEmitCallback,
   AgentHooks,
   ToolHookResult,
+  AgentRuntimeConfig,
 } from './types.js';
 
 export { DEFAULT_AGENT_BUDGET, noopEmit } from './types.js';
