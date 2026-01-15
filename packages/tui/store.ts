@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
@@ -68,6 +68,8 @@ export interface StoreSnapshot {
   themeCursor: number;
   // Plan mode
   planMode: boolean;
+  // Response pane content
+  responseContent: ResponseContent | null;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -129,6 +131,9 @@ export class Store {
 
   // Plan mode
   private planMode = false;
+
+  // Response pane content
+  private responseContent: ResponseContent | null = null;
 
   private historyCache: {
     width: number;
@@ -195,6 +200,8 @@ export class Store {
       themeCursor: this.themeCursor,
       // Plan mode
       planMode: this.planMode,
+      // Response pane content
+      responseContent: this.responseContent,
     };
   }
 
@@ -880,6 +887,26 @@ export class Store {
     this.emit();
   }
 
+  // ==================== Response Pane Methods ====================
+
+  /**
+   * Sets response content and enters response mode.
+   */
+  setResponseContent(content: ResponseContent): void {
+    this.responseContent = content;
+    this.uiMode = "response";
+    this.emit();
+  }
+
+  /**
+   * Clears response content and returns to chat mode.
+   */
+  clearResponseContent(): void {
+    this.responseContent = null;
+    this.uiMode = "chat";
+    this.emit();
+  }
+
   // ==================== Paste Methods ====================
 
   /**
@@ -1004,8 +1031,9 @@ function buildHistoryLines(
 
   for (const entry of history) {
     const label = roleLabel(entry.role);
-    const prefix = `${label}: `;
-    const wrapped = wrapText(entry.text || "", safeWidth - prefix.length);
+    const prefix = label ? `${label}: ` : "";
+    const contentWidth = label ? safeWidth - prefix.length : safeWidth;
+    const wrapped = wrapText(entry.text || "", contentWidth);
     const blockStartIndex = lines.length;
 
     wrapped.forEach((line, index) => {
@@ -1014,7 +1042,7 @@ function buildHistoryLines(
     });
 
     if (entry.meta) {
-      const metaLines = wrapText(entry.meta, safeWidth - prefix.length);
+      const metaLines = wrapText(entry.meta, contentWidth);
       metaLines.forEach((line) => {
         const text = `${" ".repeat(prefix.length)}${line}`;
         lines.push({ text, role: entry.role });
@@ -1026,15 +1054,16 @@ function buildHistoryLines(
       lines[lines.length - 1].isBlockEnd = true;
     }
 
-    if (!compact) {
-      lines.push({ text: "" });  // Separator line (no role)
-    }
+    // Add a blank separator line after each message
+    // Use a space character so Ink renders it with actual height
+    lines.push({ text: " ", role: undefined });
   }
 
   if (streamingText) {
     const label = roleLabel("agent");
-    const prefix = `${label}: `;
-    const wrapped = wrapText(streamingText, safeWidth - prefix.length);
+    const prefix = label ? `${label}: ` : "";
+    const contentWidth = label ? safeWidth - prefix.length : safeWidth;
+    const wrapped = wrapText(streamingText, contentWidth);
     wrapped.forEach((line, index) => {
       const text = index === 0 ? `${prefix}${line}` : `${" ".repeat(prefix.length)}${line}`;
       lines.push({ text, role: "agent", isBlockStart: index === 0 });
@@ -1047,18 +1076,18 @@ function buildHistoryLines(
   return lines;
 }
 
-function roleLabel(role: Role): string {
+function roleLabel(role: Role): string | null {
   switch (role) {
     case "user":
       return "You";
     case "agent":
       return "Agent";
     case "system":
-      return "System";
+      return null;  // No prefix for system messages
     case "status":
-      return "Status";
+      return null;  // No prefix for status messages
     default:
-      return "Message";
+      return null;
   }
 }
 

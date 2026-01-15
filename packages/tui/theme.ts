@@ -62,6 +62,13 @@ export interface ThemeColors {
   error: string;
   warning: string;
   info: string;
+  // Diff colors
+  diffAdd: string;
+  diffRemove: string;
+  diffAddBg: string;
+  diffRemoveBg: string;
+  diffHeader: string;     // File header text (e.g., "✓ Edit /path/to/file.ts")
+  diffHeaderBg: string;   // File header background
 }
 
 export interface Theme {
@@ -98,6 +105,12 @@ export const themes: Record<string, Theme> = {
       error: "#f38ba8",     // Red
       warning: "#f9e2af",   // Yellow
       info: "#74c7ec",      // Sapphire
+      diffAdd: "#a6e3a1",   // Green - same as success
+      diffRemove: "#f38ba8", // Red - same as error
+      diffAddBg: "#1e3a1e",   // Dark green background
+      diffRemoveBg: "#3a1e1e", // Dark red background
+      diffHeader: "#89b4fa", // Blue - file path header
+      diffHeaderBg: "#313244", // Surface0 - subtle background
     },
   },
 
@@ -123,6 +136,12 @@ export const themes: Record<string, Theme> = {
       error: "#e78284",     // Red
       warning: "#e5c890",   // Yellow
       info: "#85c1dc",      // Sapphire
+      diffAdd: "#a6d189",   // Green
+      diffRemove: "#e78284", // Red
+      diffAddBg: "#1e3a1e",   // Dark green background
+      diffRemoveBg: "#3a1e1e", // Dark red background
+      diffHeader: "#8caaee", // Blue - file path header
+      diffHeaderBg: "#414559", // Surface0 - subtle background
     },
   },
 
@@ -149,6 +168,12 @@ export const themes: Record<string, Theme> = {
       error: "#eb6f92",     // Love
       warning: "#f6c177",   // Gold
       info: "#9ccfd8",      // Foam
+      diffAdd: "#31748f",   // Pine
+      diffRemove: "#eb6f92", // Love
+      diffAddBg: "#1a2e2e",   // Dark teal background
+      diffRemoveBg: "#2e1a22", // Dark rose background
+      diffHeader: "#9ccfd8", // Foam - file path header
+      diffHeaderBg: "#26233a", // Highlight low - subtle background
     },
   },
 
@@ -174,6 +199,12 @@ export const themes: Record<string, Theme> = {
       error: "#eb6f92",     // Love
       warning: "#f6c177",   // Gold
       info: "#9ccfd8",      // Foam
+      diffAdd: "#3e8fb0",   // Pine
+      diffRemove: "#eb6f92", // Love
+      diffAddBg: "#1a2e2e",   // Dark teal background
+      diffRemoveBg: "#2e1a22", // Dark rose background
+      diffHeader: "#9ccfd8", // Foam - file path header
+      diffHeaderBg: "#2a273f", // Highlight low - subtle background
     },
   },
 
@@ -200,6 +231,12 @@ export const themes: Record<string, Theme> = {
       error: "#f7768e",     // Red
       warning: "#e0af68",   // Yellow
       info: "#7dcfff",      // Cyan
+      diffAdd: "#9ece6a",   // Green
+      diffRemove: "#f7768e", // Red
+      diffAddBg: "#1a2e1a",   // Dark green background
+      diffRemoveBg: "#2e1a1e", // Dark red background
+      diffHeader: "#7aa2f7", // Blue - file path header
+      diffHeaderBg: "#1f2335", // Background highlight - subtle background
     },
   },
 
@@ -226,6 +263,12 @@ export const themes: Record<string, Theme> = {
       error: "#BF616A",     // Nord11 - Red
       warning: "#EBCB8B",   // Nord13 - Yellow
       info: "#88C0D0",      // Nord8 - Cyan
+      diffAdd: "#A3BE8C",   // Nord14 - Green
+      diffRemove: "#BF616A", // Nord11 - Red
+      diffAddBg: "#1e2e1e",   // Dark green background
+      diffRemoveBg: "#2e1e1e", // Dark red background
+      diffHeader: "#88C0D0", // Nord8 - file path header
+      diffHeaderBg: "#3B4252", // Nord1 - subtle background
     },
   },
 
@@ -252,6 +295,12 @@ export const themes: Record<string, Theme> = {
       error: "#fb4934",     // Bright red
       warning: "#fabd2f",   // Bright yellow
       info: "#83a598",      // Bright blue
+      diffAdd: "#b8bb26",   // Bright green
+      diffRemove: "#fb4934", // Bright red
+      diffAddBg: "#2a2e1a",   // Dark olive background
+      diffRemoveBg: "#2e1a1a", // Dark red background
+      diffHeader: "#83a598", // Bright blue - file path header
+      diffHeaderBg: "#3c3836", // Dark1 - subtle background
     },
   },
 
@@ -278,6 +327,12 @@ export const themes: Record<string, Theme> = {
       error: "#E82424",     // Samurai red
       warning: "#FF9E3B",   // Ronin yellow
       info: "#7E9CD8",      // Crystal blue
+      diffAdd: "#76946A",   // Autumn green
+      diffRemove: "#E82424", // Samurai red
+      diffAddBg: "#1e2a1e",   // Dark green background
+      diffRemoveBg: "#2a1e1e", // Dark red background
+      diffHeader: "#7E9CD8", // Crystal blue - file path header
+      diffHeaderBg: "#2A2A37", // Sumi ink4 - subtle background
     },
   },
 
@@ -304,6 +359,12 @@ export const themes: Record<string, Theme> = {
       error: "#e67e80",     // Red
       warning: "#dbbc7f",   // Yellow
       info: "#7fbbb3",      // Aqua
+      diffAdd: "#a7c080",   // Bright green
+      diffRemove: "#e67e80", // Red
+      diffAddBg: "#1e2a1e",   // Dark green background
+      diffRemoveBg: "#2a1e1e", // Dark red background
+      diffHeader: "#7fbbb3", // Aqua - file path header
+      diffHeaderBg: "#374145", // Bg2 - subtle background
     },
   },
 
@@ -330,6 +391,12 @@ export const themes: Record<string, Theme> = {
       error: "#e06c75",     // Red
       warning: "#e5c07b",   // Yellow
       info: "#56b6c2",      // Cyan
+      diffAdd: "#98c379",   // Green
+      diffRemove: "#e06c75", // Red
+      diffAddBg: "#1e2a1e",   // Dark green background
+      diffRemoveBg: "#2a1e1e", // Dark red background
+      diffHeader: "#61afef", // Blue - file path header
+      diffHeaderBg: "#2c323c", // Gutter bg - subtle background
     },
   },
 };

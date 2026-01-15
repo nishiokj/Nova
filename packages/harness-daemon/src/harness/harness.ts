@@ -16,14 +16,17 @@ import {
   type AgentConfig,
   type AgentHooks,
   type ToolHookResult,
+  type EnvironmentContext,
   getAgentPrompt,
   buildAgentConfig,
   getPlanningPromptAddendum,
 } from 'agent';
+import os from 'os';
+import { execSync } from 'child_process';
 import { Orchestrator } from 'orchestrator';
-import { createAdapter } from 'llm';
+import { createAdapter, RateLimitError } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot } from 'types';
+import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
 import { createWorkItem } from 'work';
 import { coerceStructuredOutput } from 'shared';
@@ -55,11 +58,84 @@ import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './sk
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
 
+/**
+ * Gather environment context for system prompts.
+ * Runs synchronously at startup - git commands are fast.
+ */
+function gatherEnvironmentContext(workingDir: string): EnvironmentContext {
+  const env: EnvironmentContext = {
+    workingDir,
+    platform: process.platform,
+    osVersion: os.release(),
+    date: new Date().toISOString().split('T')[0],
+  };
 
-function buildAgentRegistry(config: FullHarnessConfig): AgentRegistry {
+  try {
+    const isRepo = execSync('git rev-parse --is-inside-work-tree', {
+      cwd: workingDir,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim() === 'true';
+
+    if (isRepo) {
+      const currentBranch = execSync('git branch --show-current', {
+        cwd: workingDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+
+      // Detect main branch (main or master)
+      let mainBranch = 'main';
+      try {
+        execSync('git rev-parse --verify main', {
+          cwd: workingDir,
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch {
+        try {
+          execSync('git rev-parse --verify master', {
+            cwd: workingDir,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          mainBranch = 'master';
+        } catch {
+          // Neither main nor master exists
+        }
+      }
+
+      const status = execSync('git status --short', {
+        cwd: workingDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+
+      const recentCommits = execSync('git log --oneline -5', {
+        cwd: workingDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim().split('\n').filter(Boolean);
+
+      env.git = {
+        isRepo: true,
+        currentBranch: currentBranch || undefined,
+        mainBranch,
+        status: status || undefined,
+        recentCommits: recentCommits.length > 0 ? recentCommits : undefined,
+      };
+    }
+  } catch {
+    env.git = { isRepo: false };
+  }
+
+  return env;
+}
+
+function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentContext): AgentRegistry {
   const agentConfigs: Array<{ config: AgentConfig; llm: LLMRequestConfig }> = Object.entries(config.agents).map(([agentType, resolved]) => {
     return {
-      config: buildAgentConfig(agentType, resolved.tools, resolved.budget, resolved.outputSchema) as AgentConfig,
+      config: buildAgentConfig(agentType, resolved.tools, resolved.budget, resolved.outputSchema, envContext) as AgentConfig,
       llm: {
         model: resolved.llm.model,
         provider: resolved.llm.provider,
@@ -230,7 +306,10 @@ export class AgentHarness {
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
-    this.agentRegistry = buildAgentRegistry(config);
+
+    // Gather environment context once at startup
+    const envContext = gatherEnvironmentContext(config.tools.workingDir);
+    this.agentRegistry = buildAgentRegistry(config, envContext);
 
     const apiKeys: Partial<Record<LLMProvider, string>> = {};
     const baseUrls: Partial<Record<LLMProvider, string>> = {};
@@ -617,6 +696,7 @@ export class AgentHarness {
         const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode);
 
         if (result.paused && result.userPrompt) {
+          // Pausing for user input - only emit user prompt event, not response
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
             result.userPrompt.question,
@@ -624,19 +704,20 @@ export class AgentHarness {
             result.userPrompt.context,
             result.userPrompt.multiSelect
           ));
+        } else {
+          // Execution completed (success or failure) - emit response event
+          eventQueue.push(
+            createResponseEvent(
+              requestId,
+              result.success,
+              result.finalText,
+              result.toolsUsed,
+              result.durationMs,
+              result.errorMessage,
+              result.metadata
+            )
+          );
         }
-
-        eventQueue.push(
-          createResponseEvent(
-            requestId,
-            result.success,
-            result.finalText,
-            result.toolsUsed,
-            result.durationMs,
-            result.errorMessage,
-            result.metadata
-          )
-        );
 
         eventQueue.push(createStatusEvent('idle'));
 
@@ -644,6 +725,61 @@ export class AgentHarness {
 
         return result;
       } catch (error) {
+        // Handle RateLimitError specially - persist context and notify user gracefully
+        if (RateLimitError.isRateLimitError(error)) {
+          const rateLimitInfo = error.info;
+          this.logger.warning('Rate limit hit during agent run', {
+            requestId,
+            provider: error.provider,
+            model: error.model,
+            type: rateLimitInfo.type,
+            retryAfterMs: rateLimitInfo.retryAfterMs,
+            limitType: rateLimitInfo.limitType,
+          });
+
+          // Emit rate_limit event for monitoring/dashboards
+          emit(createEvent('rate_limit', {
+            provider: error.provider,
+            model: error.model,
+            type: rateLimitInfo.type,
+            retryAfterMs: rateLimitInfo.retryAfterMs,
+            limitType: rateLimitInfo.limitType,
+            message: rateLimitInfo.message,
+            contextPreserved: true,
+          } as RateLimitData));
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          // Create a user-friendly error message based on rate limit type
+          let userMessage: string;
+          if (rateLimitInfo.type === 'billing') {
+            userMessage = `⚠️ Billing limit reached for ${error.provider}. Please check your account billing status. Your conversation has been saved.`;
+          } else if (rateLimitInfo.type === 'quota') {
+            userMessage = `⚠️ API quota exceeded for ${error.provider} (${rateLimitInfo.limitType ?? 'requests'}). This may be a daily or monthly limit. Your conversation has been saved.`;
+          } else {
+            const waitTime = rateLimitInfo.retryAfterMs
+              ? ` Please wait ${Math.ceil(rateLimitInfo.retryAfterMs / 1000)} seconds and try again.`
+              : ' Please wait a moment and try again.';
+            userMessage = `⚠️ Rate limit reached for ${error.provider}.${waitTime} Your conversation has been saved.`;
+          }
+
+          eventQueue.push(createErrorEvent(userMessage, true)); // recoverable = true
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Generic error handling for non-rate-limit errors
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.logger.error('Agent run failed', { error: errorMessage, requestId });
 
@@ -737,144 +873,6 @@ export class AgentHarness {
       this.logger.warning('GraphD persist failed', { error: String(error) });
     }
   }
-
-  /**
-   * Run a single agent without orchestration.
-   * Used for simple tier or any tier that doesn't need multi-agent coordination.
-   */
-  private async runSingleAgent(
-    agentType: string,
-    context: ContextWindow,
-    goal: string,
-    requestId: string,
-    emit: ReturnType<typeof createEventEmitCallback>,
-    llm: ReturnType<typeof createAdapter>,
-    agentConfig: ResolvedAgentConfig,
-    workingDir?: string
-  ): Promise<AgentRunResult> {
-    // Get system prompt from prompts.ts, merge with behavioral rules (skip for simple/routing)
-    const basePrompt = getAgentPrompt(agentType);
-    const skipBehavioralRules = agentType === 'simple' || agentType === 'routing';
-    const systemPrompt = (this.config.behavioralRules && !skipBehavioralRules)
-      ? `${basePrompt}\n\n${this.config.behavioralRules}`
-      : basePrompt;
-
-    const config = {
-      type: agentType,
-      systemPrompt,
-      tools: agentConfig.tools,
-      budget: agentConfig.budget,
-      outputSchema: agentConfig.outputSchema,
-    };
-
-    const llmConfig: LLMRequestConfig = {
-      model: agentConfig.llm.model,
-      provider: agentConfig.llm.provider,
-      apiKey: agentConfig.llm.apiKey,
-      maxTokens: agentConfig.llm.maxTokens,
-      temperature: agentConfig.llm.temperature,
-      baseUrl: agentConfig.llm.baseUrl,
-      reasoning: agentConfig.llm.reasoning,
-      fallback: agentConfig.llm.fallback,
-    };
-
-    const agent = new Agent(config, {
-      llm,
-      toolRegistry: this.toolRegistry,
-      emit,
-      requestId,
-      agentRegistry: this.agentRegistry,
-      llmConfig,
-    });
-
-    const workItem = createWorkItem({
-      goal,
-      objective: goal,
-      agent: agentType,
-      bounds: {
-        maxToolCalls: agentConfig.budget.maxToolCalls,
-        maxDurationMs: agentConfig.budget.maxDurationMs,
-        maxLlmCalls: agentConfig.budget.maxIterations,
-      },
-    });
-
-    emit(createEvent('workitem_status', {
-      workId: workItem.workId,
-      objective: workItem.objective,
-      delta: workItem.delta,
-      agent: workItem.agent,
-      dependencies: [...workItem.dependencies],
-      status: 'started',
-    }, workItem.workId));
-
-    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-    const result = await agent.run({ globalContext: context, workItem, cwd: effectiveWorkingDir });
-
-    if (!result.needsUserInput) {
-      if (result.success) {
-        emit(createEvent('workitem_status', {
-          workId: workItem.workId,
-          objective: workItem.objective,
-          delta: workItem.delta,
-          agent: workItem.agent,
-          dependencies: [...workItem.dependencies],
-          status: 'completed',
-          response: result.response,
-          metrics: {
-            llmCallsMade: result.metrics.llmCallsMade,
-            toolCallsMade: result.metrics.toolCallsMade,
-            durationMs: result.metrics.durationMs,
-          },
-        }, workItem.workId));
-
-        emit(createEvent('goal_achieved', {
-          goal,
-          completed: 1,
-          skipped: 0,
-        }));
-      } else {
-        emit(createEvent('workitem_status', {
-          workId: workItem.workId,
-          objective: workItem.objective,
-          delta: workItem.delta,
-          agent: workItem.agent,
-          dependencies: [...workItem.dependencies],
-          status: 'failed',
-          error: result.error ?? 'Unknown error',
-          toolErrors: result.toolErrors,
-          terminationReason: result.terminationReason,
-        }, workItem.workId));
-
-        emit(createEvent('goal_not_achieved', {
-          goal,
-          reason: result.error ?? 'Unknown error',
-          completed: 0,
-          failed: 1,
-          skipped: 0,
-        }));
-      }
-    }
-
-    return {
-      requestId,
-      sessionKey: context.sessionKey,
-      success: result.success,
-      finalText: result.response,
-      errorMessage: result.error,
-      paused: result.needsUserInput,
-      userPrompt: result.needsUserInput && result.userPrompt ? {
-        requestId,
-        question: String(result.userPrompt.question ?? 'Please provide input:'),
-        options: result.userPrompt.options,
-        context: result.userPrompt.context,
-        multiSelect: result.userPrompt.multiSelect,
-      } : undefined,
-      toolsUsed: [],
-      durationMs: result.metrics.durationMs,
-      metadata: { tier: agentType, metrics: result.metrics },
-    };
-  }
-
   /**
    * Filter tools for plan mode - removes write/edit capabilities.
    */
@@ -1112,6 +1110,7 @@ export class AgentHarness {
         );
 
         if (result.paused && result.userPrompt) {
+          // Pausing for user input - only emit user prompt event, not response
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
             result.userPrompt.question,
@@ -1119,25 +1118,69 @@ export class AgentHarness {
             result.userPrompt.context,
             result.userPrompt.multiSelect
           ));
+        } else {
+          // Execution completed (success or failure) - emit response event
+          eventQueue.push(
+            createResponseEvent(
+              requestId,
+              result.success,
+              result.finalText,
+              result.toolsUsed,
+              result.durationMs,
+              result.errorMessage,
+              result.metadata
+            )
+          );
         }
-
-        eventQueue.push(
-          createResponseEvent(
-            requestId,
-            result.success,
-            result.finalText,
-            result.toolsUsed,
-            result.durationMs,
-            result.errorMessage,
-            result.metadata
-          )
-        );
 
         eventQueue.push(createStatusEvent('idle'));
         this.persistContext(contextWindow);
 
         return result;
       } catch (error) {
+        // Handle RateLimitError specially - persist context and notify user gracefully
+        if (RateLimitError.isRateLimitError(error)) {
+          const rateLimitInfo = error.info;
+          this.logger.warning('Rate limit hit during resume', {
+            requestId,
+            provider: error.provider,
+            model: error.model,
+            type: rateLimitInfo.type,
+            retryAfterMs: rateLimitInfo.retryAfterMs,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          // Create a user-friendly error message
+          let userMessage: string;
+          if (rateLimitInfo.type === 'billing') {
+            userMessage = `⚠️ Billing limit reached for ${error.provider}. Please check your account billing status. Your conversation has been saved.`;
+          } else if (rateLimitInfo.type === 'quota') {
+            userMessage = `⚠️ API quota exceeded for ${error.provider}. This may be a daily or monthly limit. Your conversation has been saved.`;
+          } else {
+            const waitTime = rateLimitInfo.retryAfterMs
+              ? ` Please wait ${Math.ceil(rateLimitInfo.retryAfterMs / 1000)} seconds and try again.`
+              : ' Please wait a moment and try again.';
+            userMessage = `⚠️ Rate limit reached for ${error.provider}.${waitTime} Your conversation has been saved.`;
+          }
+
+          eventQueue.push(createErrorEvent(userMessage, true)); // recoverable = true
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Generic error handling
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.logger.error('Resume failed', { error: errorMessage, requestId });
 

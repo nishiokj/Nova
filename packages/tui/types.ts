@@ -69,7 +69,7 @@ export type EventKind = "work" | "tool" | "planning" | "system";
 
 export type Role = "user" | "agent" | "system" | "status";
 
-export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme";
+export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response";
 export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {
@@ -93,6 +93,10 @@ export interface ProgressData {
   kind?: EventKind;
   /** Duration in milliseconds (for completed operations) */
   duration_ms?: number;
+  /** Tool arguments (for structured display) */
+  tool_args?: Record<string, unknown>;
+  /** Tool result success flag */
+  tool_success?: boolean;
 }
 
 export interface StreamData {
@@ -210,4 +214,20 @@ export interface UserPromptData {
   question_type?: string;
   /** Multiple questions to ask in sequence */
   questions?: UserPromptQuestion[];
+}
+
+/** Response content for full-pane response mode */
+export interface ResponseContent {
+  /** Type of response content */
+  type: "diff" | "text";
+  /** Lines to render (pre-processed for full-width) */
+  lines: ResponseLine[];
+  /** Original file path (for diff responses) */
+  filePath?: string;
+}
+
+/** A single line in a response pane */
+export interface ResponseLine {
+  text: string;
+  type: "header" | "added" | "removed" | "context" | "text" | "separator";
 }

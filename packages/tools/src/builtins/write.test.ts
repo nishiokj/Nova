@@ -39,12 +39,12 @@ describe('executeWrite', () => {
     it('should create a new file with content', async () => {
       const result = await executeWrite({
         path: 'new.txt',
-        cwd: tempDir,
         content: 'Hello, World!',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
-      expect(result.output).toContain('Successfully wrote');
+      expect(result.output).toContain('Created');
+      expect(result.output).toContain('Preview:');
 
       const content = await readFile(join(tempDir, 'new.txt'), 'utf-8');
       expect(content).toBe('Hello, World!');
@@ -54,9 +54,8 @@ describe('executeWrite', () => {
       const multiline = 'line1\nline2\nline3';
       const result = await executeWrite({
         path: 'multiline.txt',
-        cwd: tempDir,
         content: multiline,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'multiline.txt'), 'utf-8');
@@ -67,9 +66,8 @@ describe('executeWrite', () => {
       const unicode = '日本語 🎉 émojis';
       const result = await executeWrite({
         path: 'unicode.txt',
-        cwd: tempDir,
         content: unicode,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'unicode.txt'), 'utf-8');
@@ -79,9 +77,8 @@ describe('executeWrite', () => {
     it('should create empty file', async () => {
       const result = await executeWrite({
         path: 'empty.txt',
-        cwd: tempDir,
         content: '',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'empty.txt'), 'utf-8');
@@ -93,9 +90,8 @@ describe('executeWrite', () => {
     it('should create parent directories if needed', async () => {
       const result = await executeWrite({
         path: 'a/b/c/deep.txt',
-        cwd: tempDir,
         content: 'deep content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'a/b/c/deep.txt'), 'utf-8');
@@ -107,9 +103,8 @@ describe('executeWrite', () => {
 
       const result = await executeWrite({
         path: 'existing/file.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
     });
@@ -121,9 +116,8 @@ describe('executeWrite', () => {
 
       const result = await executeWrite({
         path: 'existing.txt',
-        cwd: tempDir,
         content: 'new content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('already exists');
@@ -139,9 +133,8 @@ describe('executeWrite', () => {
     it('should indicate atomic write in metadata', async () => {
       const result = await executeWrite({
         path: 'atomic.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.atomic).toBe(true);
@@ -150,9 +143,8 @@ describe('executeWrite', () => {
     it('should not leave temp files on success', async () => {
       await executeWrite({
         path: 'success.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       const { readdir } = await import('fs/promises');
       const files = await readdir(tempDir);
@@ -166,9 +158,8 @@ describe('executeWrite', () => {
       // This is hard to test without mocking, but documents the behavior
       const result = await executeWrite({
         path: 'test.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       // Normal case should succeed
       expect(result.isSuccess).toBe(true);
@@ -179,9 +170,8 @@ describe('executeWrite', () => {
     it('should resolve relative paths from cwd', async () => {
       const result = await executeWrite({
         path: 'relative.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.path).toBe(resolve(tempDir, 'relative.txt'));
@@ -192,9 +182,8 @@ describe('executeWrite', () => {
 
       const result = await executeWrite({
         path: absolutePath,
-        cwd: '/some/other/dir',
         content: 'content',
-      });
+      }, { workdirOverride: '/some/other/dir' });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(absolutePath, 'utf-8');
@@ -217,9 +206,8 @@ describe('executeWrite', () => {
     it('should return error when content is missing', async () => {
       const result = await executeWrite({
         path: 'nocontent.txt',
-        cwd: tempDir,
         // content is missing
-      } as any);
+      } as any, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('content');
@@ -228,9 +216,8 @@ describe('executeWrite', () => {
     it('should return error when content is null', async () => {
       const result = await executeWrite({
         path: 'null.txt',
-        cwd: tempDir,
         content: null as any,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('content');
@@ -242,9 +229,8 @@ describe('executeWrite', () => {
       const content = 'Hello, World!';
       const result = await executeWrite({
         path: 'meta.txt',
-        cwd: tempDir,
         content,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.metadata?.bytesWritten).toBe(content.length);
     });
@@ -252,9 +238,8 @@ describe('executeWrite', () => {
     it('should include action=write in metadata', async () => {
       const result = await executeWrite({
         path: 'action.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.metadata?.action).toBe('write');
     });
@@ -262,9 +247,8 @@ describe('executeWrite', () => {
     it('should record duration', async () => {
       const result = await executeWrite({
         path: 'timed.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.durationMs).toBeDefined();
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
@@ -273,9 +257,8 @@ describe('executeWrite', () => {
     it('should include correct tool name', async () => {
       const result = await executeWrite({
         path: 'name.txt',
-        cwd: tempDir,
         content: 'content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.toolName).toBe('Write');
     });
@@ -304,10 +287,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'test.txt',
-        cwd: tempDir,
         oldString: 'World',
         newString: 'Universe',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('Replaced 1 occurrence');
@@ -321,10 +303,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'preserve.txt',
-        cwd: tempDir,
         oldString: 'TARGET',
         newString: 'REPLACED',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'preserve.txt'), 'utf-8');
@@ -336,10 +317,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'multi.txt',
-        cwd: tempDir,
         oldString: 'old',
         newString: 'new',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'multi.txt'), 'utf-8');
@@ -351,10 +331,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'delete.txt',
-        cwd: tempDir,
         oldString: 'remove this',
         newString: '',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'delete.txt'), 'utf-8');
@@ -368,10 +347,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'insert.txt',
-        cwd: tempDir,
         oldString: '',
         newString: 'prefix',
-      });
+      }, { workdirOverride: tempDir });
 
       // Empty string should fail validation
       expect(result.isSuccess).toBe(false);
@@ -384,10 +362,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'multi.txt',
-        cwd: tempDir,
         oldString: 'foo',
         newString: 'replaced',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('3 times');
@@ -403,10 +380,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'context.txt',
-        cwd: tempDir,
         oldString: 'foo',
         newString: 'bar',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('First occurrence near');
@@ -417,10 +393,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'suggest.txt',
-        cwd: tempDir,
         oldString: 'a',
         newString: 'b',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('replaceAll');
@@ -433,11 +408,10 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'all.txt',
-        cwd: tempDir,
         oldString: 'foo',
         newString: 'replaced',
         replaceAll: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('Replaced 3 occurrence');
@@ -452,11 +426,10 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'one.txt',
-        cwd: tempDir,
         oldString: 'foo',
         newString: 'bar',
         replaceAll: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.replacements).toBe(1);
@@ -469,10 +442,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'notfound.txt',
-        cwd: tempDir,
         oldString: 'nonexistent',
         newString: 'replacement',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('not found');
@@ -487,10 +459,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'whitespace.txt',
-        cwd: tempDir,
         oldString: 'content here', // Missing double space
         newString: 'new',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('whitespace');
@@ -501,10 +472,9 @@ describe('executeEdit', () => {
     it('should return error for non-existent file', async () => {
       const result = await executeEdit({
         path: 'missing.txt',
-        cwd: tempDir,
         oldString: 'old',
         newString: 'new',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('not found');
@@ -518,10 +488,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'ws.txt',
-        cwd: tempDir,
         oldString: 'a  b', // Two spaces
         newString: 'a b', // One space
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'ws.txt'), 'utf-8');
@@ -533,10 +502,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'indent.txt',
-        cwd: tempDir,
         oldString: '    function foo()',
         newString: '    function bar()',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'indent.txt'), 'utf-8');
@@ -548,10 +516,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'tabs.txt',
-        cwd: tempDir,
         oldString: '\tindented',
         newString: '  indented', // Replace tab with spaces
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'tabs.txt'), 'utf-8');
@@ -563,10 +530,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'crlf.txt',
-        cwd: tempDir,
         oldString: 'line1\r\nline2',
         newString: 'line1\nline2', // Convert to LF
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'crlf.txt'), 'utf-8');
@@ -580,10 +546,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'entire.txt',
-        cwd: tempDir,
         oldString: 'old content',
         newString: 'new content',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'entire.txt'), 'utf-8');
@@ -596,10 +561,9 @@ describe('executeEdit', () => {
       const longString = 'x'.repeat(100000);
       const result = await executeEdit({
         path: 'long.txt',
-        cwd: tempDir,
         oldString: 'short',
         newString: longString,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'long.txt'), 'utf-8');
@@ -611,10 +575,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'special.txt',
-        cwd: tempDir,
         oldString: '$100.00',
         newString: '$200.00',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'special.txt'), 'utf-8');
@@ -627,10 +590,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'regex.txt',
-        cwd: tempDir,
         oldString: '.*',
         newString: '-',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       const content = await readFile(join(tempDir, 'regex.txt'), 'utf-8');
@@ -644,11 +606,10 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'contains.txt',
-        cwd: tempDir,
         oldString: 'foo',
         newString: 'foofoo', // Contains oldString
         replaceAll: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       // Should only replace original occurrences
@@ -663,10 +624,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'atomic.txt',
-        cwd: tempDir,
         oldString: 'original',
         newString: 'edited',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.metadata?.atomic).toBe(true);
     });
@@ -679,10 +639,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'subdir/file.txt',
-        cwd: tempDir,
         oldString: 'old',
         newString: 'new',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.path).toBe(resolve(tempDir, 'subdir/file.txt'));
@@ -706,10 +665,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'bytes.txt',
-        cwd: tempDir,
         oldString: 'short',
         newString: 'longer string',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.metadata?.bytesWritten).toBe('longer string'.length);
     });
@@ -719,10 +677,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'action.txt',
-        cwd: tempDir,
         oldString: 'old',
         newString: 'new',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.metadata?.action).toBe('edit');
     });
@@ -732,11 +689,10 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'count.txt',
-        cwd: tempDir,
         oldString: 'a',
         newString: 'b',
         replaceAll: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.metadata?.replacements).toBe(3);
     });
@@ -746,10 +702,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'time.txt',
-        cwd: tempDir,
         oldString: 'content',
         newString: 'new',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.durationMs).toBeDefined();
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
@@ -760,10 +715,9 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'name.txt',
-        cwd: tempDir,
         oldString: 'content',
         newString: 'new',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.toolName).toBe('Edit');
     });
@@ -775,9 +729,8 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'missing.txt',
-        cwd: tempDir,
         newString: 'new',
-      } as any);
+      } as any, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('oldString');
@@ -788,12 +741,72 @@ describe('executeEdit', () => {
 
       const result = await executeEdit({
         path: 'missing.txt',
-        cwd: tempDir,
         oldString: 'content',
-      } as any);
+      } as any, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('newString');
+    });
+  });
+
+  describe('Snake_case parameter compatibility', () => {
+    it('should accept snake_case parameters (old_string, new_string)', async () => {
+      await writeFile(join(tempDir, 'snake.txt'), 'hello world');
+
+      const result = await executeEdit({
+        path: 'snake.txt',
+        old_string: 'hello',
+        new_string: 'goodbye',
+      }, { workdirOverride: tempDir });
+
+      expect(result.isSuccess).toBe(true);
+      const content = await readFile(join(tempDir, 'snake.txt'), 'utf-8');
+      expect(content).toBe('goodbye world');
+    });
+
+    it('should accept file_path instead of path', async () => {
+      await writeFile(join(tempDir, 'filepath.txt'), 'test content');
+
+      const result = await executeEdit({
+        file_path: 'filepath.txt',
+        old_string: 'test',
+        new_string: 'new',
+      }, { workdirOverride: tempDir });
+
+      expect(result.isSuccess).toBe(true);
+      const content = await readFile(join(tempDir, 'filepath.txt'), 'utf-8');
+      expect(content).toBe('new content');
+    });
+
+    it('should accept replace_all snake_case parameter', async () => {
+      await writeFile(join(tempDir, 'replaceall.txt'), 'foo bar foo baz foo');
+
+      const result = await executeEdit({
+        path: 'replaceall.txt',
+        old_string: 'foo',
+        new_string: 'XXX',
+        replace_all: true,
+      }, { workdirOverride: tempDir });
+
+      expect(result.isSuccess).toBe(true);
+      const content = await readFile(join(tempDir, 'replaceall.txt'), 'utf-8');
+      expect(content).toBe('XXX bar XXX baz XXX');
+    });
+
+    it('should prefer camelCase over snake_case when both provided', async () => {
+      await writeFile(join(tempDir, 'prefer.txt'), 'original content');
+
+      const result = await executeEdit({
+        path: 'prefer.txt',
+        oldString: 'original',
+        old_string: 'content',  // This should be ignored
+        newString: 'modified',
+        new_string: 'ignored',  // This should be ignored
+      }, { workdirOverride: tempDir });
+
+      expect(result.isSuccess).toBe(true);
+      const content = await readFile(join(tempDir, 'prefer.txt'), 'utf-8');
+      expect(content).toBe('modified content');
     });
   });
 });

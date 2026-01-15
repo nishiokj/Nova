@@ -29,12 +29,134 @@ interface Metrics {
   totalOutputTokens: number;
 }
 
+// Daily metrics for rolling 10-day charts
+interface DailyMetrics {
+  date: string; // YYYY-MM-DD
+  dateLabel: string; // MM/DD
+  totalInput: number;
+  totalOutput: number;
+  requests: number;
+  llmCalls: number;
+  inputPerCall: number;
+  outputPerCall: number;
+  inputPerRequest: number;
+  outputPerRequest: number;
+  llmCallsPerRequest: number;
+}
+
 function isWithinDays(timestamp: string, days: number): boolean {
   const date = new Date(timestamp);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffDays = diffMs / (1000 * 60 * 60 * 24);
   return diffDays <= days;
+}
+
+function getDateKey(timestamp: string): string {
+  const date = new Date(timestamp);
+  return date.toISOString().split('T')[0];
+}
+
+function getDateLabel(dateKey: string): string {
+  const [, month, day] = dateKey.split('-');
+  return `${month}/${day}`;
+}
+
+function computeDailyMetrics(sessions: Session[]): DailyMetrics[] {
+  // Generate last 10 days
+  const days: string[] = [];
+  const now = new Date();
+  for (let i = 9; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    days.push(d.toISOString().split('T')[0]);
+  }
+
+  // Initialize daily buckets
+  const buckets = new Map<string, {
+    input: number;
+    output: number;
+    requests: Set<string>;
+    llmCalls: number;
+  }>();
+
+  for (const day of days) {
+    buckets.set(day, { input: 0, output: 0, requests: new Set(), llmCalls: 0 });
+  }
+
+  // Aggregate data
+  for (const session of sessions) {
+    for (const request of session.requests) {
+      for (const call of request.llmCalls) {
+        const dayKey = getDateKey(call.timestamp);
+        const bucket = buckets.get(dayKey);
+        if (bucket) {
+          bucket.input += call.promptTokens;
+          bucket.output += call.completionTokens;
+          bucket.requests.add(request.id);
+          bucket.llmCalls++;
+        }
+      }
+    }
+  }
+
+  // Convert to array
+  return days.map(day => {
+    const bucket = buckets.get(day)!;
+    const requests = bucket.requests.size;
+    const llmCalls = bucket.llmCalls;
+    return {
+      date: day,
+      dateLabel: getDateLabel(day),
+      totalInput: bucket.input,
+      totalOutput: bucket.output,
+      requests,
+      llmCalls,
+      inputPerCall: llmCalls > 0 ? bucket.input / llmCalls : 0,
+      outputPerCall: llmCalls > 0 ? bucket.output / llmCalls : 0,
+      inputPerRequest: requests > 0 ? bucket.input / requests : 0,
+      outputPerRequest: requests > 0 ? bucket.output / requests : 0,
+      llmCallsPerRequest: requests > 0 ? llmCalls / requests : 0,
+    };
+  });
+}
+
+// Daily metrics table component
+function DailyMetricsTable({ data }: { data: DailyMetrics[] }) {
+  return (
+    <table className="analytics-table daily-table">
+      <thead>
+        <tr>
+          <th className="analytics-th">Date</th>
+          <th className="analytics-th analytics-num text-cyan">Input</th>
+          <th className="analytics-th analytics-num text-green">Output</th>
+          <th className="analytics-th analytics-num">Reqs</th>
+          <th className="analytics-th analytics-num">LLM Calls</th>
+          <th className="analytics-th analytics-num text-cyan">In/Call</th>
+          <th className="analytics-th analytics-num text-green">Out/Call</th>
+          <th className="analytics-th analytics-num text-cyan">In/Req</th>
+          <th className="analytics-th analytics-num text-green">Out/Req</th>
+          <th className="analytics-th analytics-num">Calls/Req</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.map((d) => (
+          <tr key={d.date} className="analytics-row">
+            <td className="analytics-td">{d.dateLabel}</td>
+            <td className="analytics-td analytics-num text-cyan">{formatTokens(d.totalInput)}</td>
+            <td className="analytics-td analytics-num text-green">{formatTokens(d.totalOutput)}</td>
+            <td className="analytics-td analytics-num">{d.requests}</td>
+            <td className="analytics-td analytics-num">{d.llmCalls}</td>
+            <td className="analytics-td analytics-num text-cyan">{formatTokens(d.inputPerCall)}</td>
+            <td className="analytics-td analytics-num text-green">{formatTokens(d.outputPerCall)}</td>
+            <td className="analytics-td analytics-num text-cyan">{formatTokens(d.inputPerRequest)}</td>
+            <td className="analytics-td analytics-num text-green">{formatTokens(d.outputPerRequest)}</td>
+            <td className="analytics-td analytics-num">{d.llmCallsPerRequest.toFixed(1)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
 }
 
 function computeAnalytics(sessions: Session[]): { byProvider: ProviderStats[]; metrics: Metrics } {
@@ -110,6 +232,7 @@ function computeAnalytics(sessions: Session[]): { byProvider: ProviderStats[]; m
 
 export function AnalyticsView({ sessions }: AnalyticsViewProps) {
   const { byProvider, metrics } = useMemo(() => computeAnalytics(sessions), [sessions]);
+  const dailyMetrics = useMemo(() => computeDailyMetrics(sessions), [sessions]);
 
   if (sessions.length === 0) {
     return (
@@ -121,6 +244,12 @@ export function AnalyticsView({ sessions }: AnalyticsViewProps) {
 
   return (
     <div className="analytics-view">
+      {/* Rolling 10-day table */}
+      <div className="analytics-section">
+        <div className="analytics-section-title">Rolling 10 Days</div>
+        <DailyMetricsTable data={dailyMetrics} />
+      </div>
+
       <div className="analytics-section">
         <div className="analytics-section-title">Tokens by Provider</div>
         <table className="analytics-table">

@@ -19,7 +19,7 @@ export async function executeBash(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const command = args.command as string;
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
+  const cwd = context?.workdirOverride ?? process.cwd();
   const timeoutMs = ((args.timeout as number) ?? 30) * 1000;
   const env = (args.env as Record<string, string>) ?? {
     ...process.env,
@@ -116,10 +116,6 @@ export const bashToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory for command execution',
-      },
       command: {
         type: 'string',
         description: 'The command to execute',
@@ -129,9 +125,9 @@ export const bashToolOptions: ToolRegistrationOptions = {
         description: 'Timeout in seconds (default: 30)',
       },
     },
-    required: ['cwd', 'command'],
+    required: ['command'],
   },
-  required: ['cwd', 'command'],
+  required: ['command'],
   executor: executeBash,
   timeoutMs: 30000,
   readOnly: false,

@@ -25,6 +25,10 @@ import {
   type CircuitBreakerState,
   type ResilienceConfig,
   DEFAULT_RESILIENCE_CONFIG,
+  RateLimitError,
+  type RateLimitInfo,
+  type RateLimitType,
+  sleep,
 } from './retry.js';
 import { parseApiErrorResponse, formatApiError } from './response_schemas.js';
 
@@ -63,6 +67,184 @@ function parseApiError(
 ): Error {
   const parsed = parseApiErrorResponse(provider, status, responseText);
   return formatApiError(provider, status, parsed);
+}
+
+// ============================================
+// RATE LIMIT PARSING
+// ============================================
+
+/**
+ * Parse rate limit headers from a Response object.
+ * Supports OpenAI, Anthropic, and OpenAI-compatible providers (Cerebras, Groq, etc.)
+ */
+function parseRateLimitHeaders(headers: Headers): Partial<RateLimitInfo> {
+  const result: Partial<RateLimitInfo> = {};
+
+  // retry-after header (standard, in seconds)
+  const retryAfter = headers.get('retry-after');
+  if (retryAfter) {
+    const seconds = parseInt(retryAfter, 10);
+    if (!isNaN(seconds)) {
+      result.retryAfterMs = seconds * 1000;
+    }
+  }
+
+  // x-ratelimit-reset-* headers (OpenAI/Anthropic/Cerebras)
+  // These can be timestamps or durations
+  const resetRequests = headers.get('x-ratelimit-reset-requests');
+  const resetTokens = headers.get('x-ratelimit-reset-tokens');
+  const resetMs = headers.get('x-ratelimit-reset-ms'); // Cerebras specific
+
+  if (resetMs) {
+    const ms = parseInt(resetMs, 10);
+    if (!isNaN(ms)) {
+      result.retryAfterMs = ms;
+    }
+  } else if (resetRequests || resetTokens) {
+    // Parse duration strings like "1s", "500ms", "2m30s"
+    const parseResetDuration = (val: string): number | undefined => {
+      // Try parsing as duration (e.g., "1s", "500ms", "2m30s")
+      const msMatch = val.match(/^(\d+)ms$/);
+      if (msMatch) return parseInt(msMatch[1], 10);
+
+      const sMatch = val.match(/^(\d+)s$/);
+      if (sMatch) return parseInt(sMatch[1], 10) * 1000;
+
+      const mMatch = val.match(/^(\d+)m$/);
+      if (mMatch) return parseInt(mMatch[1], 10) * 60 * 1000;
+
+      // Try parsing as seconds number
+      const num = parseFloat(val);
+      if (!isNaN(num) && num < 1000000) return num * 1000; // Assume seconds if small
+
+      // Try parsing as timestamp
+      const timestamp = Date.parse(val);
+      if (!isNaN(timestamp)) {
+        const waitMs = timestamp - Date.now();
+        return waitMs > 0 ? waitMs : undefined;
+      }
+      return undefined;
+    };
+
+    const requestWait = resetRequests ? parseResetDuration(resetRequests) : undefined;
+    const tokenWait = resetTokens ? parseResetDuration(resetTokens) : undefined;
+
+    // Use the longer wait time
+    if (requestWait !== undefined || tokenWait !== undefined) {
+      result.retryAfterMs = Math.max(requestWait ?? 0, tokenWait ?? 0);
+    }
+  }
+
+  // Remaining counts
+  const remainingRequests = headers.get('x-ratelimit-remaining-requests');
+  const remainingTokens = headers.get('x-ratelimit-remaining-tokens');
+  if (remainingRequests !== null) {
+    const remaining = parseInt(remainingRequests, 10);
+    if (!isNaN(remaining)) {
+      result.remaining = remaining;
+      result.limitType = 'requests';
+    }
+  }
+  if (remainingTokens !== null) {
+    const remaining = parseInt(remainingTokens, 10);
+    if (!isNaN(remaining) && (result.remaining === undefined || remaining < result.remaining)) {
+      result.remaining = remaining;
+      result.limitType = 'tokens';
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Classify rate limit type from error message content.
+ */
+function classifyRateLimitType(errorMessage: string, retryAfterMs?: number): RateLimitType {
+  const lower = errorMessage.toLowerCase();
+
+  // Billing/payment issues
+  if (
+    lower.includes('billing') ||
+    lower.includes('payment') ||
+    lower.includes('insufficient') ||
+    lower.includes('credit') ||
+    lower.includes('subscription')
+  ) {
+    return 'billing';
+  }
+
+  // Quota exhaustion (daily/weekly/monthly limits)
+  if (
+    lower.includes('quota') ||
+    lower.includes('daily') ||
+    lower.includes('weekly') ||
+    lower.includes('monthly') ||
+    lower.includes('exceeded your') ||
+    lower.includes('limit exceeded') && (lower.includes('day') || lower.includes('month'))
+  ) {
+    return 'quota';
+  }
+
+  // Short window rate limit (per-minute, per-second)
+  if (
+    lower.includes('rate limit') ||
+    lower.includes('too many requests') ||
+    lower.includes('requests per') ||
+    lower.includes('tokens per')
+  ) {
+    // If we have retry-after and it's short, it's a window limit
+    if (retryAfterMs !== undefined && retryAfterMs <= 120000) {
+      return 'window';
+    }
+    // Default to window for generic rate limits (most common case)
+    return 'window';
+  }
+
+  return 'unknown';
+}
+
+/**
+ * Create a RateLimitError from a 429 response.
+ */
+function createRateLimitError(
+  provider: string,
+  model: string,
+  status: number,
+  headers: Headers,
+  responseText: string
+): RateLimitError {
+  const headerInfo = parseRateLimitHeaders(headers);
+
+  // Parse the error message
+  let errorMessage = responseText;
+  try {
+    const parsed = JSON.parse(responseText);
+    errorMessage = parsed?.error?.message ?? parsed?.message ?? responseText;
+  } catch {
+    // Keep original text
+  }
+
+  const rateLimitType = classifyRateLimitType(errorMessage, headerInfo.retryAfterMs);
+
+  const info: RateLimitInfo = {
+    type: rateLimitType,
+    retryAfterMs: headerInfo.retryAfterMs,
+    limitType: headerInfo.limitType,
+    remaining: headerInfo.remaining,
+    message: errorMessage,
+  };
+
+  const displayWait = info.retryAfterMs
+    ? ` (retry after ${Math.ceil(info.retryAfterMs / 1000)}s)`
+    : '';
+
+  return new RateLimitError(
+    `${provider} rate limit [${rateLimitType}]: ${errorMessage}${displayWait}`,
+    info,
+    provider,
+    model,
+    status
+  );
 }
 
 // ============================================
@@ -343,6 +525,41 @@ class LLMRouterAdapter implements LLMAdapter {
         }
       });
     } catch (error) {
+      // Handle RateLimitError specially - wait and retry for short windows
+      if (RateLimitError.isRateLimitError(error) && error.isWorthWaiting()) {
+        const waitMs = error.info.retryAfterMs ?? 30000;
+        this.logger.warn('Rate limit hit (short window), waiting to retry', {
+          provider: error.provider,
+          model: error.model,
+          type: error.info.type,
+          waitMs,
+        });
+        await sleep(waitMs);
+        // Retry once after waiting
+        try {
+          return await this.withResilience(resolved.provider, resolved.model, async () => {
+            switch (resolved.provider) {
+              case 'openai':
+                return this.respondOpenAI(params, resolved);
+              case 'anthropic':
+                return this.respondAnthropic(params, resolved);
+              case 'openai-compat':
+                return this.respondOpenAICompat(params, resolved);
+              default:
+                throw new Error(`Unsupported provider: ${resolved.provider}`);
+            }
+          });
+        } catch (retryError) {
+          // If retry also fails, continue to fallback logic below
+          this.logger.warn('Retry after rate limit wait also failed', {
+            error: retryError instanceof Error ? retryError.message : String(retryError),
+          });
+          // Re-throw the original rate limit error if no fallback
+          const fallback = params.llm.fallback ?? this.fallbackConfig;
+          if (!fallback) throw error;
+        }
+      }
+
       // Check for fallback config (per-request takes precedence over global)
       const fallback = params.llm.fallback ?? this.fallbackConfig;
       if (fallback) {
@@ -416,6 +633,44 @@ class LLMRouterAdapter implements LLMAdapter {
       // Delegate to the provider generator
       return yield* generator;
     } catch (error) {
+      // Handle RateLimitError specially - wait and retry for short windows
+      if (RateLimitError.isRateLimitError(error) && error.isWorthWaiting()) {
+        const waitMs = error.info.retryAfterMs ?? 30000;
+        this.logger.warn('Stream rate limit hit (short window), waiting to retry', {
+          provider: error.provider,
+          model: error.model,
+          type: error.info.type,
+          waitMs,
+        });
+        await sleep(waitMs);
+        // Retry once after waiting
+        try {
+          let retryGenerator: AsyncGenerator<string, LLMResponse>;
+          switch (resolved.provider) {
+            case 'openai':
+              retryGenerator = this.streamOpenAI(params, resolved);
+              break;
+            case 'anthropic':
+              retryGenerator = this.streamAnthropic(params, resolved);
+              break;
+            case 'openai-compat':
+              retryGenerator = this.streamOpenAICompat(params, resolved);
+              break;
+            default:
+              throw new Error(`Unsupported provider: ${resolved.provider}`);
+          }
+          return yield* retryGenerator;
+        } catch (retryError) {
+          // If retry also fails, continue to fallback logic below
+          this.logger.warn('Stream retry after rate limit wait also failed', {
+            error: retryError instanceof Error ? retryError.message : String(retryError),
+          });
+          // Re-throw the original rate limit error if no fallback
+          const fallback = params.llm.fallback ?? this.fallbackConfig;
+          if (!fallback) throw error;
+        }
+      }
+
       // Check for fallback config (per-request takes precedence over global)
       const fallback = params.llm.fallback ?? this.fallbackConfig;
       if (fallback) {
@@ -568,6 +823,10 @@ class LLMRouterAdapter implements LLMAdapter {
         model: resolved.model,
         errorPreview: errorText.slice(0, 200),
       });
+      // Throw RateLimitError for 429s with parsed header info
+      if (response.status === 429) {
+        throw createRateLimitError('Anthropic', resolved.model, response.status, response.headers, errorText);
+      }
       throw parseApiError('Anthropic', response.status, errorText);
     }
 
@@ -673,6 +932,10 @@ class LLMRouterAdapter implements LLMAdapter {
         model: resolved.model,
         errorPreview: errorText.slice(0, 200),
       });
+      // Throw RateLimitError for 429s with parsed header info
+      if (response.status === 429) {
+        throw createRateLimitError('Anthropic', resolved.model, response.status, response.headers, errorText);
+      }
       throw parseApiError('Anthropic', response.status, errorText);
     }
 
@@ -1080,6 +1343,10 @@ class LLMRouterAdapter implements LLMAdapter {
         inputLength: Array.isArray(body.input) ? body.input.length : 0,
         errorPreview: errorText.slice(0, 200),
       });
+      // Throw RateLimitError for 429s with parsed header info
+      if (response.status === 429) {
+        throw createRateLimitError('OpenAI', resolved.model, response.status, response.headers, errorText);
+      }
       throw parseApiError('OpenAI', response.status, errorText);
     }
 
@@ -1190,6 +1457,10 @@ class LLMRouterAdapter implements LLMAdapter {
           responseId,
           errorPreview: errorText.slice(0, 200),
         });
+        // Throw RateLimitError for 429s with parsed header info
+        if (response.status === 429) {
+          throw createRateLimitError('OpenAI', resolved.model, response.status, response.headers, errorText);
+        }
         throw parseApiError('OpenAI', response.status, errorText);
       }
 
@@ -1332,6 +1603,10 @@ class LLMRouterAdapter implements LLMAdapter {
         model: resolved.model,
         errorPreview: errorText.slice(0, 200),
       });
+      // Throw RateLimitError for 429s with parsed header info
+      if (response.status === 429) {
+        throw createRateLimitError('OpenAI', resolved.model, response.status, response.headers, errorText);
+      }
       throw parseApiError('OpenAI', response.status, errorText);
     }
 
@@ -1695,6 +1970,10 @@ class LLMRouterAdapter implements LLMAdapter {
         model: resolved.model,
         errorPreview: errorText.slice(0, 200),
       });
+      // Throw RateLimitError for 429s with parsed header info
+      if (response.status === 429) {
+        throw createRateLimitError('OpenAI-compat', resolved.model, response.status, response.headers, errorText);
+      }
       throw parseApiError('OpenAI-compat', response.status, errorText);
     }
 
@@ -1840,6 +2119,10 @@ class LLMRouterAdapter implements LLMAdapter {
         model: resolved.model,
         errorPreview: errorText.slice(0, 200),
       });
+      // Throw RateLimitError for 429s with parsed header info
+      if (response.status === 429) {
+        throw createRateLimitError('OpenAI-compat', resolved.model, response.status, response.headers, errorText);
+      }
       throw parseApiError('OpenAI-compat', response.status, errorText);
     }
 

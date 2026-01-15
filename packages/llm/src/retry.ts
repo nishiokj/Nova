@@ -109,12 +109,18 @@ export function sleep(ms: number): Promise<void> {
 
 /**
  * Check if an error is retryable.
- * Rate limits (429) are NOT retryable - they should fallback immediately.
+ * RateLimitErrors are handled specially - only retry if worth waiting.
+ * Other transient errors (timeout, overload) are retryable.
  */
 export function isRetryableError(error: unknown): boolean {
+  // RateLimitErrors: only retry if it's a short window we can wait for
+  if (error instanceof RateLimitError) {
+    return error.isWorthWaiting();
+  }
+
   if (error instanceof Error) {
     const message = error.message.toLowerCase();
-    // Rate limits should NOT retry - fallback immediately
+    // Generic 429 without RateLimitError wrapper - don't retry (let it bubble up)
     if (message.includes('429') || message.includes('rate limit')) {
       return false;
     }
@@ -218,6 +224,74 @@ export class CircuitOpenError extends Error {
   constructor(key: string) {
     super(`Circuit breaker is open for: ${key}`);
     this.name = 'CircuitOpenError';
+  }
+}
+
+/**
+ * Rate limit type classification.
+ * - 'window': Short-term limit (per-minute, per-second) - worth waiting
+ * - 'quota': Daily/weekly/monthly quota exceeded - not worth waiting
+ * - 'billing': Account billing limit - requires user action
+ * - 'unknown': Couldn't determine the type
+ */
+export type RateLimitType = 'window' | 'quota' | 'billing' | 'unknown';
+
+/**
+ * Parsed rate limit information from headers and error response.
+ */
+export interface RateLimitInfo {
+  type: RateLimitType;
+  retryAfterMs?: number;
+  limitType?: string; // e.g., 'tokens', 'requests'
+  remaining?: number;
+  resetAt?: Date;
+  message: string;
+}
+
+/**
+ * Error thrown when rate limit is hit.
+ * Contains metadata to allow callers to decide how to handle.
+ */
+export class RateLimitError extends Error {
+  public readonly info: RateLimitInfo;
+  public readonly provider: string;
+  public readonly model: string;
+  public readonly status: number;
+
+  constructor(
+    message: string,
+    info: RateLimitInfo,
+    provider: string,
+    model: string,
+    status: number = 429
+  ) {
+    super(message);
+    this.name = 'RateLimitError';
+    this.info = info;
+    this.provider = provider;
+    this.model = model;
+    this.status = status;
+  }
+
+  /**
+   * Check if this rate limit is worth waiting for (short window).
+   * Returns true if retryAfterMs is defined and <= 60 seconds.
+   */
+  isWorthWaiting(maxWaitMs: number = 60000): boolean {
+    if (this.info.type === 'quota' || this.info.type === 'billing') {
+      return false;
+    }
+    if (this.info.retryAfterMs && this.info.retryAfterMs <= maxWaitMs) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Check if an error is a RateLimitError.
+   */
+  static isRateLimitError(error: unknown): error is RateLimitError {
+    return error instanceof RateLimitError;
   }
 }
 

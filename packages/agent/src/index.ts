@@ -27,6 +27,8 @@ export {
   STANDARD_PROMPT,
   getAgentPrompt,
   buildAgentConfig,
+  buildEnvironmentPrompt,
   PLANNING_PROMPT_ADDENDUM,
   getPlanningPromptAddendum,
 } from './prompts.js';
+export type { EnvironmentContext } from './prompts.js';

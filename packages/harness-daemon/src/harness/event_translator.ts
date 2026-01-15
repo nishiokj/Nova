@@ -111,6 +111,10 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         const duration = toolData.durationMs !== undefined ? ` (${toolData.durationMs}ms)` : '';
         message = `${status} ${toolData.toolName || 'tool'}${duration}`;
       }
+
+      // Include tool arguments for structured display (Edit tool gets full args for diff rendering)
+      const includeArgs = isCompleted && toolData.toolName === 'Edit';
+
       return {
         type: 'progress',
         data: {
@@ -120,6 +124,8 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
           kind: 'tool',
           tool_name: toolData.toolName,
           duration_ms: isCompleted ? toolData.durationMs : undefined,
+          tool_args: includeArgs ? toolData.arguments : undefined,
+          tool_success: isCompleted ? toolData.success : undefined,
         } satisfies ProgressEventData,
       };
     }

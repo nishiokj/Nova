@@ -61,6 +61,7 @@ export const HELP_LINES: string[] = [
   "  /exit           Exit the TUI",
   "",
   "Scrolling:",
+  "  Shift+Up/Down   Scroll one line",
   "  Mouse wheel     Scroll history up/down",
   "  PageUp/Down     Scroll one page",
   "  Home/End        Jump to top/bottom",

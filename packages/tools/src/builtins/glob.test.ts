@@ -44,7 +44,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'file2.ts'), 'content');
       await writeFile(join(tempDir, 'file.js'), 'content');
 
-      const result = await executeGlob({ pattern: '*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('file1.ts');
@@ -57,7 +57,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'b2.ts'), 'content');
       await writeFile(join(tempDir, 'abc.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '??.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '??.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('a1.ts');
@@ -71,7 +71,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'c.ts'), 'content');
       await writeFile(join(tempDir, 'd.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '[abc].ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '[abc].ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('a.ts');
@@ -83,7 +83,7 @@ describe('executeGlob', () => {
     it('should handle no matches gracefully', async () => {
       await writeFile(join(tempDir, 'file.js'), 'content');
 
-      const result = await executeGlob({ pattern: '*.py', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.py' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('No files found');
@@ -97,7 +97,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'src', 'index.ts'), 'content');
       await writeFile(join(tempDir, 'src', 'components', 'Button.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '**/*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('root.ts');
@@ -109,7 +109,7 @@ describe('executeGlob', () => {
       await mkdir(join(tempDir, 'src', 'utils'), { recursive: true });
       await mkdir(join(tempDir, 'lib', 'utils'), { recursive: true });
 
-      const result = await executeGlob({ pattern: '**/utils/', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/utils/' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('src/utils/');
@@ -120,7 +120,7 @@ describe('executeGlob', () => {
       await mkdir(join(tempDir, 'a', 'b', 'c'), { recursive: true });
       await writeFile(join(tempDir, 'a', 'b', 'c', 'deep.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '**/deep.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/deep.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('a/b/c/deep.ts');
@@ -134,7 +134,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'node_modules', 'pkg', 'index.ts'), 'content');
       await writeFile(join(tempDir, 'src', 'index.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '**/*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('src/index.ts');
@@ -148,9 +148,8 @@ describe('executeGlob', () => {
 
       const result = await executeGlob({
         pattern: '**/*',
-        cwd: tempDir,
         includeHidden: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).not.toContain('.git/');
@@ -161,7 +160,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, '__pycache__', 'module.pyc'), 'content');
       await writeFile(join(tempDir, 'module.py'), 'content');
 
-      const result = await executeGlob({ pattern: '**/*', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/*' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).not.toContain('__pycache__');
@@ -173,9 +172,8 @@ describe('executeGlob', () => {
 
       const result = await executeGlob({
         pattern: '**/*.py',
-        cwd: tempDir,
         includeHidden: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).not.toContain('.venv');
@@ -187,7 +185,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, '.hidden'), 'content');
       await writeFile(join(tempDir, 'visible'), 'content');
 
-      const result = await executeGlob({ pattern: '*', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('visible');
@@ -200,9 +198,8 @@ describe('executeGlob', () => {
 
       const result = await executeGlob({
         pattern: '*',
-        cwd: tempDir,
         includeHidden: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('visible');
@@ -214,7 +211,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, '.hidden-dir', 'file.ts'), 'content');
       await writeFile(join(tempDir, 'visible.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '**/*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('visible.ts');
@@ -231,9 +228,8 @@ describe('executeGlob', () => {
 
       const result = await executeGlob({
         pattern: '*.ts',
-        cwd: tempDir,
         maxResults: 5,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('[truncated at 5 results]');
@@ -247,9 +243,8 @@ describe('executeGlob', () => {
 
       const result = await executeGlob({
         pattern: '*.ts',
-        cwd: tempDir,
         maxResults: 10,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).not.toContain('truncated');
@@ -258,7 +253,7 @@ describe('executeGlob', () => {
 
     it('should default to 200 maxResults', async () => {
       // We won't create 200 files, just verify default is used
-      const result = await executeGlob({ pattern: '*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       // The default should allow up to 200 results
       expect(result.isSuccess).toBe(true);
@@ -266,39 +261,23 @@ describe('executeGlob', () => {
   });
 
   describe('Path resolution', () => {
-    it('should resolve relative paths from cwd', async () => {
+    it('should resolve relative paths from workdirOverride', async () => {
       await mkdir(join(tempDir, 'subdir'), { recursive: true });
       await writeFile(join(tempDir, 'subdir', 'file.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '*.ts', cwd: join(tempDir, 'subdir') });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: join(tempDir, 'subdir') });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('file.ts');
     });
 
-    it('should use context workdirOverride when cwd not provided', async () => {
+    it('should use context workdirOverride', async () => {
       await writeFile(join(tempDir, 'test.ts'), 'content');
 
       const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('test.ts');
-    });
-
-    it('should prefer args.cwd over context.workdirOverride', async () => {
-      await mkdir(join(tempDir, 'a'), { recursive: true });
-      await mkdir(join(tempDir, 'b'), { recursive: true });
-      await writeFile(join(tempDir, 'a', 'filea.ts'), 'content');
-      await writeFile(join(tempDir, 'b', 'fileb.ts'), 'content');
-
-      const result = await executeGlob(
-        { pattern: '*.ts', cwd: join(tempDir, 'a') },
-        { workdirOverride: join(tempDir, 'b') }
-      );
-
-      expect(result.isSuccess).toBe(true);
-      expect(result.output).toContain('filea.ts');
-      expect(result.output).not.toContain('fileb.ts');
     });
   });
 
@@ -308,7 +287,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'module.pyc'), 'content');
       await writeFile(join(tempDir, 'main.o'), 'content');
 
-      const result = await executeGlob({ pattern: '*', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('module.py');
@@ -319,7 +298,7 @@ describe('executeGlob', () => {
 
   describe('Edge cases', () => {
     it('should handle empty directory', async () => {
-      const result = await executeGlob({ pattern: '*', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('No files found');
@@ -329,7 +308,7 @@ describe('executeGlob', () => {
       // Files with characters that are special in regex
       await writeFile(join(tempDir, 'file[1].ts'), 'content');
 
-      const result = await executeGlob({ pattern: '*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('file[1].ts');
@@ -338,7 +317,7 @@ describe('executeGlob', () => {
     it('should handle files with spaces in names', async () => {
       await writeFile(join(tempDir, 'file with spaces.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('file with spaces.ts');
@@ -349,7 +328,7 @@ describe('executeGlob', () => {
       await mkdir(deepPath, { recursive: true });
       await writeFile(join(deepPath, 'deep.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '**/*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/*.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('a/b/c/d/e/f/deep.ts');
@@ -360,7 +339,7 @@ describe('executeGlob', () => {
       // This might not match user expectations on case-sensitive filesystems
       await writeFile(join(tempDir, 'File.TS'), 'content');
 
-      const result = await executeGlob({ pattern: '*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       // On macOS HFS+ this will match, on Linux ext4 it might not
       // The regex is set to 'i' (case insensitive) which might cause issues
@@ -374,7 +353,7 @@ describe('executeGlob', () => {
       await mkdir(join(tempDir, 'accessible'), { recursive: true });
       await writeFile(join(tempDir, 'accessible', 'file.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '**/*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '**/*.ts' }, { workdirOverride: tempDir });
 
       // Should succeed even if some dirs can't be read
       expect(result.isSuccess).toBe(true);
@@ -384,7 +363,7 @@ describe('executeGlob', () => {
       await mkdir(join(tempDir, 'mydir'), { recursive: true });
       await writeFile(join(tempDir, 'mydir', 'file.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '*/', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*/' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('mydir/');
@@ -399,7 +378,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'file.js'), 'content');
 
       // Must use separate patterns or ** approach
-      const result = await executeGlob({ pattern: '*.*', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.*' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('file.ts');
@@ -410,7 +389,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'root.ts'), 'content');
 
       // Pattern starting with / typically means absolute from cwd
-      const result = await executeGlob({ pattern: '/*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '/*.ts' }, { workdirOverride: tempDir });
 
       // This should not match because path won't start with /
       expect(result.isSuccess).toBe(true);
@@ -422,7 +401,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'root.ts'), 'content');
 
       // ** without trailing / should match "any path"
-      const result = await executeGlob({ pattern: 'src/**', cwd: tempDir });
+      const result = await executeGlob({ pattern: 'src/**' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('src/index.ts');
@@ -433,7 +412,7 @@ describe('executeGlob', () => {
     it('should include correct metadata on success', async () => {
       await writeFile(join(tempDir, 'file.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       expect(result.metadata).toBeDefined();
       expect(result.metadata?.pattern).toBe('*.ts');
@@ -446,7 +425,7 @@ describe('executeGlob', () => {
       await writeFile(join(tempDir, 'a.ts'), 'content');
       await writeFile(join(tempDir, 'm.ts'), 'content');
 
-      const result = await executeGlob({ pattern: '*.ts', cwd: tempDir });
+      const result = await executeGlob({ pattern: '*.ts' }, { workdirOverride: tempDir });
 
       const lines = result.output.split('\n');
       expect(lines[0]).toBe('a.ts');

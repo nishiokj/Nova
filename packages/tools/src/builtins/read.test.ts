@@ -42,7 +42,7 @@ describe('executeRead', () => {
       const content = 'Hello, World!';
       await writeFile(join(tempDir, 'test.txt'), content);
 
-      const result = await executeRead({ path: 'test.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'test.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -53,7 +53,7 @@ describe('executeRead', () => {
       const content = 'Line 1\nLine 2\nLine 3';
       await writeFile(join(tempDir, 'multiline.txt'), content);
 
-      const result = await executeRead({ path: 'multiline.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'multiline.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -63,7 +63,7 @@ describe('executeRead', () => {
       const content = '特殊字符 🎉 émojis and ümlauts';
       await writeFile(join(tempDir, 'unicode.txt'), content, 'utf-8');
 
-      const result = await executeRead({ path: 'unicode.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'unicode.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -72,7 +72,7 @@ describe('executeRead', () => {
     it('should read empty files', async () => {
       await writeFile(join(tempDir, 'empty.txt'), '');
 
-      const result = await executeRead({ path: 'empty.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'empty.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('');
@@ -84,7 +84,7 @@ describe('executeRead', () => {
       await mkdir(join(tempDir, 'subdir'), { recursive: true });
       await writeFile(join(tempDir, 'subdir', 'file.txt'), 'content');
 
-      const result = await executeRead({ path: 'subdir/file.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'subdir/file.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('content');
@@ -94,7 +94,7 @@ describe('executeRead', () => {
       const absolutePath = join(tempDir, 'absolute.txt');
       await writeFile(absolutePath, 'absolute content');
 
-      const result = await executeRead({ path: absolutePath, cwd: '/some/other/dir' });
+      const result = await executeRead({ path: absolutePath }, { workdirOverride: '/some/other/dir' });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('absolute content');
@@ -112,29 +112,14 @@ describe('executeRead', () => {
       expect(result.output).toBe('from context');
     });
 
-    it('should prefer args.cwd over context.workdirOverride', async () => {
-      await mkdir(join(tempDir, 'a'), { recursive: true });
-      await mkdir(join(tempDir, 'b'), { recursive: true });
-      await writeFile(join(tempDir, 'a', 'file.txt'), 'from a');
-      await writeFile(join(tempDir, 'b', 'file.txt'), 'from b');
-
-      const result = await executeRead(
-        { path: 'file.txt', cwd: join(tempDir, 'a') },
-        { workdirOverride: join(tempDir, 'b') }
-      );
-
-      expect(result.isSuccess).toBe(true);
-      expect(result.output).toBe('from a');
-    });
-
     it('should handle paths with ../', async () => {
       await mkdir(join(tempDir, 'a', 'b'), { recursive: true });
       await writeFile(join(tempDir, 'a', 'parent.txt'), 'parent');
 
-      const result = await executeRead({
-        path: '../parent.txt',
-        cwd: join(tempDir, 'a', 'b'),
-      });
+      const result = await executeRead(
+        { path: '../parent.txt' },
+        { workdirOverride: join(tempDir, 'a', 'b') }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('parent');
@@ -143,7 +128,7 @@ describe('executeRead', () => {
     it('should include resolved path in metadata', async () => {
       await writeFile(join(tempDir, 'meta.txt'), 'content');
 
-      const result = await executeRead({ path: 'meta.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'meta.txt' }, { workdirOverride: tempDir });
 
       expect(result.metadata?.path).toBe(resolve(tempDir, 'meta.txt'));
     });
@@ -151,7 +136,7 @@ describe('executeRead', () => {
 
   describe('Error handling', () => {
     it('should return error for non-existent file', async () => {
-      const result = await executeRead({ path: 'missing.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'missing.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.status).toBe('error');
@@ -161,7 +146,7 @@ describe('executeRead', () => {
     it('should return error when path is a directory', async () => {
       await mkdir(join(tempDir, 'mydir'), { recursive: true });
 
-      const result = await executeRead({ path: 'mydir', cwd: tempDir });
+      const result = await executeRead({ path: 'mydir' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('not a file');
@@ -176,7 +161,7 @@ describe('executeRead', () => {
       await chmod(filePath, 0o000);
 
       try {
-        const result = await executeRead({ path: 'noperm.txt', cwd: tempDir });
+        const result = await executeRead({ path: 'noperm.txt' }, { workdirOverride: tempDir });
 
         expect(result.isSuccess).toBe(false);
         expect(result.error).toBeDefined();
@@ -193,7 +178,7 @@ describe('executeRead', () => {
 
       try {
         await symlink(join(tempDir, 'nonexistent'), linkPath);
-        const result = await executeRead({ path: 'broken-link', cwd: tempDir });
+        const result = await executeRead({ path: 'broken-link' }, { workdirOverride: tempDir });
 
         expect(result.isSuccess).toBe(false);
       } catch {
@@ -208,7 +193,7 @@ describe('executeRead', () => {
       const largeContent = 'x'.repeat(150000);
       await writeFile(join(tempDir, 'large.txt'), largeContent);
 
-      const result = await executeRead({ path: 'large.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'large.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.length).toBeLessThan(largeContent.length);
@@ -219,11 +204,10 @@ describe('executeRead', () => {
       const content = 'x'.repeat(1000);
       await writeFile(join(tempDir, 'medium.txt'), content);
 
-      const result = await executeRead({
-        path: 'medium.txt',
-        cwd: tempDir,
-        maxBytes: 100,
-      });
+      const result = await executeRead(
+        { path: 'medium.txt', maxBytes: 100 },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('[truncated');
@@ -235,11 +219,10 @@ describe('executeRead', () => {
       const content = 'Small content';
       await writeFile(join(tempDir, 'small.txt'), content);
 
-      const result = await executeRead({
-        path: 'small.txt',
-        cwd: tempDir,
-        maxBytes: 10000,
-      });
+      const result = await executeRead(
+        { path: 'small.txt', maxBytes: 10000 },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -250,7 +233,7 @@ describe('executeRead', () => {
       const content = 'Known size content';
       await writeFile(join(tempDir, 'sized.txt'), content);
 
-      const result = await executeRead({ path: 'sized.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'sized.txt' }, { workdirOverride: tempDir });
 
       expect(result.metadata?.size).toBe(content.length);
     });
@@ -262,11 +245,10 @@ describe('executeRead', () => {
       const content = emoji.repeat(100); // 400 bytes
       await writeFile(join(tempDir, 'emoji.txt'), content, 'utf-8');
 
-      const result = await executeRead({
-        path: 'emoji.txt',
-        cwd: tempDir,
-        maxBytes: 50, // Will cut in middle of emoji
-      });
+      const result = await executeRead(
+        { path: 'emoji.txt', maxBytes: 50 },
+        { workdirOverride: tempDir }
+      );
 
       // This might produce invalid UTF-8 or replacement characters
       expect(result.isSuccess).toBe(true);
@@ -279,7 +261,7 @@ describe('executeRead', () => {
       const content = 'UTF-8 content with special chars: café';
       await writeFile(join(tempDir, 'utf8.txt'), content, 'utf-8');
 
-      const result = await executeRead({ path: 'utf8.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'utf8.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -290,11 +272,10 @@ describe('executeRead', () => {
       const content = 'café';
       await writeFile(join(tempDir, 'latin1.txt'), content, 'latin1');
 
-      const result = await executeRead({
-        path: 'latin1.txt',
-        cwd: tempDir,
-        encoding: 'latin1',
-      });
+      const result = await executeRead(
+        { path: 'latin1.txt', encoding: 'latin1' },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -304,11 +285,10 @@ describe('executeRead', () => {
       const content = 'Simple ASCII text 123';
       await writeFile(join(tempDir, 'ascii.txt'), content, 'ascii');
 
-      const result = await executeRead({
-        path: 'ascii.txt',
-        cwd: tempDir,
-        encoding: 'ascii',
-      });
+      const result = await executeRead(
+        { path: 'ascii.txt', encoding: 'ascii' },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -319,7 +299,7 @@ describe('executeRead', () => {
       const binaryContent = Buffer.from([0x89, 0x50, 0x4E, 0x47]); // PNG header
       await writeFile(join(tempDir, 'binary.png'), binaryContent);
 
-      const result = await executeRead({ path: 'binary.png', cwd: tempDir });
+      const result = await executeRead({ path: 'binary.png' }, { workdirOverride: tempDir });
 
       // Should succeed but content may be garbled
       expect(result.isSuccess).toBe(true);
@@ -330,7 +310,7 @@ describe('executeRead', () => {
     it('should handle files with no extension', async () => {
       await writeFile(join(tempDir, 'Makefile'), 'all: build');
 
-      const result = await executeRead({ path: 'Makefile', cwd: tempDir });
+      const result = await executeRead({ path: 'Makefile' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('all: build');
@@ -339,7 +319,7 @@ describe('executeRead', () => {
     it('should handle files with multiple dots', async () => {
       await writeFile(join(tempDir, 'file.test.spec.ts'), 'test content');
 
-      const result = await executeRead({ path: 'file.test.spec.ts', cwd: tempDir });
+      const result = await executeRead({ path: 'file.test.spec.ts' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('test content');
@@ -348,7 +328,7 @@ describe('executeRead', () => {
     it('should handle files starting with dot', async () => {
       await writeFile(join(tempDir, '.gitignore'), 'node_modules/');
 
-      const result = await executeRead({ path: '.gitignore', cwd: tempDir });
+      const result = await executeRead({ path: '.gitignore' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('node_modules/');
@@ -357,7 +337,7 @@ describe('executeRead', () => {
     it('should handle files with spaces in name', async () => {
       await writeFile(join(tempDir, 'file with spaces.txt'), 'content');
 
-      const result = await executeRead({ path: 'file with spaces.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'file with spaces.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('content');
@@ -367,7 +347,7 @@ describe('executeRead', () => {
       const longName = 'a'.repeat(200) + '.txt';
       await writeFile(join(tempDir, longName), 'long name content');
 
-      const result = await executeRead({ path: longName, cwd: tempDir });
+      const result = await executeRead({ path: longName }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('long name content');
@@ -377,7 +357,7 @@ describe('executeRead', () => {
       const content = 'line1\nline2\r\nline3\rline4';
       await writeFile(join(tempDir, 'newlines.txt'), content);
 
-      const result = await executeRead({ path: 'newlines.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'newlines.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -387,7 +367,7 @@ describe('executeRead', () => {
       const content = 'before\0after';
       await writeFile(join(tempDir, 'null.txt'), content);
 
-      const result = await executeRead({ path: 'null.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'null.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe(content);
@@ -398,14 +378,14 @@ describe('executeRead', () => {
     it('should record duration in result', async () => {
       await writeFile(join(tempDir, 'timed.txt'), 'content');
 
-      const result = await executeRead({ path: 'timed.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'timed.txt' }, { workdirOverride: tempDir });
 
       expect(result.durationMs).toBeDefined();
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
     });
 
     it('should record duration even on error', async () => {
-      const result = await executeRead({ path: 'nonexistent.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'nonexistent.txt' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.durationMs).toBeDefined();
@@ -415,7 +395,7 @@ describe('executeRead', () => {
     it('should include correct toolName', async () => {
       await writeFile(join(tempDir, 'name.txt'), 'content');
 
-      const result = await executeRead({ path: 'name.txt', cwd: tempDir });
+      const result = await executeRead({ path: 'name.txt' }, { workdirOverride: tempDir });
 
       expect(result.toolName).toBe('Read');
     });
@@ -431,7 +411,7 @@ describe('executeRead', () => {
 
       // Read all concurrently
       const results = await Promise.all(
-        files.map((f) => executeRead({ path: f, cwd: tempDir }))
+        files.map((f) => executeRead({ path: f }, { workdirOverride: tempDir }))
       );
 
       expect(results.every((r) => r.isSuccess)).toBe(true);

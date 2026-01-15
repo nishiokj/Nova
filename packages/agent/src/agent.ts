@@ -622,6 +622,11 @@ export class Agent {
         }
       }
 
+      // Debug: log tool result for Edit to diagnose "(no output)" issue
+      if (call.name.toLowerCase() === 'edit') {
+        console.error(`[TOOL_RESULT_DEBUG] Edit tool result: output=${toolResult.output?.slice(0, 200)}, isSuccess=${toolResult.isSuccess}, error=${toolResult.error}`);
+      }
+
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
@@ -740,12 +745,6 @@ export class Agent {
           }
         }
 
-        this.emit(createEvent('tool_call', {
-          toolName: canonicalName,
-          arguments: effectiveArgs,
-          phase: 'starting',
-        }, workItemId));
-
         const toolStartTime = Date.now();
         const capturedArgs = effectiveArgs;
         const promise = (async () => {
@@ -790,12 +789,6 @@ export class Agent {
           effectiveArgs = hookResult.modifiedArgs;
         }
       }
-
-      this.emit(createEvent('tool_call', {
-        toolName: canonicalName,
-        arguments: effectiveArgs,
-        phase: 'starting',
-      }, workItemId));
 
       const toolStartTime = Date.now();
 

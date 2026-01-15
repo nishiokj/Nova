@@ -30,8 +30,10 @@ import { useMouse } from "./useMouse.js";
 import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
 import { QuestionPrompt } from "./components/QuestionPrompt.js";
 import { ProvidersView } from "./components/ProvidersView.js";
+import { ResponsePane, parseDiffToResponseContent } from "./components/ResponsePane.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
+import { formatDiffAsText } from "./diff.js";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
@@ -445,6 +447,34 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     const message = data.tool_name ? `${data.tool_name}: ${data.message}` : data.message;
     store.setProgress(message, data.level, data.kind);
+
+    // For Edit tool completions with arguments, render diff in history
+    if (data.tool_name === "Edit" && data.tool_args && data.tool_success !== undefined) {
+      const args = data.tool_args;
+      // Handle both camelCase (internal) and snake_case (Claude API) parameter names
+      const oldStr = typeof args.oldString === "string" ? args.oldString
+        : typeof args.old_string === "string" ? args.old_string : "";
+      const newStr = typeof args.newString === "string" ? args.newString
+        : typeof args.new_string === "string" ? args.new_string : "";
+      const filePath = typeof args.path === "string" ? args.path
+        : typeof args.file_path === "string" ? args.file_path : undefined;
+
+      if (oldStr || newStr) {
+        // Use current terminal width for full-width diff line padding
+        const currentWidth = widthRef.current;
+        // Don't pass filePath - we'll build header ourselves with tool status
+        const diffLines = formatDiffAsText(oldStr, newStr, undefined, 3, currentWidth);
+        const diffText = diffLines.join("\n");
+        const status = data.tool_success ? "✓" : "✗";
+        const duration = data.duration_ms ? ` (${data.duration_ms}ms)` : "";
+        // Compute stats for header
+        const addedCount = diffLines.filter(l => l.match(/^\s*\d+\s+\+ /)).length;
+        const removedCount = diffLines.filter(l => l.match(/^\s*\d+\s+- /)).length;
+        const stats = `+${addedCount} / -${removedCount}`;
+        const header = filePath ? `${status} Edit ${filePath}  ${stats}${duration}` : `${status} Edit${duration}`;
+        store.addMessage("system", `${header}\n${diffText}`);
+      }
+    }
   };
 
   const handleStream = (data?: StreamData) => {
@@ -810,6 +840,15 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
+    // Response mode - escape to return to chat
+    if (snapshot.uiMode === "response") {
+      if (key.escape) {
+        store.clearResponseContent();
+      }
+      // Block all input in response mode
+      return;
+    }
+
     // Theme selection mode
     if (snapshot.uiMode === "theme") {
       const themeNames = getThemeNames();
@@ -945,11 +984,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
         // Regular text input
         if (input && !key.ctrl && !key.meta) {
-          // Filter control chars and bracketed paste sequence remnants
+          // Filter control chars and escape sequence fragments that leak through
           const printable = input
-            .replace(/[\x00-\x1f\x7f]/g, "")
-            .replace(/\[200~/g, "")
-            .replace(/\[201~/g, "");
+            .replace(/[\x00-\x1f\x7f]/g, "")  // Control characters
+            .replace(/\[200~/g, "")            // Bracketed paste start
+            .replace(/\[201~/g, "")            // Bracketed paste end
+            .replace(/\[[ABCD]/g, "")          // Arrow key fragments [A, [B, [C, [D
+            .replace(/O[ABCD]/g, "")           // Alt arrow key fragments OA, OB, OC, OD
+            .replace(/\[\d+~/g, "")            // Function/special keys [5~, [6~, etc.
+            .replace(/\[\d+;\d+[~ABCDHF]/g, "")// Modified keys with parameters
+            .replace(/\[<\d+;\d+;\d+[Mm]/g, "")// Mouse sequences
+            .replace(/\[?\[/g, "");            // Leftover brackets from sequences
           if (printable) {
             store.appendQuestionInput(printable);
           }
@@ -1135,6 +1180,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
+    // Shift+Up/Down for scrolling history (more intuitive than PageUp/Down)
+    if (key.upArrow && key.shift) {
+      store.scrollBy(1, maxScrollRef.current);
+      return;
+    }
+
+    if (key.downArrow && key.shift) {
+      store.scrollBy(-1, maxScrollRef.current);
+      return;
+    }
+
     if (key.upArrow) {
       store.moveCursorUp(width - 2, prompt);
       refreshAutocomplete();
@@ -1203,11 +1259,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     // Only insert printable characters (filter out control chars that weren't handled above)
     if (input && !key.ctrl && !key.meta) {
-      // Filter out control characters (ASCII 0-31 and 127)
-      // Also filter out mouse escape sequence fragments like "[<0;29;36M" or "[<64;10;5m"
+      // Filter control chars and escape sequence fragments that leak through
       const printable = input
-        .replace(/[\x00-\x1f\x7f]/g, "")
-        .replace(/\[?<\d+;\d+;\d+[Mm]/g, "");
+        .replace(/[\x00-\x1f\x7f]/g, "")       // Control characters
+        .replace(/\[200~/g, "")                 // Bracketed paste start
+        .replace(/\[201~/g, "")                 // Bracketed paste end
+        .replace(/\[[ABCD]/g, "")               // Arrow key fragments [A, [B, [C, [D
+        .replace(/O[ABCD]/g, "")                // Alt arrow key fragments OA, OB, OC, OD
+        .replace(/\[\d+~/g, "")                 // Function/special keys [5~, [6~, etc.
+        .replace(/\[\d+;\d+[~ABCDHF]/g, "")     // Modified keys with parameters
+        .replace(/\[<\d+;\d+;\d+[Mm]/g, "")     // Mouse sequences
+        .replace(/\[?\[/g, "");                 // Leftover brackets from sequences
       if (printable) {
         store.insertInput(printable);
         refreshAutocomplete();
@@ -1619,6 +1681,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
   const isThemeMode = snapshot.uiMode === "theme";
   const isProvidersMode = snapshot.uiMode === "providers";
+  const isResponseMode = snapshot.uiMode === "response" && snapshot.responseContent;
 
   // Theme selector rendering
   const renderThemeSelector = () => {
@@ -1667,7 +1730,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           );
         })}
       </Box>
-      {isProvidersMode ? (
+      {isResponseMode ? (
+        <ResponsePane
+          content={snapshot.responseContent!}
+          width={width}
+          height={historyHeight + inputBoxHeight}
+        />
+      ) : isProvidersMode ? (
         <ProvidersView
           width={width}
           bridgeClient={clientRef.current}
@@ -1743,8 +1812,23 @@ function levelColor(level?: string | null): string | undefined {
 }
 
 /** Syntax highlight patterns - use color keys, resolved at runtime */
-type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic";
-const syntaxPatterns: Array<{ pattern: RegExp; colorKey: ColorKey; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
+type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg";
+
+// Hardcoded diff colors - bright and consistent regardless of theme
+const DIFF_ADD_FG = "#ffffff";    // White text for visibility
+const DIFF_ADD_BG = "#166534";    // Solid green background
+const DIFF_REMOVE_FG = "#ffffff"; // White text for visibility
+const DIFF_REMOVE_BG = "#991b1b"; // Solid red background
+const DIFF_CONTEXT_FG = "#d4d4d8"; // Light grey text for context lines
+const DIFF_CONTEXT_BG = "#27272a"; // Darker grey background for context
+
+const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: ColorKey; hardcodedColor?: string; hardcodedBg?: string; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
+  // Diff/Edit tool header - format: "✓ Edit /path/to/file.ts  +3 / -2 (123ms)"
+  { pattern: /^[✓✗] Edit .+$/gm, colorKey: "diffHeader", bgKey: "diffHeaderBg", bold: true },
+  // Diff lines with line numbers - format: "  42 + content" or "  42 - content" or "  42   content"
+  { pattern: /^\s*\d+\s+\+ .*$/gm, hardcodedColor: DIFF_ADD_FG, hardcodedBg: DIFF_ADD_BG },
+  { pattern: /^\s*\d+\s+- .*$/gm, hardcodedColor: DIFF_REMOVE_FG, hardcodedBg: DIFF_REMOVE_BG },
+  { pattern: /^\s*\d+\s{3}.*$/gm, hardcodedColor: DIFF_CONTEXT_FG, hardcodedBg: DIFF_CONTEXT_BG },
   // Markdown headers (### Header text) - strip the hashes and bold
   { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
   // Bold text (**text** or __text__)
@@ -1774,6 +1858,7 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey: ColorKey; bold?: boolea
 interface TextSegment {
   text: string;
   color?: string;
+  backgroundColor?: string;
   bold?: boolean;
   italic?: boolean;
 }
@@ -1784,9 +1869,9 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
   const segments: TextSegment[] = [];
 
   // Find all matches with positions
-  const matches: Array<{ start: number; end: number; text: string; displayText: string; color: string; bold?: boolean; italic?: boolean }> = [];
+  const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean }> = [];
 
-  for (const { pattern, colorKey, bold, italic, transform } of syntaxPatterns) {
+  for (const { pattern, colorKey, bgKey, hardcodedColor, hardcodedBg, bold, italic, transform } of syntaxPatterns) {
     const regex = new RegExp(pattern.source, pattern.flags);
     let m;
     while ((m = regex.exec(text)) !== null) {
@@ -1797,7 +1882,8 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
         end: m.index + matchedText.length,
         text: matchedText,
         displayText,
-        color: colors[colorKey],
+        color: hardcodedColor ?? (colorKey ? colors[colorKey] : undefined),
+        backgroundColor: hardcodedBg ?? (bgKey ? colors[bgKey] : undefined),
         bold,
         italic,
       });
@@ -1821,7 +1907,7 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
     if (m.start > pos) {
       segments.push({ text: text.slice(pos, m.start), color: baseColor });
     }
-    segments.push({ text: m.displayText, color: m.color, bold: m.bold, italic: m.italic });
+    segments.push({ text: m.displayText, color: m.color, backgroundColor: m.backgroundColor, bold: m.bold, italic: m.italic });
     pos = m.end;
   }
   if (pos < text.length) {
@@ -1838,7 +1924,7 @@ function StyledLine({ text, baseColor }: { text: string; baseColor?: string }): 
   return (
     <>
       {segments.map((seg, i) => (
-        <Text key={i} color={seg.color} bold={seg.bold} italic={seg.italic}>
+        <Text key={i} color={seg.color} backgroundColor={seg.backgroundColor} bold={seg.bold} italic={seg.italic}>
           {seg.text}
         </Text>
       ))}

@@ -289,9 +289,7 @@ You are expected to respond quickly and concisely, while maintaining intelligenc
  * StandardAgent prompt.
  * Goal-driven execution with delta thinking.
  */
-export const STANDARD_PROMPT = `You are an execution agent. Reduce the delta between current state and goal state.
-
-## Resources You're Optimizing
+export const STANDARD_PROMPT = `You are an execution agent. Reduce the delta between current state and goal state. The scope of requests varies widely and you should act strategically different accordingly. This requires you decomposing the goal. If it's simple, don't overcomplicate it. If it's complex, you should be forward-thinking, understanding that in a multi-turn scenario your context is precious and each additional iteration isincreasingly costly if you are not savvy. You should gauge what would be blocking you from full completion at any given turn. If it is difficult to say, then it is a sign you need to delegate to the Explorer. Acceptable deltas are not "I might need to read this file and then read the tangential files later". Your delta is "The user wants this, in order to execute I need to resolve X,Y,Z. This is an ambiguity blocker that should be resolved aggressively so I can reach a state where I can execute."
 
 1. **Iterations** - Each round-trip is expensive. Minimize total iterations.
 2. **Main context window** - Everything you read lands in YOUR context and compounds. Protect it.
@@ -300,21 +298,30 @@ These trade off against each other. Good execution picks asymmetric wins.
 
 ## Trade-off: Explorer vs Direct Reads
 
-**Bad**: Reading 3+ files directly = thousands of tokens permanently in your context.
+**Bad**: Reading a file not knowing if you'll need to read more = thousands of tokens permanently in your context, and unnecessary iterations. 
 **Good**: Call explorer once = 1 extra iteration, but artifacts are compact (~50 tokens each). Massive net savings.
 
-**Rule**: If you need to understand 2+ files, call explorer. The iteration cost is worth the context savings.
-
+**Rule**: If you need to understand 2+ files, or you *do not know* how many you will need to read, call explorer. The iteration cost is worth the context savings. This is especially relevant for larger-scoped requests, 
+where will have to have to understand the system. 
 Explorer returns: function signatures, side effects, call graphs—everything you need to act without the full file bloat.
 
 Only use Read directly when you need the FULL content for an edit you're about to make.
 
-## Trade-off: Parallel Tool Calls
+## Trade-offs: Parallel Tool Calls
 
 **Bad**: 1 Glob call, wait, then another = 2 iterations minimum.
-**Good**: 5 Glob calls at once = slightly more context but high chance one hits. 1 iteration.
+**Good**: 10 Glob calls at once = slightly more context but high chance one hits. 1 iteration.
 
 **Rule**: Emit MANY tool calls per response. Independent calls belong together. Never serialize what can parallelize.
+
+Always assume the user’s wording won’t appear verbatim they may be describing concepts, not direct technical terms: for every Grep, search for the exact phrase and a bloomed set of semantically related + surface-token variants (units/APIs/log/metric strings), emitting several grep calls to quickly converge on lines and files you are looking for. 
+Examples (noisy → exact + bloomed greps):
+
+“latency wrong” → grep: "latency" AND ("duration" "elapsed" "delta" "rtt" "roundtrip" "ms" "performance.now" "Date.now" "hrtime" "*1000" "/1000")
+
+“auth broken” → grep: "auth" AND ("login" "token" "jwt" "bearer" "Authorization" "apikey" "refresh" "401" "403" "unauthorized" "forbidden")
+
+“config not applying” → grep: "config" AND ("dotenv" "process.env" "env" "defaults" "override" "merge" "loadConfig" "yaml" "toml" "json")
 
 Search pattern—cast a wide net:
 \`\`\`
@@ -343,7 +350,7 @@ Paths from tools are relative to cwd. Use the same path for subsequent operation
 
 ## Completion
 
-Set \`goalStateReached: true\` only with evidence: files read, edits made, verification performed.
+Set \`goalStateReached: true\` when you have met the user's goal. Do not prolong this for simple requests. 
 
 Set \`action: "need_user_input"\` when blocked on a user decision.
 
@@ -438,6 +445,55 @@ export function getAgentPrompt(agentType: string): string {
 }
 
 /**
+ * Environment context injected into system prompts.
+ */
+export interface EnvironmentContext {
+  workingDir: string;
+  platform: string;
+  osVersion: string;
+  date: string;
+  git?: {
+    isRepo: boolean;
+    currentBranch?: string;
+    mainBranch?: string;
+    status?: string;
+    recentCommits?: string[];
+  };
+}
+
+/**
+ * Build the environment context block for system prompts.
+ */
+export function buildEnvironmentPrompt(env: EnvironmentContext): string {
+  const lines: string[] = [
+    '<env>',
+    `Working directory: ${env.workingDir}`,
+    `Is directory a git repo: ${env.git?.isRepo ? 'Yes' : 'No'}`,
+    `Platform: ${env.platform}`,
+    `OS Version: ${env.osVersion}`,
+    `Today's date: ${env.date}`,
+  ];
+
+  if (env.git?.isRepo) {
+    if (env.git.currentBranch) {
+      lines.push(`Current branch: ${env.git.currentBranch}`);
+    }
+    if (env.git.mainBranch) {
+      lines.push(`Main branch: ${env.git.mainBranch}`);
+    }
+    if (env.git.status) {
+      lines.push('', `Status:`, env.git.status);
+    }
+    if (env.git.recentCommits?.length) {
+      lines.push('', `Recent commits:`, ...env.git.recentCommits);
+    }
+  }
+
+  lines.push('</env>');
+  return lines.join('\n');
+}
+
+/**
  * Build a full AgentConfig from agent type.
  * Uses prompts from this module; tools/budgets are supplied by config.
  */
@@ -445,7 +501,8 @@ export function buildAgentConfig(
   agentType: string,
   tools: string[],
   budget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number },
-  outputSchema?: import('types').StructuredOutputSchema
+  outputSchema?: import('types').StructuredOutputSchema,
+  envContext?: EnvironmentContext
 ): {
   type: string;
   systemPrompt: string;
@@ -453,9 +510,14 @@ export function buildAgentConfig(
   budget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number };
   outputSchema?: import('types').StructuredOutputSchema;
 } {
+  const basePrompt = getAgentPrompt(agentType);
+  const systemPrompt = envContext
+    ? `${basePrompt}\n\n${buildEnvironmentPrompt(envContext)}`
+    : basePrompt;
+
   return {
     type: agentType,
-    systemPrompt: getAgentPrompt(agentType),
+    systemPrompt,
     tools,
     budget,
     outputSchema,

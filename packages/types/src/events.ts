@@ -18,6 +18,7 @@ export type AgentCoreEventType =
   | 'tool_call'
   | 'llm_call'
   | 'llm_error'
+  | 'rate_limit'
   | 'agent_bounds_hit'
   | 'agent_message'
   | 'artifact_discovered'
@@ -217,6 +218,30 @@ export interface LLMErrorData {
   model: string;
   error: string;
   errorType: 'api_error' | 'rate_limit' | 'timeout' | 'validation' | 'circuit_open' | 'unknown';
+}
+
+/**
+ * Rate limit type classification.
+ */
+export type RateLimitType = 'window' | 'quota' | 'billing' | 'unknown';
+
+/**
+ * Data for rate_limit event.
+ * Emitted when a rate limit is hit and the adapter can't recover automatically.
+ */
+export interface RateLimitData {
+  provider: string;
+  model: string;
+  /** Type of rate limit hit */
+  type: RateLimitType;
+  /** Retry-after time in milliseconds, if known */
+  retryAfterMs?: number;
+  /** What was limited (tokens, requests, etc.) */
+  limitType?: string;
+  /** Error message from the API */
+  message: string;
+  /** Whether the context was preserved */
+  contextPreserved: boolean;
 }
 
 /**

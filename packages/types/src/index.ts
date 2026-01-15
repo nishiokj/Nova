@@ -42,6 +42,8 @@ export type {
   ToolCallPhase,
   LLMCallData,
   LLMErrorData,
+  RateLimitType,
+  RateLimitData,
   ArtifactDiscoveredData,
   AgentProgressData,
   EventCallback,

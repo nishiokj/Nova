@@ -19,6 +19,8 @@ export {
   type CircuitState,
   type CircuitBreakerState,
   type ResilienceConfig,
+  type RateLimitType,
+  type RateLimitInfo,
   createCircuitState,
   DEFAULT_RESILIENCE_CONFIG,
   calculateBackoff,
@@ -29,6 +31,7 @@ export {
   recordFailure,
   CircuitOpenError,
   RetriesExhaustedError,
+  RateLimitError,
   type ResilientCallOptions,
   resilientCall,
 } from './retry.js';
