@@ -23,13 +23,27 @@ export const UserPromptOptionSchema = z.union([
 ]);
 
 /**
- * User prompt structure for asking questions.
+ * Single question structure for asking questions.
  */
-export const UserPromptSchema = z.object({
+export const SingleQuestionSchema = z.object({
   question: z.string(),
   options: z.array(UserPromptOptionSchema).nullable(),
   context: z.string().nullable(),
   multiSelect: z.boolean().nullable(),
+});
+
+/**
+ * User prompt structure for asking questions.
+ * Supports single question (backwards compatible) or multiple questions.
+ */
+export const UserPromptSchema = z.object({
+  /** Single question (backwards compatible) */
+  question: z.string().nullable(),
+  options: z.array(UserPromptOptionSchema).nullable(),
+  context: z.string().nullable(),
+  multiSelect: z.boolean().nullable(),
+  /** Multiple questions to ask in sequence */
+  questions: z.array(SingleQuestionSchema).nullable(),
 });
 
 // ============================================
@@ -146,6 +160,7 @@ export type OutputSchemaName = keyof typeof OUTPUT_SCHEMAS;
 // ============================================
 
 export type UserPromptOption = z.infer<typeof UserPromptOptionSchema>;
+export type SingleQuestion = z.infer<typeof SingleQuestionSchema>;
 export type UserPrompt = z.infer<typeof UserPromptSchema>;
 export type RoutingOutput = z.infer<typeof RoutingOutputSchema>;
 export type AgentAction = z.infer<typeof AgentActionSchema>;

@@ -13,6 +13,25 @@
     "package.json",
     "README.md"
   ],
+  "exports": {
+    ".": "./packages/launcher/dist/index.js",
+    "./llm": {
+      "import": "./packages/llm/dist/index.js",
+      "types": "./packages/llm/dist/index.d.ts"
+    },
+    "./agent": {
+      "import": "./packages/agent/dist/index.js",
+      "types": "./packages/agent/dist/index.d.ts"
+    },
+    "./types": {
+      "import": "./packages/types/dist/index.js",
+      "types": "./packages/types/dist/index.d.ts"
+    },
+    "./shared": {
+      "import": "./packages/shared/dist/index.js",
+      "types": "./packages/shared/dist/index.d.ts"
+    }
+  },
   "bin": {
     "rex": "./packages/launcher/dist/index.js",
     "rex-daemon": "./packages/harness-daemon/dist/index.js"

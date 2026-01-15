@@ -6,41 +6,29 @@ interface TextInputFieldProps {
   placeholder?: string;
   width: number;
   multiline?: boolean;
-  label?: string;
 }
 
 export function TextInputField({
   value,
   placeholder,
-  width,
   multiline = false,
-  label,
 }: TextInputFieldProps): JSX.Element {
   const displayValue = value || "";
   const showPlaceholder = displayValue.length === 0 && placeholder;
 
   const colors = getColors();
-  const textColor = colors.text;
-  const placeholderColor = colors.muted;
-  const cursorColor = colors.accent;
 
   // Multiline with newlines
   if (multiline && displayValue.includes("\n")) {
     const lines = displayValue.split("\n");
-
     return (
       <Box flexDirection="column" marginY={1}>
-        {label && (
-          <Text color={placeholderColor} bold>
-            {label}
-          </Text>
-        )}
         {lines.map((line, i) => {
           const isLastLine = i === lines.length - 1;
           return (
             <Box key={i}>
-              <Text color={textColor}>{line}</Text>
-              {isLastLine && <Text backgroundColor={cursorColor}> </Text>}
+              <Text color={colors.text}>{line}</Text>
+              {isLastLine && <Text backgroundColor={colors.accent}> </Text>}
             </Box>
           );
         })}
@@ -50,28 +38,18 @@ export function TextInputField({
 
   // Single line input
   return (
-    <Box flexDirection="column" marginY={1}>
-      {label && (
-        <Box marginBottom={1}>
-          <Text color={placeholderColor} bold>
-            {label}
-          </Text>
-        </Box>
+    <Box marginY={1}>
+      {showPlaceholder ? (
+        <>
+          <Text color={colors.muted}>{placeholder}</Text>
+          <Text backgroundColor={colors.accent}> </Text>
+        </>
+      ) : (
+        <>
+          <Text color={colors.text}>{displayValue}</Text>
+          <Text backgroundColor={colors.accent}> </Text>
+        </>
       )}
-
-      <Box>
-        {showPlaceholder ? (
-          <>
-            <Text color={placeholderColor}>{placeholder}</Text>
-            <Text backgroundColor={cursorColor}> </Text>
-          </>
-        ) : (
-          <>
-            <Text color={textColor}>{displayValue}</Text>
-            <Text backgroundColor={cursorColor}> </Text>
-          </>
-        )}
-      </Box>
     </Box>
   );
 }

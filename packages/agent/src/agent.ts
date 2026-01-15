@@ -248,14 +248,6 @@ export class Agent {
       const content = response.content ?? '';
       const toolCalls = response.toolCalls ?? [];
 
-      // Emit intermediate text for TUI display (when LLM outputs text alongside tool calls)
-      if (content && content.trim().length > 0 && toolCalls.length > 0) {
-        this.emit(createEvent('agent_message', {
-          agentType: this.config.type,
-          message: content,
-        }, workItem.workId));
-      }
-
       const structuredOutput = this.parseStructuredOutput(content);
       if (structuredOutput) {
         result.structuredOutput = structuredOutput;
@@ -266,6 +258,16 @@ export class Agent {
       const action = this.extractStructuredAction(structuredOutput);
       const responseText = this.extractStructuredResponse(structuredOutput);
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
+
+      // Emit intermediate text for TUI display (when LLM outputs text alongside tool calls)
+      // Use extracted responseText from structured output if available, otherwise skip
+      // (raw content may be JSON which shouldn't be displayed)
+      if (toolCalls.length > 0 && responseText && responseText.trim().length > 0) {
+        this.emit(createEvent('agent_message', {
+          agentType: this.config.type,
+          message: responseText,
+        }, workItem.workId));
+      }
 
       console.error(`[AGENT DEBUG] LLM response: iteration=${iteration}, agent=${this.config.type}, action=${action}, hasResponseText=${!!responseText}, responseTextLength=${responseText?.length ?? 0}, toolCallCount=${toolCalls.length}, contentLength=${content.length}`);
 
@@ -1268,12 +1270,15 @@ export class Agent {
     const context = typeof data.context === 'string' ? data.context : undefined;
     const multiSelect =
       typeof data.multiSelect === 'boolean' ? data.multiSelect : undefined;
+    const questionType =
+      typeof data.questionType === 'string' ? data.questionType : undefined;
 
     return {
       question,
       options,
       context,
       multiSelect,
+      questionType,
     };
   }
 

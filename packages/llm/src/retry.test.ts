@@ -115,10 +115,11 @@ describe('calculateBackoff', () => {
 });
 
 describe('isRetryableError', () => {
-  it('should return true for rate limit errors', () => {
-    expect(isRetryableError(new Error('rate limit exceeded'))).toBe(true);
-    expect(isRetryableError(new Error('Rate Limit'))).toBe(true);
-    expect(isRetryableError(new Error('You have exceeded your rate limit'))).toBe(true);
+  it('should return false for rate limit errors (use fallback instead)', () => {
+    // Rate limits should NOT retry - they should trigger fallback to another provider
+    expect(isRetryableError(new Error('rate limit exceeded'))).toBe(false);
+    expect(isRetryableError(new Error('Rate Limit'))).toBe(false);
+    expect(isRetryableError(new Error('429 Too Many Requests'))).toBe(false);
   });
 
   it('should return true for timeout errors', () => {
@@ -487,12 +488,12 @@ describe('CircuitOpenError', () => {
 });
 
 describe('RetriesExhaustedError', () => {
-  it('should include attempt count and last error', () => {
-    const lastError = new Error('final failure');
-    const error = new RetriesExhaustedError('All retries failed', lastError, 3);
+  it('should include attempt count and cause error', () => {
+    const causeError = new Error('final failure');
+    const error = new RetriesExhaustedError('All retries failed', causeError, 3);
 
     expect(error.message).toContain('3');
-    expect(error.lastError).toBe(lastError);
+    expect(error.cause).toBe(causeError);
     expect(error.attempts).toBe(3);
     expect(error.name).toBe('RetriesExhaustedError');
   });

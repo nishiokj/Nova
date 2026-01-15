@@ -223,23 +223,17 @@ export class CircuitOpenError extends Error {
 
 /**
  * Error thrown when all retries exhausted.
- * Preserves the underlying error message for debugging.
+ * Preserves the underlying error via standard .cause property.
  */
 export class RetriesExhaustedError extends Error {
-  public readonly lastError: Error;
   public readonly attempts: number;
 
   constructor(message: string, lastError: Error, attempts: number) {
-    // Include the underlying error message so it surfaces to users
-    const underlyingMessage = lastError.message;
-    super(`${message} after ${attempts} attempts: ${underlyingMessage}`);
+    super(`${message} after ${attempts} attempts: ${lastError.message}`, {
+      cause: lastError,
+    });
     this.name = 'RetriesExhaustedError';
-    this.lastError = lastError;
     this.attempts = attempts;
-    // Preserve the stack trace from the original error
-    if (lastError.stack) {
-      this.stack = `${this.stack}\nCaused by: ${lastError.stack}`;
-    }
   }
 }
 

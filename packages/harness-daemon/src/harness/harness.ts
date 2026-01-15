@@ -23,7 +23,7 @@ import {
 import { Orchestrator } from 'orchestrator';
 import { createAdapter } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot } from 'types';
+import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot } from 'types';
 import { ContextWindow } from 'context';
 import { createWorkItem } from 'work';
 import { coerceStructuredOutput } from 'shared';
@@ -50,7 +50,7 @@ import type {
 import { loadConfig, getAgentConfig } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
 import { HookExecutor } from './hook_executor.js';
-import type { HookContext } from './skills_loader.js';
+import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -286,6 +286,75 @@ export class AgentHarness {
     for (const toolOptions of builtinToolOptions) {
       this.toolRegistry.register(toolOptions);
     }
+
+    // Register Skill tool - loads and executes skills from config/skills/
+    const skillsDir = config.skills.directory
+      ? path.resolve(workingDir, config.skills.directory)
+      : path.resolve(workingDir, 'config/skills');
+
+    this.toolRegistry.register({
+      name: 'Skill',
+      description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like handoff, code review, etc.',
+      parameters: {
+        type: 'object',
+        properties: {
+          skill: {
+            type: 'string',
+            description: 'Skill name to execute (e.g., "handoff"), or "list" to see available skills',
+          },
+          args: {
+            type: 'string',
+            description: 'Optional arguments to pass to the skill',
+          },
+        },
+        required: ['skill'],
+      },
+      required: ['skill'],
+      executor: async (args) => {
+        const skillName = String(args.skill ?? '').trim();
+        if (!skillName) {
+          return errorResult('Skill', 'Skill name is required', 0);
+        }
+
+        // List available skills
+        if (skillName === 'list') {
+          const skills = loadSkillDefinitions(skillsDir);
+          if (skills.length === 0) {
+            return successResult('Skill', 'No skills available. Add skills to config/skills/<name>/SKILL.md', 0);
+          }
+          const list = skills
+            .filter(s => s.enabled)
+            .map(s => `- **${s.name}**: ${s.description}`)
+            .join('\n');
+          return successResult('Skill', `Available skills:\n\n${list}`, 0);
+        }
+
+        // Load and return skill instructions
+        const skill = getSkillDefinition(skillsDir, skillName);
+        if (!skill) {
+          const available = loadSkillDefinitions(skillsDir)
+            .filter(s => s.enabled)
+            .map(s => s.name);
+          return errorResult('Skill', `Skill '${skillName}' not found. Available: ${available.join(', ') || 'none'}`, 0);
+        }
+
+        if (!skill.enabled) {
+          return errorResult('Skill', `Skill '${skillName}' is disabled`, 0);
+        }
+
+        // Return instructions with optional args
+        const skillArgs = typeof args.args === 'string' ? args.args.trim() : '';
+        const instructions = skillArgs
+          ? `${skill.instructions}\n\n## Arguments\n${skillArgs}`
+          : skill.instructions;
+
+        return successResult('Skill', instructions, 0);
+      },
+      enabled: true,
+      readOnly: true,
+      parallelizable: false,
+      costHint: 'low',
+    });
 
     // Initialize GraphD if enabled
     // Note: config.graphd.dbPath is already an absolute path (resolved in config_loader.ts)

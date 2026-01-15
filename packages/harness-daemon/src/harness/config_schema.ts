@@ -114,7 +114,7 @@ export const AgentBudgetConfigSchema = z.object({
  */
 export const StructuredOutputSchemaSchema = z.object({
   name: z.string(),
-  schema: z.record(z.unknown()),
+  schema: z.record(z.string(), z.unknown()),
   strict: z.boolean().optional(),
 });
 
@@ -221,7 +221,7 @@ export const AuthConfigSchema = z.object({
 /**
  * Provider API keys configuration.
  */
-export const ProvidersConfigSchema = z.record(z.string().optional());
+export const ProvidersConfigSchema = z.record(z.string(), z.string().optional());
 
 // ============================================
 // ROOT CONFIG (RAW FROM FILE)
@@ -232,7 +232,7 @@ export const ProvidersConfigSchema = z.record(z.string().optional());
  */
 export const HarnessConfigFileSchema = z.object({
   providers: ProvidersConfigSchema.optional(),
-  agents: z.record(AgentConfigEntrySchema),
+  agents: z.record(z.string(), AgentConfigEntrySchema),
   tools: ToolsConfigSchema.optional(),
   graphd: GraphDConfigSchema.optional(),
   context: ContextConfigSchema.optional(),

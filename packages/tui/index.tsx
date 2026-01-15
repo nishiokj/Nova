@@ -20,6 +20,7 @@ import {
   type Role,
   type BridgeCommandType,
   type UserPromptData,
+  type UserPromptQuestion,
   type AgentQuestion,
   type QuestionType,
 } from "./types.js";
@@ -617,50 +618,56 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const handleUserPrompt = (data?: UserPromptData) => {
-    if (!data?.question) return;
+    if (!data) return;
 
-    // Check for plan_mode_exit question type from server
-    if (data.question_type === "plan_mode_exit") {
-      // This is a plan mode exit request from the agent
-      const question: AgentQuestion = {
-        requestId: data.request_id,
-        type: "plan_mode_exit",
-        question: data.question,
-        context: data.context,
-        options: data.options?.map((opt, i) => ({
-          id: String(i),
-          label: typeof opt === "string" ? opt : opt.label,
-          description: typeof opt === "object" ? opt.description : undefined,
-        })),
-      };
-      store.setActiveQuestion(question);
-      return;
-    }
-
-    // Infer question type from the data
-    const inferQuestionType = (): QuestionType => {
-      if (!data.options || data.options.length === 0) {
-        return "free_text";
-      }
-      if (data.multi_select) {
-        return "multi_select";
-      }
-      // Check if it's a yes/no question
-      const labels = data.options.map((opt) =>
+    // Helper to infer question type from options and flags
+    const inferQuestionType = (
+      opts?: Array<string | { label: string; description?: string }>,
+      multiSelect?: boolean,
+      questionType?: string
+    ): QuestionType => {
+      if (questionType === "plan_mode_exit") return "plan_mode_exit";
+      if (!opts || opts.length === 0) return "free_text";
+      if (multiSelect) return "multi_select";
+      const labels = opts.map((opt) =>
         (typeof opt === "string" ? opt : opt.label).toLowerCase()
       );
-      if (
-        labels.length === 2 &&
-        labels.every((l) => ["yes", "no", "y", "n"].includes(l))
-      ) {
+      if (labels.length === 2 && labels.every((l) => ["yes", "no", "y", "n"].includes(l))) {
         return "yes_no";
       }
       return "multiple_choice";
     };
 
+    // Helper to convert raw question data to AgentQuestion
+    const toAgentQuestion = (
+      q: UserPromptQuestion,
+      requestId: string,
+      index: number
+    ): AgentQuestion => ({
+      requestId: `${requestId}_q${index}`,
+      type: inferQuestionType(q.options, q.multi_select, q.question_type),
+      question: q.question,
+      context: q.context,
+      options: q.options?.map((opt, i) => ({
+        id: String(i),
+        label: typeof opt === "string" ? opt : opt.label,
+        description: typeof opt === "object" ? opt.description : undefined,
+      })),
+    });
+
+    // Handle multiple questions
+    if (data.questions && data.questions.length > 0) {
+      const questions = data.questions.map((q, i) => toAgentQuestion(q, data.request_id, i));
+      store.setQuestionQueue(questions, data.request_id);
+      return;
+    }
+
+    // Handle single question (backwards compatible)
+    if (!data.question) return;
+
     const question: AgentQuestion = {
       requestId: data.request_id,
-      type: inferQuestionType(),
+      type: inferQuestionType(data.options, data.multi_select, data.question_type),
       question: data.question,
       context: data.context,
       options: data.options?.map((opt, i) => ({
@@ -670,7 +677,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       })),
     };
 
-    store.setActiveQuestion(question);
+    store.setActiveQuestion(question, data.request_id);
   };
 
   const handleError = (data?: ErrorData) => {
@@ -868,24 +875,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           if (questionType === "multiple_choice" || questionType === "yes_no" || questionType === "plan_mode_exit") {
             store.toggleQuestionSelection();
           }
-          const answer = store.getQuestionAnswer();
-          const requestId = snapshot.activeQuestion.requestId;
 
           // Handle plan_mode_exit: if user selected first option ("Yes, exit"), disable plan mode
           if (questionType === "plan_mode_exit") {
             const selectedIdx = snapshot.questionSelection[0];
             if (selectedIdx === 0) {
-              // First option = exit plan mode
               store.setPlanMode(false);
               store.addMessage("system", "Plan mode disabled. Full tool access restored.");
             }
           }
 
-          sendCommand("user_prompt_response", {
-            request_id: requestId,
-            answer,
-          });
-          store.clearQuestion();
+          // Check if there are more questions in the queue
+          const hasMoreQuestions = store.saveAnswerAndAdvance();
+          if (!hasMoreQuestions) {
+            // All questions answered - send response
+            const requestId = store.getQuestionRequestId();
+            const allAnswers = store.getAllAnswers();
+            // For single question, send the single answer; for multiple, send array
+            const answer = allAnswers.size === 1
+              ? allAnswers.values().next().value
+              : Object.fromEntries(allAnswers);
+            sendCommand("user_prompt_response", {
+              request_id: requestId,
+              answer,
+            });
+            store.clearQuestion();
+          }
           return;
         }
       }
@@ -904,13 +919,21 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
         // Enter submits
         if (key.return && !key.shift) {
-          const answer = store.getQuestionAnswer();
-          const requestId = snapshot.activeQuestion.requestId;
-          sendCommand("user_prompt_response", {
-            request_id: requestId,
-            answer,
-          });
-          store.clearQuestion();
+          // Check if there are more questions in the queue
+          const hasMoreQuestions = store.saveAnswerAndAdvance();
+          if (!hasMoreQuestions) {
+            // All questions answered - send response
+            const requestId = store.getQuestionRequestId();
+            const allAnswers = store.getAllAnswers();
+            const answer = allAnswers.size === 1
+              ? allAnswers.values().next().value
+              : Object.fromEntries(allAnswers);
+            sendCommand("user_prompt_response", {
+              request_id: requestId,
+              answer,
+            });
+            store.clearQuestion();
+          }
           return;
         }
 
@@ -1053,17 +1076,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       if (snapshot.uiMode !== "chat") {
         store.setUIMode("chat");
       }
-      store.addMessage("user", text);
+
+      // Auto-trigger planning mode: "planning mode <prompt>" or "/plan <prompt>"
+      let effectiveText = text;
+      let effectivePlanMode = snapshot.planMode;
+      const lowerText = text.toLowerCase();
+      if (lowerText.startsWith("planning mode ") || lowerText.startsWith("/plan ")) {
+        const prefixLen = lowerText.startsWith("planning mode ") ? 14 : 6;
+        effectiveText = text.slice(prefixLen).trim();
+        if (effectiveText && !effectivePlanMode) {
+          effectivePlanMode = true;
+          store.setPlanMode(true);
+          store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
+        }
+      }
+
+      store.addMessage("user", effectiveText);
       store.clearInput();
       store.incrementRequestCount();
       store.clearProgress();
       store.setState("sending");
-      loggerRef.current?.transcript("user", text);
+      loggerRef.current?.transcript("user", effectiveText);
 
       sendCommand("send_text", {
-        text,
+        text: effectiveText,
         client_request_id: requestId,
-        plan_mode: snapshot.planMode,
+        plan_mode: effectivePlanMode,
       });
       return;
     }
@@ -1644,6 +1682,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           selection={snapshot.questionSelection}
           inputText={snapshot.questionInput}
           width={width}
+          queueInfo={store.getQuestionQueueInfo()}
         />
       ) : (
         <>

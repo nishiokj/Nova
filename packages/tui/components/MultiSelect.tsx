@@ -14,46 +14,31 @@ export function MultiSelect({
   cursor,
   selected,
 }: MultiSelectProps): JSX.Element {
-  const selectedCount = selected.length;
-
   const colors = getColors();
-  const accentColor = colors.accent;
-  const selectedColor = colors.success;
-  const textColor = colors.text;
-  const dimColor = colors.muted;
 
   return (
     <Box flexDirection="column" marginY={1}>
       {options.map((opt, i) => {
         const isCursor = i === cursor;
         const isSelected = selected.includes(i);
-
-        const marker = isCursor ? ">" : " ";
         const checkbox = isSelected ? "[x]" : "[ ]";
 
         return (
           <Box key={opt.id}>
-            <Text color={isCursor ? accentColor : dimColor} bold={isCursor}>
-              {marker} {checkbox}{" "}
+            <Text color={isCursor ? colors.accent : colors.muted}>
+              {isCursor ? "> " : "  "}
+              {checkbox}{" "}
             </Text>
-            <Text
-              color={isCursor ? accentColor : isSelected ? selectedColor : textColor}
-              bold={isCursor || isSelected}
-            >
+            <Text color={isCursor ? colors.text : isSelected ? colors.success : colors.muted}>
               {opt.label}
             </Text>
             {opt.description && (
-              <Text color={dimColor}> - {opt.description}</Text>
+              <Text color={colors.muted}> - {opt.description}</Text>
             )}
           </Box>
         );
       })}
-
-      {selectedCount > 0 && (
-        <Box marginTop={1}>
-          <Text color={selectedColor}>{selectedCount} selected</Text>
-        </Box>
-      )}
+      <Text color={colors.muted}>space toggle</Text>
     </Box>
   );
 }

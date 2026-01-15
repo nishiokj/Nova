@@ -23,7 +23,7 @@ import {
   DEFAULT_RESILIENCE_CONFIG,
   type CircuitBreakerState,
   type ResilienceConfig,
-} from '../packages/agent-core/src/llm/retry.js';
+} from '../packages/llm/src/retry.js';
 
 describe('Circuit Breaker State Machine', () => {
   let state: CircuitBreakerState;
@@ -147,9 +147,10 @@ describe('Backoff Calculation', () => {
 });
 
 describe('Retryable Error Detection', () => {
-  it('identifies rate limit errors as retryable', () => {
-    expect(isRetryableError(new Error('rate limit exceeded'))).toBe(true);
-    expect(isRetryableError(new Error('Error 429: Too many requests'))).toBe(true);
+  it('rate limit errors should NOT retry (trigger fallback instead)', () => {
+    // Rate limits shouldn't be retried - they should trigger fallback to another provider
+    expect(isRetryableError(new Error('rate limit exceeded'))).toBe(false);
+    expect(isRetryableError(new Error('Error 429: Too many requests'))).toBe(false);
   });
 
   it('identifies timeout errors as retryable', () => {
@@ -187,7 +188,7 @@ describe('Error Types', () => {
     const error = new RetriesExhaustedError('Request failed', underlying, 3);
 
     expect(error.name).toBe('RetriesExhaustedError');
-    expect(error.lastError).toBe(underlying);
+    expect(error.cause).toBe(underlying);
     expect(error.attempts).toBe(3);
     expect(error.message).toContain('Connection refused');
     expect(error.message).toContain('3 attempts');

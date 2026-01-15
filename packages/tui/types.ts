@@ -190,11 +190,24 @@ export interface AgentQuestion {
   required?: boolean;
 }
 
-export interface UserPromptData {
-  request_id: string;
+/** Single question item in a user prompt */
+export interface UserPromptQuestion {
   question: string;
   options?: Array<string | { label: string; description?: string }>;
   context?: string;
   multi_select?: boolean;
   question_type?: string;
+}
+
+/** User prompt data from harness - supports single question or multiple */
+export interface UserPromptData {
+  request_id: string;
+  /** Single question (backwards compatible) */
+  question?: string;
+  options?: Array<string | { label: string; description?: string }>;
+  context?: string;
+  multi_select?: boolean;
+  question_type?: string;
+  /** Multiple questions to ask in sequence */
+  questions?: UserPromptQuestion[];
 }

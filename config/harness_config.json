@@ -110,6 +110,7 @@
         "Glob",
         "Grep",
         "Bash",
+        "Skill",
         "coding-agent",
         "explorer",
         "runtime_script"
@@ -138,6 +139,7 @@
         "Glob",
         "Grep",
         "Bash",
+        "Skill",
         "standard"
       ],
       "output_schema": "goal_driven"
@@ -174,7 +176,8 @@
         "Edit",
         "Glob",
         "Grep",
-        "Bash"
+        "Bash",
+        "Skill"
       ],
       "output_schema": "agent_action"
     },

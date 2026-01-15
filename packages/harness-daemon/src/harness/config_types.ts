@@ -191,6 +191,7 @@ export const DEFAULT_ENABLED_TOOLS = [
   'Glob',
   'Grep',
   'Bash',
+  'Skill',
 ];
 
 export const DEFAULT_SKILLS_CONFIG: SkillsConfigSection = {
