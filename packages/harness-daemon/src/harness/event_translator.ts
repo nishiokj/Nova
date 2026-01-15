@@ -10,6 +10,7 @@ import type {
   ProgressEventData,
   StatusEventData,
   UserPromptEventData,
+  UserPromptEventQuestion,
   EventLevel,
   EventKind,
 } from './types.js';
@@ -329,24 +330,35 @@ export function createReadyEvent(sessionKey: string, configSummary?: string): Br
 
 /**
  * Create a user prompt event for the TUI.
+ * Supports single question (backwards compatible) or multiple questions.
  */
 export function createUserPromptEvent(
   requestId: string,
-  question: string,
+  question?: string,
   options?: Array<string | { label: string; description?: string }>,
   context?: string,
   multiSelect?: boolean,
-  questionType?: string
+  questionType?: string,
+  questions?: UserPromptEventQuestion[]
 ): BridgeEvent {
+  const data: UserPromptEventData = {
+    request_id: requestId,
+  };
+
+  // If multiple questions provided, use that format
+  if (questions && questions.length > 0) {
+    data.questions = questions;
+  } else if (question) {
+    // Single question format (backwards compatible)
+    data.question = question;
+    data.options = options;
+    data.context = context;
+    data.multi_select = multiSelect;
+    data.question_type = questionType;
+  }
+
   return {
     type: 'user_prompt',
-    data: {
-      request_id: requestId,
-      question,
-      options,
-      context,
-      multi_select: multiSelect,
-      question_type: questionType,
-    } satisfies UserPromptEventData,
+    data: data as unknown as Record<string, unknown>,
   };
 }

@@ -984,7 +984,7 @@ export class BridgeGateway {
     let modelOverride = null;
     if (graphd) {
       const session = graphd.sessionGet(sessionKey);
-      modelOverride = session?.metadata?.model_override ?? null;
+      modelOverride = (session?.metadata as Record<string, unknown>)?.model_override ?? null;
     }
 
     // Get config default

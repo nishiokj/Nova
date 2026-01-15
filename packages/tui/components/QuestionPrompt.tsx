@@ -11,6 +11,7 @@ interface QuestionPromptProps {
   selection: number[];
   inputText: string;
   width: number;
+  queueInfo?: { current: number; total: number };
 }
 
 export function QuestionPrompt({
@@ -19,15 +20,15 @@ export function QuestionPrompt({
   selection,
   inputText,
   width,
+  queueInfo,
 }: QuestionPromptProps): JSX.Element {
   const colors = getColors();
-  const questionColor = colors.accent;
-  const dimColor = colors.muted;
 
-  const renderQuestionBody = () => {
+  const renderInput = () => {
     switch (question.type) {
       case "multiple_choice":
       case "yes_no":
+      case "plan_mode_exit":
         return (
           <SingleSelect
             options={question.options || []}
@@ -63,30 +64,19 @@ export function QuestionPrompt({
     }
   };
 
+  const showProgress = queueInfo && queueInfo.total > 1;
+
   return (
-    <Box flexDirection="column" marginY={1}>
-      {/* Question text */}
-      <Text color={questionColor} bold>
-        {question.question}
-      </Text>
-
-      {/* Context if provided */}
-      {question.context && (
-        <Text color={dimColor}>{question.context}</Text>
+    <Box flexDirection="column">
+      {showProgress && (
+        <Text color={colors.muted}>Question {queueInfo.current} of {queueInfo.total}</Text>
       )}
-
-      {/* Input area */}
-      {renderQuestionBody()}
-
-      {/* Controls hint */}
-      <Box marginTop={1}>
-        <Text color={dimColor}>
-          <Text color={colors.success}>Enter</Text>
-          {" submit  "}
-          <Text color={colors.error}>Esc</Text>
-          {" cancel"}
-        </Text>
-      </Box>
+      <Text color={colors.accent}>{question.question}</Text>
+      {question.context && <Text color={colors.muted}>{question.context}</Text>}
+      {renderInput()}
+      <Text color={colors.muted}>
+        enter submit | esc cancel
+      </Text>
     </Box>
   );
 }

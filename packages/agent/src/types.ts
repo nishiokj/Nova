@@ -123,6 +123,7 @@ export interface UserPromptInfo {
   options?: Array<string | { label: string; description?: string }>;
   context?: string;
   multiSelect?: boolean;
+  questionType?: string;
 }
 
 /**

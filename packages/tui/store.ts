@@ -58,6 +58,9 @@ export interface StoreSnapshot {
   questionSelection: number[];
   questionCursor: number;
   questionInput: string;
+  questionQueue: AgentQuestion[];
+  questionAnswers: Map<string, unknown>;
+  questionRequestId: string | null;
   // Paste state
   pasteInProgress: boolean;
   pasteBytesReceived: number;
@@ -113,6 +116,9 @@ export class Store {
   private questionSelection: number[] = [];
   private questionCursor = 0;
   private questionInput = "";
+  private questionQueue: AgentQuestion[] = [];
+  private questionAnswers = new Map<string, unknown>();
+  private questionRequestId: string | null = null;
 
   // Paste state
   private pasteInProgress = false;
@@ -179,6 +185,9 @@ export class Store {
       questionSelection: [...this.questionSelection],
       questionCursor: this.questionCursor,
       questionInput: this.questionInput,
+      questionQueue: [...this.questionQueue],
+      questionAnswers: new Map(this.questionAnswers),
+      questionRequestId: this.questionRequestId,
       // Paste state
       pasteInProgress: this.pasteInProgress,
       pasteBytesReceived: this.pasteBytesReceived,
@@ -653,16 +662,43 @@ export class Store {
 
   /**
    * Sets the active question and enters question mode.
+   * For single questions from the harness.
    */
-  setActiveQuestion(question: AgentQuestion | null): void {
+  setActiveQuestion(question: AgentQuestion | null, requestId?: string): void {
     this.activeQuestion = question;
     this.questionSelection = [];
     this.questionCursor = 0;
     this.questionInput = question?.defaultValue || "";
+    if (requestId) {
+      this.questionRequestId = requestId;
+    }
     if (question) {
       this.uiMode = "question";
     }
     this.emit();
+  }
+
+  /**
+   * Sets a queue of questions to ask in sequence.
+   */
+  setQuestionQueue(questions: AgentQuestion[], requestId: string): void {
+    this.questionQueue = questions.slice(1); // Queue all but the first
+    this.questionAnswers.clear();
+    this.questionRequestId = requestId;
+    // Start with the first question
+    if (questions.length > 0) {
+      this.setActiveQuestion(questions[0], requestId);
+    }
+  }
+
+  /**
+   * Returns info about the question queue.
+   */
+  getQuestionQueueInfo(): { current: number; total: number } {
+    const answered = this.questionAnswers.size;
+    const remaining = this.questionQueue.length;
+    const total = answered + remaining + (this.activeQuestion ? 1 : 0);
+    return { current: answered + 1, total };
   }
 
   /**
@@ -686,7 +722,8 @@ export class Store {
 
     if (
       this.activeQuestion.type === "multiple_choice" ||
-      this.activeQuestion.type === "yes_no"
+      this.activeQuestion.type === "yes_no" ||
+      this.activeQuestion.type === "plan_mode_exit"
     ) {
       // Single selection - replace
       this.questionSelection = [this.questionCursor];
@@ -737,6 +774,7 @@ export class Store {
     switch (this.activeQuestion.type) {
       case "multiple_choice":
       case "yes_no":
+      case "plan_mode_exit":
         if (this.questionSelection.length === 0) return null;
         return this.activeQuestion.options?.[this.questionSelection[0]]?.id;
       case "multi_select":
@@ -752,6 +790,45 @@ export class Store {
   }
 
   /**
+   * Saves the current answer and advances to next question or completes.
+   * Returns true if there are more questions, false if done.
+   */
+  saveAnswerAndAdvance(): boolean {
+    if (!this.activeQuestion) return false;
+
+    // Save the current answer
+    const answer = this.getQuestionAnswer();
+    this.questionAnswers.set(this.activeQuestion.requestId, answer);
+
+    // Check if there are more questions in the queue
+    if (this.questionQueue.length > 0) {
+      const nextQuestion = this.questionQueue.shift()!;
+      this.activeQuestion = nextQuestion;
+      this.questionSelection = [];
+      this.questionCursor = 0;
+      this.questionInput = nextQuestion.defaultValue || "";
+      this.emit();
+      return true; // More questions remaining
+    }
+
+    return false; // No more questions
+  }
+
+  /**
+   * Gets all collected answers (for multi-question flows).
+   */
+  getAllAnswers(): Map<string, unknown> {
+    return new Map(this.questionAnswers);
+  }
+
+  /**
+   * Gets the request ID for the current question flow.
+   */
+  getQuestionRequestId(): string | null {
+    return this.questionRequestId;
+  }
+
+  /**
    * Clears the active question and returns to chat mode.
    */
   clearQuestion(): void {
@@ -759,6 +836,9 @@ export class Store {
     this.questionSelection = [];
     this.questionCursor = 0;
     this.questionInput = "";
+    this.questionQueue = [];
+    this.questionAnswers.clear();
+    this.questionRequestId = null;
     this.uiMode = "chat";
     this.emit();
   }

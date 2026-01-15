@@ -19,7 +19,7 @@ export const BashArgsSchema = z.object({
   workdir: z.string().optional(),
   cwd: z.string().optional(),
   timeout: z.number().positive().optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 // ============================================
@@ -113,6 +113,18 @@ export const GrepArgsSchema = z.object({
 });
 
 // ============================================
+// SKILL TOOL
+// ============================================
+
+/**
+ * Arguments for skill tool execution.
+ */
+export const SkillArgsSchema = z.object({
+  skill: z.string().min(1, 'Skill name cannot be empty'),
+  args: z.string().optional(),
+});
+
+// ============================================
 // SCHEMA REGISTRY
 // ============================================
 
@@ -126,6 +138,7 @@ export const TOOL_SCHEMAS: Record<string, z.ZodType> = {
   Edit: EditArgsSchema,
   Glob: GlobArgsSchema,
   Grep: GrepArgsSchema,
+  Skill: SkillArgsSchema,
 };
 
 // ============================================
@@ -138,6 +151,7 @@ export type WriteArgs = z.infer<typeof WriteArgsSchema>;
 export type EditArgs = z.infer<typeof EditArgsSchema>;
 export type GlobArgs = z.infer<typeof GlobArgsSchema>;
 export type GrepArgs = z.infer<typeof GrepArgsSchema>;
+export type SkillArgs = z.infer<typeof SkillArgsSchema>;
 
 // ============================================
 // VALIDATION FUNCTIONS

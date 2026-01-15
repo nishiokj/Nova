@@ -36,15 +36,27 @@ export interface AgentRunResult {
   metadata?: Record<string, unknown>;
 }
 
+/** Single question item */
+export interface UserPromptQuestion {
+  question: string;
+  options?: Array<string | { label: string; description?: string }>;
+  context?: string;
+  multiSelect?: boolean;
+  questionType?: string;
+}
+
 /**
  * User prompt info when agent pauses for input.
  */
 export interface UserPromptInfo {
   requestId: string;
-  question: string;
+  /** Single question (backwards compatible) */
+  question?: string;
   options?: Array<string | { label: string; description?: string }>;
   context?: string;
   multiSelect?: boolean;
+  /** Multiple questions to ask in sequence */
+  questions?: UserPromptQuestion[];
 }
 
 /**
@@ -57,7 +69,9 @@ export type BridgeEventType =
   | 'stream'
   | 'response'
   | 'user_prompt'
-  | 'error';
+  | 'error'
+  | 'provider_key_required'
+  | 'model_changed';
 
 /**
  * Bridge event structure matching TUI expectations.
@@ -149,16 +163,28 @@ export interface ReadyEventData {
   config_summary?: string;
 }
 
-/**
- * User prompt data for user_prompt events.
- */
-export interface UserPromptEventData {
-  request_id: string;
+/** Single question item in wire format */
+export interface UserPromptEventQuestion {
   question: string;
   options?: Array<string | { label: string; description?: string }>;
   context?: string;
   multi_select?: boolean;
   question_type?: string;
+}
+
+/**
+ * User prompt data for user_prompt events.
+ */
+export interface UserPromptEventData {
+  request_id: string;
+  /** Single question (backwards compatible) */
+  question?: string;
+  options?: Array<string | { label: string; description?: string }>;
+  context?: string;
+  multi_select?: boolean;
+  question_type?: string;
+  /** Multiple questions to ask in sequence */
+  questions?: UserPromptEventQuestion[];
 }
 
 /**

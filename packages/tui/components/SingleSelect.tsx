@@ -12,36 +12,23 @@ interface SingleSelectProps {
 export function SingleSelect({
   options,
   cursor,
-  selected,
 }: SingleSelectProps): JSX.Element {
   const colors = getColors();
-  const accentColor = colors.accent;
-  const selectedColor = colors.success;
-  const textColor = colors.text;
-  const dimColor = colors.muted;
 
   return (
     <Box flexDirection="column" marginY={1}>
       {options.map((opt, i) => {
         const isCursor = i === cursor;
-        const isSelected = i === selected;
-
-        const marker = isCursor ? ">" : " ";
-        const radio = isSelected ? "(*)" : "( )";
-
         return (
           <Box key={opt.id}>
-            <Text color={isCursor ? accentColor : dimColor} bold={isCursor}>
-              {marker} {radio}{" "}
+            <Text color={isCursor ? colors.accent : colors.muted}>
+              {isCursor ? "> " : "  "}
             </Text>
-            <Text
-              color={isCursor ? accentColor : isSelected ? selectedColor : textColor}
-              bold={isCursor || isSelected}
-            >
+            <Text color={isCursor ? colors.text : colors.muted}>
               {opt.label}
             </Text>
             {opt.description && (
-              <Text color={dimColor}> - {opt.description}</Text>
+              <Text color={colors.muted}> - {opt.description}</Text>
             )}
           </Box>
         );

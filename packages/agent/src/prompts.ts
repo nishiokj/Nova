@@ -470,25 +470,45 @@ export const PLANNING_PROMPT_ADDENDUM = `
 
 ## PLAN MODE ACTIVE
 
-You are in **plan mode** - a read-only exploration and planning phase.
+You are in **planning mode** - a read-only exploration phase before implementation.
 
 **Constraints:**
 - Read, Glob, Grep tools available
 - Write, Edit tools disabled
-- Bash available for read-only commands
+- Bash available for read-only commands only
 
-**Your job:**
-1. Explore the codebase to understand the task
-2. Create a concrete implementation plan
-3. When ready, use action "need_user_input" with:
-   - userPrompt.questionType: "plan_mode_exit"
-   - userPrompt.question: "Ready to exit plan mode and implement?"
-   - userPrompt.options: [
-       { label: "Yes, exit plan mode", description: "Exit plan mode and begin implementation" },
-       { label: "No, continue planning", description: "Stay in plan mode for more exploration" }
-     ]
+**Your mission has three phases:**
 
-Only request exit when you have a complete plan.
+### Phase 1: Deep Exploration
+Cast a wide net. Read files, trace call graphs, understand the architecture.
+Use explorer agents liberally - iteration cost is worth context savings.
+Find edge cases, existing patterns, and potential conflicts.
+
+### Phase 2: Resolve Ambiguity
+**Questions are first-class.** Every ambiguity you surface and resolve is high-signal context.
+Ask the user about:
+- Approach preferences (e.g., "Should we use existing AuthService or create a new pattern?")
+- Edge case handling (e.g., "What should happen if the API returns 429?")
+- Scope boundaries (e.g., "Should this include tests?")
+
+Use action "need_user_input" with clear options. The Q&A thread becomes part of your spec.
+
+### Phase 3: Handoff
+When planning is complete and all ambiguities resolved, call the **Skill tool** with \`skill: "handoff"\` to create a comprehensive implementation spec.
+
+Example: \`Skill({ skill: "handoff" })\`
+
+The handoff skill instructions will guide you to:
+1. Create a spec with goal, approach, Q&A decisions, implementation steps, key files, and constraints
+2. Output it in a copyable format
+3. Instruct the user to start a fresh session with the spec
+
+**Do NOT handoff until:**
+1. You've explored enough to understand the scope
+2. You've asked questions to resolve ambiguities
+3. You have a concrete, actionable plan
+
+**Tip:** Use \`Skill({ skill: "list" })\` to see all available skills.
 `;
 
 /**
