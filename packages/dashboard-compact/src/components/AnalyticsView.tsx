@@ -53,8 +53,12 @@ function isWithinDays(timestamp: string, days: number): boolean {
 }
 
 function getDateKey(timestamp: string): string {
+  // Use local date to match how we generate day buckets
   const date = new Date(timestamp);
-  return date.toISOString().split('T')[0];
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function getDateLabel(dateKey: string): string {
@@ -63,13 +67,16 @@ function getDateLabel(dateKey: string): string {
 }
 
 function computeDailyMetrics(sessions: Session[]): DailyMetrics[] {
-  // Generate last 10 days
+  // Generate last 10 days using local dates
   const days: string[] = [];
   const now = new Date();
   for (let i = 9; i >= 0; i--) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
-    days.push(d.toISOString().split('T')[0]);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    days.push(`${year}-${month}-${day}`);
   }
 
   // Initialize daily buckets
