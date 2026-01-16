@@ -97,22 +97,21 @@ export function buildSystemMessage(
     : '';
   const constraintsInfo = constraints ? formatConstraints(constraints) : '';
 
-  return `You are an expert assistant executing a step in a plan.
+  // Only show GOAL if it differs meaningfully from OBJECTIVE
+  const goalSection = goal !== objective && goal.length > 0
+    ? `GOAL: ${goal}\n\n`
+    : '';
 
-GOAL: ${goal}
-
-OBJECTIVE: ${objective}
-${workspaceInfo}
+  return `OBJECTIVE: ${objective}
+${goalSection}${workspaceInfo}
 ${behavioralRules}${constraintsInfo ? `\n${constraintsInfo}` : ''}
 
-IMPORTANT RESPONSE ACTIONS:
-- Set action to "done" when the objective is complete and provide your response
-- Set action to "need_user_input" when you need user input and include userPrompt details
-- Set action to "continue" when you need another iteration and explain next steps
-- Set goalStateReached: true only when the objective is complete
-- Do not repeat the same tool call with identical arguments after you already received its output
+RESPONSE ACTIONS:
+- action: "done" + goalStateReached: true → objective complete
+- action: "need_user_input" + userPrompt → blocked, need user decision
+- action: "continue" → progress made, more work needed
 
-Always be concise and focused on the objective.`;
+Do not repeat identical tool calls.`;
 }
 
 function formatConstraints(constraints: {
@@ -541,6 +540,36 @@ export class ContextWindow {
    */
   hasReadFile(path: string): boolean {
     return this._readFiles.has(path);
+  }
+
+  /**
+   * Build a context summary showing what's already available.
+   * Helps the model avoid re-reading files or re-discovering artifacts.
+   */
+  buildContextSummary(): string | null {
+    const parts: string[] = [];
+
+    // List files already in context
+    if (this._readFiles.size > 0) {
+      const fileList = Array.from(this._readFiles).slice(0, 20); // Cap at 20
+      parts.push(`FILES IN CONTEXT (${this._readFiles.size}): ${fileList.join(', ')}${this._readFiles.size > 20 ? '...' : ''}`);
+    }
+
+    // List artifacts by kind
+    const artifacts = this.getArtifacts();
+    if (artifacts.length > 0) {
+      const byKind = new Map<string, number>();
+      for (const a of artifacts) {
+        byKind.set(a.kind, (byKind.get(a.kind) ?? 0) + 1);
+      }
+      const kindSummary = Array.from(byKind.entries())
+        .map(([kind, count]) => `${count} ${kind}`)
+        .join(', ');
+      parts.push(`ARTIFACTS DISCOVERED: ${kindSummary}`);
+    }
+
+    if (parts.length === 0) return null;
+    return `[CONTEXT STATE]\n${parts.join('\n')}\nDo not re-read these files or re-discover these artifacts.`;
   }
 
   /**

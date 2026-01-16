@@ -13,6 +13,41 @@ import { successResult, errorResult } from 'types';
 import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
 
 /**
+ * Atomically write content to a file using a temporary file.
+ *
+ * This function writes content to a temporary file and then atomically
+ * renames it to the target path. This ensures that either the full write
+ * succeeds or no partial write occurs.
+ *
+ * @param filePath - The target file path to write to
+ * @param content - The content to write
+ * @param encoding - The character encoding to use (default: 'utf-8')
+ * @returns Promise that resolves when the write is complete
+ * @throws Error if the write fails, with temporary file cleaned up
+ */
+async function atomicWrite(
+  filePath: string,
+  content: string,
+  encoding: BufferEncoding = 'utf-8'
+): Promise<void> {
+  const dirPath = dirname(filePath);
+  const tmpPath = resolve(dirPath, `.tmp_${randomBytes(8).toString('hex')}.tmp`);
+
+  try {
+    await writeFile(tmpPath, content, encoding);
+    await rename(tmpPath, filePath);
+  } catch (e) {
+    // Clean up temp file on failure
+    try {
+      await unlink(tmpPath);
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw e;
+  }
+}
+
+/**
  * Write content to a new file (fails if exists).
  */
 export async function executeWrite(
@@ -51,24 +86,8 @@ export async function executeWrite(
     const dirPath = dirname(resolvedPath);
     await mkdir(dirPath, { recursive: true });
 
-    // Atomic write: write to temp file, then rename
-    const tmpPath = resolve(
-      dirPath,
-      `.tmp_write_${randomBytes(8).toString('hex')}.tmp`
-    );
-
-    try {
-      await writeFile(tmpPath, content, 'utf-8');
-      await rename(tmpPath, resolvedPath);
-    } catch (e) {
-      // Clean up temp file on failure
-      try {
-        await unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw e;
-    }
+    // Atomic write using shared utility
+    await atomicWrite(resolvedPath, content, 'utf-8');
 
     // Build informative output so model knows write succeeded
     const lines = content.split('\n');
@@ -185,24 +204,8 @@ export async function executeEdit(
       replacements = 1;
     }
 
-    // Atomic write
-    const dirPath = dirname(resolvedPath);
-    const tmpPath = resolve(
-      dirPath,
-      `.tmp_edit_${randomBytes(8).toString('hex')}.tmp`
-    );
-
-    try {
-      await writeFile(tmpPath, newContent, 'utf-8');
-      await rename(tmpPath, resolvedPath);
-    } catch (e) {
-      try {
-        await unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw e;
-    }
+    // Atomic write using shared utility
+    await atomicWrite(resolvedPath, newContent, 'utf-8');
 
     // Build informative output with replacement context
     // Find where the replacement occurred to show context
@@ -465,19 +468,10 @@ export async function executeBatchEdit(
       }
     }
 
-    // Atomic write
-    const dirPath = dirname(resolvedPath);
-    const tmpPath = resolve(dirPath, `.tmp_batch_${randomBytes(8).toString('hex')}.tmp`);
-
+    // Atomic write using shared utility
     try {
-      await writeFile(tmpPath, content, 'utf-8');
-      await rename(tmpPath, resolvedPath);
+      await atomicWrite(resolvedPath, content, 'utf-8');
     } catch (e) {
-      try {
-        await unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
       return errorResult(
         'BatchEdit',
         `Write failed for ${resolvedPath}: ${(e as Error).message}`,

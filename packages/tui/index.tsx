@@ -249,15 +249,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       });
     }, 5000);
 
-    store.addMessage("system", "Indexing files for autocomplete...");
-    fileCache
-      .buildInitial()
-      .then(() => {
-        store.addMessage("system", "Autocomplete ready.");
-      })
-      .catch(() => {
-        store.addMessage("system", "Autocomplete indexing failed.");
-      });
+    fileCache.buildInitial();
 
     // Create bridge client (remote harness connection)
     const { host, port } = resolveBusConfig();
@@ -377,7 +369,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const handleReady = async (data?: ReadyData) => {
-    store.addMessage("system", "Bridge ready.");
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
     }
@@ -414,10 +405,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Send initial prompt if provided (from standalone launcher)
     if (initialPrompt && clientRef.current) {
       const requestId = `ink_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
-      store.addMessage("user", initialPrompt);
-      store.incrementRequestCount();
-      store.clearProgress();
-      store.setState("sending");
+      store.batch(() => {
+        store.addMessage("user", initialPrompt);
+        store.incrementRequestCount();
+        store.clearProgress();
+        store.setState("sending");
+      });
       loggerRef.current?.transcript("user", initialPrompt);
       sendCommand("send_text", {
         text: initialPrompt,
@@ -492,12 +485,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     if (data.is_final) {
       const finalText = store.getSnapshot().streamingText;
-      if (!messageExists(store.getSnapshot().history, data.request_id)) {
-        store.addMessage("agent", finalText, undefined, data.request_id);
-      }
-      store.finalizeStreaming();
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        if (!messageExists(store.getSnapshot().history, data.request_id)) {
+          store.addMessage("agent", finalText, undefined, data.request_id);
+        }
+        store.finalizeStreaming();
+        store.clearProgress();
+        store.setState("idle");
+      });
     }
   };
 
@@ -510,9 +505,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       : [];
     if (action === "list") {
       const items = Array.isArray(payload?.items) ? (payload?.items as Record<string, unknown>[]) : [];
-      store.setSkillsList(items, errors);
-      store.setUIMode("skills");
-      store.scrollToBottom();
+      store.batch(() => {
+        store.setSkillsList(items, errors);
+        store.setUIMode("skills");
+        store.scrollToBottom();
+      });
       return;
     }
     // Skills are read-only in TUI. To create/edit, use the agent with Write/Edit.
@@ -530,9 +527,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       : [];
     if (action === "list") {
       const items = Array.isArray(payload?.items) ? (payload?.items as Record<string, unknown>[]) : [];
-      store.setHooksList(items, errors);
-      store.setUIMode("hooks");
-      store.scrollToBottom();
+      store.batch(() => {
+        store.setHooksList(items, errors);
+        store.setUIMode("hooks");
+        store.scrollToBottom();
+      });
       return;
     }
     // Hooks are read-only in TUI. To create/edit, use the agent with Write/Edit.
@@ -563,30 +562,36 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     if (kind === "skills") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
-      handleSkillsPayload(payload, content);
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        handleSkillsPayload(payload, content);
+        store.clearProgress();
+        store.setState("idle");
+      });
       return;
     }
     if (kind === "hooks") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
-      handleHooksPayload(payload, content);
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        handleHooksPayload(payload, content);
+        store.clearProgress();
+        store.setState("idle");
+      });
       return;
     }
     if (kind === "compact_context") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
-      if (payload?.success) {
-        const itemsRemoved = payload.itemsRemoved ?? 0;
-        const bytesRecovered = payload.bytesRecovered ?? 0;
-        store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
-      } else {
-        const errorMsg = payload?.error ?? "Unknown error";
-        store.addMessage("system", `Context compaction failed: ${errorMsg}`);
-      }
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        if (payload?.success) {
+          const itemsRemoved = payload.itemsRemoved ?? 0;
+          const bytesRecovered = payload.bytesRecovered ?? 0;
+          store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
+        } else {
+          const errorMsg = payload?.error ?? "Unknown error";
+          store.addMessage("system", `Context compaction failed: ${errorMsg}`);
+        }
+        store.clearProgress();
+        store.setState("idle");
+      });
       return;
     }
 
@@ -604,34 +609,37 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     const meta = metaLines.length ? metaLines.join("\n") : undefined;
 
-    if (requestId && meta) {
-      store.updateMessageMeta(requestId, meta);
-    }
-
-    if (!content && error) {
-      if (requestId && messageExists(store.getSnapshot().history, requestId)) {
-        store.updateMessageText(requestId, `Error: ${error}`, meta);
-      } else {
-        store.addMessage("system", `Error: ${error}`);
+    // Batch all final state updates for a single render
+    store.batch(() => {
+      if (requestId && meta) {
+        store.updateMessageMeta(requestId, meta);
       }
-    } else if (!content && data.success === false) {
-      const fallback = "Error: Request failed with no details. Check logs for diagnostics.";
-      if (requestId && messageExists(store.getSnapshot().history, requestId)) {
-        store.updateMessageText(requestId, fallback, meta);
-      } else {
-        store.addMessage("system", fallback);
+
+      if (!content && error) {
+        if (requestId && messageExists(store.getSnapshot().history, requestId)) {
+          store.updateMessageText(requestId, `Error: ${error}`, meta);
+        } else {
+          store.addMessage("system", `Error: ${error}`);
+        }
+      } else if (!content && data.success === false) {
+        const fallback = "Error: Request failed with no details. Check logs for diagnostics.";
+        if (requestId && messageExists(store.getSnapshot().history, requestId)) {
+          store.updateMessageText(requestId, fallback, meta);
+        } else {
+          store.addMessage("system", fallback);
+        }
       }
-    }
 
-    if (content && requestId && messageExists(store.getSnapshot().history, requestId)) {
-      store.updateMessageText(requestId, content, meta);
-    } else if (content && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
-      store.addMessage("agent", content, meta, requestId);
-    }
+      if (content && requestId && messageExists(store.getSnapshot().history, requestId)) {
+        store.updateMessageText(requestId, content, meta);
+      } else if (content && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
+        store.addMessage("agent", content, meta, requestId);
+      }
 
-    store.finalizeStreaming();
-    store.clearProgress();
-    store.setState("idle");
+      store.finalizeStreaming();
+      store.clearProgress();
+      store.setState("idle");
+    });
   };
 
   const handleTranscription = (data?: TranscriptionData) => {
@@ -721,8 +729,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           ? data.detail
           : JSON.stringify(data.detail, null, 2);
     const detail = detailText ? `\n${detailText}` : "";
-    store.addMessage("system", `${data.message}${detail}`);
-    store.setError(data.message);
+    store.batch(() => {
+      store.addMessage("system", `${data.message}${detail}`);
+      store.setError(data.message);
+    });
     if (data.fatal) {
       setTimeout(() => {
         exit();
@@ -919,8 +929,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           if (questionType === "plan_mode_exit") {
             const selectedIdx = snapshot.questionSelection[0];
             if (selectedIdx === 0) {
-              store.setPlanMode(false);
-              store.addMessage("system", "Plan mode disabled. Full tool access restored.");
+              store.batch(() => {
+                store.setPlanMode(false);
+                store.addMessage("system", "Plan mode disabled. Full tool access restored.");
+              });
             }
           }
 
@@ -1131,16 +1143,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         effectiveText = text.slice(prefixLen).trim();
         if (effectiveText && !effectivePlanMode) {
           effectivePlanMode = true;
-          store.setPlanMode(true);
-          store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
         }
       }
 
-      store.addMessage("user", effectiveText);
-      store.clearInput();
-      store.incrementRequestCount();
-      store.clearProgress();
-      store.setState("sending");
+      store.batch(() => {
+        if (effectivePlanMode && !snapshot.planMode) {
+          store.setPlanMode(true);
+          store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
+        }
+        store.addMessage("user", effectiveText);
+        store.clearInput();
+        store.incrementRequestCount();
+        store.clearProgress();
+        store.setState("sending");
+      });
       loggerRef.current?.transcript("user", effectiveText);
 
       sendCommand("send_text", {
@@ -1153,8 +1169,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     if (key.tab) {
       if (snapshot.autocomplete.active) {
-        store.acceptAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.batch(() => {
+          store.acceptAutocomplete();
+          store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        });
       }
       return;
     }
@@ -1405,13 +1423,15 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       case "/plan": {
         const currentPlanMode = snapshot.planMode;
-        store.setPlanMode(!currentPlanMode);
-        store.addMessage(
-          "system",
-          !currentPlanMode
-            ? "Plan mode enabled. Write/Edit tools disabled. Agent will explore and plan before implementing."
-            : "Plan mode disabled. Full tool access restored."
-        );
+        store.batch(() => {
+          store.setPlanMode(!currentPlanMode);
+          store.addMessage(
+            "system",
+            !currentPlanMode
+              ? "Plan mode enabled. Write/Edit tools disabled. Agent will explore and plan before implementing."
+              : "Plan mode disabled. Full tool access restored."
+          );
+        });
         return;
       }
       case "/theme": {
@@ -1430,13 +1450,15 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           store.addMessage("system", "Voice mode not available.");
           return;
         }
-        store.setVoiceMode(enabled);
-        store.addMessage(
-          "system",
-          enabled
-            ? "Voice mode enabled. Hold SPACE to record, press SPACE or Esc to stop."
-            : "Voice mode disabled.",
-        );
+        store.batch(() => {
+          store.setVoiceMode(enabled);
+          store.addMessage(
+            "system",
+            enabled
+              ? "Voice mode enabled. Hold SPACE to record, press SPACE or Esc to stop."
+              : "Voice mode disabled.",
+          );
+        });
         return;
       }
       case "/clear":

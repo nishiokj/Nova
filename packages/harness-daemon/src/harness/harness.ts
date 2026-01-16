@@ -24,7 +24,7 @@ import {
 import os from 'os';
 import { execSync } from 'child_process';
 import { Orchestrator } from 'orchestrator';
-import { createAdapter, RateLimitError } from 'llm';
+import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
@@ -779,6 +779,62 @@ export class AgentHarness {
           };
         }
 
+        // Handle CircuitOpenError - circuit breaker tripped, need to wait before retrying
+        if (error instanceof CircuitOpenError) {
+          this.logger.warning('Circuit breaker open', {
+            requestId,
+            message: error.message,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
+
+          eventQueue.push(createErrorEvent(userMessage, true)); // recoverable = true
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Handle RetriesExhaustedError - all retry attempts failed
+        if (error instanceof RetriesExhaustedError) {
+          const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause ?? '');
+          this.logger.warning('All retries exhausted', {
+            requestId,
+            attempts: error.attempts,
+            cause: causeMessage,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
+
+          eventQueue.push(createErrorEvent(userMessage, true)); // recoverable = true
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
         // Generic error handling for non-rate-limit errors
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.logger.error('Agent run failed', { error: errorMessage, requestId });
@@ -1164,6 +1220,62 @@ export class AgentHarness {
               : ' Please wait a moment and try again.';
             userMessage = `⚠️ Rate limit reached for ${error.provider}.${waitTime} Your conversation has been saved.`;
           }
+
+          eventQueue.push(createErrorEvent(userMessage, true)); // recoverable = true
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Handle CircuitOpenError - circuit breaker tripped
+        if (error instanceof CircuitOpenError) {
+          this.logger.warning('Circuit breaker open during resume', {
+            requestId,
+            message: error.message,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
+
+          eventQueue.push(createErrorEvent(userMessage, true)); // recoverable = true
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Handle RetriesExhaustedError - all retry attempts failed
+        if (error instanceof RetriesExhaustedError) {
+          const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause ?? '');
+          this.logger.warning('All retries exhausted during resume', {
+            requestId,
+            attempts: error.attempts,
+            cause: causeMessage,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
 
           eventQueue.push(createErrorEvent(userMessage, true)); // recoverable = true
           eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state

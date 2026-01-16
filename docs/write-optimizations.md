@@ -391,9 +391,9 @@ function truncateOutput(output: string, maxLength: number = 100000): string {
 
 ---
 
-### 2. Cache Environment Merging
+### 2. ~~Cache Environment Merging~~ (NOT RECOMMENDED)
 
-**Current:** Spreads environment every call:
+~~**Current:** Spreads environment every call:~~
 ```typescript
 const env = (args.env as Record<string, string>) ?? {
   ...process.env,
@@ -401,15 +401,23 @@ const env = (args.env as Record<string, string>) ?? {
 };
 ```
 
-**Optimization:** Cache merged environment:
+~~**Optimization:** Cache merged environment:~~
 ```typescript
 const mergedEnv = { ...process.env, ...(context?.envOverrides ?? {}) };
 const env = args.env as Record<string, string> ?? mergedEnv;
 ```
 
-**Benefits:**
-- Minor performance improvement
-- Cleaner code
+~~**Benefits:**~~
+- ~~Minor performance improvement~~
+- ~~Cleaner code~~
+
+**Why NOT to do this:**
+- **Statefulness concern**: Caching `mergedEnv` outside the function scope would create shared state across tool invocations
+- **Multi-user scaling**: If multiple users execute the tool concurrently, a cached environment could serve stale values from `context?.envOverrides` or `process.env`
+- **process.env is already a reference**: The spread operator is fast enough; `process.env` itself is a shared global object
+- **Context is per-request**: `context?.envOverrides` is designed to be request-specific; caching defeats this purpose
+
+**Recommendation**: **DO NOT implement this optimization.** The current approach correctly creates a fresh environment object per call, which scales safely.
 
 ---
 

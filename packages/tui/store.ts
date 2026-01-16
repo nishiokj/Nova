@@ -142,6 +142,15 @@ export class Store {
     lines: HistoryLine[];
   } | null = null;
 
+  // Batching support
+  private batchDepth = 0;
+  private batchDirty = false;
+
+  // Streaming throttle
+  private streamingThrottleMs = 32; // ~30fps during streaming
+  private lastStreamingEmit = 0;
+  private pendingStreamingEmit: ReturnType<typeof setTimeout> | null = null;
+
   constructor(maxHistory = DEFAULT_MAX_HISTORY) {
     this.maxHistory = maxHistory;
   }
@@ -206,8 +215,32 @@ export class Store {
   }
 
   private emit(): void {
+    // If we're in a batch, mark dirty and defer
+    if (this.batchDepth > 0) {
+      this.batchDirty = true;
+      return;
+    }
     for (const listener of this.listeners) {
       listener();
+    }
+  }
+
+  /**
+   * Batch multiple mutations into a single emit.
+   * Nested batches are supported - only the outermost batch triggers emit.
+   */
+  batch(fn: () => void): void {
+    this.batchDepth++;
+    try {
+      fn();
+    } finally {
+      this.batchDepth--;
+      if (this.batchDepth === 0 && this.batchDirty) {
+        this.batchDirty = false;
+        for (const listener of this.listeners) {
+          listener();
+        }
+      }
     }
   }
 
@@ -426,14 +459,35 @@ export class Store {
     this.streamingText += chunk;
     this.historyVersion += 1;
     this.historyCache = null;
-    this.emit();
+
+    // Throttle emissions during streaming for better performance
+    const now = Date.now();
+    if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
+      this.lastStreamingEmit = now;
+      this.emit();
+    } else if (!this.pendingStreamingEmit) {
+      // Schedule a trailing emit to ensure we don't miss the last chunk
+      this.pendingStreamingEmit = setTimeout(() => {
+        this.pendingStreamingEmit = null;
+        this.lastStreamingEmit = Date.now();
+        this.emit();
+      }, this.streamingThrottleMs);
+    }
   }
 
   finalizeStreaming(): void {
+    // Cancel any pending throttled emit
+    if (this.pendingStreamingEmit) {
+      clearTimeout(this.pendingStreamingEmit);
+      this.pendingStreamingEmit = null;
+    }
+
     this.streamingRequestId = null;
     this.streamingText = "";
     this.historyVersion += 1;
     this.historyCache = null;
+    // Always emit immediately on finalize - user needs to see the final response
+    this.lastStreamingEmit = 0;
     this.emit();
   }
 

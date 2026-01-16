@@ -172,6 +172,15 @@ export class Agent {
       const elapsedMs = Date.now() - startTime;
       console.error(`[AGENT DEBUG] Starting iteration ${iteration}/${maxIterations}, elapsed=${elapsedMs}ms, toolCallsMade=${metrics.toolCallsMade}, agent=${this.config.type}`);
 
+      // Auto-compact if context is near full
+      if (localContext.isNearFull()) {
+        const compactResult = localContext.compact({
+          deduplicateByPath: true,
+          truncateOutputsTo: 4000,
+        });
+        console.error(`[AGENT DEBUG] Compacted context: removed=${compactResult.itemsRemoved}, truncated=${compactResult.outputsTruncated}, recovered=${compactResult.bytesRecovered}b`);
+      }
+
       if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         result.terminationReason = 'bounds:tool_calls';
         this.emit(createEvent('agent_bounds_hit', {
@@ -505,14 +514,28 @@ export class Agent {
       }
     }
 
+    // Build context summary from both global and local contexts
+    const globalSummary = globalContext.buildContextSummary();
+    const localSummary = localContext.buildContextSummary();
+    const combinedSummary = [globalSummary, localSummary].filter(Boolean).join('\n');
+
     const hasUserInput = globalItems.some(
       (item) => item.type === 'message' && (item as any).role === 'user'
     );
 
     if (!hasUserInput) {
+      const objectiveWithContext = combinedSummary
+        ? `${combinedSummary}\n\n${workItem.objective}`
+        : workItem.objective;
       messages.push({
         role: 'user',
-        content: `Execute the following objective:\n\n${workItem.objective}`,
+        content: objectiveWithContext,
+      });
+    } else if (combinedSummary) {
+      // Inject context summary even if there's user input
+      messages.push({
+        role: 'user',
+        content: combinedSummary,
       });
     }
 
@@ -724,6 +747,24 @@ export class Agent {
 
       // Normalize tool name to canonical form for case-insensitive lookup
       const canonicalName = canonicalNames.get(nameLower) ?? call.name;
+
+      // Intercept Read calls for files already in context
+      if (nameLower === 'read') {
+        const readPath = call.arguments.path ?? call.arguments.file_path;
+        if (typeof readPath === 'string' && localReadFiles.has(readPath)) {
+          // File already in context - don't re-read
+          const msg = `File "${readPath}" is already in your context. Look above for its contents instead of re-reading.`;
+          console.error(`[AGENT DEBUG] Intercepted duplicate Read for: ${readPath}`);
+          localContext.appendItem({
+            type: 'function_call_output',
+            callId: call.id,
+            output: msg,
+            isError: false,
+            timestamp: Date.now(),
+          });
+          continue;
+        }
+      }
 
       const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
       const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
@@ -1111,16 +1152,15 @@ export class Agent {
     this.mergeSubAgentResults(parentLocalContext, subResult);
 
     // Include full structured output so calling agent can see artifacts, patterns, etc.
+    // Also include explicit filesRead so calling agent knows not to re-read these
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
       success: subResult.success,
       response: enhancedResponse,
-      structuredOutput: subResult.structuredOutput,
+      filesRead: subResult.filesRead, // Explicit list - do not re-read these
       artifactsAdded: Array.isArray(artifacts) ? artifacts.length : 0,
       error: subResult.error,
-      needsUserInput: subResult.needsUserInput,
-      userPrompt: subResult.userPrompt,
       metrics: subResult.metrics,
     };
 
