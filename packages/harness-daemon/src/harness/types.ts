@@ -55,6 +55,7 @@ export interface UserPromptInfo {
   options?: Array<string | { label: string; description?: string }>;
   context?: string;
   multiSelect?: boolean;
+  questionType?: string;
   /** Multiple questions to ask in sequence */
   questions?: UserPromptQuestion[];
 }
@@ -126,6 +127,10 @@ export interface ProgressEventData {
   kind?: EventKind;
   /** Duration in milliseconds (for completed operations) */
   duration_ms?: number;
+  /** Tool arguments (for structured display) */
+  tool_args?: Record<string, unknown>;
+  /** Tool result success flag */
+  tool_success?: boolean;
 }
 
 /**

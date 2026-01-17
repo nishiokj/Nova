@@ -18,7 +18,7 @@ export async function executeRead(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const path = args.path as string;
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
+  const cwd = context?.workdirOverride ?? process.cwd();
   const encoding = (args.encoding as BufferEncoding) ?? 'utf-8';
   const maxBytes = (args.maxBytes as number) ?? 100000;
   const startLine = typeof args.startLine === 'number' ? args.startLine : undefined;
@@ -109,13 +109,9 @@ export const readToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory to resolve relative paths against',
-      },
       path: {
         type: 'string',
-        description: 'Path to the file to read (relative to cwd or absolute)',
+        description: 'Path to the file to read (relative or absolute)',
       },
       encoding: {
         type: 'string',
@@ -134,9 +130,9 @@ export const readToolOptions: ToolRegistrationOptions = {
         description: 'End line for partial reads (1-indexed, inclusive). Use with startLine for surgical reads.',
       },
     },
-    required: ['cwd', 'path'],
+    required: ['path'],
   },
-  required: ['cwd', 'path'],
+  required: ['path'],
   executor: executeRead,
   timeoutMs: 10000,
   readOnly: true,

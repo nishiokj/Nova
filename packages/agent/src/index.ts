@@ -16,9 +16,13 @@ export type {
   AgentHooks,
   ToolHookResult,
   AgentRuntimeConfig,
+  InternalHookEvent,
+  InternalHookContext,
+  InternalHookHandler,
+  InternalHookQueue,
 } from './types.js';
 
-export { DEFAULT_AGENT_BUDGET, noopEmit } from './types.js';
+export { DEFAULT_AGENT_BUDGET, noopEmit, noopHookQueue } from './types.js';
 export {
   ROUTING_PROMPT,
   SIMPLE_PROMPT,
@@ -27,6 +31,8 @@ export {
   STANDARD_PROMPT,
   getAgentPrompt,
   buildAgentConfig,
+  buildEnvironmentPrompt,
   PLANNING_PROMPT_ADDENDUM,
   getPlanningPromptAddendum,
 } from './prompts.js';
+export type { EnvironmentContext } from './prompts.js';

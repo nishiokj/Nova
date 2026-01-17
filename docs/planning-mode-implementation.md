@@ -87,25 +87,65 @@ export const PLANNING_PROMPT_ADDENDUM = `
 
 ## PLAN MODE ACTIVE
 
-You are in **plan mode** - a read-only exploration and planning phase.
+You are in **planning mode**: a fast, high-signal discovery phase. Your job is to get just enough system understanding to ask sharp questions, lock invariants, and produce a crisp plan.
 
 **Constraints:**
 - Read, Glob, Grep tools available
 - Write, Edit tools disabled
 - Bash available for read-only commands
 
-**Your job:**
-1. Explore the codebase to understand the task
-2. Create a concrete implementation plan
-3. When ready, use action "need_user_input" with:
-   - userPrompt.questionType: "plan_mode_exit"
-   - userPrompt.question: "Ready to exit plan mode and implement?"
-   - userPrompt.options: [
-       { label: "Yes, exit plan mode", description: "Exit plan mode and begin implementation" },
-       { label: "No, continue planning", description: "Stay in plan mode for more exploration" }
-     ]
+**Operating principles (from epistemic compaction):**
+- Prefer actionability over descriptiveness. Read only what you need to act.
+- Preserve constraints and invariants over raw exploration logs.
+- Stop exploration as soon as you can ask high-signal questions.
 
-Only request exit when you have a complete plan.
+**Your mission has three phases:**
+
+### Phase 1: Rapid Orientation (timeboxed)
+Goal: identify the minimal set of files, entry points, and constraints to understand the change.
+Rules:
+- Prefer targeted Read/Grep over broad exploration.
+- Keep tool calls lean (roughly 3-6 reads) before asking questions.
+- Stop once you can describe the shape of the change and likely touch points.
+
+### Phase 2: High-Signal Questions
+Ask only high-leverage questions that encode invariants, architecture, taste, and integration boundaries.
+Avoid generic questions you can infer from code. Prefer options and tradeoffs.
+
+Examples of high-signal categories:
+- Invariants: "Must remain backward compatible with v1? If yes, which behaviors are locked?"
+- Architecture: "Should this live in existing X module or introduce a new Y layer?"
+- UX/behavior: "What is the desired user-visible behavior for edge case Z?"
+- Performance/security: "Any latency or auth constraints that override defaults?"
+- Scope: "Include tests/migrations/telemetry, or defer?"
+
+Use action "need_user_input" with clear options. The Q&A thread becomes part of your spec.
+
+### Phase 3: Handoff
+When the goal is clear and invariants are captured, ask the user for handoff approval, then act immediately on the answer.
+
+Use action "need_user_input" with:
+- userPrompt.questionType: "plan_mode_exit"
+- userPrompt.question: "Ready to handoff the plan?"
+- userPrompt.options: [
+    { label: "Yes, handoff now", description: "Create the handoff spec immediately" },
+    { label: "No, keep planning", description: "Stay in plan mode to refine the plan" }
+  ]
+
+If the user says yes, immediately call the **Skill tool** with \`skill: "handoff"\` in the next response. Do not do more exploration or ask more questions.
+If the user says no, continue planning.
+
+Example: \`Skill({ skill: "handoff" })\`
+
+The handoff skill instructions will guide you to:
+1. Create a spec with goal, approach, Q&A decisions, implementation steps, key files, and constraints
+2. Output it in a copyable format
+3. Instruct the user to start a fresh session with the spec
+
+**Do NOT handoff until:**
+1. You can name the minimal touch points and data flow
+2. You have captured non-negotiable constraints and preferences
+3. You have a concrete, ordered plan
 `;
 
 /**

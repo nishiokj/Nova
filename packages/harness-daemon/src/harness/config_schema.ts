@@ -6,6 +6,15 @@
  */
 
 import { z } from 'zod';
+import {
+  SUPPORTED_PROVIDER_IDS,
+  OPENAI_COMPAT_PROVIDERS as CENTRAL_OPENAI_COMPAT_PROVIDERS,
+  isSupportedProvider as centralIsSupportedProvider,
+  isOpenAICompatProvider as centralIsOpenAICompatProvider,
+  getCanonicalProvider as centralGetCanonicalProvider,
+  type LLMProvider as CentralLLMProvider,
+  type SupportedProvider as CentralSupportedProvider,
+} from 'types';
 
 // ============================================
 // ENUMS & PRIMITIVES
@@ -13,33 +22,17 @@ import { z } from 'zod';
 
 /**
  * Canonical LLM providers (what the adapter routes to).
+ * Derived from central types.
  */
 export const LLMProviderSchema = z.enum(['anthropic', 'openai', 'openai-compat']);
 
 /**
- * Named providers that route to openai-compat adapter.
- */
-export const OpenAICompatProviderSchema = z.enum([
-  'openai-compat',
-  'cerebras',
-  'together',
-  'groq',
-  'fireworks',
-]);
-
-/**
  * All supported provider names (config input).
+ * Uses central provider registry for validation.
  */
-export const SupportedProviderSchema = z.enum([
-  'anthropic',
-  'openai',
-  'openai-compat',
-  'cerebras',
-  'together',
-  'groq',
-  'fireworks',
-  'gemini',
-]);
+export const SupportedProviderSchema = z.enum(
+  SUPPORTED_PROVIDER_IDS as [CentralSupportedProvider, ...CentralSupportedProvider[]]
+);
 
 /**
  * Reasoning effort levels across all providers.
@@ -62,7 +55,7 @@ export const ReasoningEffortSchema = z.enum([
  * Fallback LLM configuration (raw from JSON).
  */
 export const AgentFallbackConfigSchema = z.object({
-  provider: z.string(),
+  provider: z.string().optional(),
   model: z.string(),
   api_base: z.string().optional(),
 });
@@ -83,7 +76,7 @@ export const AgentReasoningConfigSchema = z.union([
  * LLM configuration for an agent (raw from JSON).
  */
 export const AgentLLMConfigSchema = z.object({
-  provider: z.string(),
+  provider: z.string().optional(),
   model: z.string(),
   max_tokens: z.number().positive(),
   temperature: z.number().min(0).max(2).optional(),
@@ -223,6 +216,30 @@ export const AuthConfigSchema = z.object({
  */
 export const ProvidersConfigSchema = z.record(z.string(), z.string().optional());
 
+/**
+ * Model entry for the models list.
+ * Provider is the actual provider name (anthropic, openai, cerebras, etc.)
+ * not the canonical adapter (openai-compat).
+ */
+export const ModelConfigEntrySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  provider: z.string(),
+  description: z.string().optional(),
+  max_tokens: z.number().positive().optional(),
+  supports_reasoning: z.boolean().optional(),
+});
+
+/**
+ * Models configuration section.
+ */
+export const ModelsConfigSchema = z.object({
+  /** List of available models */
+  available: z.array(ModelConfigEntrySchema).optional(),
+  /** Default model ID to use */
+  default: z.string().optional(),
+});
+
 // ============================================
 // ROOT CONFIG (RAW FROM FILE)
 // ============================================
@@ -232,6 +249,7 @@ export const ProvidersConfigSchema = z.record(z.string(), z.string().optional())
  */
 export const HarnessConfigFileSchema = z.object({
   providers: ProvidersConfigSchema.optional(),
+  models: ModelsConfigSchema.optional(),
   agents: z.record(z.string(), AgentConfigEntrySchema),
   tools: ToolsConfigSchema.optional(),
   graphd: GraphDConfigSchema.optional(),
@@ -262,6 +280,8 @@ export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
 export type HooksConfigSection = z.infer<typeof HooksConfigSchema>;
 export type AuthConfigSection = z.infer<typeof AuthConfigSchema>;
 export type ProvidersConfigSection = z.infer<typeof ProvidersConfigSchema>;
+export type ModelConfigEntry = z.infer<typeof ModelConfigEntrySchema>;
+export type ModelsConfigSection = z.infer<typeof ModelsConfigSchema>;
 export type HarnessConfigFile = z.infer<typeof HarnessConfigFileSchema>;
 
 // ============================================
@@ -269,40 +289,12 @@ export type HarnessConfigFile = z.infer<typeof HarnessConfigFileSchema>;
 // ============================================
 
 /**
- * Set of OpenAI-compatible providers (for canonicalization).
+ * Re-export central provider helpers for backwards compatibility.
  */
-export const OPENAI_COMPAT_PROVIDERS = new Set<string>([
-  'openai-compat',
-  'cerebras',
-  'together',
-  'groq',
-  'fireworks',
-]);
-
-/**
- * Check if provider is supported.
- */
-export function isSupportedProvider(provider: string): provider is SupportedProvider {
-  return SupportedProviderSchema.safeParse(provider).success;
-}
-
-/**
- * Check if provider routes to openai-compat adapter.
- */
-export function isOpenAICompatProvider(provider: string): boolean {
-  return OPENAI_COMPAT_PROVIDERS.has(provider);
-}
-
-/**
- * Get canonical provider for adapter routing.
- */
-export function getCanonicalProvider(provider: string): LLMProvider {
-  if (isOpenAICompatProvider(provider) && provider !== 'openai-compat') {
-    return 'openai-compat';
-  }
-  const result = LLMProviderSchema.safeParse(provider);
-  return result.success ? result.data : 'openai-compat';
-}
+export const OPENAI_COMPAT_PROVIDERS = CENTRAL_OPENAI_COMPAT_PROVIDERS;
+export const isSupportedProvider = centralIsSupportedProvider;
+export const isOpenAICompatProvider = centralIsOpenAICompatProvider;
+export const getCanonicalProvider = centralGetCanonicalProvider;
 
 /**
  * Normalize reasoning effort, validating against provider constraints.

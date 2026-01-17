@@ -13,6 +13,8 @@ const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const PASTE_START_REGEX = /\x1b\[200~/;
 const PASTE_END_REGEX = /\x1b\[201~/;
+const ASYNC_PASTE_THRESHOLD = 512 * 1024;
+const PASTE_CHUNK_SIZE = 64 * 1024;
 
 interface UseBracketedPasteOptions {
   /**
@@ -69,6 +71,51 @@ export function useBracketedPaste(options: UseBracketedPasteOptions): void {
     let buffer = "";
     let isPasting = false;
     let pasteBuffer = "";
+    let pendingPasteChunks: string[] = [];
+    let flushTimer: NodeJS.Timeout | null = null;
+    let pendingPasteCompletion: (() => void) | null = null;
+
+    const flushPasteChunks = (): void => {
+      flushTimer = null;
+      const start = Date.now();
+      while (pendingPasteChunks.length > 0) {
+        const chunk = pendingPasteChunks.shift();
+        if (chunk) {
+          optionsRef.current.onPaste(chunk);
+        }
+        if (Date.now() - start > 8) {
+          break;
+        }
+      }
+
+      if (pendingPasteChunks.length > 0) {
+        flushTimer = setTimeout(flushPasteChunks, 0);
+      } else if (pendingPasteCompletion) {
+        const onComplete = pendingPasteCompletion;
+        pendingPasteCompletion = null;
+        onComplete();
+      }
+    };
+
+    const queuePasteText = (text: string, onComplete?: () => void): void => {
+      if (text.length <= ASYNC_PASTE_THRESHOLD) {
+        optionsRef.current.onPaste(text);
+        onComplete?.();
+        return;
+      }
+
+      for (let i = 0; i < text.length; i += PASTE_CHUNK_SIZE) {
+        pendingPasteChunks.push(text.slice(i, i + PASTE_CHUNK_SIZE));
+      }
+
+      if (onComplete) {
+        pendingPasteCompletion = onComplete;
+      }
+
+      if (!flushTimer) {
+        flushTimer = setTimeout(flushPasteChunks, 0);
+      }
+    };
 
     const handleData = (data: Buffer): void => {
       const str = data.toString("utf8");
@@ -98,8 +145,9 @@ export function useBracketedPaste(options: UseBracketedPasteOptions): void {
             pasteBuffer = "";
             isPasting = false;
 
-            optionsRef.current.onPaste(pastedText);
-            optionsRef.current.onPasteEnd?.();
+            queuePasteText(pastedText, () => {
+              optionsRef.current.onPasteEnd?.();
+            });
 
             // Put anything after the end sequence back in buffer
             if (afterEnd) {
@@ -131,8 +179,9 @@ export function useBracketedPaste(options: UseBracketedPasteOptions): void {
         pasteBuffer = "";
         isPasting = false;
 
-        optionsRef.current.onPaste(pastedText);
-        optionsRef.current.onPasteEnd?.();
+        queuePasteText(pastedText, () => {
+          optionsRef.current.onPasteEnd?.();
+        });
 
         // Put anything after the end sequence back in buffer
         if (afterEnd) {
@@ -150,8 +199,9 @@ export function useBracketedPaste(options: UseBracketedPasteOptions): void {
         pasteBuffer = "";
         isPasting = false;
 
-        optionsRef.current.onPaste(partialText);
-        optionsRef.current.onPasteEnd?.();
+        queuePasteText(partialText, () => {
+          optionsRef.current.onPasteEnd?.();
+        });
       }
     };
 
@@ -159,6 +209,12 @@ export function useBracketedPaste(options: UseBracketedPasteOptions): void {
 
     return () => {
       stdin.off("data", handleData);
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      pendingPasteChunks = [];
+      pendingPasteCompletion = null;
       // Disable bracketed paste mode
       process.stdout.write("\x1b[?2004l");
     };

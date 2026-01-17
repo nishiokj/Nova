@@ -31,7 +31,11 @@ export type BridgeCommandType =
   | "providers_delete"
   | "providers_test"
   | "session_fork"
-  | "compact_context";
+  | "session_close"
+  | "list_sessions"
+  | "compact_context"
+  | "set_model"
+  | "get_model";
 
 export type BridgeEventType =
   | "ready"
@@ -41,7 +45,9 @@ export type BridgeEventType =
   | "response"
   | "transcription"
   | "user_prompt"
-  | "error";
+  | "error"
+  | "provider_key_required"
+  | "model_changed";
 
 export interface BridgeCommand {
   type: BridgeCommandType;
@@ -69,7 +75,7 @@ export type EventKind = "work" | "tool" | "planning" | "system";
 
 export type Role = "user" | "agent" | "system" | "status";
 
-export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme";
+export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response" | "models" | "sessions" | "usage";
 export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {
@@ -93,6 +99,10 @@ export interface ProgressData {
   kind?: EventKind;
   /** Duration in milliseconds (for completed operations) */
   duration_ms?: number;
+  /** Tool arguments (for structured display) */
+  tool_args?: Record<string, unknown>;
+  /** Tool result success flag */
+  tool_success?: boolean;
 }
 
 export interface StreamData {
@@ -111,6 +121,18 @@ export interface ResponseData {
   duration_ms?: number;
   error?: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface ProviderKeyRequiredData {
+  provider?: string;
+  model?: string;
+  reasoning?: string;
+}
+
+export interface ModelChangedData {
+  provider?: string;
+  model?: string;
+  reasoning?: string;
 }
 
 export interface StatusData {
@@ -144,24 +166,6 @@ export interface ErrorData {
   fatal?: boolean;
   /** Error code for programmatic handling */
   code?: string;
-}
-
-// Box styling for message containers
-export type BoxStyle = "rounded" | "sharp" | "double" | "minimal";
-
-export const BOX_CHARS = {
-  rounded: { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" },
-  sharp: { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" },
-  double: { tl: "╔", tr: "╗", bl: "╚", br: "╝", h: "═", v: "║" },
-  minimal: { tl: " ", tr: " ", bl: " ", br: " ", h: " ", v: "│" },
-} as const;
-
-export interface MessageBoxConfig {
-  style: BoxStyle;
-  alignment: "left" | "right";
-  maxWidth: number;
-  padding: number;
-  showTimestamp?: boolean;
 }
 
 // Question flow types
@@ -210,4 +214,72 @@ export interface UserPromptData {
   question_type?: string;
   /** Multiple questions to ask in sequence */
   questions?: UserPromptQuestion[];
+}
+
+/** Response content for full-pane response mode */
+export interface ResponseContent {
+  /** Type of response content */
+  type: "diff" | "text";
+  /** Lines to render (pre-processed for full-width) */
+  lines: ResponseLine[];
+  /** Original file path (for diff responses) */
+  filePath?: string;
+}
+
+/** A single line in a response pane */
+export interface ResponseLine {
+  text: string;
+  type: "header" | "added" | "removed" | "context" | "text" | "separator";
+}
+
+/** Model entry from the harness */
+export interface ModelEntry {
+  id: string;
+  name: string;
+  provider?: string;
+}
+
+/** Session entry for session recovery */
+export interface SessionEntry {
+  sessionKey: string;
+  clientType: string;
+  createdAt: number;
+  lastAccessedAt: number;
+  workingDir: string | null;
+  status: string;
+  lastUserMessagePreview?: string | null;
+}
+
+/** Usage session summary for /usage view */
+export interface UsageSessionSummary {
+  sessionKey: string;
+  status: "active" | "idle" | "ended";
+  projectName: string;
+  workingDir: string | null;
+  createdAt: number;
+  lastAccessedAt: number;
+  requestCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  llmCallCount: number;
+  toolCallCount: number;
+  durationMs: number;
+  providerTokens: Map<string, number>;
+}
+
+/** Daily usage analytics */
+export interface UsageDayStats {
+  date: string;
+  inputTokens: number;
+  outputTokens: number;
+  requestCount: number;
+  llmCallCount: number;
+}
+
+/** Provider usage analytics */
+export interface UsageProviderStats {
+  provider: string;
+  today: number;
+  week: number;
+  month: number;
 }

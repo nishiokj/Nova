@@ -25,6 +25,8 @@ import {
 } from './skills_loader.js';
 import type { AuthService } from './auth_service.js';
 import { LocalProviderManager } from './local_providers.js';
+import { isOpenAICompatProvider } from 'types';
+import { getAllModels } from 'types';
 
 interface BridgeCommand {
   type: string;
@@ -48,7 +50,7 @@ interface HarnessLike {
   shutdown(): Promise<void>;
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
-  hasApiKey(provider: import('types').LLMProvider): boolean;
+  hasApiKey(provider: string): boolean;
   getGraphD?(): import('graphd').GraphDManager | null;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
@@ -94,6 +96,14 @@ export class BridgeGateway {
   }
 
   handleDisconnect(connectionId: string): void {
+    const state = this.connections.get(connectionId);
+    if (state?.sessionKey) {
+      // Mark session as inactive (recoverable) on disconnect
+      const graphd = this.harness.getGraphD?.();
+      if (graphd) {
+        graphd.sessionUpdateStatus(state.sessionKey, 'inactive');
+      }
+    }
     this.connections.delete(connectionId);
   }
 
@@ -215,6 +225,12 @@ export class BridgeGateway {
         case 'session_fork':
           this.handleSessionFork(connectionId, state);
           return;
+        case 'session_close':
+          this.handleSessionClose(connectionId, state);
+          return;
+        case 'list_sessions':
+          this.handleListSessions(connectionId, command.data, state);
+          return;
         case 'compact_context':
           this.handleCompactContext(connectionId, state);
           return;
@@ -246,6 +262,14 @@ export class BridgeGateway {
       typeof requestedSessionKey === 'string' && requestedSessionKey.length > 0
         ? requestedSessionKey
         : generateSessionKey();
+
+    // CRITICAL: Mark old session as inactive BEFORE switching to new one
+    // This fixes the bug where switched-from sessions stay "active" forever
+    const graphd = this.harness.getGraphD?.();
+    if (state.sessionKey && state.sessionKey !== sessionKey && graphd) {
+      graphd.sessionUpdateStatus(state.sessionKey, 'inactive');
+    }
+
     state.sessionKey = sessionKey;
 
     // Store working directory from client (where TUI was launched)
@@ -254,6 +278,13 @@ export class BridgeGateway {
       typeof requestedWorkingDir === 'string' && requestedWorkingDir.length > 0
         ? requestedWorkingDir
         : this.workingDir; // fallback to daemon's working dir
+
+    // Touch session to update last_accessed_at (reactivates inactive sessions)
+    // Also sets status to 'active' for the new session
+    if (graphd) {
+      graphd.sessionTouch(sessionKey, state.workingDir);
+      graphd.sessionUpdateStatus(sessionKey, 'active');
+    }
 
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
@@ -376,6 +407,14 @@ export class BridgeGateway {
   }
 
   private handleGetModels(connectionId: string): void {
+    const config = this.harness.getConfig();
+
+    const models = getAllModels().map((model) => ({
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+    }));
+
     this.sendEvent(connectionId, {
       type: 'response',
       data: {
@@ -383,12 +422,8 @@ export class BridgeGateway {
         content: '',
         metadata: {
           kind: 'models',
-          payload: [
-            { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
-            { id: 'claude-opus-4-20250514', name: 'Claude Opus 4' },
-            { id: 'gpt-4o', name: 'GPT-4o' },
-            { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
-          ],
+          payload: models,
+          default: config.models.default,
         },
       },
     });
@@ -717,8 +752,7 @@ export class BridgeGateway {
       // If save succeeded, also update the running LLM adapter
       if (result.success && this.harness.updateApiKey) {
         // Map to canonical provider for adapter (e.g., 'cerebras' -> 'openai-compat')
-        const openaiCompatProviders = new Set(['cerebras', 'together', 'groq', 'fireworks']);
-        const canonicalProvider = openaiCompatProviders.has(provider) ? 'openai-compat' : provider;
+        const canonicalProvider = isOpenAICompatProvider(provider) ? 'openai-compat' : provider;
         this.harness.updateApiKey(canonicalProvider, apiKey);
       }
 
@@ -737,8 +771,7 @@ export class BridgeGateway {
 
       // If save succeeded, also update the running LLM adapter
       if (result.success && this.harness.updateApiKey) {
-        const openaiCompatProviders = new Set(['cerebras', 'together', 'groq', 'fireworks']);
-        const canonicalProvider = openaiCompatProviders.has(provider) ? 'openai-compat' : provider;
+        const canonicalProvider = isOpenAICompatProvider(provider) ? 'openai-compat' : provider;
         this.harness.updateApiKey(canonicalProvider, apiKey);
       }
 
@@ -854,6 +887,80 @@ export class BridgeGateway {
   }
 
   // =========================================================================
+  // Session Close Handler
+  // =========================================================================
+
+  private handleSessionClose(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'session_close', {
+        success: true,
+        message: 'No active session to close',
+      });
+      return;
+    }
+
+    const graphd = this.harness.getGraphD?.();
+    if (graphd) {
+      graphd.sessionUpdateStatus(sessionKey, 'inactive');
+    }
+
+    // Clear the connection's session reference
+    state.sessionKey = null;
+
+    this.sendAuthResponse(connectionId, 'session_close', {
+      success: true,
+      sessionKey,
+      message: 'Session marked inactive',
+    });
+  }
+
+  // =========================================================================
+  // List Sessions Handler
+  // =========================================================================
+
+  private handleListSessions(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): void {
+    const graphd = this.harness.getGraphD?.();
+    if (!graphd) {
+      this.sendAuthResponse(connectionId, 'list_sessions', {
+        success: false,
+        sessions: [],
+        error: 'GraphD not available',
+      });
+      return;
+    }
+
+    // Use provided workingDir or fall back to connection's workingDir
+    const workingDir = typeof data?.workingDir === 'string' ? data.workingDir : state.workingDir;
+
+    // Default to recoverable sessions (active + inactive)
+    const defaultStatuses = ['active', 'inactive'];
+    const status = Array.isArray(data?.status)
+      ? data.status as string[]
+      : typeof data?.status === 'string'
+        ? [data.status]
+        : defaultStatuses;
+
+    const limit = typeof data?.limit === 'number' ? data.limit : 20;
+
+    const result = graphd.sessionsList({
+      workingDir: workingDir ?? undefined,
+      status,
+      limit,
+    });
+
+    this.sendAuthResponse(connectionId, 'list_sessions', {
+      success: !result.error,
+      sessions: result.sessions ?? [],
+      error: result.error,
+    });
+  }
+
+  // =========================================================================
   // Context Compaction Handler
   // =========================================================================
 
@@ -930,7 +1037,7 @@ export class BridgeGateway {
     }
 
     // Check if we have an API key for this provider
-    const hasKey = this.harness.hasApiKey(provider as import('types').LLMProvider);
+    const hasKey = this.harness.hasApiKey(provider);
     if (!hasKey) {
       // Emit provider_key_required event - TUI will route to providers screen
       this.sendEvent(connectionId, {

@@ -45,31 +45,53 @@ Updated `PLANNING_PROMPT_ADDENDUM` with three phases:
 ```markdown
 ## PLAN MODE ACTIVE
 
-You are in **planning mode** - a read-only exploration phase before implementation.
+You are in **planning mode**: a fast, high-signal discovery phase. Your job is to get just enough system understanding to ask sharp questions, lock invariants, and produce a crisp plan.
 
 **Constraints:**
 - Read, Glob, Grep tools available
 - Write, Edit tools disabled
 - Bash available for read-only commands only
 
+**Operating principles (from epistemic compaction):**
+- Prefer actionability over descriptiveness. Read only what you need to act.
+- Preserve constraints and invariants over raw exploration logs.
+- Stop exploration as soon as you can ask high-signal questions.
+
 **Your mission has three phases:**
 
-### Phase 1: Deep Exploration
-Cast a wide net. Read files, trace call graphs, understand the architecture.
-Use explorer agents liberally - iteration cost is worth context savings.
-Find edge cases, existing patterns, and potential conflicts.
+### Phase 1: Rapid Orientation (timeboxed)
+Goal: identify the minimal set of files, entry points, and constraints to understand the change.
+Rules:
+- Prefer targeted Read/Grep over broad exploration.
+- Keep tool calls lean (roughly 3-6 reads) before asking questions.
+- Stop once you can describe the shape of the change and likely touch points.
 
-### Phase 2: Resolve Ambiguity
-**Questions are first-class.** Every ambiguity you surface and resolve is high-signal context.
-Ask the user about:
-- Approach preferences (e.g., "Should we use existing AuthService or create a new pattern?")
-- Edge case handling (e.g., "What should happen if the API returns 429?")
-- Scope boundaries (e.g., "Should this include tests?")
+### Phase 2: High-Signal Questions
+Ask only high-leverage questions that encode invariants, architecture, taste, and integration boundaries.
+Avoid generic questions you can infer from code. Prefer options and tradeoffs.
+
+Examples of high-signal categories:
+- Invariants: "Must remain backward compatible with v1? If yes, which behaviors are locked?"
+- Architecture: "Should this live in existing X module or introduce a new Y layer?"
+- UX/behavior: "What is the desired user-visible behavior for edge case Z?"
+- Performance/security: "Any latency or auth constraints that override defaults?"
+- Scope: "Include tests/migrations/telemetry, or defer?"
 
 Use action "need_user_input" with clear options. The Q&A thread becomes part of your spec.
 
 ### Phase 3: Handoff
-When planning is complete and all ambiguities resolved, use the **handoff skill** to create a comprehensive implementation spec.
+When the goal is clear and invariants are captured, ask the user for handoff approval, then act immediately on the answer.
+
+Use action "need_user_input" with:
+- userPrompt.questionType: "plan_mode_exit"
+- userPrompt.question: "Ready to handoff the plan?"
+- userPrompt.options: [
+    { label: "Yes, handoff now", description: "Create the handoff spec immediately" },
+    { label: "No, keep planning", description: "Stay in plan mode to refine the plan" }
+  ]
+
+If the user says yes, immediately call the **handoff skill** in the next response.
+If the user says no, continue planning.
 
 The handoff skill will guide you to:
 1. Create a spec with goal, approach, Q&A decisions, implementation steps, key files, and constraints
@@ -77,9 +99,9 @@ The handoff skill will guide you to:
 3. Instruct the user to start a fresh session with the spec
 
 **Do NOT handoff until:**
-1. You've explored enough to understand the scope
-2. You've asked questions to resolve ambiguities
-3. You have a concrete, actionable plan
+1. You can name the minimal touch points and data flow
+2. You have captured non-negotiable constraints and preferences
+3. You have a concrete, ordered plan
 ```
 
 ### 3. Skill Tool (`packages/harness-daemon/src/harness/harness.ts`)

@@ -16,6 +16,7 @@ import { z } from 'zod';
  */
 export const AgentCoreEventTypeSchema = z.enum([
   'tool_call',
+  'hook_call',
   'llm_call',
   'llm_error',
   'agent_bounds_hit',
@@ -78,6 +79,22 @@ export const ToolCallDataSchema = z.object({
   phase: ToolCallPhaseSchema,
   result: z.string().optional(),
   success: z.boolean().optional(),
+  durationMs: z.number().optional(),
+});
+
+/**
+ * Hook call phase.
+ */
+export const HookCallPhaseSchema = z.enum(['starting', 'completed']);
+
+/**
+ * Data for hook_call events.
+ */
+export const HookCallDataSchema = z.object({
+  hookType: z.string(),
+  phase: HookCallPhaseSchema,
+  success: z.boolean().optional(),
+  error: z.string().optional(),
   durationMs: z.number().optional(),
 });
 
@@ -220,6 +237,14 @@ export const ToolCallEventSchema = BaseEventFieldsSchema.extend({
 });
 
 /**
+ * Hook call event.
+ */
+export const HookCallEventSchema = BaseEventFieldsSchema.extend({
+  type: z.literal('hook_call'),
+  data: HookCallDataSchema,
+});
+
+/**
  * LLM call event.
  */
 export const LLMCallEventSchema = BaseEventFieldsSchema.extend({
@@ -304,6 +329,7 @@ export const GoalNotAchievedEventSchema = BaseEventFieldsSchema.extend({
  */
 export const AgentEventSchema = z.discriminatedUnion('type', [
   ToolCallEventSchema,
+  HookCallEventSchema,
   LLMCallEventSchema,
   LLMErrorEventSchema,
   AgentBoundsHitEventSchema,
@@ -324,9 +350,11 @@ export type AgentCoreEventType = z.infer<typeof AgentCoreEventTypeSchema>;
 export type OrchestratorEventType = z.infer<typeof OrchestratorEventTypeSchema>;
 export type AgentEventType = z.infer<typeof AgentEventTypeSchema>;
 export type ToolCallPhase = z.infer<typeof ToolCallPhaseSchema>;
+export type HookCallPhase = z.infer<typeof HookCallPhaseSchema>;
 export type LLMErrorType = z.infer<typeof LLMErrorTypeSchema>;
 
 export type ToolCallData = z.infer<typeof ToolCallDataSchema>;
+export type HookCallData = z.infer<typeof HookCallDataSchema>;
 export type LLMCallData = z.infer<typeof LLMCallDataSchema>;
 export type LLMErrorData = z.infer<typeof LLMErrorDataSchema>;
 export type RuntimeScriptCreatedData = z.infer<typeof RuntimeScriptCreatedDataSchema>;
@@ -336,6 +364,7 @@ export type GoalAchievedData = z.infer<typeof GoalAchievedDataSchema>;
 export type GoalNotAchievedData = z.infer<typeof GoalNotAchievedDataSchema>;
 
 export type ToolCallEvent = z.infer<typeof ToolCallEventSchema>;
+export type HookCallEvent = z.infer<typeof HookCallEventSchema>;
 export type LLMCallEvent = z.infer<typeof LLMCallEventSchema>;
 export type LLMErrorEvent = z.infer<typeof LLMErrorEventSchema>;
 export type AgentEvent = z.infer<typeof AgentEventSchema>;

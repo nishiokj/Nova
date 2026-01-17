@@ -671,14 +671,21 @@ export class GraphDManager {
    * Close a session.
    */
   sessionClose(sessionKey: string): Record<string, unknown> {
+    return this.sessionUpdateStatus(sessionKey, 'closed');
+  }
+
+  /**
+   * Update session status.
+   */
+  sessionUpdateStatus(sessionKey: string, status: string): Record<string, unknown> {
     if (!this.store) {
       return { success: false, error: 'reusing_existing_instance' };
     }
     try {
-      const updated = this.store.updateSessionStatus(sessionKey, 'closed');
+      const updated = this.store.updateSessionStatus(sessionKey, status);
       return { success: updated };
     } catch (err) {
-      console.warn('Session close failed:', err);
+      console.warn('Session status update failed:', err);
       return { success: false, error: (err as Error).message };
     }
   }
@@ -723,18 +730,21 @@ export class GraphDManager {
   }
 
   /**
-   * List sessions.
+   * List sessions with optional filtering.
    */
   sessionsList(
-    clientType?: string,
-    status = 'active',
-    limit = 50
+    options: {
+      clientType?: string;
+      workingDir?: string;
+      status?: string | string[];
+      limit?: number;
+    } = {}
   ): Record<string, unknown> {
     if (!this.store) {
       return { sessions: [], error: 'reusing_existing_instance' };
     }
     try {
-      const sessions = this.store.listSessions(clientType, status, limit);
+      const sessions = this.store.listSessions(options);
       return { sessions };
     } catch (err) {
       console.warn('Sessions list failed:', err);

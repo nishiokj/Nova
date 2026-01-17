@@ -122,10 +122,9 @@ export function getToolUseBlocks(message: Message): ToolUseContentBlock[] {
 // LLM CONFIG
 // ============================================
 
-/**
- * LLM provider type.
- */
-export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat';
+// Import and re-export LLMProvider from the central providers module
+import type { LLMProvider } from './providers.js';
+export type { LLMProvider };
 
 /**
  * Reasoning configuration.
@@ -173,6 +172,8 @@ export interface LLMRequestConfig {
   maxTokens?: number;
   temperature?: number;
   baseUrl?: string; // Optional override for custom API endpoints
+  /** User-facing provider name for error messages (e.g., 'cerebras' when provider is 'openai-compat') */
+  displayProvider?: string;
   reasoning?: ReasoningConfig;
   fallback?: FallbackConfig; // Fallback model if primary fails
 }
@@ -239,6 +240,7 @@ export interface LLMResponse {
 export interface RespondParams {
   messages: Message[];
   tools?: import('./tools.js').ToolDefinition[];
+  toolChoice?: 'auto' | 'none' | 'required';
   maxTokens?: number;
   temperature?: number;
   system?: string;

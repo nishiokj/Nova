@@ -1,0 +1,192 @@
+{
+  "$schema": "./config-schema.json",
+  "$comment": "Default configuration for the harness. User config at ~/.rex/config.json overrides these values.",
+
+  "providers": {
+    "$comment": "API keys for each provider. Leave empty to use environment variables.",
+    "anthropic": "",
+    "openai": "",
+    "cerebras": "",
+    "together": "",
+    "groq": "",
+    "fireworks": "",
+    "gemini": "",
+    "replicate": "",
+    "z.ai-coder": ""
+  },
+
+  "models": {
+    "$comment": "Available models are defined in packages/types/src/providers.ts.",
+    "available": [],
+    "default": ""
+  },
+
+  "agents": {
+    "routing": {
+      "$comment": "Fast, cheap model for routing decisions. No tools needed.",
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-4.1-mini",
+        "max_tokens": 200,
+        "temperature": 0.1
+      },
+      "budget": {
+        "max_iterations": 1,
+        "max_tool_calls": 0,
+        "max_duration_ms": 3000
+      },
+      "output_schema": "routing"
+    },
+
+    "simple": {
+      "$comment": "Simple tasks without tool use. Quick responses.",
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-4.1-mini",
+        "max_tokens": 4000,
+        "temperature": 0.5
+      },
+      "budget": {
+        "max_iterations": 1,
+        "max_tool_calls": 0,
+        "max_duration_ms": 5000
+      },
+      "output_schema": "agent_action"
+    },
+
+    "explorer": {
+      "$comment": "Code exploration and search. Read-only tools.",
+      "llm": {
+        "provider": "anthropic",
+        "model": "claude-3-7-sonnet-20250219",
+        "max_tokens": 64000,
+        "temperature": 0.3
+      },
+      "budget": {
+        "max_iterations": 5,
+        "max_tool_calls": 40,
+        "max_duration_ms": 60000
+      },
+      "tools": ["Read", "Glob", "Grep", "Bash"],
+      "output_schema": "explorer"
+    },
+
+    "standard": {
+      "$comment": "Default agent for most tasks. Full tool access.",
+      "llm": {
+        "provider": "anthropic",
+        "model": "claude-3-7-sonnet-20250219",
+        "max_tokens": 64000,
+        "temperature": 0.7
+      },
+      "budget": {
+        "max_iterations": 20,
+        "max_tool_calls": 150,
+        "max_duration_ms": 180000
+      },
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "coding-agent", "explorer"],
+      "output_schema": "goal_driven"
+    },
+
+    "coding-agent": {
+      "$comment": "Deep coding tasks with high reasoning effort.",
+      "llm": {
+        "provider": "openai",
+        "model": "o4-mini",
+        "max_tokens": 128000,
+        "temperature": 0.7,
+        "reasoning": { "effort": "high" }
+      },
+      "budget": {
+        "max_iterations": 30,
+        "max_tool_calls": 100,
+        "max_duration_ms": 600000
+      },
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "standard"],
+      "output_schema": "goal_driven"
+    },
+
+    "context_compactor": {
+      "$comment": "Summarizes conversation history to reduce context size.",
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-4.1-mini",
+        "max_tokens": 200000,
+        "temperature": 0.3
+      },
+      "budget": {
+        "max_iterations": 2,
+        "max_tool_calls": 0,
+        "max_duration_ms": 30000
+      },
+      "output_schema": "agent_action"
+    },
+
+    "debugger": {
+      "$comment": "Debugging and error analysis.",
+      "llm": {
+        "provider": "anthropic",
+        "model": "claude-3-7-sonnet-20250219",
+        "max_tokens": 16000,
+        "temperature": 0.5
+      },
+      "budget": {
+        "max_iterations": 10,
+        "max_tool_calls": 30,
+        "max_duration_ms": 120000
+      },
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill"],
+      "output_schema": "agent_action"
+    },
+
+    "web_crawler": {
+      "$comment": "Web search and content fetching.",
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-4.1-mini",
+        "max_tokens": 8000,
+        "temperature": 0.5
+      },
+      "budget": {
+        "max_iterations": 10,
+        "max_tool_calls": 15,
+        "max_duration_ms": 120000
+      },
+      "tools": ["WebFetch", "WebSearch"],
+      "output_schema": "agent_action"
+    }
+  },
+
+  "tools": {
+    "bash_timeout_ms": 30000,
+    "max_output_length": 10000
+  },
+
+  "graphd": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 9444,
+    "db_path": "~/.graphd/graphd.db"
+  },
+
+  "context": {
+    "max_tokens": 200000
+  },
+
+  "skills": {
+    "enabled": true,
+    "directory": "config/skills"
+  },
+
+  "hooks": {
+    "enabled": true,
+    "directory": "config/hooks"
+  },
+
+  "auth": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 9556,
+    "session_expiry_days": null
+  }
+}

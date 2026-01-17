@@ -12,4 +12,7 @@ export {
   type OrchestratorLogger,
   type TerminationReason,
   type PlanModeOptions,
+  type ModelOverride,
 } from './orchestrator.js';
+
+export { registerHook, getHandlers, HOOK_REGISTRY } from './hooks/index.js';

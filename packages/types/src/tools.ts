@@ -159,7 +159,6 @@ export interface ToolDefinition {
  */
 export interface BashArgs {
   command: string;
-  workdir?: string;
   timeout?: number; // milliseconds
   env?: Record<string, string>;
 }
@@ -203,7 +202,7 @@ export interface GrepArgs {
  */
 export interface GlobArgs {
   pattern: string;
-  cwd?: string;
+  path?: string; // Subdirectory to search within
   ignore?: string[];
   maxResults?: number;
 }

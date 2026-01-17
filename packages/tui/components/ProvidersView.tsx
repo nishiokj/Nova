@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { BridgeClient } from "../bridge_client.js";
 import { useBracketedPaste } from "../hooks/useBracketedPaste.js";
+import { getAllProviders, type ProviderDefinition } from "types";
 
 interface ProviderInfo {
   provider: string;
@@ -30,16 +31,11 @@ type ViewMode =
   | { mode: "testing"; provider: string }
   | { mode: "error"; message: string };
 
-const SUPPORTED_PROVIDERS = [
-  { id: "anthropic", name: "Anthropic (Claude)" },
-  { id: "openai", name: "OpenAI" },
-  { id: "cerebras", name: "Cerebras" },
-  { id: "together", name: "Together AI" },
-  { id: "groq", name: "Groq" },
-  { id: "fireworks", name: "Fireworks AI" },
-  { id: "gemini", name: "Google Gemini" },
-  { id: "replicate", name: "Replicate" },
-];
+// Derive provider list from central registry
+const SUPPORTED_PROVIDERS = getAllProviders().map((p: ProviderDefinition) => ({
+  id: p.id,
+  name: p.displayName,
+}));
 
 /** Strip bracketed paste escape sequences from input */
 function stripPasteMarkers(str: string): string {

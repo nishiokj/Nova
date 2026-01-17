@@ -16,8 +16,6 @@ import { z } from 'zod';
  */
 export const BashArgsSchema = z.object({
   command: z.string().min(1, 'Command cannot be empty'),
-  workdir: z.string().optional(),
-  cwd: z.string().optional(),
   timeout: z.number().positive().optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
@@ -36,7 +34,6 @@ export const ReadArgsSchema = z.object({
   maxBytes: z.number().positive().int().optional(),
   offset: z.number().nonnegative().int().optional(),
   limit: z.number().positive().int().optional(),
-  cwd: z.string().optional(),
 });
 
 // ============================================
@@ -52,7 +49,6 @@ export const WriteArgsSchema = z.object({
   content: z.string(),
   encoding: z.string().optional(),
   mode: z.number().int().optional(),
-  cwd: z.string().optional(),
 });
 
 // ============================================
@@ -61,15 +57,28 @@ export const WriteArgsSchema = z.object({
 
 /**
  * Arguments for edit tool execution.
+ * Accepts both camelCase and snake_case for compatibility.
  */
 export const EditArgsSchema = z.object({
-  path: z.string().min(1, 'Path cannot be empty'),
-  file_path: z.string().optional(), // Alias for path
-  old_string: z.string(),
-  new_string: z.string(),
+  path: z.string().optional(),
+  file_path: z.string().optional(),
+  // Accept both naming conventions
+  old_string: z.string().optional(),
+  oldString: z.string().optional(),
+  new_string: z.string().optional(),
+  newString: z.string().optional(),
   replace_all: z.boolean().optional(),
-  cwd: z.string().optional(),
-});
+  replaceAll: z.boolean().optional(),
+}).refine(
+  (data) => data.path || data.file_path,
+  { message: 'Either path or file_path is required' }
+).refine(
+  (data) => data.old_string || data.oldString,
+  { message: 'Either old_string or oldString is required' }
+).refine(
+  (data) => data.new_string !== undefined || data.newString !== undefined,
+  { message: 'Either new_string or newString is required' }
+);
 
 // ============================================
 // GLOB TOOL
@@ -80,8 +89,7 @@ export const EditArgsSchema = z.object({
  */
 export const GlobArgsSchema = z.object({
   pattern: z.string().min(1, 'Pattern cannot be empty'),
-  cwd: z.string().optional(),
-  path: z.string().optional(), // Alias for cwd
+  path: z.string().optional(), // Subdirectory to search within
   ignore: z.array(z.string()).optional(),
   maxResults: z.number().positive().int().optional(),
 });
@@ -95,7 +103,7 @@ export const GlobArgsSchema = z.object({
  */
 export const GrepArgsSchema = z.object({
   pattern: z.string().min(1, 'Pattern cannot be empty'),
-  path: z.string().optional(),
+  path: z.string().optional(), // Subdirectory to search within
   glob: z.string().optional(),
   type: z.string().optional(),
   output_mode: z.enum(['content', 'files_with_matches', 'count']).optional(),
@@ -109,7 +117,6 @@ export const GrepArgsSchema = z.object({
   multiline: z.boolean().optional(),
   maxResults: z.number().positive().int().optional(),
   caseInsensitive: z.boolean().optional(),
-  cwd: z.string().optional(),
 });
 
 // ============================================

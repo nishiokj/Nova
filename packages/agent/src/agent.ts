@@ -20,8 +20,10 @@ import type {
   EventEmitCallback,
   UserPromptInfo,
   AgentHooks,
+  InternalHookQueue,
+  InternalHookContext,
 } from './types.js';
-import { noopEmit } from './types.js';
+import { noopEmit, noopHookQueue } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { coerceStructuredOutput } from 'shared';
 import { createMicroQueue } from 'shared';
@@ -30,7 +32,7 @@ type AgentAction = 'done' | 'need_user_input' | 'continue';
 
 const MAX_IDENTICAL_TOOL_CALLS = 2;
 const MAX_TOOL_OUTPUT_LENGTH = 8000;
-const MAX_FILE_READ_OUTPUT_LENGTH = 30000;
+const MAX_FILE_READ_OUTPUT_LENGTH = 50000;
 
 function getMaxOutputLength(toolName: string): number {
   return toolName.toLowerCase() === 'read' ? MAX_FILE_READ_OUTPUT_LENGTH : MAX_TOOL_OUTPUT_LENGTH;
@@ -58,6 +60,7 @@ export class Agent {
   private llmConfig: LLMRequestConfig;
   private lastRequestConfig: LLMRequestConfig | null = null;
   private hooks?: AgentHooks;
+  private internalHookQueue: InternalHookQueue;
 
   constructor(config: AgentConfig, runtime: {
     llm: LLMAdapter;
@@ -67,6 +70,7 @@ export class Agent {
     agentRegistry?: AgentRegistry;
     llmConfig?: LLMRequestConfig;
     hooks?: AgentHooks;
+    internalHookQueue?: InternalHookQueue;
   }) {
     this.config = config;
     this.llm = runtime.llm;
@@ -76,6 +80,19 @@ export class Agent {
     this.agentRegistry = runtime.agentRegistry;
     this.llmConfig = runtime.llmConfig ?? { model: 'unknown' };
     this.hooks = runtime.hooks;
+    this.internalHookQueue = runtime.internalHookQueue ?? noopHookQueue;
+  }
+
+  /**
+   * Build internal hook context from current state.
+   */
+  private buildHookContext(workItem: WorkItem): InternalHookContext {
+    return {
+      workId: workItem.workId,
+      agentType: this.config.type,
+      sessionKey: this.requestId,
+      requestId: this.requestId,
+    };
   }
 
   /**
@@ -136,6 +153,22 @@ export class Agent {
     // Bundle artifacts explicitly in result for clear contract
     result.artifacts = localContext.getArtifacts();
 
+    if (result.invalidatedPaths.length > 0) {
+      this.internalHookQueue.enqueue({
+        type: 'files_modified',
+        paths: result.invalidatedPaths,
+      }, this.buildHookContext(workItem));
+    }
+
+    this.internalHookQueue.enqueue({
+      type: 'agent_completed',
+      workId: workItem.workId,
+      success: result.success,
+      terminationReason: result.terminationReason,
+      filesRead: result.filesRead,
+      invalidatedPaths: result.invalidatedPaths,
+    }, this.buildHookContext(workItem));
+
     return result;
   }
 
@@ -171,6 +204,33 @@ export class Agent {
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       const elapsedMs = Date.now() - startTime;
       console.error(`[AGENT DEBUG] Starting iteration ${iteration}/${maxIterations}, elapsed=${elapsedMs}ms, toolCallsMade=${metrics.toolCallsMade}, agent=${this.config.type}`);
+
+      // Auto-compact if context is near full
+      if (localContext.isNearFull()) {
+        let compactResult = { itemsRemoved: 0, outputsTruncated: 0, bytesRecovered: 0, fileContentRemoved: 0 };
+        try {
+          compactResult = await localContext.compactWithLedger({
+            llm: this.llm,
+            llmConfig: this.llmConfig,
+            targetReductionRatio: 0.66,
+            preserveRecentItems: 12,
+            deduplicateByPath: true,
+            truncateOutputsTo: 4000,
+          });
+        } catch {
+          compactResult = localContext.compact({
+            deduplicateByPath: true,
+            truncateOutputsTo: 4000,
+          });
+        }
+        console.error(`[AGENT DEBUG] Compacted context: removed=${compactResult.itemsRemoved}, truncated=${compactResult.outputsTruncated}, recovered=${compactResult.bytesRecovered}b`);
+        this.internalHookQueue.enqueue({
+          type: 'context_threshold',
+          usagePercent: localContext.metrics.percentageUsed,
+          tokenCount: localContext.metrics.inputTokens + localContext.metrics.outputTokens,
+          itemCount: localContext.items.length,
+        }, this.buildHookContext(workItem));
+      }
 
       if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
         result.terminationReason = 'bounds:tool_calls';
@@ -219,6 +279,7 @@ export class Agent {
       const shouldWithholdTools = isLastIteration || toolBudgetNearlyExhausted || timeBudgetNearlyExhausted;
 
       const toolsForThisCall = shouldWithholdTools ? undefined : (allowedTools.length > 0 ? allowedTools : undefined);
+      const toolChoiceForThisCall = shouldWithholdTools ? 'none' : undefined;
 
       if (shouldWithholdTools && allowedTools.length > 0) {
         console.error(`[AGENT DEBUG] Withholding tools to force synthesis: iteration=${iteration}/${maxIterations}, toolCalls=${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls}, elapsed=${elapsedMs}/${workItem.bounds.maxDurationMs}ms, agent=${this.config.type}`);
@@ -229,6 +290,7 @@ export class Agent {
       const response = await this.llm.respond({
         messages: messages as unknown as Message[],
         tools: toolsForThisCall,
+        toolChoice: toolChoiceForThisCall,
         llm: this.llmConfig,
         responseSchema: this.config.outputSchema,
       });
@@ -258,6 +320,16 @@ export class Agent {
       const action = this.extractStructuredAction(structuredOutput);
       const responseText = this.extractStructuredResponse(structuredOutput);
       const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
+      const emitTurnCompleted = (hasResponse: boolean): void => {
+        this.internalHookQueue.enqueue({
+          type: 'turn_completed',
+          iteration,
+          toolCallsMade: metrics.toolCallsMade,
+          llmCallsMade: metrics.llmCallsMade,
+          hasResponse,
+          terminationReason: result.terminationReason || undefined,
+        }, this.buildHookContext(workItem));
+      };
 
       // Emit intermediate text for TUI display (when LLM outputs text alongside tool calls)
       // Use extracted responseText from structured output if available, otherwise skip
@@ -273,6 +345,9 @@ export class Agent {
 
       if (toolCalls.length > 0) {
         console.error(`[AGENT DEBUG] Processing ${toolCalls.length} tool calls, iteration=${iteration}, agent=${this.config.type}`);
+        const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
+        const toolCallsFailedBefore = metrics.toolCallsFailed;
+
         await this.processToolCalls(
           toolCalls,
           globalContext,
@@ -286,11 +361,23 @@ export class Agent {
           toolRepeatState
         );
 
+        if (toolCalls.length > 0) {
+          const successCount = metrics.toolCallsSucceeded - toolCallsSucceededBefore;
+          const failCount = metrics.toolCallsFailed - toolCallsFailedBefore;
+          this.internalHookQueue.enqueue({
+            type: 'tool_batch_completed',
+            toolNames: toolCalls.map(tc => tc.name),
+            successCount,
+            failCount,
+          }, this.buildHookContext(workItem));
+        }
+
         console.error(`[AGENT DEBUG] After processToolCalls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}, toolCallsMade=${metrics.toolCallsMade}, maxToolCalls=${workItem.bounds.maxToolCalls}`);
 
         if (result.needsUserInput || result.terminationReason) {
           console.error(`[AGENT DEBUG] Early exit after tool calls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}`);
           result.filesRead = Array.from(localReadFiles);
+          emitTurnCompleted(!!responseText);
           return;
         }
 
@@ -313,6 +400,7 @@ export class Agent {
             result.terminationReason = 'goal_state_reached';
           }
           result.filesRead = Array.from(localReadFiles);
+          emitTurnCompleted(!!responseText);
           return;
         }
 
@@ -322,6 +410,7 @@ export class Agent {
           result.userPrompt = structuredPrompt;
           result.terminationReason = 'user_input_required';
           result.filesRead = Array.from(localReadFiles);
+          emitTurnCompleted(!!responseText);
           return;
         }
 
@@ -330,6 +419,7 @@ export class Agent {
           result.response = responseText;
         }
 
+        emitTurnCompleted(!!responseText);
         continue;
       }
 
@@ -351,6 +441,7 @@ export class Agent {
           result.terminationReason = 'goal_state_reached';
         }
         result.filesRead = Array.from(localReadFiles);
+        emitTurnCompleted(!!responseText);
         return;
       }
 
@@ -360,9 +451,11 @@ export class Agent {
           result.userPrompt = structuredPrompt;
           result.terminationReason = 'user_input_required';
           result.filesRead = Array.from(localReadFiles);
+          emitTurnCompleted(!!responseText);
           return;
         }
         // No valid userPrompt provided, continue execution
+        emitTurnCompleted(!!responseText);
         continue;
       }
 
@@ -371,6 +464,7 @@ export class Agent {
         if (responseText && responseText.trim().length > 0) {
           result.response = responseText;
         }
+        emitTurnCompleted(!!responseText);
         continue;
       }
 
@@ -383,6 +477,7 @@ export class Agent {
       result.error = preview
         ? `LLM response has no tools and no action directive. Response preview: ${preview}`
         : 'LLM response has no tools and no action directive';
+      emitTurnCompleted(!!responseText);
       break;
     }
 
@@ -505,14 +600,28 @@ export class Agent {
       }
     }
 
+    // Build context summary from both global and local contexts
+    const globalSummary = globalContext.buildContextSummary();
+    const localSummary = localContext.buildContextSummary();
+    const combinedSummary = [globalSummary, localSummary].filter(Boolean).join('\n');
+
     const hasUserInput = globalItems.some(
       (item) => item.type === 'message' && (item as any).role === 'user'
     );
 
     if (!hasUserInput) {
+      const objectiveWithContext = combinedSummary
+        ? `${combinedSummary}\n\n${workItem.objective}`
+        : workItem.objective;
       messages.push({
         role: 'user',
-        content: `Execute the following objective:\n\n${workItem.objective}`,
+        content: objectiveWithContext,
+      });
+    } else if (combinedSummary) {
+      // Inject context summary even if there's user input
+      messages.push({
+        role: 'user',
+        content: combinedSummary,
       });
     }
 
@@ -622,6 +731,11 @@ export class Agent {
         }
       }
 
+      // Debug: log tool result for Edit to diagnose "(no output)" issue
+      if (call.name.toLowerCase() === 'edit') {
+        console.error(`[TOOL_RESULT_DEBUG] Edit tool result: output=${toolResult.output?.slice(0, 200)}, isSuccess=${toolResult.isSuccess}, error=${toolResult.error}`);
+      }
+
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
@@ -719,6 +833,24 @@ export class Agent {
 
       // Normalize tool name to canonical form for case-insensitive lookup
       const canonicalName = canonicalNames.get(nameLower) ?? call.name;
+
+      // Intercept Read calls for files already in context
+      if (nameLower === 'read') {
+        const readPath = call.arguments.path ?? call.arguments.file_path;
+        if (typeof readPath === 'string' && localReadFiles.has(readPath)) {
+          // File already in context - don't re-read
+          const msg = `File "${readPath}" is already in your context. Look above for its contents instead of re-reading.`;
+          console.error(`[AGENT DEBUG] Intercepted duplicate Read for: ${readPath}`);
+          localContext.appendItem({
+            type: 'function_call_output',
+            callId: call.id,
+            output: msg,
+            isError: false,
+            timestamp: Date.now(),
+          });
+          continue;
+        }
+      }
 
       const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
       const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
@@ -1022,6 +1154,7 @@ export class Agent {
       agentRegistry: this.agentRegistry,
       llmConfig,
       hooks: this.hooks,
+      internalHookQueue: this.internalHookQueue,
     });
 
     // Create merged context for sub-agent: combines global context with parent's discoveries
@@ -1118,16 +1251,15 @@ export class Agent {
     this.mergeSubAgentResults(parentLocalContext, subResult);
 
     // Include full structured output so calling agent can see artifacts, patterns, etc.
+    // Also include explicit filesRead so calling agent knows not to re-read these
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
       success: subResult.success,
       response: enhancedResponse,
-      structuredOutput: subResult.structuredOutput,
+      filesRead: subResult.filesRead, // Explicit list - do not re-read these
       artifactsAdded: Array.isArray(artifacts) ? artifacts.length : 0,
       error: subResult.error,
-      needsUserInput: subResult.needsUserInput,
-      userPrompt: subResult.userPrompt,
       metrics: subResult.metrics,
     };
 

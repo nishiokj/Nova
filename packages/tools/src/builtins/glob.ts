@@ -91,7 +91,7 @@ export async function executeGlob(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const pattern = args.pattern as string;
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
+  const cwd = context?.workdirOverride ?? process.cwd();
   const maxResults = (args.maxResults as number) ?? 200;
   const includeHidden = (args.includeHidden as boolean) ?? false;
   const maxDepth = (args.maxDepth as number) ?? 20;
@@ -163,10 +163,6 @@ export const globToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory to resolve patterns against',
-      },
       pattern: {
         type: 'string',
         description: 'Glob pattern to match',
@@ -184,9 +180,9 @@ export const globToolOptions: ToolRegistrationOptions = {
         description: 'Include hidden files and directories (default: false)',
       },
     },
-    required: ['cwd', 'pattern'],
+    required: ['pattern'],
   },
-  required: ['cwd', 'pattern'],
+  required: ['pattern'],
   executor: executeGlob,
   timeoutMs: 15000,
   readOnly: true,

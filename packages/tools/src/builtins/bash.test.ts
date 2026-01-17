@@ -41,7 +41,7 @@ describe('executeBash', () => {
 
   describe('Basic command execution', () => {
     it('should execute simple echo command', async () => {
-      const result = await executeBash({ command: 'echo "hello"', cwd: tempDir });
+      const result = await executeBash({ command: 'echo "hello"'}, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.trim()).toBe('hello');
@@ -49,20 +49,22 @@ describe('executeBash', () => {
     });
 
     it('should execute command with arguments', async () => {
-      const result = await executeBash({
-        command: 'echo "arg1" "arg2" "arg3"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "arg1" "arg2" "arg3"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.trim()).toBe('arg1 arg2 arg3');
     });
 
     it('should capture multiline output', async () => {
-      const result = await executeBash({
-        command: 'echo "line1"; echo "line2"; echo "line3"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "line1"; echo "line2"; echo "line3"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('line1');
@@ -71,10 +73,11 @@ describe('executeBash', () => {
     });
 
     it('should execute complex shell commands', async () => {
-      const result = await executeBash({
-        command: 'for i in 1 2 3; do echo $i; done',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'for i in 1 2 3; do echo $i; done',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('1');
@@ -85,10 +88,11 @@ describe('executeBash', () => {
     it('should handle pipes', async () => {
       await writeFile(join(tempDir, 'test.txt'), 'apple\nbanana\napricot\n');
 
-      const result = await executeBash({
-        command: 'cat test.txt | grep "^a"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'cat test.txt | grep "^a"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('apple');
@@ -97,10 +101,11 @@ describe('executeBash', () => {
     });
 
     it('should handle command substitution', async () => {
-      const result = await executeBash({
-        command: 'echo "Today is $(date +%A)"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "Today is $(date +%A)"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       // Just verify it ran without error
@@ -110,10 +115,11 @@ describe('executeBash', () => {
 
   describe('Working directory', () => {
     it('should execute in specified cwd', async () => {
-      const result = await executeBash({
-        command: 'pwd',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'pwd',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       // On macOS, /var is a symlink to /private/var, so compare real paths
@@ -125,10 +131,11 @@ describe('executeBash', () => {
       await mkdir(join(tempDir, 'subdir'), { recursive: true });
       await writeFile(join(tempDir, 'subdir', 'file.txt'), 'content');
 
-      const result = await executeBash({
-        command: 'cat subdir/file.txt',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'cat subdir/file.txt',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.trim()).toBe('content');
@@ -146,25 +153,11 @@ describe('executeBash', () => {
       expect(result.output.trim()).toBe(realpathSync(tempDir));
     });
 
-    it('should prefer args.cwd over context.workdirOverride', async () => {
-      await mkdir(join(tempDir, 'a'), { recursive: true });
-      await mkdir(join(tempDir, 'b'), { recursive: true });
-
-      const result = await executeBash(
-        { command: 'pwd', cwd: join(tempDir, 'a') },
-        { workdirOverride: join(tempDir, 'b') }
-      );
-
-      expect(result.isSuccess).toBe(true);
-      // On macOS, /var is a symlink to /private/var
-      const { realpathSync } = await import('fs');
-      expect(result.output.trim()).toBe(realpathSync(join(tempDir, 'a')));
-    });
   });
 
   describe('Exit codes', () => {
     it('should return success for exit code 0', async () => {
-      const result = await executeBash({ command: 'true', cwd: tempDir });
+      const result = await executeBash({ command: 'true'}, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.status).toBe('success');
@@ -172,7 +165,7 @@ describe('executeBash', () => {
     });
 
     it('should return error for non-zero exit code', async () => {
-      const result = await executeBash({ command: 'false', cwd: tempDir });
+      const result = await executeBash({ command: 'false'}, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.status).toBe('error');
@@ -181,7 +174,7 @@ describe('executeBash', () => {
     });
 
     it('should preserve specific exit codes', async () => {
-      const result = await executeBash({ command: 'exit 42', cwd: tempDir });
+      const result = await executeBash({ command: 'exit 42'}, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.metadata?.returnCode).toBe(42);
@@ -189,10 +182,11 @@ describe('executeBash', () => {
     });
 
     it('should handle command not found', async () => {
-      const result = await executeBash({
-        command: 'nonexistent_command_xyz',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'nonexistent_command_xyz',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.metadata?.returnCode).toBe(127);
@@ -201,10 +195,11 @@ describe('executeBash', () => {
 
   describe('Stderr handling', () => {
     it('should capture stderr output', async () => {
-      const result = await executeBash({
-        command: 'echo "error message" >&2',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "error message" >&2',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('[stderr]');
@@ -212,10 +207,11 @@ describe('executeBash', () => {
     });
 
     it('should capture both stdout and stderr', async () => {
-      const result = await executeBash({
-        command: 'echo "stdout"; echo "stderr" >&2',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "stdout"; echo "stderr" >&2',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('stdout');
@@ -223,10 +219,11 @@ describe('executeBash', () => {
     });
 
     it('should handle stderr-only output with non-zero exit', async () => {
-      const result = await executeBash({
-        command: 'echo "error" >&2; exit 1',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "error" >&2; exit 1',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.output).toContain('error');
@@ -235,22 +232,20 @@ describe('executeBash', () => {
 
   describe('Timeout handling', () => {
     it('should complete within timeout', async () => {
-      const result = await executeBash({
-        command: 'echo "fast"',
-        cwd: tempDir,
-        timeout: 5,
-      });
+      const result = await executeBash(
+        { command: 'echo "fast"', timeout: 5 },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.status).not.toBe('timeout');
     });
 
     it('should timeout for long-running commands', async () => {
-      const result = await executeBash({
-        command: 'sleep 10',
-        cwd: tempDir,
-        timeout: 1, // 1 second timeout
-      });
+      const result = await executeBash(
+        { command: 'sleep 10', timeout: 1 },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.status).toBe('timeout');
@@ -258,22 +253,20 @@ describe('executeBash', () => {
 
     it('should use default 30 second timeout', async () => {
       // Just verify the parameter is handled correctly
-      const result = await executeBash({
-        command: 'echo "test"',
-        cwd: tempDir,
-        // No timeout specified - should use 30s default
-      });
+      const result = await executeBash(
+        { command: 'echo "test"' },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
     });
 
     it('should kill process on timeout', async () => {
       const start = Date.now();
-      const result = await executeBash({
-        command: 'sleep 60',
-        cwd: tempDir,
-        timeout: 1,
-      });
+      const result = await executeBash(
+        { command: 'sleep 60', timeout: 1 },
+        { workdirOverride: tempDir }
+      );
       const duration = Date.now() - start;
 
       expect(result.status).toBe('timeout');
@@ -284,60 +277,66 @@ describe('executeBash', () => {
 
   describe('Dangerous command blocking', () => {
     it('should block rm -rf /', async () => {
-      const result = await executeBash({
-        command: 'rm -rf /',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'rm -rf /',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('blocked for safety');
     });
 
     it('should block rm -rf /*', async () => {
-      const result = await executeBash({
-        command: 'rm -rf /*',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'rm -rf /*',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('blocked for safety');
     });
 
     it('should block fork bomb', async () => {
-      const result = await executeBash({
-        command: ':(){:|:&};:',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: ':(){:|:&};:',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('blocked for safety');
     });
 
     it('should block dd to device', async () => {
-      const result = await executeBash({
-        command: 'dd if=/dev/zero of=/dev/sda',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'dd if=/dev/zero of=/dev/sda',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('blocked for safety');
     });
 
     it('should block chmod -R 777 /', async () => {
-      const result = await executeBash({
-        command: 'chmod -R 777 /',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'chmod -R 777 /',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('blocked for safety');
     });
 
     it('should block mkfs commands', async () => {
-      const result = await executeBash({
-        command: 'mkfs.ext4 /dev/sda1',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'mkfs.ext4 /dev/sda1',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('blocked for safety');
@@ -346,10 +345,11 @@ describe('executeBash', () => {
     it('should allow safe rm commands', async () => {
       await writeFile(join(tempDir, 'safe.txt'), 'content');
 
-      const result = await executeBash({
-        command: 'rm safe.txt',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'rm safe.txt',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
     });
@@ -358,10 +358,11 @@ describe('executeBash', () => {
       await mkdir(join(tempDir, 'toremove'), { recursive: true });
       await writeFile(join(tempDir, 'toremove', 'file.txt'), 'content');
 
-      const result = await executeBash({
-        command: 'rm -rf toremove',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'rm -rf toremove',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
     });
@@ -370,10 +371,11 @@ describe('executeBash', () => {
       // The current implementation uses .includes() which can be bypassed
       // with creative command construction
       // This documents the limitation
-      const result = await executeBash({
-        command: 'echo "this is safe: rm -rf / test"', // Contains pattern but is safe
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "this is safe: rm -rf / test"', // Contains pattern but is safe
+        },
+        { workdirOverride: tempDir }
+      );
 
       // Currently this will be blocked even though it's just an echo
       expect(result.isSuccess).toBe(false);
@@ -382,10 +384,11 @@ describe('executeBash', () => {
 
   describe('Environment variables', () => {
     it('should inherit process environment', async () => {
-      const result = await executeBash({
-        command: 'echo $PATH',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo $PATH',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.length).toBeGreaterThan(0);
@@ -393,8 +396,8 @@ describe('executeBash', () => {
 
     it('should use context.envOverrides', async () => {
       const result = await executeBash(
-        { command: 'echo $MY_VAR', cwd: tempDir },
-        { envOverrides: { MY_VAR: 'custom_value' } }
+        { command: 'echo $MY_VAR' },
+        { workdirOverride: tempDir, envOverrides: { MY_VAR: 'custom_value' } }
       );
 
       expect(result.isSuccess).toBe(true);
@@ -402,11 +405,10 @@ describe('executeBash', () => {
     });
 
     it('should allow env override via args.env', async () => {
-      const result = await executeBash({
-        command: 'echo $CUSTOM_ENV',
-        cwd: tempDir,
-        env: { CUSTOM_ENV: 'from_args' },
-      });
+      const result = await executeBash(
+        { command: 'echo $CUSTOM_ENV', env: { CUSTOM_ENV: 'from_args' } },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       // May include stderr from shell config files, so just check stdout contains value
@@ -415,8 +417,8 @@ describe('executeBash', () => {
 
     it('should merge context.envOverrides with process.env', async () => {
       const result = await executeBash(
-        { command: 'echo "PATH=$PATH CUSTOM=$CUSTOM"', cwd: tempDir },
-        { envOverrides: { CUSTOM: 'value' } }
+        { command: 'echo "PATH=$PATH CUSTOM=$CUSTOM"' },
+        { workdirOverride: tempDir, envOverrides: { CUSTOM: 'value' } }
       );
 
       expect(result.isSuccess).toBe(true);
@@ -429,10 +431,11 @@ describe('executeBash', () => {
   describe('Output truncation', () => {
     it('should truncate very long output', async () => {
       // Generate output longer than 100000 chars
-      const result = await executeBash({
-        command: 'yes "x" | head -50000', // Each line is 2 chars, 50000 lines = 100000 chars
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'yes "x" | head -50000', // Each line is 2 chars, 50000 lines = 100000 chars
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       // Output should be truncated
@@ -442,10 +445,11 @@ describe('executeBash', () => {
     });
 
     it('should not truncate normal output', async () => {
-      const result = await executeBash({
-        command: 'echo "short output"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "short output"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).not.toContain('[truncated]');
@@ -454,20 +458,22 @@ describe('executeBash', () => {
 
   describe('Edge cases', () => {
     it('should handle empty command output', async () => {
-      const result = await executeBash({
-        command: 'true', // Produces no output
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'true', // Produces no output
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toBe('');
     });
 
     it('should handle commands with quotes', async () => {
-      const result = await executeBash({
-        command: "echo 'single quotes' \"double quotes\"",
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: "echo 'single quotes' \"double quotes\"",
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('single quotes');
@@ -475,20 +481,22 @@ describe('executeBash', () => {
     });
 
     it('should handle commands with special characters', async () => {
-      const result = await executeBash({
-        command: 'echo "special chars: $HOME & && || ; |"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "special chars: $HOME & && || ; |"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       // The command should execute (special chars are in quotes)
       expect(result.isSuccess).toBe(true);
     });
 
     it('should handle commands with newlines in output', async () => {
-      const result = await executeBash({
-        command: 'printf "line1\\nline2\\nline3"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'printf "line1\\nline2\\nline3"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.split('\n').length).toBeGreaterThanOrEqual(3);
@@ -496,10 +504,11 @@ describe('executeBash', () => {
 
     it('should handle commands producing binary output', async () => {
       // This produces some binary-ish output
-      const result = await executeBash({
-        command: 'echo -e "\\x00\\x01\\x02"',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo -e "\\x00\\x01\\x02"',
+        },
+        { workdirOverride: tempDir }
+      );
 
       // Should not crash, though output may be garbled
       expect(result.isSuccess).toBe(true);
@@ -507,9 +516,9 @@ describe('executeBash', () => {
 
     it('should handle rapid sequential commands', async () => {
       const results = await Promise.all([
-        executeBash({ command: 'echo "1"', cwd: tempDir }),
-        executeBash({ command: 'echo "2"', cwd: tempDir }),
-        executeBash({ command: 'echo "3"', cwd: tempDir }),
+        executeBash({ command: 'echo "1"' }, { workdirOverride: tempDir }),
+        executeBash({ command: 'echo "2"' }, { workdirOverride: tempDir }),
+        executeBash({ command: 'echo "3"' }, { workdirOverride: tempDir }),
       ]);
 
       expect(results.every((r) => r.isSuccess)).toBe(true);
@@ -517,10 +526,11 @@ describe('executeBash', () => {
 
     it('should handle command with very long arguments', async () => {
       const longArg = 'x'.repeat(10000);
-      const result = await executeBash({
-        command: `echo "${longArg}" | wc -c`,
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: `echo "${longArg}" | wc -c`,
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       // Should output approximately 10001 (10000 chars + newline)
@@ -530,20 +540,22 @@ describe('executeBash', () => {
 
   describe('Timing and metadata', () => {
     it('should record duration', async () => {
-      const result = await executeBash({
-        command: 'sleep 0.1',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'sleep 0.1',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.durationMs).toBeDefined();
       expect(result.durationMs).toBeGreaterThan(50); // At least ~100ms
     });
 
     it('should record duration even on error', async () => {
-      const result = await executeBash({
-        command: 'exit 1',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'exit 1',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(false);
       expect(result.durationMs).toBeDefined();
@@ -551,11 +563,10 @@ describe('executeBash', () => {
     });
 
     it('should record duration on timeout', async () => {
-      const result = await executeBash({
-        command: 'sleep 10',
-        cwd: tempDir,
-        timeout: 1,
-      });
+      const result = await executeBash(
+        { command: 'sleep 10', timeout: 1 },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.status).toBe('timeout');
       expect(result.durationMs).toBeDefined();
@@ -563,10 +574,11 @@ describe('executeBash', () => {
     });
 
     it('should include correct tool name', async () => {
-      const result = await executeBash({
-        command: 'echo test',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo test',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.toolName).toBe('Bash');
     });
@@ -574,10 +586,11 @@ describe('executeBash', () => {
 
   describe('File operations via bash', () => {
     it('should create files', async () => {
-      const result = await executeBash({
-        command: 'echo "content" > newfile.txt && cat newfile.txt',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'echo "content" > newfile.txt && cat newfile.txt',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.trim()).toBe('content');
@@ -587,10 +600,11 @@ describe('executeBash', () => {
       await writeFile(join(tempDir, 'a.txt'), 'a');
       await writeFile(join(tempDir, 'b.txt'), 'b');
 
-      const result = await executeBash({
-        command: 'ls -1',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'ls -1',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('a.txt');
@@ -600,10 +614,11 @@ describe('executeBash', () => {
     it('should handle file permissions', async () => {
       await writeFile(join(tempDir, 'script.sh'), '#!/bin/bash\necho "executed"');
 
-      const result = await executeBash({
-        command: 'chmod +x script.sh && ./script.sh',
-        cwd: tempDir,
-      });
+      const result = await executeBash(
+        { command: 'chmod +x script.sh && ./script.sh',
+        },
+        { workdirOverride: tempDir }
+      );
 
       expect(result.isSuccess).toBe(true);
       expect(result.output.trim()).toBe('executed');

@@ -23,6 +23,44 @@ interface GrepMatch {
   content: string;
 }
 
+/**
+ * Convert a glob pattern to a regex for fallback matching.
+ * Supports basic patterns like *.ts, **\/*.tsx, etc.
+ */
+function globToRegex(glob: string): RegExp {
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&') // Escape regex special chars except * and ?
+    .replace(/\*\*/g, '{{GLOBSTAR}}') // Preserve **
+    .replace(/\*/g, '[^/]*') // * matches anything except /
+    .replace(/\?/g, '[^/]') // ? matches single char except /
+    .replace(/\{\{GLOBSTAR\}\}/g, '.*'); // ** matches anything including /
+
+  return new RegExp(`(^|/)${escaped}$`);
+}
+
+/**
+ * Map file types to their extensions (matching ripgrep's --type).
+ */
+function getExtensionsForType(type: string): string[] {
+  const typeMap: Record<string, string[]> = {
+    ts: ['.ts', '.tsx'],
+    js: ['.js', '.jsx', '.mjs', '.cjs'],
+    py: ['.py', '.pyi'],
+    rust: ['.rs'],
+    go: ['.go'],
+    java: ['.java'],
+    c: ['.c', '.h'],
+    cpp: ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h'],
+    css: ['.css', '.scss', '.sass', '.less'],
+    html: ['.html', '.htm'],
+    json: ['.json'],
+    yaml: ['.yaml', '.yml'],
+    md: ['.md', '.markdown'],
+    sh: ['.sh', '.bash', '.zsh'],
+  };
+  return typeMap[type.toLowerCase()] ?? [`.${type}`];
+}
+
 const RIPGREP_GLOB_IGNORES = [
   ...Array.from(DEFAULT_EXCLUDE_DIRS).map((dir) => `!**/${dir}/**`),
   '!**/*.egg-info/**',
@@ -54,7 +92,9 @@ async function tryRipgrepGrep(
   resolvedCwd: string,
   resolvedPath: string,
   maxResults: number,
-  caseSensitive: boolean
+  caseSensitive: boolean,
+  glob?: string,
+  fileType?: string
 ): Promise<{
   matches: string[];
   truncated: boolean;
@@ -74,6 +114,8 @@ async function tryRipgrepGrep(
     '--no-ignore',
     ...(caseSensitive ? [] : ['-i']),
     ...RIPGREP_IGNORE_ARGS,
+    ...(glob ? ['--glob', glob] : []),
+    ...(fileType ? ['--type', fileType] : []),
     '-e',
     pattern,
     '--',
@@ -114,9 +156,26 @@ async function executeGrepFallback(
   regex: RegExp,
   maxResults: number,
   startTime: number,
-  pathIsFile: boolean
+  pathIsFile: boolean,
+  glob?: string,
+  fileType?: string
 ): Promise<ToolResult> {
   const matches: GrepMatch[] = [];
+
+  // Build file filter from glob/type
+  const globRegex = glob ? globToRegex(glob) : null;
+  const typeExtensions: Set<string> | null = fileType
+    ? new Set(getExtensionsForType(fileType))
+    : null;
+
+  function shouldIncludeFile(filePath: string): boolean {
+    if (globRegex && !globRegex.test(filePath)) return false;
+    if (typeExtensions) {
+      const ext = filePath.slice(filePath.lastIndexOf('.'));
+      if (!typeExtensions.has(ext)) return false;
+    }
+    return true;
+  }
 
   async function searchDir(dirPath: string): Promise<void> {
     if (matches.length >= maxResults) return;
@@ -138,7 +197,8 @@ async function executeGrepFallback(
           await searchDir(fullPath);
         }
       } else if (entry.isFile()) {
-        if (!shouldSkipFile(entry.name)) {
+        const relativePath = relative(resolvedCwd, fullPath);
+        if (!shouldSkipFile(entry.name) && shouldIncludeFile(relativePath)) {
           await searchFile(fullPath);
         }
       }
@@ -209,10 +269,12 @@ export async function executeGrep(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const pattern = args.pattern as string;
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
+  const cwd = context?.workdirOverride ?? process.cwd();
   const searchPath = (args.path as string) ?? '.';
   const maxResults = (args.maxResults as number) ?? 20;
   const caseSensitive = (args.caseSensitive as boolean) ?? false;
+  const glob = args.glob as string | undefined;
+  const fileType = args.type as string | undefined;
 
   const startTime = Date.now();
   const resolvedCwd = resolve(cwd);
@@ -247,7 +309,9 @@ export async function executeGrep(
       resolvedCwd,
       resolvedPath,
       maxResults,
-      caseSensitive
+      caseSensitive,
+      glob,
+      fileType
     );
 
     if (rgResult) {
@@ -289,7 +353,9 @@ export async function executeGrep(
       regex,
       maxResults,
       startTime,
-      pathStats.isFile()
+      pathStats.isFile(),
+      glob,
+      fileType
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -306,10 +372,6 @@ export const grepToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory to search within',
-      },
       pattern: {
         type: 'string',
         description: 'Regex pattern to search for',
@@ -317,6 +379,14 @@ export const grepToolOptions: ToolRegistrationOptions = {
       path: {
         type: 'string',
         description: "Optional subpath to scope the search (default: '.')",
+      },
+      glob: {
+        type: 'string',
+        description: 'Glob pattern to filter files (e.g. "*.ts", "**/*.tsx")',
+      },
+      type: {
+        type: 'string',
+        description: 'File type to search (e.g. "ts", "js", "py") - maps to rg --type',
       },
       maxResults: {
         type: 'number',
@@ -327,9 +397,9 @@ export const grepToolOptions: ToolRegistrationOptions = {
         description: 'Whether the search should respect case',
       },
     },
-    required: ['cwd', 'pattern'],
+    required: ['pattern'],
   },
-  required: ['cwd', 'pattern'],
+  required: ['pattern'],
   executor: executeGrep,
   timeoutMs: 20000,
   readOnly: true,

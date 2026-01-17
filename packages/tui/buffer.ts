@@ -1,3 +1,6 @@
+// Resource limit for input buffer to prevent memory exhaustion
+const MAX_INPUT_LENGTH = 100 * 1024; // 100KB
+
 export interface InputLayout {
   lines: string[];
   lineStartIndices: number[];
@@ -37,8 +40,14 @@ export class InputBuffer {
     if (!text) {
       return;
     }
+    // Enforce input limit - silently reject if full
+    if (this.buffer.length >= MAX_INPUT_LENGTH) {
+      return;
+    }
     const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    const chars = normalized.split("");
+    // Truncate to fit within limit
+    const available = MAX_INPUT_LENGTH - this.buffer.length;
+    const chars = normalized.slice(0, available).split("");
     this.buffer.splice(this.cursor, 0, ...chars);
     this.cursor += chars.length;
   }
@@ -143,20 +152,26 @@ export class InputBuffer {
   insertBulkText(text: string): void {
     if (!text) return;
 
+    // Enforce input limit
+    const available = MAX_INPUT_LENGTH - this.buffer.length;
+    if (available <= 0) return;
+
     // Normalize line endings but preserve all other whitespace
     const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    // Truncate to fit within limit
+    const truncated = normalized.slice(0, available);
 
     // For large pastes (>1000 chars), use array concatenation
     // which is more efficient than splice for large insertions
-    if (normalized.length > 1000) {
+    if (truncated.length > 1000) {
       const before = this.buffer.slice(0, this.cursor);
       const after = this.buffer.slice(this.cursor);
-      const chars = normalized.split("");
+      const chars = truncated.split("");
       this.buffer = [...before, ...chars, ...after];
       this.cursor += chars.length;
     } else {
       // Small paste - use existing method
-      const chars = normalized.split("");
+      const chars = truncated.split("");
       this.buffer.splice(this.cursor, 0, ...chars);
       this.cursor += chars.length;
     }

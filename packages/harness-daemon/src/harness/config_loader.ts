@@ -6,7 +6,7 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import type {
@@ -24,22 +24,73 @@ import {
   DEFAULT_SKILLS_CONFIG,
   DEFAULT_HOOKS_CONFIG,
   DEFAULT_AUTH_CONFIG,
+  DEFAULT_MODELS_CONFIG,
 } from './config_types.js';
 import {
   HarnessConfigFileSchema,
-  isSupportedProvider,
-  getCanonicalProvider,
   normalizeReasoningEffort,
   extractReasoningEffort,
-  OPENAI_COMPAT_PROVIDERS,
   type LLMProvider,
   type AgentConfigEntry,
   type HarnessConfigFile,
 } from './config_schema.js';
+import {
+  isSupportedProvider,
+  getCanonicalProvider,
+  getProviderEnvVar,
+  getProviderBaseUrl as getCentralProviderBaseUrl,
+  OPENAI_COMPAT_PROVIDERS,
+  getAllModels,
+  getProviderForModel,
+} from 'types';
 
 const DEFAULT_CONFIG_PATH = 'config/harness_config.json';
+const DEFAULTS_CONFIG_PATH = 'config/defaults.json';
+const USER_CONFIG_PATH = '~/.rex/config.json';
 const OUTPUT_SCHEMAS_PATH = 'config/output_schemas.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
+
+// ============================================
+// DEEP MERGE UTILITY
+// ============================================
+
+/**
+ * Check if a value is a plain object (not array, null, Date, etc.)
+ */
+function isPlainObject(obj: unknown): obj is Record<string, unknown> {
+  return typeof obj === 'object' && obj !== null && !Array.isArray(obj) && !(obj instanceof Date);
+}
+
+/**
+ * Deep merge two objects. Source values override target values.
+ * - Objects are recursively merged
+ * - Arrays replace entirely (no array merging)
+ * - Primitives replace entirely
+ * - Source values override target values
+ */
+function deepMerge<T extends Record<string, unknown>>(target: T, source: Partial<T>): T {
+  const result = { ...target };
+
+  for (const key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+
+    const sourceValue = source[key];
+    const targetValue = result[key];
+
+    // Skip undefined source values (explicit overrides only)
+    if (sourceValue === undefined) continue;
+
+    // If both are plain objects, merge recursively
+    if (isPlainObject(targetValue) && isPlainObject(sourceValue)) {
+      result[key] = deepMerge(targetValue as Record<string, unknown>, sourceValue as Record<string, unknown>) as T[typeof key];
+    } else {
+      // Otherwise, source replaces target
+      result[key] = sourceValue as T[typeof key];
+    }
+  }
+
+  return result;
+}
 
 /**
  * Get the package root directory from this module's location.
@@ -163,6 +214,11 @@ interface LoadedConfigFile {
  * Relative paths in the config should be resolved relative to configDir.
  */
 export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
+  const resolveConfigDirForPath = (path: string): string => {
+    const parent = dirname(path);
+    return basename(parent) === 'config' ? dirname(parent) : parent;
+  };
+
   // Helper to validate config with Zod
   const validateConfig = (content: string, path: string): HarnessConfigFile | null => {
     try {
@@ -188,8 +244,7 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
       const parsed = validateConfig(content, explicitPath);
       if (parsed) {
         console.log(`[config] Loaded from ${explicitPath}`);
-        // Config dir is parent of 'config/' directory (i.e., repo root)
-        const configDir = dirname(dirname(explicitPath));
+        const configDir = resolveConfigDirForPath(explicitPath);
         return { config: parsed, configDir, configPath: explicitPath };
       }
     }
@@ -311,27 +366,8 @@ function resolveOutputSchema(
 // API KEY RESOLUTION
 // ============================================
 
-const API_KEY_ENV_MAP: Record<string, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  'openai-compat': 'OPENAI_COMPAT_API_KEY',
-  gemini: 'GOOGLE_API_KEY',
-  // OpenAI-compatible providers with their own API keys
-  cerebras: 'CEREBRAS_API_KEY',
-  together: 'TOGETHER_API_KEY',
-  groq: 'GROQ_API_KEY',
-  fireworks: 'FIREWORKS_API_KEY',
-};
-
-/** Base URLs for OpenAI-compatible providers */
-const OPENAI_COMPAT_BASE_URLS: Record<string, string> = {
-  cerebras: 'https://api.cerebras.ai/v1',
-  together: 'https://api.together.xyz/v1',
-  groq: 'https://api.groq.com/openai/v1',
-  fireworks: 'https://api.fireworks.ai/inference/v1',
-};
-
-// Note: OPENAI_COMPAT_PROVIDERS is now imported from config_schema.ts
+// API_KEY_ENV_MAP and OPENAI_COMPAT_BASE_URLS are now in packages/types/src/providers.ts
+// Use getProviderEnvVar() and getCentralProviderBaseUrl() from types
 
 /** Module-level providers cache (set by createConfigFromFile) */
 let configProviders: ProvidersConfigSection = {};
@@ -361,8 +397,8 @@ export function resolveApiKey(provider: string, providers?: ProvidersConfigSecti
     return configKey;
   }
 
-  // Fall back to environment variable
-  const envVar = API_KEY_ENV_MAP[provider] ?? `${provider.toUpperCase()}_API_KEY`;
+  // Fall back to environment variable (using central registry)
+  const envVar = getProviderEnvVar(provider);
   const key = process.env[envVar];
   if (!key) {
     const canonicalHint = OPENAI_COMPAT_PROVIDERS.has(provider) && provider !== 'openai-compat'
@@ -376,17 +412,13 @@ export function resolveApiKey(provider: string, providers?: ProvidersConfigSecti
   return key;
 }
 
-// Note: isSupportedProvider and getCanonicalProvider are now imported from config_schema.ts
-
 /**
- * Get the base URL for a provider, using built-in registry for known providers.
+ * Get the base URL for a provider, using central registry for known providers.
  */
 function getProviderBaseUrl(provider: string, configBaseUrl?: string): string | undefined {
   if (configBaseUrl) return configBaseUrl;
-  return OPENAI_COMPAT_BASE_URLS[provider];
+  return getCentralProviderBaseUrl(provider);
 }
-
-// Note: normalizeReasoningEffort is now imported from config_schema.ts
 
 // ============================================
 // AGENT CONFIG RESOLUTION
@@ -396,11 +428,23 @@ function getProviderBaseUrl(provider: string, configBaseUrl?: string): string | 
  * Resolve fallback config if present.
  */
 function resolveFallbackConfig(
-  fallback: { provider: string; model: string; api_base?: string } | undefined
+  fallback: { provider?: string; model: string; api_base?: string } | undefined
 ): ResolvedFallbackConfig | undefined {
   if (!fallback) return undefined;
 
-  const configProvider = fallback.provider;
+  const modelProvider = getProviderForModel(fallback.model);
+  let configProvider = fallback.provider ?? modelProvider;
+  if (modelProvider && fallback.provider && fallback.provider !== modelProvider) {
+    console.warn(
+      `[config] Fallback model '${fallback.model}' is registered under provider ` +
+      `'${modelProvider}', ignoring provider '${fallback.provider}'.`
+    );
+    configProvider = modelProvider;
+  }
+  if (!configProvider) {
+    console.warn(`[config] Fallback missing provider and model '${fallback.model}' is not registered`);
+    return undefined;
+  }
   if (!isSupportedProvider(configProvider)) {
     console.warn(`[config] Unsupported fallback provider: ${configProvider}, skipping fallback`);
     return undefined;
@@ -426,9 +470,19 @@ function resolveFallbackConfig(
 /**
  * Resolve a single agent config entry to runtime format.
  */
-function resolveAgentConfig(entry: AgentConfigEntry): ResolvedAgentConfig {
-  const configProvider = entry.llm.provider;
-
+function resolveAgentConfig(agentType: string, entry: AgentConfigEntry): ResolvedAgentConfig {
+  const modelProvider = getProviderForModel(entry.llm.model);
+  let configProvider = entry.llm.provider ?? modelProvider;
+  if (modelProvider && entry.llm.provider && entry.llm.provider !== modelProvider) {
+    console.warn(
+      `[config] Agent '${agentType}' model '${entry.llm.model}' is registered under provider ` +
+      `'${modelProvider}', ignoring provider '${entry.llm.provider}'.`
+    );
+    configProvider = modelProvider;
+  }
+  if (!configProvider) {
+    throw new Error(`Provider missing for model '${entry.llm.model}' (not registered)`);
+  }
   if (!isSupportedProvider(configProvider)) {
     throw new Error(`Unsupported LLM provider: ${configProvider}`);
   }
@@ -450,6 +504,7 @@ function resolveAgentConfig(entry: AgentConfigEntry): ResolvedAgentConfig {
 
   const llm: ResolvedLLMConfig = {
     provider: canonicalProvider,
+    displayProvider: configProvider,  // Original provider name for error messages
     model: entry.llm.model,
     apiKey,
     maxTokens: entry.llm.max_tokens,
@@ -520,6 +575,170 @@ function resolvePathRelativeTo(basePath: string, relativePath: string): string {
 }
 
 // ============================================
+// LAYERED CONFIG LOADING
+// ============================================
+
+/**
+ * Load the defaults.json config file.
+ * This contains the full schema with sensible defaults.
+ */
+function loadDefaultsConfig(): HarnessConfigFile | null {
+  // Check cwd parents first (development)
+  for (const dir of walkParents(process.cwd())) {
+    const path = resolve(dir, DEFAULTS_CONFIG_PATH);
+    if (!existsSync(path)) continue;
+
+    try {
+      const content = readFileSync(path, 'utf-8');
+      const json = JSON.parse(content);
+      // Strip $comment and $schema fields (JSON5-style metadata)
+      const stripped = stripJsonComments(json);
+      const result = HarnessConfigFileSchema.safeParse(stripped);
+      if (result.success) {
+        console.log(`[config] Loaded defaults from ${path}`);
+        return result.data;
+      }
+    } catch (e) {
+      console.warn(`[config] Failed to parse defaults ${path}:`, e);
+    }
+  }
+
+  // Check package location (fallback for global installs)
+  const packagePath = resolve(getPackageRoot(), DEFAULTS_CONFIG_PATH);
+  if (existsSync(packagePath)) {
+    try {
+      const content = readFileSync(packagePath, 'utf-8');
+      const json = JSON.parse(content);
+      const stripped = stripJsonComments(json);
+      const result = HarnessConfigFileSchema.safeParse(stripped);
+      if (result.success) {
+        console.log(`[config] Loaded defaults from package: ${packagePath}`);
+        return result.data;
+      }
+    } catch (e) {
+      console.warn(`[config] Failed to parse package defaults ${packagePath}:`, e);
+    }
+  }
+
+  console.log('[config] No defaults.json found, using built-in defaults');
+  return null;
+}
+
+/**
+ * Load the user config from ~/.rex/config.json.
+ * This contains user overrides for providers, models, etc.
+ */
+function loadUserConfig(): { config: HarnessConfigFile; path: string } | null {
+  const userPath = expandHome(USER_CONFIG_PATH);
+
+  if (!existsSync(userPath)) {
+    console.log(`[config] No user config at ${userPath}`);
+    return null;
+  }
+
+  try {
+    const content = readFileSync(userPath, 'utf-8');
+    const json = JSON.parse(content);
+    // Strip $comment and $schema fields
+    const stripped = stripJsonComments(json);
+    const result = HarnessConfigFileSchema.safeParse(stripped);
+    if (result.success) {
+      console.log(`[config] Loaded user config from ${userPath}`);
+      return { config: result.data, path: userPath };
+    }
+    console.warn(`[config] User config invalid: ${result.error.message}`);
+  } catch (e) {
+    console.warn(`[config] Failed to parse user config ${userPath}:`, e);
+  }
+
+  return null;
+}
+
+/**
+ * Strip $comment, $schema, and other JSON5-style metadata fields recursively.
+ */
+function stripJsonComments(obj: unknown): unknown {
+  if (Array.isArray(obj)) {
+    return obj.map(stripJsonComments);
+  }
+  if (isPlainObject(obj)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // Skip comment fields
+      if (key === '$comment' || key === '$schema') continue;
+      result[key] = stripJsonComments(value);
+    }
+    return result;
+  }
+  return obj;
+}
+
+/**
+ * Load layered config: defaults + user config + project config.
+ * Priority (highest to lowest):
+ * 1. Explicit configPath (if provided)
+ * 2. Project harness_config.json (if in a project with config/)
+ * 3. User config (~/.rex/config.json)
+ * 4. Package defaults (config/defaults.json)
+ */
+function loadLayeredConfig(configPath?: string): LoadedConfigFile | null {
+  // Load defaults first
+  const defaults = loadDefaultsConfig();
+
+  // Load user config
+  const userConfig = loadUserConfig();
+
+  // Load project config (existing behavior)
+  const projectConfig = loadConfigFile(configPath);
+
+  // Merge: defaults <- user <- project
+  let merged: HarnessConfigFile | null = null;
+  let configDir: string = process.cwd();
+  let finalConfigPath: string | undefined = undefined;
+
+  if (defaults) {
+    merged = defaults;
+    // configDir for defaults is the package root
+    configDir = getPackageRoot();
+  }
+
+  if (userConfig) {
+    if (merged) {
+      merged = deepMerge(merged, userConfig.config) as HarnessConfigFile;
+    } else {
+      merged = userConfig.config;
+    }
+    // Keep configDir from defaults/project, not user config
+  }
+
+  if (projectConfig) {
+    if (merged) {
+      merged = deepMerge(merged, projectConfig.config) as HarnessConfigFile;
+    } else {
+      merged = projectConfig.config;
+    }
+    // Project config sets the configDir (repo root)
+    configDir = projectConfig.configDir;
+    finalConfigPath = projectConfig.configPath;
+  }
+
+  if (!merged) {
+    return null;
+  }
+
+  // Use user config path if no project config
+  if (!finalConfigPath && userConfig) {
+    finalConfigPath = userConfig.path;
+  }
+
+  return {
+    config: merged,
+    configDir,
+    configPath: finalConfigPath ?? '',
+  };
+}
+
+// ============================================
 // CONFIG CREATION
 // ============================================
 
@@ -537,6 +756,10 @@ export function createConfigFromFile(
   workingDir?: string,
   configPath?: string
 ): FullHarnessConfig {
+  if ((fileConfig.models?.available ?? []).length > 0) {
+    console.warn('[config] models.available is now derived from provider registry; config list is ignored');
+  }
+
   // Merge file providers with existing (preloaded GraphD providers take precedence)
   const existingProviders = getConfigProviders();
   const fileProviders = fileConfig.providers ?? {};
@@ -547,7 +770,7 @@ export function createConfigFromFile(
   const agents: Record<string, ResolvedAgentConfig> = {};
   for (const [agentType, entry] of Object.entries(fileConfig.agents)) {
     try {
-      const resolved = resolveAgentConfig(entry);
+      const resolved = resolveAgentConfig(agentType, entry);
       agents[agentType] = resolved;
     } catch (e) {
       console.warn(`[config] Failed to resolve agent '${agentType}':`, e);
@@ -624,6 +847,10 @@ export function createConfigFromFile(
     },
     behavioralRules: loadBehavioralRules(),
     providers: mergedProviders,
+    models: {
+      available: getAllModels(),
+      default: fileConfig.models?.default ?? DEFAULT_MODELS_CONFIG.default,
+    },
     configPath,
   };
 }
@@ -638,21 +865,24 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
 
   let provider: LLMProvider;
   let apiKey: string;
+  let displayProvider: string;
+  let baseUrl: string | undefined;
 
   if (explicitProvider && isSupportedProvider(explicitProvider)) {
+    displayProvider = explicitProvider;
     provider = getCanonicalProvider(explicitProvider);
-    apiKey = explicitProvider === 'anthropic' ? (anthropicKey ?? '') : (openaiKey ?? '');
-    if (!apiKey) {
-      throw new Error(
-        `LLM_PROVIDER is '${provider}' but ${API_KEY_ENV_MAP[provider]} is not set.`
-      );
-    }
+    apiKey = resolveApiKey(explicitProvider);
+    baseUrl = getProviderBaseUrl(explicitProvider);
   } else if (openaiKey) {
     provider = 'openai';
+    displayProvider = 'openai';
     apiKey = openaiKey;
+    baseUrl = getProviderBaseUrl('openai');
   } else if (anthropicKey) {
     provider = 'anthropic';
+    displayProvider = 'anthropic';
     apiKey = anthropicKey;
+    baseUrl = getProviderBaseUrl('anthropic');
   } else {
     throw new Error(
       'No API key found. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.'
@@ -664,8 +894,10 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
   // Create minimal agent configs from env
   const defaultLLM: ResolvedLLMConfig = {
     provider,
+    displayProvider,  // Use explicit provider name for error messages
     model: process.env.LLM_MODEL ?? defaultModel,
     apiKey,
+    ...(baseUrl ? { baseUrl } : {}),
     maxTokens: 16000,
     temperature: 0.7,
     reasoning: { effort: 'none' },
@@ -763,6 +995,10 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
     },
     behavioralRules: loadBehavioralRules(),
     providers: {},
+    models: {
+      available: getAllModels(),
+      default: undefined,
+    },
     configPath: undefined,
   };
 }
@@ -772,7 +1008,12 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
 // ============================================
 
 /**
- * Load full config: try file first, fallback to env-only.
+ * Load full config using layered approach: defaults + user + project.
+ *
+ * Config priority (highest to lowest):
+ * 1. Project harness_config.json (repo-specific settings)
+ * 2. User config ~/.rex/config.json (user API keys, preferences)
+ * 3. Package defaults config/defaults.json (sensible defaults)
  *
  * Path resolution is BULLETPROOF:
  * - All relative paths in config are resolved relative to where the config file was found
@@ -783,7 +1024,8 @@ export function loadConfig(
   configPath?: string,
   workingDir?: string
 ): FullHarnessConfig {
-  const loaded = loadConfigFile(configPath);
+  // Use layered config loading (defaults + user + project)
+  const loaded = loadLayeredConfig(configPath);
 
   if (loaded) {
     // configDir is where the config file was found (repo root)

@@ -23,6 +23,8 @@ import type {
   HooksConfigSection,
   AuthConfigSection,
   ProvidersConfigSection,
+  ModelConfigEntry,
+  ModelsConfigSection,
 } from './config_schema.js';
 
 // ============================================
@@ -47,6 +49,8 @@ export type {
   HooksConfigSection,
   AuthConfigSection,
   ProvidersConfigSection,
+  ModelConfigEntry,
+  ModelsConfigSection,
   HarnessConfigFile,
 } from './config_schema.js';
 
@@ -75,6 +79,8 @@ export interface ResolvedFallbackConfig {
  */
 export interface ResolvedLLMConfig {
   provider: LLMProvider;
+  /** Original provider name from config (e.g., 'z.ai-coder') for display in errors */
+  displayProvider: string;
   model: string;
   apiKey: string;
   maxTokens: number;
@@ -160,6 +166,12 @@ export interface FullHarnessConfig {
   /** Provider API keys (from config file) */
   providers: ProvidersConfigSection;
 
+  /** Available models for selection */
+  models: {
+    available: ModelConfigEntry[];
+    default?: string;
+  };
+
   /** Path to the config file (needed for updating providers) */
   configPath?: string;
 }
@@ -211,4 +223,9 @@ export const DEFAULT_AUTH_CONFIG: AuthConfigSection = {
   host: '127.0.0.1',
   port: 9556,
   session_expiry_days: null, // Never expires
+};
+
+export const DEFAULT_MODELS_CONFIG: ModelsConfigSection = {
+  available: [],
+  default: undefined,
 };

@@ -89,6 +89,16 @@ export interface WorkItem {
 }
 
 /**
+ * Known param shapes for typed access.
+ * The actual params field remains Record<string, unknown> for flexibility.
+ */
+export interface InternalHookParams {
+  isInternalHook: true;
+  hookType: string;
+  handler: () => Promise<void>;
+}
+
+/**
  * Create a work item.
  */
 export function createWorkItem(params: {

@@ -1,7 +1,11 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
+
+// Resource limits to prevent memory exhaustion
+const MAX_STREAMING_BYTES = 5 * 1024 * 1024;  // 5MB - cap streaming text
+const MAX_INPUT_LENGTH = 100 * 1024;           // 100KB - cap input buffer
 
 export interface AutocompleteState {
   active: boolean;
@@ -11,8 +15,10 @@ export interface AutocompleteState {
 }
 
 export interface HistoryLine {
+  id: string;
   text: string;
   role?: Role;
+  requestId?: string;
   isBlockStart?: boolean;  // First line of a message block
   isBlockEnd?: boolean;    // Last line of a message block (before separator)
 }
@@ -68,6 +74,22 @@ export interface StoreSnapshot {
   themeCursor: number;
   // Plan mode
   planMode: boolean;
+  // Response pane content
+  responseContent: ResponseContent | null;
+  // Models selection
+  modelsList: ModelEntry[];
+  modelsCursor: number;
+  selectedModel: string | null;
+  // Sessions selection
+  sessionsList: SessionEntry[];
+  sessionsCursor: number;
+  // Usage view
+  usageSessions: UsageSessionSummary[];
+  usageCursor: number;
+  usageViewMode: "list" | "detail" | "analytics";
+  usageDayStats: UsageDayStats[];
+  usageProviderStats: UsageProviderStats[];
+  usageLoading: boolean;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -88,8 +110,10 @@ export class Store {
   private progressLevel: EventLevel | null = null;
   private progressKind: EventKind | null = null;
   private history: MessageEntry[] = [];
+  private historyStart = 0;
   private streamingText = "";
   private streamingRequestId: string | null = null;
+  private streamingTruncated = false;
   private scrollOffset = 0;
   private newMessages = false;
   private compact = false;
@@ -119,6 +143,7 @@ export class Store {
   private questionQueue: AgentQuestion[] = [];
   private questionAnswers = new Map<string, unknown>();
   private questionRequestId: string | null = null;
+  private questionProcessing = false;  // Re-entrance guard
 
   // Paste state
   private pasteInProgress = false;
@@ -130,12 +155,41 @@ export class Store {
   // Plan mode
   private planMode = false;
 
+  // Response pane content
+  private responseContent: ResponseContent | null = null;
+
+  // Models selection
+  private modelsList: ModelEntry[] = [];
+  private modelsCursor = 0;
+  private selectedModel: string | null = null;
+
+  // Sessions selection
+  private sessionsList: SessionEntry[] = [];
+  private sessionsCursor = 0;
+
+  // Usage view
+  private usageSessions: UsageSessionSummary[] = [];
+  private usageCursor = 0;
+  private usageViewMode: "list" | "detail" | "analytics" = "list";
+  private usageDayStats: UsageDayStats[] = [];
+  private usageProviderStats: UsageProviderStats[] = [];
+  private usageLoading = false;
+
   private historyCache: {
     width: number;
     compact: boolean;
     version: number;
     lines: HistoryLine[];
   } | null = null;
+
+  // Batching support
+  private batchDepth = 0;
+  private batchDirty = false;
+
+  // Streaming throttle
+  private streamingThrottleMs = 32; // ~30fps during streaming
+  private lastStreamingEmit = 0;
+  private pendingStreamingEmit: ReturnType<typeof setTimeout> | null = null;
 
   constructor(maxHistory = DEFAULT_MAX_HISTORY) {
     this.maxHistory = maxHistory;
@@ -159,7 +213,7 @@ export class Store {
       cursor: this.inputBuffer.getCursor(),
       inputScrollOffset: this.inputScrollOffset,
       autocomplete: { ...this.autocomplete },
-      history: [...this.history],
+      history: this.history.slice(this.historyStart),
       streamingText: this.streamingText,
       streamingRequestId: this.streamingRequestId,
       scrollOffset: this.scrollOffset,
@@ -195,12 +249,70 @@ export class Store {
       themeCursor: this.themeCursor,
       // Plan mode
       planMode: this.planMode,
+      // Response pane content
+      responseContent: this.responseContent,
+      // Models selection
+      modelsList: [...this.modelsList],
+      modelsCursor: this.modelsCursor,
+      selectedModel: this.selectedModel,
+      // Sessions selection
+      sessionsList: [...this.sessionsList],
+      sessionsCursor: this.sessionsCursor,
+      // Usage view
+      usageSessions: [...this.usageSessions],
+      usageCursor: this.usageCursor,
+      usageViewMode: this.usageViewMode,
+      usageDayStats: [...this.usageDayStats],
+      usageProviderStats: [...this.usageProviderStats],
+      usageLoading: this.usageLoading,
     };
   }
 
   private emit(): void {
-    for (const listener of this.listeners) {
+    // If we're in a batch, mark dirty and defer
+    if (this.batchDepth > 0) {
+      this.batchDirty = true;
+      return;
+    }
+    // Clone listeners to prevent modification during iteration
+    const listeners = [...this.listeners];
+    for (const listener of listeners) {
       listener();
+    }
+  }
+
+  private pruneHistory(): void {
+    const activeLength = this.history.length - this.historyStart;
+    if (activeLength <= this.maxHistory) {
+      return;
+    }
+
+    this.historyStart += activeLength - this.maxHistory;
+
+    if (this.historyStart > this.maxHistory && this.historyStart > 1000) {
+      this.history = this.history.slice(this.historyStart);
+      this.historyStart = 0;
+    }
+  }
+
+  /**
+   * Batch multiple mutations into a single emit.
+   * Nested batches are supported - only the outermost batch triggers emit.
+   */
+  batch(fn: () => void): void {
+    this.batchDepth++;
+    try {
+      fn();
+    } finally {
+      this.batchDepth--;
+      if (this.batchDepth === 0 && this.batchDirty) {
+        this.batchDirty = false;
+        // Clone listeners to prevent modification during iteration
+        const listeners = [...this.listeners];
+        for (const listener of listeners) {
+          listener();
+        }
+      }
     }
   }
 
@@ -358,9 +470,7 @@ export class Store {
     };
 
     this.history.push(entry);
-    if (this.history.length > this.maxHistory) {
-      this.history.splice(0, this.history.length - this.maxHistory);
-    }
+    this.pruneHistory();
 
     if (this.scrollOffset > 0) {
       this.newMessages = true;
@@ -372,7 +482,8 @@ export class Store {
   }
 
   updateMessageMeta(requestId: string, meta: string): void {
-    for (const entry of this.history) {
+    for (let i = this.historyStart; i < this.history.length; i += 1) {
+      const entry = this.history[i];
       if (entry.requestId === requestId) {
         entry.meta = meta;
         this.historyVersion += 1;
@@ -384,7 +495,8 @@ export class Store {
   }
 
   updateMessageText(requestId: string, text: string, meta?: string): void {
-    for (const entry of this.history) {
+    for (let i = this.historyStart; i < this.history.length; i += 1) {
+      const entry = this.history[i];
       if (entry.requestId === requestId) {
         entry.text = text;
         if (meta !== undefined) {
@@ -400,6 +512,7 @@ export class Store {
 
   clearHistory(): void {
     this.history = [];
+    this.historyStart = 0;
     this.historyVersion += 1;
     this.historyCache = null;
     this.scrollOffset = 0;
@@ -416,17 +529,48 @@ export class Store {
   }
 
   appendStreaming(chunk: string): void {
+    // Enforce streaming limit to prevent memory exhaustion
+    if (this.streamingText.length + chunk.length > MAX_STREAMING_BYTES) {
+      if (!this.streamingTruncated) {
+        this.streamingTruncated = true;
+        this.streamingText += '\n[Response truncated - exceeded 5MB limit]';
+      }
+      return;
+    }
+
     this.streamingText += chunk;
     this.historyVersion += 1;
     this.historyCache = null;
-    this.emit();
+
+    // Throttle emissions during streaming for better performance
+    const now = Date.now();
+    if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
+      this.lastStreamingEmit = now;
+      this.emit();
+    } else if (!this.pendingStreamingEmit) {
+      // Schedule a trailing emit to ensure we don't miss the last chunk
+      this.pendingStreamingEmit = setTimeout(() => {
+        this.pendingStreamingEmit = null;
+        this.lastStreamingEmit = Date.now();
+        this.emit();
+      }, this.streamingThrottleMs);
+    }
   }
 
   finalizeStreaming(): void {
+    // Cancel any pending throttled emit
+    if (this.pendingStreamingEmit) {
+      clearTimeout(this.pendingStreamingEmit);
+      this.pendingStreamingEmit = null;
+    }
+
     this.streamingRequestId = null;
     this.streamingText = "";
+    this.streamingTruncated = false;
     this.historyVersion += 1;
     this.historyCache = null;
+    // Always emit immediately on finalize - user needs to see the final response
+    this.lastStreamingEmit = 0;
     this.emit();
   }
 
@@ -642,7 +786,7 @@ export class Store {
     }
 
     const lines = buildHistoryLines(
-      this.history,
+      this.history.slice(this.historyStart),
       this.streamingText ? `${this.streamingText}${streamCursor}` : "",
       width,
       compact,
@@ -743,7 +887,8 @@ export class Store {
    * Updates the text input for fill_in_blank/free_text questions.
    */
   setQuestionInput(text: string): void {
-    this.questionInput = text;
+    // Enforce input limit
+    this.questionInput = text.slice(0, MAX_INPUT_LENGTH);
     this.emit();
   }
 
@@ -751,7 +896,10 @@ export class Store {
    * Appends text to the question input.
    */
   appendQuestionInput(text: string): void {
-    this.questionInput += text;
+    // Enforce input limit
+    const available = MAX_INPUT_LENGTH - this.questionInput.length;
+    if (available <= 0) return;
+    this.questionInput += text.slice(0, available);
     this.emit();
   }
 
@@ -794,24 +942,30 @@ export class Store {
    * Returns true if there are more questions, false if done.
    */
   saveAnswerAndAdvance(): boolean {
-    if (!this.activeQuestion) return false;
+    // Guard against re-entrance (rapid double-submit)
+    if (this.questionProcessing || !this.activeQuestion) return false;
+    this.questionProcessing = true;
 
-    // Save the current answer
-    const answer = this.getQuestionAnswer();
-    this.questionAnswers.set(this.activeQuestion.requestId, answer);
+    try {
+      // Save the current answer
+      const answer = this.getQuestionAnswer();
+      this.questionAnswers.set(this.activeQuestion.requestId, answer);
 
-    // Check if there are more questions in the queue
-    if (this.questionQueue.length > 0) {
-      const nextQuestion = this.questionQueue.shift()!;
-      this.activeQuestion = nextQuestion;
-      this.questionSelection = [];
-      this.questionCursor = 0;
-      this.questionInput = nextQuestion.defaultValue || "";
-      this.emit();
-      return true; // More questions remaining
+      // Check if there are more questions in the queue
+      if (this.questionQueue.length > 0) {
+        const nextQuestion = this.questionQueue.shift()!;
+        this.activeQuestion = nextQuestion;
+        this.questionSelection = [];
+        this.questionCursor = 0;
+        this.questionInput = nextQuestion.defaultValue || "";
+        this.emit();
+        return true; // More questions remaining
+      }
+
+      return false; // No more questions
+    } finally {
+      this.questionProcessing = false;
     }
-
-    return false; // No more questions
   }
 
   /**
@@ -858,6 +1012,7 @@ export class Store {
    * Moves theme cursor up or down.
    */
   moveThemeCursor(delta: number, total: number): void {
+    if (total <= 0) return;  // Guard against empty list
     this.themeCursor = (this.themeCursor + delta + total) % total;
     this.emit();
   }
@@ -877,6 +1032,204 @@ export class Store {
    */
   setPlanMode(enabled: boolean): void {
     this.planMode = enabled;
+    this.emit();
+  }
+
+  // ==================== Models Selection Methods ====================
+
+  /**
+   * Sets the models list and enters models selection mode.
+   */
+  setModelsList(models: ModelEntry[]): void {
+    this.modelsList = models;
+    // Position cursor on currently selected model if any
+    const currentIdx = this.selectedModel
+      ? models.findIndex((m) => m.id === this.selectedModel)
+      : -1;
+    this.modelsCursor = Math.max(0, currentIdx);
+    this.uiMode = "models";
+    this.emit();
+  }
+
+  /**
+   * Moves models cursor up or down.
+   */
+  moveModelsCursor(delta: number): void {
+    const count = this.modelsList.length;
+    if (count === 0) return;
+    this.modelsCursor = (this.modelsCursor + delta + count) % count;
+    this.emit();
+  }
+
+  /**
+   * Selects the model at the current cursor position.
+   * Returns the selected model entry.
+   */
+  selectModel(): ModelEntry | null {
+    const model = this.modelsList[this.modelsCursor];
+    if (model) {
+      this.selectedModel = model.id;
+      this.emit();
+      return model;
+    }
+    return null;
+  }
+
+  /**
+   * Sets the selected model by ID (used for external updates).
+   */
+  setSelectedModel(modelId: string | null): void {
+    this.selectedModel = modelId;
+    if (modelId && this.modelsList.length > 0) {
+      const idx = this.modelsList.findIndex((m) => m.id === modelId);
+      if (idx >= 0) {
+        this.modelsCursor = idx;
+      }
+    }
+    this.emit();
+  }
+
+  /**
+   * Gets the currently selected model ID.
+   */
+  getSelectedModel(): string | null {
+    return this.selectedModel;
+  }
+
+  /**
+   * Exits models mode and returns to chat.
+   */
+  exitModelsMode(): void {
+    this.uiMode = "chat";
+    this.emit();
+  }
+
+  // ==================== Sessions Selection Methods ====================
+
+  /**
+   * Sets the sessions list and enters sessions selection mode.
+   */
+  setSessionsList(sessions: SessionEntry[]): void {
+    this.sessionsList = sessions;
+    this.sessionsCursor = 0;
+    this.uiMode = "sessions";
+    this.emit();
+  }
+
+  /**
+   * Moves sessions cursor up or down.
+   */
+  moveSessionsCursor(delta: number): void {
+    const count = this.sessionsList.length;
+    if (count === 0) return;
+    this.sessionsCursor = (this.sessionsCursor + delta + count) % count;
+    this.emit();
+  }
+
+  /**
+   * Gets the session at the current cursor position.
+   */
+  getSelectedSession(): SessionEntry | null {
+    return this.sessionsList[this.sessionsCursor] ?? null;
+  }
+
+  /**
+   * Exits sessions mode and returns to chat.
+   */
+  exitSessionsMode(): void {
+    this.sessionsList = [];
+    this.sessionsCursor = 0;
+    this.uiMode = "chat";
+    this.emit();
+  }
+
+  // ==================== Usage View Methods ====================
+
+  /**
+   * Sets usage loading state.
+   */
+  setUsageLoading(loading: boolean): void {
+    this.usageLoading = loading;
+    this.emit();
+  }
+
+  /**
+   * Sets the usage sessions list and enters usage view mode.
+   */
+  setUsageSessions(sessions: UsageSessionSummary[]): void {
+    this.usageSessions = sessions;
+    this.usageCursor = 0;
+    this.usageViewMode = "list";
+    this.usageLoading = false;
+    this.uiMode = "usage";
+    this.emit();
+  }
+
+  /**
+   * Sets the usage analytics data.
+   */
+  setUsageAnalytics(dayStats: UsageDayStats[], providerStats: UsageProviderStats[]): void {
+    this.usageDayStats = dayStats;
+    this.usageProviderStats = providerStats;
+    this.emit();
+  }
+
+  /**
+   * Moves usage cursor up or down.
+   */
+  moveUsageCursor(delta: number): void {
+    const count = this.usageSessions.length;
+    if (count === 0) return;
+    this.usageCursor = (this.usageCursor + delta + count) % count;
+    this.emit();
+  }
+
+  /**
+   * Sets the usage view mode (list, detail, analytics).
+   */
+  setUsageViewMode(mode: "list" | "detail" | "analytics"): void {
+    this.usageViewMode = mode;
+    this.emit();
+  }
+
+  /**
+   * Gets the session at the current usage cursor position.
+   */
+  getSelectedUsageSession(): UsageSessionSummary | null {
+    return this.usageSessions[this.usageCursor] ?? null;
+  }
+
+  /**
+   * Exits usage mode and returns to chat.
+   */
+  exitUsageMode(): void {
+    this.usageSessions = [];
+    this.usageCursor = 0;
+    this.usageViewMode = "list";
+    this.usageDayStats = [];
+    this.usageProviderStats = [];
+    this.usageLoading = false;
+    this.uiMode = "chat";
+    this.emit();
+  }
+
+  // ==================== Response Pane Methods ====================
+
+  /**
+   * Sets response content and enters response mode.
+   */
+  setResponseContent(content: ResponseContent): void {
+    this.responseContent = content;
+    this.uiMode = "response";
+    this.emit();
+  }
+
+  /**
+   * Clears response content and returns to chat mode.
+   */
+  clearResponseContent(): void {
+    this.responseContent = null;
+    this.uiMode = "chat";
     this.emit();
   }
 
@@ -997,27 +1350,38 @@ function buildHistoryLines(
   history: MessageEntry[],
   streamingText: string,
   width: number,
-  compact: boolean,
+  _compact: boolean,
 ): HistoryLine[] {
   const lines: HistoryLine[] = [];
   const safeWidth = Math.max(20, width);
 
   for (const entry of history) {
-    const label = roleLabel(entry.role);
-    const prefix = `${label}: `;
-    const wrapped = wrapText(entry.text || "", safeWidth - prefix.length);
+    const wrapped = wrapText(entry.text || "", safeWidth);
+    const entryLinePrefix = entry.id;
+    let lineIndex = 0;
     const blockStartIndex = lines.length;
 
     wrapped.forEach((line, index) => {
-      const text = index === 0 ? `${prefix}${line}` : `${" ".repeat(prefix.length)}${line}`;
-      lines.push({ text, role: entry.role, isBlockStart: index === 0 });
+      lines.push({
+        id: `${entryLinePrefix}:${lineIndex}`,
+        text: line,
+        role: entry.role,
+        requestId: entry.requestId,
+        isBlockStart: index === 0,
+      });
+      lineIndex += 1;
     });
 
     if (entry.meta) {
-      const metaLines = wrapText(entry.meta, safeWidth - prefix.length);
+      const metaLines = wrapText(entry.meta, safeWidth);
       metaLines.forEach((line) => {
-        const text = `${" ".repeat(prefix.length)}${line}`;
-        lines.push({ text, role: entry.role });
+        lines.push({
+          id: `${entryLinePrefix}:${lineIndex}`,
+          text: line,
+          role: entry.role,
+          requestId: entry.requestId,
+        });
+        lineIndex += 1;
       });
     }
 
@@ -1026,18 +1390,25 @@ function buildHistoryLines(
       lines[lines.length - 1].isBlockEnd = true;
     }
 
-    if (!compact) {
-      lines.push({ text: "" });  // Separator line (no role)
-    }
+    // Add a blank separator line after each message
+    // Use a space character so Ink renders it with actual height
+    lines.push({
+      id: `${entryLinePrefix}:${lineIndex}`,
+      text: " ",
+      role: undefined,
+      requestId: entry.requestId,
+    });
   }
 
   if (streamingText) {
-    const label = roleLabel("agent");
-    const prefix = `${label}: `;
-    const wrapped = wrapText(streamingText, safeWidth - prefix.length);
+    const wrapped = wrapText(streamingText, safeWidth);
     wrapped.forEach((line, index) => {
-      const text = index === 0 ? `${prefix}${line}` : `${" ".repeat(prefix.length)}${line}`;
-      lines.push({ text, role: "agent", isBlockStart: index === 0 });
+      lines.push({
+        id: `stream:${index}`,
+        text: line,
+        role: "agent",
+        isBlockStart: index === 0,
+      });
     });
     if (lines.length > 0 && lines[lines.length - 1].role === "agent") {
       lines[lines.length - 1].isBlockEnd = true;
@@ -1045,21 +1416,6 @@ function buildHistoryLines(
   }
 
   return lines;
-}
-
-function roleLabel(role: Role): string {
-  switch (role) {
-    case "user":
-      return "You";
-    case "agent":
-      return "Agent";
-    case "system":
-      return "System";
-    case "status":
-      return "Status";
-    default:
-      return "Message";
-  }
 }
 
 function wrapText(text: string, width: number): string[] {

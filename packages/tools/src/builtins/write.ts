@@ -13,14 +13,50 @@ import { successResult, errorResult } from 'types';
 import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
 
 /**
+ * Atomically write content to a file using a temporary file.
+ *
+ * This function writes content to a temporary file and then atomically
+ * renames it to the target path. This ensures that either the full write
+ * succeeds or no partial write occurs.
+ *
+ * @param filePath - The target file path to write to
+ * @param content - The content to write
+ * @param encoding - The character encoding to use (default: 'utf-8')
+ * @returns Promise that resolves when the write is complete
+ * @throws Error if the write fails, with temporary file cleaned up
+ */
+async function atomicWrite(
+  filePath: string,
+  content: string,
+  encoding: BufferEncoding = 'utf-8'
+): Promise<void> {
+  const dirPath = dirname(filePath);
+  const tmpPath = resolve(dirPath, `.tmp_${randomBytes(8).toString('hex')}.tmp`);
+
+  try {
+    await writeFile(tmpPath, content, encoding);
+    await rename(tmpPath, filePath);
+  } catch (e) {
+    // Clean up temp file on failure
+    try {
+      await unlink(tmpPath);
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw e;
+  }
+}
+
+/**
  * Write content to a new file (fails if exists).
  */
 export async function executeWrite(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  const path = args.path as string;
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
+  // Accept both camelCase and snake_case parameter names for compatibility
+  const path = (args.path ?? args.file_path) as string;
+  const cwd = context?.workdirOverride ?? process.cwd();
   const content = args.content as string;
 
   if (content === undefined || content === null) {
@@ -50,29 +86,19 @@ export async function executeWrite(
     const dirPath = dirname(resolvedPath);
     await mkdir(dirPath, { recursive: true });
 
-    // Atomic write: write to temp file, then rename
-    const tmpPath = resolve(
-      dirPath,
-      `.tmp_write_${randomBytes(8).toString('hex')}.tmp`
-    );
+    // Atomic write using shared utility
+    await atomicWrite(resolvedPath, content, 'utf-8');
 
-    try {
-      await writeFile(tmpPath, content, 'utf-8');
-      await rename(tmpPath, resolvedPath);
-    } catch (e) {
-      // Clean up temp file on failure
-      try {
-        await unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw e;
-    }
+    // Build informative output so model knows write succeeded
+    const lines = content.split('\n');
+    const lineCount = lines.length;
+    const preview = lines.slice(0, 5).join('\n');
+    const previewSuffix = lineCount > 5 ? `\n... (${lineCount - 5} more lines)` : '';
 
     return {
       ...successResult(
         'Write',
-        `Successfully wrote ${resolvedPath}`,
+        `Created ${resolvedPath} (${content.length} bytes, ${lineCount} lines)\n\nPreview:\n${preview}${previewSuffix}`,
         Date.now() - startTime
       ),
       metadata: {
@@ -95,11 +121,12 @@ export async function executeEdit(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  const path = args.path as string;
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
-  const oldString = args.oldString as string;
-  const newString = args.newString as string;
-  const replaceAll = (args.replaceAll as boolean) ?? false;
+  // Accept both camelCase and snake_case parameter names for compatibility
+  const path = (args.path ?? args.file_path) as string;
+  const cwd = context?.workdirOverride ?? process.cwd();
+  const oldString = (args.oldString ?? args.old_string) as string;
+  const newString = (args.newString ?? args.new_string) as string;
+  const replaceAll = ((args.replaceAll ?? args.replace_all) as boolean) ?? false;
 
   if (!oldString || newString === undefined) {
     return errorResult(
@@ -111,6 +138,7 @@ export async function executeEdit(
 
   const startTime = Date.now();
   const resolvedPath = resolve(cwd, path);
+
 
   try {
     // Read existing content
@@ -176,31 +204,33 @@ export async function executeEdit(
       replacements = 1;
     }
 
-    // Atomic write
-    const dirPath = dirname(resolvedPath);
-    const tmpPath = resolve(
-      dirPath,
-      `.tmp_edit_${randomBytes(8).toString('hex')}.tmp`
-    );
+    // Atomic write using shared utility
+    await atomicWrite(resolvedPath, newContent, 'utf-8');
 
-    try {
-      await writeFile(tmpPath, newContent, 'utf-8');
-      await rename(tmpPath, resolvedPath);
-    } catch (e) {
-      try {
-        await unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw e;
+    // Build informative output with replacement context
+    // Find where the replacement occurred to show context
+    const newLines = newContent.split('\n');
+    const firstNewIdx = newContent.indexOf(newString);
+    let contextLines = '';
+    if (firstNewIdx !== -1) {
+      // Count lines before the replacement
+      const linesBefore = newContent.slice(0, firstNewIdx).split('\n').length - 1;
+      const startLine = Math.max(0, linesBefore - 1);
+      const endLine = Math.min(newLines.length, linesBefore + newString.split('\n').length + 2);
+      contextLines = newLines.slice(startLine, endLine)
+        .map((line, i) => `${startLine + i + 1}: ${line}`)
+        .join('\n');
     }
 
+    const output = [
+      `Edited ${resolvedPath}`,
+      `Replaced ${replacements} occurrence(s)`,
+      '',
+      contextLines ? `Context after edit:\n${contextLines}` : '',
+    ].filter(Boolean).join('\n');
+
     return {
-      ...successResult(
-        'Edit',
-        `Replaced ${replacements} occurrence(s) in ${resolvedPath}`,
-        Date.now() - startTime
-      ),
+      ...successResult('Edit', output, Date.now() - startTime),
       metadata: {
         path: resolvedPath,
         bytesWritten: newContent.length,
@@ -224,22 +254,18 @@ export const writeToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory to resolve relative paths against',
-      },
       path: {
         type: 'string',
-        description: 'Path to the new file (relative to cwd or absolute)',
+        description: 'Path to the new file (relative or absolute)',
       },
       content: {
         type: 'string',
         description: 'Full file content to write',
       },
     },
-    required: ['cwd', 'path', 'content'],
+    required: ['path', 'content'],
   },
-  required: ['cwd', 'path', 'content'],
+  required: ['path', 'content'],
   executor: executeWrite,
   timeoutMs: 10000,
   readOnly: false,
@@ -256,13 +282,9 @@ export const editToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory to resolve relative paths against',
-      },
       path: {
         type: 'string',
-        description: 'Path to the file to edit (relative to cwd or absolute)',
+        description: 'Path to the file to edit (relative or absolute)',
       },
       oldString: {
         type: 'string',
@@ -277,9 +299,9 @@ export const editToolOptions: ToolRegistrationOptions = {
         description: 'Replace all occurrences (default: false)',
       },
     },
-    required: ['cwd', 'path', 'oldString', 'newString'],
+    required: ['path', 'oldString', 'newString'],
   },
-  required: ['cwd', 'path', 'oldString', 'newString'],
+  required: ['path', 'oldString', 'newString'],
   executor: executeEdit,
   timeoutMs: 10000,
   readOnly: false,
@@ -296,6 +318,30 @@ interface EditOperation {
   oldString: string;
   newString: string;
   replaceAll?: boolean;
+}
+
+// Raw edit operation from LLM (may use snake_case)
+interface RawEditOperation {
+  path?: string;
+  file_path?: string;
+  oldString?: string;
+  old_string?: string;
+  newString?: string;
+  new_string?: string;
+  replaceAll?: boolean;
+  replace_all?: boolean;
+}
+
+/**
+ * Normalize edit operation to camelCase.
+ */
+function normalizeEditOperation(raw: RawEditOperation): EditOperation {
+  return {
+    path: (raw.path ?? raw.file_path) as string,
+    oldString: (raw.oldString ?? raw.old_string) as string,
+    newString: (raw.newString ?? raw.new_string) as string,
+    replaceAll: (raw.replaceAll ?? raw.replace_all) ?? false,
+  };
 }
 
 interface ValidationError {
@@ -321,12 +367,15 @@ export async function executeBatchEdit(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
-  const edits = args.edits as EditOperation[];
+  const cwd = context?.workdirOverride ?? process.cwd();
+  const rawEdits = args.edits as RawEditOperation[];
 
-  if (!edits || !Array.isArray(edits) || edits.length === 0) {
+  if (!rawEdits || !Array.isArray(rawEdits) || rawEdits.length === 0) {
     return errorResult('BatchEdit', 'Must provide non-empty edits array', 0);
   }
+
+  // Normalize all edits to camelCase
+  const edits = rawEdits.map(normalizeEditOperation);
 
   const startTime = Date.now();
 
@@ -419,19 +468,10 @@ export async function executeBatchEdit(
       }
     }
 
-    // Atomic write
-    const dirPath = dirname(resolvedPath);
-    const tmpPath = resolve(dirPath, `.tmp_batch_${randomBytes(8).toString('hex')}.tmp`);
-
+    // Atomic write using shared utility
     try {
-      await writeFile(tmpPath, content, 'utf-8');
-      await rename(tmpPath, resolvedPath);
+      await atomicWrite(resolvedPath, content, 'utf-8');
     } catch (e) {
-      try {
-        await unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
       return errorResult(
         'BatchEdit',
         `Write failed for ${resolvedPath}: ${(e as Error).message}`,
@@ -440,12 +480,18 @@ export async function executeBatchEdit(
     }
   }
 
+  // Build detailed output showing what was changed
+  const details = results.map((r) => `  - ${r.path}: ${r.replacements} replacement(s)`).join('\n');
+  const output = [
+    `BatchEdit complete: ${edits.length} edits to ${editsByFile.size} file(s)`,
+    `Total replacements: ${totalReplacements}`,
+    '',
+    'Files modified:',
+    details,
+  ].join('\n');
+
   return {
-    ...successResult(
-      'BatchEdit',
-      `Applied ${edits.length} edits to ${editsByFile.size} file(s)`,
-      Date.now() - startTime
-    ),
+    ...successResult('BatchEdit', output, Date.now() - startTime),
     metadata: {
       success: true,
       filesModified: editsByFile.size,
@@ -464,10 +510,6 @@ export const batchEditToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory to resolve relative paths against',
-      },
       edits: {
         type: 'array',
         description: 'Array of edit operations to apply atomically',
@@ -483,9 +525,9 @@ export const batchEditToolOptions: ToolRegistrationOptions = {
         },
       },
     },
-    required: ['cwd', 'edits'],
+    required: ['edits'],
   },
-  required: ['cwd', 'edits'],
+  required: ['edits'],
   executor: executeBatchEdit,
   timeoutMs: 30000,
   readOnly: false,

@@ -16,14 +16,17 @@ import {
   type AgentConfig,
   type AgentHooks,
   type ToolHookResult,
+  type EnvironmentContext,
   getAgentPrompt,
   buildAgentConfig,
   getPlanningPromptAddendum,
 } from 'agent';
-import { Orchestrator } from 'orchestrator';
-import { createAdapter } from 'llm';
+import os from 'os';
+import { execSync } from 'child_process';
+import { Orchestrator, type ModelOverride } from 'orchestrator';
+import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot } from 'types';
+import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
 import { createWorkItem } from 'work';
 import { coerceStructuredOutput } from 'shared';
@@ -47,7 +50,7 @@ import type {
   AgentRunHandle,
   BridgeEvent,
 } from './types.js';
-import { loadConfig, getAgentConfig } from './config_loader.js';
+import { loadConfig, getAgentConfig, resolveApiKey } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
 import { HookExecutor } from './hook_executor.js';
 import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
@@ -55,14 +58,88 @@ import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './sk
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
 
+/**
+ * Gather environment context for system prompts.
+ * Runs synchronously at startup - git commands are fast.
+ */
+function gatherEnvironmentContext(workingDir: string): EnvironmentContext {
+  const env: EnvironmentContext = {
+    workingDir,
+    platform: process.platform,
+    osVersion: os.release(),
+    date: new Date().toISOString().split('T')[0],
+  };
 
-function buildAgentRegistry(config: FullHarnessConfig): AgentRegistry {
+  try {
+    const isRepo = execSync('git rev-parse --is-inside-work-tree', {
+      cwd: workingDir,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim() === 'true';
+
+    if (isRepo) {
+      const currentBranch = execSync('git branch --show-current', {
+        cwd: workingDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+
+      // Detect main branch (main or master)
+      let mainBranch = 'main';
+      try {
+        execSync('git rev-parse --verify main', {
+          cwd: workingDir,
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch {
+        try {
+          execSync('git rev-parse --verify master', {
+            cwd: workingDir,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          mainBranch = 'master';
+        } catch {
+          // Neither main nor master exists
+        }
+      }
+
+      const status = execSync('git status --short', {
+        cwd: workingDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+
+      const recentCommits = execSync('git log --oneline -5', {
+        cwd: workingDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim().split('\n').filter(Boolean);
+
+      env.git = {
+        isRepo: true,
+        currentBranch: currentBranch || undefined,
+        mainBranch,
+        status: status || undefined,
+        recentCommits: recentCommits.length > 0 ? recentCommits : undefined,
+      };
+    }
+  } catch {
+    env.git = { isRepo: false };
+  }
+
+  return env;
+}
+
+function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentContext): AgentRegistry {
   const agentConfigs: Array<{ config: AgentConfig; llm: LLMRequestConfig }> = Object.entries(config.agents).map(([agentType, resolved]) => {
     return {
-      config: buildAgentConfig(agentType, resolved.tools, resolved.budget, resolved.outputSchema) as AgentConfig,
+      config: buildAgentConfig(agentType, resolved.tools, resolved.budget, resolved.outputSchema, envContext) as AgentConfig,
       llm: {
         model: resolved.llm.model,
         provider: resolved.llm.provider,
+        displayProvider: resolved.llm.displayProvider,  // Original provider name for error messages
         apiKey: resolved.llm.apiKey,
         maxTokens: resolved.llm.maxTokens,
         temperature: resolved.llm.temperature,
@@ -215,7 +292,13 @@ export class AgentHarness {
   private config: FullHarnessConfig;
   private toolRegistry: ToolRegistry;
   private contextWindows = new Map<string, ContextWindow>();
-  private pausedState = new Map<string, { goal: string; agentType: string; workingDir: string; planMode?: boolean }>();
+  private pausedState = new Map<string, {
+    goal: string;
+    agentType: string;
+    workingDir: string;
+    planMode?: boolean;
+    userPromptType?: string;
+  }>();
   private logger: HarnessLogger;
   private isShutdown = false;
   private graphd: GraphDManager | null = null;
@@ -230,18 +313,18 @@ export class AgentHarness {
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
-    this.agentRegistry = buildAgentRegistry(config);
 
-    const apiKeys: Partial<Record<LLMProvider, string>> = {};
-    const baseUrls: Partial<Record<LLMProvider, string>> = {};
-    for (const agent of Object.values(config.agents)) {
-      apiKeys[agent.llm.provider] = agent.llm.apiKey;
-      if (agent.llm.baseUrl) {
-        baseUrls[agent.llm.provider] = agent.llm.baseUrl;
-      }
-    }
+    // Gather environment context once at startup
+    const envContext = gatherEnvironmentContext(config.tools.workingDir);
+    this.agentRegistry = buildAgentRegistry(config, envContext);
 
-    const llmClientConfig: LLMClientConfig = { apiKeys, baseUrls };
+    // NOTE: We don't populate shared apiKeys/baseUrls here because:
+    // 1. Multiple providers (cerebras, z.ai-coder, groq) map to the same canonical 'openai-compat'
+    // 2. Keying by canonical provider causes last-writer-wins collision
+    // 3. Each agent's per-request llm.apiKey and llm.baseUrl are already correctly resolved
+    // The adapter will use per-request config as primary source
+    const llmClientConfig: LLMClientConfig = {};
+
     // Adapt HarnessLogger to AdapterLogger (warning → warn)
     const adapterLogger = {
       debug: this.logger.debug.bind(this.logger),
@@ -250,14 +333,6 @@ export class AgentHarness {
       error: this.logger.error.bind(this.logger),
     };
     this.llmAdapter = createAdapter(llmClientConfig, adapterLogger);
-
-    for (const agent of Object.values(config.agents)) {
-      this.llmAdapter.registerModel?.(
-        agent.llm.model,
-        agent.llm.provider,
-        agent.llm.baseUrl
-      );
-    }
 
     // Create EventBus - central pub/sub for all events
     this.eventBus = new EventBus();
@@ -418,9 +493,22 @@ export class AgentHarness {
 
   /**
    * Check if an API key exists for a provider.
+   * Accepts the actual provider name (e.g., 'z.ai-coder', 'cerebras'), not canonical.
    */
-  hasApiKey(provider: LLMProvider): boolean {
-    return this.llmAdapter.hasApiKey?.(provider) ?? false;
+  hasApiKey(provider: string): boolean {
+    try {
+      const key = resolveApiKey(provider);
+      return !!key;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get the GraphD manager instance.
+   */
+  getGraphD(): GraphDManager | null {
+    return this.graphd;
   }
 
   /**
@@ -613,30 +701,53 @@ export class AgentHarness {
 
         const llmAdapter = this.llmAdapter;
 
+        // Get model override from session metadata if set
+        let modelOverride: ModelOverride | undefined;
+        if (this.isGraphDReady()) {
+          try {
+            const session = this.graphd!.sessionGet(sessionKey);
+            const metadata = session?.metadata as Record<string, unknown> | undefined;
+            const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            if (override?.provider && override?.model) {
+              modelOverride = {
+                provider: override.provider,
+                model: override.model,
+                reasoning: override.reasoning,
+              };
+              this.logger.debug('Using model override from session', { modelOverride });
+            }
+          } catch {
+            // Ignore errors getting model override - use default
+          }
+        }
+
         // All requests go through orchestrator (loop-until-goal architecture)
-        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode);
+        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, modelOverride);
 
         if (result.paused && result.userPrompt) {
+          // Pausing for user input - only emit user prompt event, not response
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
             result.userPrompt.question,
             result.userPrompt.options,
             result.userPrompt.context,
-            result.userPrompt.multiSelect
+            result.userPrompt.multiSelect,
+            result.userPrompt.questionType
           ));
+        } else {
+          // Execution completed (success or failure) - emit response event
+          eventQueue.push(
+            createResponseEvent(
+              requestId,
+              result.success,
+              result.finalText,
+              result.toolsUsed,
+              result.durationMs,
+              result.errorMessage,
+              result.metadata
+            )
+          );
         }
-
-        eventQueue.push(
-          createResponseEvent(
-            requestId,
-            result.success,
-            result.finalText,
-            result.toolsUsed,
-            result.durationMs,
-            result.errorMessage,
-            result.metadata
-          )
-        );
 
         eventQueue.push(createStatusEvent('idle'));
 
@@ -644,6 +755,117 @@ export class AgentHarness {
 
         return result;
       } catch (error) {
+        // Handle RateLimitError specially - persist context and notify user gracefully
+        if (RateLimitError.isRateLimitError(error)) {
+          const rateLimitInfo = error.info;
+          this.logger.warning('Rate limit hit during agent run', {
+            requestId,
+            provider: error.provider,
+            model: error.model,
+            type: rateLimitInfo.type,
+            retryAfterMs: rateLimitInfo.retryAfterMs,
+            limitType: rateLimitInfo.limitType,
+          });
+
+          // Emit rate_limit event for monitoring/dashboards
+          emit(createEvent('rate_limit', {
+            provider: error.provider,
+            model: error.model,
+            type: rateLimitInfo.type,
+            retryAfterMs: rateLimitInfo.retryAfterMs,
+            limitType: rateLimitInfo.limitType,
+            message: rateLimitInfo.message,
+            contextPreserved: true,
+          } as RateLimitData));
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          // Create a user-friendly error message based on rate limit type
+          let userMessage: string;
+          if (rateLimitInfo.type === 'billing') {
+            userMessage = `⚠️ Billing limit reached for ${error.provider}. Please check your account billing status. Your conversation has been saved.`;
+          } else if (rateLimitInfo.type === 'quota') {
+            userMessage = `⚠️ API quota exceeded for ${error.provider} (${rateLimitInfo.limitType ?? 'requests'}). This may be a daily or monthly limit. Your conversation has been saved.`;
+          } else {
+            const waitTime = rateLimitInfo.retryAfterMs
+              ? ` Please wait ${Math.ceil(rateLimitInfo.retryAfterMs / 1000)} seconds and try again.`
+              : ' Please wait a moment and try again.';
+            userMessage = `⚠️ Rate limit reached for ${error.provider}.${waitTime} Your conversation has been saved.`;
+          }
+
+          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Handle CircuitOpenError - circuit breaker tripped, need to wait before retrying
+        if (error instanceof CircuitOpenError) {
+          this.logger.warning('Circuit breaker open', {
+            requestId,
+            message: error.message,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
+
+          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Handle RetriesExhaustedError - all retry attempts failed
+        if (error instanceof RetriesExhaustedError) {
+          const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause ?? '');
+          this.logger.warning('All retries exhausted', {
+            requestId,
+            attempts: error.attempts,
+            cause: causeMessage,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
+
+          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Generic error handling for non-rate-limit errors
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.logger.error('Agent run failed', { error: errorMessage, requestId });
 
@@ -737,144 +959,6 @@ export class AgentHarness {
       this.logger.warning('GraphD persist failed', { error: String(error) });
     }
   }
-
-  /**
-   * Run a single agent without orchestration.
-   * Used for simple tier or any tier that doesn't need multi-agent coordination.
-   */
-  private async runSingleAgent(
-    agentType: string,
-    context: ContextWindow,
-    goal: string,
-    requestId: string,
-    emit: ReturnType<typeof createEventEmitCallback>,
-    llm: ReturnType<typeof createAdapter>,
-    agentConfig: ResolvedAgentConfig,
-    workingDir?: string
-  ): Promise<AgentRunResult> {
-    // Get system prompt from prompts.ts, merge with behavioral rules (skip for simple/routing)
-    const basePrompt = getAgentPrompt(agentType);
-    const skipBehavioralRules = agentType === 'simple' || agentType === 'routing';
-    const systemPrompt = (this.config.behavioralRules && !skipBehavioralRules)
-      ? `${basePrompt}\n\n${this.config.behavioralRules}`
-      : basePrompt;
-
-    const config = {
-      type: agentType,
-      systemPrompt,
-      tools: agentConfig.tools,
-      budget: agentConfig.budget,
-      outputSchema: agentConfig.outputSchema,
-    };
-
-    const llmConfig: LLMRequestConfig = {
-      model: agentConfig.llm.model,
-      provider: agentConfig.llm.provider,
-      apiKey: agentConfig.llm.apiKey,
-      maxTokens: agentConfig.llm.maxTokens,
-      temperature: agentConfig.llm.temperature,
-      baseUrl: agentConfig.llm.baseUrl,
-      reasoning: agentConfig.llm.reasoning,
-      fallback: agentConfig.llm.fallback,
-    };
-
-    const agent = new Agent(config, {
-      llm,
-      toolRegistry: this.toolRegistry,
-      emit,
-      requestId,
-      agentRegistry: this.agentRegistry,
-      llmConfig,
-    });
-
-    const workItem = createWorkItem({
-      goal,
-      objective: goal,
-      agent: agentType,
-      bounds: {
-        maxToolCalls: agentConfig.budget.maxToolCalls,
-        maxDurationMs: agentConfig.budget.maxDurationMs,
-        maxLlmCalls: agentConfig.budget.maxIterations,
-      },
-    });
-
-    emit(createEvent('workitem_status', {
-      workId: workItem.workId,
-      objective: workItem.objective,
-      delta: workItem.delta,
-      agent: workItem.agent,
-      dependencies: [...workItem.dependencies],
-      status: 'started',
-    }, workItem.workId));
-
-    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-    const result = await agent.run({ globalContext: context, workItem, cwd: effectiveWorkingDir });
-
-    if (!result.needsUserInput) {
-      if (result.success) {
-        emit(createEvent('workitem_status', {
-          workId: workItem.workId,
-          objective: workItem.objective,
-          delta: workItem.delta,
-          agent: workItem.agent,
-          dependencies: [...workItem.dependencies],
-          status: 'completed',
-          response: result.response,
-          metrics: {
-            llmCallsMade: result.metrics.llmCallsMade,
-            toolCallsMade: result.metrics.toolCallsMade,
-            durationMs: result.metrics.durationMs,
-          },
-        }, workItem.workId));
-
-        emit(createEvent('goal_achieved', {
-          goal,
-          completed: 1,
-          skipped: 0,
-        }));
-      } else {
-        emit(createEvent('workitem_status', {
-          workId: workItem.workId,
-          objective: workItem.objective,
-          delta: workItem.delta,
-          agent: workItem.agent,
-          dependencies: [...workItem.dependencies],
-          status: 'failed',
-          error: result.error ?? 'Unknown error',
-          toolErrors: result.toolErrors,
-          terminationReason: result.terminationReason,
-        }, workItem.workId));
-
-        emit(createEvent('goal_not_achieved', {
-          goal,
-          reason: result.error ?? 'Unknown error',
-          completed: 0,
-          failed: 1,
-          skipped: 0,
-        }));
-      }
-    }
-
-    return {
-      requestId,
-      sessionKey: context.sessionKey,
-      success: result.success,
-      finalText: result.response,
-      errorMessage: result.error,
-      paused: result.needsUserInput,
-      userPrompt: result.needsUserInput && result.userPrompt ? {
-        requestId,
-        question: String(result.userPrompt.question ?? 'Please provide input:'),
-        options: result.userPrompt.options,
-        context: result.userPrompt.context,
-        multiSelect: result.userPrompt.multiSelect,
-      } : undefined,
-      toolsUsed: [],
-      durationMs: result.metrics.durationMs,
-      metadata: { tier: agentType, metrics: result.metrics },
-    };
-  }
-
   /**
    * Filter tools for plan mode - removes write/edit capabilities.
    */
@@ -941,7 +1025,8 @@ export class AgentHarness {
     llm: ReturnType<typeof createAdapter>,
     agentType: AgentType = 'standard',
     workingDir?: string,
-    planMode?: boolean
+    planMode?: boolean,
+    modelOverride?: ModelOverride
   ): Promise<AgentRunResult> {
     const hooks = this.createAgentHooks(context.sessionKey, requestId);
 
@@ -962,7 +1047,8 @@ export class AgentHarness {
       this.agentRegistry,
       hooks,
       planModeOptions,
-      this.eventBus
+      this.eventBus,
+      modelOverride
     );
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
@@ -971,7 +1057,13 @@ export class AgentHarness {
 
     // Store paused state for resume, or clear it on completion
     if (result.paused) {
-      this.pausedState.set(context.sessionKey, { goal, agentType, workingDir: effectiveWorkingDir, planMode });
+      this.pausedState.set(context.sessionKey, {
+        goal,
+        agentType,
+        workingDir: effectiveWorkingDir,
+        planMode,
+        userPromptType: result.userPrompt?.questionType,
+      });
     } else {
       this.pausedState.delete(context.sessionKey);
     }
@@ -989,69 +1081,12 @@ export class AgentHarness {
         options: result.userPrompt.options,
         context: result.userPrompt.context,
         multiSelect: result.userPrompt.multiSelect,
+        questionType: result.userPrompt.questionType,
       } : undefined,
       toolsUsed: [],
       durationMs: result.metrics.durationMs,
       metadata: { agentType, metrics: result.metrics },
     };
-  }
-
-  /**
-   * Route a request to determine tier.
-   * Uses agents.routing config from harness_config.json.
-   */
-  private async route(goal: string, requestId?: string): Promise<AgentType> {
-    const startTime = Date.now();
-    const routingAgentConfig = getAgentConfig(this.config, 'routing');
-    const routingPrompt = getAgentPrompt('routing');
-
-    const routingAdapter = this.llmAdapter;
-
-    const response = await routingAdapter.respond({
-      messages: [
-        { role: 'system', content: routingPrompt },
-        { role: 'user', content: goal },
-      ],
-      llm: {
-        model: routingAgentConfig.llm.model,
-        provider: routingAgentConfig.llm.provider,
-        apiKey: routingAgentConfig.llm.apiKey,
-        maxTokens: routingAgentConfig.llm.maxTokens,
-        temperature: routingAgentConfig.llm.temperature,
-        baseUrl: routingAgentConfig.llm.baseUrl,
-        reasoning: routingAgentConfig.llm.reasoning,
-        fallback: routingAgentConfig.llm.fallback,
-      },
-      responseSchema: routingAgentConfig.outputSchema,
-    });
-
-    const content = response.content?.toLowerCase().trim() ?? '';
-    const structured = coerceStructuredOutput(response.content);
-    const tierValue =
-      structured && typeof structured.tier === 'string'
-        ? structured.tier.toLowerCase().trim()
-        : '';
-    this.logger.debug('Routing agent response', {
-      content: tierValue || content,
-      model: response.model,
-      stopReason: response.stopReason,
-    });
-    this.eventBus.publish(createEvent('llm_call', {
-      agentType: 'routing',
-      promptPreview: routingPrompt.slice(0, 4000),
-      responsePreview: (tierValue || content).slice(0, 4000),
-      totalTokens: response.usage?.totalTokens ?? 0,
-      promptTokens: response.usage?.promptTokens ?? 0,
-      completionTokens: response.usage?.completionTokens ?? 0,
-      durationMs: Date.now() - startTime,
-      model: response.model ?? routingAgentConfig.llm.model,
-      toolCallsCount: response.toolCalls?.length ?? 0,
-      toolNames: [],
-      messageCount: 2,
-    }, undefined, requestId));
-    if (tierValue.includes('simple') || content.includes('simple')) return 'simple';
-    if (tierValue.includes('complex') || content.includes('complex')) return 'complex';
-    return 'standard';
   }
 
   /**
@@ -1066,7 +1101,7 @@ export class AgentHarness {
     const paused = this.pausedState.get(sessionKey);
     if (!paused) {
       const errorMessage = 'No paused session found for this sessionKey';
-      eventQueue.push(createErrorEvent(errorMessage, true));
+      eventQueue.push(createErrorEvent(errorMessage, false));
       eventQueue.push(createStatusEvent('error', errorMessage));
       const resultPromise = Promise.resolve({
         requestId,
@@ -1098,8 +1133,48 @@ export class AgentHarness {
         const answerText = typeof answer === 'string' ? answer : JSON.stringify(answer);
         contextWindow.addMessage('user', answerText);
 
+        // Get model override from session metadata if set
+        let modelOverride: ModelOverride | undefined;
+        if (this.isGraphDReady()) {
+          try {
+            const session = this.graphd!.sessionGet(sessionKey);
+            const metadata = session?.metadata as Record<string, unknown> | undefined;
+            const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            if (override?.provider && override?.model) {
+              modelOverride = {
+                provider: override.provider,
+                model: override.model,
+                reasoning: override.reasoning,
+              };
+            }
+          } catch {
+            // Ignore errors getting model override - use default
+          }
+        }
+
+        const isPlanModeExit = paused.userPromptType === 'plan_mode_exit';
+        const normalizedAnswer = typeof answer === 'string'
+          ? answer.trim().toLowerCase()
+          : answer;
+        const approvedHandoff = isPlanModeExit && (
+          normalizedAnswer === '0' ||
+          normalizedAnswer === 'yes' ||
+          normalizedAnswer === 'y' ||
+          normalizedAnswer === 'true' ||
+          normalizedAnswer === 0 ||
+          normalizedAnswer === true
+        );
+
+        if (approvedHandoff) {
+          contextWindow.addMessage(
+            'system',
+            'User approved handoff. Immediately call Skill({ skill: "handoff" }) and do not continue planning.'
+          );
+        }
+
         // Re-run orchestrator with the stored goal/agentType/workingDir
         const effectiveWorkingDir = workingDir ?? paused.workingDir;
+        const planMode = approvedHandoff ? false : paused.planMode;
         const result = await this.runOrchestrator(
           contextWindow,
           paused.goal,
@@ -1108,36 +1183,139 @@ export class AgentHarness {
           this.llmAdapter,
           paused.agentType,
           effectiveWorkingDir,
-          paused.planMode
+          planMode,
+          modelOverride
         );
 
         if (result.paused && result.userPrompt) {
+          // Pausing for user input - only emit user prompt event, not response
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
             result.userPrompt.question,
             result.userPrompt.options,
             result.userPrompt.context,
-            result.userPrompt.multiSelect
+            result.userPrompt.multiSelect,
+            result.userPrompt.questionType
           ));
+        } else {
+          // Execution completed (success or failure) - emit response event
+          eventQueue.push(
+            createResponseEvent(
+              requestId,
+              result.success,
+              result.finalText,
+              result.toolsUsed,
+              result.durationMs,
+              result.errorMessage,
+              result.metadata
+            )
+          );
         }
-
-        eventQueue.push(
-          createResponseEvent(
-            requestId,
-            result.success,
-            result.finalText,
-            result.toolsUsed,
-            result.durationMs,
-            result.errorMessage,
-            result.metadata
-          )
-        );
 
         eventQueue.push(createStatusEvent('idle'));
         this.persistContext(contextWindow);
 
         return result;
       } catch (error) {
+        // Handle RateLimitError specially - persist context and notify user gracefully
+        if (RateLimitError.isRateLimitError(error)) {
+          const rateLimitInfo = error.info;
+          this.logger.warning('Rate limit hit during resume', {
+            requestId,
+            provider: error.provider,
+            model: error.model,
+            type: rateLimitInfo.type,
+            retryAfterMs: rateLimitInfo.retryAfterMs,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          // Create a user-friendly error message
+          let userMessage: string;
+          if (rateLimitInfo.type === 'billing') {
+            userMessage = `⚠️ Billing limit reached for ${error.provider}. Please check your account billing status. Your conversation has been saved.`;
+          } else if (rateLimitInfo.type === 'quota') {
+            userMessage = `⚠️ API quota exceeded for ${error.provider}. This may be a daily or monthly limit. Your conversation has been saved.`;
+          } else {
+            const waitTime = rateLimitInfo.retryAfterMs
+              ? ` Please wait ${Math.ceil(rateLimitInfo.retryAfterMs / 1000)} seconds and try again.`
+              : ' Please wait a moment and try again.';
+            userMessage = `⚠️ Rate limit reached for ${error.provider}.${waitTime} Your conversation has been saved.`;
+          }
+
+          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Handle CircuitOpenError - circuit breaker tripped
+        if (error instanceof CircuitOpenError) {
+          this.logger.warning('Circuit breaker open during resume', {
+            requestId,
+            message: error.message,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
+
+          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Handle RetriesExhaustedError - all retry attempts failed
+        if (error instanceof RetriesExhaustedError) {
+          const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause ?? '');
+          this.logger.warning('All retries exhausted during resume', {
+            requestId,
+            attempts: error.attempts,
+            cause: causeMessage,
+          });
+
+          // Persist context so user doesn't lose work
+          this.persistContext(contextWindow);
+
+          const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
+
+          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: userMessage,
+            errorMessage: error.message,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
+        }
+
+        // Generic error handling
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.logger.error('Resume failed', { error: errorMessage, requestId });
 

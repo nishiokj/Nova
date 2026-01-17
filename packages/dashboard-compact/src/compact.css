@@ -792,3 +792,11 @@ body {
   color: var(--muted);
   text-transform: uppercase;
 }
+
+/* ================================
+   DAILY METRICS TABLE
+   ================================ */
+
+.daily-table {
+  max-width: 700px;
+}

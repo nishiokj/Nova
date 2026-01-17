@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import path from "path";
 import { fileURLToPath } from "url";
-import { BridgeClient } from "./bridge_client.js";
+import { BridgeClient, type ConnectionState } from "./bridge_client.js";
 import { FileCache } from "./file_cache.js";
 import { Store } from "./store.js";
 import { HELP_LINES, parseSlashCommand } from "./commands.js";
@@ -19,10 +19,15 @@ import {
   type MessageEntry,
   type Role,
   type BridgeCommandType,
+  type ProviderKeyRequiredData,
+  type ModelChangedData,
   type UserPromptData,
   type UserPromptQuestion,
   type AgentQuestion,
   type QuestionType,
+  type UsageSessionSummary,
+  type UsageDayStats,
+  type UsageProviderStats,
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
@@ -30,8 +35,13 @@ import { useMouse } from "./useMouse.js";
 import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
 import { QuestionPrompt } from "./components/QuestionPrompt.js";
 import { ProvidersView } from "./components/ProvidersView.js";
+import { ResponsePane, parseDiffToResponseContent } from "./components/ResponsePane.js";
+import { SessionsView } from "./components/SessionsView.js";
+import { UsageView } from "./components/UsageView.js";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
+import { formatDiffAsText } from "./diff.js";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
@@ -42,6 +52,9 @@ interface GraphDSession {
   status: string;
   working_dir: string | null;
   last_accessed_at: number;
+  created_at: number;
+  client_type: string;
+  metadata_json?: string;
 }
 
 function resolveGraphdUrl(): string {
@@ -62,9 +75,29 @@ function resolveBusConfig(): { host: string; port: number } {
   };
 }
 
+// Fetch with timeout to prevent indefinite hangs
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 10000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function fetchGraphdSessions(): Promise<GraphDSession[]> {
   const baseUrl = resolveGraphdUrl();
-  const response = await fetch(`${baseUrl}/export?table=sessions`);
+  const response = await fetchWithTimeout(`${baseUrl}/export?table=sessions`);
   if (!response.ok) {
     throw new Error(`GraphD export failed (${response.status})`);
   }
@@ -78,14 +111,199 @@ async function fetchGraphdSessions(): Promise<GraphDSession[]> {
 
 async function deleteGraphdSession(sessionKey: string): Promise<boolean> {
   const baseUrl = resolveGraphdUrl();
-  const response = await fetch(`${baseUrl}/session/${encodeURIComponent(sessionKey)}`, {
-    method: "DELETE",
-  });
+  const response = await fetchWithTimeout(
+    `${baseUrl}/session/${encodeURIComponent(sessionKey)}`,
+    { method: "DELETE" }
+  );
   if (!response.ok) {
     return false;
   }
   const payload = (await response.json()) as { deleted?: boolean };
   return payload.deleted === true;
+}
+
+interface GraphDMessage {
+  session_key: string;
+  request_id: string;
+  role: string;
+  content: string;
+  timestamp: number;
+  metadata_json?: string;
+}
+
+/**
+ * Fetch usage data from GraphD and compute session summaries.
+ */
+async function fetchUsageData(): Promise<{
+  sessions: UsageSessionSummary[];
+  dayStats: UsageDayStats[];
+  providerStats: UsageProviderStats[];
+}> {
+  const baseUrl = resolveGraphdUrl();
+
+  // Fetch sessions and messages in parallel
+  const [sessionsResponse, messagesResponse] = await Promise.all([
+    fetchWithTimeout(`${baseUrl}/export?table=sessions`),
+    fetchWithTimeout(`${baseUrl}/export?table=conversation_messages`),
+  ]);
+
+  if (!sessionsResponse.ok) {
+    throw new Error(`GraphD sessions export failed (${sessionsResponse.status})`);
+  }
+
+  const sessionsPayload = (await sessionsResponse.json()) as { data?: string };
+  const rawSessions: GraphDSession[] = sessionsPayload.data
+    ? sessionsPayload.data.split("\n").filter(Boolean).map((line) => JSON.parse(line) as GraphDSession)
+    : [];
+
+  // Parse messages if available
+  let rawMessages: GraphDMessage[] = [];
+  if (messagesResponse.ok) {
+    const messagesPayload = (await messagesResponse.json()) as { data?: string };
+    if (messagesPayload.data) {
+      rawMessages = messagesPayload.data
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as GraphDMessage);
+    }
+  }
+
+  // Group messages by session
+  const messagesBySession = new Map<string, GraphDMessage[]>();
+  for (const msg of rawMessages) {
+    const list = messagesBySession.get(msg.session_key) ?? [];
+    list.push(msg);
+    messagesBySession.set(msg.session_key, list);
+  }
+
+  // Build session summaries
+  const now = Date.now() / 1000;
+  const staleThreshold = 5 * 60; // 5 minutes
+
+  const sessions: UsageSessionSummary[] = rawSessions.map((raw) => {
+    const messages = messagesBySession.get(raw.session_key) ?? [];
+    const meta = raw.metadata_json ? JSON.parse(raw.metadata_json) : {};
+
+    // Compute token metrics from agent_events if available
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let llmCallCount = 0;
+    let toolCallCount = 0;
+    let requestCount = 0;
+    const providerTokens = new Map<string, number>();
+
+    const agentEvents = meta.agent_events as unknown[] | undefined;
+    if (agentEvents && Array.isArray(agentEvents)) {
+      const seenRequests = new Set<string>();
+      for (const event of agentEvents) {
+        const e = event as Record<string, unknown>;
+        const eventType = e.type as string;
+        const requestId = (e.request_id as string) ?? (e.requestId as string);
+        if (requestId && !seenRequests.has(requestId)) {
+          seenRequests.add(requestId);
+          requestCount++;
+        }
+
+        if (eventType === "llm_call") {
+          const data = (e.data ?? {}) as Record<string, unknown>;
+          const promptTokens = (data.prompt_tokens as number) ?? (data.promptTokens as number) ?? 0;
+          const completionTokens = (data.completion_tokens as number) ?? (data.completionTokens as number) ?? 0;
+          inputTokens += promptTokens;
+          outputTokens += completionTokens;
+          llmCallCount++;
+
+          const provider = (data.provider as string) ?? "unknown";
+          providerTokens.set(provider, (providerTokens.get(provider) ?? 0) + promptTokens);
+        } else if (eventType === "tool_call") {
+          toolCallCount++;
+        }
+      }
+    }
+
+    // Determine status
+    let status: "active" | "idle" | "ended" = "idle";
+    if (raw.status === "closed" || raw.status === "expired") {
+      status = "ended";
+    } else if (now - raw.last_accessed_at <= staleThreshold) {
+      status = "active";
+    }
+
+    const projectName = raw.working_dir?.split("/").pop() ?? "unknown";
+    const durationMs = (raw.last_accessed_at - raw.created_at) * 1000;
+
+    return {
+      sessionKey: raw.session_key,
+      status,
+      projectName,
+      workingDir: raw.working_dir,
+      createdAt: raw.created_at,
+      lastAccessedAt: raw.last_accessed_at,
+      requestCount,
+      inputTokens,
+      outputTokens,
+      llmCallCount,
+      toolCallCount,
+      durationMs,
+      providerTokens,
+    };
+  });
+
+  // Sort by last accessed (most recent first)
+  sessions.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+
+  // Compute day stats
+  const dayStatsMap = new Map<string, UsageDayStats>();
+  for (const session of sessions) {
+    const date = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+    const existing = dayStatsMap.get(date) ?? {
+      date,
+      inputTokens: 0,
+      outputTokens: 0,
+      requestCount: 0,
+      llmCallCount: 0,
+    };
+    existing.inputTokens += session.inputTokens;
+    existing.outputTokens += session.outputTokens;
+    existing.requestCount += session.requestCount;
+    existing.llmCallCount += session.llmCallCount;
+    dayStatsMap.set(date, existing);
+  }
+  const dayStats = Array.from(dayStatsMap.values()).sort((a, b) => b.date.localeCompare(a.date));
+
+  // Compute provider stats from actual provider data
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  const providerStatsMap = new Map<string, { today: number; week: number; month: number }>();
+
+  for (const session of sessions) {
+    const sessionDate = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+
+    // Aggregate tokens by provider from actual session data
+    for (const [provider, tokens] of session.providerTokens) {
+      const existing = providerStatsMap.get(provider) ?? { today: 0, week: 0, month: 0 };
+
+      if (sessionDate === todayDate) {
+        existing.today += tokens;
+      }
+      if (sessionDate >= weekAgo) {
+        existing.week += tokens;
+      }
+      if (sessionDate >= monthAgo) {
+        existing.month += tokens;
+      }
+
+      providerStatsMap.set(provider, existing);
+    }
+  }
+
+  const providerStats: UsageProviderStats[] = Array.from(providerStatsMap.entries()).map(([provider, stats]) => ({
+    provider,
+    ...stats,
+  }));
+
+  return { sessions, dayStats, providerStats };
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -247,15 +465,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       });
     }, 5000);
 
-    store.addMessage("system", "Indexing files for autocomplete...");
-    fileCache
-      .buildInitial()
-      .then(() => {
-        store.addMessage("system", "Autocomplete ready.");
-      })
-      .catch(() => {
-        store.addMessage("system", "Autocomplete indexing failed.");
-      });
+    fileCache.buildInitial();
 
     // Create bridge client (remote harness connection)
     const { host, port } = resolveBusConfig();
@@ -267,8 +477,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     });
 
     client.on("error", (payload) => {
-      const message = typeof payload?.message === "string" ? payload.message : "Agent error";
-      store.setError(message);
+      const message = typeof payload?.message === "string" ? payload.message : "Connection error";
+      store.batch(() => {
+        store.addMessage("system", message);
+        store.setError(message);
+      });
+    });
+
+    // Connection state changes - show status and handle reconnection
+    client.on("connection_state", (state: ConnectionState) => {
+      switch (state) {
+        case "connecting":
+          store.setStatus("Connecting to bridge...");
+          break;
+        case "connected":
+          store.batch(() => {
+            store.clearError();
+            store.setStatus("Connected");
+          });
+          break;
+        case "reconnecting":
+          store.setStatus("Connection lost. Reconnecting...");
+          break;
+        case "disconnected":
+          store.setError("Disconnected from bridge");
+          break;
+      }
     });
 
     void client
@@ -280,6 +514,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           log_transcripts: options.logTranscripts,
           working_dir: process.cwd(),
         };
+        // Only use explicit session key from CLI (e.g., --session <key>)
         if (options.sessionKey) {
           initData.session_key = options.sessionKey;
         }
@@ -294,8 +529,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       });
 
     // Cleanup function for both useEffect and signal handlers
+    // Gracefully closes session before disconnecting
     const cleanup = () => {
-      client.close();
+      // Signal session close to harness (don't await - best effort)
+      // This marks the session as inactive so it shows correctly in /sessions
+      client.sessionClose().catch(() => {
+        // Ignore errors during cleanup - connection may already be closed
+      });
+      // Small delay to allow the close message to be sent
+      setTimeout(() => {
+        client.close();
+      }, 50);
       clearInterval(refreshInterval);
       logger.close();
     };
@@ -344,38 +588,51 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   });
 
   const handleBridgeEvent = (event: BridgeEvent) => {
-    switch (event.type) {
-      case "ready":
-        handleReady(event.data as ReadyData | undefined);
-        break;
-      case "status":
-        handleStatus(event.data as StatusData | undefined);
-        break;
-      case "progress":
-        handleProgress(event.data as ProgressData | undefined);
-        break;
-      case "stream":
-        handleStream(event.data as StreamData | undefined);
-        break;
-      case "response":
-        handleResponse(event.data as ResponseData | undefined);
-        break;
-      case "transcription":
-        handleTranscription(event.data as TranscriptionData | undefined);
-        break;
-      case "user_prompt":
-        handleUserPrompt(event.data as UserPromptData | undefined);
-        break;
-      case "error":
-        handleError(event.data as ErrorData | undefined);
-        break;
-      default:
-        break;
+    try {
+      switch (event.type) {
+        case "ready":
+          handleReady(event.data as ReadyData | undefined);
+          break;
+        case "status":
+          handleStatus(event.data as StatusData | undefined);
+          break;
+        case "progress":
+          handleProgress(event.data as ProgressData | undefined);
+          break;
+        case "stream":
+          handleStream(event.data as StreamData | undefined);
+          break;
+        case "response":
+          handleResponse(event.data as ResponseData | undefined);
+          break;
+        case "transcription":
+          handleTranscription(event.data as TranscriptionData | undefined);
+          break;
+        case "user_prompt":
+          handleUserPrompt(event.data as UserPromptData | undefined);
+          break;
+        case "error":
+          handleError(event.data as ErrorData | undefined);
+          break;
+        case "provider_key_required":
+          handleProviderKeyRequired(event.data as ProviderKeyRequiredData | undefined);
+          break;
+        case "model_changed":
+          handleModelChanged(event.data as ModelChangedData | undefined);
+          break;
+        default:
+          break;
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      store.batch(() => {
+        store.addMessage("system", `Event processing error: ${errorMessage}`);
+        store.setError(errorMessage);
+      });
     }
   };
 
   const handleReady = async (data?: ReadyData) => {
-    store.addMessage("system", "Bridge ready.");
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
     }
@@ -412,10 +669,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Send initial prompt if provided (from standalone launcher)
     if (initialPrompt && clientRef.current) {
       const requestId = `ink_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
-      store.addMessage("user", initialPrompt);
-      store.incrementRequestCount();
-      store.clearProgress();
-      store.setState("sending");
+      store.batch(() => {
+        store.addMessage("user", initialPrompt);
+        store.incrementRequestCount();
+        store.clearProgress();
+        store.setState("sending");
+      });
       loggerRef.current?.transcript("user", initialPrompt);
       sendCommand("send_text", {
         text: initialPrompt,
@@ -445,6 +704,34 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     const message = data.tool_name ? `${data.tool_name}: ${data.message}` : data.message;
     store.setProgress(message, data.level, data.kind);
+
+    // For Edit tool completions with arguments, render diff in history
+    if (data.tool_name === "Edit" && data.tool_args && data.tool_success !== undefined) {
+      const args = data.tool_args;
+      // Handle both camelCase (internal) and snake_case (Claude API) parameter names
+      const oldStr = typeof args.oldString === "string" ? args.oldString
+        : typeof args.old_string === "string" ? args.old_string : "";
+      const newStr = typeof args.newString === "string" ? args.newString
+        : typeof args.new_string === "string" ? args.new_string : "";
+      const filePath = typeof args.path === "string" ? args.path
+        : typeof args.file_path === "string" ? args.file_path : undefined;
+
+      if (oldStr || newStr) {
+        // Use current terminal width for full-width diff line padding
+        const currentWidth = widthRef.current;
+        // Don't pass filePath - we'll build header ourselves with tool status
+        const diffLines = formatDiffAsText(oldStr, newStr, undefined, 3, currentWidth);
+        const diffText = diffLines.join("\n");
+        const status = data.tool_success ? "✓" : "✗";
+        const duration = data.duration_ms ? ` (${data.duration_ms}ms)` : "";
+        // Compute stats for header
+        const addedCount = diffLines.filter(l => l.match(/^\s*\d+\s+\+ /)).length;
+        const removedCount = diffLines.filter(l => l.match(/^\s*\d+\s+- /)).length;
+        const stats = `+${addedCount} / -${removedCount}`;
+        const header = filePath ? `${status} Edit ${filePath}  ${stats}${duration}` : `${status} Edit${duration}`;
+        store.addMessage("system", `${header}\n${diffText}`);
+      }
+    }
   };
 
   const handleStream = (data?: StreamData) => {
@@ -462,12 +749,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     if (data.is_final) {
       const finalText = store.getSnapshot().streamingText;
-      if (!messageExists(store.getSnapshot().history, data.request_id)) {
-        store.addMessage("agent", finalText, undefined, data.request_id);
-      }
-      store.finalizeStreaming();
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        if (!messageExists(store.getSnapshot().history, data.request_id)) {
+          store.addMessage("agent", finalText, undefined, data.request_id);
+        }
+        store.finalizeStreaming();
+        store.clearProgress();
+        store.setState("idle");
+      });
     }
   };
 
@@ -480,9 +769,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       : [];
     if (action === "list") {
       const items = Array.isArray(payload?.items) ? (payload?.items as Record<string, unknown>[]) : [];
-      store.setSkillsList(items, errors);
-      store.setUIMode("skills");
-      store.scrollToBottom();
+      store.batch(() => {
+        store.setSkillsList(items, errors);
+        store.setUIMode("skills");
+        store.scrollToBottom();
+      });
       return;
     }
     // Skills are read-only in TUI. To create/edit, use the agent with Write/Edit.
@@ -500,9 +791,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       : [];
     if (action === "list") {
       const items = Array.isArray(payload?.items) ? (payload?.items as Record<string, unknown>[]) : [];
-      store.setHooksList(items, errors);
-      store.setUIMode("hooks");
-      store.scrollToBottom();
+      store.batch(() => {
+        store.setHooksList(items, errors);
+        store.setUIMode("hooks");
+        store.scrollToBottom();
+      });
       return;
     }
     // Hooks are read-only in TUI. To create/edit, use the agent with Write/Edit.
@@ -525,47 +818,62 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         : typeof metadata.error === "string"
           ? metadata.error
           : "";
-    if (kind === "config" || kind === "models" || kind === "status") {
+    if (kind === "config" || kind === "status") {
       if (content) {
+        store.addMessage("system", content);
+      }
+      return;
+    }
+    if (kind === "models") {
+      const payload = metadata.payload as Array<{ id: string; name: string; provider?: string }> | undefined;
+      if (payload && Array.isArray(payload)) {
+        store.setModelsList(payload);
+      } else if (content) {
         store.addMessage("system", content);
       }
       return;
     }
     if (kind === "skills") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
-      handleSkillsPayload(payload, content);
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        handleSkillsPayload(payload, content);
+        store.clearProgress();
+        store.setState("idle");
+      });
       return;
     }
     if (kind === "hooks") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
-      handleHooksPayload(payload, content);
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        handleHooksPayload(payload, content);
+        store.clearProgress();
+        store.setState("idle");
+      });
       return;
     }
     if (kind === "compact_context") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
-      if (payload?.success) {
-        const itemsRemoved = payload.itemsRemoved ?? 0;
-        const bytesRecovered = payload.bytesRecovered ?? 0;
-        store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
-      } else {
-        const errorMsg = payload?.error ?? "Unknown error";
-        store.addMessage("system", `Context compaction failed: ${errorMsg}`);
-      }
-      store.clearProgress();
-      store.setState("idle");
+      store.batch(() => {
+        if (payload?.success) {
+          const itemsRemoved = payload.itemsRemoved ?? 0;
+          const bytesRecovered = payload.bytesRecovered ?? 0;
+          store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
+        } else {
+          const errorMsg = payload?.error ?? "Unknown error";
+          store.addMessage("system", `Context compaction failed: ${errorMsg}`);
+        }
+        store.clearProgress();
+        store.setState("idle");
+      });
       return;
     }
 
     const requestId = data.request_id ?? undefined;
     const metaLines: string[] = [];
-    if (data.duration_ms) {
+    if (data.duration_ms != null) {
       metaLines.push(`Duration: ${Math.round(data.duration_ms)}ms`);
     }
-    if (data.tools_used && data.tools_used.length > 0) {
+    if (data.tools_used?.length) {
       metaLines.push(`Tools: ${data.tools_used.join(", ")}`);
     }
     if (error) {
@@ -574,34 +882,37 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     const meta = metaLines.length ? metaLines.join("\n") : undefined;
 
-    if (requestId && meta) {
-      store.updateMessageMeta(requestId, meta);
-    }
-
-    if (!content && error) {
-      if (requestId && messageExists(store.getSnapshot().history, requestId)) {
-        store.updateMessageText(requestId, `Error: ${error}`, meta);
-      } else {
-        store.addMessage("system", `Error: ${error}`);
+    // Batch all final state updates for a single render
+    store.batch(() => {
+      if (requestId && meta) {
+        store.updateMessageMeta(requestId, meta);
       }
-    } else if (!content && data.success === false) {
-      const fallback = "Error: Request failed with no details. Check logs for diagnostics.";
-      if (requestId && messageExists(store.getSnapshot().history, requestId)) {
-        store.updateMessageText(requestId, fallback, meta);
-      } else {
-        store.addMessage("system", fallback);
+
+      if (!content && error) {
+        if (requestId && messageExists(store.getSnapshot().history, requestId)) {
+          store.updateMessageText(requestId, `Error: ${error}`, meta);
+        } else {
+          store.addMessage("system", `Error: ${error}`);
+        }
+      } else if (!content && data.success === false) {
+        const fallback = "Error: Request failed with no details. Check logs for diagnostics.";
+        if (requestId && messageExists(store.getSnapshot().history, requestId)) {
+          store.updateMessageText(requestId, fallback, meta);
+        } else {
+          store.addMessage("system", fallback);
+        }
       }
-    }
 
-    if (content && requestId && messageExists(store.getSnapshot().history, requestId)) {
-      store.updateMessageText(requestId, content, meta);
-    } else if (content && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
-      store.addMessage("agent", content, meta, requestId);
-    }
+      if (content && requestId && messageExists(store.getSnapshot().history, requestId)) {
+        store.updateMessageText(requestId, content, meta);
+      } else if (content && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
+        store.addMessage("agent", content, meta, requestId);
+      }
 
-    store.finalizeStreaming();
-    store.clearProgress();
-    store.setState("idle");
+      store.finalizeStreaming();
+      store.clearProgress();
+      store.setState("idle");
+    });
   };
 
   const handleTranscription = (data?: TranscriptionData) => {
@@ -680,23 +991,50 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.setActiveQuestion(question, data.request_id);
   };
 
+  const handleProviderKeyRequired = (data?: ProviderKeyRequiredData) => {
+    const provider = data?.provider;
+    const model = data?.model;
+    const message = provider
+      ? model
+        ? `API key required for provider "${provider}" to use model "${model}".`
+        : `API key required for provider "${provider}".`
+      : "API key required to continue.";
+    store.batch(() => {
+      store.addMessage("system", message);
+      store.setUIMode("providers");
+    });
+  };
+
+  const handleModelChanged = (data?: ModelChangedData) => {
+    if (!data?.model) return;
+    const provider = data.provider ? ` [${data.provider}]` : "";
+    store.batch(() => {
+      store.setSelectedModel(data.model ?? null);
+      store.addMessage("system", `Active model set to "${data.model}"${provider}.`);
+    });
+  };
+
   const handleError = (data?: ErrorData) => {
-    if (!data?.message) {
-      return;
+    const message = data?.message ?? "An error occurred";
+    let detailText = "";
+    if (data?.detail !== undefined) {
+      if (typeof data.detail === "string") {
+        detailText = data.detail;
+      } else {
+        try {
+          detailText = JSON.stringify(data.detail, null, 2);
+        } catch {
+          detailText = "[Unable to serialize error details]";
+        }
+      }
     }
-    const detailText =
-      data.detail === undefined
-        ? ""
-        : typeof data.detail === "string"
-          ? data.detail
-          : JSON.stringify(data.detail, null, 2);
     const detail = detailText ? `\n${detailText}` : "";
-    store.addMessage("system", `${data.message}${detail}`);
-    store.setError(data.message);
-    if (data.fatal) {
-      setTimeout(() => {
-        exit();
-      }, 50);
+    store.batch(() => {
+      store.addMessage("system", `${message}${detail}`);
+      store.setError(message);
+    });
+    if (data?.fatal) {
+      store.addMessage("system", "Fatal error reported by harness. UI will remain open; restart if needed.");
     }
   };
 
@@ -801,12 +1139,25 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
-    // Skills/hooks/providers list modes - escape to return to chat, block all other input
-    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks" || snapshot.uiMode === "providers") {
+    // Skills/hooks/providers/usage list modes - escape to return to chat, block all other input
+    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks" || snapshot.uiMode === "providers" || snapshot.uiMode === "usage") {
       if (key.escape) {
-        store.setUIMode("chat");
+        if (snapshot.uiMode === "usage") {
+          store.exitUsageMode();
+        } else {
+          store.setUIMode("chat");
+        }
       }
       // Block all input in these modes - they have their own handlers
+      return;
+    }
+
+    // Response mode - escape to return to chat
+    if (snapshot.uiMode === "response") {
+      if (key.escape) {
+        store.clearResponseContent();
+      }
+      // Block all input in response mode
       return;
     }
 
@@ -840,6 +1191,82 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       // Consume all other input in theme mode
+      return;
+    }
+
+    // Models selection mode
+    if (snapshot.uiMode === "models") {
+      if (key.escape) {
+        store.exitModelsMode();
+        return;
+      }
+
+      if (key.upArrow) {
+        store.moveModelsCursor(-1);
+        return;
+      }
+
+      if (key.downArrow) {
+        store.moveModelsCursor(1);
+        return;
+      }
+
+      if (key.return) {
+        const selectedModel = store.selectModel();
+        if (selectedModel) {
+          store.addMessage("system", `Model set to "${selectedModel.name}" (${selectedModel.id}).`);
+          // Send command to update model in harness
+          sendCommand("set_model", {
+            provider: selectedModel.provider,
+            model: selectedModel.id,
+          });
+        }
+        store.exitModelsMode();
+        return;
+      }
+
+      // Consume all other input in models mode
+      return;
+    }
+
+    // Sessions selection mode
+    if (snapshot.uiMode === "sessions") {
+      if (key.escape) {
+        store.exitSessionsMode();
+        return;
+      }
+
+      if (key.upArrow) {
+        store.moveSessionsCursor(-1);
+        return;
+      }
+
+      if (key.downArrow) {
+        store.moveSessionsCursor(1);
+        return;
+      }
+
+      if (key.return) {
+        const selected = store.getSelectedSession();
+        if (selected) {
+          store.exitSessionsMode();
+          store.addMessage("system", `Switching to session ${selected.sessionKey}...`);
+
+          const client = clientRef.current;
+          if (client) {
+            client.send({
+              type: "init",
+              data: {
+                session_key: selected.sessionKey,
+                working_dir: selected.workingDir ?? process.cwd(),
+              },
+            });
+          }
+        }
+        return;
+      }
+
+      // Consume all other input in sessions mode
       return;
     }
 
@@ -880,8 +1307,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           if (questionType === "plan_mode_exit") {
             const selectedIdx = snapshot.questionSelection[0];
             if (selectedIdx === 0) {
-              store.setPlanMode(false);
-              store.addMessage("system", "Plan mode disabled. Full tool access restored.");
+              store.batch(() => {
+                store.setPlanMode(false);
+                store.addMessage("system", "Plan mode disabled. Full tool access restored.");
+              });
             }
           }
 
@@ -945,11 +1374,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
         // Regular text input
         if (input && !key.ctrl && !key.meta) {
-          // Filter control chars and bracketed paste sequence remnants
+          // Filter control chars and escape sequence fragments that leak through
           const printable = input
-            .replace(/[\x00-\x1f\x7f]/g, "")
-            .replace(/\[200~/g, "")
-            .replace(/\[201~/g, "");
+            .replace(/[\x00-\x1f\x7f]/g, "")  // Control characters
+            .replace(/\[200~/g, "")            // Bracketed paste start
+            .replace(/\[201~/g, "")            // Bracketed paste end
+            .replace(/\[[ABCD]/g, "")          // Arrow key fragments [A, [B, [C, [D
+            .replace(/O[ABCD]/g, "")           // Alt arrow key fragments OA, OB, OC, OD
+            .replace(/\[\d+~/g, "")            // Function/special keys [5~, [6~, etc.
+            .replace(/\[\d+;\d+[~ABCDHF]/g, "")// Modified keys with parameters
+            .replace(/\[<\d+;\d+;\d+[Mm]/g, "")// Mouse sequences
+            .replace(/\[?\[/g, "");            // Leftover brackets from sequences
           if (printable) {
             store.appendQuestionInput(printable);
           }
@@ -976,7 +1411,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     if (snapshot.state === "error") {
       store.clearError();
-      return;
     }
 
     if (snapshot.uiMode === "chat" && handleVoiceKeys(input, key)) {
@@ -1086,16 +1520,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         effectiveText = text.slice(prefixLen).trim();
         if (effectiveText && !effectivePlanMode) {
           effectivePlanMode = true;
-          store.setPlanMode(true);
-          store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
         }
       }
 
-      store.addMessage("user", effectiveText);
-      store.clearInput();
-      store.incrementRequestCount();
-      store.clearProgress();
-      store.setState("sending");
+      store.batch(() => {
+        if (effectivePlanMode && !snapshot.planMode) {
+          store.setPlanMode(true);
+          store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
+        }
+        store.addMessage("user", effectiveText);
+        store.clearInput();
+        store.incrementRequestCount();
+        store.clearProgress();
+        store.setState("sending");
+      });
       loggerRef.current?.transcript("user", effectiveText);
 
       sendCommand("send_text", {
@@ -1108,8 +1546,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     if (key.tab) {
       if (snapshot.autocomplete.active) {
-        store.acceptAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.batch(() => {
+          store.acceptAutocomplete();
+          store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        });
       }
       return;
     }
@@ -1132,6 +1572,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       store.moveCursor(1);
       refreshAutocomplete();
       store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      return;
+    }
+
+    // Shift+Up/Down for scrolling history (more intuitive than PageUp/Down)
+    if (key.upArrow && key.shift) {
+      store.scrollBy(1, maxScrollRef.current);
+      return;
+    }
+
+    if (key.downArrow && key.shift) {
+      store.scrollBy(-1, maxScrollRef.current);
       return;
     }
 
@@ -1203,11 +1654,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     // Only insert printable characters (filter out control chars that weren't handled above)
     if (input && !key.ctrl && !key.meta) {
-      // Filter out control characters (ASCII 0-31 and 127)
-      // Also filter out mouse escape sequence fragments like "[<0;29;36M" or "[<64;10;5m"
+      // Filter control chars and escape sequence fragments that leak through
       const printable = input
-        .replace(/[\x00-\x1f\x7f]/g, "")
-        .replace(/\[?<\d+;\d+;\d+[Mm]/g, "");
+        .replace(/[\x00-\x1f\x7f]/g, "")       // Control characters
+        .replace(/\[200~/g, "")                 // Bracketed paste start
+        .replace(/\[201~/g, "")                 // Bracketed paste end
+        .replace(/\[[ABCD]/g, "")               // Arrow key fragments [A, [B, [C, [D
+        .replace(/O[ABCD]/g, "")                // Alt arrow key fragments OA, OB, OC, OD
+        .replace(/\[\d+~/g, "")                 // Function/special keys [5~, [6~, etc.
+        .replace(/\[\d+;\d+[~ABCDHF]/g, "")     // Modified keys with parameters
+        .replace(/\[<\d+;\d+;\d+[Mm]/g, "")     // Mouse sequences
+        .replace(/\[?\[/g, "");                 // Leftover brackets from sequences
       if (printable) {
         store.insertInput(printable);
         refreshAutocomplete();
@@ -1314,6 +1771,57 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
   };
 
+  const startSessionsFlow = async () => {
+    const client = clientRef.current;
+    if (!client) {
+      store.addMessage("system", "Client not connected.");
+      return;
+    }
+
+    store.addMessage("system", "Fetching recoverable sessions...");
+    try {
+      const result = await client.listSessions({
+        status: ["active", "inactive"],
+        limit: 20,
+      });
+
+      if (!result.success) {
+        store.addMessage("system", `Failed to fetch sessions: ${result.error ?? "Unknown error"}`);
+        return;
+      }
+
+      if (result.sessions.length === 0) {
+        store.addMessage("system", "No recoverable sessions found.");
+        return;
+      }
+
+      // Convert to SessionEntry format and enter sessions selection mode
+      store.setSessionsList(result.sessions);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      store.addMessage("system", `Failed to fetch sessions: ${message}`);
+    }
+  };
+
+  const startUsageFlow = async () => {
+    store.setUsageLoading(true);
+    store.setUIMode("usage");
+
+    try {
+      const { sessions, dayStats, providerStats } = await fetchUsageData();
+      store.batch(() => {
+        store.setUsageSessions(sessions);
+        store.setUsageAnalytics(dayStats, providerStats);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      store.batch(() => {
+        store.addMessage("system", `Failed to fetch usage data: ${message}`);
+        store.exitUsageMode();
+      });
+    }
+  };
+
   const handleSlashCommand = (command: string, arg?: string) => {
     switch (command) {
       case "/help":
@@ -1334,6 +1842,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       case "/hooks":
         handleHooksCommand(arg);
         return;
+      case "/sessions":
+        void startSessionsFlow();
+        return;
+      case "/usage":
+        void startUsageFlow();
+        return;
       case "/delete":
         void startDeleteFlow(arg);
         return;
@@ -1343,13 +1857,15 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       case "/plan": {
         const currentPlanMode = snapshot.planMode;
-        store.setPlanMode(!currentPlanMode);
-        store.addMessage(
-          "system",
-          !currentPlanMode
-            ? "Plan mode enabled. Write/Edit tools disabled. Agent will explore and plan before implementing."
-            : "Plan mode disabled. Full tool access restored."
-        );
+        store.batch(() => {
+          store.setPlanMode(!currentPlanMode);
+          store.addMessage(
+            "system",
+            !currentPlanMode
+              ? "Plan mode enabled. Write/Edit tools disabled. Agent will explore and plan before implementing."
+              : "Plan mode disabled. Full tool access restored."
+          );
+        });
         return;
       }
       case "/theme": {
@@ -1368,13 +1884,15 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           store.addMessage("system", "Voice mode not available.");
           return;
         }
-        store.setVoiceMode(enabled);
-        store.addMessage(
-          "system",
-          enabled
-            ? "Voice mode enabled. Hold SPACE to record, press SPACE or Esc to stop."
-            : "Voice mode disabled.",
-        );
+        store.batch(() => {
+          store.setVoiceMode(enabled);
+          store.addMessage(
+            "system",
+            enabled
+              ? "Voice mode enabled. Hold SPACE to record, press SPACE or Esc to stop."
+              : "Voice mode disabled.",
+          );
+        });
         return;
       }
       case "/clear":
@@ -1497,7 +2015,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   // Header lines with theme colors
   const headerConfig: Array<{ text: string; color?: string; bold?: boolean }> = [
-    { text: `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}`, color: colors.accent, bold: true },
+    { text: `Bloom ${snapshot.compact ? " [compact]" : ""}`, color: colors.accent, bold: true },
     { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}${snapshot.planMode ? " | [PLAN]" : ""}`, color: colors.muted },
     { text: `Status: ${statusText}`, color: statusColor },
     { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
@@ -1618,7 +2136,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // Question mode: show QuestionPrompt instead of input box
   const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
   const isThemeMode = snapshot.uiMode === "theme";
+  const isModelsMode = snapshot.uiMode === "models";
+  const isSessionsMode = snapshot.uiMode === "sessions";
   const isProvidersMode = snapshot.uiMode === "providers";
+  const isUsageMode = snapshot.uiMode === "usage";
+  const isResponseMode = snapshot.uiMode === "response" && snapshot.responseContent;
 
   // Theme selector rendering
   const renderThemeSelector = () => {
@@ -1649,6 +2171,39 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     );
   };
 
+  // Models selector rendering
+  const renderModelsSelector = () => {
+    const colors = getColors();
+    const currentModel = store.getSelectedModel();
+    return (
+      <Box flexDirection="column" paddingX={2} paddingY={1}>
+        <Text bold color={colors.accent}>Select Model</Text>
+        <Text color={colors.muted}>Use ↑↓ to navigate, Enter to select, Esc to cancel</Text>
+        <Text> </Text>
+        {snapshot.modelsList.map((model, index) => {
+          const isSelected = index === snapshot.modelsCursor;
+          const isCurrent = model.id === currentModel;
+          const pointer = isSelected ? "▸ " : "  ";
+          const marker = isCurrent ? " (current)" : "";
+          const provider = model.provider;
+          return (
+            <Text key={`${provider ?? 'unknown'}:${model.id}`}>
+              <Text color={isSelected ? colors.accent : colors.muted}>{pointer}</Text>
+              <Text color={isSelected ? colors.text : colors.muted} bold={isSelected}>
+                {model.name}
+              </Text>
+              {provider && <Text color={colors.muted}> [{provider}]</Text>}
+              <Text color={colors.muted}>{marker}</Text>
+            </Text>
+          );
+        })}
+      </Box>
+    );
+  };
+
+  // Sessions selector uses the SessionsView component
+  const sessionsHeight = historyHeight + inputBoxHeight;
+
   return (
     <Box flexDirection="column" width={width}>
       {headerConfig.map((item, index) => (
@@ -1661,13 +2216,19 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           // Pad user lines to full width for consistent background
           const paddedText = isUserLine ? line.text.padEnd(width, " ") : line.text;
           return (
-            <Text key={`hist-${index}`} backgroundColor={bgColor}>
+            <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
               <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
             </Text>
           );
         })}
       </Box>
-      {isProvidersMode ? (
+      {isResponseMode ? (
+        <ResponsePane
+          content={snapshot.responseContent!}
+          width={width}
+          height={historyHeight + inputBoxHeight}
+        />
+      ) : isProvidersMode ? (
         <ProvidersView
           width={width}
           bridgeClient={clientRef.current}
@@ -1675,6 +2236,31 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         />
       ) : isThemeMode ? (
         renderThemeSelector()
+      ) : isModelsMode ? (
+        renderModelsSelector()
+      ) : isSessionsMode ? (
+        <SessionsView
+          sessions={snapshot.sessionsList}
+          cursor={snapshot.sessionsCursor}
+          currentSessionKey={snapshot.sessionKey}
+          width={width}
+          height={sessionsHeight}
+        />
+      ) : isUsageMode ? (
+        <UsageView
+          sessions={snapshot.usageSessions}
+          cursor={snapshot.usageCursor}
+          viewMode={snapshot.usageViewMode}
+          dayStats={snapshot.usageDayStats}
+          providerStats={snapshot.usageProviderStats}
+          loading={snapshot.usageLoading}
+          width={width}
+          height={sessionsHeight}
+          onMoveCursor={(delta) => store.moveUsageCursor(delta)}
+          onSetViewMode={(mode) => store.setUsageViewMode(mode)}
+          onRefresh={() => void startUsageFlow()}
+          onClose={() => store.exitUsageMode()}
+        />
       ) : isQuestionMode ? (
         <QuestionPrompt
           question={snapshot.activeQuestion!}
@@ -1743,30 +2329,95 @@ function levelColor(level?: string | null): string | undefined {
 }
 
 /** Syntax highlight patterns - use color keys, resolved at runtime */
-type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic";
-const syntaxPatterns: Array<{ pattern: RegExp; colorKey: ColorKey; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
+type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg";
+
+// Hardcoded diff colors - bright and consistent regardless of theme
+const DIFF_ADD_FG = "#ffffff";    // White text for visibility
+const DIFF_ADD_BG = "#166534";    // Solid green background
+const DIFF_REMOVE_FG = "#ffffff"; // White text for visibility
+const DIFF_REMOVE_BG = "#991b1b"; // Solid red background
+const DIFF_CONTEXT_FG = "#d4d4d8"; // Light grey text for context lines
+const DIFF_CONTEXT_BG = "#27272a"; // Darker grey background for context
+
+const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: ColorKey; hardcodedColor?: string; hardcodedBg?: string; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
+  // Diff/Edit tool header - format: "✓ Edit /path/to/file.ts  +3 / -2 (123ms)"
+  { pattern: /^[✓✗] Edit .+$/gm, colorKey: "diffHeader", bgKey: "diffHeaderBg", bold: true },
+  // Diff lines with line numbers - format: "  42 + content" or "  42 - content" or "  42   content"
+  { pattern: /^\s*\d+\s+\+ .*$/gm, hardcodedColor: DIFF_ADD_FG, hardcodedBg: DIFF_ADD_BG },
+  { pattern: /^\s*\d+\s+- .*$/gm, hardcodedColor: DIFF_REMOVE_FG, hardcodedBg: DIFF_REMOVE_BG },
+  { pattern: /^\s*\d+\s{3}.*$/gm, hardcodedColor: DIFF_CONTEXT_FG, hardcodedBg: DIFF_CONTEXT_BG },
+
+  // Horizontal rules (---, ***, ___)
+  { pattern: /^[-*_]{3,}\s*$/gm, colorKey: "hr", transform: (s) => "─".repeat(Math.max(3, s.trim().length)) },
+
+  // Markdown table separator row (|---|---|) - convert to box drawing
+  { pattern: /^\|?[\s:]*-{3,}[\s:]*\|[\s|:\-]+\|?\s*$/gm, colorKey: "border", transform: (s) => {
+    return s.replace(/\|/g, "┼").replace(/-+/g, (m) => "─".repeat(m.length)).replace(/^┼/, "├").replace(/┼$/, "┤").replace(/┼\s*$/, "┤");
+  }},
+
+  // Markdown table rows (| cell | cell |) - style the pipes
+  { pattern: /^\|.+\|\s*$/gm, colorKey: "text", transform: (s) => s.replace(/\|/g, "│") },
+
   // Markdown headers (### Header text) - strip the hashes and bold
   { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
+
+  // Blockquotes (> text) - preserve the > marker styled
+  { pattern: /^>\s+.+$/gm, colorKey: "blockquote", italic: true, transform: (s) => "│ " + s.slice(2) },
+
+  // Unordered list items (- item, * item, + item)
+  { pattern: /^[\s]*[-*+]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/[-*+]/, "•") },
+
+  // Numbered list items (1. item, 2. item)
+  { pattern: /^[\s]*\d+\.\s+/gm, colorKey: "listBullet" },
+
+  // Task list items (- [ ] or - [x])
+  { pattern: /^[\s]*[-*+]\s+\[[ xX]\]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/\[[ ]\]/, "☐").replace(/\[[xX]\]/, "☑").replace(/[-*+]/, "") },
+
+  // Strikethrough (~~text~~)
+  { pattern: /~~[^~]+~~/g, colorKey: "strikethrough", transform: (s) => s.slice(2, -2) },
+
+  // Markdown links [text](url) - render as "text" with link color
+  { pattern: /\[([^\]]+)\]\([^)]+\)/g, colorKey: "linkText", transform: (s) => {
+    const match = s.match(/\[([^\]]+)\]/);
+    return match ? match[1] : s;
+  }},
+
   // Bold text (**text** or __text__)
   { pattern: /\*\*[^*]+\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
   { pattern: /__[^_]+__/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
+
   // Italic text (*text* or _text_) - single asterisk/underscore, not followed by another
   { pattern: /(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
   { pattern: /(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
+
   // Inline code
-  { pattern: /`[^`]+`/g, colorKey: "code", bold: true },
-  // Code blocks (```...```)
+  { pattern: /`[^`]+`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
+
+  // Code block delimiters (``` or ```language on their own line)
+  { pattern: /^```\w*\s*$/gm, colorKey: "border", transform: (s) => {
+    const langMatch = s.match(/```(\w+)/);
+    const lang = langMatch ? ` ${langMatch[1]} ` : "";
+    return "─".repeat(3) + lang + "─".repeat(Math.max(0, 10 - lang.length));
+  }},
+
+  // Code blocks (multiline ```...```) - fallback, just color
   { pattern: /```[\s\S]*?```/g, colorKey: "code" },
-  // URLs
-  { pattern: /https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },
+
+  // URLs (standalone, not inside markdown links)
+  { pattern: /(?<!\]\()https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },
+
   // File paths
-  { pattern: /\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },
+  { pattern: /(?<!\w)\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },
+
   // Durations
   { pattern: /\b\d+(?:\.\d+)?\s*(?:ms|s|sec|min|m|h|hr)s?\b/gi, colorKey: "number" },
-  // [tool_name]
-  { pattern: /\[[a-z_][a-z0-9_]*\]/gi, colorKey: "func", bold: true },
+
+  // [tool_name] - but not markdown image/link syntax
+  { pattern: /(?<!!)\[[a-z_][a-z0-9_]*\](?!\()/gi, colorKey: "func", bold: true },
+
   // ClassName.method()
   { pattern: /\b[A-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)*\(\)/g, colorKey: "func" },
+
   // function_name()
   { pattern: /\b[a-z_][a-zA-Z0-9_]*\(\)/g, colorKey: "func" },
 ];
@@ -1774,19 +2425,34 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey: ColorKey; bold?: boolea
 interface TextSegment {
   text: string;
   color?: string;
+  backgroundColor?: string;
   bold?: boolean;
   italic?: boolean;
 }
 
+const MAX_PARSE_TEXT_LENGTH = 20000;
+const PARSE_CACHE_LIMIT = 200;
+const parseCache = new Map<string, TextSegment[]>();
+
 /** Parse text into styled segments for syntax highlighting */
 function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
+  if (text.length > MAX_PARSE_TEXT_LENGTH) {
+    return [{ text, color: baseColor }];
+  }
+
+  const cacheKey = `${baseColor ?? ""}::${text}`;
+  const cached = parseCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const colors = getColors();
   const segments: TextSegment[] = [];
 
   // Find all matches with positions
-  const matches: Array<{ start: number; end: number; text: string; displayText: string; color: string; bold?: boolean; italic?: boolean }> = [];
+  const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean }> = [];
 
-  for (const { pattern, colorKey, bold, italic, transform } of syntaxPatterns) {
+  for (const { pattern, colorKey, bgKey, hardcodedColor, hardcodedBg, bold, italic, transform } of syntaxPatterns) {
     const regex = new RegExp(pattern.source, pattern.flags);
     let m;
     while ((m = regex.exec(text)) !== null) {
@@ -1797,7 +2463,8 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
         end: m.index + matchedText.length,
         text: matchedText,
         displayText,
-        color: colors[colorKey],
+        color: hardcodedColor ?? (colorKey ? colors[colorKey] : undefined),
+        backgroundColor: hardcodedBg ?? (bgKey ? colors[bgKey] : undefined),
         bold,
         italic,
       });
@@ -1821,14 +2488,22 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
     if (m.start > pos) {
       segments.push({ text: text.slice(pos, m.start), color: baseColor });
     }
-    segments.push({ text: m.displayText, color: m.color, bold: m.bold, italic: m.italic });
+    segments.push({ text: m.displayText, color: m.color, backgroundColor: m.backgroundColor, bold: m.bold, italic: m.italic });
     pos = m.end;
   }
   if (pos < text.length) {
     segments.push({ text: text.slice(pos), color: baseColor });
   }
 
-  return segments.length > 0 ? segments : [{ text, color: baseColor }];
+  const result = segments.length > 0 ? segments : [{ text, color: baseColor }];
+  if (parseCache.size >= PARSE_CACHE_LIMIT) {
+    const oldestKey = parseCache.keys().next().value;
+    if (oldestKey) {
+      parseCache.delete(oldestKey);
+    }
+  }
+  parseCache.set(cacheKey, result);
+  return result;
 }
 
 /** Render text with syntax highlighting */
@@ -1838,7 +2513,7 @@ function StyledLine({ text, baseColor }: { text: string; baseColor?: string }): 
   return (
     <>
       {segments.map((seg, i) => (
-        <Text key={i} color={seg.color} bold={seg.bold} italic={seg.italic}>
+        <Text key={i} color={seg.color} backgroundColor={seg.backgroundColor} bold={seg.bold} italic={seg.italic}>
           {seg.text}
         </Text>
       ))}
@@ -1899,22 +2574,59 @@ const options = parseArgs(process.argv.slice(2));
 // Global cleanup reference for signal handlers
 let globalCleanup: (() => void) | null = null;
 
+// Double-cleanup guard to prevent race condition on rapid signals
+let cleanupCalled = false;
+
 // Handle graceful shutdown on signals
 const handleSignal = (signal: string) => {
+  if (cleanupCalled) return;
+  cleanupCalled = true;
+
   console.log(`\nReceived ${signal}, shutting down gracefully...`);
   if (globalCleanup) {
     globalCleanup();
   }
-  // Give cleanup time to complete before exit
-  setTimeout(() => process.exit(0), 1000);
+  // Give cleanup time to complete before exit (session close + connection close)
+  setTimeout(() => process.exit(0), 500);
 };
+
+// Process-level last resort handlers - catch anything that slips through
+process.on('uncaughtException', (error: Error) => {
+  console.error('\n[FATAL] Uncaught exception:', error.message);
+  console.error(error.stack);
+
+  // Attempt cleanup
+  if (globalCleanup && !cleanupCalled) {
+    cleanupCalled = true;
+    try {
+      globalCleanup();
+    } catch {
+      // Cleanup failed, nothing more we can do
+    }
+  }
+
+  // Exit with error code after brief delay for cleanup
+  setTimeout(() => process.exit(1), 100);
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  console.error('\n[ERROR] Unhandled promise rejection:', message);
+  // Don't exit for unhandled rejections - log and continue
+  // The specific operation failed but the app can continue
+});
 
 process.on('SIGINT', () => handleSignal('SIGINT'));
 process.on('SIGTERM', () => handleSignal('SIGTERM'));
+process.on('SIGHUP', () => handleSignal('SIGHUP'));
 
 // Export cleanup setter for App component
 export const setGlobalCleanup = (cleanup: () => void) => {
   globalCleanup = cleanup;
 };
 
-render(<App options={options} />);
+render(
+  <ErrorBoundary>
+    <App options={options} />
+  </ErrorBoundary>
+);

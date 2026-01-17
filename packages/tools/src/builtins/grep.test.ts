@@ -42,7 +42,7 @@ describe('executeGrep', () => {
     it('should find simple string pattern', async () => {
       await writeFile(join(tempDir, 'test.ts'), 'function hello() {\n  return "world";\n}');
 
-      const result = await executeGrep({ pattern: 'hello', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'hello' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('test.ts');
@@ -55,7 +55,7 @@ describe('executeGrep', () => {
         'const foo = 1;\nconst foobar = 2;\nconst bazfoo = 3;'
       );
 
-      const result = await executeGrep({ pattern: 'foo', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'foo' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       // Should find 3 matches
@@ -68,7 +68,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, 'b.ts'), 'also pattern');
       await writeFile(join(tempDir, 'c.ts'), 'no match');
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('a.ts');
@@ -79,7 +79,7 @@ describe('executeGrep', () => {
     it('should report no matches found', async () => {
       await writeFile(join(tempDir, 'test.ts'), 'nothing to find here');
 
-      const result = await executeGrep({ pattern: 'xyz123', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'xyz123' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('No matches found');
@@ -90,7 +90,7 @@ describe('executeGrep', () => {
     it('should support regex wildcards', async () => {
       await writeFile(join(tempDir, 'regex.ts'), 'foo123bar\nfoo456bar\nfooxyzbar');
 
-      const result = await executeGrep({ pattern: 'foo.*bar', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'foo.*bar' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.matchCount).toBe(3);
@@ -99,7 +99,7 @@ describe('executeGrep', () => {
     it('should support character classes', async () => {
       await writeFile(join(tempDir, 'class.ts'), 'cat\nhat\nbat\nrat');
 
-      const result = await executeGrep({ pattern: '[chb]at', cwd: tempDir });
+      const result = await executeGrep({ pattern: '[chb]at' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('cat');
@@ -114,7 +114,7 @@ describe('executeGrep', () => {
         'start of line\nmiddle start\nend of line\nline end'
       );
 
-      const result = await executeGrep({ pattern: '^start', cwd: tempDir });
+      const result = await executeGrep({ pattern: '^start' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain(':1:');
@@ -124,7 +124,7 @@ describe('executeGrep', () => {
     it('should return error for invalid regex', async () => {
       await writeFile(join(tempDir, 'test.ts'), 'content');
 
-      const result = await executeGrep({ pattern: '[invalid', cwd: tempDir });
+      const result = await executeGrep({ pattern: '[invalid' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(false);
       expect(result.error).toContain('Invalid regex');
@@ -133,7 +133,7 @@ describe('executeGrep', () => {
     it('should support quantifiers (+, *, ?)', async () => {
       await writeFile(join(tempDir, 'quant.ts'), 'color\ncolour\ncolouur\nclr');
 
-      const result = await executeGrep({ pattern: 'colou?r', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'colou?r' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('color');
@@ -144,7 +144,7 @@ describe('executeGrep', () => {
     it('should support alternation (|)', async () => {
       await writeFile(join(tempDir, 'alt.ts'), 'dog\ncat\nbird\nfish');
 
-      const result = await executeGrep({ pattern: 'dog|cat', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'dog|cat' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('dog');
@@ -155,7 +155,7 @@ describe('executeGrep', () => {
     it('should support word boundaries', async () => {
       await writeFile(join(tempDir, 'word.ts'), 'log\nlogging\nblog\nlogical');
 
-      const result = await executeGrep({ pattern: '\\blog\\b', cwd: tempDir });
+      const result = await executeGrep({ pattern: '\\blog\\b' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain(':1:');
@@ -167,7 +167,7 @@ describe('executeGrep', () => {
     it('should be case insensitive by default', async () => {
       await writeFile(join(tempDir, 'case.ts'), 'Hello\nhello\nHELLO');
 
-      const result = await executeGrep({ pattern: 'hello', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'hello' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.matchCount).toBe(3);
@@ -178,9 +178,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: 'hello',
-        cwd: tempDir,
         caseSensitive: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.matchCount).toBe(1);
@@ -192,9 +191,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: '[A-Z]bc',
-        cwd: tempDir,
         caseSensitive: true,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('Abc');
@@ -209,7 +207,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, 'src', 'index.ts'), 'pattern');
       await writeFile(join(tempDir, 'src', 'components', 'Button.ts'), 'pattern');
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('root.ts');
@@ -222,7 +220,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, 'node_modules', 'pkg', 'index.js'), 'pattern');
       await writeFile(join(tempDir, 'src.ts'), 'pattern');
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('src.ts');
@@ -234,7 +232,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, '__pycache__', 'module.cpython-39.pyc'), 'pattern');
       await writeFile(join(tempDir, 'module.py'), 'pattern');
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).not.toContain('__pycache__');
@@ -245,7 +243,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, '.git', 'config'), 'pattern');
       await writeFile(join(tempDir, 'source.ts'), 'pattern');
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).not.toContain('.git');
@@ -256,7 +254,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, 'compiled.pyc'), 'pattern');
       await writeFile(join(tempDir, 'binary.so'), 'pattern');
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('source.py');
@@ -274,9 +272,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: 'pattern',
-        cwd: tempDir,
         path: 'src',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('src/file.ts');
@@ -289,9 +286,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: 'pattern',
-        cwd: tempDir,
         path: 'target.ts',
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('target.ts');
@@ -303,9 +299,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: 'pattern',
-        cwd: '/some/other/dir',
         path: tempDir,
-      });
+      }, { workdirOverride: '/some/other/dir' });
 
       expect(result.isSuccess).toBe(true);
     });
@@ -315,7 +310,7 @@ describe('executeGrep', () => {
     it('should include file path, line number, and content', async () => {
       await writeFile(join(tempDir, 'format.ts'), 'line 1\nmatch here\nline 3');
 
-      const result = await executeGrep({ pattern: 'match', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'match' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toMatch(/format\.ts:2:.*match here/);
@@ -327,7 +322,7 @@ describe('executeGrep', () => {
         'no\nno\nno\nfound\nno\nfound\nno'
       );
 
-      const result = await executeGrep({ pattern: 'found', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'found' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain(':4:');
@@ -338,7 +333,7 @@ describe('executeGrep', () => {
       const longLine = 'x'.repeat(300) + 'pattern' + 'y'.repeat(300);
       await writeFile(join(tempDir, 'long.ts'), longLine);
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       // Line should be truncated
@@ -355,9 +350,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: 'pattern',
-        cwd: tempDir,
         maxResults: 5,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.matchCount).toBe(5);
@@ -370,9 +364,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: 'pattern',
-        cwd: tempDir,
         maxResults: 10,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.truncated).toBe(false);
@@ -383,7 +376,7 @@ describe('executeGrep', () => {
       const lines = Array(30).fill('pattern').join('\n');
       await writeFile(join(tempDir, 'default.ts'), lines);
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.metadata?.matchCount).toBe(20);
@@ -392,7 +385,7 @@ describe('executeGrep', () => {
   });
 
   describe('Context handling', () => {
-    it('should use context.workdirOverride when cwd not provided', async () => {
+    it('should use context.workdirOverride', async () => {
       await writeFile(join(tempDir, 'context.ts'), 'pattern');
 
       const result = await executeGrep(
@@ -403,28 +396,13 @@ describe('executeGrep', () => {
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('context.ts');
     });
-
-    it('should prefer args.cwd over context.workdirOverride', async () => {
-      await mkdir(join(tempDir, 'a'), { recursive: true });
-      await mkdir(join(tempDir, 'b'), { recursive: true });
-      await writeFile(join(tempDir, 'a', 'file.ts'), 'pattern');
-      await writeFile(join(tempDir, 'b', 'file.ts'), 'other');
-
-      const result = await executeGrep(
-        { pattern: 'pattern', cwd: join(tempDir, 'a') },
-        { workdirOverride: join(tempDir, 'b') }
-      );
-
-      expect(result.isSuccess).toBe(true);
-      expect(result.output).toContain('file.ts');
-    });
   });
 
   describe('Edge cases', () => {
     it('should handle empty files', async () => {
       await writeFile(join(tempDir, 'empty.ts'), '');
 
-      const result = await executeGrep({ pattern: 'anything', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'anything' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('No matches found');
@@ -433,14 +411,14 @@ describe('executeGrep', () => {
     it('should handle files with only whitespace', async () => {
       await writeFile(join(tempDir, 'whitespace.ts'), '   \n\n   \n');
 
-      const result = await executeGrep({ pattern: 'content', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'content' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('No matches found');
     });
 
     it('should handle empty directory', async () => {
-      const result = await executeGrep({ pattern: 'anything', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'anything' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('No matches found');
@@ -449,7 +427,7 @@ describe('executeGrep', () => {
     it('should handle files with Unicode content', async () => {
       await writeFile(join(tempDir, 'unicode.ts'), '日本語 pattern 中文');
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('unicode.ts');
@@ -459,7 +437,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, 'special.ts'), 'const x = foo.bar()');
 
       // User wants literal "foo.bar" but . is regex wildcard
-      const result = await executeGrep({ pattern: 'foo\\.bar', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'foo\\.bar' }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       expect(result.output).toContain('foo.bar');
@@ -475,9 +453,8 @@ describe('executeGrep', () => {
 
       const result = await executeGrep({
         pattern: 'pattern',
-        cwd: tempDir,
         maxResults: 100,
-      });
+      }, { workdirOverride: tempDir });
 
       expect(result.isSuccess).toBe(true);
       // Should find all 4 matches
@@ -493,7 +470,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, 'large.ts'), lines);
 
       const startTime = Date.now();
-      const result = await executeGrep({ pattern: 'needle', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'needle' }, { workdirOverride: tempDir });
       const duration = Date.now() - startTime;
 
       expect(result.isSuccess).toBe(true);
@@ -507,7 +484,7 @@ describe('executeGrep', () => {
       const content = 'text\x00binary\x01content\npattern';
       await writeFile(join(tempDir, 'mixed.ts'), content);
 
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       // Should still work, though content may be garbled
       expect(result.isSuccess).toBe(true);
@@ -519,7 +496,7 @@ describe('executeGrep', () => {
       await writeFile(join(tempDir, 'meta.ts'), 'pattern');
 
       // Use a pattern that will match so metadata is populated
-      const result = await executeGrep({ pattern: 'pattern', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'pattern' }, { workdirOverride: tempDir });
 
       expect(result.metadata?.pattern).toBe('pattern');
     });
@@ -527,7 +504,7 @@ describe('executeGrep', () => {
     it('should record correct tool name', async () => {
       await writeFile(join(tempDir, 'tool.ts'), 'content');
 
-      const result = await executeGrep({ pattern: 'content', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'content' }, { workdirOverride: tempDir });
 
       expect(result.toolName).toBe('Grep');
     });
@@ -535,7 +512,7 @@ describe('executeGrep', () => {
     it('should record duration', async () => {
       await writeFile(join(tempDir, 'time.ts'), 'content');
 
-      const result = await executeGrep({ pattern: 'content', cwd: tempDir });
+      const result = await executeGrep({ pattern: 'content' }, { workdirOverride: tempDir });
 
       expect(result.durationMs).toBeDefined();
       expect(result.durationMs).toBeGreaterThanOrEqual(0);

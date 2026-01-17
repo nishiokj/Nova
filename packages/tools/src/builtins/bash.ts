@@ -12,6 +12,15 @@ import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js'
 import { isDangerousCommand } from '../types.js';
 
 /**
+ * Truncate output if it exceeds maximum length.
+ */
+function truncateOutput(output: string, maxLength: number = 100000): string {
+  return output.length > maxLength
+    ? output.slice(0, maxLength) + '\n...[truncated]'
+    : output;
+}
+
+/**
  * Execute a bash command.
  */
 export async function executeBash(
@@ -19,8 +28,10 @@ export async function executeBash(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const command = args.command as string;
-  const cwd = (args.cwd as string) ?? context?.workdirOverride ?? process.cwd();
+  const cwd = context?.workdirOverride ?? process.cwd();
   const timeoutMs = ((args.timeout as number) ?? 30) * 1000;
+  // Environment is not cached - each call uses fresh values from process.env and context
+  // This scales safely across multiple users/requests (no shared state)
   const env = (args.env as Record<string, string>) ?? {
     ...process.env,
     ...context?.envOverrides,
@@ -72,14 +83,12 @@ export async function executeBash(
         return;
       }
 
-      // Truncate output if too long
+      // Build and truncate output if too long
       let output = stdout;
       if (stderr) {
         output += `\n[stderr]: ${stderr}`;
       }
-      if (output.length > 100000) {
-        output = output.slice(0, 100000) + '\n...[truncated]';
-      }
+      output = truncateOutput(output);
 
       if (code !== 0) {
         resolveResult({
@@ -116,10 +125,6 @@ export const bashToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      cwd: {
-        type: 'string',
-        description: 'Working directory for command execution',
-      },
       command: {
         type: 'string',
         description: 'The command to execute',
@@ -129,9 +134,9 @@ export const bashToolOptions: ToolRegistrationOptions = {
         description: 'Timeout in seconds (default: 30)',
       },
     },
-    required: ['cwd', 'command'],
+    required: ['command'],
   },
-  required: ['cwd', 'command'],
+  required: ['command'],
   executor: executeBash,
   timeoutMs: 30000,
   readOnly: false,

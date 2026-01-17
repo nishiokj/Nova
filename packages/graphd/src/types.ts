@@ -238,6 +238,8 @@ export interface GraphDSession {
   status: string;
   metadataJson: string | null;
   metadata?: Record<string, unknown>;
+  /** Truncated preview of the last user message (for session lists) */
+  lastUserMessagePreview?: string | null;
 }
 
 /**
