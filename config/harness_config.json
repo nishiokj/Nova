@@ -7,7 +7,13 @@
     "groq": "",
     "fireworks": "",
     "gemini": "",
-    "replicate": ""
+    "replicate": "",
+    "z.ai-coder": ""
+  },
+  "models": {
+    "$comment": "Available models are defined in packages/types/src/providers.ts.",
+    "available": [],
+    "default": ""
   },
   "agents": {
     "routing": {
@@ -40,8 +46,8 @@
     },
     "explorer": {
       "llm": {
-        "provider": "cerebras",
-        "model": "zai-glm-4.7",
+        "provider": "z.ai-coder",
+        "model": "GLM-4.7",
         "max_tokens": 64000,
         "temperature": 0.3
       },
@@ -89,8 +95,8 @@
     },
     "standard": {
       "llm": {
-        "provider": "cerebras",
-        "model": "zai-glm-4.7",
+        "provider": "z.ai-coder",
+        "model": "GLM-4.7",
         "max_tokens": 64000,
         "temperature": 0.6,
         "fallback": {
@@ -128,7 +134,7 @@
         }
       },
       "budget": {
-        "max_iterations": 20,
+        "max_iterations": 30,
         "max_tool_calls": 100,
         "max_duration_ms": 5000000
       },

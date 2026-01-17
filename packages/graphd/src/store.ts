@@ -557,11 +557,15 @@ export class GraphStore {
 
   /**
    * Update last_accessed_at timestamp for a session.
+   * Also reactivates inactive sessions when accessed.
    */
   updateSessionAccess(sessionKey: string): boolean {
     const result = this.db
       .query(
-        "UPDATE sessions SET last_accessed_at = ? WHERE session_key = ? AND status = 'active';"
+        `UPDATE sessions
+         SET last_accessed_at = ?,
+             status = CASE WHEN status = 'inactive' THEN 'active' ELSE status END
+         WHERE session_key = ? AND status IN ('active', 'inactive');`
       )
       .run(nowSeconds(), sessionKey);
     return result.changes > 0;
@@ -638,33 +642,68 @@ export class GraphStore {
 
   /**
    * List sessions with optional filtering.
+   * Supports filtering by clientType, workingDir, and multiple statuses.
    */
   listSessions(
-    clientType?: string,
-    status = 'active',
-    limit = 50
+    options: {
+      clientType?: string;
+      workingDir?: string;
+      status?: string | string[];
+      limit?: number;
+      includePreview?: boolean;
+    } = {}
   ): GraphDSession[] {
-    let rows: Record<string, unknown>[];
+    const { clientType, workingDir, status = 'active', limit = 50, includePreview = true } = options;
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
 
-    if (clientType) {
-      rows = this.db
-        .query(
-          `SELECT * FROM sessions
-           WHERE client_type = ? AND status = ?
-           ORDER BY last_accessed_at DESC
-           LIMIT ?;`
-        )
-        .all(clientType, status, limit) as Record<string, unknown>[];
+    // Status filter (single or multiple)
+    if (Array.isArray(status)) {
+      if (status.length > 0) {
+        conditions.push(`s.status IN (${status.map(() => '?').join(', ')})`);
+        params.push(...status);
+      }
     } else {
-      rows = this.db
-        .query(
-          `SELECT * FROM sessions
-           WHERE status = ?
-           ORDER BY last_accessed_at DESC
-           LIMIT ?;`
-        )
-        .all(status, limit) as Record<string, unknown>[];
+      conditions.push('s.status = ?');
+      params.push(status);
     }
+
+    // Client type filter
+    if (clientType) {
+      conditions.push('s.client_type = ?');
+      params.push(clientType);
+    }
+
+    // Working directory filter
+    if (workingDir) {
+      conditions.push('s.working_dir = ?');
+      params.push(workingDir);
+    }
+
+    params.push(limit);
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    // Use subquery to get last user message preview (truncated to 100 chars)
+    const previewSelect = includePreview
+      ? `, (
+          SELECT SUBSTR(content, 1, 100)
+          FROM conversation_messages m
+          WHERE m.session_key = s.session_key AND m.role = 'user'
+          ORDER BY m.message_index DESC
+          LIMIT 1
+        ) as last_user_preview`
+      : '';
+
+    const query = `
+      SELECT s.*${previewSelect}
+      FROM sessions s
+      ${whereClause}
+      ORDER BY s.last_accessed_at DESC
+      LIMIT ?;
+    `;
+
+    const rows = this.db.query(query).all(...params) as Record<string, unknown>[];
 
     return rows.map((row) => ({
       sessionKey: row.session_key as string,
@@ -675,6 +714,7 @@ export class GraphStore {
       workingDir: row.working_dir as string | null,
       status: row.status as string,
       metadataJson: row.metadata_json as string | null,
+      lastUserMessagePreview: includePreview ? (row.last_user_preview as string | null) : undefined,
     }));
   }
 

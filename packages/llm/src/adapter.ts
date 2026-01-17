@@ -19,6 +19,7 @@ import type {
   FallbackConfig,
   ToolDefinition,
 } from 'types';
+import { getProviderBaseUrl, getProviderResponseFormat, isSupportedProvider } from 'types';
 import {
   resilientCall,
   createCircuitState,
@@ -282,52 +283,19 @@ export class PartialStreamError extends Error {
 }
 
 // ============================================
-// MODEL REGISTRY
+// DEFAULT BASE URLS
 // ============================================
 
-const DEFAULT_PROVIDER_BASE_URLS: Record<LLMProvider, string> = {
+/**
+ * Default base URLs for canonical providers.
+ * These are fallbacks when no baseUrl is specified in config.
+ * NOTE: openai-compat is intentionally excluded - providers using openai-compat
+ * (cerebras, z.ai-coder, groq, etc.) MUST specify baseUrl in their config.
+ */
+const DEFAULT_PROVIDER_BASE_URLS: Partial<Record<LLMProvider, string>> = {
   openai: 'https://api.openai.com',
   anthropic: 'https://api.anthropic.com',
-  'openai-compat': 'https://api.openai.com',
 };
-
-type ModelRegistryEntry = { provider: LLMProvider; baseUrl: string };
-
-const DEFAULT_MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
-  'gpt-5-mini': { provider: 'openai', baseUrl: DEFAULT_PROVIDER_BASE_URLS.openai },
-  'gpt-5-nano': { provider: 'openai', baseUrl: DEFAULT_PROVIDER_BASE_URLS.openai },
-  'gpt-5.2-codex': { provider: 'openai', baseUrl: DEFAULT_PROVIDER_BASE_URLS.openai },
-  'gpt-5.2': { provider: 'openai', baseUrl: DEFAULT_PROVIDER_BASE_URLS.openai },
-  'claude-sonnet-4-5': { provider: 'anthropic', baseUrl: DEFAULT_PROVIDER_BASE_URLS.anthropic },
-  'claude-haiku-4-5': { provider: 'anthropic', baseUrl: DEFAULT_PROVIDER_BASE_URLS.anthropic },
-  'claude-opus-4-5': { provider: 'anthropic', baseUrl: DEFAULT_PROVIDER_BASE_URLS.anthropic },
-};
-
-function normalizeModelKey(model: string): string {
-  return model.trim().toLowerCase();
-}
-
-class ModelRegistry {
-  private registry = new Map<string, ModelRegistryEntry>();
-
-  constructor(seed?: Record<string, ModelRegistryEntry>) {
-    if (seed) {
-      for (const [model, entry] of Object.entries(seed)) {
-        this.registry.set(normalizeModelKey(model), entry);
-      }
-    }
-  }
-
-  register(model: string, provider: LLMProvider, baseUrl: string): void {
-    const key = normalizeModelKey(model);
-    if (this.registry.has(key)) return;
-    this.registry.set(key, { provider, baseUrl });
-  }
-
-  resolve(model: string): ModelRegistryEntry | undefined {
-    return this.registry.get(normalizeModelKey(model));
-  }
-}
 
 // ============================================
 // PROVIDER HELPERS
@@ -348,12 +316,18 @@ function supportsPromptCacheRetention(model: string): boolean {
   return !lower.includes('nano');
 }
 
+function buildSchemaInstruction(schema: Record<string, unknown>): string {
+  return `Return a single JSON object that matches this schema:\n${JSON.stringify(schema)}`;
+}
+
 // ============================================
 // ROUTER ADAPTER
 // ============================================
 
 type ResolvedRequestConfig = {
   provider: LLMProvider;
+  /** Original provider name from config (e.g., 'z.ai-coder', 'cerebras') for display in errors */
+  displayProvider: string;
   model: string;
   apiKey: string;
   baseUrl: string;
@@ -368,7 +342,6 @@ class LLMRouterAdapter implements LLMAdapter {
 
   private apiKeys: Partial<Record<LLMProvider, string>>;
   private baseUrls: Partial<Record<LLMProvider, string>>;
-  private modelRegistry: ModelRegistry;
   private circuitState: CircuitBreakerState;
   private resilienceConfig: ResilienceConfig;
   private logger: AdapterLogger;
@@ -377,12 +350,6 @@ class LLMRouterAdapter implements LLMAdapter {
   constructor(config: LLMClientConfig = {}, logger?: AdapterLogger) {
     this.apiKeys = config.apiKeys ?? {};
     this.baseUrls = config.baseUrls ?? {};
-    this.modelRegistry = new ModelRegistry(DEFAULT_MODEL_REGISTRY);
-    if (config.modelRegistry) {
-      for (const [model, entry] of Object.entries(config.modelRegistry)) {
-        this.registerModel(model, entry.provider, entry.baseUrl);
-      }
-    }
     this.circuitState = createCircuitState();
     this.resilienceConfig = {
       ...DEFAULT_RESILIENCE_CONFIG,
@@ -393,10 +360,12 @@ class LLMRouterAdapter implements LLMAdapter {
     this.fallbackConfig = config.fallback;
   }
 
+  /**
+   * Register a model mapping (kept for backwards compatibility).
+   * No longer needed - provider should be specified in LLMRequestConfig.
+   */
   registerModel(model: string, provider: LLMProvider, baseUrl?: string): void {
-    const resolvedBaseUrl =
-      baseUrl ?? this.baseUrls[provider] ?? DEFAULT_PROVIDER_BASE_URLS[provider];
-    this.modelRegistry.register(model, provider, resolvedBaseUrl);
+    this.logger.debug('registerModel called (no-op)', { model, provider, baseUrl });
   }
 
   /**
@@ -440,22 +409,34 @@ class LLMRouterAdapter implements LLMAdapter {
       throw new Error('LLM request missing model');
     }
 
-    const registryEntry = this.modelRegistry.resolve(llm.model);
-    let provider = llm.provider ?? registryEntry?.provider;
-
-    if (!provider) {
-      throw new Error(`Unknown provider for model '${llm.model}'`);
+    if (!llm.provider) {
+      throw new Error(`Provider must be specified for model '${llm.model}'`);
     }
 
-    if (!registryEntry && llm.provider) {
-      this.registerModel(llm.model, llm.provider, llm.baseUrl);
-    }
+    const provider = llm.provider;
+    // displayProvider is the user-facing name (e.g., 'z.ai-coder') for error messages
+    // Falls back to canonical provider if not specified
+    const displayProvider = (llm as { displayProvider?: string }).displayProvider ?? provider;
 
-    const baseUrl =
-      llm.baseUrl ??
-      registryEntry?.baseUrl ??
-      this.baseUrls[provider] ??
-      DEFAULT_PROVIDER_BASE_URLS[provider];
+    let baseUrl = llm.baseUrl;
+    if (!baseUrl && provider === 'openai-compat' && displayProvider !== 'openai-compat') {
+      if (isSupportedProvider(displayProvider)) {
+        baseUrl = getProviderBaseUrl(displayProvider);
+      }
+    }
+    // Resolve base URL: per-request > provider registry (openai-compat) > client config > default
+    baseUrl = baseUrl ?? this.baseUrls[provider] ?? DEFAULT_PROVIDER_BASE_URLS[provider];
+
+    // Validate baseUrl is present
+    if (!baseUrl) {
+      if (provider === 'openai-compat') {
+        throw new Error(
+          `Provider '${displayProvider}' requires baseUrl to be specified. ` +
+          `openai-compat is an adapter type, not a provider - each provider needs its own URL.`
+        );
+      }
+      throw new Error(`Base URL not configured for provider '${displayProvider}'`);
+    }
 
     const apiKey = llm.apiKey ?? this.apiKeys[provider];
 
@@ -465,6 +446,7 @@ class LLMRouterAdapter implements LLMAdapter {
     this.logger.debug('Resolving request config', {
       model: llm.model,
       provider,
+      displayProvider,
       baseUrl,
       keySource,
       keyPreview,
@@ -473,11 +455,12 @@ class LLMRouterAdapter implements LLMAdapter {
     });
 
     if (!apiKey) {
-      throw new Error(`API key not configured for provider '${provider}'`);
+      throw new Error(`API key not configured for provider '${displayProvider}' (baseUrl: ${baseUrl})`);
     }
 
     return {
       provider,
+      displayProvider,
       model: llm.model,
       apiKey,
       baseUrl,
@@ -1245,6 +1228,10 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (params.tools && params.tools.length > 0) {
       body.tools = this.formatOpenAITools(params.tools);
+    }
+    if (params.toolChoice) {
+      body.tool_choice = params.toolChoice;
+    } else if (params.tools && params.tools.length > 0) {
       body.tool_choice = 'auto';
     }
 
@@ -1538,6 +1525,10 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (params.tools && params.tools.length > 0) {
       body.tools = this.formatOpenAITools(params.tools);
+    }
+    if (params.toolChoice) {
+      body.tool_choice = params.toolChoice;
+    } else if (params.tools && params.tools.length > 0) {
       body.tool_choice = 'auto';
     }
 
@@ -1893,11 +1884,18 @@ class LLMRouterAdapter implements LLMAdapter {
     const startTime = Date.now();
 
     const systemMessage = params.messages.find((m) => m.role === 'system');
-    const systemPrompt =
+    let systemPrompt =
       params.system ??
       (systemMessage && typeof systemMessage.content === 'string'
         ? systemMessage.content
         : undefined);
+    const responseFormat = params.responseSchema
+      ? getProviderResponseFormat(resolved.displayProvider)
+      : null;
+    if (params.responseSchema && responseFormat === 'json_object') {
+      const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
+    }
 
     const body: Record<string, unknown> = {
       model: resolved.model,
@@ -1911,19 +1909,27 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (params.tools && params.tools.length > 0) {
       body.tools = this.formatOpenAICompatTools(params.tools);
+    }
+    if (params.toolChoice) {
+      body.tool_choice = params.toolChoice;
+    } else if (params.tools && params.tools.length > 0) {
       body.tool_choice = 'auto';
     }
 
     // Add structured output support for providers that support it (Cerebras, Groq, Together, etc.)
     if (params.responseSchema) {
-      body.response_format = {
-        type: 'json_schema',
-        json_schema: {
-          name: params.responseSchema.name,
-          schema: params.responseSchema.schema,
-          strict: params.responseSchema.strict ?? true,
-        },
-      };
+      if (responseFormat === 'json_object') {
+        body.response_format = { type: 'json_object' };
+      } else {
+        body.response_format = {
+          type: 'json_schema',
+          json_schema: {
+            name: params.responseSchema.name,
+            schema: params.responseSchema.schema,
+            strict: params.responseSchema.strict ?? true,
+          },
+        };
+      }
     }
 
     const formattedMessages = body.messages as Array<Record<string, unknown>>;
@@ -1942,6 +1948,7 @@ class LLMRouterAdapter implements LLMAdapter {
       messageTypes: messageTypes.join(', '),
       toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
       hasResponseFormat: !!body.response_format,
+      responseFormat: responseFormat ?? undefined,
       responseSchemaName: params.responseSchema?.name,
     });
 
@@ -1963,18 +1970,20 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (!response.ok) {
       const errorText = await response.text();
-      this.logger.error('OpenAI-compat API request failed', {
+      const providerInfo = `${resolved.displayProvider} (${resolved.baseUrl})`;
+      this.logger.error(`${resolved.displayProvider} API request failed`, {
         method: 'respond',
         endpoint: '/chat/completions',
         status: response.status,
         model: resolved.model,
+        baseUrl: resolved.baseUrl,
         errorPreview: errorText.slice(0, 200),
       });
       // Throw RateLimitError for 429s with parsed header info
       if (response.status === 429) {
-        throw createRateLimitError('OpenAI-compat', resolved.model, response.status, response.headers, errorText);
+        throw createRateLimitError(providerInfo, resolved.model, response.status, response.headers, errorText);
       }
-      throw parseApiError('OpenAI-compat', response.status, errorText);
+      throw parseApiError(providerInfo, response.status, errorText);
     }
 
     const data = (await response.json()) as {
@@ -2067,11 +2076,18 @@ class LLMRouterAdapter implements LLMAdapter {
     const startTime = Date.now();
 
     const systemMessage = params.messages.find((m) => m.role === 'system');
-    const systemPrompt =
+    let systemPrompt =
       params.system ??
       (systemMessage && typeof systemMessage.content === 'string'
         ? systemMessage.content
         : undefined);
+    const responseFormat = params.responseSchema
+      ? getProviderResponseFormat(resolved.displayProvider)
+      : null;
+    if (params.responseSchema && responseFormat === 'json_object') {
+      const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
+    }
 
     const body: Record<string, unknown> = {
       model: resolved.model,
@@ -2086,19 +2102,27 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (params.tools && params.tools.length > 0) {
       body.tools = this.formatOpenAICompatTools(params.tools);
+    }
+    if (params.toolChoice) {
+      body.tool_choice = params.toolChoice;
+    } else if (params.tools && params.tools.length > 0) {
       body.tool_choice = 'auto';
     }
 
     // Add structured output support for providers that support it
     if (params.responseSchema) {
-      body.response_format = {
-        type: 'json_schema',
-        json_schema: {
-          name: params.responseSchema.name,
-          schema: params.responseSchema.schema,
-          strict: params.responseSchema.strict ?? true,
-        },
-      };
+      if (responseFormat === 'json_object') {
+        body.response_format = { type: 'json_object' };
+      } else {
+        body.response_format = {
+          type: 'json_schema',
+          json_schema: {
+            name: params.responseSchema.name,
+            schema: params.responseSchema.schema,
+            strict: params.responseSchema.strict ?? true,
+          },
+        };
+      }
     }
 
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
@@ -2112,18 +2136,20 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (!response.ok || !response.body) {
       const errorText = await response.text();
-      this.logger.error('OpenAI-compat API stream request failed', {
+      const providerInfo = `${resolved.displayProvider} (${resolved.baseUrl})`;
+      this.logger.error(`${resolved.displayProvider} API stream request failed`, {
         method: 'stream',
         endpoint: '/chat/completions',
         status: response.status,
         model: resolved.model,
+        baseUrl: resolved.baseUrl,
         errorPreview: errorText.slice(0, 200),
       });
       // Throw RateLimitError for 429s with parsed header info
       if (response.status === 429) {
-        throw createRateLimitError('OpenAI-compat', resolved.model, response.status, response.headers, errorText);
+        throw createRateLimitError(providerInfo, resolved.model, response.status, response.headers, errorText);
       }
-      throw parseApiError('OpenAI-compat', response.status, errorText);
+      throw parseApiError(providerInfo, response.status, errorText);
     }
 
     const reader = response.body.getReader();

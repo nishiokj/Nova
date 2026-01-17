@@ -8,20 +8,28 @@
     "dev": "bun run index.tsx",
     "start": "bun run index.tsx",
     "build": "bun build index.tsx --outdir dist --target node && cp node_modules/yoga-wasm-web/dist/yoga.wasm dist/yoga.wasm",
-    "lint": "bun tsc --noEmit"
+    "lint": "bun tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "comms-bus": "workspace:*",
     "diff": "^8.0.3",
     "ink": "^4.4.1",
-    "react": "^18.2.0",
+    "react": "^18.3.1",
     "types": "workspace:*"
   },
   "devDependencies": {
     "@types/diff": "^8.0.0",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.0",
+    "ink-testing-library": "^3.0.0",
     "react-devtools-core": "^7.0.1",
     "typescript": "^5.3.3"
+  },
+  "overrides": {
+    "react": "^18.3.1",
+    "react-reconciler": {
+      "react": "^18.3.1"
+    }
   }
 }

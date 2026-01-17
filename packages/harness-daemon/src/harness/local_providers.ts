@@ -12,6 +12,7 @@ import { homedir } from 'os';
 import { GraphStore } from 'graphd';
 import type { ProvidersConfigSection } from './config_types.js';
 import { setConfigProviders } from './config_loader.js';
+import { SUPPORTED_PROVIDER_IDS, getProviderDefinition } from 'types';
 
 // ============================================
 // TYPES
@@ -48,16 +49,7 @@ export interface ProviderTestResult {
 // CONSTANTS
 // ============================================
 
-const SUPPORTED_PROVIDERS = [
-  'anthropic',
-  'openai',
-  'cerebras',
-  'together',
-  'groq',
-  'fireworks',
-  'gemini',
-  'replicate',
-];
+// SUPPORTED_PROVIDERS is now imported from types as SUPPORTED_PROVIDER_IDS
 
 // Fixed user ID for local (non-OAuth) use
 const LOCAL_USER_ID = 'local_user';
@@ -115,7 +107,7 @@ export class LocalProviderManager {
     try {
       const credentials = this.store.listProviderCredentials(LOCAL_USER_ID);
 
-      const providers = SUPPORTED_PROVIDERS.map((provider) => {
+      const providers = SUPPORTED_PROVIDER_IDS.map((provider) => {
         const cred = credentials.find((c) => c.provider === provider);
         return {
           provider,
@@ -218,7 +210,7 @@ export class LocalProviderManager {
   getProviders(): ProvidersConfigSection {
     const providers: ProvidersConfigSection = {};
 
-    for (const provider of SUPPORTED_PROVIDERS) {
+    for (const provider of SUPPORTED_PROVIDER_IDS) {
       const key = this.getProviderKey(provider);
       if (key) {
         providers[provider] = key;
@@ -330,67 +322,50 @@ export class LocalProviderManager {
   }
 
   private async testApiKey(provider: string, apiKey: string): Promise<boolean> {
-    switch (provider) {
-      case 'anthropic': {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: 'claude-3-haiku-20240307',
-            max_tokens: 1,
-            messages: [{ role: 'user', content: 'hi' }],
-          }),
-        });
-        return response.status !== 401 && response.status !== 403;
-      }
-      case 'openai': {
-        const response = await fetch('https://api.openai.com/v1/models', {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        return response.ok;
-      }
-      case 'cerebras': {
-        const response = await fetch('https://api.cerebras.ai/v1/models', {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        return response.ok;
-      }
-      case 'together': {
-        const response = await fetch('https://api.together.xyz/v1/models', {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        return response.ok;
-      }
-      case 'groq': {
-        const response = await fetch('https://api.groq.com/openai/v1/models', {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        return response.ok;
-      }
-      case 'fireworks': {
-        const response = await fetch('https://api.fireworks.ai/inference/v1/models', {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        return response.ok;
-      }
-      case 'gemini': {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
-        );
-        return response.ok;
-      }
-      case 'replicate': {
-        const response = await fetch('https://api.replicate.com/v1/models', {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        return response.ok;
-      }
-      default:
-        return apiKey.length > 0;
+    // Get provider definition from central registry
+    const definition = getProviderDefinition(provider);
+    if (!definition?.testEndpoint) {
+      // No test endpoint defined, assume valid if key exists
+      return apiKey.length > 0;
     }
+
+    // Build request based on provider definition
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    // Add custom test headers if defined
+    if (definition.testHeaders) {
+      Object.assign(headers, definition.testHeaders);
+    }
+
+    // Handle authentication - Gemini uses query param, others use Bearer/x-api-key
+    let url = definition.testEndpoint;
+    if (provider === 'gemini') {
+      url = `${definition.testEndpoint}?key=${apiKey}`;
+    } else if (provider === 'anthropic') {
+      headers['x-api-key'] = apiKey;
+    } else {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    // Make request
+    const fetchOptions: RequestInit = {
+      method: definition.testMethod ?? 'GET',
+      headers,
+    };
+
+    if (definition.testMethod === 'POST' && definition.testBody) {
+      fetchOptions.body = JSON.stringify(definition.testBody);
+    }
+
+    const response = await fetch(url, fetchOptions);
+
+    // Anthropic returns non-401/403 for valid keys (may return other errors)
+    if (provider === 'anthropic') {
+      return response.status !== 401 && response.status !== 403;
+    }
+
+    return response.ok;
   }
 }

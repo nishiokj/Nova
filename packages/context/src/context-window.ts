@@ -7,8 +7,14 @@
  * - getItemsForLLM() handles provider-specific conversion
  */
 
-import type { ContentBlock } from 'types';
-import type { ContextWindowMetrics } from 'types';
+import type {
+  ContentBlock,
+  ContextWindowMetrics,
+  LLMAdapter,
+  LLMRequestConfig,
+  Message,
+  StructuredOutputSchema,
+} from 'types';
 import { createContextWindowMetrics, updateContextMetrics } from 'types';
 import type {
   ContextItem,
@@ -69,6 +75,238 @@ function formatArtifactForLLM(artifact: ArtifactPayload): string {
   }
 
   return parts.join('\n');
+}
+
+// =========================================================================
+// Epistemic Ledger (LLM-backed compaction summary)
+// =========================================================================
+
+type LedgerEntry = { text: string; sources: string[] };
+
+type LedgerPayload = {
+  constraints: LedgerEntry[];
+  decision_boundaries: LedgerEntry[];
+  actions: LedgerEntry[];
+  open_questions: LedgerEntry[];
+};
+
+const LEDGER_RESPONSE_SCHEMA: StructuredOutputSchema = {
+  name: 'epistemic_ledger',
+  strict: true,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      constraints: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' },
+            sources: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['text', 'sources'],
+        },
+      },
+      decision_boundaries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' },
+            sources: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['text', 'sources'],
+        },
+      },
+      actions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' },
+            sources: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['text', 'sources'],
+        },
+      },
+      open_questions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' },
+            sources: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['text', 'sources'],
+        },
+      },
+    },
+    required: ['constraints', 'decision_boundaries', 'actions', 'open_questions'],
+  },
+};
+
+const LEDGER_MAX_ENTRY_CHARS = 220;
+const LEDGER_MAX_ENTRIES_PER_SECTION = 8;
+const LEDGER_MAX_ITEM_PREVIEW = 600;
+
+function truncateText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max).trimEnd() + '...';
+}
+
+function flattenContentBlocks(content: ContentBlock[]): string {
+  const parts: string[] = [];
+  for (const block of content) {
+    switch (block.type) {
+      case 'text':
+        parts.push(block.text);
+        break;
+      case 'tool_use':
+        parts.push(`[tool_use ${block.name}]`);
+        break;
+      case 'tool_result':
+        parts.push(`[tool_result${block.isError ? ' error' : ''}] ${block.content}`);
+        break;
+      case 'image':
+        parts.push('[image]');
+        break;
+    }
+  }
+  return parts.join(' ');
+}
+
+function summarizeMessageContent(content: string | ContentBlock[]): string {
+  const text = typeof content === 'string' ? content : flattenContentBlocks(content);
+  return truncateText(text.replace(/\s+/g, ' ').trim(), LEDGER_MAX_ITEM_PREVIEW);
+}
+
+function summarizeItemForLedger(item: ContextItem): string {
+  switch (item.type) {
+    case 'message':
+      return `${item.role}: ${summarizeMessageContent(item.content)}`;
+    case 'function_call':
+      return `call ${item.name} args=${truncateText(JSON.stringify(item.arguments), 240)}`;
+    case 'function_call_output':
+      return `output${item.isError ? ' (error)' : ''}: ${truncateText(item.output, 240)}`;
+    case 'reasoning':
+      return `reasoning: ${truncateText(item.content, 240)}`;
+    case 'file_content':
+      return `file ${item.path} (${item.content.length} chars)`;
+    case 'artifact':
+      return `artifact ${item.kind} ${item.sourcePath}:${item.name}`;
+  }
+}
+
+function estimateItemTokens(item: ContextItem): number {
+  switch (item.type) {
+    case 'message': {
+      const text = typeof item.content === 'string'
+        ? item.content
+        : flattenContentBlocks(item.content);
+      return Math.ceil(text.length / 4);
+    }
+    case 'file_content':
+      return Math.ceil((item.content.length + item.path.length) / 4);
+    case 'function_call_output':
+      return Math.ceil(item.output.length / 4);
+    case 'function_call':
+      return Math.ceil((JSON.stringify(item.arguments).length + item.name.length) / 4);
+    case 'reasoning':
+      return Math.ceil(item.content.length / 4);
+    case 'artifact':
+      return Math.ceil((item.name.length + item.sourcePath.length + (item.signature?.length ?? 0)) / 4);
+  }
+}
+
+function estimateItemBytes(item: ContextItem): number {
+  switch (item.type) {
+    case 'message':
+      return typeof item.content === 'string' ? item.content.length : 0;
+    case 'file_content':
+      return item.content.length;
+    case 'function_call_output':
+      return item.output.length;
+    case 'function_call':
+      return JSON.stringify(item.arguments).length + item.name.length;
+    case 'reasoning':
+      return item.content.length;
+    case 'artifact':
+      return item.name.length + item.sourcePath.length + (item.signature?.length ?? 0);
+  }
+}
+
+function parseLedgerResponse(content: string, validIds: Set<string>): LedgerPayload | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) return null;
+    try {
+      parsed = JSON.parse(content.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+
+  const payload = parsed as Partial<LedgerPayload>;
+  const sections: Array<keyof LedgerPayload> = [
+    'constraints',
+    'decision_boundaries',
+    'actions',
+    'open_questions',
+  ];
+
+  for (const key of sections) {
+    if (!Array.isArray(payload[key])) return null;
+  }
+
+  const normalizeEntries = (entries: LedgerEntry[]): LedgerEntry[] => {
+    const normalized: LedgerEntry[] = [];
+    for (const entry of entries) {
+      if (!entry || typeof entry.text !== 'string' || !Array.isArray(entry.sources)) continue;
+      const sources = entry.sources.filter((source) => validIds.has(source));
+      if (sources.length === 0) continue;
+      const text = truncateText(entry.text.replace(/\s+/g, ' ').trim(), LEDGER_MAX_ENTRY_CHARS);
+      if (text.length === 0) continue;
+      normalized.push({ text, sources });
+      if (normalized.length >= LEDGER_MAX_ENTRIES_PER_SECTION) break;
+    }
+    return normalized;
+  };
+
+  return {
+    constraints: normalizeEntries(payload.constraints as LedgerEntry[]),
+    decision_boundaries: normalizeEntries(payload.decision_boundaries as LedgerEntry[]),
+    actions: normalizeEntries(payload.actions as LedgerEntry[]),
+    open_questions: normalizeEntries(payload.open_questions as LedgerEntry[]),
+  };
+}
+
+function formatLedgerMessage(ledger: LedgerPayload): string {
+  const sections: Array<{ title: string; entries: LedgerEntry[] }> = [
+    { title: 'CONSTRAINTS', entries: ledger.constraints },
+    { title: 'DECISION BOUNDARIES', entries: ledger.decision_boundaries },
+    { title: 'ACTIONS COMPLETED', entries: ledger.actions },
+    { title: 'OPEN QUESTIONS', entries: ledger.open_questions },
+  ];
+
+  const lines: string[] = ['[EPISTEMIC LEDGER]'];
+  for (const section of sections) {
+    if (section.entries.length === 0) continue;
+    lines.push(`[${section.title}]`);
+    for (const entry of section.entries) {
+      lines.push(`- ${entry.text} (sources: ${entry.sources.join(', ')})`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 // =========================================================================
@@ -512,6 +750,191 @@ export class ContextWindow {
       fileContentRemoved,
       outputsTruncated,
       bytesRecovered,
+    };
+  }
+
+  /**
+   * Compact with an LLM-generated ledger summarizing removed items.
+   * Falls back to mechanical compaction if summarization fails.
+   */
+  async compactWithLedger(params: CompactOptions & {
+    llm: LLMAdapter;
+    llmConfig: LLMRequestConfig;
+    targetReductionRatio?: number;
+    preserveRecentItems?: number;
+  }): Promise<CompactResult> {
+    const {
+      llm,
+      llmConfig,
+      targetReductionRatio = 0.66,
+      preserveRecentItems = 12,
+      maxFileContentAgeMs,
+      maxFileContentCount,
+      deduplicateByPath = false,
+      truncateOutputsTo,
+    } = params;
+
+    const baseResult = this.compact({
+      maxFileContentAgeMs,
+      maxFileContentCount,
+      deduplicateByPath,
+      truncateOutputsTo,
+    });
+
+    const currentTokens = this.estimateTokenUsage();
+    const ratio = Math.min(Math.max(targetReductionRatio, 0), 0.9);
+    const targetTokens = Math.max(1, Math.floor(currentTokens * (1 - ratio)));
+
+    if (currentTokens <= targetTokens) {
+      return baseResult;
+    }
+
+    const preserveStart = Math.max(0, this._items.length - preserveRecentItems);
+    const protectedIndices = new Set<number>();
+    this._items.forEach((item, index) => {
+      if (index >= preserveStart) {
+        protectedIndices.add(index);
+        return;
+      }
+      if (item.type === 'artifact') {
+        protectedIndices.add(index);
+        return;
+      }
+      if (item.type === 'message' && (item.role === 'system' || item.role === 'developer')) {
+        protectedIndices.add(index);
+      }
+    });
+
+    const candidates: number[] = [];
+    for (let i = 0; i < preserveStart; i++) {
+      if (!protectedIndices.has(i)) {
+        candidates.push(i);
+      }
+    }
+
+    if (candidates.length === 0) {
+      return baseResult;
+    }
+
+    let tokensToRemove = currentTokens - targetTokens;
+    const removalIndices: number[] = [];
+    for (const index of candidates) {
+      const item = this._items[index];
+      removalIndices.push(index);
+      tokensToRemove -= estimateItemTokens(item);
+      if (tokensToRemove <= 0) break;
+    }
+
+    if (removalIndices.length === 0) {
+      return baseResult;
+    }
+
+    const ledgerItems = removalIndices.map((index) => ({
+      id: `i${index}`,
+      item: this._items[index],
+    }));
+    const validIds = new Set(ledgerItems.map((entry) => entry.id));
+    const ledgerLines = ledgerItems.map(
+      (entry) => `- [${entry.id}] ${summarizeItemForLedger(entry.item)}`
+    );
+
+    const systemPrompt = [
+      'You distill compact, actionable context.',
+      'Only use the provided items.',
+      'Each entry must cite source item ids in sources[].',
+      'Prefer constraints and decision boundaries over narration.',
+      'Keep entries concise.',
+    ].join(' ');
+
+    const userPrompt = [
+      'Summarize these items into an epistemic ledger.',
+      'If nothing is important, return empty arrays.',
+      'Items:',
+      ledgerLines.join('\n'),
+    ].join('\n');
+
+    let ledgerPayload: LedgerPayload | null = null;
+    try {
+      const response = await llm.respond({
+        llm: {
+          ...llmConfig,
+          temperature: 0,
+          maxTokens: Math.min(llmConfig.maxTokens ?? 800, 800),
+        },
+        messages: [{ role: 'user', content: userPrompt } satisfies Message],
+        system: systemPrompt,
+        responseSchema: LEDGER_RESPONSE_SCHEMA,
+      });
+      ledgerPayload = parseLedgerResponse(response.content, validIds);
+    } catch {
+      ledgerPayload = null;
+    }
+
+    if (!ledgerPayload) {
+      return baseResult;
+    }
+
+    const ledgerMessage = formatLedgerMessage(ledgerPayload);
+    if (ledgerMessage.trim().length === 0) {
+      return baseResult;
+    }
+
+    const removedSet = new Set(removalIndices);
+    const retained: ContextItem[] = [];
+    const pathsRemoved = new Set<string>();
+    let itemsRemoved = 0;
+    let fileContentRemoved = 0;
+    let bytesRecovered = 0;
+
+    this._items.forEach((item, index) => {
+      if (removedSet.has(index)) {
+        itemsRemoved++;
+        bytesRecovered += estimateItemBytes(item);
+        if (item.type === 'file_content') {
+          fileContentRemoved++;
+          pathsRemoved.add(item.path);
+        }
+        return;
+      }
+      retained.push(item);
+    });
+
+    const summaryItem: MessageItem = {
+      type: 'message',
+      role: 'system',
+      content: ledgerMessage,
+      timestamp: Date.now(),
+    };
+
+    const removedBeforePreserve = removalIndices.length;
+    let insertIndex = preserveStart - removedBeforePreserve;
+    if (insertIndex < 0) insertIndex = 0;
+    let minInsertIndex = retained.findIndex(
+      (item) => !(item.type === 'message' && (item.role === 'system' || item.role === 'developer'))
+    );
+    if (minInsertIndex === -1) {
+      minInsertIndex = retained.length;
+    }
+    if (insertIndex < minInsertIndex) insertIndex = minInsertIndex;
+
+    retained.splice(insertIndex, 0, summaryItem);
+    this._items = retained;
+    this._version++;
+
+    for (const path of pathsRemoved) {
+      const hasRemaining = this._items.some(
+        (item) => item.type === 'file_content' && item.path === path
+      );
+      if (!hasRemaining) {
+        this._readFiles.delete(path);
+      }
+    }
+
+    return {
+      itemsRemoved: baseResult.itemsRemoved + itemsRemoved,
+      fileContentRemoved: baseResult.fileContentRemoved + fileContentRemoved,
+      outputsTruncated: baseResult.outputsTruncated,
+      bytesRecovered: baseResult.bytesRecovered + bytesRecovered,
     };
   }
 

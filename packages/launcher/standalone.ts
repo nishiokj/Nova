@@ -50,6 +50,8 @@ Configuration:
 /**
  * Ensure config directory and file exist
  */
+const PROJECT_CONFIG_NAME = path.join('config', 'harness_config.json');
+
 function ensureConfig(): string {
   const configDir = path.join(homedir(), '.rex');
   const configPath = path.join(configDir, 'config.json');
@@ -68,11 +70,28 @@ function ensureConfig(): string {
   return configPath;
 }
 
+function findProjectConfigPath(startDir: string): string | null {
+  let dir = startDir;
+  while (true) {
+    const candidate = path.join(dir, PROJECT_CONFIG_NAME);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
-  const configPath = ensureConfig();
+  ensureConfig();
+  const configPath = findProjectConfigPath(process.cwd());
 
   // Set environment for harness
-  process.env.HARNESS_CONFIG_PATH = configPath;
+  if (configPath) {
+    process.env.HARNESS_CONFIG_PATH = configPath;
+  }
   process.env.EVENT_BUS_HOST = process.env.EVENT_BUS_HOST ?? '127.0.0.1';
   process.env.EVENT_BUS_PORT = process.env.EVENT_BUS_PORT ?? '9555';
 
@@ -85,7 +104,7 @@ async function main(): Promise<void> {
     const { HarnessDaemon } = await import('../harness-daemon/src/harness/daemon.js');
 
     const daemon = new HarnessDaemon({
-      configPath,
+      configPath: configPath ?? undefined,
       idleTimeoutMs: 0, // Disable idle timeout in standalone mode
     });
 

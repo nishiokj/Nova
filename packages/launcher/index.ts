@@ -10,10 +10,34 @@
 
 import { spawn, type Subprocess } from 'bun';
 import { createConnection } from 'net';
-import { mkdirSync, existsSync, copyFileSync } from 'fs';
+import { mkdirSync, existsSync, writeFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
+
+/**
+ * Minimal user config template.
+ * This is created on first run - users only need to add their API keys.
+ * All other settings come from config/defaults.json
+ */
+const MINIMAL_USER_CONFIG = {
+  $comment: "Add your API keys below. All other settings are inherited from defaults.",
+  providers: {
+    anthropic: "",
+    openai: "",
+    cerebras: "",
+    together: "",
+    groq: "",
+    fireworks: "",
+    gemini: "",
+    replicate: "",
+    "z.ai-coder": ""
+  },
+  models: {
+    available: [],
+    default: ""
+  }
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,31 +72,21 @@ const getDaemonPath = () => {
 
 const getTuiPath = () => {
   const root = getProjectRoot();
-  // Check for dist first, then src
-  const distPath = path.join(root, 'packages', 'tui', 'dist', 'index.js');
+  // Always use source - bun bundler corrupts UTF-8 box-drawing characters
   const srcPath = path.join(root, 'packages', 'tui', 'index.tsx');
-  try {
-    Bun.file(distPath);
-    return distPath;
-  } catch {
-    return srcPath;
-  }
+  return srcPath;
 };
 
+const PROJECT_CONFIG_NAME = path.join('config', 'harness_config.json');
+
 const getConfigDir = () => path.join(homedir(), '.rex');
+const getUserConfigPath = () => path.join(getConfigDir(), 'config.json');
 
-const getConfigPath = () => {
-  // Check for user config first, then project config
+const ensureUserConfig = (): string => {
   const userConfigDir = getConfigDir();
-  const userConfig = path.join(userConfigDir, 'config.json');
-  const projectConfig = path.join(getProjectRoot(), 'config', 'harness_config.json');
+  const userConfig = getUserConfigPath();
 
-  // If user config exists, use it
-  if (existsSync(userConfig)) {
-    return userConfig;
-  }
-
-  // Try to create user config from template
+  // Try to create minimal user config
   try {
     // Create directory if needed
     if (!existsSync(userConfigDir)) {
@@ -80,19 +94,40 @@ const getConfigPath = () => {
       console.log(`[rex] Created config directory: ${userConfigDir}`);
     }
 
-    // Copy template config
-    if (existsSync(projectConfig)) {
-      copyFileSync(projectConfig, userConfig);
-      console.log(`[rex] Created default config: ${userConfig}`);
-      console.log('[rex] Edit this file to configure your LLM providers and API keys');
-      return userConfig;
-    }
+    // Write minimal user config (just providers - all else from defaults)
+    writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
+    console.log(`[rex] Created user config: ${userConfig}`);
+    console.log('[rex] Add your API keys to the providers section. All other settings are inherited from defaults.');
+    return userConfig;
   } catch (err) {
     console.warn(`[rex] Could not create user config: ${err}`);
   }
 
-  // Fall back to project config
-  return projectConfig;
+  return userConfig;
+};
+
+const findProjectConfigPath = (startDir: string): string | null => {
+  let dir = startDir;
+  while (true) {
+    const candidate = path.join(dir, PROJECT_CONFIG_NAME);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+};
+
+const resolveConfigPath = (): string | undefined => {
+  if (process.env.HARNESS_CONFIG_PATH) {
+    return process.env.HARNESS_CONFIG_PATH;
+  }
+
+  ensureUserConfig();
+  const projectConfig = findProjectConfigPath(process.cwd());
+  return projectConfig ?? undefined;
 };
 
 /**
@@ -123,7 +158,7 @@ async function isDaemonRunning(): Promise<boolean> {
  */
 async function startDaemon(): Promise<Subprocess> {
   const daemonPath = getDaemonPath();
-  const configPath = getConfigPath();
+  const configPath = resolveConfigPath();
 
   console.log('[rex] Starting daemon...');
 
@@ -131,7 +166,7 @@ async function startDaemon(): Promise<Subprocess> {
     cmd: ['bun', 'run', daemonPath],
     env: {
       ...process.env,
-      HARNESS_CONFIG_PATH: configPath,
+      ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
       EVENT_BUS_HOST: DAEMON_HOST,
       EVENT_BUS_PORT: String(DAEMON_PORT),
     },
@@ -182,20 +217,47 @@ async function startTui(): Promise<void> {
 }
 
 /**
+ * Kill any running daemon gracefully
+ */
+async function killExistingDaemon(): Promise<void> {
+  const { execSync } = await import('child_process');
+  try {
+    execSync('pkill -TERM -f harness-daemon', { stdio: 'ignore' });
+    // Wait for graceful shutdown
+    const startTime = Date.now();
+    while (Date.now() - startTime < 3000) {
+      if (!(await isDaemonRunning())) {
+        return;
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    console.warn('[rex] Daemon did not shut down in time');
+  } catch {
+    // No daemon running or pkill failed - that's fine
+  }
+}
+
+/**
  * Main entry point
  */
 async function main(): Promise<void> {
+  // Handle --restart flag: kill existing daemon before proceeding
+  if (process.argv.includes('--restart')) {
+    console.log('[rex] Restarting daemon...');
+    await killExistingDaemon();
+  }
+
   // Check for --daemon-only flag
   if (process.argv.includes('--daemon-only')) {
     const daemonPath = getDaemonPath();
-    const configPath = getConfigPath();
+    const configPath = resolveConfigPath();
 
     // Run daemon in foreground
     const daemon = spawn({
       cmd: ['bun', 'run', daemonPath],
       env: {
         ...process.env,
-        HARNESS_CONFIG_PATH: configPath,
+        ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
         EVENT_BUS_HOST: DAEMON_HOST,
         EVENT_BUS_PORT: String(DAEMON_PORT),
       },

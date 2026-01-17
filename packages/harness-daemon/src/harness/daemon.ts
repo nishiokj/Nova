@@ -8,6 +8,7 @@ import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createAuthServiceFromEnv, type AuthService } from './auth_service.js';
 import { setConfigProviders, getConfigProviders } from './config_loader.js';
+import { isOpenAICompatProvider } from 'types';
 
 export interface HarnessDaemonOptions {
   host?: string;
@@ -99,8 +100,7 @@ export class HarnessDaemon {
         // Update adapter with each provider key
         for (const [provider, apiKey] of Object.entries(providers)) {
           if (apiKey) {
-            const openaiCompatProviders = new Set(['cerebras', 'together', 'groq', 'fireworks']);
-            const canonicalProvider = openaiCompatProviders.has(provider) ? 'openai-compat' : provider;
+            const canonicalProvider = isOpenAICompatProvider(provider) ? 'openai-compat' : provider;
             console.log(`[harness-daemon] Updating adapter: ${provider} -> ${canonicalProvider}, key: ${apiKey.slice(0, 8)}...`);
             this.harness.updateApiKey(canonicalProvider as import('types').LLMProvider, apiKey);
           }

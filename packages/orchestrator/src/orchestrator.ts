@@ -9,14 +9,23 @@
 
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { ContextWindow } from 'context';
-import type { EventEmitCallback, UserPromptInfo, AgentHooks, AgentResult } from 'agent';
+import { ContextWindow } from 'context';
+import type {
+  EventEmitCallback,
+  UserPromptInfo,
+  AgentHooks,
+  AgentResult,
+  InternalHookEvent,
+  InternalHookContext,
+  InternalHookQueue,
+} from 'agent';
 import { Agent } from 'agent';
 import type { AgentRegistry } from 'agent';
 import { createWorkItem, type WorkItem } from 'work';
-import { createEvent } from 'types';
-import type { ArtifactKind, ArtifactDiscoveredData } from 'types';
+import { createEvent, getCanonicalProvider, getProviderBaseUrl } from 'types';
+import type { ArtifactKind, ArtifactDiscoveredData, AgentEvent, LLMProvider, LLMRequestConfig } from 'types';
 import type { EventBusProtocol } from 'comms-bus';
+import { getHandlers } from './hooks/index.js';
 
 // --- Types ---
 
@@ -30,6 +39,8 @@ export interface OrchestratorConfig {
   maxToolCalls: number;
   /** Maximum duration in milliseconds */
   maxDurationMs: number;
+  /** Max time for internal hook handler execution */
+  hookTimeoutMs: number;
   /** Percent context usage that triggers compaction (default 0.8) */
   compactTriggerPercent: number;
   /** Percent context usage to reset compaction hysteresis (default 0.7) */
@@ -41,10 +52,11 @@ export interface OrchestratorConfig {
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
-  maxIterations: 50,
-  maxToolCalls: 200,
-  maxDurationMs: 300_000, // 5 minutes
-  compactTriggerPercent: 0.8,
+  maxIterations: 70,
+  maxToolCalls: 250,
+  maxDurationMs: 1000_000, // 5 minutes
+  hookTimeoutMs: 5000,
+  compactTriggerPercent: 0.70,
   compactResetPercent: 0.7,
   compactMaxFileCount: 20,
   compactTruncateTo: 5000,
@@ -104,6 +116,16 @@ export interface PlanModeOptions {
   toolFilter: (tools: string[]) => string[];
 }
 
+/**
+ * Model override for session-level model selection.
+ * When set, overrides the default agent LLM config.
+ */
+export interface ModelOverride {
+  provider: string;
+  model: string;
+  reasoning?: string;
+}
+
 // --- Orchestrator ---
 
 /**
@@ -119,7 +141,9 @@ export class Orchestrator {
   private agentRegistry?: AgentRegistry;
   private hooks?: AgentHooks;
   private planModeOptions?: PlanModeOptions;
+  private modelOverride?: ModelOverride;
   private eventBus?: EventBusProtocol;
+  private hookQueue: InternalHookQueue;
 
   // Work queue state for DAG-based execution
   private workQueue: WorkItem[] = [];
@@ -136,7 +160,8 @@ export class Orchestrator {
     agentRegistry?: AgentRegistry,
     hooks?: AgentHooks,
     planModeOptions?: PlanModeOptions,
-    eventBus?: EventBusProtocol
+    eventBus?: EventBusProtocol,
+    modelOverride?: ModelOverride
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
@@ -147,7 +172,9 @@ export class Orchestrator {
     this.agentRegistry = agentRegistry;
     this.hooks = hooks;
     this.planModeOptions = planModeOptions;
+    this.modelOverride = modelOverride;
     this.eventBus = eventBus;
+    this.hookQueue = this.createHookQueue();
   }
 
   /**
@@ -160,6 +187,136 @@ export class Orchestrator {
   enqueue(item: WorkItem): string {
     this.workQueue.push(item);
     return item.workId;
+  }
+
+  /**
+   * Creates a hook queue that enqueues events as work items.
+   */
+  private createHookQueue(): InternalHookQueue {
+    return {
+      enqueue: (event: InternalHookEvent, context: InternalHookContext) => {
+        const handlers = getHandlers(event.type);
+        if (handlers.length === 0) return;
+
+        const hookWorkItem = createWorkItem({
+          goal: 'internal_hook',
+          objective: `hook:${event.type}`,
+          agent: 'internal',
+          dependencies: [],
+          bounds: {
+            maxToolCalls: 0,
+            maxDurationMs: this.config.hookTimeoutMs,
+            maxLlmCalls: 0,
+          },
+          params: {
+            isInternalHook: true,
+            hookType: event.type,
+            event,
+            hookContext: context,
+            handler: async () => {
+              for (const handler of handlers) {
+                try {
+                  await handler(event, context);
+                } catch (err) {
+                  console.error(`[HOOK:${event.type}] Handler error:`, err);
+                }
+              }
+            },
+          },
+        });
+
+        this.enqueue(hookWorkItem);
+      },
+    };
+  }
+
+  /**
+   * Run a hook handler without blocking the orchestrator loop.
+   */
+  private runHookHandler(params: {
+    handler: () => Promise<void>;
+    hookType: string;
+    workItemId: string;
+    event?: InternalHookEvent;
+    hookContext?: InternalHookContext;
+    contextWindow: ContextWindow;
+  }): void {
+    const timeoutMs = this.config.hookTimeoutMs;
+    void (async () => {
+      const start = Date.now();
+      const callId = `hook-${params.hookType}-${params.workItemId}`;
+      const hookArgs = {
+        hookType: params.hookType,
+        event: params.event,
+        context: params.hookContext,
+      };
+      const hookCallContext = new ContextWindow(params.contextWindow.sessionKey, params.contextWindow.maxTokens);
+      hookCallContext.addFunctionCall(callId, `hook:${params.hookType}`, hookArgs);
+      params.contextWindow.addAgentResultContext({
+        response: '',
+        filesRead: [],
+        invalidatedPaths: [],
+        localContext: hookCallContext,
+      });
+
+      this.emit(createEvent('hook_call', {
+        hookType: params.hookType,
+        phase: 'starting',
+      }, params.workItemId, this.requestId));
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let success = false;
+      let error: string | undefined;
+      try {
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error('hook_timeout'));
+          }, timeoutMs);
+        });
+        await Promise.race([params.handler(), timeout]);
+        success = true;
+        this.emit(createEvent('hook_call', {
+          hookType: params.hookType,
+          phase: 'completed',
+          success,
+          durationMs: Date.now() - start,
+        }, params.workItemId, this.requestId));
+      } catch (err) {
+        error = String(err);
+        this.emit(createEvent('hook_call', {
+          hookType: params.hookType,
+          phase: 'completed',
+          success: false,
+          error,
+          durationMs: Date.now() - start,
+        }, params.workItemId, this.requestId));
+        console.error(`[HOOK:${params.hookType}] Handler error:`, err);
+      } finally {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        const hookOutput = new ContextWindow(params.contextWindow.sessionKey, params.contextWindow.maxTokens);
+        hookOutput.addFunctionCallOutput(
+          callId,
+          JSON.stringify(
+            {
+              hookType: params.hookType,
+              success,
+              durationMs: Date.now() - start,
+              error: error ?? null,
+            },
+            null,
+            2
+          ),
+          !success
+        );
+        params.contextWindow.addAgentResultContext({
+          response: '',
+          filesRead: [],
+          invalidatedPaths: [],
+          localContext: hookOutput,
+        });
+      }
+    })();
   }
 
   /**
@@ -178,8 +335,8 @@ export class Orchestrator {
   ): Promise<OrchestratorResult> {
     // Subscribe to artifact events for real-time stitching into global context
     // Dedupe is handled internally by addArtifact() - O(1)
-    const unsubscribe = this.eventBus?.subscribe('artifact_discovered', (event) => {
-      const data = event.data as ArtifactDiscoveredData;
+    const unsubscribe = this.eventBus?.subscribe('artifact_discovered', (event: AgentEvent<ArtifactDiscoveredData>) => {
+      const data = event.data;
       context.addArtifact({
         sourcePath: data.artifact.sourcePath,
         line: data.artifact.line,
@@ -233,7 +390,7 @@ export class Orchestrator {
     this.emit(createEvent('orchestration_started', { goal, agentType, requestId: this.requestId }));
 
     // Track in-progress work items (for multi-iteration execution)
-    const inProgress: Map<string, { item: WorkItem; agent: Agent }> = new Map();
+    const inProgress: Map<string, { item: WorkItem; agent: Agent | null }> = new Map();
 
     // Process work queue with parallel execution for independent items
     while (this.workQueue.length > 0 || inProgress.size > 0) {
@@ -242,6 +399,11 @@ export class Orchestrator {
 
       // Create agents for new ready items
       for (const item of readyItems) {
+        const hookParams = item.params as { isInternalHook?: boolean } | undefined;
+        if (hookParams?.isInternalHook) {
+          inProgress.set(item.workId, { item, agent: null });
+          continue;
+        }
         const agent = this.createAgent(item.agent);
         if (!agent) {
           // Mark as failed with synthetic error
@@ -293,11 +455,33 @@ export class Orchestrator {
         compactedRecently = false;
       }
       if (!compactedRecently && percentUsed >= this.config.compactTriggerPercent) {
-        const compactResult = context.compact({
-          deduplicateByPath: true,
-          maxFileContentCount: this.config.compactMaxFileCount,
-          truncateOutputsTo: this.config.compactTruncateTo,
-        });
+        const llmConfig = this.resolveCompactionLlmConfig(agentType);
+        let compactResult;
+        if (llmConfig) {
+          try {
+            compactResult = await context.compactWithLedger({
+              llm: this.llm,
+              llmConfig,
+              targetReductionRatio: 0.66,
+              preserveRecentItems: 12,
+              deduplicateByPath: true,
+              maxFileContentCount: this.config.compactMaxFileCount,
+              truncateOutputsTo: this.config.compactTruncateTo,
+            });
+          } catch {
+            compactResult = context.compact({
+              deduplicateByPath: true,
+              maxFileContentCount: this.config.compactMaxFileCount,
+              truncateOutputsTo: this.config.compactTruncateTo,
+            });
+          }
+        } else {
+          compactResult = context.compact({
+            deduplicateByPath: true,
+            maxFileContentCount: this.config.compactMaxFileCount,
+            truncateOutputsTo: this.config.compactTruncateTo,
+          });
+        }
         compactedRecently = true;
         this.log('info', 'Auto-compacted context', {
           percentUsed,
@@ -349,6 +533,44 @@ export class Orchestrator {
 
       // AGENT EXECUTION - run all in-progress items in parallel
       const executions = Array.from(inProgress.entries()).map(async ([workId, { item, agent }]) => {
+        const hookParams = item.params as {
+          isInternalHook?: boolean;
+          handler?: unknown;
+          hookType?: unknown;
+          event?: InternalHookEvent;
+          hookContext?: InternalHookContext;
+        } | undefined;
+        const handler = hookParams?.handler;
+        if (hookParams?.isInternalHook && typeof handler === 'function') {
+          this.runHookHandler({
+            handler: handler as () => Promise<void>,
+            hookType: String(hookParams?.hookType ?? 'unknown'),
+            workItemId: workId,
+            event: hookParams?.event,
+            hookContext: hookParams?.hookContext,
+            contextWindow: context,
+          });
+          return {
+            workId,
+            item,
+            result: {
+              success: true,
+              response: '',
+              metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
+              filesRead: [],
+              invalidatedPaths: [],
+              toolErrors: [],
+              terminationReason: 'hook_completed',
+              needsUserInput: false,
+              isRefusal: false,
+              localContext: context,
+            } as AgentResult,
+          };
+        }
+
+        if (!agent) {
+          throw new Error(`Missing agent for work item: ${workId}`);
+        }
         const result = await agent.run({ globalContext: context, workItem: item, cwd });
         return { workId, item, result };
       });
@@ -359,6 +581,13 @@ export class Orchestrator {
       let terminalResult: OrchestratorResult | null = null;
 
       for (const { workId, item, result } of results) {
+        const hookParams = item.params as { isInternalHook?: boolean } | undefined;
+        if (hookParams?.isInternalHook) {
+          this.completedWork.set(workId, result);
+          inProgress.delete(workId);
+          continue;
+        }
+
         totalLlmCalls += result.metrics.llmCallsMade;
         totalToolCalls += result.metrics.toolCallsMade;
 
@@ -575,15 +804,65 @@ export class Orchestrator {
       };
     }
 
+    // Apply model override if set (session-level model selection)
+    let llmConfig = runtime.llm;
+    if (this.modelOverride) {
+      // Get canonical provider (e.g., 'cerebras' -> 'openai-compat') and base URL from registry
+      const canonicalProvider = getCanonicalProvider(this.modelOverride.provider);
+      const baseUrl = getProviderBaseUrl(this.modelOverride.provider);
+
+      llmConfig = {
+        ...llmConfig,
+        provider: canonicalProvider,
+        model: this.modelOverride.model,
+        // Preserve user-facing provider name for error messages
+        displayProvider: this.modelOverride.provider,
+        // Set base URL for the provider
+        ...(baseUrl ? { baseUrl } : {}),
+        // Map reasoning string to ReasoningConfig if provided
+        ...(this.modelOverride.reasoning ? {
+          reasoning: { effort: this.modelOverride.reasoning as 'low' | 'medium' | 'high' }
+        } : {}),
+      };
+    }
+
     return new Agent(config, {
       llm: this.llm,
       toolRegistry: this.toolRegistry,
       emit: this.emit,
       requestId: this.requestId,
       agentRegistry: this.agentRegistry,
-      llmConfig: runtime.llm,
+      llmConfig,
       hooks: this.hooks,
+      internalHookQueue: this.hookQueue,
     });
+  }
+
+  private resolveCompactionLlmConfig(agentType: string): LLMRequestConfig | null {
+    let runtime = this.agentRegistry?.getRuntimeConfig(agentType);
+    if (!runtime && agentType !== 'standard') {
+      runtime = this.agentRegistry?.getRuntimeConfig('standard');
+    }
+    if (!runtime) return null;
+
+    let llmConfig = runtime.llm;
+    if (this.modelOverride) {
+      const canonicalProvider = getCanonicalProvider(this.modelOverride.provider);
+      const baseUrl = getProviderBaseUrl(this.modelOverride.provider);
+
+      llmConfig = {
+        ...llmConfig,
+        provider: canonicalProvider,
+        model: this.modelOverride.model,
+        displayProvider: this.modelOverride.provider,
+        ...(baseUrl ? { baseUrl } : {}),
+        ...(this.modelOverride.reasoning ? {
+          reasoning: { effort: this.modelOverride.reasoning as 'low' | 'medium' | 'high' }
+        } : {}),
+      };
+    }
+
+    return llmConfig;
   }
 
   private createWorkItem(goal: string, agentType: string): WorkItem {
@@ -630,7 +909,7 @@ export class Orchestrator {
    * Used when bounds are exceeded to return partial progress instead of empty.
    */
   private harvestCompletedWork(
-    inProgress: Map<string, { item: WorkItem; agent: Agent }>,
+    inProgress: Map<string, { item: WorkItem; agent: Agent | null }>,
     reason: string
   ): string {
     const parts: string[] = [];

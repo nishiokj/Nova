@@ -9,12 +9,50 @@ import {
   runChannel,
   sessionChannel,
 } from "comms-bus";
-import type { BridgeCommand, BridgeEvent, ReadyData, ResponseData } from "./types.js";
+import type { BridgeCommand, BridgeCommandType, BridgeEvent, BridgeEventType, ReadyData, ResponseData } from "./types.js";
+
+// Valid bridge event types for runtime validation
+const VALID_EVENT_TYPES: BridgeEventType[] = [
+  'ready',
+  'status',
+  'progress',
+  'stream',
+  'response',
+  'transcription',
+  'user_prompt',
+  'error',
+  'provider_key_required',
+  'model_changed',
+];
+
+/**
+ * Validates an incoming bridge event at the boundary.
+ * Bad data dies here, never propagates into handlers.
+ */
+function validateBridgeEvent(payload: unknown): BridgeEvent | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+
+  // Must have a valid type
+  if (typeof p.type !== 'string' || !VALID_EVENT_TYPES.includes(p.type as BridgeEventType)) {
+    return null;
+  }
+
+  // data is optional but must be object if present
+  if (p.data !== undefined && (typeof p.data !== 'object' || p.data === null)) {
+    return null;
+  }
+
+  return { type: p.type as BridgeEventType, data: p.data as Record<string, unknown> | undefined };
+}
 
 export interface BridgeClientOptions {
   host: string;
   port: number;
 }
+
+// Connection state machine - explicit states instead of boolean
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
 function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -24,7 +62,16 @@ export class BridgeClient extends EventEmitter {
   private readonly bus: BusClient;
   private sessionKey: string | null = null;
   private activeRuns = new Set<string>();
-  private connected = false;
+  private connectionState: ConnectionState = 'disconnected';
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000; // doubles each attempt, caps at 30s
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Getter for backwards compatibility
+  get connected(): boolean {
+    return this.connectionState === 'connected';
+  }
 
   constructor(options: BridgeClientOptions) {
     super();
@@ -37,23 +84,39 @@ export class BridgeClient extends EventEmitter {
       this.emit("error", payload);
     });
     this.bus.on("close", () => {
-      this.connected = false;
-      this.sessionKey = null;
-      this.activeRuns.clear();
-      this.emit("close");
+      this.handleDisconnect();
     });
   }
 
   async connect(): Promise<void> {
-    if (this.connected) return;
-    await this.bus.connect();
-    this.connected = true;
+    // Already connected or in progress
+    if (this.connectionState === 'connecting' || this.connectionState === 'reconnecting') {
+      return;
+    }
+    if (this.connectionState === 'connected') {
+      return;
+    }
+
+    this.connectionState = 'connecting';
+    this.emit('connection_state', this.connectionState);
+
+    try {
+      await this.bus.connect();
+      this.connectionState = 'connected';
+      this.reconnectAttempts = 0;
+      this.reconnectDelay = 1000;
+      this.emit('connection_state', this.connectionState);
+    } catch (err) {
+      this.connectionState = 'disconnected';
+      this.emit('connection_state', this.connectionState);
+      throw err;
+    }
   }
 
-  send(command: BridgeCommand): void {
-    if (!this.connected) {
-      this.emit("error", { message: "Bridge client not connected" });
-      return;
+  send(command: BridgeCommand): boolean {
+    if (this.connectionState !== 'connected') {
+      this.emit("error", { message: "Not connected to bridge" });
+      return false;
     }
 
     if (command.type === "send_text") {
@@ -78,12 +141,60 @@ export class BridgeClient extends EventEmitter {
     }
 
     this.bus.publish(BRIDGE_COMMAND_CHANNEL, command);
+    return true;
   }
 
   close(): void {
+    // Cancel any pending reconnection
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.connectionState = 'disconnected';
     this.sessionKey = null;
     this.activeRuns.clear();
     this.bus.close();
+    this.emit('connection_state', this.connectionState);
+  }
+
+  private handleDisconnect(): void {
+    // Already disconnected or intentionally closing
+    if (this.connectionState === 'disconnected') return;
+
+    this.sessionKey = null;
+    this.activeRuns.clear();
+    this.connectionState = 'reconnecting';
+    this.emit('connection_state', this.connectionState);
+    this.emit('close');
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.connectionState = 'disconnected';
+      this.emit('connection_state', this.connectionState);
+      this.emit('error', { message: 'Connection lost. Max reconnect attempts reached.' });
+      return;
+    }
+
+    const delay = Math.min(this.reconnectDelay, 30000);
+    this.reconnectAttempts++;
+    this.reconnectDelay *= 2;
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect().catch(() => {
+        // Connect failed, try again
+        this.connectionState = 'reconnecting';
+        this.emit('connection_state', this.connectionState);
+        this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
+  /** Get current connection state */
+  getConnectionState(): ConnectionState {
+    return this.connectionState;
   }
 
   // =========================================================================
@@ -200,8 +311,44 @@ export class BridgeClient extends EventEmitter {
     return this.sendAuthCommand('session_fork', {});
   }
 
+  /**
+   * Close (deactivate) the current session gracefully.
+   * Call this before closing the connection to ensure session is marked inactive.
+   */
+  async sessionClose(): Promise<{
+    success: boolean;
+    sessionKey?: string;
+    message?: string;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('session_close', {});
+  }
+
+  /**
+   * List recoverable sessions, optionally filtered by workingDir.
+   */
+  async listSessions(options: {
+    workingDir?: string;
+    status?: string | string[];
+    limit?: number;
+  } = {}): Promise<{
+    success: boolean;
+    sessions: Array<{
+      sessionKey: string;
+      clientType: string;
+      createdAt: number;
+      lastAccessedAt: number;
+      workingDir: string | null;
+      status: string;
+      lastUserMessagePreview?: string | null;
+    }>;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('list_sessions', options);
+  }
+
   private sendAuthCommand<T extends Record<string, unknown>>(
-    type: string,
+    type: BridgeCommandType,
     data: Record<string, unknown>
   ): Promise<T> {
     return new Promise((resolve) => {
@@ -229,11 +376,11 @@ export class BridgeClient extends EventEmitter {
   }
 
   private handleBusEvent(payload: unknown): void {
-    if (!payload || typeof payload !== "object") {
+    const event = validateBridgeEvent(payload);
+    if (!event) {
+      this.emit('error', { message: 'Malformed event from bridge' });
       return;
     }
-
-    const event = payload as BridgeEvent;
     if (event.type === "ready") {
       const data = (event.data ?? {}) as ReadyData;
       if (data.session_key && data.session_key !== this.sessionKey) {

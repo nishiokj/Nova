@@ -52,6 +52,12 @@ export interface ThemeColors {
   header: string;
   bold: string;
   italic: string;
+  strikethrough: string;
+  blockquote: string;
+  listBullet: string;
+  link: string;
+  linkText: string;
+  hr: string;
   // UI chrome
   muted: string;
   border: string;
@@ -97,6 +103,12 @@ export const themes: Record<string, Theme> = {
       header: "#cba6f7",    // Mauve - markdown headers
       bold: "#f5e0dc",      // Rosewater - bold text
       italic: "#b4befe",    // Lavender - italic text
+      strikethrough: "#6c7086", // Overlay0 - dimmed for strikethrough
+      blockquote: "#a6adc8", // Subtext0 - slightly muted for quotes
+      listBullet: "#f5c2e7", // Pink - list markers
+      link: "#89dceb",       // Sky - link URLs
+      linkText: "#89b4fa",   // Blue - link text
+      hr: "#585b70",         // Surface2 - horizontal rules
       muted: "#6c7086",     // Overlay0
       border: "#45475a",    // Surface1
       accent: "#cba6f7",    // Mauve - for headers/UI
@@ -128,6 +140,12 @@ export const themes: Record<string, Theme> = {
       header: "#ca9ee6",    // Mauve - markdown headers
       bold: "#f2d5cf",      // Rosewater - bold text
       italic: "#babbf1",    // Lavender - italic text
+      strikethrough: "#737994", // Overlay0
+      blockquote: "#a5adce", // Subtext0
+      listBullet: "#f4b8e4", // Pink
+      link: "#99d1db",       // Sky
+      linkText: "#8caaee",   // Blue
+      hr: "#626880",         // Surface2
       muted: "#737994",     // Overlay0
       border: "#51576d",    // Surface1
       accent: "#ca9ee6",    // Mauve
@@ -160,6 +178,12 @@ export const themes: Record<string, Theme> = {
       header: "#c4a7e7",    // Iris - markdown headers
       bold: "#e0def4",      // Text - bold
       italic: "#908caa",    // Subtle - italic
+      strikethrough: "#6e6a86", // Muted
+      blockquote: "#908caa", // Subtle
+      listBullet: "#eb6f92", // Love
+      link: "#c4a7e7",       // Iris
+      linkText: "#9ccfd8",   // Foam
+      hr: "#524f67",         // Highlight high
       muted: "#6e6a86",     // Muted
       border: "#403d52",    // Highlight med
       accent: "#c4a7e7",    // Iris
@@ -191,6 +215,12 @@ export const themes: Record<string, Theme> = {
       header: "#c4a7e7",    // Iris - markdown headers
       bold: "#e0def4",      // Text - bold
       italic: "#908caa",    // Subtle - italic
+      strikethrough: "#6e6a86", // Muted
+      blockquote: "#908caa", // Subtle
+      listBullet: "#eb6f92", // Love
+      link: "#c4a7e7",       // Iris
+      linkText: "#9ccfd8",   // Foam
+      hr: "#56526e",         // Highlight high
       muted: "#6e6a86",     // Muted
       border: "#44415a",    // Highlight med
       accent: "#c4a7e7",    // Iris
@@ -223,6 +253,12 @@ export const themes: Record<string, Theme> = {
       header: "#bb9af7",    // Purple - markdown headers
       bold: "#c0caf5",      // Foreground - bold
       italic: "#9aa5ce",    // Foreground dim - italic
+      strikethrough: "#565f89", // Comment
+      blockquote: "#9aa5ce", // Foreground dim
+      listBullet: "#ff9e64", // Orange
+      link: "#7dcfff",       // Cyan
+      linkText: "#7aa2f7",   // Blue
+      hr: "#414868",         // Terminal black
       muted: "#565f89",     // Comment
       border: "#3b4261",    // Border
       accent: "#bb9af7",    // Purple
@@ -255,6 +291,12 @@ export const themes: Record<string, Theme> = {
       header: "#88C0D0",    // Nord8 - markdown headers
       bold: "#ECEFF4",      // Nord6 - bold
       italic: "#D8DEE9",    // Nord4 - italic
+      strikethrough: "#4C566A", // Nord3
+      blockquote: "#D8DEE9", // Nord4
+      listBullet: "#D08770", // Nord12
+      link: "#81A1C1",       // Nord9
+      linkText: "#88C0D0",   // Nord8
+      hr: "#434C5E",         // Nord2
       muted: "#4C566A",     // Nord3 - Bright black
       border: "#3B4252",    // Nord1 - Dark
       accent: "#88C0D0",    // Nord8
@@ -287,6 +329,12 @@ export const themes: Record<string, Theme> = {
       header: "#d3869b",    // Bright purple - markdown headers
       bold: "#fbf1c7",      // Light0 - bold
       italic: "#d5c4a1",    // Light2 - italic
+      strikethrough: "#665c54", // Dark3
+      blockquote: "#bdae93", // Light3
+      listBullet: "#fe8019", // Bright orange
+      link: "#83a598",       // Bright blue
+      linkText: "#8ec07c",   // Bright aqua
+      hr: "#7c6f64",         // Dark4
       muted: "#665c54",     // Dark3
       border: "#504945",    // Dark2
       accent: "#d3869b",    // Bright purple
@@ -319,6 +367,12 @@ export const themes: Record<string, Theme> = {
       header: "#957FB8",    // Oni violet - markdown headers
       bold: "#DCD7BA",      // Fuji white - bold
       italic: "#C8C093",    // Old white - italic
+      strikethrough: "#727169", // Fuji gray
+      blockquote: "#C8C093", // Old white
+      listBullet: "#FFA066", // Surimi orange
+      link: "#A3D4D5",       // Light blue
+      linkText: "#7E9CD8",   // Crystal blue
+      hr: "#625e5a",         // Fuji gray dim
       muted: "#727169",     // Fuji gray
       border: "#54546D",    // Sumi ink6
       accent: "#957FB8",    // Oni violet
@@ -351,6 +405,12 @@ export const themes: Record<string, Theme> = {
       header: "#a7c080",    // Green - markdown headers
       bold: "#d3c6aa",      // Foreground - bold
       italic: "#9da9a0",    // Gray2 - italic
+      strikethrough: "#7a8478", // Gray1
+      blockquote: "#9da9a0", // Gray2
+      listBullet: "#e69875", // Orange
+      link: "#7fbbb3",       // Aqua
+      linkText: "#83c092",   // Green
+      hr: "#5c6a60",         // Gray0
       muted: "#7a8478",     // Gray1
       border: "#4f5b58",    // Gray0 dim
       accent: "#a7c080",    // Green
@@ -383,6 +443,12 @@ export const themes: Record<string, Theme> = {
       header: "#c678dd",    // Purple - markdown headers
       bold: "#abb2bf",      // Foreground - bold
       italic: "#848b98",    // Comment bright - italic
+      strikethrough: "#5c6370", // Comment gray
+      blockquote: "#848b98", // Comment bright
+      listBullet: "#d19a66", // Orange
+      link: "#61afef",       // Blue
+      linkText: "#56b6c2",   // Cyan
+      hr: "#4b5263",         // Gutter gray bright
       muted: "#5c6370",     // Comment gray
       border: "#3e4451",    // Gutter gray
       accent: "#c678dd",    // Purple

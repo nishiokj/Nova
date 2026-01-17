@@ -40,6 +40,8 @@ export type {
   GoalNotAchievedData,
   ToolCallData,
   ToolCallPhase,
+  HookCallData,
+  HookCallPhase,
   LLMCallData,
   LLMErrorData,
   RateLimitType,
@@ -58,11 +60,13 @@ export {
 export {
   AgentEventSchema,
   ToolCallEventSchema,
+  HookCallEventSchema,
   LLMCallEventSchema,
   LLMErrorEventSchema,
   WorkItemStatusEventSchema,
   WorkItemStatusDataSchema,
   ToolCallDataSchema,
+  HookCallDataSchema,
   LLMCallDataSchema,
   LLMErrorDataSchema,
   parseEvent,
@@ -106,7 +110,6 @@ export type {
   ImageContentBlock,
   ContentBlock,
   Message,
-  LLMProvider,
   LLMRequestConfig,
   LLMClientConfig,
   StopReason,
@@ -180,3 +183,36 @@ export type {
   GeneratedFile,
   ScaffoldResult,
 } from './design-spec.js';
+
+// ============================================
+// PROVIDERS
+// ============================================
+export type {
+  LLMProvider,
+  SupportedProvider,
+  ProviderDefinition,
+  ProviderResponseFormat,
+  ProviderModelDefinition,
+  ProviderModelEntry,
+} from './providers.js';
+
+export {
+  PROVIDER_REGISTRY,
+  OPENAI_COMPAT_PROVIDERS,
+  SUPPORTED_PROVIDER_IDS,
+  isSupportedProvider,
+  isOpenAICompatProvider,
+  getCanonicalProvider,
+  getProviderBaseUrl,
+  getProviderEnvVar,
+  getProviderDisplayName,
+  getProviderTestEndpoint,
+  getProviderResponseFormat,
+  getProviderDefinition,
+  getAllProviders,
+  getProvidersByCanonical,
+  getAllModels,
+  getProviderModels,
+  getProviderForModel,
+  getModelDefinition,
+} from './providers.js';

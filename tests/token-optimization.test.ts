@@ -218,7 +218,7 @@ describe('Artifact Batching (Fix #2)', () => {
 // ============================================================================
 
 describe('Tool Output Truncation (Fix #3)', () => {
-  const MAX_TOOL_OUTPUT_LENGTH = 8000;
+  const MAX_TOOL_OUTPUT_LENGTH = 10000;
 
   it('truncates outputs longer than 8000 chars', async () => {
     // Create a long output (10000 chars)

@@ -181,6 +181,91 @@ export interface AgentHooks {
 }
 
 // ============================================
+// INTERNAL ASYNC HOOKS (best-effort housekeeping)
+// ============================================
+
+/**
+ * Internal hook event types.
+ * Fired by agent, enqueued as work items, executed as plain functions (no LLM).
+ */
+export type InternalHookEvent =
+  | {
+      type: 'turn_completed';
+      iteration: number;
+      toolCallsMade: number;
+      llmCallsMade: number;
+      hasResponse: boolean;
+      terminationReason?: string;
+    }
+  | {
+      type: 'tool_batch_completed';
+      toolNames: string[];
+      successCount: number;
+      failCount: number;
+    }
+  | {
+      type: 'context_threshold';
+      usagePercent: number;
+      tokenCount: number;
+      itemCount: number;
+    }
+  | {
+      type: 'artifacts_discovered';
+      artifacts: Array<{ sourcePath: string; name: string; kind: string }>;
+      discoveredBy: string;
+    }
+  | {
+      type: 'files_modified';
+      paths: string[];
+    }
+  | {
+      type: 'agent_completed';
+      workId: string;
+      success: boolean;
+      terminationReason: string;
+      filesRead: string[];
+      invalidatedPaths: string[];
+    };
+
+/**
+ * Context passed to internal hook handlers.
+ */
+export interface InternalHookContext {
+  workId: string;
+  agentType: string;
+  sessionKey: string;
+  requestId: string;
+}
+
+/**
+ * Internal hook handler function signature.
+ * Plain async function - no LLM, no agent.
+ */
+export type InternalHookHandler<T extends InternalHookEvent = InternalHookEvent> = (
+  event: T,
+  context: InternalHookContext
+) => Promise<void>;
+
+/**
+ * Interface for enqueueing internal hook work items.
+ * Implemented by orchestrator, passed to agent.
+ */
+export interface InternalHookQueue {
+  /**
+   * Enqueue a hook event as a work item.
+   * Returns immediately - does not block.
+   */
+  enqueue(event: InternalHookEvent, context: InternalHookContext): void;
+}
+
+/**
+ * Noop hook queue for when hooks are disabled.
+ */
+export const noopHookQueue: InternalHookQueue = {
+  enqueue: () => {},
+};
+
+// ============================================
 // AGENT RUNTIME CONFIG
 // ============================================
 
@@ -210,4 +295,6 @@ export interface AgentRuntimeConfig {
   llmConfig?: LLMRequestConfig;
   /** Optional lifecycle hooks */
   hooks?: AgentHooks;
+  /** Optional internal hook queue */
+  internalHookQueue?: InternalHookQueue;
 }

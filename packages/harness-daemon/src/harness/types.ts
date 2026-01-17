@@ -55,6 +55,7 @@ export interface UserPromptInfo {
   options?: Array<string | { label: string; description?: string }>;
   context?: string;
   multiSelect?: boolean;
+  questionType?: string;
   /** Multiple questions to ask in sequence */
   questions?: UserPromptQuestion[];
 }

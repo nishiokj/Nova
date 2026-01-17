@@ -16,6 +16,7 @@ type CoreAgentType = string;
  */
 export type AgentCoreEventType =
   | 'tool_call'
+  | 'hook_call'
   | 'llm_call'
   | 'llm_error'
   | 'rate_limit'
@@ -188,6 +189,22 @@ export interface ToolCallData {
   phase: ToolCallPhase;
   result?: string;
   success?: boolean;
+  durationMs?: number;
+}
+
+/**
+ * Phase of a hook call event.
+ */
+export type HookCallPhase = 'starting' | 'completed';
+
+/**
+ * Data for hook_call event.
+ */
+export interface HookCallData {
+  hookType: string;
+  phase: HookCallPhase;
+  success?: boolean;
+  error?: string;
   durationMs?: number;
 }
 

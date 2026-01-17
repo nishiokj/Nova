@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import path from "path";
 import { fileURLToPath } from "url";
-import { BridgeClient } from "./bridge_client.js";
+import { BridgeClient, type ConnectionState } from "./bridge_client.js";
 import { FileCache } from "./file_cache.js";
 import { Store } from "./store.js";
 import { HELP_LINES, parseSlashCommand } from "./commands.js";
@@ -19,10 +19,15 @@ import {
   type MessageEntry,
   type Role,
   type BridgeCommandType,
+  type ProviderKeyRequiredData,
+  type ModelChangedData,
   type UserPromptData,
   type UserPromptQuestion,
   type AgentQuestion,
   type QuestionType,
+  type UsageSessionSummary,
+  type UsageDayStats,
+  type UsageProviderStats,
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
@@ -31,6 +36,9 @@ import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
 import { QuestionPrompt } from "./components/QuestionPrompt.js";
 import { ProvidersView } from "./components/ProvidersView.js";
 import { ResponsePane, parseDiffToResponseContent } from "./components/ResponsePane.js";
+import { SessionsView } from "./components/SessionsView.js";
+import { UsageView } from "./components/UsageView.js";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
 import { formatDiffAsText } from "./diff.js";
@@ -44,6 +52,9 @@ interface GraphDSession {
   status: string;
   working_dir: string | null;
   last_accessed_at: number;
+  created_at: number;
+  client_type: string;
+  metadata_json?: string;
 }
 
 function resolveGraphdUrl(): string {
@@ -64,9 +75,29 @@ function resolveBusConfig(): { host: string; port: number } {
   };
 }
 
+// Fetch with timeout to prevent indefinite hangs
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 10000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function fetchGraphdSessions(): Promise<GraphDSession[]> {
   const baseUrl = resolveGraphdUrl();
-  const response = await fetch(`${baseUrl}/export?table=sessions`);
+  const response = await fetchWithTimeout(`${baseUrl}/export?table=sessions`);
   if (!response.ok) {
     throw new Error(`GraphD export failed (${response.status})`);
   }
@@ -80,14 +111,199 @@ async function fetchGraphdSessions(): Promise<GraphDSession[]> {
 
 async function deleteGraphdSession(sessionKey: string): Promise<boolean> {
   const baseUrl = resolveGraphdUrl();
-  const response = await fetch(`${baseUrl}/session/${encodeURIComponent(sessionKey)}`, {
-    method: "DELETE",
-  });
+  const response = await fetchWithTimeout(
+    `${baseUrl}/session/${encodeURIComponent(sessionKey)}`,
+    { method: "DELETE" }
+  );
   if (!response.ok) {
     return false;
   }
   const payload = (await response.json()) as { deleted?: boolean };
   return payload.deleted === true;
+}
+
+interface GraphDMessage {
+  session_key: string;
+  request_id: string;
+  role: string;
+  content: string;
+  timestamp: number;
+  metadata_json?: string;
+}
+
+/**
+ * Fetch usage data from GraphD and compute session summaries.
+ */
+async function fetchUsageData(): Promise<{
+  sessions: UsageSessionSummary[];
+  dayStats: UsageDayStats[];
+  providerStats: UsageProviderStats[];
+}> {
+  const baseUrl = resolveGraphdUrl();
+
+  // Fetch sessions and messages in parallel
+  const [sessionsResponse, messagesResponse] = await Promise.all([
+    fetchWithTimeout(`${baseUrl}/export?table=sessions`),
+    fetchWithTimeout(`${baseUrl}/export?table=conversation_messages`),
+  ]);
+
+  if (!sessionsResponse.ok) {
+    throw new Error(`GraphD sessions export failed (${sessionsResponse.status})`);
+  }
+
+  const sessionsPayload = (await sessionsResponse.json()) as { data?: string };
+  const rawSessions: GraphDSession[] = sessionsPayload.data
+    ? sessionsPayload.data.split("\n").filter(Boolean).map((line) => JSON.parse(line) as GraphDSession)
+    : [];
+
+  // Parse messages if available
+  let rawMessages: GraphDMessage[] = [];
+  if (messagesResponse.ok) {
+    const messagesPayload = (await messagesResponse.json()) as { data?: string };
+    if (messagesPayload.data) {
+      rawMessages = messagesPayload.data
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as GraphDMessage);
+    }
+  }
+
+  // Group messages by session
+  const messagesBySession = new Map<string, GraphDMessage[]>();
+  for (const msg of rawMessages) {
+    const list = messagesBySession.get(msg.session_key) ?? [];
+    list.push(msg);
+    messagesBySession.set(msg.session_key, list);
+  }
+
+  // Build session summaries
+  const now = Date.now() / 1000;
+  const staleThreshold = 5 * 60; // 5 minutes
+
+  const sessions: UsageSessionSummary[] = rawSessions.map((raw) => {
+    const messages = messagesBySession.get(raw.session_key) ?? [];
+    const meta = raw.metadata_json ? JSON.parse(raw.metadata_json) : {};
+
+    // Compute token metrics from agent_events if available
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let llmCallCount = 0;
+    let toolCallCount = 0;
+    let requestCount = 0;
+    const providerTokens = new Map<string, number>();
+
+    const agentEvents = meta.agent_events as unknown[] | undefined;
+    if (agentEvents && Array.isArray(agentEvents)) {
+      const seenRequests = new Set<string>();
+      for (const event of agentEvents) {
+        const e = event as Record<string, unknown>;
+        const eventType = e.type as string;
+        const requestId = (e.request_id as string) ?? (e.requestId as string);
+        if (requestId && !seenRequests.has(requestId)) {
+          seenRequests.add(requestId);
+          requestCount++;
+        }
+
+        if (eventType === "llm_call") {
+          const data = (e.data ?? {}) as Record<string, unknown>;
+          const promptTokens = (data.prompt_tokens as number) ?? (data.promptTokens as number) ?? 0;
+          const completionTokens = (data.completion_tokens as number) ?? (data.completionTokens as number) ?? 0;
+          inputTokens += promptTokens;
+          outputTokens += completionTokens;
+          llmCallCount++;
+
+          const provider = (data.provider as string) ?? "unknown";
+          providerTokens.set(provider, (providerTokens.get(provider) ?? 0) + promptTokens);
+        } else if (eventType === "tool_call") {
+          toolCallCount++;
+        }
+      }
+    }
+
+    // Determine status
+    let status: "active" | "idle" | "ended" = "idle";
+    if (raw.status === "closed" || raw.status === "expired") {
+      status = "ended";
+    } else if (now - raw.last_accessed_at <= staleThreshold) {
+      status = "active";
+    }
+
+    const projectName = raw.working_dir?.split("/").pop() ?? "unknown";
+    const durationMs = (raw.last_accessed_at - raw.created_at) * 1000;
+
+    return {
+      sessionKey: raw.session_key,
+      status,
+      projectName,
+      workingDir: raw.working_dir,
+      createdAt: raw.created_at,
+      lastAccessedAt: raw.last_accessed_at,
+      requestCount,
+      inputTokens,
+      outputTokens,
+      llmCallCount,
+      toolCallCount,
+      durationMs,
+      providerTokens,
+    };
+  });
+
+  // Sort by last accessed (most recent first)
+  sessions.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+
+  // Compute day stats
+  const dayStatsMap = new Map<string, UsageDayStats>();
+  for (const session of sessions) {
+    const date = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+    const existing = dayStatsMap.get(date) ?? {
+      date,
+      inputTokens: 0,
+      outputTokens: 0,
+      requestCount: 0,
+      llmCallCount: 0,
+    };
+    existing.inputTokens += session.inputTokens;
+    existing.outputTokens += session.outputTokens;
+    existing.requestCount += session.requestCount;
+    existing.llmCallCount += session.llmCallCount;
+    dayStatsMap.set(date, existing);
+  }
+  const dayStats = Array.from(dayStatsMap.values()).sort((a, b) => b.date.localeCompare(a.date));
+
+  // Compute provider stats from actual provider data
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  const providerStatsMap = new Map<string, { today: number; week: number; month: number }>();
+
+  for (const session of sessions) {
+    const sessionDate = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+
+    // Aggregate tokens by provider from actual session data
+    for (const [provider, tokens] of session.providerTokens) {
+      const existing = providerStatsMap.get(provider) ?? { today: 0, week: 0, month: 0 };
+
+      if (sessionDate === todayDate) {
+        existing.today += tokens;
+      }
+      if (sessionDate >= weekAgo) {
+        existing.week += tokens;
+      }
+      if (sessionDate >= monthAgo) {
+        existing.month += tokens;
+      }
+
+      providerStatsMap.set(provider, existing);
+    }
+  }
+
+  const providerStats: UsageProviderStats[] = Array.from(providerStatsMap.entries()).map(([provider, stats]) => ({
+    provider,
+    ...stats,
+  }));
+
+  return { sessions, dayStats, providerStats };
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -261,8 +477,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     });
 
     client.on("error", (payload) => {
-      const message = typeof payload?.message === "string" ? payload.message : "Agent error";
-      store.setError(message);
+      const message = typeof payload?.message === "string" ? payload.message : "Connection error";
+      store.batch(() => {
+        store.addMessage("system", message);
+        store.setError(message);
+      });
+    });
+
+    // Connection state changes - show status and handle reconnection
+    client.on("connection_state", (state: ConnectionState) => {
+      switch (state) {
+        case "connecting":
+          store.setStatus("Connecting to bridge...");
+          break;
+        case "connected":
+          store.batch(() => {
+            store.clearError();
+            store.setStatus("Connected");
+          });
+          break;
+        case "reconnecting":
+          store.setStatus("Connection lost. Reconnecting...");
+          break;
+        case "disconnected":
+          store.setError("Disconnected from bridge");
+          break;
+      }
     });
 
     void client
@@ -274,6 +514,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           log_transcripts: options.logTranscripts,
           working_dir: process.cwd(),
         };
+        // Only use explicit session key from CLI (e.g., --session <key>)
         if (options.sessionKey) {
           initData.session_key = options.sessionKey;
         }
@@ -288,8 +529,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       });
 
     // Cleanup function for both useEffect and signal handlers
+    // Gracefully closes session before disconnecting
     const cleanup = () => {
-      client.close();
+      // Signal session close to harness (don't await - best effort)
+      // This marks the session as inactive so it shows correctly in /sessions
+      client.sessionClose().catch(() => {
+        // Ignore errors during cleanup - connection may already be closed
+      });
+      // Small delay to allow the close message to be sent
+      setTimeout(() => {
+        client.close();
+      }, 50);
       clearInterval(refreshInterval);
       logger.close();
     };
@@ -338,33 +588,47 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   });
 
   const handleBridgeEvent = (event: BridgeEvent) => {
-    switch (event.type) {
-      case "ready":
-        handleReady(event.data as ReadyData | undefined);
-        break;
-      case "status":
-        handleStatus(event.data as StatusData | undefined);
-        break;
-      case "progress":
-        handleProgress(event.data as ProgressData | undefined);
-        break;
-      case "stream":
-        handleStream(event.data as StreamData | undefined);
-        break;
-      case "response":
-        handleResponse(event.data as ResponseData | undefined);
-        break;
-      case "transcription":
-        handleTranscription(event.data as TranscriptionData | undefined);
-        break;
-      case "user_prompt":
-        handleUserPrompt(event.data as UserPromptData | undefined);
-        break;
-      case "error":
-        handleError(event.data as ErrorData | undefined);
-        break;
-      default:
-        break;
+    try {
+      switch (event.type) {
+        case "ready":
+          handleReady(event.data as ReadyData | undefined);
+          break;
+        case "status":
+          handleStatus(event.data as StatusData | undefined);
+          break;
+        case "progress":
+          handleProgress(event.data as ProgressData | undefined);
+          break;
+        case "stream":
+          handleStream(event.data as StreamData | undefined);
+          break;
+        case "response":
+          handleResponse(event.data as ResponseData | undefined);
+          break;
+        case "transcription":
+          handleTranscription(event.data as TranscriptionData | undefined);
+          break;
+        case "user_prompt":
+          handleUserPrompt(event.data as UserPromptData | undefined);
+          break;
+        case "error":
+          handleError(event.data as ErrorData | undefined);
+          break;
+        case "provider_key_required":
+          handleProviderKeyRequired(event.data as ProviderKeyRequiredData | undefined);
+          break;
+        case "model_changed":
+          handleModelChanged(event.data as ModelChangedData | undefined);
+          break;
+        default:
+          break;
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      store.batch(() => {
+        store.addMessage("system", `Event processing error: ${errorMessage}`);
+        store.setError(errorMessage);
+      });
     }
   };
 
@@ -554,8 +818,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         : typeof metadata.error === "string"
           ? metadata.error
           : "";
-    if (kind === "config" || kind === "models" || kind === "status") {
+    if (kind === "config" || kind === "status") {
       if (content) {
+        store.addMessage("system", content);
+      }
+      return;
+    }
+    if (kind === "models") {
+      const payload = metadata.payload as Array<{ id: string; name: string; provider?: string }> | undefined;
+      if (payload && Array.isArray(payload)) {
+        store.setModelsList(payload);
+      } else if (content) {
         store.addMessage("system", content);
       }
       return;
@@ -597,10 +870,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     const requestId = data.request_id ?? undefined;
     const metaLines: string[] = [];
-    if (data.duration_ms) {
+    if (data.duration_ms != null) {
       metaLines.push(`Duration: ${Math.round(data.duration_ms)}ms`);
     }
-    if (data.tools_used && data.tools_used.length > 0) {
+    if (data.tools_used?.length) {
       metaLines.push(`Tools: ${data.tools_used.join(", ")}`);
     }
     if (error) {
@@ -718,25 +991,50 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.setActiveQuestion(question, data.request_id);
   };
 
+  const handleProviderKeyRequired = (data?: ProviderKeyRequiredData) => {
+    const provider = data?.provider;
+    const model = data?.model;
+    const message = provider
+      ? model
+        ? `API key required for provider "${provider}" to use model "${model}".`
+        : `API key required for provider "${provider}".`
+      : "API key required to continue.";
+    store.batch(() => {
+      store.addMessage("system", message);
+      store.setUIMode("providers");
+    });
+  };
+
+  const handleModelChanged = (data?: ModelChangedData) => {
+    if (!data?.model) return;
+    const provider = data.provider ? ` [${data.provider}]` : "";
+    store.batch(() => {
+      store.setSelectedModel(data.model ?? null);
+      store.addMessage("system", `Active model set to "${data.model}"${provider}.`);
+    });
+  };
+
   const handleError = (data?: ErrorData) => {
-    if (!data?.message) {
-      return;
+    const message = data?.message ?? "An error occurred";
+    let detailText = "";
+    if (data?.detail !== undefined) {
+      if (typeof data.detail === "string") {
+        detailText = data.detail;
+      } else {
+        try {
+          detailText = JSON.stringify(data.detail, null, 2);
+        } catch {
+          detailText = "[Unable to serialize error details]";
+        }
+      }
     }
-    const detailText =
-      data.detail === undefined
-        ? ""
-        : typeof data.detail === "string"
-          ? data.detail
-          : JSON.stringify(data.detail, null, 2);
     const detail = detailText ? `\n${detailText}` : "";
     store.batch(() => {
-      store.addMessage("system", `${data.message}${detail}`);
-      store.setError(data.message);
+      store.addMessage("system", `${message}${detail}`);
+      store.setError(message);
     });
-    if (data.fatal) {
-      setTimeout(() => {
-        exit();
-      }, 50);
+    if (data?.fatal) {
+      store.addMessage("system", "Fatal error reported by harness. UI will remain open; restart if needed.");
     }
   };
 
@@ -841,10 +1139,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
-    // Skills/hooks/providers list modes - escape to return to chat, block all other input
-    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks" || snapshot.uiMode === "providers") {
+    // Skills/hooks/providers/usage list modes - escape to return to chat, block all other input
+    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks" || snapshot.uiMode === "providers" || snapshot.uiMode === "usage") {
       if (key.escape) {
-        store.setUIMode("chat");
+        if (snapshot.uiMode === "usage") {
+          store.exitUsageMode();
+        } else {
+          store.setUIMode("chat");
+        }
       }
       // Block all input in these modes - they have their own handlers
       return;
@@ -889,6 +1191,82 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       // Consume all other input in theme mode
+      return;
+    }
+
+    // Models selection mode
+    if (snapshot.uiMode === "models") {
+      if (key.escape) {
+        store.exitModelsMode();
+        return;
+      }
+
+      if (key.upArrow) {
+        store.moveModelsCursor(-1);
+        return;
+      }
+
+      if (key.downArrow) {
+        store.moveModelsCursor(1);
+        return;
+      }
+
+      if (key.return) {
+        const selectedModel = store.selectModel();
+        if (selectedModel) {
+          store.addMessage("system", `Model set to "${selectedModel.name}" (${selectedModel.id}).`);
+          // Send command to update model in harness
+          sendCommand("set_model", {
+            provider: selectedModel.provider,
+            model: selectedModel.id,
+          });
+        }
+        store.exitModelsMode();
+        return;
+      }
+
+      // Consume all other input in models mode
+      return;
+    }
+
+    // Sessions selection mode
+    if (snapshot.uiMode === "sessions") {
+      if (key.escape) {
+        store.exitSessionsMode();
+        return;
+      }
+
+      if (key.upArrow) {
+        store.moveSessionsCursor(-1);
+        return;
+      }
+
+      if (key.downArrow) {
+        store.moveSessionsCursor(1);
+        return;
+      }
+
+      if (key.return) {
+        const selected = store.getSelectedSession();
+        if (selected) {
+          store.exitSessionsMode();
+          store.addMessage("system", `Switching to session ${selected.sessionKey}...`);
+
+          const client = clientRef.current;
+          if (client) {
+            client.send({
+              type: "init",
+              data: {
+                session_key: selected.sessionKey,
+                working_dir: selected.workingDir ?? process.cwd(),
+              },
+            });
+          }
+        }
+        return;
+      }
+
+      // Consume all other input in sessions mode
       return;
     }
 
@@ -1033,7 +1411,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     if (snapshot.state === "error") {
       store.clearError();
-      return;
     }
 
     if (snapshot.uiMode === "chat" && handleVoiceKeys(input, key)) {
@@ -1394,6 +1771,57 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
   };
 
+  const startSessionsFlow = async () => {
+    const client = clientRef.current;
+    if (!client) {
+      store.addMessage("system", "Client not connected.");
+      return;
+    }
+
+    store.addMessage("system", "Fetching recoverable sessions...");
+    try {
+      const result = await client.listSessions({
+        status: ["active", "inactive"],
+        limit: 20,
+      });
+
+      if (!result.success) {
+        store.addMessage("system", `Failed to fetch sessions: ${result.error ?? "Unknown error"}`);
+        return;
+      }
+
+      if (result.sessions.length === 0) {
+        store.addMessage("system", "No recoverable sessions found.");
+        return;
+      }
+
+      // Convert to SessionEntry format and enter sessions selection mode
+      store.setSessionsList(result.sessions);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      store.addMessage("system", `Failed to fetch sessions: ${message}`);
+    }
+  };
+
+  const startUsageFlow = async () => {
+    store.setUsageLoading(true);
+    store.setUIMode("usage");
+
+    try {
+      const { sessions, dayStats, providerStats } = await fetchUsageData();
+      store.batch(() => {
+        store.setUsageSessions(sessions);
+        store.setUsageAnalytics(dayStats, providerStats);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      store.batch(() => {
+        store.addMessage("system", `Failed to fetch usage data: ${message}`);
+        store.exitUsageMode();
+      });
+    }
+  };
+
   const handleSlashCommand = (command: string, arg?: string) => {
     switch (command) {
       case "/help":
@@ -1413,6 +1841,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       case "/hooks":
         handleHooksCommand(arg);
+        return;
+      case "/sessions":
+        void startSessionsFlow();
+        return;
+      case "/usage":
+        void startUsageFlow();
         return;
       case "/delete":
         void startDeleteFlow(arg);
@@ -1581,7 +2015,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   // Header lines with theme colors
   const headerConfig: Array<{ text: string; color?: string; bold?: boolean }> = [
-    { text: `Voice Agent - Ink TUI${snapshot.compact ? " [compact]" : ""}`, color: colors.accent, bold: true },
+    { text: `Bloom ${snapshot.compact ? " [compact]" : ""}`, color: colors.accent, bold: true },
     { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}${snapshot.planMode ? " | [PLAN]" : ""}`, color: colors.muted },
     { text: `Status: ${statusText}`, color: statusColor },
     { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
@@ -1702,7 +2136,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // Question mode: show QuestionPrompt instead of input box
   const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
   const isThemeMode = snapshot.uiMode === "theme";
+  const isModelsMode = snapshot.uiMode === "models";
+  const isSessionsMode = snapshot.uiMode === "sessions";
   const isProvidersMode = snapshot.uiMode === "providers";
+  const isUsageMode = snapshot.uiMode === "usage";
   const isResponseMode = snapshot.uiMode === "response" && snapshot.responseContent;
 
   // Theme selector rendering
@@ -1734,6 +2171,39 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     );
   };
 
+  // Models selector rendering
+  const renderModelsSelector = () => {
+    const colors = getColors();
+    const currentModel = store.getSelectedModel();
+    return (
+      <Box flexDirection="column" paddingX={2} paddingY={1}>
+        <Text bold color={colors.accent}>Select Model</Text>
+        <Text color={colors.muted}>Use ↑↓ to navigate, Enter to select, Esc to cancel</Text>
+        <Text> </Text>
+        {snapshot.modelsList.map((model, index) => {
+          const isSelected = index === snapshot.modelsCursor;
+          const isCurrent = model.id === currentModel;
+          const pointer = isSelected ? "▸ " : "  ";
+          const marker = isCurrent ? " (current)" : "";
+          const provider = model.provider;
+          return (
+            <Text key={`${provider ?? 'unknown'}:${model.id}`}>
+              <Text color={isSelected ? colors.accent : colors.muted}>{pointer}</Text>
+              <Text color={isSelected ? colors.text : colors.muted} bold={isSelected}>
+                {model.name}
+              </Text>
+              {provider && <Text color={colors.muted}> [{provider}]</Text>}
+              <Text color={colors.muted}>{marker}</Text>
+            </Text>
+          );
+        })}
+      </Box>
+    );
+  };
+
+  // Sessions selector uses the SessionsView component
+  const sessionsHeight = historyHeight + inputBoxHeight;
+
   return (
     <Box flexDirection="column" width={width}>
       {headerConfig.map((item, index) => (
@@ -1746,7 +2216,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           // Pad user lines to full width for consistent background
           const paddedText = isUserLine ? line.text.padEnd(width, " ") : line.text;
           return (
-            <Text key={`hist-${index}`} backgroundColor={bgColor}>
+            <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
               <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
             </Text>
           );
@@ -1766,6 +2236,31 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         />
       ) : isThemeMode ? (
         renderThemeSelector()
+      ) : isModelsMode ? (
+        renderModelsSelector()
+      ) : isSessionsMode ? (
+        <SessionsView
+          sessions={snapshot.sessionsList}
+          cursor={snapshot.sessionsCursor}
+          currentSessionKey={snapshot.sessionKey}
+          width={width}
+          height={sessionsHeight}
+        />
+      ) : isUsageMode ? (
+        <UsageView
+          sessions={snapshot.usageSessions}
+          cursor={snapshot.usageCursor}
+          viewMode={snapshot.usageViewMode}
+          dayStats={snapshot.usageDayStats}
+          providerStats={snapshot.usageProviderStats}
+          loading={snapshot.usageLoading}
+          width={width}
+          height={sessionsHeight}
+          onMoveCursor={(delta) => store.moveUsageCursor(delta)}
+          onSetViewMode={(mode) => store.setUsageViewMode(mode)}
+          onRefresh={() => void startUsageFlow()}
+          onClose={() => store.exitUsageMode()}
+        />
       ) : isQuestionMode ? (
         <QuestionPrompt
           question={snapshot.activeQuestion!}
@@ -1834,7 +2329,7 @@ function levelColor(level?: string | null): string | undefined {
 }
 
 /** Syntax highlight patterns - use color keys, resolved at runtime */
-type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg";
+type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg";
 
 // Hardcoded diff colors - bright and consistent regardless of theme
 const DIFF_ADD_FG = "#ffffff";    // White text for visibility
@@ -1851,28 +2346,78 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
   { pattern: /^\s*\d+\s+\+ .*$/gm, hardcodedColor: DIFF_ADD_FG, hardcodedBg: DIFF_ADD_BG },
   { pattern: /^\s*\d+\s+- .*$/gm, hardcodedColor: DIFF_REMOVE_FG, hardcodedBg: DIFF_REMOVE_BG },
   { pattern: /^\s*\d+\s{3}.*$/gm, hardcodedColor: DIFF_CONTEXT_FG, hardcodedBg: DIFF_CONTEXT_BG },
+
+  // Horizontal rules (---, ***, ___)
+  { pattern: /^[-*_]{3,}\s*$/gm, colorKey: "hr", transform: (s) => "─".repeat(Math.max(3, s.trim().length)) },
+
+  // Markdown table separator row (|---|---|) - convert to box drawing
+  { pattern: /^\|?[\s:]*-{3,}[\s:]*\|[\s|:\-]+\|?\s*$/gm, colorKey: "border", transform: (s) => {
+    return s.replace(/\|/g, "┼").replace(/-+/g, (m) => "─".repeat(m.length)).replace(/^┼/, "├").replace(/┼$/, "┤").replace(/┼\s*$/, "┤");
+  }},
+
+  // Markdown table rows (| cell | cell |) - style the pipes
+  { pattern: /^\|.+\|\s*$/gm, colorKey: "text", transform: (s) => s.replace(/\|/g, "│") },
+
   // Markdown headers (### Header text) - strip the hashes and bold
   { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
+
+  // Blockquotes (> text) - preserve the > marker styled
+  { pattern: /^>\s+.+$/gm, colorKey: "blockquote", italic: true, transform: (s) => "│ " + s.slice(2) },
+
+  // Unordered list items (- item, * item, + item)
+  { pattern: /^[\s]*[-*+]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/[-*+]/, "•") },
+
+  // Numbered list items (1. item, 2. item)
+  { pattern: /^[\s]*\d+\.\s+/gm, colorKey: "listBullet" },
+
+  // Task list items (- [ ] or - [x])
+  { pattern: /^[\s]*[-*+]\s+\[[ xX]\]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/\[[ ]\]/, "☐").replace(/\[[xX]\]/, "☑").replace(/[-*+]/, "") },
+
+  // Strikethrough (~~text~~)
+  { pattern: /~~[^~]+~~/g, colorKey: "strikethrough", transform: (s) => s.slice(2, -2) },
+
+  // Markdown links [text](url) - render as "text" with link color
+  { pattern: /\[([^\]]+)\]\([^)]+\)/g, colorKey: "linkText", transform: (s) => {
+    const match = s.match(/\[([^\]]+)\]/);
+    return match ? match[1] : s;
+  }},
+
   // Bold text (**text** or __text__)
   { pattern: /\*\*[^*]+\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
   { pattern: /__[^_]+__/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
+
   // Italic text (*text* or _text_) - single asterisk/underscore, not followed by another
   { pattern: /(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
   { pattern: /(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
+
   // Inline code
-  { pattern: /`[^`]+`/g, colorKey: "code", bold: true },
-  // Code blocks (```...```)
+  { pattern: /`[^`]+`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
+
+  // Code block delimiters (``` or ```language on their own line)
+  { pattern: /^```\w*\s*$/gm, colorKey: "border", transform: (s) => {
+    const langMatch = s.match(/```(\w+)/);
+    const lang = langMatch ? ` ${langMatch[1]} ` : "";
+    return "─".repeat(3) + lang + "─".repeat(Math.max(0, 10 - lang.length));
+  }},
+
+  // Code blocks (multiline ```...```) - fallback, just color
   { pattern: /```[\s\S]*?```/g, colorKey: "code" },
-  // URLs
-  { pattern: /https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },
+
+  // URLs (standalone, not inside markdown links)
+  { pattern: /(?<!\]\()https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },
+
   // File paths
-  { pattern: /\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },
+  { pattern: /(?<!\w)\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },
+
   // Durations
   { pattern: /\b\d+(?:\.\d+)?\s*(?:ms|s|sec|min|m|h|hr)s?\b/gi, colorKey: "number" },
-  // [tool_name]
-  { pattern: /\[[a-z_][a-z0-9_]*\]/gi, colorKey: "func", bold: true },
+
+  // [tool_name] - but not markdown image/link syntax
+  { pattern: /(?<!!)\[[a-z_][a-z0-9_]*\](?!\()/gi, colorKey: "func", bold: true },
+
   // ClassName.method()
   { pattern: /\b[A-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)*\(\)/g, colorKey: "func" },
+
   // function_name()
   { pattern: /\b[a-z_][a-zA-Z0-9_]*\(\)/g, colorKey: "func" },
 ];
@@ -1885,8 +2430,22 @@ interface TextSegment {
   italic?: boolean;
 }
 
+const MAX_PARSE_TEXT_LENGTH = 20000;
+const PARSE_CACHE_LIMIT = 200;
+const parseCache = new Map<string, TextSegment[]>();
+
 /** Parse text into styled segments for syntax highlighting */
 function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
+  if (text.length > MAX_PARSE_TEXT_LENGTH) {
+    return [{ text, color: baseColor }];
+  }
+
+  const cacheKey = `${baseColor ?? ""}::${text}`;
+  const cached = parseCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const colors = getColors();
   const segments: TextSegment[] = [];
 
@@ -1936,7 +2495,15 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
     segments.push({ text: text.slice(pos), color: baseColor });
   }
 
-  return segments.length > 0 ? segments : [{ text, color: baseColor }];
+  const result = segments.length > 0 ? segments : [{ text, color: baseColor }];
+  if (parseCache.size >= PARSE_CACHE_LIMIT) {
+    const oldestKey = parseCache.keys().next().value;
+    if (oldestKey) {
+      parseCache.delete(oldestKey);
+    }
+  }
+  parseCache.set(cacheKey, result);
+  return result;
 }
 
 /** Render text with syntax highlighting */
@@ -2007,22 +2574,59 @@ const options = parseArgs(process.argv.slice(2));
 // Global cleanup reference for signal handlers
 let globalCleanup: (() => void) | null = null;
 
+// Double-cleanup guard to prevent race condition on rapid signals
+let cleanupCalled = false;
+
 // Handle graceful shutdown on signals
 const handleSignal = (signal: string) => {
+  if (cleanupCalled) return;
+  cleanupCalled = true;
+
   console.log(`\nReceived ${signal}, shutting down gracefully...`);
   if (globalCleanup) {
     globalCleanup();
   }
-  // Give cleanup time to complete before exit
-  setTimeout(() => process.exit(0), 1000);
+  // Give cleanup time to complete before exit (session close + connection close)
+  setTimeout(() => process.exit(0), 500);
 };
+
+// Process-level last resort handlers - catch anything that slips through
+process.on('uncaughtException', (error: Error) => {
+  console.error('\n[FATAL] Uncaught exception:', error.message);
+  console.error(error.stack);
+
+  // Attempt cleanup
+  if (globalCleanup && !cleanupCalled) {
+    cleanupCalled = true;
+    try {
+      globalCleanup();
+    } catch {
+      // Cleanup failed, nothing more we can do
+    }
+  }
+
+  // Exit with error code after brief delay for cleanup
+  setTimeout(() => process.exit(1), 100);
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  console.error('\n[ERROR] Unhandled promise rejection:', message);
+  // Don't exit for unhandled rejections - log and continue
+  // The specific operation failed but the app can continue
+});
 
 process.on('SIGINT', () => handleSignal('SIGINT'));
 process.on('SIGTERM', () => handleSignal('SIGTERM'));
+process.on('SIGHUP', () => handleSignal('SIGHUP'));
 
 // Export cleanup setter for App component
 export const setGlobalCleanup = (cleanup: () => void) => {
   globalCleanup = cleanup;
 };
 
-render(<App options={options} />);
+render(
+  <ErrorBoundary>
+    <App options={options} />
+  </ErrorBoundary>
+);
