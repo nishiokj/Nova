@@ -26,7 +26,7 @@ import { execSync } from 'child_process';
 import { Orchestrator, type ModelOverride } from 'orchestrator';
 import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot, type RateLimitData } from 'types';
+import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
 import { createWorkItem } from 'work';
 import { coerceStructuredOutput } from 'shared';
@@ -308,6 +308,7 @@ export class AgentHarness {
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
+    this.sessionTtlMs = config.context.sessionTtlMs;
 
     // Gather environment context once at startup
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
@@ -510,12 +511,11 @@ export class AgentHarness {
    * Close and evict in-memory state for a session.
    */
   closeSession(sessionKey: string): void {
-    const context = this.contextWindows.get(sessionKey);
-    if (context) {
-      this.persistContext(context);
-      this.contextWindows.delete(sessionKey);
+    const entry = this.sessionStores.get(sessionKey);
+    if (entry) {
+      entry.store.close();
+      this.sessionStores.delete(sessionKey);
     }
-    this.pausedState.delete(sessionKey);
   }
 
   /**
@@ -533,7 +533,7 @@ export class AgentHarness {
             reusing: this.graphd.isReusing(),
           });
           if (!this.graphdSubscriber) {
-            this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd);
+            this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd, { batchMode: false });
             this.logger.debug('GraphDSubscriber created');
           }
         }
@@ -547,66 +547,52 @@ export class AgentHarness {
   }
 
   /**
-   * Get or create a ContextWindow for the session.
+   * Get or create a SessionStore for the session.
    */
-  private getOrCreateContext(sessionKey: string): ContextWindow {
-    let context = this.contextWindows.get(sessionKey);
-    if (context) {
-      return context;
+  private getOrCreateSessionStore(sessionKey: string): SessionStore {
+    const existing = this.sessionStores.get(sessionKey);
+    const now = Date.now();
+    if (existing) {
+      existing.lastAccessMs = now;
+      return existing.store;
     }
 
-    // Try to hydrate from GraphD
-    if (this.isGraphDReady()) {
-      try {
-        const result = this.graphd!.contextGet(sessionKey) as {
-          snapshot?: { context?: ContextWindowSnapshot };
-          error?: string;
-        };
-        if (result.snapshot && result.snapshot.context) {
-          context = ContextWindow.deserialize(result.snapshot.context);
-          this.contextWindows.set(sessionKey, context);
-          this.logger.debug('Hydrated context from GraphD', {
-            sessionKey,
-            itemCount: context.items.length,
-            version: context.version,
-          });
-          return context;
-        }
-      } catch (error) {
-        this.logger.warning('Failed to hydrate context from GraphD', {
-          sessionKey,
-          error: String(error),
-        });
-      }
-    }
-
-    // Create new context
-    const maxTokens = this.config.context.maxTokens;
-    context = new ContextWindow(sessionKey, maxTokens);
-    this.contextWindows.set(sessionKey, context);
-    this.logger.debug('Created new context', { sessionKey, maxTokens });
-    return context;
+    const store = new SessionStore({
+      sessionKey,
+      maxTokens: this.config.context.maxTokens,
+      graphd: this.graphd,
+      isGraphDReady: () => this.isGraphDReady(),
+      logger: this.logger,
+    });
+    this.sessionStores.set(sessionKey, { store, lastAccessMs: now });
+    return store;
   }
 
-  /**
-   * Persist a ContextWindow to GraphD.
-   */
-  private persistContext(context: ContextWindow): void {
-    if (!this.isGraphDReady()) return;
+  private pruneSessionStores(reason: string): void {
+    if (this.sessionTtlMs <= 0) return;
+    const now = Date.now();
+    const cutoff = now - this.sessionTtlMs;
+    for (const [sessionKey, entry] of this.sessionStores.entries()) {
+      if (entry.lastAccessMs > cutoff) continue;
+      if (entry.store.hasPausedState()) continue;
+      entry.store.close();
+      this.sessionStores.delete(sessionKey);
+      this.logger.debug('Evicted session store', {
+        sessionKey,
+        reason,
+        idleMs: now - entry.lastAccessMs,
+      });
+    }
+  }
 
+  private persistUserMessage(sessionKey: string, requestId: string, userInput: string): boolean {
+    if (!this.isGraphDReady()) return false;
     try {
-      const snapshot = context.serialize();
-      this.graphd!.contextSave(context.sessionKey, { context: snapshot });
-      this.logger.debug('Persisted context to GraphD', {
-        sessionKey: context.sessionKey,
-        itemCount: context.items.length,
-        version: context.version,
-      });
+      this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      return true;
     } catch (error) {
-      this.logger.warning('Failed to persist context to GraphD', {
-        sessionKey: context.sessionKey,
-        error: String(error),
-      });
+      this.logger.warning('GraphD user message persist failed', { error: String(error) });
+      return false;
     }
   }
 
@@ -620,13 +606,16 @@ export class AgentHarness {
 
     eventQueue.push(createStatusEvent('sending', 'Processing request...'));
 
+    this.pruneSessionStores('run');
+    const store = this.getOrCreateSessionStore(sessionKey);
+
     if (this.isGraphDReady()) {
       try {
         const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-        this.graphd!.sessionTouch(sessionKey, effectiveWorkingDir);
+        store.touch(effectiveWorkingDir);
         this.graphd!.setActive(true);
         if (!this.graphdSubscriber) {
-          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!);
+          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!, { batchMode: false });
           this.logger.debug('GraphDSubscriber created');
         }
       } catch (error) {
@@ -634,14 +623,15 @@ export class AgentHarness {
       }
     }
 
-    const contextWindow = this.getOrCreateContext(sessionKey);
+    const contextWindow = store.getContext();
 
     // NOTE: Per min_patch_spec.md, we no longer auto-inject @path references into context.
     // Users should use explicit tools (Read/Glob/Grep) to bring file contents into context.
 
     contextWindow.addMessage('user', inputText);
 
-    const emit = createEventEmitCallback(this.eventBus, requestId, runId);
+    const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, inputText);
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
     const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
       const bridgeEvent = translateAgentEvent(event);
@@ -726,7 +716,7 @@ export class AgentHarness {
         }
 
         // All requests go through orchestrator (loop-until-goal architecture)
-        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, modelOverride);
+        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, modelOverride, store);
 
         if (result.paused && result.userPrompt) {
           // Pausing for user input - only emit user prompt event, not response
@@ -755,7 +745,7 @@ export class AgentHarness {
 
         eventQueue.push(createStatusEvent('idle'));
 
-        this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs);
+        this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs, userMessagePersisted);
 
         return result;
       } catch (error) {
@@ -783,7 +773,7 @@ export class AgentHarness {
           } as RateLimitData));
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           // Create a user-friendly error message based on rate limit type
           let userMessage: string;
@@ -821,7 +811,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -850,7 +840,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -911,7 +901,7 @@ export class AgentHarness {
         queueMicrotask(() => {
           try {
             unsubscribe();
-            this.persistContext(contextWindow);
+            store.persistContext();
 
             // Flush subscriber events to make them visible to dashboard immediately
             this.graphdSubscriber?.flush();
@@ -943,12 +933,15 @@ export class AgentHarness {
     requestId: string,
     userInput: string,
     assistantResponse: string,
-    durationMs: number
+    durationMs: number,
+    userMessagePersisted = false
   ): void {
     if (!this.isGraphDReady()) return;
 
     try {
-      this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      if (!userMessagePersisted) {
+        this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      }
       this.graphd!.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
         duration_ms: durationMs,
       });
@@ -1027,7 +1020,8 @@ export class AgentHarness {
     agentType: AgentType = 'standard',
     workingDir?: string,
     planMode?: boolean,
-    modelOverride?: ModelOverride
+    modelOverride?: ModelOverride,
+    store?: SessionStore
   ): Promise<AgentRunResult> {
     const hooks = this.createAgentHooks(context.sessionKey, requestId);
 
@@ -1058,7 +1052,7 @@ export class AgentHarness {
 
     // Store paused state for resume, or clear it on completion
     if (result.paused) {
-      this.pausedState.set(context.sessionKey, {
+      store?.setPausedState({
         goal,
         agentType,
         workingDir: effectiveWorkingDir,
@@ -1066,7 +1060,7 @@ export class AgentHarness {
         userPromptType: result.userPrompt?.questionType,
       });
     } else {
-      this.pausedState.delete(context.sessionKey);
+      store?.clearPausedState();
     }
 
     return {
@@ -1099,8 +1093,14 @@ export class AgentHarness {
 
     eventQueue.push(createStatusEvent('sending', 'Resuming with user input...'));
 
-    const paused = this.pausedState.get(sessionKey);
-    if (!paused) {
+    this.pruneSessionStores('resume');
+    const storeEntry = this.sessionStores.get(sessionKey);
+    const store = storeEntry?.store ?? null;
+    const paused = store?.getPausedState() ?? null;
+    if (storeEntry) {
+      storeEntry.lastAccessMs = Date.now();
+    }
+    if (!store || !paused) {
       const errorMessage = 'No paused session found for this sessionKey';
       eventQueue.push(createErrorEvent(errorMessage, false));
       eventQueue.push(createStatusEvent('error', errorMessage));
@@ -1118,8 +1118,22 @@ export class AgentHarness {
       return { result: resultPromise, events: eventQueue };
     }
 
-    const contextWindow = this.getOrCreateContext(sessionKey);
-    const emit = createEventEmitCallback(this.eventBus, requestId, runId);
+    if (this.isGraphDReady()) {
+      try {
+        const effectiveWorkingDir = workingDir ?? paused.workingDir;
+        store.touch(effectiveWorkingDir);
+        this.graphd!.setActive(true);
+        if (!this.graphdSubscriber) {
+          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!, { batchMode: false });
+          this.logger.debug('GraphDSubscriber created');
+        }
+      } catch (error) {
+        this.logger.warning('GraphD session touch failed', { error: String(error) });
+      }
+    }
+
+    const contextWindow = store.getContext();
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
     const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
       const bridgeEvent = translateAgentEvent(event);
@@ -1133,6 +1147,7 @@ export class AgentHarness {
         // Add user's response to context (serialize if structured)
         const answerText = typeof answer === 'string' ? answer : JSON.stringify(answer);
         contextWindow.addMessage('user', answerText);
+        const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, answerText);
 
         // Get model override from session metadata if set
         let modelOverride: ModelOverride | undefined;
@@ -1185,7 +1200,8 @@ export class AgentHarness {
           paused.agentType,
           effectiveWorkingDir,
           planMode,
-          modelOverride
+          modelOverride,
+          store
         );
 
         if (result.paused && result.userPrompt) {
@@ -1214,7 +1230,8 @@ export class AgentHarness {
         }
 
         eventQueue.push(createStatusEvent('idle'));
-        this.persistContext(contextWindow);
+        this.persistToGraphD(sessionKey, requestId, answerText, result.finalText, result.durationMs, userMessagePersisted);
+        store.persistContext();
 
         return result;
       } catch (error) {
@@ -1230,7 +1247,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           // Create a user-friendly error message
           let userMessage: string;
@@ -1268,7 +1285,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -1297,7 +1314,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -1353,6 +1370,14 @@ export class AgentHarness {
           // Flush subscriber events to make them visible to dashboard immediately
           this.graphdSubscriber?.flush();
 
+          if (this.isGraphDReady()) {
+            try {
+              this.graphd!.setActive(false);
+            } catch {
+              // Ignore errors during cleanup
+            }
+          }
+
           eventQueue.finish();
         });
       }
@@ -1387,16 +1412,16 @@ export class AgentHarness {
 
     if (result.success) {
       // Pre-populate in-memory cache with cloned context
-      const sourceContext = this.contextWindows.get(sourceSessionKey);
-      if (sourceContext) {
-        const clonedSnapshot = sourceContext.serialize();
-        clonedSnapshot.sessionKey = targetSessionKey;
-        const clonedContext = ContextWindow.deserialize(clonedSnapshot);
-        this.contextWindows.set(targetSessionKey, clonedContext);
+      const sourceEntry = this.sessionStores.get(sourceSessionKey);
+      const sourceSnapshot = sourceEntry?.store.getCachedContextSnapshot() ?? null;
+      if (sourceSnapshot) {
+        const clonedSnapshot = { ...sourceSnapshot, sessionKey: targetSessionKey };
+        const targetStore = this.getOrCreateSessionStore(targetSessionKey);
+        targetStore.hydrateFromSnapshot(clonedSnapshot);
         this.logger.info('Forked session with in-memory context', {
           sourceSessionKey,
           targetSessionKey,
-          contextItems: clonedContext.items.length,
+          contextItems: clonedSnapshot.items.length,
         });
       } else {
         this.logger.info('Forked session (no in-memory context to clone)', {
@@ -1414,10 +1439,12 @@ export class AgentHarness {
    * This triggers immediate compaction regardless of current context usage.
    */
   compactContext(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string } {
-    const context = this.contextWindows.get(sessionKey);
-    if (!context) {
+    const entry = this.sessionStores.get(sessionKey);
+    if (!entry || !entry.store.getCachedContextSnapshot()) {
       return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: 'No context found for session' };
     }
+
+    const context = entry.store.getContext();
 
     try {
       const result = context.compact({
@@ -1433,7 +1460,7 @@ export class AgentHarness {
       });
 
       // Persist the compacted context
-      this.persistContext(context);
+      entry.store.persistContext();
 
       return {
         success: true,
@@ -1466,7 +1493,7 @@ export class AgentHarness {
     }
 
     if (this.isGraphDReady()) {
-      for (const sessionKey of this.contextWindows.keys()) {
+      for (const sessionKey of this.sessionStores.keys()) {
         try {
           this.graphd!.sessionClose(sessionKey);
           this.logger.debug('Closed GraphD session', { sessionKey });
@@ -1496,7 +1523,10 @@ export class AgentHarness {
       }
     }
 
-    this.contextWindows.clear();
+    for (const entry of this.sessionStores.values()) {
+      entry.store.close();
+    }
+    this.sessionStores.clear();
     this.toolRegistry.clearCache();
     this.logger.info('AgentHarness shutdown');
     this.logger.flush?.();

@@ -287,6 +287,7 @@ export class Agent {
 
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
+      const shouldStreamToTui = !this.config.outputSchema;
       const stream = this.llm.stream({
         messages: messages as unknown as Message[],
         tools: toolsForThisCall,
@@ -294,6 +295,7 @@ export class Agent {
         llm: this.llmConfig,
         responseSchema: this.config.outputSchema,
         onChunk: (chunk) => {
+          if (!shouldStreamToTui) return;
           this.emit(createEvent('agent_message', {
             agentType: this.config.type,
             message: chunk,

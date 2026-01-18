@@ -1697,6 +1697,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     };
 
     // Check for held Esc+key (appears as meta or escape modifier in terminals)
+    // Also handle raw escape sequences: \x1b + letter (sent by some terminals when holding Esc)
     if ((key.meta || key.escape) && !key.ctrl) {
       const lowerInput = input.toLowerCase();
       if (lowerInput === "m") {
@@ -1704,6 +1705,19 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
       if (lowerInput === "t") {
+        cycleReasoning();
+        return;
+      }
+    }
+
+    // Handle raw escape sequences: \x1bm or \x1bt (Esc held + letter in some terminals)
+    if (input.length === 2 && input.charCodeAt(0) === 0x1b) {
+      const letter = input[1].toLowerCase();
+      if (letter === "m") {
+        cycleModel();
+        return;
+      }
+      if (letter === "t") {
         cycleReasoning();
         return;
       }

@@ -1166,12 +1166,17 @@ class LLMRouterAdapter implements LLMAdapter {
     if (!output) return [];
 
     const toolCalls: ToolCall[] = [];
+    const isValidToolName = (name: unknown): name is string =>
+      typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
 
     for (const item of output) {
       // Handle function_call items directly in output array (OpenAI Responses API format)
       if (item.type === 'function_call') {
         const callId = (item.call_id ?? item.id) as string;
         const name = item.name as string;
+        if (!isValidToolName(name)) {
+          continue;
+        }
         const argsJson = item.arguments as string;
         let args: Record<string, unknown> = {};
         try {
@@ -1193,6 +1198,9 @@ class LLMRouterAdapter implements LLMAdapter {
 
         const callId = block.id as string;
         const name = block.name as string;
+        if (!isValidToolName(name)) {
+          continue;
+        }
         const argsJson = block.arguments as string;
         let args: Record<string, unknown> = {};
         try {
@@ -1525,6 +1533,7 @@ class LLMRouterAdapter implements LLMAdapter {
     const body: Record<string, unknown> = {
       model: resolved.model,
       stream: true,
+      background: true,
     };
 
     if (instructions) {
