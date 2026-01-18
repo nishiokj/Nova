@@ -1,6 +1,7 @@
 import { ContextWindow } from 'context';
-import type { ContextWindowSnapshot } from 'types';
 import type { GraphDManager } from 'graphd';
+import type { ContextWindowSnapshot } from 'types';
+import type { ModelOverride } from 'orchestrator';
 
 export interface HarnessLogger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -34,6 +35,7 @@ export class SessionStore {
   private readonly logger: HarnessLogger;
   private context: ContextWindow | null = null;
   private pausedState: PausedState | null = null;
+  private modelOverride: ModelOverride | null = null;
 
   constructor(options: SessionStoreOptions) {
     this.sessionKey = options.sessionKey;
@@ -129,5 +131,18 @@ export class SessionStore {
     this.persistContext();
     this.context = null;
     this.pausedState = null;
+    this.modelOverride = null;
+  }
+
+  setModelOverride(override: ModelOverride | null): void {
+    this.modelOverride = override;
+  }
+
+  getModelOverride(): ModelOverride | null {
+    return this.modelOverride;
+  }
+
+  clearModelOverride(): void {
+    this.modelOverride = null;
   }
 }

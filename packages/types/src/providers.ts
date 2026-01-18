@@ -100,37 +100,40 @@ export type ProviderResponseFormat = 'json_schema' | 'json_object';
 /**
  * Provider defaults for each model role.
  * Keys are SupportedProvider ids; values are optional per-role model ids.
+ * Used by resolveModelForRole() to find an appropriate model when agents
+ * specify only a role (fast, standard, powerful, reasoning).
  */
 export const PROVIDER_MODEL_DEFAULTS: Partial<
   Record<SupportedProvider, Partial<Record<ModelRole, string>>>
 > = {
   anthropic: {
-    fast: 'claude-3-5-haiku-20241022',
-    standard: 'claude-sonnet-4-20250514',
-    powerful: 'claude-sonnet-4-20250514',
-    reasoning: 'claude-sonnet-4-20250514',
+    fast: 'claude-sonnet-4.5',
+    standard: 'claude-sonnet-4.5',
+    powerful: 'claude-opus-4.5',
+    reasoning: 'claude-opus-4.5',
   },
   openai: {
-    fast: 'gpt-4.1-mini',
-    standard: 'gpt-4.1',
-    powerful: 'gpt-4.1',
-    reasoning: 'o4-mini',
-  },
-  groq: {
-    fast: 'llama-3.3-70b-versatile',
-    standard: 'llama-3.3-70b-versatile',
+    fast: 'gpt-5-nano',
+    standard: 'gpt-5-mini',
+    powerful: 'gpt-5.2',
+    reasoning: 'gpt-5.2-codex',
   },
   cerebras: {
     fast: 'llama-3.3-70b',
     standard: 'llama-3.3-70b',
   },
+  groq: {
+    fast: 'llama-3.3-70b-versatile',
+    standard: 'llama-3.3-70b-versatile',
+  },
   gemini: {
     fast: 'gemini-3.0-flash',
-    standard: 'gemini-3.0-pro',
+    standard: 'gemini-3.0-flash',
+    powerful: 'gemini-3.0-pro',
   },
   'z.ai-coder': {
+    fast: 'glm-4.7',
     standard: 'glm-4.7',
-    reasoning: 'glm-4.7',
   },
 };
 

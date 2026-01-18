@@ -58,6 +58,18 @@ export const consoleLogger: AdapterLogger = {
 };
 
 /**
+ * Provider service interface for runtime API key resolution.
+ * This allows the harness to provide dynamic key lookup without
+ * the adapter needing to know about the storage mechanism.
+ */
+export interface ProviderKeyService {
+  /** Get API key for a provider. Returns null if not configured. */
+  getApiKey(provider: string): string | null;
+  /** Check if an API key exists for a provider. */
+  hasApiKey(provider: string): boolean;
+}
+
+/**
  * Parse API error response to extract detailed error information.
  * Uses Zod schemas for type-safe parsing.
  */
@@ -346,8 +358,9 @@ class LLMRouterAdapter implements LLMAdapter {
   private resilienceConfig: ResilienceConfig;
   private logger: AdapterLogger;
   private fallbackConfig?: FallbackConfig;
+  private providerKeyService?: ProviderKeyService;
 
-  constructor(config: LLMClientConfig = {}, logger?: AdapterLogger) {
+  constructor(config: LLMClientConfig = {}, logger?: AdapterLogger, providerKeyService?: ProviderKeyService) {
     this.apiKeys = config.apiKeys ?? {};
     this.baseUrls = config.baseUrls ?? {};
     this.circuitState = createCircuitState();
@@ -358,6 +371,15 @@ class LLMRouterAdapter implements LLMAdapter {
     };
     this.logger = logger ?? consoleLogger;
     this.fallbackConfig = config.fallback;
+    this.providerKeyService = providerKeyService;
+  }
+
+  /**
+   * Set the provider key service for dynamic API key resolution.
+   */
+  setProviderKeyService(service: ProviderKeyService): void {
+    this.providerKeyService = service;
+    this.logger.info('Provider key service configured');
   }
 
   /**
@@ -381,8 +403,14 @@ class LLMRouterAdapter implements LLMAdapter {
 
   /**
    * Check if an API key exists for a provider.
+   * Checks: 1) provider key service (dynamic), 2) stored keys (static)
    */
   hasApiKey(provider: LLMProvider): boolean {
+    // First check the provider key service (dynamic lookup)
+    if (this.providerKeyService?.hasApiKey(provider)) {
+      return true;
+    }
+    // Fall back to stored keys
     return !!this.apiKeys[provider];
   }
 
@@ -438,10 +466,24 @@ class LLMRouterAdapter implements LLMAdapter {
       throw new Error(`Base URL not configured for provider '${displayProvider}'`);
     }
 
-    const apiKey = llm.apiKey ?? this.apiKeys[provider];
+    // API key resolution priority:
+    // 1. Per-request apiKey (explicit)
+    // 2. Provider key service (dynamic - from GraphD/config)
+    // 3. Stored apiKeys (static - from constructor)
+    let apiKey = llm.apiKey;
+    let keySource = 'per-request';
+
+    if (!apiKey && this.providerKeyService) {
+      apiKey = this.providerKeyService.getApiKey(displayProvider) ?? null;
+      if (apiKey) keySource = 'provider-service';
+    }
+
+    if (!apiKey) {
+      apiKey = this.apiKeys[provider] ?? null;
+      if (apiKey) keySource = 'stored';
+    }
 
     // Debug logging for API key resolution
-    const keySource = llm.apiKey ? 'per-request' : 'stored';
     const keyPreview = apiKey ? `${apiKey.slice(0, 8)}...` : 'MISSING';
     this.logger.debug('Resolving request config', {
       model: llm.model,
@@ -450,12 +492,12 @@ class LLMRouterAdapter implements LLMAdapter {
       baseUrl,
       keySource,
       keyPreview,
+      hasProviderService: !!this.providerKeyService,
       hasStoredKey: !!this.apiKeys[provider],
-      storedProviders: Object.keys(this.apiKeys).filter(k => !!this.apiKeys[k as LLMProvider]),
     });
 
     if (!apiKey) {
-      throw new Error(`API key not configured for provider '${displayProvider}' (baseUrl: ${baseUrl})`);
+      throw new Error(`API key not configured for provider '${displayProvider}'. Use /providers to add your API key.`);
     }
 
     return {
@@ -2377,6 +2419,10 @@ class LLMRouterAdapter implements LLMAdapter {
 /**
  * Create an LLM adapter based on configuration.
  */
-export function createAdapter(config: LLMClientConfig = {}, logger?: AdapterLogger): LLMAdapter {
-  return new LLMRouterAdapter(config, logger);
+export function createAdapter(
+  config: LLMClientConfig = {},
+  logger?: AdapterLogger,
+  providerKeyService?: ProviderKeyService
+): LLMAdapter {
+  return new LLMRouterAdapter(config, logger, providerKeyService);
 }

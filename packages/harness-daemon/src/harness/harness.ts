@@ -568,6 +568,20 @@ export class AgentHarness {
     return store;
   }
 
+  setSessionModelOverride(sessionKey: string, override: ModelOverride | null): void {
+    const store = this.getOrCreateSessionStore(sessionKey);
+    if (override) {
+      store.setModelOverride(override);
+    } else {
+      store.clearModelOverride();
+    }
+  }
+
+  getSessionModelOverride(sessionKey: string): ModelOverride | null {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.getModelOverride() ?? null;
+  }
+
   private pruneSessionStores(reason: string): void {
     if (this.sessionTtlMs <= 0) return;
     const now = Date.now();
@@ -695,9 +709,12 @@ export class AgentHarness {
 
         const llmAdapter = this.llmAdapter;
 
-        // Get model override from session metadata if set
+        // Get model override from session store or GraphD metadata if set
         let modelOverride: ModelOverride | undefined;
-        if (this.isGraphDReady()) {
+        const cachedOverride = store.getModelOverride();
+        if (cachedOverride) {
+          modelOverride = cachedOverride;
+        } else if (this.isGraphDReady()) {
           try {
             const session = this.graphd!.sessionGet(sessionKey);
             const metadata = session?.metadata as Record<string, unknown> | undefined;
@@ -708,6 +725,7 @@ export class AgentHarness {
                 model: override.model,
                 reasoning: override.reasoning,
               };
+              store.setModelOverride(modelOverride);
               this.logger.debug('Using model override from session', { modelOverride });
             }
           } catch {
@@ -1149,9 +1167,12 @@ export class AgentHarness {
         contextWindow.addMessage('user', answerText);
         const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, answerText);
 
-        // Get model override from session metadata if set
+        // Get model override from session store or GraphD metadata if set
         let modelOverride: ModelOverride | undefined;
-        if (this.isGraphDReady()) {
+        const cachedOverride = store.getModelOverride();
+        if (cachedOverride) {
+          modelOverride = cachedOverride;
+        } else if (this.isGraphDReady()) {
           try {
             const session = this.graphd!.sessionGet(sessionKey);
             const metadata = session?.metadata as Record<string, unknown> | undefined;
@@ -1162,6 +1183,7 @@ export class AgentHarness {
                 model: override.model,
                 reasoning: override.reasoning,
               };
+              store.setModelOverride(modelOverride);
             }
           } catch {
             // Ignore errors getting model override - use default

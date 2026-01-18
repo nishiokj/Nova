@@ -51,6 +51,7 @@ interface HarnessLike {
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string): boolean;
+  setSessionModelOverride?(sessionKey: string, override: import('orchestrator').ModelOverride | null): void;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
@@ -147,7 +148,7 @@ export class BridgeGateway {
           this.handleGetModels(connectionId);
           return;
         case 'models_delete':
-          this.handleModelsDelete(connectionId, command.data);
+          this.handleModelsDelete(connectionId, command.data, state);
           return;
         case 'skills_list':
           this.handleSkillsList(connectionId);
@@ -300,9 +301,14 @@ export class BridgeGateway {
     // Load and emit last model preference if available
     if (graphd) {
       const lastModel = graphd.getUserPreference<{ provider: string; model: string; reasoning?: string }>('user_prefs:last_model');
-      if (lastModel?.provider && this.harness.hasApiKey(lastModel.provider)) {
+      const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+      const isHidden = lastModel?.model
+        ? hiddenModels.some((hidden) => hidden.trim().toLowerCase() === lastModel.model.trim().toLowerCase())
+        : false;
+      if (lastModel?.provider && !isHidden && this.harness.hasApiKey(lastModel.provider)) {
         // Store in session metadata and emit event
         graphd.sessionUpdateMetadata(sessionKey, { model_override: lastModel });
+        this.harness.setSessionModelOverride?.(sessionKey, lastModel);
         this.sendEvent(connectionId, {
           type: 'model_changed',
           data: lastModel,
@@ -457,7 +463,11 @@ export class BridgeGateway {
     });
   }
 
-  private handleModelsDelete(connectionId: string, data: Record<string, unknown> | undefined): void {
+  private handleModelsDelete(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): void {
     // TUI sends 'model' (model ID), accept both 'model' and 'model_id' for flexibility
     const modelId = typeof data?.model === 'string' ? data.model : (typeof data?.model_id === 'string' ? data.model_id : '');
     if (!modelId) {
@@ -482,6 +492,26 @@ export class BridgeGateway {
     if (!hiddenModels.includes(modelId)) {
       hiddenModels.push(modelId);
       graphd.setUserPreference('user_prefs:hidden_models', hiddenModels);
+    }
+
+    const sessionKey = state.sessionKey;
+    const normalizedModelId = modelId.trim().toLowerCase();
+
+    // Clear last-model preference if it matches the deleted model
+    const lastModel = graphd.getUserPreference<{ provider?: string; model?: string }>('user_prefs:last_model');
+    if (lastModel?.model && lastModel.model.trim().toLowerCase() === normalizedModelId) {
+      graphd.deleteUserPreference('user_prefs:last_model');
+    }
+
+    // Clear session override if it matches the deleted model
+    if (sessionKey) {
+      const session = graphd.sessionGet(sessionKey);
+      const metadata = session?.metadata as Record<string, unknown> | undefined;
+      const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+      if (override?.model && override.model.trim().toLowerCase() === normalizedModelId) {
+        graphd.sessionUpdateMetadata(sessionKey, { model_override: null });
+        this.harness.setSessionModelOverride?.(sessionKey, null);
+      }
     }
 
     this.sendAuthResponse(connectionId, 'models_delete', {
@@ -1082,7 +1112,9 @@ export class BridgeGateway {
       const graphd = this.harness.getGraphD?.();
       if (graphd) {
         graphd.sessionUpdateMetadata(sessionKey, { model_override: null });
+        graphd.deleteUserPreference('user_prefs:last_model');
       }
+      this.harness.setSessionModelOverride?.(sessionKey, null);
       this.sendAuthResponse(connectionId, 'set_model', {
         success: true,
         model_override: null,
@@ -1095,6 +1127,14 @@ export class BridgeGateway {
       this.sendAuthResponse(connectionId, 'set_model', {
         success: false,
         error: 'Provider is required',
+      });
+      return;
+    }
+
+    if (!model) {
+      this.sendAuthResponse(connectionId, 'set_model', {
+        success: false,
+        error: 'Model is required',
       });
       return;
     }
@@ -1128,6 +1168,7 @@ export class BridgeGateway {
       // Also persist as global preference for next session
       graphd.setUserPreference('user_prefs:last_model', modelOverride);
     }
+    this.harness.setSessionModelOverride?.(sessionKey, modelOverride);
 
     // Emit model_changed event
     this.sendEvent(connectionId, {

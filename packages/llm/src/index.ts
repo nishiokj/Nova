@@ -39,6 +39,7 @@ export {
 // Adapters
 export {
   type AdapterLogger,
+  type ProviderKeyService,
   consoleLogger,
   createAdapter,
   PartialStreamError,

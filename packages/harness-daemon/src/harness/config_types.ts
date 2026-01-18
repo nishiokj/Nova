@@ -65,28 +65,30 @@ export type {
 export type AgentType = string;
 
 // ============================================
-// RUNTIME CONFIG (resolved with API keys)
+// RUNTIME CONFIG (no credentials - resolved at request time)
 // ============================================
 
 /**
- * Resolved fallback config with API key.
+ * Resolved fallback config - NO API KEY.
+ * Credentials are resolved at request time via ProviderService.
  */
 export interface ResolvedFallbackConfig {
   provider: LLMProvider;
   model: string;
-  apiKey: string;
   baseUrl?: string;
 }
 
 /**
- * Resolved LLM config with API key from environment.
+ * Resolved LLM config - NO API KEY.
+ * Credentials are resolved at request time via ProviderService.
+ * This allows the harness to start without any configured providers,
+ * and for users to add/change API keys at runtime.
  */
 export interface ResolvedLLMConfig {
   provider: LLMProvider;
   /** Original provider name from config (e.g., 'z.ai-coder') for display in errors */
   displayProvider: string;
   model: string;
-  apiKey: string;
   maxTokens: number;
   temperature?: number;
   baseUrl?: string;
@@ -94,6 +96,19 @@ export interface ResolvedLLMConfig {
     effort: ReasoningEffort;
   };
   fallback?: ResolvedFallbackConfig;
+}
+
+/**
+ * Provider service interface for runtime API key resolution.
+ * This is queried at request time, not at config load time.
+ */
+export interface ProviderService {
+  /** Get API key for a provider. Returns null if not configured. */
+  getApiKey(provider: string): string | null;
+  /** Check if an API key exists for a provider. */
+  hasApiKey(provider: string): boolean;
+  /** Save an API key for a provider. */
+  saveApiKey(provider: string, apiKey: string): { success: boolean; error?: string };
 }
 
 /**

@@ -80,6 +80,9 @@ export class LocalProviderManager {
     // Ensure local user exists
     this.ensureLocalUser();
 
+    // Load stored provider keys into config cache for hasApiKey() checks.
+    this.updateConfigCache();
+
     console.log(`[local-providers] Initialized with GraphD at ${graphdDbPath}`);
   }
 
