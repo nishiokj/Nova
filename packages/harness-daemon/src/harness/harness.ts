@@ -142,7 +142,6 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
         model: resolved.llm.model,
         provider: resolved.llm.provider,
         displayProvider: resolved.llm.displayProvider,  // Original provider name for error messages
-        apiKey: resolved.llm.apiKey,
         maxTokens: resolved.llm.maxTokens,
         temperature: resolved.llm.temperature,
         baseUrl: resolved.llm.baseUrl,
