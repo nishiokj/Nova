@@ -7,8 +7,6 @@ import { createHarnessFromEnv, type AgentHarness } from './harness.js';
 import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createAuthServiceFromEnv, type AuthService } from './auth_service.js';
-import { setConfigProviders, getConfigProviders } from './config_loader.js';
-import { isOpenAICompatProvider } from 'types';
 
 export interface HarnessDaemonOptions {
   host?: string;
@@ -84,29 +82,10 @@ export class HarnessDaemon {
 
   async start(): Promise<{ host: string; port: number }> {
     if (!this.harness) {
-      // Load GraphD provider keys BEFORE creating harness (so they're available during config resolution)
-      await this.preloadGraphDProviders();
-
+      // Create harness - API keys are resolved at request time via ProviderKeyService
+      // No preloading needed - the harness queries GraphD/config/env at runtime
       this.harness = createHarnessFromEnv(this.workingDir, this.configPath);
       await this.harness.start();
-
-      // Update the running adapter with GraphD keys (harness was created with them in config cache)
-      const config = this.harness.getConfig();
-      if (config.graphd.enabled && config.graphd.dbPath) {
-        const { LocalProviderManager } = await import('./local_providers.js');
-        const providerManager = new LocalProviderManager(config.graphd.dbPath);
-        const providers = providerManager.getProviders();
-
-        // Update adapter with each provider key
-        for (const [provider, apiKey] of Object.entries(providers)) {
-          if (apiKey) {
-            const canonicalProvider = isOpenAICompatProvider(provider) ? 'openai-compat' : provider;
-            console.log(`[harness-daemon] Updating adapter: ${provider} -> ${canonicalProvider}, key: ${apiKey.slice(0, 8)}...`);
-            this.harness.updateApiKey(canonicalProvider as import('types').LLMProvider, apiKey);
-          }
-        }
-        providerManager.close();
-      }
     }
 
     // Initialize auth service (optional - depends on env vars)
@@ -157,66 +136,6 @@ export class HarnessDaemon {
       return { host: this.host, port: this.port };
     }
     return this.bus.getAddress();
-  }
-
-  /**
-   * Pre-load GraphD provider keys into the config cache BEFORE creating the harness.
-   * This ensures API keys are available during agent config resolution.
-   */
-  private async preloadGraphDProviders(): Promise<void> {
-    const { existsSync } = await import('fs');
-    const { resolve } = await import('path');
-    const { homedir } = await import('os');
-    const { loadConfigFile } = await import('./config_loader.js');
-
-    // Use the same config loading logic as the harness
-    const loaded = loadConfigFile(this.configPath);
-    if (!loaded) {
-      console.log(`[harness-daemon] No config file found, skipping GraphD preload`);
-      return;
-    }
-
-    const { config, configDir } = loaded;
-
-    // Check if graphd is enabled and has a db_path
-    const graphdEnabled = config.graphd?.enabled ?? false;
-    const dbPathRaw = config.graphd?.db_path ?? '~/.graphd/graphd.db';
-
-    if (!graphdEnabled) {
-      console.log(`[harness-daemon] GraphD disabled in config, skipping preload`);
-      return;
-    }
-
-    // Resolve ~ to home directory, or resolve relative to config dir
-    const dbPath = dbPathRaw.startsWith('~')
-      ? resolve(homedir(), dbPathRaw.slice(2))
-      : resolve(configDir, dbPathRaw);
-
-    if (!existsSync(dbPath)) {
-      console.log(`[harness-daemon] GraphD database not found at ${dbPath}, skipping preload`);
-      return;
-    }
-
-    try {
-      console.log(`[harness-daemon] Pre-loading provider keys from GraphD at ${dbPath}`);
-      const { LocalProviderManager } = await import('./local_providers.js');
-      const providerManager = new LocalProviderManager(dbPath);
-      const providers = providerManager.getProviders();
-
-      if (Object.keys(providers).length > 0) {
-        // Merge into config cache (GraphD takes precedence)
-        const existingProviders = getConfigProviders();
-        const mergedProviders = { ...existingProviders, ...providers };
-        setConfigProviders(mergedProviders);
-        console.log(`[harness-daemon] Pre-loaded ${Object.keys(providers).length} provider key(s) from GraphD`);
-      } else {
-        console.log(`[harness-daemon] No provider keys found in GraphD during preload`);
-      }
-
-      providerManager.close();
-    } catch (err) {
-      console.error(`[harness-daemon] Failed to preload GraphD providers:`, err);
-    }
   }
 }
 

@@ -1617,6 +1617,10 @@ export class AgentHarness {
     }
     this.sessionStores.clear();
     this.toolRegistry.clearCache();
+
+    // Close provider key service (releases LocalProviderManager resources)
+    this.providerKeyService.close();
+
     this.logger.info('AgentHarness shutdown');
     this.logger.flush?.();
   }
