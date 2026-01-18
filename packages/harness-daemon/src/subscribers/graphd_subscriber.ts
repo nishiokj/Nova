@@ -16,10 +16,6 @@ import type { GraphDManager } from 'graphd';
  * Configuration for GraphDSubscriber.
  */
 export interface GraphDSubscriberConfig {
-  /** Session key for this subscriber */
-  sessionKey: string;
-  /** Request ID for correlating events */
-  requestId?: string;
   /** Event types to persist (default: all) */
   eventTypes?: string[];
   /** Whether to batch events or persist immediately (default: false = immediate) */
@@ -48,8 +44,6 @@ export class GraphDSubscriber {
   ) {
     this.graphd = graphd;
     this.config = {
-      sessionKey: config.sessionKey,
-      requestId: config.requestId ?? '',
       eventTypes: config.eventTypes ?? [],
       batchMode: config.batchMode ?? true,
       batchSize: config.batchSize ?? 50,
@@ -59,19 +53,16 @@ export class GraphDSubscriber {
   }
 
   /**
-   * Update the request ID for new requests.
-   */
-  setRequestId(requestId: string): void {
-    this.config.requestId = requestId;
-  }
-
-  /**
    * Handle an event from the EventBus.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private enqueueEvent(event: AgentEvent<any>): void {
     if (this.closed) return;
     if (this.config.eventTypes.length > 0 && !this.config.eventTypes.includes(event.type)) {
+      return;
+    }
+
+    if (!event.sessionKey) {
       return;
     }
 
@@ -123,8 +114,8 @@ export class GraphDSubscriber {
   private persistEvent(event: AgentEvent<any>): void {
     try {
       const formattedEvent = this.formatEventForDashboard(event);
-
-      const result = this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
+      if (!event.sessionKey) return;
+      const result = this.graphd.sessionUpdateMetadata(event.sessionKey, {
         agent_events: [formattedEvent],
       });
       if ((result as { success?: boolean; error?: string }).success === false) {
@@ -153,8 +144,9 @@ export class GraphDSubscriber {
       type: event.type,
       timestamp,
       work_item_id: event.workItemId ?? null,
-      request_id: event.requestId || this.config.requestId || undefined,
+      request_id: event.requestId || undefined,
       run_id: event.runId ?? undefined,
+      session_key: event.sessionKey ?? undefined,
       data: formattedData,
     };
   }
@@ -186,15 +178,21 @@ export class GraphDSubscriber {
     if (this.eventBatch.length === 0) return;
 
     try {
-      const formattedEvents = this.eventBatch.map((event) =>
-        this.formatEventForDashboard(event)
-      );
+      const bySession = new Map<string, Array<Record<string, unknown>>>();
+      for (const event of this.eventBatch) {
+        if (!event.sessionKey) continue;
+        const list = bySession.get(event.sessionKey) ?? [];
+        list.push(this.formatEventForDashboard(event));
+        bySession.set(event.sessionKey, list);
+      }
 
-      const result = this.graphd.sessionUpdateMetadata(this.config.sessionKey, {
-        agent_events: formattedEvents,
-      });
-      if ((result as { success?: boolean; error?: string }).success === false) {
-        console.error(`[GraphDSubscriber] Failed to flush batch: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+      for (const [sessionKey, formattedEvents] of bySession) {
+        const result = this.graphd.sessionUpdateMetadata(sessionKey, {
+          agent_events: formattedEvents,
+        });
+        if ((result as { success?: boolean; error?: string }).success === false) {
+          console.error(`[GraphDSubscriber] Failed to flush batch: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+        }
       }
       // NOTE: No checkpoint needed - SQLite WAL commits are immediately visible to readers.
 
@@ -236,16 +234,12 @@ export class GraphDSubscriber {
 }
 
 /**
- * Create a GraphDSubscriber for a session.
+ * Create a GraphDSubscriber with explicit config.
  */
 export function createGraphDSubscriber(
   eventBus: EventBusProtocol,
   graphd: GraphDManager,
-  sessionKey: string,
-  requestId?: string
+  config: GraphDSubscriberConfig = {}
 ): GraphDSubscriber {
-  return new GraphDSubscriber(eventBus, graphd, {
-    sessionKey,
-    requestId,
-  });
+  return new GraphDSubscriber(eventBus, graphd, config);
 }

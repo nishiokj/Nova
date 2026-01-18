@@ -13,6 +13,7 @@
 import type { StructuredOutputSchema } from 'types';
 import type {
   LLMProvider,
+  ModelRole,
   ReasoningEffort,
   ToolsConfigSection,
   GraphDConfigSection,
@@ -23,6 +24,7 @@ import type {
   HooksConfigSection,
   AuthConfigSection,
   ProvidersConfigSection,
+  ProviderPriority,
   ModelConfigEntry,
   ModelsConfigSection,
 } from './config_schema.js';
@@ -35,6 +37,7 @@ export type {
   LLMProvider,
   SupportedProvider,
   ReasoningEffort,
+  ModelRole,
   AgentReasoningConfig,
   AgentFallbackConfig,
   AgentLLMConfig,
@@ -49,6 +52,7 @@ export type {
   HooksConfigSection,
   AuthConfigSection,
   ProvidersConfigSection,
+  ProviderPriority,
   ModelConfigEntry,
   ModelsConfigSection,
   HarnessConfigFile,

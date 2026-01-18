@@ -42,6 +42,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
 import { formatDiffAsText } from "./diff.js";
+import { getModelDefinition } from "types";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
@@ -392,6 +393,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const historyHeightRef = useRef(0);
   const width = Math.max(40, size.columns || 80);
   const height = Math.max(10, size.rows || 24);
+  const HORIZONTAL_PADDING = 2;
+  const TOP_PADDING = 1;
+  const BOTTOM_PADDING = 3;
+  const contentWidth = width - HORIZONTAL_PADDING * 2;
   const prompt = "> ";
   const widthRef = useRef(width);
   const voiceStateRef = useRef({
@@ -402,6 +407,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     manualStopMode: false,
     interval: null as NodeJS.Timeout | null,
   });
+  // Track escape key for leader-key shortcuts (Esc then M for model, Esc then R for reasoning)
+  const escapeLeaderRef = useRef<number>(0);
+  // Track when user explicitly requested models mode (vs startup fetch)
+  const pendingModelsModeRef = useRef(false);
   useEffect(() => {
     return store.subscribe(() => {
       setSnapshot(store.getSnapshot());
@@ -551,7 +560,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   }, [options, store]);
 
   useEffect(() => {
-    store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+    store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
   }, [width, snapshot.inputText, snapshot.cursor, store]);
 
   // Mouse wheel scrolling
@@ -573,7 +582,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       if (cache) {
         store.updateAutocomplete(cache);
       }
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
     },
     onPasteStart: () => {
       store.setPasteProgress(0);
@@ -664,6 +673,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
     } catch {
       // Ignore errors checking providers on startup
+    }
+
+    // Fetch models list for the input footer dropdown
+    try {
+      sendCommand("get_models");
+    } catch {
+      // Ignore errors fetching models on startup
     }
 
     // Send initial prompt if provided (from standalone launcher)
@@ -827,7 +843,21 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (kind === "models") {
       const payload = metadata.payload as Array<{ id: string; name: string; provider?: string }> | undefined;
       if (payload && Array.isArray(payload)) {
-        store.setModelsList(payload);
+        // Enrich models with reasoning options from the registry
+        const enrichedModels = payload.map((model) => {
+          const definition = getModelDefinition(model.id);
+          return {
+            ...model,
+            reasoning: definition?.reasoning,
+          };
+        });
+        // Only enter models mode if user explicitly requested it (via /models)
+        if (pendingModelsModeRef.current) {
+          pendingModelsModeRef.current = false;
+          store.setModelsList(enrichedModels);
+        } else {
+          store.updateModelsList(enrichedModels);
+        }
       } else if (content) {
         store.addMessage("system", content);
       }
@@ -996,13 +1026,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const model = data?.model;
     const message = provider
       ? model
-        ? `API key required for provider "${provider}" to use model "${model}".`
-        : `API key required for provider "${provider}".`
-      : "API key required to continue.";
-    store.batch(() => {
-      store.addMessage("system", message);
-      store.setUIMode("providers");
-    });
+        ? `API key required for provider "${provider}" to use model "${model}". Use /providers to configure.`
+        : `API key required for provider "${provider}". Use /providers to configure.`
+      : "API key required to continue. Use /providers to configure.";
+    // Don't auto-switch to providers mode - just show message and let user decide
+    store.addMessage("system", message);
   };
 
   const handleModelChanged = (data?: ModelChangedData) => {
@@ -1139,8 +1167,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
-    // Skills/hooks/providers/usage list modes - escape to return to chat, block all other input
-    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks" || snapshot.uiMode === "providers" || snapshot.uiMode === "usage") {
+    // Skills/hooks/usage list modes - escape to return to chat, block all other input
+    // Note: providers mode has its own internal navigation and handles escape in ProvidersView
+    if (snapshot.uiMode === "skills" || snapshot.uiMode === "hooks" || snapshot.uiMode === "usage") {
       if (key.escape) {
         if (snapshot.uiMode === "usage") {
           store.exitUsageMode();
@@ -1149,6 +1178,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         }
       }
       // Block all input in these modes - they have their own handlers
+      return;
+    }
+
+    // Providers mode - let ProvidersView handle all input including escape
+    if (snapshot.uiMode === "providers") {
       return;
     }
 
@@ -1451,19 +1485,19 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (isBackspace) {
       store.backspace();
       refreshAutocomplete();
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       return;
     }
 
     if (snapshot.autocomplete.active) {
       if (key.return && !key.shift) {
         store.acceptAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
         return;
       }
       if (key.tab) {
         store.acceptAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
         return;
       }
       if (key.escape) {
@@ -1483,7 +1517,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (key.return && key.shift) {
       store.insertInput("\n");
       refreshAutocomplete();
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       return;
     }
 
@@ -1548,7 +1582,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       if (snapshot.autocomplete.active) {
         store.batch(() => {
           store.acceptAutocomplete();
-          store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+          store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
         });
       }
       return;
@@ -1557,21 +1591,21 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (key.delete) {
       store.deleteForward();
       refreshAutocomplete();
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       return;
     }
 
     if (key.leftArrow) {
       store.moveCursor(-1);
       refreshAutocomplete();
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       return;
     }
 
     if (key.rightArrow) {
       store.moveCursor(1);
       refreshAutocomplete();
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       return;
     }
 
@@ -1587,16 +1621,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
 
     if (key.upArrow) {
-      store.moveCursorUp(width - 2, prompt);
+      store.moveCursorUp(contentWidth, prompt);
       refreshAutocomplete();
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       return;
     }
 
     if (key.downArrow) {
-      store.moveCursorDown(width - 2, prompt);
+      store.moveCursorDown(contentWidth, prompt);
       refreshAutocomplete();
-      store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+      store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       return;
     }
 
@@ -1622,17 +1656,58 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
+    // Escape-leader shortcuts: Esc then M for model, Esc then R for reasoning
+    // Must be pressed within 500ms of each other
+    const LEADER_TIMEOUT = 500;
+    const now = Date.now();
+    const isAfterEscapeLeader = now - escapeLeaderRef.current < LEADER_TIMEOUT;
+
+    if (key.escape && !isResponseMode && !isProvidersMode && !isModelsMode && !isSessionsMode && !isThemeMode && !isUsageMode) {
+      // Record escape press time for leader key sequence
+      escapeLeaderRef.current = now;
+      return;
+    }
+
+    // Check for leader-key follow-up (no modifiers, just the letter)
+    if (isAfterEscapeLeader && !key.ctrl && !key.meta) {
+      if (input === "m" || input === "M") {
+        escapeLeaderRef.current = 0; // Reset leader
+        // Cycle to next model
+        const nextModel = store.cycleToNextModel();
+        if (nextModel) {
+          sendCommand("set_model", {
+            provider: nextModel.provider,
+            model: nextModel.id,
+          });
+        } else {
+          store.addMessage("system", "No models available. Run /models to fetch model list.");
+        }
+        return;
+      }
+      if (input === "t" || input === "T") {
+        escapeLeaderRef.current = 0; // Reset leader
+        // Cycle to next reasoning level
+        const nextLevel = store.cycleReasoningLevel();
+        if (nextLevel === null) {
+          store.addMessage("system", "Current model does not support reasoning levels.");
+        }
+        return;
+      }
+      // Any other key after escape leader - reset and continue normal processing
+      escapeLeaderRef.current = 0;
+    }
+
     if (key.ctrl) {
       if (input === "a") {
         store.moveCursorTo(0);
         refreshAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
         return;
       }
       if (input === "e") {
         store.moveCursorTo(snapshot.inputText.length);
         refreshAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
         return;
       }
       if (input === "u") {
@@ -1642,7 +1717,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       if (input === "w") {
         store.deleteWordBack();
         refreshAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
         return;
       }
     }
@@ -1668,7 +1743,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       if (printable) {
         store.insertInput(printable);
         refreshAutocomplete();
-        store.ensureInputCursorVisible(width - 2, prompt, DEFAULT_MAX_INPUT_LINES);
+        store.ensureInputCursorVisible(contentWidth, prompt, DEFAULT_MAX_INPUT_LINES);
       }
     }
   });
@@ -1831,6 +1906,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         sendCommand("get_config");
         return;
       case "/models":
+        pendingModelsModeRef.current = true;
         sendCommand("get_models");
         return;
       case "/providers":
@@ -2019,19 +2095,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}${snapshot.planMode ? " | [PLAN]" : ""}`, color: colors.muted },
     { text: `Status: ${statusText}`, color: statusColor },
     { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
-    { text: "-".repeat(width), color: colors.border },
+    { text: "-".repeat(contentWidth), color: colors.border },
   ];
   const headerLines = headerConfig.map((h) => h.text);
 
-  const inputLayout = computeInputLayout(snapshot.inputText.split(""), snapshot.cursor, width - 2, prompt);
+  const inputLayout = computeInputLayout(snapshot.inputText.split(""), snapshot.cursor, contentWidth, prompt);
   const inputVisibleLines = Math.min(DEFAULT_MAX_INPUT_LINES, inputLayout.lines.length);
-  const inputBoxHeight = inputVisibleLines + 2;
+  // inputBoxHeight = top line (1) + input lines + bottom line (1) + model indicator row (1)
+  const inputBoxHeight = 1 + inputVisibleLines + 1 + 1;
   const autocompleteHeight = snapshot.autocomplete.active
     ? snapshot.autocomplete.suggestions.length + 1
     : 0;
   const historyHeight = Math.max(
     3,
-    height - headerLines.length - inputBoxHeight - autocompleteHeight,
+    height - headerLines.length - inputBoxHeight - autocompleteHeight - TOP_PADDING - BOTTOM_PADDING,
   );
 
   historyHeightRef.current = historyHeight;
@@ -2072,7 +2149,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const streamCursor = snapshot.state === "streaming"
     ? STREAM_CURSOR_FRAMES[statusTick % STREAM_CURSOR_FRAMES.length]
     : "";
-  let historyLines = store.getHistoryLines(width, snapshot.compact, streamCursor);
+  let historyLines = store.getHistoryLines(contentWidth, snapshot.compact, streamCursor);
   if (snapshot.uiMode === "skills") {
     historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors, true);
   } else if (snapshot.uiMode === "hooks") {
@@ -2109,17 +2186,22 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     return lines.slice(start, end).map((line, idx) => {
       const globalIndex = start + idx;
       const prefix = globalIndex === 0 ? prompt : " ".repeat(prompt.length);
-      return `${prefix}${line}`.padEnd(width - 2, " ").slice(0, width - 2);
+      return `${prefix}${line}`.padEnd(contentWidth, " ").slice(0, contentWidth);
     });
   };
 
   const inputLines = renderInputLines();
-  const borderTop = `+${"-".repeat(width - 2)}+`;
-  const borderBottom = borderTop;
+  // Simple horizontal line for input separator
+  const horizontalLine = "─".repeat(contentWidth);
+
+  // Get current model/reasoning for footer display
+  const currentModelEntry = store.getCurrentModelEntry();
+  const reasoningOptions = store.getCurrentModelReasoningOptions() ?? [];
+  const hasReasoning = reasoningOptions.length > 0;
 
   if (snapshot.helpVisible) {
     return (
-      <Box flexDirection="column" paddingLeft={2} paddingTop={1} width={width}>
+      <Box flexDirection="column" paddingLeft={2} paddingTop={1} width={contentWidth}>
         {HELP_LINES.map((line, index) => {
           // Section headers (lines ending with :)
           const isHeader = line.endsWith(":");
@@ -2175,17 +2257,24 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const renderModelsSelector = () => {
     const colors = getColors();
     const currentModel = store.getSelectedModel();
+    const currentReasoning = store.getSelectedReasoningLevel();
+    const reasoningOptions = store.getCurrentModelReasoningOptions();
+    const reasoningInfo = reasoningOptions && reasoningOptions.length > 0
+      ? ` | Reasoning: ${currentReasoning ?? 'off'}`
+      : '';
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
         <Text bold color={colors.accent}>Select Model</Text>
         <Text color={colors.muted}>Use ↑↓ to navigate, Enter to select, Esc to cancel</Text>
+        <Text color={colors.muted}>From chat: Esc+M to cycle models | Esc+T to cycle reasoning</Text>
         <Text> </Text>
         {snapshot.modelsList.map((model, index) => {
           const isSelected = index === snapshot.modelsCursor;
           const isCurrent = model.id === currentModel;
           const pointer = isSelected ? "▸ " : "  ";
-          const marker = isCurrent ? " (current)" : "";
+          const marker = isCurrent ? ` (current${reasoningInfo})` : "";
           const provider = model.provider;
+          const hasReasoning = model.reasoning && model.reasoning.length > 0;
           return (
             <Text key={`${provider ?? 'unknown'}:${model.id}`}>
               <Text color={isSelected ? colors.accent : colors.muted}>{pointer}</Text>
@@ -2193,6 +2282,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
                 {model.name}
               </Text>
               {provider && <Text color={colors.muted}> [{provider}]</Text>}
+              {hasReasoning && <Text color={colors.func}> [R]</Text>}
               <Text color={colors.muted}>{marker}</Text>
             </Text>
           );
@@ -2204,33 +2294,38 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // Sessions selector uses the SessionsView component
   const sessionsHeight = historyHeight + inputBoxHeight;
 
+  // Full-screen modes that replace both history and input
+  const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode;
+
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={width} paddingX={HORIZONTAL_PADDING} paddingTop={TOP_PADDING} paddingBottom={BOTTOM_PADDING}>
       {headerConfig.map((item, index) => (
-        <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, width)}</Text>
+        <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, contentWidth)}</Text>
       ))}
-      <Box flexDirection="column" height={historyHeight}>
-        {visibleHistoryLines.map((line, index) => {
-          const isUserLine = line.role === "user";
-          const bgColor = isUserLine ? colors.userBg : undefined;
-          // Pad user lines to full width for consistent background
-          const paddedText = isUserLine ? line.text.padEnd(width, " ") : line.text;
-          return (
-            <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
-              <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
-            </Text>
-          );
-        })}
-      </Box>
+      {!isFullScreenMode && (
+        <Box flexDirection="column" height={historyHeight}>
+          {visibleHistoryLines.map((line, index) => {
+            const isUserLine = line.role === "user";
+            const bgColor = isUserLine ? colors.userBg : undefined;
+            // Pad user lines to full width for consistent background
+            const paddedText = isUserLine ? line.text.padEnd(contentWidth, " ") : line.text;
+            return (
+              <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
+                <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
+              </Text>
+            );
+          })}
+        </Box>
+      )}
       {isResponseMode ? (
         <ResponsePane
           content={snapshot.responseContent!}
-          width={width}
+          width={contentWidth}
           height={historyHeight + inputBoxHeight}
         />
       ) : isProvidersMode ? (
         <ProvidersView
-          width={width}
+          width={contentWidth}
           bridgeClient={clientRef.current}
           onClose={() => store.setUIMode("chat")}
         />
@@ -2243,7 +2338,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           sessions={snapshot.sessionsList}
           cursor={snapshot.sessionsCursor}
           currentSessionKey={snapshot.sessionKey}
-          width={width}
+          width={contentWidth}
           height={sessionsHeight}
         />
       ) : isUsageMode ? (
@@ -2254,7 +2349,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           dayStats={snapshot.usageDayStats}
           providerStats={snapshot.usageProviderStats}
           loading={snapshot.usageLoading}
-          width={width}
+          width={contentWidth}
           height={sessionsHeight}
           onMoveCursor={(delta) => store.moveUsageCursor(delta)}
           onSetViewMode={(mode) => store.setUsageViewMode(mode)}
@@ -2267,19 +2362,50 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           cursor={snapshot.questionCursor}
           selection={snapshot.questionSelection}
           inputText={snapshot.questionInput}
-          width={width}
+          width={contentWidth}
           queueInfo={store.getQuestionQueueInfo()}
         />
       ) : (
         <>
-          <Text color={colors.border}>{borderTop}</Text>
+          {/* Top separator line - runs edge to edge */}
+          <Text color={colors.border}>{horizontalLine}</Text>
+
+          {/* Input lines - no side borders */}
           {inputLines.map((line, index) => (
-            <Text key={`input-${index}`} color={colors.text}><Text color={colors.border}>|</Text>{line}<Text color={colors.border}>|</Text></Text>
+            <Text key={`input-${index}`} color={colors.text}>{line}</Text>
           ))}
-          <Text color={colors.border}>{borderBottom}</Text>
+
+          {/* Bottom separator line - runs edge to edge */}
+          <Text color={colors.border}>{horizontalLine}</Text>
+
+          {/* Model indicator below the input - right-aligned with padding */}
+          <Text>
+            {(() => {
+              const modelName = currentModelEntry?.name ?? "no model";
+              const reasoningLevel = hasReasoning ? (snapshot.selectedReasoningLevel ?? "off") : null;
+              const indicator = reasoningLevel ? `${modelName} | ${reasoningLevel}` : modelName;
+              const rightPadding = 2;
+              const leftPadding = contentWidth - indicator.length - rightPadding;
+              return (
+                <>
+                  <Text>{" ".repeat(Math.max(0, leftPadding))}</Text>
+                  <Text color={colors.muted}>{modelName}</Text>
+                  {reasoningLevel && (
+                    <>
+                      <Text color={colors.border}> | </Text>
+                      <Text color={colors.func}>{reasoningLevel}</Text>
+                    </>
+                  )}
+                  <Text>{" ".repeat(rightPadding)}</Text>
+                </>
+              );
+            })()}
+          </Text>
+
+          {/* Autocomplete dropdown */}
           {snapshot.autocomplete.active ? (
-            <Box flexDirection="column" width={width}>
-              <Text color={colors.border}>{"-".repeat(width)}</Text>
+            <Box flexDirection="column" width={contentWidth}>
+              <Text color={colors.border}>{horizontalLine}</Text>
               {snapshot.autocomplete.suggestions.map((suggestion, index) => {
                 const isSelected = index === snapshot.autocomplete.selected;
                 return (

@@ -8,9 +8,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { exec } from "child_process";
 import type { BridgeClient } from "../bridge_client.js";
 import { useBracketedPaste } from "../hooks/useBracketedPaste.js";
-import { getAllProviders, type ProviderDefinition } from "types";
+import { getAllProviders, getProviderDashboardUrl, type ProviderDefinition } from "types";
 
 interface ProviderInfo {
   provider: string;
@@ -214,6 +215,18 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
         loadProviders();
         return;
       }
+
+      if (input.toLowerCase() === "l") {
+        const provider = SUPPORTED_PROVIDERS[selectedIndex];
+        const dashboardUrl = getProviderDashboardUrl(provider.id);
+        if (dashboardUrl) {
+          // Open URL in default browser (cross-platform)
+          const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+          exec(`${cmd} "${dashboardUrl}"`);
+          setMessage({ text: `Opening ${provider.name} dashboard...`, type: "success" });
+        }
+        return;
+      }
     } else if (viewMode.mode === "add") {
       if (key.escape) {
         setViewMode({ mode: "list" });
@@ -313,7 +326,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
           <Text backgroundColor="cyan"> </Text>
         </Box>
         <Text> </Text>
-        <Text dimColor>[Enter] Save  [Esc] Cancel</Text>
+        <Text dimColor>[Enter] Save  [Esc] Back to list</Text>
       </Box>
     );
   }
@@ -326,7 +339,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
           Remove API key for {providerName}?
         </Text>
         <Text> </Text>
-        <Text dimColor>[Y] Yes  [N] No  [Esc] Cancel</Text>
+        <Text dimColor>[Y] Yes  [N/Esc] Back to list</Text>
       </Box>
     );
   }
@@ -355,14 +368,20 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
         const prefix = isSelected ? "> " : "  ";
         const status = configured ? "✓" : "○";
         const statusColor = configured ? "green" : "gray";
+        const dashboardUrl = getProviderDashboardUrl(provider.id);
 
         return (
-          <Text key={provider.id}>
-            {prefix}
-            <Text color={statusColor}>{status}</Text>
-            {" "}
-            <Text color={isSelected ? "cyan" : undefined}>{provider.name}</Text>
-          </Text>
+          <Box key={provider.id} flexDirection="column">
+            <Text>
+              {prefix}
+              <Text color={statusColor}>{status}</Text>
+              {" "}
+              <Text color={isSelected ? "cyan" : undefined}>{provider.name}</Text>
+            </Text>
+            {isSelected && dashboardUrl && (
+              <Text dimColor>    ↳ <Text color="blue">{dashboardUrl}</Text> Hold [L]</Text>
+            )}
+          </Box>
         );
       })}
 
@@ -377,7 +396,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
       )}
 
       <Text dimColor>
-        [Enter/A] Add/Update  [D] Delete  [T] Test  [R] Refresh  [Esc] Close
+        [Enter/A] Add  [D] Delete  [T] Test  Hold [L] Dashboard  [R] Refresh  [Esc] Close
       </Text>
     </Box>
   );

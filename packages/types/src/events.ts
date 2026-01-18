@@ -59,6 +59,8 @@ export interface AgentEvent<T = Record<string, unknown>> {
   type: AgentEventType;
   /** REQUIRED: Correlates all events for a single request */
   requestId: string;
+  /** Optional session key for routing events to persistence */
+  sessionKey?: string;
   /** Optional run ID for per-run channels */
   runId?: string;
   /** Unix timestamp in seconds */
@@ -76,11 +78,13 @@ export function createEvent<T>(
   type: AgentEventType,
   data: T,
   workItemId?: string,
-  requestId = ''
+  requestId = '',
+  sessionKey?: string
 ): AgentEvent<T> {
   return {
     type,
     requestId,
+    sessionKey,
     timestamp: Date.now() / 1000,
     workItemId,
     data,
@@ -95,6 +99,7 @@ export function eventToDict(event: AgentEvent): Record<string, unknown> {
     type: event.type,
     timestamp: event.timestamp,
     request_id: event.requestId,
+    session_key: event.sessionKey ?? null,
     run_id: event.runId ?? null,
     work_item_id: event.workItemId ?? null,
     data: event.data ?? {},

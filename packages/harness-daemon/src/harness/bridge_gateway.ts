@@ -52,6 +52,7 @@ interface HarnessLike {
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string): boolean;
   getGraphD?(): import('graphd').GraphDManager | null;
+  closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
 }
@@ -103,6 +104,7 @@ export class BridgeGateway {
       if (graphd) {
         graphd.sessionUpdateStatus(state.sessionKey, 'inactive');
       }
+      this.harness.closeSession?.(state.sessionKey);
     }
     this.connections.delete(connectionId);
   }
@@ -266,8 +268,11 @@ export class BridgeGateway {
     // CRITICAL: Mark old session as inactive BEFORE switching to new one
     // This fixes the bug where switched-from sessions stay "active" forever
     const graphd = this.harness.getGraphD?.();
-    if (state.sessionKey && state.sessionKey !== sessionKey && graphd) {
-      graphd.sessionUpdateStatus(state.sessionKey, 'inactive');
+    if (state.sessionKey && state.sessionKey !== sessionKey) {
+      if (graphd) {
+        graphd.sessionUpdateStatus(state.sessionKey, 'inactive');
+      }
+      this.harness.closeSession?.(state.sessionKey);
     }
 
     state.sessionKey = sessionKey;
@@ -904,6 +909,8 @@ export class BridgeGateway {
     if (graphd) {
       graphd.sessionUpdateStatus(sessionKey, 'inactive');
     }
+
+    this.harness.closeSession?.(sessionKey);
 
     // Clear the connection's session reference
     state.sessionKey = null;

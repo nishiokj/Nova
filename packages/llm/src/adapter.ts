@@ -2015,7 +2015,7 @@ class LLMRouterAdapter implements LLMAdapter {
     };
 
     const choice = data.choices[0];
-    const content = choice?.message?.content ?? '';
+    const content = this.normalizeOpenAICompatContent(choice?.message?.content);
 
     this.logger.debug('OpenAI-compat response received', {
       model: resolved.model,
@@ -2067,6 +2067,42 @@ class LLMRouterAdapter implements LLMAdapter {
       model: data.model ?? resolved.model,
       durationMs: Date.now() - startTime,
     };
+  }
+
+  private normalizeOpenAICompatContent(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (!content) return '';
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const block of content) {
+        if (typeof block === 'string') {
+          parts.push(block);
+          continue;
+        }
+        if (block && typeof block === 'object') {
+          const record = block as Record<string, unknown>;
+          if (typeof record.text === 'string') {
+            parts.push(record.text);
+            continue;
+          }
+          if (typeof record.content === 'string') {
+            parts.push(record.content);
+            continue;
+          }
+          try {
+            parts.push(JSON.stringify(block));
+          } catch {
+            // Ignore non-serializable blocks.
+          }
+        }
+      }
+      return parts.join('\n');
+    }
+    try {
+      return JSON.stringify(content);
+    } catch {
+      return '';
+    }
   }
 
   private async *streamOpenAICompat(

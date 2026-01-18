@@ -80,6 +80,7 @@ export interface StoreSnapshot {
   modelsList: ModelEntry[];
   modelsCursor: number;
   selectedModel: string | null;
+  selectedReasoningLevel: string | null;
   // Sessions selection
   sessionsList: SessionEntry[];
   sessionsCursor: number;
@@ -162,6 +163,7 @@ export class Store {
   private modelsList: ModelEntry[] = [];
   private modelsCursor = 0;
   private selectedModel: string | null = null;
+  private selectedReasoningLevel: string | null = null;
 
   // Sessions selection
   private sessionsList: SessionEntry[] = [];
@@ -255,6 +257,7 @@ export class Store {
       modelsList: [...this.modelsList],
       modelsCursor: this.modelsCursor,
       selectedModel: this.selectedModel,
+      selectedReasoningLevel: this.selectedReasoningLevel,
       // Sessions selection
       sessionsList: [...this.sessionsList],
       sessionsCursor: this.sessionsCursor,
@@ -1038,15 +1041,29 @@ export class Store {
   // ==================== Models Selection Methods ====================
 
   /**
+   * Updates the models list without changing UI mode.
+   * Auto-selects first model if none selected.
+   */
+  updateModelsList(models: ModelEntry[]): void {
+    this.modelsList = models;
+    // Auto-select first model if none selected
+    if (!this.selectedModel && models.length > 0) {
+      this.selectedModel = models[0].id;
+      this.selectedReasoningLevel = models[0].reasoning?.[0] ?? null;
+    }
+    // Update cursor position
+    const currentIdx = this.selectedModel
+      ? models.findIndex((m) => m.id === this.selectedModel)
+      : 0;
+    this.modelsCursor = Math.max(0, currentIdx);
+    this.emit();
+  }
+
+  /**
    * Sets the models list and enters models selection mode.
    */
   setModelsList(models: ModelEntry[]): void {
-    this.modelsList = models;
-    // Position cursor on currently selected model if any
-    const currentIdx = this.selectedModel
-      ? models.findIndex((m) => m.id === this.selectedModel)
-      : -1;
-    this.modelsCursor = Math.max(0, currentIdx);
+    this.updateModelsList(models);
     this.uiMode = "models";
     this.emit();
   }
@@ -1069,6 +1086,7 @@ export class Store {
     const model = this.modelsList[this.modelsCursor];
     if (model) {
       this.selectedModel = model.id;
+      this.selectedReasoningLevel = model.reasoning?.[0] ?? null;
       this.emit();
       return model;
     }
@@ -1084,6 +1102,15 @@ export class Store {
       const idx = this.modelsList.findIndex((m) => m.id === modelId);
       if (idx >= 0) {
         this.modelsCursor = idx;
+        const model = this.modelsList[idx];
+        // Preserve reasoning level if supported, otherwise reset
+        if (model.reasoning && model.reasoning.length > 0) {
+          if (!this.selectedReasoningLevel || !model.reasoning.includes(this.selectedReasoningLevel)) {
+            this.selectedReasoningLevel = model.reasoning[0];
+          }
+        } else {
+          this.selectedReasoningLevel = null;
+        }
       }
     }
     this.emit();
@@ -1102,6 +1129,99 @@ export class Store {
   exitModelsMode(): void {
     this.uiMode = "chat";
     this.emit();
+  }
+
+  /**
+   * Cycles to the next model in the models list.
+   * Returns the new model entry or null if no models available.
+   */
+  cycleToNextModel(): ModelEntry | null {
+    if (this.modelsList.length === 0) return null;
+
+    // Find current model index
+    let currentIdx = this.selectedModel
+      ? this.modelsList.findIndex((m) => m.id === this.selectedModel)
+      : -1;
+
+    // Move to next model (wrap around)
+    const nextIdx = (currentIdx + 1) % this.modelsList.length;
+    const nextModel = this.modelsList[nextIdx];
+
+    if (nextModel) {
+      this.selectedModel = nextModel.id;
+      this.modelsCursor = nextIdx;
+      // Reset reasoning level when switching models
+      this.selectedReasoningLevel = nextModel.reasoning?.[0] ?? null;
+      this.emit();
+      return nextModel;
+    }
+    return null;
+  }
+
+  /**
+   * Gets the currently selected reasoning level.
+   */
+  getSelectedReasoningLevel(): string | null {
+    return this.selectedReasoningLevel;
+  }
+
+  /**
+   * Sets the reasoning level.
+   */
+  setReasoningLevel(level: string | null): void {
+    this.selectedReasoningLevel = level;
+    this.emit();
+  }
+
+  /**
+   * Cycles to the next reasoning level for the current model.
+   * Returns the new reasoning level or null if model doesn't support reasoning.
+   */
+  cycleReasoningLevel(): string | null {
+    // Find current model's reasoning options
+    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    if (!currentModel?.reasoning || currentModel.reasoning.length === 0) {
+      return null;
+    }
+
+    const levels = currentModel.reasoning;
+    if (levels.length === 0) return null;
+
+    // Find current level index
+    let currentIdx = this.selectedReasoningLevel
+      ? levels.indexOf(this.selectedReasoningLevel)
+      : -1;
+
+    // Move to next level (wrap around)
+    const nextIdx = (currentIdx + 1) % levels.length;
+    this.selectedReasoningLevel = levels[nextIdx];
+    this.emit();
+    return this.selectedReasoningLevel;
+  }
+
+  /**
+   * Gets reasoning options for the currently selected model.
+   */
+  getCurrentModelReasoningOptions(): string[] | null {
+    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    return currentModel?.reasoning ?? null;
+  }
+
+  /**
+   * Gets the currently selected model entry.
+   */
+  getCurrentModelEntry(): ModelEntry | null {
+    if (!this.selectedModel) return null;
+    return this.modelsList.find((m) => m.id === this.selectedModel) ?? null;
+  }
+
+  /**
+   * Gets models for the currently selected model's provider.
+   */
+  getCurrentProviderModels(): ModelEntry[] {
+    const currentModel = this.getCurrentModelEntry();
+    if (!currentModel?.provider) return this.modelsList; // No provider = show all
+    return this.modelsList.filter((m) => m.provider === currentModel.provider);
   }
 
   // ==================== Sessions Selection Methods ====================

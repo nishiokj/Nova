@@ -237,6 +237,8 @@ export interface ModelEntry {
   id: string;
   name: string;
   provider?: string;
+  /** Available reasoning levels (undefined if model doesn't support reasoning) */
+  reasoning?: string[];
 }
 
 /** Session entry for session recovery */

@@ -47,6 +47,11 @@ export const ReasoningEffortSchema = z.enum([
   'xhigh',
 ]);
 
+/**
+ * Role-based model selection.
+ */
+export const ModelRoleSchema = z.enum(['fast', 'standard', 'powerful', 'reasoning']);
+
 // ============================================
 // FALLBACK CONFIG
 // ============================================
@@ -76,13 +81,21 @@ export const AgentReasoningConfigSchema = z.union([
  * LLM configuration for an agent (raw from JSON).
  */
 export const AgentLLMConfigSchema = z.object({
+  role: ModelRoleSchema.optional(),
   provider: z.string().optional(),
-  model: z.string(),
+  model: z.string().optional(),
   max_tokens: z.number().positive(),
   temperature: z.number().min(0).max(2).optional(),
   api_base: z.string().optional(),
   reasoning: AgentReasoningConfigSchema.optional(),
   fallback: AgentFallbackConfigSchema.optional(),
+}).superRefine((value, ctx) => {
+  if (!value.model && !value.role) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'llm.model or llm.role is required',
+    });
+  }
 });
 
 // ============================================
@@ -217,6 +230,11 @@ export const AuthConfigSchema = z.object({
 export const ProvidersConfigSchema = z.record(z.string(), z.string().optional());
 
 /**
+ * Provider priority order for role-based resolution.
+ */
+export const ProviderPrioritySchema = z.array(z.string());
+
+/**
  * Model entry for the models list.
  * Provider is the actual provider name (anthropic, openai, cerebras, etc.)
  * not the canonical adapter (openai-compat).
@@ -249,6 +267,7 @@ export const ModelsConfigSchema = z.object({
  */
 export const HarnessConfigFileSchema = z.object({
   providers: ProvidersConfigSchema.optional(),
+  provider_priority: ProviderPrioritySchema.optional(),
   models: ModelsConfigSchema.optional(),
   agents: z.record(z.string(), AgentConfigEntrySchema),
   tools: ToolsConfigSchema.optional(),
@@ -266,6 +285,7 @@ export const HarnessConfigFileSchema = z.object({
 export type LLMProvider = z.infer<typeof LLMProviderSchema>;
 export type SupportedProvider = z.infer<typeof SupportedProviderSchema>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
+export type ModelRole = z.infer<typeof ModelRoleSchema>;
 export type AgentReasoningConfig = z.infer<typeof AgentReasoningConfigSchema>;
 export type AgentFallbackConfig = z.infer<typeof AgentFallbackConfigSchema>;
 export type AgentLLMConfig = z.infer<typeof AgentLLMConfigSchema>;
@@ -280,6 +300,7 @@ export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
 export type HooksConfigSection = z.infer<typeof HooksConfigSchema>;
 export type AuthConfigSection = z.infer<typeof AuthConfigSchema>;
 export type ProvidersConfigSection = z.infer<typeof ProvidersConfigSchema>;
+export type ProviderPriority = z.infer<typeof ProviderPrioritySchema>;
 export type ModelConfigEntry = z.infer<typeof ModelConfigEntrySchema>;
 export type ModelsConfigSection = z.infer<typeof ModelsConfigSchema>;
 export type HarnessConfigFile = z.infer<typeof HarnessConfigFileSchema>;

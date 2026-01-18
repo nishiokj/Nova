@@ -119,8 +119,8 @@ export interface ArtifactItem extends ArtifactPayload {
   id: string;
   /** Which uncertainty category this artifact reduces */
   reduces?: UncertaintyCategory;
-  /** Relevance score 0.0-1.0 (internal use - not sent to LLM) */
-  relevance: number;
+  /** Relevance score 0.0-1.0 (internal use - not sent to LLM). Defaults to 1.0 */
+  relevance?: number;
   /** Which agent/tool discovered this */
   discoveredBy: string;
   timestamp: number;
