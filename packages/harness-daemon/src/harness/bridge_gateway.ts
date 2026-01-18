@@ -496,6 +496,7 @@ export class BridgeGateway {
 
     const sessionKey = state.sessionKey;
     const normalizedModelId = modelId.trim().toLowerCase();
+    let clearedOverride = false;
 
     // Clear last-model preference if it matches the deleted model
     const lastModel = graphd.getUserPreference<{ provider?: string; model?: string }>('user_prefs:last_model');
@@ -511,6 +512,22 @@ export class BridgeGateway {
       if (override?.model && override.model.trim().toLowerCase() === normalizedModelId) {
         graphd.sessionUpdateMetadata(sessionKey, { model_override: null });
         this.harness.setSessionModelOverride?.(sessionKey, null);
+        clearedOverride = true;
+      }
+    }
+
+    if (clearedOverride) {
+      const config = this.harness.getConfig();
+      const defaultAgent = config.agents[config.defaultAgent];
+      const configDefault = defaultAgent ? {
+        provider: defaultAgent.llm.provider,
+        model: defaultAgent.llm.model,
+      } : null;
+      if (configDefault) {
+        this.sendEvent(connectionId, {
+          type: 'model_changed',
+          data: configDefault,
+        });
       }
     }
 

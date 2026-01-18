@@ -468,30 +468,18 @@ class LLMRouterAdapter implements LLMAdapter {
 
     // API key resolution priority:
     // 1. Per-request apiKey (explicit)
-<<<<<<< HEAD
-    // 2. Provider key service (dynamic - from GraphD/config)
-=======
     // 2. Provider key service (dynamic - from GraphD/config at runtime)
->>>>>>> 1c4e27f (provider service)
     // 3. Stored apiKeys (static - from constructor)
     let apiKey = llm.apiKey;
     let keySource = 'per-request';
 
     if (!apiKey && this.providerKeyService) {
-<<<<<<< HEAD
-      apiKey = this.providerKeyService.getApiKey(displayProvider) ?? null;
-=======
       apiKey = this.providerKeyService.getApiKey(displayProvider) ?? undefined;
->>>>>>> 1c4e27f (provider service)
       if (apiKey) keySource = 'provider-service';
     }
 
     if (!apiKey) {
-<<<<<<< HEAD
-      apiKey = this.apiKeys[provider] ?? null;
-=======
       apiKey = this.apiKeys[provider];
->>>>>>> 1c4e27f (provider service)
       if (apiKey) keySource = 'stored';
     }
 

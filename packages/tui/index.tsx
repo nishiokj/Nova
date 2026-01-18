@@ -680,6 +680,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     } catch {
       // Ignore errors fetching models on startup
     }
+    try {
+      sendCommand("get_model");
+    } catch {
+      // Ignore errors fetching active model on startup
+    }
 
     // Send initial prompt if provided (from standalone launcher)
     if (initialPrompt && clientRef.current) {
@@ -850,6 +855,21 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         }
       } else if (content) {
         store.addMessage("system", content);
+      }
+      return;
+    }
+    if (kind === "get_model") {
+      const payload = metadata.payload as {
+        model_override?: { provider?: string; model?: string; reasoning?: string };
+        config_default?: { provider?: string; model?: string };
+        active?: { provider?: string; model?: string; reasoning?: string };
+      } | undefined;
+      const active = payload?.active ?? payload?.model_override ?? payload?.config_default;
+      if (active?.model) {
+        store.setSelectedModel(active.model);
+        if (typeof active.reasoning === "string") {
+          store.setReasoningLevel(active.reasoning);
+        }
       }
       return;
     }
@@ -1236,12 +1256,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       if (key.return) {
-        const selectedModel = store.selectModel();
+        const selectedModel = snapshot.modelsList[snapshot.modelsCursor];
         if (selectedModel) {
-          // Send command to update model in harness
           sendCommand("set_model", {
             provider: selectedModel.provider,
             model: selectedModel.id,
+            ...(selectedModel.reasoning?.[0] ? { reasoning: selectedModel.reasoning[0] } : {}),
           });
         }
         store.exitModelsMode();
@@ -1675,25 +1695,46 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const now = Date.now();
     const isAfterEscapeLeader = now - escapeLeaderRef.current < LEADER_TIMEOUT;
 
-    // Helper to cycle model
     const cycleModel = () => {
-      const nextModel = store.cycleToNextModel();
-      if (nextModel) {
-        sendCommand("set_model", {
-          provider: nextModel.provider,
-          model: nextModel.id,
-        });
-      } else {
+      const models = snapshot.modelsList;
+      if (models.length === 0) {
         store.addMessage("system", "No models available. Run /models to fetch model list.");
+        return;
       }
+      const currentId = snapshot.selectedModel;
+      let currentIdx = currentId ? models.findIndex((m) => m.id === currentId) : -1;
+      if (currentIdx < 0) currentIdx = Math.max(0, snapshot.modelsCursor);
+      const nextIdx = (currentIdx + 1) % models.length;
+      const nextModel = models[nextIdx];
+      if (!nextModel) return;
+      sendCommand("set_model", {
+        provider: nextModel.provider,
+        model: nextModel.id,
+        ...(nextModel.reasoning?.[0] ? { reasoning: nextModel.reasoning[0] } : {}),
+      });
     };
 
-    // Helper to cycle reasoning
     const cycleReasoning = () => {
-      const nextLevel = store.cycleReasoningLevel();
-      if (nextLevel === null) {
+      const currentModel = snapshot.modelsList.find((m) => m.id === snapshot.selectedModel);
+      const levels = currentModel?.reasoning ?? [];
+      if (!currentModel || levels.length === 0) {
         store.addMessage("system", "Current model does not support reasoning levels.");
+        return;
       }
+      const currentLevel = snapshot.selectedReasoningLevel;
+      let currentIdx = currentLevel ? levels.indexOf(currentLevel) : -1;
+      if (currentIdx < 0) currentIdx = 0;
+      const nextIdx = (currentIdx + 1) % levels.length;
+      const nextLevel = levels[nextIdx];
+      if (!currentModel.provider) {
+        store.addMessage("system", "Current model is missing a provider.");
+        return;
+      }
+      sendCommand("set_model", {
+        provider: currentModel.provider,
+        model: currentModel.id,
+        reasoning: nextLevel,
+      });
     };
 
     // Check for held Esc+key (appears as meta or escape modifier in terminals)

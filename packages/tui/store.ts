@@ -1054,6 +1054,16 @@ export class Store {
       this.selectedModel = models[0].id;
       this.selectedReasoningLevel = models[0].reasoning?.[0] ?? null;
     }
+    const selected = this.selectedModel
+      ? models.find((model) => model.id === this.selectedModel)
+      : null;
+    if (selected?.reasoning && selected.reasoning.length > 0) {
+      if (!this.selectedReasoningLevel || !selected.reasoning.includes(this.selectedReasoningLevel)) {
+        this.selectedReasoningLevel = selected.reasoning[0];
+      }
+    } else if (selected) {
+      this.selectedReasoningLevel = null;
+    }
     // Update cursor position
     const currentIdx = this.selectedModel
       ? models.findIndex((m) => m.id === this.selectedModel)
