@@ -5,7 +5,7 @@
  * Returns AgentResult with all outputs.
  */
 
-import type { LLMAdapter, Message, LLMRequestConfig } from 'llm';
+import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
@@ -287,13 +287,37 @@ export class Agent {
 
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
-      const response = await this.llm.respond({
+      const stream = this.llm.stream({
         messages: messages as unknown as Message[],
         tools: toolsForThisCall,
         toolChoice: toolChoiceForThisCall,
         llm: this.llmConfig,
         responseSchema: this.config.outputSchema,
+        onChunk: (chunk) => {
+          this.emit(createEvent('agent_message', {
+            agentType: this.config.type,
+            message: chunk,
+          }, workItem.workId));
+        },
       });
+      let buffer = '';
+      let response: LLMResponse | undefined;
+      while (true) {
+        const { value, done } = await stream.next();
+        if (done) {
+          response = value;
+          break;
+        }
+        if (value) {
+          buffer += value;
+        }
+      }
+      if (!response) {
+        throw new Error('LLM stream completed without a final response');
+      }
+      if (!response.content || response.content.length === 0) {
+        response = { ...response, content: buffer };
+      }
       const llmDurationMs = Date.now() - llmStartTime;
       metrics.llmCallsMade++;
 

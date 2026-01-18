@@ -82,6 +82,7 @@ Enable fast experimentation across prompts, models, and context-engineering stra
 - If runs mutate files, create per-run worktrees.
 - Each run uses a distinct `working_dir`.
 - Parallel runs without isolated worktrees are not allowed.
+- For low-overhead isolation, create a branch per run and keep runs sequential.
 
 ### Compaction Divergence Testing
 - Use session forking to isolate the moment of divergence.
@@ -116,6 +117,7 @@ Enable fast experimentation across prompts, models, and context-engineering stra
 - `scripts/bench/run_v2.ts` runs comparative benchmarks with session forking.
 - Example:
   - `bun run scripts/bench/run_v2.ts --runs bench/runs.json --questions bench/questions.json --out bench/results.jsonl`
+  - `bun run scripts/bench/run_v2.ts --runs bench/runs.json --questions bench/questions.json --model_provider openai --model gpt-4.1`
 
 ---
 

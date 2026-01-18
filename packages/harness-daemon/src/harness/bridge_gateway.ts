@@ -146,6 +146,9 @@ export class BridgeGateway {
         case 'get_models':
           this.handleGetModels(connectionId);
           return;
+        case 'models_delete':
+          this.handleModelsDelete(connectionId, command.data);
+          return;
         case 'skills_list':
           this.handleSkillsList(connectionId);
           return;
@@ -293,6 +296,19 @@ export class BridgeGateway {
 
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
+
+    // Load and emit last model preference if available
+    if (graphd) {
+      const lastModel = graphd.getUserPreference<{ provider: string; model: string; reasoning?: string }>('user_prefs:last_model');
+      if (lastModel?.provider && this.harness.hasApiKey(lastModel.provider)) {
+        // Store in session metadata and emit event
+        graphd.sessionUpdateMetadata(sessionKey, { model_override: lastModel });
+        this.sendEvent(connectionId, {
+          type: 'model_changed',
+          data: lastModel,
+        }, sessionChannel(sessionKey));
+      }
+    }
   }
 
   private handleSendText(
@@ -413,12 +429,19 @@ export class BridgeGateway {
 
   private handleGetModels(connectionId: string): void {
     const config = this.harness.getConfig();
+    const graphd = this.harness.getGraphD?.();
 
-    const models = getAllModels().map((model) => ({
-      id: model.id,
-      name: model.name,
-      provider: model.provider,
-    }));
+    // Get hidden models from user preferences
+    const hiddenModels = graphd?.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+
+    const models = getAllModels()
+      .filter((model) => !hiddenModels.includes(model.id))
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        provider: model.provider,
+        reasoning: model.reasoning,
+      }));
 
     this.sendEvent(connectionId, {
       type: 'response',
@@ -431,6 +454,39 @@ export class BridgeGateway {
           default: config.models.default,
         },
       },
+    });
+  }
+
+  private handleModelsDelete(connectionId: string, data: Record<string, unknown> | undefined): void {
+    // TUI sends 'model' (model ID), accept both 'model' and 'model_id' for flexibility
+    const modelId = typeof data?.model === 'string' ? data.model : (typeof data?.model_id === 'string' ? data.model_id : '');
+    if (!modelId) {
+      this.sendAuthResponse(connectionId, 'models_delete', {
+        success: false,
+        error: 'Missing model',
+      });
+      return;
+    }
+
+    const graphd = this.harness.getGraphD?.();
+    if (!graphd) {
+      this.sendAuthResponse(connectionId, 'models_delete', {
+        success: false,
+        error: 'GraphD not available',
+      });
+      return;
+    }
+
+    // Get current hidden models and add the new one
+    const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+    if (!hiddenModels.includes(modelId)) {
+      hiddenModels.push(modelId);
+      graphd.setUserPreference('user_prefs:hidden_models', hiddenModels);
+    }
+
+    this.sendAuthResponse(connectionId, 'models_delete', {
+      success: true,
+      model: modelId,
     });
   }
 
@@ -1064,11 +1120,13 @@ export class BridgeGateway {
       return;
     }
 
-    // Store model override in session metadata
+    // Store model override in session metadata AND as global preference
     const modelOverride = { provider, model, reasoning };
     const graphd = this.harness.getGraphD?.();
     if (graphd) {
       graphd.sessionUpdateMetadata(sessionKey, { model_override: modelOverride });
+      // Also persist as global preference for next session
+      graphd.setUserPreference('user_prefs:last_model', modelOverride);
     }
 
     // Emit model_changed event

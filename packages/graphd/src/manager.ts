@@ -1015,6 +1015,50 @@ export class GraphDManager {
   }
 
   // =========================================================================
+  // User Preferences
+  // =========================================================================
+
+  /**
+   * Get a user preference value.
+   */
+  getUserPreference<T = unknown>(key: string): T | null {
+    if (!this.store) return null;
+    try {
+      return this.store.getUserPreference<T>(key);
+    } catch (err) {
+      console.warn('Get user preference failed:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Set a user preference value.
+   */
+  setUserPreference(key: string, value: unknown): boolean {
+    if (!this.store) return false;
+    try {
+      this.store.setUserPreference(key, value);
+      return true;
+    } catch (err) {
+      console.warn('Set user preference failed:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Delete a user preference.
+   */
+  deleteUserPreference(key: string): boolean {
+    if (!this.store) return false;
+    try {
+      return this.store.deleteUserPreference(key);
+    } catch (err) {
+      console.warn('Delete user preference failed:', err);
+      return false;
+    }
+  }
+
+  // =========================================================================
   // Private Helpers
   // =========================================================================
 

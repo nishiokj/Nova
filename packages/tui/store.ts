@@ -79,6 +79,7 @@ export interface StoreSnapshot {
   // Models selection
   modelsList: ModelEntry[];
   modelsCursor: number;
+  modelDeletePending: boolean;
   selectedModel: string | null;
   selectedReasoningLevel: string | null;
   // Sessions selection
@@ -162,6 +163,7 @@ export class Store {
   // Models selection
   private modelsList: ModelEntry[] = [];
   private modelsCursor = 0;
+  private modelDeletePending = false;
   private selectedModel: string | null = null;
   private selectedReasoningLevel: string | null = null;
 
@@ -256,6 +258,7 @@ export class Store {
       // Models selection
       modelsList: [...this.modelsList],
       modelsCursor: this.modelsCursor,
+      modelDeletePending: this.modelDeletePending,
       selectedModel: this.selectedModel,
       selectedReasoningLevel: this.selectedReasoningLevel,
       // Sessions selection
@@ -1069,11 +1072,12 @@ export class Store {
   }
 
   /**
-   * Moves models cursor up or down.
+   * Moves models cursor up or down. Cancels any pending delete.
    */
   moveModelsCursor(delta: number): void {
     const count = this.modelsList.length;
     if (count === 0) return;
+    this.modelDeletePending = false;
     this.modelsCursor = (this.modelsCursor + delta + count) % count;
     this.emit();
   }
@@ -1124,11 +1128,54 @@ export class Store {
   }
 
   /**
-   * Exits models mode and returns to chat.
+   * Exits models mode and returns to chat. Clears pending delete.
    */
   exitModelsMode(): void {
+    this.modelDeletePending = false;
     this.uiMode = "chat";
     this.emit();
+  }
+
+  /**
+   * Sets or clears the pending delete state.
+   */
+  setModelDeletePending(pending: boolean): void {
+    this.modelDeletePending = pending;
+    this.emit();
+  }
+
+  /**
+   * Removes the model at the current cursor position from the local list.
+   * Returns the removed model for sending a delete command to the harness.
+   * Clears pending delete state.
+   */
+  removeModelAtCursor(): ModelEntry | null {
+    this.modelDeletePending = false;
+    if (this.modelsList.length === 0) return null;
+    if (this.modelsCursor < 0 || this.modelsCursor >= this.modelsList.length) return null;
+
+    const removed = this.modelsList[this.modelsCursor];
+    this.modelsList = this.modelsList.filter((_, i) => i !== this.modelsCursor);
+
+    // Adjust cursor if needed
+    if (this.modelsCursor >= this.modelsList.length) {
+      this.modelsCursor = Math.max(0, this.modelsList.length - 1);
+    }
+
+    // If removed model was selected, select another
+    if (this.selectedModel === removed.id) {
+      if (this.modelsList.length > 0) {
+        const newSelected = this.modelsList[this.modelsCursor];
+        this.selectedModel = newSelected?.id ?? null;
+        this.selectedReasoningLevel = newSelected?.reasoning?.[0] ?? null;
+      } else {
+        this.selectedModel = null;
+        this.selectedReasoningLevel = null;
+      }
+    }
+
+    this.emit();
+    return removed;
   }
 
   /**

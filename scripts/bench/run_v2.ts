@@ -16,8 +16,11 @@ type RunConfig = {
   model?: ModelOverride;
   prompt_variant_id?: string;
   context_strategy_id?: string;
+  sys_prompt_id?: string;
+  context_window_id?: string;
   temperature?: number;
   working_dir?: string;
+  branch_name?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -83,6 +86,54 @@ function parseQuestionsFile(filePath: string): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function runGitCommand(command: string, cwd: string) {
+  return execSync(command, { encoding: 'utf-8', cwd }).trim();
+}
+
+function sanitizeBranchSegment(segment: string) {
+  const trimmed = segment.trim();
+  if (!trimmed) return 'default';
+  return trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '') || 'default';
+}
+
+function buildBranchName(runIndex: number, run: RunConfig, defaultModelLabel: string) {
+  const sysPrompt = sanitizeBranchSegment(run.sys_prompt_id ?? 'default');
+  const contextWindow = sanitizeBranchSegment(run.context_window_id ?? 'default');
+  const modelLabel = sanitizeBranchSegment(defaultModelLabel);
+  return `bench${runIndex}_${sysPrompt}_${contextWindow}_${modelLabel}`;
+}
+
+function ensureBranchForRun(
+  cwd: string,
+  branchName: string,
+  baseRef: string,
+  forceBranch: boolean
+) {
+  try {
+    runGitCommand('git rev-parse --is-inside-work-tree', cwd);
+  } catch {
+    throw new Error(`Not a git repo: ${cwd}`);
+  }
+
+  let branchExists = false;
+  try {
+    runGitCommand(`git show-ref --verify refs/heads/${branchName}`, cwd);
+    branchExists = true;
+  } catch {
+    branchExists = false;
+  }
+
+  if (branchExists && !forceBranch) {
+    throw new Error(`Branch already exists: ${branchName}`);
+  }
+
+  runGitCommand(`git checkout -B ${branchName} ${baseRef}`, cwd);
 }
 
 async function waitForReady(client: BridgeClient, sessionKey: string, timeoutMs = 10000) {
@@ -242,6 +293,7 @@ function ensureUniqueWorkingDirs(runs: RunConfig[], fallbackWorkingDir: string) 
 async function runSession(params: {
   run: RunConfig;
   runId: string;
+  runIndex: number;
   sessionKey: string;
   questions: string[];
   questionSetId: string;
@@ -250,10 +302,14 @@ async function runSession(params: {
   port: number;
   dbPath: string;
   experimentId?: string;
+  baseRef: string;
+  forceBranch: boolean;
+  defaultModelLabel: string;
 }) {
   const {
     run,
     runId,
+    runIndex,
     sessionKey,
     questions,
     questionSetId,
@@ -262,8 +318,13 @@ async function runSession(params: {
     port,
     dbPath,
     experimentId,
+    baseRef,
+    forceBranch,
+    defaultModelLabel,
   } = params;
   const workingDir = run.working_dir ?? baseWorkingDir;
+  const branchName = run.branch_name ?? buildBranchName(runIndex, run, defaultModelLabel);
+  ensureBranchForRun(workingDir, branchName, baseRef, forceBranch);
   const client = new BridgeClient({ host, port });
   await client.connect();
 
@@ -348,10 +409,13 @@ async function runSession(params: {
           : undefined,
     prompt_variant_id: run.prompt_variant_id,
     context_strategy_id: run.context_strategy_id,
+    sys_prompt_id: run.sys_prompt_id,
+    context_window_id: run.context_window_id,
     temperature: run.temperature,
     question_set_id: questionSetId,
     questions_count: questions.length,
     working_dir: workingDir,
+    branch_name: branchName,
     total_llm_calls: metrics.total_llm_calls,
     total_tool_calls: metrics.total_tool_calls,
     prompt_tokens: metrics.prompt_tokens,
@@ -375,6 +439,13 @@ async function main() {
   const seedPrompt = args.seed_prompt;
   const questionSetId = args.question_set_id ?? 'v2_default';
   const parallel = args.parallel === 'true';
+  const baseRef = args.base_ref ?? 'HEAD';
+  const forceBranch = args.force_branch === 'true';
+
+  const defaultModelProvider = args.model_provider;
+  const defaultModelName = args.model;
+  const defaultModelReasoning = args.model_reasoning;
+  const defaultModelLabel = defaultModelName ?? defaultModelProvider ?? 'default';
 
   const runsPath = args.runs;
   const questionsPath = args.questions;
@@ -387,6 +458,16 @@ async function main() {
   const runs = Array.isArray(runsConfig.runs) ? runsConfig.runs : [];
   if (runs.length === 0) {
     throw new Error('No runs provided. Provide a runs file with at least one run.');
+  }
+
+  for (const run of runs) {
+    if (!run.model && defaultModelProvider) {
+      run.model = {
+        provider: defaultModelProvider,
+        model: defaultModelName,
+        reasoning: defaultModelReasoning,
+      };
+    }
   }
 
   const questions = questionsPath ? parseQuestionsFile(questionsPath) : [defaultPrompt];
@@ -461,6 +542,7 @@ async function main() {
       runSession({
         run,
         runId,
+        runIndex: index + 1,
         sessionKey,
         questions,
         questionSetId: runsConfig.question_set_id ?? questionSetId,
@@ -469,6 +551,9 @@ async function main() {
         port,
         dbPath,
         experimentId,
+        baseRef,
+        forceBranch,
+        defaultModelLabel: run.model?.model ?? run.model?.provider ?? defaultModelLabel,
       });
   });
 

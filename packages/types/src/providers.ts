@@ -172,7 +172,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
       { id: 'gpt-5.2', name: 'gpt-5.2', reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5-mini', name: 'gpt-5-mini', reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5-nano', name: 'gpt-5-nano' },
-      { id: 'gpt-5.1-codex', name: 'gpt-5.1-codex' },
+      { id: 'gpt-5.2-codex', name: 'gpt-5.2-codex', reasoning: ['low', 'medium', 'high'] },
     ],
     envVar: 'OPENAI_API_KEY',
     testEndpoint: 'https://api.openai.com/v1/models',

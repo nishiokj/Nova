@@ -32,7 +32,7 @@ import { createWorkItem } from 'work';
 import { coerceStructuredOutput } from 'shared';
 import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
-import { GraphDSubscriber } from '../subscribers/graphd_subscriber.js';
+import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
 import path from 'path';
 import fs from 'fs';
@@ -303,7 +303,7 @@ export class AgentHarness {
   private isShutdown = false;
   private graphd: GraphDManager | null = null;
   private graphdStarted = false;
-  private graphdSubscribers = new Map<string, GraphDSubscriber>();
+  private graphdSubscriber: ReturnType<typeof createGraphDSubscriber> | null = null;
   private eventBus: EventBus;
   private logSubscriber: LogSubscriber | null = null;
   private agentRegistry: AgentRegistry;
@@ -512,6 +512,18 @@ export class AgentHarness {
   }
 
   /**
+   * Close and evict in-memory state for a session.
+   */
+  closeSession(sessionKey: string): void {
+    const context = this.contextWindows.get(sessionKey);
+    if (context) {
+      this.persistContext(context);
+      this.contextWindows.delete(sessionKey);
+    }
+    this.pausedState.delete(sessionKey);
+  }
+
+  /**
    * Start async services (GraphD).
    */
   async start(): Promise<boolean> {
@@ -525,6 +537,10 @@ export class AgentHarness {
             dbPath: this.config.graphd.dbPath,
             reusing: this.graphd.isReusing(),
           });
+          if (!this.graphdSubscriber) {
+            this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd);
+            this.logger.debug('GraphDSubscriber created');
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -611,19 +627,12 @@ export class AgentHarness {
 
     if (this.isGraphDReady()) {
       try {
-        this.graphd!.sessionTouch(sessionKey, this.config.tools.workingDir);
+        const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+        this.graphd!.sessionTouch(sessionKey, effectiveWorkingDir);
         this.graphd!.setActive(true);
-
-        let subscriber = this.graphdSubscribers.get(sessionKey);
-        if (!subscriber) {
-          subscriber = new GraphDSubscriber(this.eventBus, this.graphd!, {
-            sessionKey,
-            requestId,
-          });
-          this.graphdSubscribers.set(sessionKey, subscriber);
-          this.logger.debug('Created GraphDSubscriber for session', { sessionKey });
-        } else {
-          subscriber.setRequestId(requestId);
+        if (!this.graphdSubscriber) {
+          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!);
+          this.logger.debug('GraphDSubscriber created');
         }
       } catch (error) {
         this.logger.warning('GraphD session touch failed', { error: String(error) });
@@ -910,10 +919,7 @@ export class AgentHarness {
             this.persistContext(contextWindow);
 
             // Flush subscriber events to make them visible to dashboard immediately
-            const subscriber = this.graphdSubscribers.get(sessionKey);
-            if (subscriber) {
-              subscriber.flush();
-            }
+            this.graphdSubscriber?.flush();
 
             if (this.isGraphDReady()) {
               try {
@@ -1350,10 +1356,7 @@ export class AgentHarness {
           unsubscribe();
 
           // Flush subscriber events to make them visible to dashboard immediately
-          const subscriber = this.graphdSubscribers.get(sessionKey);
-          if (subscriber) {
-            subscriber.flush();
-          }
+          this.graphdSubscriber?.flush();
 
           eventQueue.finish();
         });
@@ -1460,20 +1463,19 @@ export class AgentHarness {
     if (this.isShutdown) return;
     this.isShutdown = true;
 
-    const sessionKeysToClose: string[] = [];
-    for (const [sessionKey, subscriber] of this.graphdSubscribers) {
+    if (this.graphdSubscriber) {
       try {
-        subscriber.close();
-        sessionKeysToClose.push(sessionKey);
-        this.logger.debug('Closed GraphDSubscriber', { sessionKey });
+        this.graphdSubscriber.close();
+        this.logger.debug('Closed GraphDSubscriber');
       } catch (error) {
-        this.logger.warning('GraphDSubscriber close failed', { sessionKey, error: String(error) });
+        this.logger.warning('GraphDSubscriber close failed', { error: String(error) });
+      } finally {
+        this.graphdSubscriber = null;
       }
     }
-    this.graphdSubscribers.clear();
 
     if (this.isGraphDReady()) {
-      for (const sessionKey of sessionKeysToClose) {
+      for (const sessionKey of this.contextWindows.keys()) {
         try {
           this.graphd!.sessionClose(sessionKey);
           this.logger.debug('Closed GraphD session', { sessionKey });

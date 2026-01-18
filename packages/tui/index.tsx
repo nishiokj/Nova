@@ -42,7 +42,6 @@ import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
 import { formatDiffAsText } from "./diff.js";
-import { getModelDefinition } from "types";
 
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
@@ -841,22 +840,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
     if (kind === "models") {
-      const payload = metadata.payload as Array<{ id: string; name: string; provider?: string }> | undefined;
+      const payload = metadata.payload as Array<{ id: string; name: string; provider?: string; reasoning?: string[] }> | undefined;
       if (payload && Array.isArray(payload)) {
-        // Enrich models with reasoning options from the registry
-        const enrichedModels = payload.map((model) => {
-          const definition = getModelDefinition(model.id);
-          return {
-            ...model,
-            reasoning: definition?.reasoning,
-          };
-        });
-        // Only enter models mode if user explicitly requested it (via /models)
         if (pendingModelsModeRef.current) {
           pendingModelsModeRef.current = false;
-          store.setModelsList(enrichedModels);
+          store.setModelsList(payload);
         } else {
-          store.updateModelsList(enrichedModels);
+          store.updateModelsList(payload);
         }
       } else if (content) {
         store.addMessage("system", content);
@@ -1035,11 +1025,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   const handleModelChanged = (data?: ModelChangedData) => {
     if (!data?.model) return;
-    const provider = data.provider ? ` [${data.provider}]` : "";
-    store.batch(() => {
-      store.setSelectedModel(data.model ?? null);
-      store.addMessage("system", `Active model set to "${data.model}"${provider}.`);
-    });
+    store.setSelectedModel(data.model ?? null);
+    // Also restore reasoning level if provided
+    if (data.reasoning) {
+      store.setReasoningLevel(data.reasoning);
+    }
   };
 
   const handleError = (data?: ErrorData) => {
@@ -1248,7 +1238,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       if (key.return) {
         const selectedModel = store.selectModel();
         if (selectedModel) {
-          store.addMessage("system", `Model set to "${selectedModel.name}" (${selectedModel.id}).`);
           // Send command to update model in harness
           sendCommand("set_model", {
             provider: selectedModel.provider,
@@ -1256,6 +1245,30 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           });
         }
         store.exitModelsMode();
+        return;
+      }
+
+      // Two-step delete: 'd' to mark, then 'd' or Enter to confirm
+      if (input === "d" || input === "D") {
+        if (snapshot.modelDeletePending) {
+          // Confirm delete
+          const removed = store.removeModelAtCursor();
+          if (removed) {
+            sendCommand("models_delete", {
+              provider: removed.provider,
+              model: removed.id,
+            });
+          }
+        } else {
+          // First press - mark for deletion
+          store.setModelDeletePending(true);
+        }
+        return;
+      }
+
+      // Any other key cancels pending delete
+      if (snapshot.modelDeletePending) {
+        store.setModelDeletePending(false);
         return;
       }
 
@@ -1656,44 +1669,64 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
-    // Escape-leader shortcuts: Esc then M for model, Esc then R for reasoning
-    // Must be pressed within 500ms of each other
-    const LEADER_TIMEOUT = 500;
+    // Escape shortcuts: Esc+M for model, Esc+T for reasoning
+    // Supports both: holding Esc (sends as meta/escape modifier) or Esc-then-key (leader pattern)
+    const LEADER_TIMEOUT = 300;
     const now = Date.now();
     const isAfterEscapeLeader = now - escapeLeaderRef.current < LEADER_TIMEOUT;
 
-    if (key.escape && !isResponseMode && !isProvidersMode && !isModelsMode && !isSessionsMode && !isThemeMode && !isUsageMode) {
-      // Record escape press time for leader key sequence
+    // Helper to cycle model
+    const cycleModel = () => {
+      const nextModel = store.cycleToNextModel();
+      if (nextModel) {
+        sendCommand("set_model", {
+          provider: nextModel.provider,
+          model: nextModel.id,
+        });
+      } else {
+        store.addMessage("system", "No models available. Run /models to fetch model list.");
+      }
+    };
+
+    // Helper to cycle reasoning
+    const cycleReasoning = () => {
+      const nextLevel = store.cycleReasoningLevel();
+      if (nextLevel === null) {
+        store.addMessage("system", "Current model does not support reasoning levels.");
+      }
+    };
+
+    // Check for held Esc+key (appears as meta or escape modifier in terminals)
+    if ((key.meta || key.escape) && !key.ctrl) {
+      const lowerInput = input.toLowerCase();
+      if (lowerInput === "m") {
+        cycleModel();
+        return;
+      }
+      if (lowerInput === "t") {
+        cycleReasoning();
+        return;
+      }
+    }
+
+    // Pure escape press - record for leader key sequence
+    if (key.escape && !input && !isResponseMode && !isProvidersMode && !isModelsMode && !isSessionsMode && !isThemeMode && !isUsageMode) {
       escapeLeaderRef.current = now;
       return;
     }
 
-    // Check for leader-key follow-up (no modifiers, just the letter)
+    // Leader-key follow-up: Esc then M/T (for terminals that don't support held Esc)
     if (isAfterEscapeLeader && !key.ctrl && !key.meta) {
       if (input === "m" || input === "M") {
-        escapeLeaderRef.current = 0; // Reset leader
-        // Cycle to next model
-        const nextModel = store.cycleToNextModel();
-        if (nextModel) {
-          sendCommand("set_model", {
-            provider: nextModel.provider,
-            model: nextModel.id,
-          });
-        } else {
-          store.addMessage("system", "No models available. Run /models to fetch model list.");
-        }
+        escapeLeaderRef.current = 0;
+        cycleModel();
         return;
       }
       if (input === "t" || input === "T") {
-        escapeLeaderRef.current = 0; // Reset leader
-        // Cycle to next reasoning level
-        const nextLevel = store.cycleReasoningLevel();
-        if (nextLevel === null) {
-          store.addMessage("system", "Current model does not support reasoning levels.");
-        }
+        escapeLeaderRef.current = 0;
+        cycleReasoning();
         return;
       }
-      // Any other key after escape leader - reset and continue normal processing
       escapeLeaderRef.current = 0;
     }
 
@@ -2262,28 +2295,39 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const reasoningInfo = reasoningOptions && reasoningOptions.length > 0
       ? ` | Reasoning: ${currentReasoning ?? 'off'}`
       : '';
+    const deletePending = snapshot.modelDeletePending;
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
-        <Text bold color={colors.accent}>Select Model</Text>
-        <Text color={colors.muted}>Use ↑↓ to navigate, Enter to select, Esc to cancel</Text>
-        <Text color={colors.muted}>From chat: Esc+M to cycle models | Esc+T to cycle reasoning</Text>
+        <Box>
+          <Text bold color={colors.accent}>Select Model</Text>
+          {deletePending ? (
+            <Text color={colors.error}>  d to confirm delete</Text>
+          ) : (
+            <Text color={colors.muted}>  d to delete</Text>
+          )}
+        </Box>
         <Text> </Text>
         {snapshot.modelsList.map((model, index) => {
           const isSelected = index === snapshot.modelsCursor;
           const isCurrent = model.id === currentModel;
+          const isPendingDelete = isSelected && deletePending;
           const pointer = isSelected ? "▸ " : "  ";
           const marker = isCurrent ? ` (current${reasoningInfo})` : "";
           const provider = model.provider;
           const hasReasoning = model.reasoning && model.reasoning.length > 0;
           return (
             <Text key={`${provider ?? 'unknown'}:${model.id}`}>
-              <Text color={isSelected ? colors.accent : colors.muted}>{pointer}</Text>
-              <Text color={isSelected ? colors.text : colors.muted} bold={isSelected}>
+              <Text color={isPendingDelete ? colors.error : (isSelected ? colors.accent : colors.muted)}>{pointer}</Text>
+              <Text
+                color={isPendingDelete ? colors.error : (isSelected ? colors.text : colors.muted)}
+                bold={isSelected}
+                strikethrough={isPendingDelete}
+              >
                 {model.name}
               </Text>
-              {provider && <Text color={colors.muted}> [{provider}]</Text>}
-              {hasReasoning && <Text color={colors.func}> [R]</Text>}
-              <Text color={colors.muted}>{marker}</Text>
+              {provider && <Text color={isPendingDelete ? colors.error : colors.muted} strikethrough={isPendingDelete}> [{provider}]</Text>}
+              {hasReasoning && <Text color={isPendingDelete ? colors.error : colors.func} strikethrough={isPendingDelete}> [R]</Text>}
+              <Text color={isPendingDelete ? colors.error : colors.muted} strikethrough={isPendingDelete}>{marker}</Text>
             </Text>
           );
         })}
@@ -2378,17 +2422,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {/* Bottom separator line - runs edge to edge */}
           <Text color={colors.border}>{horizontalLine}</Text>
 
-          {/* Model indicator below the input - right-aligned with padding */}
+          {/* Model indicator row: shortcuts left, model/reasoning right */}
           <Text>
             {(() => {
               const modelName = currentModelEntry?.name ?? "no model";
               const reasoningLevel = hasReasoning ? (snapshot.selectedReasoningLevel ?? "off") : null;
-              const indicator = reasoningLevel ? `${modelName} | ${reasoningLevel}` : modelName;
-              const rightPadding = 2;
-              const leftPadding = contentWidth - indicator.length - rightPadding;
+              const rightContent = reasoningLevel ? `${modelName} | ${reasoningLevel}` : modelName;
+              const leftContent = hasReasoning ? "Esc+M  Esc+T" : "Esc+M";
+              const padding = 2;
+              const gap = contentWidth - leftContent.length - rightContent.length - (padding * 2);
               return (
                 <>
-                  <Text>{" ".repeat(Math.max(0, leftPadding))}</Text>
+                  <Text>{" ".repeat(padding)}</Text>
+                  <Text color={colors.muted} dimColor>{leftContent}</Text>
+                  <Text>{" ".repeat(Math.max(1, gap))}</Text>
                   <Text color={colors.muted}>{modelName}</Text>
                   {reasoningLevel && (
                     <>
@@ -2396,7 +2443,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
                       <Text color={colors.func}>{reasoningLevel}</Text>
                     </>
                   )}
-                  <Text>{" ".repeat(rightPadding)}</Text>
+                  <Text>{" ".repeat(padding)}</Text>
                 </>
               );
             })()}

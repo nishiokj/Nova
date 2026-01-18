@@ -5,6 +5,7 @@ export type BridgeCommandType =
   | "voice_stop"
   | "get_config"
   | "get_models"
+  | "models_delete"
   | "get_status"
   | "skills_list"
   | "skills_get"
