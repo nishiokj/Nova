@@ -54,6 +54,7 @@ import { loadConfig, getAgentConfig, resolveApiKey } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
 import { HookExecutor } from './hook_executor.js';
 import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
+import { SessionStore } from './session_store.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -291,14 +292,8 @@ const consoleLogger: HarnessLogger = createFileLogger();
 export class AgentHarness {
   private config: FullHarnessConfig;
   private toolRegistry: ToolRegistry;
-  private contextWindows = new Map<string, ContextWindow>();
-  private pausedState = new Map<string, {
-    goal: string;
-    agentType: string;
-    workingDir: string;
-    planMode?: boolean;
-    userPromptType?: string;
-  }>();
+  private sessionStores = new Map<string, { store: SessionStore; lastAccessMs: number }>();
+  private readonly sessionTtlMs: number;
   private logger: HarnessLogger;
   private isShutdown = false;
   private graphd: GraphDManager | null = null;
@@ -1370,11 +1365,7 @@ export class AgentHarness {
    * Create a ready event for initialization.
    */
   createReadyEvent(sessionKey: string): BridgeEvent {
-    const defaultAgent = this.config.agents[this.config.defaultAgent];
-    const configSummary = defaultAgent
-      ? `Provider: ${defaultAgent.llm.provider}, Model: ${defaultAgent.llm.model}`
-      : 'No default agent configured';
-    return createReadyEvent(sessionKey, configSummary);
+    return createReadyEvent(sessionKey);
   }
 
   /**

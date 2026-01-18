@@ -1,7 +1,14 @@
 import { ContextWindow } from 'context';
 import type { ContextWindowSnapshot } from 'types';
 import type { GraphDManager } from 'graphd';
-import type { HarnessLogger } from './harness_infra.js';
+
+export interface HarnessLogger {
+  info(msg: string, meta?: Record<string, unknown>): void;
+  debug(msg: string, meta?: Record<string, unknown>): void;
+  warning(msg: string, meta?: Record<string, unknown>): void;
+  error(msg: string, meta?: Record<string, unknown>): void;
+  flush?(): void;
+}
 
 export interface PausedState {
   goal: string;
@@ -108,6 +115,10 @@ export class SessionStore {
 
   getPausedState(): PausedState | null {
     return this.pausedState;
+  }
+
+  hasPausedState(): boolean {
+    return this.pausedState !== null;
   }
 
   clearPausedState(): void {

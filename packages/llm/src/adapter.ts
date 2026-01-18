@@ -1020,6 +1020,8 @@ class LLMRouterAdapter implements LLMAdapter {
 
   private normalizeInput(messages: Message[]): Array<Record<string, unknown>> {
     const input: Array<Record<string, unknown>> = [];
+    const isValidToolName = (name: unknown): name is string =>
+      typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
 
     for (const msg of messages) {
       // Skip undefined/null messages
@@ -1029,6 +1031,13 @@ class LLMRouterAdapter implements LLMAdapter {
       const callId = (item.call_id ?? item.id ?? item.callId) as string;
 
       if (item.type === 'function_call') {
+        if (!isValidToolName(item.name)) {
+          this.logger.warn('Skipping function_call with invalid name', {
+            name: item.name,
+            callId,
+          });
+          continue;
+        }
         input.push({
           type: 'function_call',
           call_id: callId,
@@ -1284,7 +1293,6 @@ class LLMRouterAdapter implements LLMAdapter {
     }
 
     body.input = this.normalizeInput(params.messages);
-
     const inputArray = body.input as Array<Record<string, unknown>>;
     if (!inputArray || inputArray.length === 0) {
       this.logger.error('OpenAI request has no input items', {
@@ -1614,6 +1622,7 @@ class LLMRouterAdapter implements LLMAdapter {
     const toolCalls: ToolCall[] = [];
     let model = resolved.model;
     let responseId: string | undefined;
+    let sawTextDelta = false;
     let buffer = '';
 
     try {
@@ -1641,6 +1650,7 @@ class LLMRouterAdapter implements LLMAdapter {
             if (event.type === 'response.output_text.delta') {
               const delta = event.delta as string;
               if (delta) {
+                sawTextDelta = true;
                 fullContent += delta;
                 params.onChunk?.(delta);
                 yield delta;
@@ -1649,28 +1659,10 @@ class LLMRouterAdapter implements LLMAdapter {
 
             if (event.type === 'response.output_text.done') {
               const text = event.text as string;
-              if (text) {
+              if (text && !sawTextDelta) {
                 fullContent += text;
                 params.onChunk?.(text);
                 yield text;
-              }
-            }
-
-            if (event.type === 'response.output_item.added') {
-              const item = event.item as Record<string, unknown>;
-              if (item?.type === 'tool_call') {
-                const tcData = item as { id: string; name: string; arguments: string };
-                let args: Record<string, unknown> = {};
-                try {
-                  args = JSON.parse(tcData.arguments);
-                } catch {
-                  args = {};
-                }
-                toolCalls.push({
-                  id: tcData.id,
-                  name: tcData.name,
-                  arguments: args,
-                });
               }
             }
 
@@ -1678,12 +1670,13 @@ class LLMRouterAdapter implements LLMAdapter {
               const responseObj = event.response as Record<string, unknown> | undefined;
               if (responseObj) {
                 const parsedText = this.parseOutputText(responseObj);
-                if (parsedText) {
+                if (parsedText && fullContent.length === 0) {
                   fullContent += parsedText;
                 }
                 const parsedCalls = this.parseToolCalls(responseObj);
                 if (parsedCalls.length > 0) {
-                  toolCalls.push(...parsedCalls);
+                  toolCalls.length = 0;
+                  toolCalls.push(...parsedCalls.filter((call) => !!call.name));
                 }
                 const usageData = responseObj.usage as Record<string, number> | undefined;
                 if (usageData) {

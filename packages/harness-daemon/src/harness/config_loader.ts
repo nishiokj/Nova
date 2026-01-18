@@ -907,6 +907,7 @@ export function createConfigFromFile(
     },
     context: {
       maxTokens: fileConfig.context?.max_tokens ?? DEFAULT_CONTEXT_CONFIG.max_tokens,
+      sessionTtlMs: fileConfig.context?.session_ttl_ms ?? DEFAULT_CONTEXT_CONFIG.session_ttl_ms,
     },
     skills: {
       enabled: fileConfig.skills?.enabled ?? DEFAULT_SKILLS_CONFIG.enabled,
@@ -1057,6 +1058,7 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
     },
     context: {
       maxTokens: DEFAULT_CONTEXT_CONFIG.max_tokens,
+      sessionTtlMs: DEFAULT_CONTEXT_CONFIG.session_ttl_ms,
     },
     skills: {
       enabled: DEFAULT_SKILLS_CONFIG.enabled,

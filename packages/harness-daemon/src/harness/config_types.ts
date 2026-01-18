@@ -140,6 +140,7 @@ export interface FullHarnessConfig {
   /** Context window configuration */
   context: {
     maxTokens: number;
+    sessionTtlMs: number;
   };
 
   /** Skills configuration */
@@ -198,6 +199,7 @@ export const DEFAULT_GRAPHD_CONFIG: GraphDConfigSection = {
 
 export const DEFAULT_CONTEXT_CONFIG: ContextConfigSection = {
   max_tokens: 200_000,
+  session_ttl_ms: 1_800_000,
 };
 
 export const DEFAULT_ENABLED_TOOLS = [

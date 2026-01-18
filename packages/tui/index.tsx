@@ -2128,7 +2128,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}${snapshot.planMode ? " | [PLAN]" : ""}`, color: colors.muted },
     { text: `Status: ${statusText}`, color: statusColor },
     { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
-    { text: "-".repeat(contentWidth), color: colors.border },
+    { text: "─".repeat(contentWidth), color: colors.border },
   ];
   const headerLines = headerConfig.map((h) => h.text);
 
@@ -2422,27 +2422,26 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {/* Bottom separator line - runs edge to edge */}
           <Text color={colors.border}>{horizontalLine}</Text>
 
-          {/* Model indicator row: shortcuts left, model/reasoning right */}
+          {/* Model indicator row: model (Esc+M) | reasoning (Esc+T) */}
           <Text>
             {(() => {
               const modelName = currentModelEntry?.name ?? "no model";
-              const reasoningLevel = hasReasoning ? (snapshot.selectedReasoningLevel ?? "off") : null;
-              const rightContent = reasoningLevel ? `${modelName} | ${reasoningLevel}` : modelName;
-              const leftContent = hasReasoning ? "Esc+M  Esc+T" : "Esc+M";
+              const reasoningLevel = hasReasoning ? (snapshot.selectedReasoningLevel ?? "off") : "n/a";
+              // Layout: modelName (Esc+M) | reasoning (Esc+T) or n/a
+              const rightContent = hasReasoning
+                ? `${modelName} (Esc+M) | ${reasoningLevel} (Esc+T)`
+                : `${modelName} (Esc+M) | n/a`;
               const padding = 2;
-              const gap = contentWidth - leftContent.length - rightContent.length - (padding * 2);
+              const gap = contentWidth - rightContent.length - (padding * 2);
               return (
                 <>
                   <Text>{" ".repeat(padding)}</Text>
-                  <Text color={colors.muted} dimColor>{leftContent}</Text>
-                  <Text>{" ".repeat(Math.max(1, gap))}</Text>
+                  <Text>{" ".repeat(Math.max(0, gap))}</Text>
                   <Text color={colors.muted}>{modelName}</Text>
-                  {reasoningLevel && (
-                    <>
-                      <Text color={colors.border}> | </Text>
-                      <Text color={colors.func}>{reasoningLevel}</Text>
-                    </>
-                  )}
+                  <Text color={colors.muted} dimColor> (Esc+M)</Text>
+                  <Text color={colors.border}> | </Text>
+                  <Text color={hasReasoning ? colors.func : colors.muted} dimColor={!hasReasoning}>{reasoningLevel}</Text>
+                  {hasReasoning && <Text color={colors.muted} dimColor> (Esc+T)</Text>}
                   <Text>{" ".repeat(padding)}</Text>
                 </>
               );
