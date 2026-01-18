@@ -54,7 +54,21 @@ export interface ProviderDefinition {
   testBody?: Record<string, unknown>;
   /** Test request headers (additional to Authorization) */
   testHeaders?: Record<string, string>;
+  /** URL to provider's API billing/usage dashboard */
+  dashboardUrl?: string;
 }
+
+/**
+ * Reasoning level options for models that support reasoning.
+ * If undefined, the model does not support reasoning.
+ * If defined, specifies available reasoning levels.
+ */
+export type ReasoningOptions = string[];
+
+/**
+ * Role-based model selection for provider-first configs.
+ */
+export type ModelRole = 'fast' | 'standard' | 'powerful' | 'reasoning';
 
 /**
  * Model definition for a provider.
@@ -65,7 +79,13 @@ export interface ProviderModelDefinition {
   name: string;
   description?: string;
   max_tokens?: number;
-  supports_reasoning?: boolean;
+  /**
+   * Available reasoning levels for this model.
+   * - undefined: model does not support reasoning
+   * - ['on', 'off']: simple on/off reasoning (e.g., Claude extended thinking)
+   * - ['low', 'medium', 'high']: OpenAI-style reasoning effort levels
+   */
+  reasoning?: ReasoningOptions;
 }
 
 /**
@@ -76,6 +96,43 @@ export interface ProviderModelEntry extends ProviderModelDefinition {
 }
 
 export type ProviderResponseFormat = 'json_schema' | 'json_object';
+
+/**
+ * Provider defaults for each model role.
+ * Keys are SupportedProvider ids; values are optional per-role model ids.
+ */
+export const PROVIDER_MODEL_DEFAULTS: Partial<
+  Record<SupportedProvider, Partial<Record<ModelRole, string>>>
+> = {
+  anthropic: {
+    fast: 'claude-3-5-haiku-20241022',
+    standard: 'claude-sonnet-4-20250514',
+    powerful: 'claude-sonnet-4-20250514',
+    reasoning: 'claude-sonnet-4-20250514',
+  },
+  openai: {
+    fast: 'gpt-4.1-mini',
+    standard: 'gpt-4.1',
+    powerful: 'gpt-4.1',
+    reasoning: 'o4-mini',
+  },
+  groq: {
+    fast: 'llama-3.3-70b-versatile',
+    standard: 'llama-3.3-70b-versatile',
+  },
+  cerebras: {
+    fast: 'llama-3.3-70b',
+    standard: 'llama-3.3-70b',
+  },
+  gemini: {
+    fast: 'gemini-3.0-flash',
+    standard: 'gemini-3.0-pro',
+  },
+  'z.ai-coder': {
+    standard: 'glm-4.7',
+    reasoning: 'glm-4.7',
+  },
+};
 
 // ============================================
 // PROVIDER REGISTRY
@@ -92,8 +149,8 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     canonicalProvider: 'anthropic',
     baseUrl: 'https://api.anthropic.com',
     models: [
-      { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5' },
-      { id: 'claude-opus-4.5', name: 'Claude Opus 4.5' },
+      { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', reasoning: ['on', 'off'] },
+      { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', reasoning: ['on', 'off'] },
     ],
     envVar: 'ANTHROPIC_API_KEY',
     testEndpoint: 'https://api.anthropic.com/v1/messages',
@@ -104,6 +161,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
       max_tokens: 1,
       messages: [{ role: 'user', content: 'hi' }],
     },
+    dashboardUrl: 'https://console.anthropic.com/settings/billing',
   },
   openai: {
     id: 'openai',
@@ -111,13 +169,14 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     canonicalProvider: 'openai',
     baseUrl: 'https://api.openai.com',
     models: [
-      { id: 'gpt-5.2', name: 'gpt-5.2' },
-      { id: 'gpt-5-mini', name: 'gpt-5-mini' },
+      { id: 'gpt-5.2', name: 'gpt-5.2', reasoning: ['low', 'medium', 'high'] },
+      { id: 'gpt-5-mini', name: 'gpt-5-mini', reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5-nano', name: 'gpt-5-nano' },
-      { id: 'gpt-5.1-codex', name: 'gpt-5.1-codex' },
+      { id: 'gpt-5.2-codex', name: 'gpt-5.2-codex', reasoning: ['low', 'medium', 'high'] },
     ],
     envVar: 'OPENAI_API_KEY',
     testEndpoint: 'https://api.openai.com/v1/models',
+    dashboardUrl: 'https://platform.openai.com/usage',
   },
   'openai-compat': {
     id: 'openai-compat',
@@ -137,6 +196,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     envVar: 'CEREBRAS_API_KEY',
     testEndpoint: 'https://api.cerebras.ai/v1/models',
+    dashboardUrl: 'https://cloud.cerebras.ai/billing',
   },
   groq: {
     id: 'groq',
@@ -152,19 +212,20 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     envVar: 'GROQ_API_KEY',
     testEndpoint: 'https://api.groq.com/openai/v1/models',
+    dashboardUrl: 'https://console.groq.com/settings/billing',
   },
   gemini: {
     id: 'gemini',
     displayName: 'Google Gemini',
     canonicalProvider: 'openai-compat',
     models: [
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fast Gemini model' },
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Most capable Gemini model' },
+      { id: 'gemini-3.0-flash', name: 'Gemini 3.0 Flash', description: 'Fast Gemini model' },
       { id: 'gemini-3.0-pro', name: 'Gemini 3.0 Pro' },
     ],
     envVar: 'GOOGLE_API_KEY',
     // Gemini uses query param auth, not header
     testEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
+    dashboardUrl: 'https://aistudio.google.com/apikey',
   },
   'z.ai-coder': {
     id: 'z.ai-coder',
@@ -177,6 +238,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     envVar: 'ZAI_CODER_API_KEY',
     testEndpoint: 'https://api.z.ai/api/coding/paas/v4/models',
+    dashboardUrl: 'https://bigmodel.cn/console/finance',
   },
 };
 
@@ -264,6 +326,17 @@ export function getProviderDisplayName(provider: string): string {
 export function getProviderTestEndpoint(provider: string): string | undefined {
   if (isSupportedProvider(provider)) {
     return PROVIDER_REGISTRY[provider].testEndpoint;
+  }
+  return undefined;
+}
+
+/**
+ * Get the billing/usage dashboard URL for a provider.
+ * Returns undefined if no dashboard URL is configured.
+ */
+export function getProviderDashboardUrl(provider: string): string | undefined {
+  if (isSupportedProvider(provider)) {
+    return PROVIDER_REGISTRY[provider].dashboardUrl;
   }
   return undefined;
 }
@@ -360,4 +433,21 @@ export function getModelDefinition(modelId: string): ProviderModelEntry | undefi
     }
   }
   return undefined;
+}
+
+/**
+ * Get reasoning options for a model.
+ * Returns undefined if the model doesn't support reasoning.
+ */
+export function getModelReasoningOptions(modelId: string): ReasoningOptions | undefined {
+  const model = getModelDefinition(modelId);
+  return model?.reasoning;
+}
+
+/**
+ * Check if a model supports reasoning.
+ */
+export function modelSupportsReasoning(modelId: string): boolean {
+  const options = getModelReasoningOptions(modelId);
+  return options !== undefined && options.length > 0;
 }

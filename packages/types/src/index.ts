@@ -190,15 +190,18 @@ export type {
 export type {
   LLMProvider,
   SupportedProvider,
+  ModelRole,
   ProviderDefinition,
   ProviderResponseFormat,
   ProviderModelDefinition,
   ProviderModelEntry,
+  ReasoningOptions,
 } from './providers.js';
 
 export {
   PROVIDER_REGISTRY,
   OPENAI_COMPAT_PROVIDERS,
+  PROVIDER_MODEL_DEFAULTS,
   SUPPORTED_PROVIDER_IDS,
   isSupportedProvider,
   isOpenAICompatProvider,
@@ -207,6 +210,7 @@ export {
   getProviderEnvVar,
   getProviderDisplayName,
   getProviderTestEndpoint,
+  getProviderDashboardUrl,
   getProviderResponseFormat,
   getProviderDefinition,
   getAllProviders,
@@ -215,4 +219,6 @@ export {
   getProviderModels,
   getProviderForModel,
   getModelDefinition,
+  getModelReasoningOptions,
+  modelSupportsReasoning,
 } from './providers.js';

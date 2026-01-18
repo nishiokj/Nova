@@ -53,6 +53,8 @@ export const AgentEventTypeSchema = z.union([
 export const BaseEventFieldsSchema = z.object({
   /** REQUIRED: Correlates all events for a single request */
   requestId: z.string(),
+  /** Optional session key for routing events to persistence */
+  sessionKey: z.string().optional(),
   /** Optional run ID for per-run channels */
   runId: z.string().optional(),
   /** Unix timestamp in seconds */

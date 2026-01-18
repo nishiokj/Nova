@@ -40,8 +40,10 @@ import {
   getProviderEnvVar,
   getProviderBaseUrl as getCentralProviderBaseUrl,
   OPENAI_COMPAT_PROVIDERS,
+  PROVIDER_MODEL_DEFAULTS,
   getAllModels,
   getProviderForModel,
+  type ModelRole,
 } from 'types';
 
 const DEFAULT_CONFIG_PATH = 'config/harness_config.json';
@@ -372,11 +374,35 @@ function resolveOutputSchema(
 /** Module-level providers cache (set by createConfigFromFile) */
 let configProviders: ProvidersConfigSection = {};
 
+const DEFAULT_PROVIDER_PRIORITY: string[] = [
+  'anthropic',
+  'openai',
+  'groq',
+  'cerebras',
+  'gemini',
+  'z.ai-coder',
+  'openai-compat',
+];
+
+/** Module-level provider priority (set by createConfigFromFile) */
+let configProviderPriority: string[] | undefined;
+
 /**
  * Set providers from config file (called during config loading).
  */
 export function setConfigProviders(providers: ProvidersConfigSection): void {
   configProviders = providers;
+}
+
+export function setProviderPriority(priority?: string[]): void {
+  configProviderPriority = priority;
+}
+
+function getProviderPriority(): string[] {
+  if (configProviderPriority && configProviderPriority.length > 0) {
+    return configProviderPriority;
+  }
+  return DEFAULT_PROVIDER_PRIORITY;
 }
 
 /**
@@ -467,21 +493,59 @@ function resolveFallbackConfig(
   }
 }
 
+function resolveModelForRole(
+  role: ModelRole,
+  providerHint?: string
+): { provider: string; model: string } | null {
+  const providerOrder = providerHint ? [providerHint] : getProviderPriority();
+
+  for (const provider of providerOrder) {
+    if (!isSupportedProvider(provider)) continue;
+    const model = PROVIDER_MODEL_DEFAULTS[provider]?.[role];
+    if (!model) continue;
+    try {
+      resolveApiKey(provider);
+    } catch {
+      continue;
+    }
+    return { provider, model };
+  }
+
+  return null;
+}
+
 /**
  * Resolve a single agent config entry to runtime format.
  */
 function resolveAgentConfig(agentType: string, entry: AgentConfigEntry): ResolvedAgentConfig {
-  const modelProvider = getProviderForModel(entry.llm.model);
-  let configProvider = entry.llm.provider ?? modelProvider;
-  if (modelProvider && entry.llm.provider && entry.llm.provider !== modelProvider) {
+  let resolvedProvider = entry.llm.provider;
+  let resolvedModel = entry.llm.model;
+
+  if (!resolvedModel) {
+    if (!entry.llm.role) {
+      throw new Error(`Agent '${agentType}' missing both model and role`);
+    }
+    const resolved = resolveModelForRole(entry.llm.role, resolvedProvider);
+    if (!resolved) {
+      throw new Error(
+        `No configured provider supports role '${entry.llm.role}'. Configure a provider in ~/.rex/config.json`
+      );
+    }
+    resolvedProvider = resolved.provider;
+    resolvedModel = resolved.model;
+  }
+
+  const modelProvider = getProviderForModel(resolvedModel);
+  let configProvider = resolvedProvider ?? modelProvider;
+  if (modelProvider && resolvedProvider && resolvedProvider !== modelProvider) {
     console.warn(
-      `[config] Agent '${agentType}' model '${entry.llm.model}' is registered under provider ` +
-      `'${modelProvider}', ignoring provider '${entry.llm.provider}'.`
+      `[config] Agent '${agentType}' model '${resolvedModel}' is registered under provider ` +
+      `'${modelProvider}', ignoring provider '${resolvedProvider}'.`
     );
     configProvider = modelProvider;
   }
   if (!configProvider) {
-    throw new Error(`Provider missing for model '${entry.llm.model}' (not registered)`);
+    throw new Error(`Provider missing for model '${resolvedModel}' (not registered)`);
   }
   if (!isSupportedProvider(configProvider)) {
     throw new Error(`Unsupported LLM provider: ${configProvider}`);
@@ -505,7 +569,7 @@ function resolveAgentConfig(agentType: string, entry: AgentConfigEntry): Resolve
   const llm: ResolvedLLMConfig = {
     provider: canonicalProvider,
     displayProvider: configProvider,  // Original provider name for error messages
-    model: entry.llm.model,
+    model: resolvedModel,
     apiKey,
     maxTokens: entry.llm.max_tokens,
     temperature: entry.llm.temperature,
@@ -598,6 +662,8 @@ function loadDefaultsConfig(): HarnessConfigFile | null {
         console.log(`[config] Loaded defaults from ${path}`);
         return result.data;
       }
+      // Log validation errors for debugging
+      console.warn(`[config] Schema validation failed for ${path}:`, result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', '));
     } catch (e) {
       console.warn(`[config] Failed to parse defaults ${path}:`, e);
     }
@@ -615,12 +681,16 @@ function loadDefaultsConfig(): HarnessConfigFile | null {
         console.log(`[config] Loaded defaults from package: ${packagePath}`);
         return result.data;
       }
+      // Log validation errors for debugging
+      console.warn(`[config] Schema validation failed for package defaults ${packagePath}:`, result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', '));
     } catch (e) {
       console.warn(`[config] Failed to parse package defaults ${packagePath}:`, e);
     }
+  } else {
+    console.warn(`[config] Package defaults not found at ${packagePath}`);
   }
 
-  console.log('[config] No defaults.json found, using built-in defaults');
+  console.warn('[config] No defaults.json found - this will cause issues!');
   return null;
 }
 
@@ -723,6 +793,7 @@ function loadLayeredConfig(configPath?: string): LoadedConfigFile | null {
   }
 
   if (!merged) {
+    console.error('[config] CRITICAL: No config could be loaded (defaults, user, or project). Agent initialization will fail.');
     return null;
   }
 
@@ -766,6 +837,16 @@ export function createConfigFromFile(
   // GraphD providers (already in cache) take precedence over config file
   const mergedProviders = { ...fileProviders, ...existingProviders };
   setConfigProviders(mergedProviders);
+
+  const rawPriority = fileConfig.provider_priority;
+  const filteredPriority = (rawPriority && rawPriority.length > 0 ? rawPriority : DEFAULT_PROVIDER_PRIORITY)
+    .filter((provider) => {
+      if (isSupportedProvider(provider)) return true;
+      console.warn(`[config] Ignoring unsupported provider in provider_priority: ${provider}`);
+      return false;
+    });
+  setProviderPriority(filteredPriority.length > 0 ? filteredPriority : DEFAULT_PROVIDER_PRIORITY);
+
   // Resolve all agent configs
   const agents: Record<string, ResolvedAgentConfig> = {};
   for (const [agentType, entry] of Object.entries(fileConfig.agents)) {

@@ -161,13 +161,15 @@ export class EventBus implements EventBusProtocol {
 export function createEventEmitCallback(
   eventBus: EventBusProtocol,
   requestId: string,
-  runId?: string
+  runId?: string,
+  sessionKey?: string
 ): (event: AnyEvent) => void {
   return (event: AnyEvent) => {
     const taggedEvent = {
       ...event,
       requestId,
       runId: runId ?? requestId,
+      sessionKey: sessionKey ?? event.sessionKey,
       timestamp: event.timestamp ?? Date.now() / 1000,
     };
     eventBus.publish(taggedEvent);

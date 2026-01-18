@@ -5,7 +5,7 @@
  * Returns AgentResult with all outputs.
  */
 
-import type { LLMAdapter, Message, LLMRequestConfig } from 'llm';
+import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
@@ -278,22 +278,46 @@ export class Agent {
       const timeBudgetNearlyExhausted = elapsedMs >= workItem.bounds.maxDurationMs * 0.8;
       const shouldWithholdTools = isLastIteration || toolBudgetNearlyExhausted || timeBudgetNearlyExhausted;
 
-      const toolsForThisCall = shouldWithholdTools ? undefined : (allowedTools.length > 0 ? allowedTools : undefined);
+      const toolsForThisCall = allowedTools.length > 0 ? allowedTools : undefined;
       const toolChoiceForThisCall = shouldWithholdTools ? 'none' : undefined;
 
       if (shouldWithholdTools && allowedTools.length > 0) {
-        console.error(`[AGENT DEBUG] Withholding tools to force synthesis: iteration=${iteration}/${maxIterations}, toolCalls=${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls}, elapsed=${elapsedMs}/${workItem.bounds.maxDurationMs}ms, agent=${this.config.type}`);
+        console.error(`[AGENT DEBUG] Setting tool_choice=none to force synthesis: iteration=${iteration}/${maxIterations}, toolCalls=${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls}, elapsed=${elapsedMs}/${workItem.bounds.maxDurationMs}ms, agent=${this.config.type}`);
       }
 
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
-      const response = await this.llm.respond({
+      const stream = this.llm.stream({
         messages: messages as unknown as Message[],
         tools: toolsForThisCall,
         toolChoice: toolChoiceForThisCall,
         llm: this.llmConfig,
         responseSchema: this.config.outputSchema,
+        onChunk: (chunk) => {
+          this.emit(createEvent('agent_message', {
+            agentType: this.config.type,
+            message: chunk,
+          }, workItem.workId));
+        },
       });
+      let buffer = '';
+      let response: LLMResponse | undefined;
+      while (true) {
+        const { value, done } = await stream.next();
+        if (done) {
+          response = value;
+          break;
+        }
+        if (value) {
+          buffer += value;
+        }
+      }
+      if (!response) {
+        throw new Error('LLM stream completed without a final response');
+      }
+      if (!response.content || response.content.length === 0) {
+        response = { ...response, content: buffer };
+      }
       const llmDurationMs = Date.now() - llmStartTime;
       metrics.llmCallsMade++;
 
@@ -1212,24 +1236,25 @@ export class Agent {
     }
 
     // Extract artifacts from structured output and add to parent's local context
+    // Artifacts use the rich schema: sourcePath, line, kind, name, signature, modifies, calls, insight, reduces
     const artifacts = subResult.structuredOutput?.artifacts;
     if (Array.isArray(artifacts) && artifacts.length > 0) {
       const validArtifacts = artifacts.filter((a): a is {
         sourcePath: string;
-        line?: number;
+        line?: number | null;
         kind: string;
         name: string;
-        signature?: string;
-        description: string;
-        relevance: number;
+        signature?: string | null;
+        modifies?: string[] | null;
+        calls?: string[] | null;
+        insight?: string | null;
+        reduces?: string | null;
       } => (
         typeof a === 'object' &&
         a !== null &&
         typeof a.sourcePath === 'string' &&
         typeof a.kind === 'string' &&
-        typeof a.name === 'string' &&
-        typeof a.description === 'string' &&
-        typeof a.relevance === 'number'
+        typeof a.name === 'string'
       ));
 
       if (validArtifacts.length > 0) {
@@ -1239,8 +1264,11 @@ export class Agent {
           kind: a.kind as ArtifactKind,
           name: a.name,
           signature: typeof a.signature === 'string' ? a.signature : undefined,
-          description: a.description,
-          relevance: a.relevance,
+          modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
+          calls: Array.isArray(a.calls) ? a.calls : undefined,
+          insight: typeof a.insight === 'string' ? a.insight : undefined,
+          reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
+          relevance: 1.0, // Default: explorer returns what's relevant
           discoveredBy: agentConfig.type,
         })));
       }
@@ -1252,13 +1280,17 @@ export class Agent {
 
     // Include full structured output so calling agent can see artifacts, patterns, etc.
     // Also include explicit filesRead so calling agent knows not to re-read these
+    //
+    // CRITICAL: Include actual artifact content, not just count. The calling agent
+    // needs to see the rich semantic extractions (signatures, side effects, call graphs)
+    // to act without re-reading files.
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
       success: subResult.success,
       response: enhancedResponse,
       filesRead: subResult.filesRead, // Explicit list - do not re-read these
-      artifactsAdded: Array.isArray(artifacts) ? artifacts.length : 0,
+      artifacts: Array.isArray(artifacts) ? artifacts : [], // Full artifact content for downstream use
       error: subResult.error,
       metrics: subResult.metrics,
     };

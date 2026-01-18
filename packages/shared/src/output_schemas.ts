@@ -83,6 +83,7 @@ export const GoalDrivenOutputSchema = AgentActionOutputSchema.extend({
 
 /**
  * Code artifact from explorer agent.
+ * Rich semantic extraction that enables downstream agents to act without re-reading files.
  */
 export const ArtifactSchema = z.object({
   sourcePath: z.string().describe('File path where this artifact was found'),
@@ -99,10 +100,20 @@ export const ArtifactSchema = z.object({
   ]).describe('What type of code construct this represents'),
   name: z.string().describe('Name of the artifact (function name, class name, etc.)'),
   signature: z.string().nullable().describe(
-    "Signature or definition (e.g., 'async function run(params: RunParams): Promise<Result>')"
+    "Full type signature (e.g., 'async run(params: RunParams): Promise<Result>')"
   ),
-  description: z.string().describe('Human-readable description of what this does'),
-  relevance: z.number().min(0).max(1).describe('Relevance score 0.0-1.0 (how relevant to the current query)'),
+  modifies: z.array(z.string()).nullable().describe(
+    'Side effects: state, files, globals this touches (e.g., ["this._items", "fs:config.json", "db:users"])'
+  ),
+  calls: z.array(z.string()).nullable().describe(
+    'Call graph: significant functions this invokes (e.g., ["llm.complete", "tools.execute"])'
+  ),
+  insight: z.string().nullable().describe(
+    'Non-obvious info NOT derivable from name/signature (e.g., "Retries 3x with exponential backoff")'
+  ),
+  reduces: z.enum(['structural', 'relational', 'behavioral', 'contractual']).nullable().describe(
+    'Which uncertainty category this artifact reduces: structural (what exists), relational (what connects), behavioral (what happens), contractual (what is promised)'
+  ),
 });
 
 /**

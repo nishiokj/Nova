@@ -79,7 +79,9 @@ export interface StoreSnapshot {
   // Models selection
   modelsList: ModelEntry[];
   modelsCursor: number;
+  modelDeletePending: boolean;
   selectedModel: string | null;
+  selectedReasoningLevel: string | null;
   // Sessions selection
   sessionsList: SessionEntry[];
   sessionsCursor: number;
@@ -161,7 +163,9 @@ export class Store {
   // Models selection
   private modelsList: ModelEntry[] = [];
   private modelsCursor = 0;
+  private modelDeletePending = false;
   private selectedModel: string | null = null;
+  private selectedReasoningLevel: string | null = null;
 
   // Sessions selection
   private sessionsList: SessionEntry[] = [];
@@ -254,7 +258,9 @@ export class Store {
       // Models selection
       modelsList: [...this.modelsList],
       modelsCursor: this.modelsCursor,
+      modelDeletePending: this.modelDeletePending,
       selectedModel: this.selectedModel,
+      selectedReasoningLevel: this.selectedReasoningLevel,
       // Sessions selection
       sessionsList: [...this.sessionsList],
       sessionsCursor: this.sessionsCursor,
@@ -1038,25 +1044,40 @@ export class Store {
   // ==================== Models Selection Methods ====================
 
   /**
+   * Updates the models list without changing UI mode.
+   * Auto-selects first model if none selected.
+   */
+  updateModelsList(models: ModelEntry[]): void {
+    this.modelsList = models;
+    // Auto-select first model if none selected
+    if (!this.selectedModel && models.length > 0) {
+      this.selectedModel = models[0].id;
+      this.selectedReasoningLevel = models[0].reasoning?.[0] ?? null;
+    }
+    // Update cursor position
+    const currentIdx = this.selectedModel
+      ? models.findIndex((m) => m.id === this.selectedModel)
+      : 0;
+    this.modelsCursor = Math.max(0, currentIdx);
+    this.emit();
+  }
+
+  /**
    * Sets the models list and enters models selection mode.
    */
   setModelsList(models: ModelEntry[]): void {
-    this.modelsList = models;
-    // Position cursor on currently selected model if any
-    const currentIdx = this.selectedModel
-      ? models.findIndex((m) => m.id === this.selectedModel)
-      : -1;
-    this.modelsCursor = Math.max(0, currentIdx);
+    this.updateModelsList(models);
     this.uiMode = "models";
     this.emit();
   }
 
   /**
-   * Moves models cursor up or down.
+   * Moves models cursor up or down. Cancels any pending delete.
    */
   moveModelsCursor(delta: number): void {
     const count = this.modelsList.length;
     if (count === 0) return;
+    this.modelDeletePending = false;
     this.modelsCursor = (this.modelsCursor + delta + count) % count;
     this.emit();
   }
@@ -1069,6 +1090,7 @@ export class Store {
     const model = this.modelsList[this.modelsCursor];
     if (model) {
       this.selectedModel = model.id;
+      this.selectedReasoningLevel = model.reasoning?.[0] ?? null;
       this.emit();
       return model;
     }
@@ -1084,6 +1106,15 @@ export class Store {
       const idx = this.modelsList.findIndex((m) => m.id === modelId);
       if (idx >= 0) {
         this.modelsCursor = idx;
+        const model = this.modelsList[idx];
+        // Preserve reasoning level if supported, otherwise reset
+        if (model.reasoning && model.reasoning.length > 0) {
+          if (!this.selectedReasoningLevel || !model.reasoning.includes(this.selectedReasoningLevel)) {
+            this.selectedReasoningLevel = model.reasoning[0];
+          }
+        } else {
+          this.selectedReasoningLevel = null;
+        }
       }
     }
     this.emit();
@@ -1097,11 +1128,147 @@ export class Store {
   }
 
   /**
-   * Exits models mode and returns to chat.
+   * Exits models mode and returns to chat. Clears pending delete.
    */
   exitModelsMode(): void {
+    this.modelDeletePending = false;
     this.uiMode = "chat";
     this.emit();
+  }
+
+  /**
+   * Sets or clears the pending delete state.
+   */
+  setModelDeletePending(pending: boolean): void {
+    this.modelDeletePending = pending;
+    this.emit();
+  }
+
+  /**
+   * Removes the model at the current cursor position from the local list.
+   * Returns the removed model for sending a delete command to the harness.
+   * Clears pending delete state.
+   */
+  removeModelAtCursor(): ModelEntry | null {
+    this.modelDeletePending = false;
+    if (this.modelsList.length === 0) return null;
+    if (this.modelsCursor < 0 || this.modelsCursor >= this.modelsList.length) return null;
+
+    const removed = this.modelsList[this.modelsCursor];
+    this.modelsList = this.modelsList.filter((_, i) => i !== this.modelsCursor);
+
+    // Adjust cursor if needed
+    if (this.modelsCursor >= this.modelsList.length) {
+      this.modelsCursor = Math.max(0, this.modelsList.length - 1);
+    }
+
+    // If removed model was selected, select another
+    if (this.selectedModel === removed.id) {
+      if (this.modelsList.length > 0) {
+        const newSelected = this.modelsList[this.modelsCursor];
+        this.selectedModel = newSelected?.id ?? null;
+        this.selectedReasoningLevel = newSelected?.reasoning?.[0] ?? null;
+      } else {
+        this.selectedModel = null;
+        this.selectedReasoningLevel = null;
+      }
+    }
+
+    this.emit();
+    return removed;
+  }
+
+  /**
+   * Cycles to the next model in the models list.
+   * Returns the new model entry or null if no models available.
+   */
+  cycleToNextModel(): ModelEntry | null {
+    if (this.modelsList.length === 0) return null;
+
+    // Find current model index
+    let currentIdx = this.selectedModel
+      ? this.modelsList.findIndex((m) => m.id === this.selectedModel)
+      : -1;
+
+    // Move to next model (wrap around)
+    const nextIdx = (currentIdx + 1) % this.modelsList.length;
+    const nextModel = this.modelsList[nextIdx];
+
+    if (nextModel) {
+      this.selectedModel = nextModel.id;
+      this.modelsCursor = nextIdx;
+      // Reset reasoning level when switching models
+      this.selectedReasoningLevel = nextModel.reasoning?.[0] ?? null;
+      this.emit();
+      return nextModel;
+    }
+    return null;
+  }
+
+  /**
+   * Gets the currently selected reasoning level.
+   */
+  getSelectedReasoningLevel(): string | null {
+    return this.selectedReasoningLevel;
+  }
+
+  /**
+   * Sets the reasoning level.
+   */
+  setReasoningLevel(level: string | null): void {
+    this.selectedReasoningLevel = level;
+    this.emit();
+  }
+
+  /**
+   * Cycles to the next reasoning level for the current model.
+   * Returns the new reasoning level or null if model doesn't support reasoning.
+   */
+  cycleReasoningLevel(): string | null {
+    // Find current model's reasoning options
+    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    if (!currentModel?.reasoning || currentModel.reasoning.length === 0) {
+      return null;
+    }
+
+    const levels = currentModel.reasoning;
+    if (levels.length === 0) return null;
+
+    // Find current level index
+    let currentIdx = this.selectedReasoningLevel
+      ? levels.indexOf(this.selectedReasoningLevel)
+      : -1;
+
+    // Move to next level (wrap around)
+    const nextIdx = (currentIdx + 1) % levels.length;
+    this.selectedReasoningLevel = levels[nextIdx];
+    this.emit();
+    return this.selectedReasoningLevel;
+  }
+
+  /**
+   * Gets reasoning options for the currently selected model.
+   */
+  getCurrentModelReasoningOptions(): string[] | null {
+    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    return currentModel?.reasoning ?? null;
+  }
+
+  /**
+   * Gets the currently selected model entry.
+   */
+  getCurrentModelEntry(): ModelEntry | null {
+    if (!this.selectedModel) return null;
+    return this.modelsList.find((m) => m.id === this.selectedModel) ?? null;
+  }
+
+  /**
+   * Gets models for the currently selected model's provider.
+   */
+  getCurrentProviderModels(): ModelEntry[] {
+    const currentModel = this.getCurrentModelEntry();
+    if (!currentModel?.provider) return this.modelsList; // No provider = show all
+    return this.modelsList.filter((m) => m.provider === currentModel.provider);
   }
 
   // ==================== Sessions Selection Methods ====================

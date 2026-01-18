@@ -2020,4 +2020,41 @@ export class GraphStore {
       return { success: false, error: message };
     }
   }
+
+  // =========================================================================
+  // User Preferences Methods (Key-Value Storage)
+  // =========================================================================
+
+  /**
+   * Get a user preference value by key.
+   * Returns the parsed JSON value or null if not found.
+   */
+  getUserPreference<T = unknown>(key: string): T | null {
+    const row = this.db
+      .query('SELECT value FROM graphd_metadata WHERE key = ?;')
+      .get(key) as { value: string } | undefined;
+
+    if (!row?.value) return null;
+    return safeJsonParse(row.value, null) as T | null;
+  }
+
+  /**
+   * Set a user preference value.
+   * Value is stored as JSON.
+   */
+  setUserPreference(key: string, value: unknown): void {
+    this.db
+      .query('INSERT OR REPLACE INTO graphd_metadata (key, value) VALUES (?, ?);')
+      .run(key, JSON.stringify(value));
+  }
+
+  /**
+   * Delete a user preference.
+   */
+  deleteUserPreference(key: string): boolean {
+    const result = this.db
+      .query('DELETE FROM graphd_metadata WHERE key = ?;')
+      .run(key);
+    return result.changes > 0;
+  }
 }

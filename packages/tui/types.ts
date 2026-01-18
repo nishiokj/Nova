@@ -5,6 +5,7 @@ export type BridgeCommandType =
   | "voice_stop"
   | "get_config"
   | "get_models"
+  | "models_delete"
   | "get_status"
   | "skills_list"
   | "skills_get"
@@ -237,6 +238,8 @@ export interface ModelEntry {
   id: string;
   name: string;
   provider?: string;
+  /** Available reasoning levels (undefined if model doesn't support reasoning) */
+  reasoning?: string[];
 }
 
 /** Session entry for session recovery */
