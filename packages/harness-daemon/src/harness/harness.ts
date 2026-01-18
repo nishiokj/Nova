@@ -24,7 +24,7 @@ import {
 import os from 'os';
 import { execSync } from 'child_process';
 import { Orchestrator, type ModelOverride } from 'orchestrator';
-import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError } from 'llm';
+import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
@@ -50,8 +50,9 @@ import type {
   AgentRunHandle,
   BridgeEvent,
 } from './types.js';
-import { loadConfig, getAgentConfig, resolveApiKey } from './config_loader.js';
+import { loadConfig, getAgentConfig, resolveApiKey, getConfigProviders } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
+import { LocalProviderManager } from './local_providers.js';
 import { HookExecutor } from './hook_executor.js';
 import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
@@ -287,6 +288,71 @@ function createFileLogger(logDir: string = 'logs'): HarnessLogger {
 const consoleLogger: HarnessLogger = createFileLogger();
 
 /**
+ * Provider key service implementation for the harness.
+ * Queries API keys at runtime from:
+ * 1. LocalProviderManager (GraphD storage) - if available
+ * 2. Config providers cache
+ * 3. Environment variables
+ *
+ * This allows API keys to be added/changed at runtime without restarting the harness.
+ */
+class HarnessProviderKeyService implements ProviderKeyService {
+  private localProviders: LocalProviderManager | null = null;
+  private logger: HarnessLogger;
+
+  constructor(graphdDbPath: string | null, logger: HarnessLogger) {
+    this.logger = logger;
+    if (graphdDbPath) {
+      try {
+        this.localProviders = new LocalProviderManager(graphdDbPath);
+        this.logger.info('HarnessProviderKeyService initialized with GraphD', { dbPath: graphdDbPath });
+      } catch (err) {
+        this.logger.warning('Failed to initialize LocalProviderManager', { error: String(err) });
+      }
+    }
+  }
+
+  getApiKey(provider: string): string | null {
+    // Priority 1: LocalProviderManager (GraphD storage)
+    if (this.localProviders) {
+      const key = this.localProviders.getProviderKey(provider);
+      if (key) {
+        this.logger.debug('API key found in GraphD', { provider });
+        return key;
+      }
+    }
+
+    // Priority 2: Config providers cache
+    const configProviders = getConfigProviders();
+    if (configProviders[provider]) {
+      this.logger.debug('API key found in config cache', { provider });
+      return configProviders[provider] ?? null;
+    }
+
+    // Priority 3: Try resolveApiKey which checks env vars
+    try {
+      const key = resolveApiKey(provider);
+      if (key) {
+        this.logger.debug('API key found via resolveApiKey', { provider });
+        return key;
+      }
+    } catch {
+      // No key found
+    }
+
+    return null;
+  }
+
+  hasApiKey(provider: string): boolean {
+    return this.getApiKey(provider) !== null;
+  }
+
+  close(): void {
+    this.localProviders?.close();
+  }
+}
+
+/**
  * AgentHarness - Wraps the TypeScript Agent for TUI integration.
  */
 export class AgentHarness {
@@ -304,6 +370,7 @@ export class AgentHarness {
   private agentRegistry: AgentRegistry;
   private llmAdapter: ReturnType<typeof createAdapter>;
   private hookExecutor: HookExecutor | null = null;
+  private providerKeyService: HarnessProviderKeyService;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
@@ -314,11 +381,16 @@ export class AgentHarness {
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
     this.agentRegistry = buildAgentRegistry(config, envContext);
 
+    // Create provider key service for runtime API key resolution
+    // This allows keys to be added/changed at runtime without restart
+    const graphdDbPath = config.graphd.enabled ? config.graphd.dbPath : null;
+    this.providerKeyService = new HarnessProviderKeyService(graphdDbPath, this.logger);
+
     // NOTE: We don't populate shared apiKeys/baseUrls here because:
     // 1. Multiple providers (cerebras, z.ai-coder, groq) map to the same canonical 'openai-compat'
     // 2. Keying by canonical provider causes last-writer-wins collision
-    // 3. Each agent's per-request llm.apiKey and llm.baseUrl are already correctly resolved
-    // The adapter will use per-request config as primary source
+    // 3. The providerKeyService will resolve API keys at request time
+    // The adapter queries providerKeyService for keys when making requests
     const llmClientConfig: LLMClientConfig = {};
 
     // Adapt HarnessLogger to AdapterLogger (warning → warn)
@@ -328,7 +400,7 @@ export class AgentHarness {
       warn: this.logger.warning.bind(this.logger),
       error: this.logger.error.bind(this.logger),
     };
-    this.llmAdapter = createAdapter(llmClientConfig, adapterLogger);
+    this.llmAdapter = createAdapter(llmClientConfig, adapterLogger, this.providerKeyService);
 
     // Create EventBus - central pub/sub for all events
     this.eventBus = new EventBus();
@@ -492,12 +564,7 @@ export class AgentHarness {
    * Accepts the actual provider name (e.g., 'z.ai-coder', 'cerebras'), not canonical.
    */
   hasApiKey(provider: string): boolean {
-    try {
-      const key = resolveApiKey(provider);
-      return !!key;
-    } catch {
-      return false;
-    }
+    return this.providerKeyService.hasApiKey(provider);
   }
 
   /**
