@@ -15,4 +15,22 @@ export {
   type ModelOverride,
 } from './orchestrator.js';
 
-export { registerHook, getHandlers, HOOK_REGISTRY } from './hooks/index.js';
+export {
+  registerHook,
+  getHandlers,
+  HOOK_REGISTRY,
+  type StopHookHandler,
+  type StopHookContext,
+} from './hooks/index.js';
+
+// Ralph Loop - iterative self-referential development
+export {
+  RalphLoop,
+  runRalphLoop,
+  createRalphStopHook,
+  checkCompletionPromise,
+  createRalphState,
+  type RalphLoopConfig,
+  type RalphLoopState,
+  type RalphCompletionReason,
+} from './ralph-loop.js';

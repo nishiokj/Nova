@@ -81,6 +81,7 @@ export interface StoreSnapshot {
   modelsCursor: number;
   modelDeletePending: boolean;
   selectedModel: string | null;
+  selectedProvider: string | null;
   selectedReasoningLevel: string | null;
   // Sessions selection
   sessionsList: SessionEntry[];
@@ -165,6 +166,7 @@ export class Store {
   private modelsCursor = 0;
   private modelDeletePending = false;
   private selectedModel: string | null = null;
+  private selectedProvider: string | null = null;
   private selectedReasoningLevel: string | null = null;
 
   // Sessions selection
@@ -191,9 +193,8 @@ export class Store {
   private batchDirty = false;
 
   // Streaming throttle
-  private streamingThrottleMs = 32; // ~30fps during streaming
+  private streamingThrottleMs = 16; // ~60fps during streaming for lower latency
   private lastStreamingEmit = 0;
-  private pendingStreamingEmit: ReturnType<typeof setTimeout> | null = null;
 
   constructor(maxHistory = DEFAULT_MAX_HISTORY) {
     this.maxHistory = maxHistory;
@@ -260,6 +261,7 @@ export class Store {
       modelsCursor: this.modelsCursor,
       modelDeletePending: this.modelDeletePending,
       selectedModel: this.selectedModel,
+      selectedProvider: this.selectedProvider,
       selectedReasoningLevel: this.selectedReasoningLevel,
       // Sessions selection
       sessionsList: [...this.sessionsList],
@@ -546,30 +548,16 @@ export class Store {
 
     this.streamingText += chunk;
     this.historyVersion += 1;
-    this.historyCache = null;
 
     // Throttle emissions during streaming for better performance
     const now = Date.now();
     if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
       this.lastStreamingEmit = now;
       this.emit();
-    } else if (!this.pendingStreamingEmit) {
-      // Schedule a trailing emit to ensure we don't miss the last chunk
-      this.pendingStreamingEmit = setTimeout(() => {
-        this.pendingStreamingEmit = null;
-        this.lastStreamingEmit = Date.now();
-        this.emit();
-      }, this.streamingThrottleMs);
     }
   }
 
   finalizeStreaming(): void {
-    // Cancel any pending throttled emit
-    if (this.pendingStreamingEmit) {
-      clearTimeout(this.pendingStreamingEmit);
-      this.pendingStreamingEmit = null;
-    }
-
     this.streamingRequestId = null;
     this.streamingText = "";
     this.streamingTruncated = false;
@@ -1049,14 +1037,17 @@ export class Store {
    */
   updateModelsList(models: ModelEntry[]): void {
     this.modelsList = models;
-    // Auto-select first model if none selected
-    if (!this.selectedModel && models.length > 0) {
-      this.selectedModel = models[0].id;
-      this.selectedReasoningLevel = models[0].reasoning?.[0] ?? null;
+    const selected = this.getCurrentModelEntry();
+    if (selected?.reasoning && selected.reasoning.length > 0) {
+      if (!this.selectedReasoningLevel || !selected.reasoning.includes(this.selectedReasoningLevel)) {
+        this.selectedReasoningLevel = selected.reasoning[0];
+      }
+    } else if (selected) {
+      this.selectedReasoningLevel = null;
     }
     // Update cursor position
-    const currentIdx = this.selectedModel
-      ? models.findIndex((m) => m.id === this.selectedModel)
+    const currentIdx = selected
+      ? models.findIndex((m) => m.id === selected.id && (!this.selectedProvider || m.provider === this.selectedProvider))
       : 0;
     this.modelsCursor = Math.max(0, currentIdx);
     this.emit();
@@ -1090,6 +1081,7 @@ export class Store {
     const model = this.modelsList[this.modelsCursor];
     if (model) {
       this.selectedModel = model.id;
+      this.selectedProvider = model.provider ?? null;
       this.selectedReasoningLevel = model.reasoning?.[0] ?? null;
       this.emit();
       return model;
@@ -1102,11 +1094,20 @@ export class Store {
    */
   setSelectedModel(modelId: string | null): void {
     this.selectedModel = modelId;
-    if (modelId && this.modelsList.length > 0) {
-      const idx = this.modelsList.findIndex((m) => m.id === modelId);
+    if (!modelId) {
+      this.selectedProvider = null;
+      this.selectedReasoningLevel = null;
+      this.emit();
+      return;
+    }
+    if (this.modelsList.length > 0) {
+      const idx = this.selectedProvider
+        ? this.modelsList.findIndex((m) => m.id === modelId && m.provider === this.selectedProvider)
+        : this.modelsList.findIndex((m) => m.id === modelId);
       if (idx >= 0) {
         this.modelsCursor = idx;
         const model = this.modelsList[idx];
+        this.selectedProvider = model.provider ?? this.selectedProvider;
         // Preserve reasoning level if supported, otherwise reset
         if (model.reasoning && model.reasoning.length > 0) {
           if (!this.selectedReasoningLevel || !model.reasoning.includes(this.selectedReasoningLevel)) {
@@ -1115,8 +1116,18 @@ export class Store {
         } else {
           this.selectedReasoningLevel = null;
         }
+      } else {
+        this.selectedReasoningLevel = null;
       }
     }
+    this.emit();
+  }
+
+  /**
+   * Sets the selected model provider (used for backend sync).
+   */
+  setSelectedProvider(provider: string | null): void {
+    this.selectedProvider = provider;
     this.emit();
   }
 
@@ -1125,6 +1136,13 @@ export class Store {
    */
   getSelectedModel(): string | null {
     return this.selectedModel;
+  }
+
+  /**
+   * Gets the currently selected model provider.
+   */
+  getSelectedProvider(): string | null {
+    return this.selectedProvider;
   }
 
   /**
@@ -1162,18 +1180,6 @@ export class Store {
       this.modelsCursor = Math.max(0, this.modelsList.length - 1);
     }
 
-    // If removed model was selected, select another
-    if (this.selectedModel === removed.id) {
-      if (this.modelsList.length > 0) {
-        const newSelected = this.modelsList[this.modelsCursor];
-        this.selectedModel = newSelected?.id ?? null;
-        this.selectedReasoningLevel = newSelected?.reasoning?.[0] ?? null;
-      } else {
-        this.selectedModel = null;
-        this.selectedReasoningLevel = null;
-      }
-    }
-
     this.emit();
     return removed;
   }
@@ -1196,6 +1202,7 @@ export class Store {
 
     if (nextModel) {
       this.selectedModel = nextModel.id;
+      this.selectedProvider = nextModel.provider ?? null;
       this.modelsCursor = nextIdx;
       // Reset reasoning level when switching models
       this.selectedReasoningLevel = nextModel.reasoning?.[0] ?? null;
@@ -1259,6 +1266,10 @@ export class Store {
    */
   getCurrentModelEntry(): ModelEntry | null {
     if (!this.selectedModel) return null;
+    const provider = this.selectedProvider;
+    if (provider) {
+      return this.modelsList.find((m) => m.id === this.selectedModel && m.provider === provider) ?? null;
+    }
     return this.modelsList.find((m) => m.id === this.selectedModel) ?? null;
   }
 
@@ -1267,8 +1278,9 @@ export class Store {
    */
   getCurrentProviderModels(): ModelEntry[] {
     const currentModel = this.getCurrentModelEntry();
-    if (!currentModel?.provider) return this.modelsList; // No provider = show all
-    return this.modelsList.filter((m) => m.provider === currentModel.provider);
+    const provider = currentModel?.provider ?? this.selectedProvider;
+    if (!provider) return this.modelsList; // No provider = show all
+    return this.modelsList.filter((m) => m.provider === provider);
   }
 
   // ==================== Sessions Selection Methods ====================
@@ -1557,10 +1569,16 @@ function buildHistoryLines(
       lines[lines.length - 1].isBlockEnd = true;
     }
 
-    // Add a blank separator line after each message
-    // Use a space character so Ink renders it with actual height
+    // Add blank separator lines after each message for visual breathing room
+    // Use space characters so Ink renders them with actual height
     lines.push({
       id: `${entryLinePrefix}:${lineIndex}`,
+      text: " ",
+      role: undefined,
+      requestId: entry.requestId,
+    });
+    lines.push({
+      id: `${entryLinePrefix}:${lineIndex + 1}`,
       text: " ",
       role: undefined,
       requestId: entry.requestId,
@@ -1585,15 +1603,64 @@ function buildHistoryLines(
   return lines;
 }
 
+/**
+ * Pre-process markdown text to add proper spacing around block elements.
+ * This ensures headers, code blocks, blockquotes, lists, and HRs have
+ * visual breathing room without requiring a full markdown AST parser.
+ */
+function normalizeMarkdownSpacing(text: string): string {
+  let result = text;
+
+  // Normalize line endings
+  result = result.replace(/\r\n/g, "\n");
+
+  // Headers: ensure blank line before (unless at start) and after
+  // Matches: # Header, ## Header, etc.
+  result = result.replace(/([^\n])\n(#{1,6}\s+)/g, "$1\n\n$2");  // blank before
+  result = result.replace(/(#{1,6}\s+[^\n]+)\n(?!\n)/g, "$1\n\n"); // blank after
+
+  // Code blocks (```): ensure blank line before and after
+  result = result.replace(/([^\n])\n(```)/g, "$1\n\n$2");  // blank before opening
+  result = result.replace(/(```[^\n]*)\n(?!\n)/g, "$1\n\n"); // blank after opening (for content)
+  result = result.replace(/([^\n])\n(```\s*$)/gm, "$1\n\n$2"); // blank before closing
+  result = result.replace(/(```)\n(?!\n)/g, "$1\n\n"); // blank after closing
+
+  // Horizontal rules (---, ***, ___): ensure blank line before and after
+  result = result.replace(/([^\n])\n([-*_]{3,}\s*)$/gm, "$1\n\n$2");  // blank before
+  result = result.replace(/^([-*_]{3,}\s*)\n(?!\n)/gm, "$1\n\n"); // blank after
+
+  // Blockquotes (> text): ensure blank line before first quote and after last
+  // Before: non-quote line followed by quote line
+  result = result.replace(/([^\n>].*)\n(>\s+)/g, "$1\n\n$2");
+  // After: quote line followed by non-quote, non-blank line
+  result = result.replace(/(^>\s+[^\n]*)\n(?!>)(?!\n)(.)/gm, "$1\n\n$2");
+
+  // Lists: ensure blank line before first item (when preceded by non-list content)
+  // Matches lines starting with -, *, +, or number.
+  result = result.replace(/([^\n\-*+\d].*)\n([\s]*[-*+]\s+)/g, "$1\n\n$2");
+  result = result.replace(/([^\n\-*+\d].*)\n([\s]*\d+\.\s+)/g, "$1\n\n$2");
+
+  // Collapse excessive blank lines (more than 2 consecutive) to just 2
+  result = result.replace(/\n{3,}/g, "\n\n");
+
+  // Trim leading/trailing whitespace but preserve internal structure
+  result = result.trim();
+
+  return result;
+}
+
 function wrapText(text: string, width: number): string[] {
   if (!text) {
     return [""];
   }
 
+  // Pre-process to add proper markdown block spacing
+  const normalized = normalizeMarkdownSpacing(text);
+
   const lines: string[] = [];
   const safeWidth = Math.max(10, width);
 
-  const rawLines = text.split("\n");
+  const rawLines = normalized.split("\n");
   for (const rawLine of rawLines) {
     if (!rawLine) {
       lines.push("");

@@ -1,0 +1,740 @@
+/**
+ * OpenAI-compatible provider implementation.
+ * Handles Chat Completions API for Cerebras, Groq, Together, etc.
+ */
+
+import type {
+  ToolDefinition,
+  ToolCall,
+  TokenUsage,
+  StopReason,
+  LLMResponse,
+  RespondParams,
+  StreamParams,
+} from 'types';
+import type { ProviderContext, LLMProviderAdapter } from './types.js';
+import { PartialStreamError } from './types.js';
+import { getProviderResponseFormat } from 'types';
+import {
+  createRateLimitError,
+} from '../rate-limits.js';
+import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
+
+function parseApiError(provider: string, status: number, responseText: string): Error {
+  const parsed = parseApiErrorResponse(provider, status, responseText);
+  return formatApiError(provider, status, parsed);
+}
+
+// ============================================
+// OPENAI-COMPAT PROVIDER
+// ============================================
+
+function buildSchemaInstruction(schema: Record<string, unknown>): string {
+  return `Return a single JSON object that matches this schema:\n${JSON.stringify(schema)}`;
+}
+
+export class OpenAICompatProvider implements LLMProviderAdapter {
+  readonly name = 'openai-compat' as const;
+
+  respond(context: ProviderContext, params: RespondParams): Promise<LLMResponse> {
+    return this.respondOpenAICompat(context, params);
+  }
+
+  async *stream(context: ProviderContext, params: StreamParams): AsyncGenerator<string, LLMResponse> {
+    return yield* this.streamOpenAICompat(context, params);
+  }
+
+  formatTools(tools: ToolDefinition[]): Record<string, unknown>[] {
+    return tools.map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: {
+          type: 'object',
+          properties: t.parameters.properties,
+          required: t.parameters.required,
+        },
+      },
+    }));
+  }
+
+  formatMessages(messages: any[], systemPrompt?: string): Array<Record<string, unknown>> {
+    const result: Array<Record<string, unknown>> = [];
+
+    if (systemPrompt) {
+      result.push({ role: 'system', content: systemPrompt });
+    }
+
+    const functionCalls: Array<{ callId: string; name: string; argumentsStr: string }> = [];
+    // Track pending reasoning content to attach to the next assistant message (GLM-4.7)
+    let pendingReasoningContent = '';
+
+    for (const msg of messages) {
+      if (!msg || msg.role === 'system') continue;
+      const item = msg as unknown as Record<string, unknown>;
+
+      // Handle reasoning items (GLM-4.7 thinking traces)
+      // Collect reasoning content to attach to the next assistant message
+      if (item.type === 'reasoning') {
+        const content = item.content as string;
+        if (content) {
+          pendingReasoningContent += (pendingReasoningContent ? '\n' : '') + content;
+        }
+        continue;
+      }
+
+      if (item.type === 'function_call') {
+        const callId = (item.call_id ?? item.callId) as string;
+        const name = item.name as string;
+        const args = item.arguments;
+        const argsStr = typeof args === 'string' ? args : JSON.stringify(args);
+        functionCalls.push({ callId, name, argumentsStr: argsStr });
+        continue;
+      }
+
+      if (item.type === 'function_call_output') {
+        if (functionCalls.length > 0) {
+          const assistantMsg: Record<string, unknown> = {
+            role: 'assistant',
+            content: '',
+            tool_calls: functionCalls.map((fc) => ({
+              id: fc.callId,
+              type: 'function',
+              function: {
+                name: fc.name,
+                arguments: fc.argumentsStr,
+              },
+            })),
+          };
+          // Attach pending reasoning content to assistant message
+          if (pendingReasoningContent) {
+            assistantMsg.reasoning_content = pendingReasoningContent;
+            pendingReasoningContent = '';
+          }
+          result.push(assistantMsg);
+          functionCalls.length = 0;
+        }
+
+        const callId = (item.call_id ?? item.callId) as string;
+        const output = item.output as string;
+        result.push({
+          role: 'tool',
+          tool_call_id: callId,
+          content: output,
+        });
+        continue;
+      }
+
+      if (typeof msg.content === 'string') {
+        const formattedMsg: Record<string, unknown> = { role: msg.role, content: msg.content };
+        // Attach pending reasoning content to assistant messages
+        if (msg.role === 'assistant' && pendingReasoningContent) {
+          formattedMsg.reasoning_content = pendingReasoningContent;
+          pendingReasoningContent = '';
+        }
+        result.push(formattedMsg);
+        continue;
+      }
+
+      if (!msg.content) continue;
+      if (!Array.isArray(msg.content)) continue;
+
+      const textParts: string[] = [];
+      const toolCalls: Array<Record<string, unknown>> = [];
+
+      for (const block of msg.content) {
+        if (!block) continue;
+        if (block.type === 'text') {
+          textParts.push(block.text);
+        } else if (block.type === 'tool_use') {
+          toolCalls.push({
+            id: block.id,
+            type: 'function',
+            function: {
+              name: block.name,
+              arguments: JSON.stringify(block.input),
+            },
+          });
+        } else if (block.type === 'tool_result') {
+          result.push({
+            role: 'tool',
+            tool_call_id: block.toolUseId,
+            content: block.content ?? '',
+          });
+        }
+      }
+
+      if (toolCalls.length > 0) {
+        const assistantMsg: Record<string, unknown> = {
+          role: 'assistant',
+          content: textParts.join('\n') || '',
+          tool_calls: toolCalls,
+        };
+        // Attach pending reasoning content to assistant message
+        if (pendingReasoningContent) {
+          assistantMsg.reasoning_content = pendingReasoningContent;
+          pendingReasoningContent = '';
+        }
+        result.push(assistantMsg);
+      } else if (textParts.length > 0) {
+        const formattedMsg: Record<string, unknown> = {
+          role: msg.role,
+          content: textParts.join('\n'),
+        };
+        // Attach pending reasoning content to assistant messages
+        if (msg.role === 'assistant' && pendingReasoningContent) {
+          formattedMsg.reasoning_content = pendingReasoningContent;
+          pendingReasoningContent = '';
+        }
+        result.push(formattedMsg);
+      }
+    }
+
+    if (functionCalls.length > 0) {
+      const assistantMsg: Record<string, unknown> = {
+        role: 'assistant',
+        content: '',
+        tool_calls: functionCalls.map((fc) => ({
+          id: fc.callId,
+          type: 'function',
+          function: {
+            name: fc.name,
+            arguments: fc.argumentsStr,
+          },
+        })),
+      };
+      // Attach pending reasoning content to final assistant message
+      if (pendingReasoningContent) {
+        assistantMsg.reasoning_content = pendingReasoningContent;
+        pendingReasoningContent = '';
+      }
+      result.push(assistantMsg);
+    }
+
+    return result;
+  }
+
+  // ============================================
+  // OPENAI-COMPAT (non-streaming)
+  // ============================================
+
+  private async respondOpenAICompat(
+    context: ProviderContext,
+    params: RespondParams
+  ): Promise<LLMResponse> {
+    const { config, logger } = context;
+    const resolved = config;
+
+    const systemMessage = params.messages.find((m) => m.role === 'system');
+    let systemPrompt =
+      params.system ??
+      (systemMessage && typeof systemMessage.content === 'string'
+        ? systemMessage.content
+        : undefined);
+    const responseFormat = params.responseSchema
+      ? getProviderResponseFormat(resolved.displayProvider)
+      : null;
+    if (params.responseSchema && responseFormat === 'json_object') {
+      const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
+    }
+
+    const body: Record<string, unknown> = {
+      model: resolved.model,
+      messages: this.formatMessages(params.messages, systemPrompt),
+      max_tokens: params.maxTokens ?? resolved.maxTokens ?? 4096,
+    };
+
+    if (params.temperature ?? resolved.temperature) {
+      body.temperature = params.temperature ?? resolved.temperature;
+    }
+
+    // For GLM models, map reasoning config to thinking parameter
+    // GLM uses thinking: { type: 'enabled' } instead of standard reasoning
+    const isGlmModel = resolved.model.toLowerCase().startsWith('glm-');
+    if (isGlmModel && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
+      body.thinking = {
+        type: 'enabled',
+        clear_thinking: false, // Preserve thinking across turns for multi-turn salience
+      };
+    }
+
+    if (params.tools && params.tools.length > 0) {
+      body.tools = this.formatTools(params.tools);
+    }
+    if (params.toolChoice) {
+      body.tool_choice = params.toolChoice;
+    } else if (params.tools && params.tools.length > 0) {
+      body.tool_choice = 'auto';
+    }
+
+    if (params.responseSchema) {
+      if (responseFormat === 'json_object') {
+        body.response_format = { type: 'json_object' };
+      } else {
+        body.response_format = {
+          type: 'json_schema',
+          json_schema: {
+            name: params.responseSchema.name,
+            schema: params.responseSchema.schema,
+            strict: params.responseSchema.strict ?? true,
+          },
+        };
+      }
+    }
+
+    const formattedMessages = body.messages as Array<Record<string, unknown>>;
+    const messageTypes = formattedMessages.map(m => {
+      if (m.role === 'tool') return 'tool';
+      if (m.role === 'assistant' && m.tool_calls) return 'assistant+tools';
+      return m.role;
+    });
+
+    logger.debug('OpenAI-compat API request', {
+      method: 'respond',
+      endpoint: '/chat/completions',
+      model: resolved.model,
+      maxTokens: body.max_tokens,
+      messageCount: formattedMessages.length,
+      messageTypes: messageTypes.join(', '),
+      toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+      hasResponseFormat: !!body.response_format,
+      responseFormat: responseFormat ?? undefined,
+      responseSchemaName: params.responseSchema?.name,
+    });
+
+    if (messageTypes.includes('tool') || messageTypes.includes('assistant+tools')) {
+      logger.debug('OpenAI-compat messages with tools', {
+        messages: JSON.stringify(formattedMessages.slice(-6), null, 2),
+      });
+    }
+
+    const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${resolved.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      const providerInfo = `${resolved.displayProvider} (${resolved.baseUrl})`;
+      logger.error(`${resolved.displayProvider} API request failed`, {
+        method: 'respond',
+        endpoint: '/chat/completions',
+        status: response.status,
+        model: resolved.model,
+        baseUrl: resolved.baseUrl,
+        errorPreview: errorText.slice(0, 200),
+      });
+      if (response.status === 429) {
+        throw createRateLimitError(providerInfo, resolved.model, response.status, response.headers, errorText);
+      }
+      throw parseApiError(providerInfo, response.status, errorText);
+    }
+
+    const data = (await response.json()) as {
+      id: string;
+      object: string;
+      created: number;
+      model: string;
+      choices: Array<{
+        index: number;
+        message: {
+          role: string;
+          content: string | null;
+          reasoning_content?: string | null; // GLM-4.7 thinking trace
+          tool_calls?: Array<{
+            id: string;
+            type: string;
+            function: {
+              name: string;
+              arguments: string;
+            };
+          }>;
+        };
+        finish_reason: string;
+      }>;
+      usage: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+      };
+    };
+
+    const choice = data.choices[0];
+    const content = this.normalizeContent(choice?.message?.content);
+    const reasoningContent = choice?.message?.reasoning_content ?? undefined;
+
+    logger.debug('OpenAI-compat response received', {
+      model: resolved.model,
+      finishReason: choice?.finish_reason,
+      hasContent: !!content,
+      contentLength: content?.length ?? 0,
+      contentPreview: content?.slice(0, 200),
+      hasToolCalls: !!choice?.message?.tool_calls,
+      toolCallCount: choice?.message?.tool_calls?.length ?? 0,
+    });
+
+    const toolCalls: ToolCall[] = [];
+    if (choice?.message?.tool_calls) {
+      for (const tc of choice.message.tool_calls) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.function.arguments);
+        } catch {
+          args = {};
+        }
+        toolCalls.push({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: args,
+        });
+      }
+    }
+
+    const stopReasonMap: Record<string, StopReason> = {
+      stop: 'end_turn',
+      length: 'max_tokens',
+      tool_calls: 'tool_use',
+      content_filter: 'end_turn',
+    };
+    const stopReason: StopReason =
+      stopReasonMap[choice?.finish_reason ?? 'stop'] ?? 'end_turn';
+
+    const usage: TokenUsage = {
+      promptTokens: data.usage?.prompt_tokens ?? 0,
+      completionTokens: data.usage?.completion_tokens ?? 0,
+      totalTokens: data.usage?.total_tokens ?? 0,
+    };
+
+    return {
+      content,
+      stopReason,
+      usage,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      model: data.model ?? resolved.model,
+      durationMs: Date.now() - context.startTime,
+      reasoningContent,
+    };
+  }
+
+  // ============================================
+  // OPENAI-COMPAT STREAMING
+  // ============================================
+
+  private async *streamOpenAICompat(
+    context: ProviderContext,
+    params: StreamParams
+  ): AsyncGenerator<string, LLMResponse> {
+    const { config, logger } = context;
+    const resolved = config;
+
+    const systemMessage = params.messages.find((m) => m.role === 'system');
+    let systemPrompt =
+      params.system ??
+      (systemMessage && typeof systemMessage.content === 'string'
+        ? systemMessage.content
+        : undefined);
+    const responseFormat = params.responseSchema
+      ? getProviderResponseFormat(resolved.displayProvider)
+      : null;
+    if (params.responseSchema && responseFormat === 'json_object') {
+      const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
+    }
+
+    const body: Record<string, unknown> = {
+      model: resolved.model,
+      messages: this.formatMessages(params.messages, systemPrompt),
+      max_tokens: params.maxTokens ?? resolved.maxTokens ?? 4096,
+      stream: true,
+    };
+
+    if (params.temperature ?? resolved.temperature) {
+      body.temperature = params.temperature ?? resolved.temperature;
+    }
+
+    // For GLM models, map reasoning config to thinking parameter
+    // GLM uses thinking: { type: 'enabled' } instead of standard reasoning
+    const isGlmModel = resolved.model.toLowerCase().startsWith('glm-');
+    if (isGlmModel && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
+      body.thinking = {
+        type: 'enabled',
+        clear_thinking: false, // Preserve thinking across turns for multi-turn salience
+      };
+    }
+
+    if (params.tools && params.tools.length > 0) {
+      body.tools = this.formatTools(params.tools);
+    }
+    if (params.toolChoice) {
+      body.tool_choice = params.toolChoice;
+    } else if (params.tools && params.tools.length > 0) {
+      body.tool_choice = 'auto';
+    }
+
+    if (params.responseSchema) {
+      if (responseFormat === 'json_object') {
+        body.response_format = { type: 'json_object' };
+      } else {
+        body.response_format = {
+          type: 'json_schema',
+          json_schema: {
+            name: params.responseSchema.name,
+            schema: params.responseSchema.schema,
+            strict: params.responseSchema.strict ?? true,
+          },
+        };
+      }
+    }
+
+    const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${resolved.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok || !response.body) {
+      const errorText = await response.text();
+      const providerInfo = `${resolved.displayProvider} (${resolved.baseUrl})`;
+      logger.error(`${resolved.displayProvider} API stream request failed`, {
+        method: 'stream',
+        endpoint: '/chat/completions',
+        status: response.status,
+        model: resolved.model,
+        baseUrl: resolved.baseUrl,
+        errorPreview: errorText.slice(0, 200),
+      });
+      if (response.status === 429) {
+        throw createRateLimitError(providerInfo, resolved.model, response.status, response.headers, errorText);
+      }
+      throw parseApiError(providerInfo, response.status, errorText);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    let fullContent = '';
+    let fullReasoningContent = '';
+    let stopReason: StopReason = 'end_turn';
+    let usage: TokenUsage = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    const toolCalls: ToolCall[] = [];
+    const toolCallBuilders: Map<number, { id: string; name: string; arguments: string }> = new Map();
+    let model = resolved.model;
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6);
+          if (data === '[DONE]') continue;
+
+          try {
+            const event = JSON.parse(data) as {
+              id?: string;
+              object?: string;
+              model?: string;
+              choices?: Array<{
+                index: number;
+                delta: {
+                  role?: string;
+                  content?: string;
+                  reasoning_content?: string; // GLM-4.7 thinking trace
+                  tool_calls?: Array<{
+                    index: number;
+                    id?: string;
+                    type?: string;
+                    function?: {
+                      name?: string;
+                      arguments?: string;
+                    };
+                  }>;
+                };
+                finish_reason?: string;
+              }>;
+              usage?: {
+                prompt_tokens: number;
+                completion_tokens: number;
+                total_tokens: number;
+              };
+            };
+
+            if (event.model) {
+              model = event.model;
+            }
+
+            const choice = event.choices?.[0];
+            if (choice) {
+              // Accumulate reasoning content (GLM-4.7 thinking trace)
+              if (choice.delta?.reasoning_content) {
+                fullReasoningContent += choice.delta.reasoning_content;
+              }
+
+              if (choice.delta?.content) {
+                fullContent += choice.delta.content;
+                params.onChunk?.(choice.delta.content);
+                yield choice.delta.content;
+              }
+
+              if (choice.delta?.tool_calls) {
+                for (const tc of choice.delta.tool_calls) {
+                  if (!toolCallBuilders.has(tc.index)) {
+                    toolCallBuilders.set(tc.index, {
+                      id: tc.id ?? '',
+                      name: tc.function?.name ?? '',
+                      arguments: '',
+                    });
+                  }
+                  const builder = toolCallBuilders.get(tc.index)!;
+                  if (tc.id) builder.id = tc.id;
+                  if (tc.function?.name) builder.name = tc.function.name;
+                  if (tc.function?.arguments) builder.arguments += tc.function.arguments;
+                }
+              }
+
+              if (choice.finish_reason) {
+                const stopReasonMap: Record<string, StopReason> = {
+                  stop: 'end_turn',
+                  length: 'max_tokens',
+                  tool_calls: 'tool_use',
+                  content_filter: 'end_turn',
+                };
+                stopReason = stopReasonMap[choice.finish_reason] ?? 'end_turn';
+              }
+            }
+
+            if (event.usage) {
+              usage = {
+                promptTokens: event.usage.prompt_tokens,
+                completionTokens: event.usage.completion_tokens,
+                totalTokens: event.usage.total_tokens,
+              };
+            }
+          } catch {
+            // Skip malformed events
+          }
+        }
+      }
+    } catch (streamError) {
+      // Convert partial tool call builders to tool calls for error recovery
+      const partialToolCalls: ToolCall[] = [];
+      for (const builder of toolCallBuilders.values()) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(builder.arguments);
+        } catch {
+          args = {};
+        }
+        partialToolCalls.push({
+          id: builder.id,
+          name: builder.name,
+          arguments: args,
+        });
+      }
+
+      const cause = streamError instanceof Error ? streamError : new Error(String(streamError));
+      logger.warn('Stream interrupted mid-response', {
+        method: 'stream',
+        model: resolved.model,
+        partialContentLength: fullContent.length,
+        partialToolCalls: partialToolCalls.length,
+        error: cause.message,
+      });
+
+      throw new PartialStreamError(
+        'Stream interrupted',
+        cause,
+        fullContent,
+        partialToolCalls
+      );
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (toolCallBuilders.size > 0) {
+      for (const builder of toolCallBuilders.values()) {
+        if (!builder.name) continue;
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(builder.arguments);
+        } catch {
+          args = {};
+        }
+        toolCalls.push({
+          id: builder.id,
+          name: builder.name,
+          arguments: args,
+        });
+      }
+    }
+
+    return {
+      content: fullContent,
+      stopReason,
+      usage,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      model,
+      durationMs: Date.now() - context.startTime,
+      reasoningContent: fullReasoningContent || undefined,
+    };
+  }
+
+  // ============================================
+  // HELPERS
+  // ============================================
+
+  private normalizeContent(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (!content) return '';
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const block of content) {
+        if (typeof block === 'string') {
+          parts.push(block);
+          continue;
+        }
+        if (block && typeof block === 'object') {
+          const record = block as Record<string, unknown>;
+          if (typeof record.text === 'string') {
+            parts.push(record.text);
+            continue;
+          }
+          if (typeof record.content === 'string') {
+            parts.push(record.content);
+            continue;
+          }
+          try {
+            parts.push(JSON.stringify(block));
+          } catch {
+            // Ignore non-serializable blocks.
+          }
+        }
+      }
+      return parts.join('\n');
+    }
+    try {
+      return JSON.stringify(content);
+    } catch {
+      return '';
+    }
+  }
+}

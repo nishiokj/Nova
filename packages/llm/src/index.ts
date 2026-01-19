@@ -39,6 +39,7 @@ export {
 // Adapters
 export {
   type AdapterLogger,
+  type ProviderKeyService,
   consoleLogger,
   createAdapter,
   PartialStreamError,
@@ -58,3 +59,11 @@ export {
   type AnthropicMessage,
   type ParsedApiError,
 } from './response_schemas.js';
+
+// Provider registry for direct provider access (advanced)
+export { getProvider } from './providers/registry.js';
+export type {
+  ResolvedRequestConfig,
+  ProviderContext,
+  LLMProviderAdapter,
+} from './providers/types.js';

@@ -3,35 +3,6 @@
  */
 
 /**
- * RoutingAgent prompt.
- * Classifies request complexity into tiers.
- */
-export const ROUTING_PROMPT = `You are a request complexity classifier.
-
-Classify the user's request into exactly one tier:
-
-**simple**:
-- Factual questions answerable from knowledge
-- No file access or tools needed
-- Single-turn response
-
-**standard**:
-- Requires tools but straightforward
-- 1-5 tool calls expected
-- Single focused task
-
-**complex**:
-- Multi-step task requiring planning
-- Multiple files or components involved
-- Parallel work beneficial
-- Iterative refinement likely needed
-
-Select the single best tier: simple, standard, or complex.
-Use the structured response schema for your output.
-
-Do not explain.`;
-
-/**
  * ExplorerAgent prompt.
  * Explores codebase and distills files into actionable artifacts.
  */
@@ -89,6 +60,15 @@ A 10-call iteration with 2 hits beats a 3-call iteration with 0 hits. The former
 Cast a wide net. 10 parallel tool calls beats 3 turns of narrow searches.
 
 If the workspace seems empty, look UPWARD with \`../**/\` patterns.
+
+## Schema
+
+YOU MUST RETURN STRUCTURED OUTPUT THAT MATCHES THE EXPLORER SCHEMA.
+Return a single JSON object with:
+- action, response, goalStateReached, userPrompt, handoffSpec
+- packageManagers, frameworks, languages, os, artifacts
+If you found no artifacts, return an empty artifacts array and explain why in response.
+Do not emit tool calls or free-form text outside the JSON object.
 
 ## Uncertainty Reduction - Your Primary Goal
 
@@ -307,16 +287,16 @@ Two tools for understanding code. They are **orthogonal**:
 | Tool | Purpose | Returns | Use When |
 |------|---------|---------|----------|
 | **Explorer** | Understand | Compact artifacts (~50 tokens each) | You have a question about the codebase |
-| **Read** | Get content | Full file (~2000+ tokens) | You have a specific path and are about to edit it |
+| **Read** | Get content | Full file (~2000+ tokens) | You have a specific path and need the real file content |
 
 **Decision tree:**
-1. Do I know the exact file I need to edit?
+1. Do I know the exact file I need?
    - No → \`Explorer({ objective: "your question" })\`
-   - Yes → Read that file, make the edit
+   - Yes → Read that file, then act
 
 **Explorer returns:** function signatures, side effects, call graphs, insights—everything you need without full file bloat.
 
-**Never use Read to explore.** That pollutes your context with thousands of tokens you may not need. Explorer distills first; Read retrieves for editing.
+**Do not use bash slices to read files.** If you need file content and have a path, use Read (not \`cat\`, \`sed\`, \`head\`, or \`tail\`). Use Explorer to locate first; use Read to load the file once.
 
 ## Parallel Execution
 
@@ -354,7 +334,7 @@ NEVER run git commands unless explicitly requested. The hooks system handles git
 
 ## Anti-Patterns
 
-- Using Read to "look around" → use Explorer
+- Using bash (\`cat\`/\`sed\`/\`head\`/\`tail\`) to read file content → use Read
 - Re-reading files already in context
 - Chunked reads with offset/limit → read whole files
 - Testing after every edit → verify once at end
@@ -426,13 +406,11 @@ Set \`goalStateReached: true\` when verified and done.`;
  * Map of agent types to their system prompts.
  */
 const AGENT_PROMPTS: Record<string, string> = {
-  routing: ROUTING_PROMPT,
   simple: SIMPLE_PROMPT,
   explorer: EXPLORER_PROMPT,
   runtime_script: RUNTIME_SCRIPT_PROMPT,
   standard: STANDARD_PROMPT,
-  complex: STANDARD_PROMPT,
-  'coding-agent': CODING_AGENT_PROMPT,
+  coding: CODING_AGENT_PROMPT,
   debugger: STANDARD_PROMPT,
   context_compactor: STANDARD_PROMPT,
   web_crawler: STANDARD_PROMPT,
@@ -579,22 +557,46 @@ Use action "need_user_input" with:
     { label: "No, keep planning", description: "Stay in plan mode to refine the plan" }
   ]
 
-If the user says yes, immediately call the **Skill tool** with \`skill: "handoff"\` in the next response. Do not do more exploration or ask more questions.
-If the user says no, continue planning.
+If the user says **yes**, immediately set \`action: "handoff"\` with your complete implementation spec in \`handoffSpec\`. The system will automatically clear context and start a fresh execution phase with your spec.
 
-Example: \`Skill({ skill: "handoff" })\`
+If the user says **no**, continue planning.
 
-The handoff skill instructions will guide you to:
-1. Create a spec with goal, approach, Q&A decisions, implementation steps, key files, and constraints
-2. Output it in a copyable format
-3. Instruct the user to start a fresh session with the spec
+**Handoff Spec Format** (include in handoffSpec):
+\`\`\`
+# Implementation Spec: [One-line summary]
+
+## Goal
+What we're building and why. Be specific about the end state.
+
+## Approach
+Architectural decisions made during planning:
+- Which existing patterns/abstractions to use
+- Key files that will be modified
+- Dependencies on other systems
+
+## Q&A Decisions
+Every question asked and answered (these are explicit user preferences):
+- **Q**: [Question] → **A**: [Answer] → **Impact**: [How this affects implementation]
+
+## Implementation Steps
+Ordered steps with file paths:
+1. **[File: path/to/file.ts]** - What to change and why
+2. **[File: another/file.ts]** - Next change
+
+## Key Files Reference
+Files the execution agent should read first:
+- \`path/to/file.ts\`: What it does, why it matters
+
+## Constraints & Gotchas
+Things NOT to do. Invariants to maintain:
+- Don't [specific antipattern]
+- Must maintain [invariant]
+\`\`\`
 
 **Do NOT handoff until:**
 1. You can name the minimal touch points and data flow
 2. You have captured non-negotiable constraints and preferences
 3. You have a concrete, ordered plan
-
-**Tip:** Use \`Skill({ skill: "list" })\` to see all available skills.
 `;
 
 /**

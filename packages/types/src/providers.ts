@@ -82,7 +82,7 @@ export interface ProviderModelDefinition {
   /**
    * Available reasoning levels for this model.
    * - undefined: model does not support reasoning
-   * - ['on', 'off']: simple on/off reasoning (e.g., Claude extended thinking)
+   * - ['on', 'off']: simple on/off reasoning (e.g., Claude extended thinking, GLM thinking)
    * - ['low', 'medium', 'high']: OpenAI-style reasoning effort levels
    */
   reasoning?: ReasoningOptions;
@@ -100,37 +100,40 @@ export type ProviderResponseFormat = 'json_schema' | 'json_object';
 /**
  * Provider defaults for each model role.
  * Keys are SupportedProvider ids; values are optional per-role model ids.
+ * Used by resolveModelForRole() to find an appropriate model when agents
+ * specify only a role (fast, standard, powerful, reasoning).
  */
 export const PROVIDER_MODEL_DEFAULTS: Partial<
   Record<SupportedProvider, Partial<Record<ModelRole, string>>>
 > = {
   anthropic: {
-    fast: 'claude-3-5-haiku-20241022',
-    standard: 'claude-sonnet-4-20250514',
-    powerful: 'claude-sonnet-4-20250514',
-    reasoning: 'claude-sonnet-4-20250514',
+    fast: 'claude-sonnet-4.5',
+    standard: 'claude-sonnet-4.5',
+    powerful: 'claude-opus-4.5',
+    reasoning: 'claude-opus-4.5',
   },
   openai: {
-    fast: 'gpt-4.1-mini',
-    standard: 'gpt-4.1',
-    powerful: 'gpt-4.1',
-    reasoning: 'o4-mini',
-  },
-  groq: {
-    fast: 'llama-3.3-70b-versatile',
-    standard: 'llama-3.3-70b-versatile',
+    fast: 'gpt-5-nano',
+    standard: 'gpt-5-mini',
+    powerful: 'gpt-5.2',
+    reasoning: 'gpt-5.2-codex',
   },
   cerebras: {
     fast: 'llama-3.3-70b',
     standard: 'llama-3.3-70b',
   },
+  groq: {
+    fast: 'llama-3.3-70b-versatile',
+    standard: 'llama-3.3-70b-versatile',
+  },
   gemini: {
     fast: 'gemini-3.0-flash',
-    standard: 'gemini-3.0-pro',
+    standard: 'gemini-3.0-flash',
+    powerful: 'gemini-3.0-pro',
   },
   'z.ai-coder': {
+    fast: 'glm-4.7',
     standard: 'glm-4.7',
-    reasoning: 'glm-4.7',
   },
 };
 
@@ -176,7 +179,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     envVar: 'OPENAI_API_KEY',
     testEndpoint: 'https://api.openai.com/v1/models',
-    dashboardUrl: 'https://platform.openai.com/usage',
+    dashboardUrl: 'https://platform.openai.com/settings/organization/billing/overview',
   },
   'openai-compat': {
     id: 'openai-compat',
@@ -196,7 +199,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     envVar: 'CEREBRAS_API_KEY',
     testEndpoint: 'https://api.cerebras.ai/v1/models',
-    dashboardUrl: 'https://cloud.cerebras.ai/billing',
+    dashboardUrl: 'https://cloud.cerebras.ai/',
   },
   groq: {
     id: 'groq',
@@ -225,7 +228,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     envVar: 'GOOGLE_API_KEY',
     // Gemini uses query param auth, not header
     testEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
-    dashboardUrl: 'https://aistudio.google.com/apikey',
+    dashboardUrl: 'https://aistudio.google.com/app/apikey',
   },
   'z.ai-coder': {
     id: 'z.ai-coder',
@@ -234,11 +237,16 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
     responseFormat: 'json_object',
     models: [
-      { id: 'glm-4.7', name: 'GLM-4.7', description: 'Z.AI coding model' },
+      {
+        id: 'glm-4.7',
+        name: 'GLM-4.7',
+        description: 'Z.AI coding model with interleaved thinking',
+        reasoning: ['on', 'off'],
+      },
     ],
     envVar: 'ZAI_CODER_API_KEY',
     testEndpoint: 'https://api.z.ai/api/coding/paas/v4/models',
-    dashboardUrl: 'https://bigmodel.cn/console/finance',
+    dashboardUrl: 'https://open.bigmodel.cn/finance-center/bill/recharge-details',
   },
 };
 

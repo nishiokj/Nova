@@ -452,6 +452,7 @@ function getProviderBaseUrl(provider: string, configBaseUrl?: string): string | 
 
 /**
  * Resolve fallback config if present.
+ * NO API KEY resolution - credentials are resolved at request time.
  */
 function resolveFallbackConfig(
   fallback: { provider?: string; model: string; api_base?: string } | undefined
@@ -476,23 +477,22 @@ function resolveFallbackConfig(
     return undefined;
   }
 
-  try {
-    const apiKey = resolveApiKey(configProvider);
-    const canonicalProvider = getCanonicalProvider(configProvider);
-    const baseUrl = getProviderBaseUrl(configProvider, fallback.api_base);
+  const canonicalProvider = getCanonicalProvider(configProvider);
+  const baseUrl = getProviderBaseUrl(configProvider, fallback.api_base);
 
-    return {
-      provider: canonicalProvider,
-      model: fallback.model,
-      apiKey,
-      baseUrl,
-    };
-  } catch (e) {
-    console.warn(`[config] Failed to resolve fallback config:`, e);
-    return undefined;
-  }
+  return {
+    provider: canonicalProvider,
+    model: fallback.model,
+    baseUrl,
+  };
 }
 
+/**
+ * Resolve a model for a given role.
+ * Returns the first matching provider/model from provider priority order.
+ * NO API KEY check - we don't care if the key exists at config time.
+ * The user may add the key later at runtime.
+ */
 function resolveModelForRole(
   role: ModelRole,
   providerHint?: string
@@ -502,13 +502,9 @@ function resolveModelForRole(
   for (const provider of providerOrder) {
     if (!isSupportedProvider(provider)) continue;
     const model = PROVIDER_MODEL_DEFAULTS[provider]?.[role];
-    if (!model) continue;
-    try {
-      resolveApiKey(provider);
-    } catch {
-      continue;
+    if (model) {
+      return { provider, model };
     }
-    return { provider, model };
   }
 
   return null;
@@ -516,23 +512,41 @@ function resolveModelForRole(
 
 /**
  * Resolve a single agent config entry to runtime format.
+ * NO API KEY resolution - credentials are resolved at request time.
+ * This allows the harness to start without any configured providers.
  */
-function resolveAgentConfig(agentType: string, entry: AgentConfigEntry): ResolvedAgentConfig {
+function resolveAgentConfig(
+  agentType: string,
+  entry: AgentConfigEntry,
+  defaultModelId?: string
+): ResolvedAgentConfig {
   let resolvedProvider = entry.llm.provider;
   let resolvedModel = entry.llm.model;
 
   if (!resolvedModel) {
-    if (!entry.llm.role) {
-      throw new Error(`Agent '${agentType}' missing both model and role`);
+    // Try role-based resolution first - finds a model from provider priority order
+    if (entry.llm.role) {
+      const roleResolution = resolveModelForRole(entry.llm.role, entry.llm.provider);
+      if (roleResolution) {
+        resolvedModel = roleResolution.model;
+        resolvedProvider = roleResolution.provider;
+      }
     }
-    const resolved = resolveModelForRole(entry.llm.role, resolvedProvider);
-    if (!resolved) {
+    // Fall back to default model if role resolution failed
+    if (!resolvedModel && defaultModelId && defaultModelId.trim().length > 0) {
+      resolvedModel = defaultModelId;
+    }
+    // Error if we still don't have a model - this is a config error, not a runtime issue
+    if (!resolvedModel) {
+      if (!entry.llm.role) {
+        throw new Error(`Agent '${agentType}' missing both model and role`);
+      }
       throw new Error(
-        `No configured provider supports role '${entry.llm.role}'. Configure a provider in ~/.rex/config.json`
+        `No model found for role '${entry.llm.role}'. ` +
+        `Add a provider that supports this role to provider_priority, ` +
+        `or set agents.${agentType}.llm.model explicitly.`
       );
     }
-    resolvedProvider = resolved.provider;
-    resolvedModel = resolved.model;
   }
 
   const modelProvider = getProviderForModel(resolvedModel);
@@ -551,9 +565,6 @@ function resolveAgentConfig(agentType: string, entry: AgentConfigEntry): Resolve
     throw new Error(`Unsupported LLM provider: ${configProvider}`);
   }
 
-  // Use original provider name for API key lookup (e.g., 'cerebras' -> CEREBRAS_API_KEY)
-  const apiKey = resolveApiKey(configProvider);
-
   // Map to canonical provider for adapter routing (e.g., 'cerebras' -> 'openai-compat')
   const canonicalProvider = getCanonicalProvider(configProvider);
 
@@ -563,14 +574,13 @@ function resolveAgentConfig(agentType: string, entry: AgentConfigEntry): Resolve
   const rawEffort = extractReasoningEffort(entry.llm.reasoning);
   const reasoningEffort = normalizeReasoningEffort(canonicalProvider, rawEffort);
 
-  // Resolve fallback config if present
+  // Resolve fallback config if present (also without API keys)
   const fallback = resolveFallbackConfig(entry.llm.fallback);
 
   const llm: ResolvedLLMConfig = {
     provider: canonicalProvider,
     displayProvider: configProvider,  // Original provider name for error messages
     model: resolvedModel,
-    apiKey,
     maxTokens: entry.llm.max_tokens,
     temperature: entry.llm.temperature,
     baseUrl,
@@ -851,7 +861,7 @@ export function createConfigFromFile(
   const agents: Record<string, ResolvedAgentConfig> = {};
   for (const [agentType, entry] of Object.entries(fileConfig.agents)) {
     try {
-      const resolved = resolveAgentConfig(agentType, entry);
+      const resolved = resolveAgentConfig(agentType, entry, fileConfig.models?.default ?? undefined);
       agents[agentType] = resolved;
     } catch (e) {
       console.warn(`[config] Failed to resolve agent '${agentType}':`, e);
@@ -907,6 +917,7 @@ export function createConfigFromFile(
     },
     context: {
       maxTokens: fileConfig.context?.max_tokens ?? DEFAULT_CONTEXT_CONFIG.max_tokens,
+      sessionTtlMs: fileConfig.context?.session_ttl_ms ?? (DEFAULT_CONTEXT_CONFIG.session_ttl_ms ?? 0),
     },
     skills: {
       enabled: fileConfig.skills?.enabled ?? DEFAULT_SKILLS_CONFIG.enabled,
@@ -938,46 +949,32 @@ export function createConfigFromFile(
 
 /**
  * Create config from environment variables only (fallback mode).
+ * NO API KEY requirement - the harness can start without any keys configured.
+ * Users will be prompted to configure providers when they try to use the system.
  */
 export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
+  // Determine default provider/model from env or use anthropic as default
   const explicitProvider = process.env.LLM_PROVIDER;
-
-  let provider: LLMProvider;
-  let apiKey: string;
-  let displayProvider: string;
+  let provider: LLMProvider = 'anthropic';
+  let displayProvider = 'anthropic';
   let baseUrl: string | undefined;
 
   if (explicitProvider && isSupportedProvider(explicitProvider)) {
     displayProvider = explicitProvider;
     provider = getCanonicalProvider(explicitProvider);
-    apiKey = resolveApiKey(explicitProvider);
     baseUrl = getProviderBaseUrl(explicitProvider);
-  } else if (openaiKey) {
-    provider = 'openai';
-    displayProvider = 'openai';
-    apiKey = openaiKey;
-    baseUrl = getProviderBaseUrl('openai');
-  } else if (anthropicKey) {
-    provider = 'anthropic';
-    displayProvider = 'anthropic';
-    apiKey = anthropicKey;
-    baseUrl = getProviderBaseUrl('anthropic');
   } else {
-    throw new Error(
-      'No API key found. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.'
-    );
+    baseUrl = getProviderBaseUrl('anthropic');
   }
 
-  const defaultModel = provider;
+  // Default model - can be overridden via env
+  const defaultModel = process.env.LLM_MODEL ?? 'claude-sonnet-4.5';
 
-  // Create minimal agent configs from env
+  // Create minimal agent configs - NO API KEYS
   const defaultLLM: ResolvedLLMConfig = {
     provider,
-    displayProvider,  // Use explicit provider name for error messages
-    model: process.env.LLM_MODEL ?? defaultModel,
-    apiKey,
+    displayProvider,
+    model: defaultModel,
     ...(baseUrl ? { baseUrl } : {}),
     maxTokens: 16000,
     temperature: 0.7,
@@ -1057,6 +1054,7 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
     },
     context: {
       maxTokens: DEFAULT_CONTEXT_CONFIG.max_tokens,
+      sessionTtlMs: DEFAULT_CONTEXT_CONFIG.session_ttl_ms ?? 0,
     },
     skills: {
       enabled: DEFAULT_SKILLS_CONFIG.enabled,

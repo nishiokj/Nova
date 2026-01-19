@@ -2,7 +2,7 @@
  * Agent Module - Barrel Export
  */
 
-export { Agent } from './agent.js';
+export { Agent, resetProviderCircuit, getCircuitStatus } from './agent.js';
 export { AgentRegistry } from './agent-registry.js';
 export type {
   AgentType,
@@ -20,6 +20,7 @@ export type {
   InternalHookContext,
   InternalHookHandler,
   InternalHookQueue,
+  StopHookResult,
 } from './types.js';
 
 export { DEFAULT_AGENT_BUDGET, noopEmit, noopHookQueue } from './types.js';

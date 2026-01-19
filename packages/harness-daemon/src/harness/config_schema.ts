@@ -168,6 +168,7 @@ export const GraphDConfigSchema = z.object({
  */
 export const ContextConfigSchema = z.object({
   max_tokens: z.number().positive().int(),
+  session_ttl_ms: z.number().int().nonnegative().optional(),
 });
 
 /**

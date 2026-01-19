@@ -24,9 +24,9 @@ import {
 import os from 'os';
 import { execSync } from 'child_process';
 import { Orchestrator, type ModelOverride } from 'orchestrator';
-import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError } from 'llm';
+import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type ContextWindowSnapshot, type RateLimitData } from 'types';
+import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
 import { createWorkItem } from 'work';
 import { coerceStructuredOutput } from 'shared';
@@ -50,10 +50,13 @@ import type {
   AgentRunHandle,
   BridgeEvent,
 } from './types.js';
-import { loadConfig, getAgentConfig, resolveApiKey } from './config_loader.js';
+import { loadConfig, getAgentConfig, resolveApiKey, getConfigProviders } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config_types.js';
+import { LocalProviderManager } from './local_providers.js';
 import { HookExecutor } from './hook_executor.js';
 import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
+import { SessionStore } from './session_store.js';
+import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -139,13 +142,13 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
       llm: {
         model: resolved.llm.model,
         provider: resolved.llm.provider,
-        displayProvider: resolved.llm.displayProvider,  // Original provider name for error messages
-        apiKey: resolved.llm.apiKey,
+        displayProvider: resolved.llm.displayProvider,
         maxTokens: resolved.llm.maxTokens,
         temperature: resolved.llm.temperature,
         baseUrl: resolved.llm.baseUrl,
         reasoning: resolved.llm.reasoning,
         fallback: resolved.llm.fallback,
+        // thinking config comes from provider registry at request time
       },
     };
   });
@@ -218,72 +221,72 @@ class AsyncEventQueue {
   }
 }
 
-/**
- * Logger interface for harness.
- */
-interface HarnessLogger {
-  info(msg: string, meta?: Record<string, unknown>): void;
-  debug(msg: string, meta?: Record<string, unknown>): void;
-  warning(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
-  flush?(): void;
-}
+const consoleLogger: HarnessLogger = createFileLogger();
 
 /**
- * File-based logger for TUI compatibility.
- * Writes to logs/harness.log since console is captured by TUI.
+ * Provider key service implementation for the harness.
+ * Queries API keys at runtime from:
+ * 1. LocalProviderManager (GraphD storage) - if available
+ * 2. Config providers cache
+ * 3. Environment variables
+ *
+ * This allows API keys to be added/changed at runtime without restarting the harness.
  */
-function createFileLogger(logDir: string = 'logs'): HarnessLogger {
-  const logPath = path.join(logDir, 'harness.log');
-  try {
-    fs.mkdirSync(logDir, { recursive: true });
-  } catch {
-    // Directory may already exist
+class HarnessProviderKeyService implements ProviderKeyService {
+  private localProviders: LocalProviderManager | null = null;
+  private logger: HarnessLogger;
+
+  constructor(graphdDbPath: string | null, logger: HarnessLogger) {
+    this.logger = logger;
+    if (graphdDbPath) {
+      try {
+        this.localProviders = new LocalProviderManager(graphdDbPath);
+        this.logger.info('HarnessProviderKeyService initialized with GraphD', { dbPath: graphdDbPath });
+      } catch (err) {
+        this.logger.warning('Failed to initialize LocalProviderManager', { error: String(err) });
+      }
+    }
   }
 
-  const stream = fs.createWriteStream(logPath, { flags: 'a' });
-  stream.on('error', () => {
-    // Swallow log write errors to avoid disrupting the harness.
-  });
-  const pendingLines: string[] = [];
-  let flushScheduled = false;
-
-  const flush = () => {
-    flushScheduled = false;
-    if (pendingLines.length === 0) return;
-    const chunk = pendingLines.join('');
-    pendingLines.length = 0;
-    try {
-      stream.write(chunk);
-    } catch {
-      // Ignore logging failures
+  getApiKey(provider: string): string | null {
+    // Priority 1: LocalProviderManager (GraphD storage)
+    if (this.localProviders) {
+      const key = this.localProviders.getProviderKey(provider);
+      if (key) {
+        this.logger.debug('API key found in GraphD', { provider });
+        return key;
+      }
     }
-  };
 
-  const scheduleFlush = () => {
-    if (flushScheduled) return;
-    flushScheduled = true;
-    queueMicrotask(flush);
-  };
+    // Priority 2: Config providers cache
+    const configProviders = getConfigProviders();
+    if (configProviders[provider]) {
+      this.logger.debug('API key found in config cache', { provider });
+      return configProviders[provider] ?? null;
+    }
 
-  const write = (level: string, msg: string, meta?: Record<string, unknown>) => {
-    const timestamp = new Date().toISOString();
-    const metaStr = meta ? ` ${JSON.stringify(meta)}` : '';
-    const line = `${timestamp} [${level}] ${msg}${metaStr}\n`;
-    pendingLines.push(line);
-    scheduleFlush();
-  };
+    // Priority 3: Try resolveApiKey which checks env vars
+    try {
+      const key = resolveApiKey(provider);
+      if (key) {
+        this.logger.debug('API key found via resolveApiKey', { provider });
+        return key;
+      }
+    } catch {
+      // No key found
+    }
 
-  return {
-    info: (msg, meta) => write('INFO', msg, meta),
-    debug: (msg, meta) => write('DEBUG', msg, meta),
-    warning: (msg, meta) => write('WARN', msg, meta),
-    error: (msg, meta) => write('ERROR', msg, meta),
-    flush,
-  };
+    return null;
+  }
+
+  hasApiKey(provider: string): boolean {
+    return this.getApiKey(provider) !== null;
+  }
+
+  close(): void {
+    this.localProviders?.close();
+  }
 }
-
-const consoleLogger: HarnessLogger = createFileLogger();
 
 /**
  * AgentHarness - Wraps the TypeScript Agent for TUI integration.
@@ -291,14 +294,8 @@ const consoleLogger: HarnessLogger = createFileLogger();
 export class AgentHarness {
   private config: FullHarnessConfig;
   private toolRegistry: ToolRegistry;
-  private contextWindows = new Map<string, ContextWindow>();
-  private pausedState = new Map<string, {
-    goal: string;
-    agentType: string;
-    workingDir: string;
-    planMode?: boolean;
-    userPromptType?: string;
-  }>();
+  private sessionStores = new Map<string, { store: SessionStore; lastAccessMs: number }>();
+  private readonly sessionTtlMs: number;
   private logger: HarnessLogger;
   private isShutdown = false;
   private graphd: GraphDManager | null = null;
@@ -309,20 +306,27 @@ export class AgentHarness {
   private agentRegistry: AgentRegistry;
   private llmAdapter: ReturnType<typeof createAdapter>;
   private hookExecutor: HookExecutor | null = null;
+  private providerKeyService: HarnessProviderKeyService;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
+    this.sessionTtlMs = config.context.sessionTtlMs;
 
     // Gather environment context once at startup
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
     this.agentRegistry = buildAgentRegistry(config, envContext);
 
+    // Create provider key service for runtime API key resolution
+    // This allows keys to be added/changed at runtime without restart
+    const graphdDbPath = config.graphd.enabled ? config.graphd.dbPath : null;
+    this.providerKeyService = new HarnessProviderKeyService(graphdDbPath, this.logger);
+
     // NOTE: We don't populate shared apiKeys/baseUrls here because:
     // 1. Multiple providers (cerebras, z.ai-coder, groq) map to the same canonical 'openai-compat'
     // 2. Keying by canonical provider causes last-writer-wins collision
-    // 3. Each agent's per-request llm.apiKey and llm.baseUrl are already correctly resolved
-    // The adapter will use per-request config as primary source
+    // 3. The providerKeyService will resolve API keys at request time
+    // The adapter queries providerKeyService for keys when making requests
     const llmClientConfig: LLMClientConfig = {};
 
     // Adapt HarnessLogger to AdapterLogger (warning → warn)
@@ -332,7 +336,7 @@ export class AgentHarness {
       warn: this.logger.warning.bind(this.logger),
       error: this.logger.error.bind(this.logger),
     };
-    this.llmAdapter = createAdapter(llmClientConfig, adapterLogger);
+    this.llmAdapter = createAdapter(llmClientConfig, adapterLogger, this.providerKeyService);
 
     // Create EventBus - central pub/sub for all events
     this.eventBus = new EventBus();
@@ -369,13 +373,13 @@ export class AgentHarness {
 
     this.toolRegistry.register({
       name: 'Skill',
-      description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like handoff, code review, etc.',
+      description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like code review, design, etc.',
       parameters: {
         type: 'object',
         properties: {
           skill: {
             type: 'string',
-            description: 'Skill name to execute (e.g., "handoff"), or "list" to see available skills',
+            description: 'Skill name to execute (e.g., "design-fork"), or "list" to see available skills',
           },
           args: {
             type: 'string',
@@ -496,12 +500,7 @@ export class AgentHarness {
    * Accepts the actual provider name (e.g., 'z.ai-coder', 'cerebras'), not canonical.
    */
   hasApiKey(provider: string): boolean {
-    try {
-      const key = resolveApiKey(provider);
-      return !!key;
-    } catch {
-      return false;
-    }
+    return this.providerKeyService.hasApiKey(provider);
   }
 
   /**
@@ -515,12 +514,11 @@ export class AgentHarness {
    * Close and evict in-memory state for a session.
    */
   closeSession(sessionKey: string): void {
-    const context = this.contextWindows.get(sessionKey);
-    if (context) {
-      this.persistContext(context);
-      this.contextWindows.delete(sessionKey);
+    const entry = this.sessionStores.get(sessionKey);
+    if (entry) {
+      entry.store.close();
+      this.sessionStores.delete(sessionKey);
     }
-    this.pausedState.delete(sessionKey);
   }
 
   /**
@@ -538,7 +536,7 @@ export class AgentHarness {
             reusing: this.graphd.isReusing(),
           });
           if (!this.graphdSubscriber) {
-            this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd);
+            this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd, { batchMode: false });
             this.logger.debug('GraphDSubscriber created');
           }
         }
@@ -552,66 +550,66 @@ export class AgentHarness {
   }
 
   /**
-   * Get or create a ContextWindow for the session.
+   * Get or create a SessionStore for the session.
    */
-  private getOrCreateContext(sessionKey: string): ContextWindow {
-    let context = this.contextWindows.get(sessionKey);
-    if (context) {
-      return context;
+  private getOrCreateSessionStore(sessionKey: string): SessionStore {
+    const existing = this.sessionStores.get(sessionKey);
+    const now = Date.now();
+    if (existing) {
+      existing.lastAccessMs = now;
+      return existing.store;
     }
 
-    // Try to hydrate from GraphD
-    if (this.isGraphDReady()) {
-      try {
-        const result = this.graphd!.contextGet(sessionKey) as {
-          snapshot?: { context?: ContextWindowSnapshot };
-          error?: string;
-        };
-        if (result.snapshot && result.snapshot.context) {
-          context = ContextWindow.deserialize(result.snapshot.context);
-          this.contextWindows.set(sessionKey, context);
-          this.logger.debug('Hydrated context from GraphD', {
-            sessionKey,
-            itemCount: context.items.length,
-            version: context.version,
-          });
-          return context;
-        }
-      } catch (error) {
-        this.logger.warning('Failed to hydrate context from GraphD', {
-          sessionKey,
-          error: String(error),
-        });
-      }
-    }
-
-    // Create new context
-    const maxTokens = this.config.context.maxTokens;
-    context = new ContextWindow(sessionKey, maxTokens);
-    this.contextWindows.set(sessionKey, context);
-    this.logger.debug('Created new context', { sessionKey, maxTokens });
-    return context;
+    const store = new SessionStore({
+      sessionKey,
+      maxTokens: this.config.context.maxTokens,
+      graphd: this.graphd,
+      isGraphDReady: () => this.isGraphDReady(),
+      logger: this.logger,
+    });
+    this.sessionStores.set(sessionKey, { store, lastAccessMs: now });
+    return store;
   }
 
-  /**
-   * Persist a ContextWindow to GraphD.
-   */
-  private persistContext(context: ContextWindow): void {
-    if (!this.isGraphDReady()) return;
+  setSessionSelectedModel(sessionKey: string, selectedModel: ModelOverride | null): void {
+    const store = this.getOrCreateSessionStore(sessionKey);
+    if (selectedModel) {
+      store.setModelOverride(selectedModel);
+    } else {
+      store.clearModelOverride();
+    }
+  }
 
+  getSessionSelectedModel(sessionKey: string): ModelOverride | null {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.getModelOverride() ?? null;
+  }
+
+  private pruneSessionStores(reason: string): void {
+    if (this.sessionTtlMs <= 0) return;
+    const now = Date.now();
+    const cutoff = now - this.sessionTtlMs;
+    for (const [sessionKey, entry] of this.sessionStores.entries()) {
+      if (entry.lastAccessMs > cutoff) continue;
+      if (entry.store.hasPausedState()) continue;
+      entry.store.close();
+      this.sessionStores.delete(sessionKey);
+      this.logger.debug('Evicted session store', {
+        sessionKey,
+        reason,
+        idleMs: now - entry.lastAccessMs,
+      });
+    }
+  }
+
+  private persistUserMessage(sessionKey: string, requestId: string, userInput: string): boolean {
+    if (!this.isGraphDReady()) return false;
     try {
-      const snapshot = context.serialize();
-      this.graphd!.contextSave(context.sessionKey, { context: snapshot });
-      this.logger.debug('Persisted context to GraphD', {
-        sessionKey: context.sessionKey,
-        itemCount: context.items.length,
-        version: context.version,
-      });
+      this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      return true;
     } catch (error) {
-      this.logger.warning('Failed to persist context to GraphD', {
-        sessionKey: context.sessionKey,
-        error: String(error),
-      });
+      this.logger.warning('GraphD user message persist failed', { error: String(error) });
+      return false;
     }
   }
 
@@ -625,13 +623,50 @@ export class AgentHarness {
 
     eventQueue.push(createStatusEvent('sending', 'Processing request...'));
 
+    this.pruneSessionStores('run');
+    const store = this.getOrCreateSessionStore(sessionKey);
+
+    // Attempt to mark execution as started; if another run is active, queue instead.
+    if (!store.startExecution(requestId)) {
+      this.logger.info('Message received during active execution, queueing for agent', {
+        sessionKey,
+        requestId,
+        executingRequestId: store.getExecutingRequestId(),
+        messagePreview: inputText.slice(0, 100),
+      });
+
+      // Queue the message - this adds it to context immediately
+      store.queueUserMessage(requestId, inputText);
+
+      // Persist to GraphD if available
+      this.persistUserMessage(sessionKey, requestId, inputText);
+
+      // Emit a status event indicating the message was queued
+      eventQueue.push(createStatusEvent('idle', 'Message queued - agent will see it on next turn'));
+
+      // Return a "queued" result - not an error, but also not a full response
+      const resultPromise = Promise.resolve({
+        requestId,
+        sessionKey,
+        success: true,
+        finalText: '',
+        paused: false,
+        toolsUsed: [],
+        durationMs: 0,
+        metadata: { queued: true, executingRequestId: store.getExecutingRequestId() },
+      } as AgentRunResult);
+
+      queueMicrotask(() => eventQueue.finish());
+      return { result: resultPromise, events: eventQueue };
+    }
+
     if (this.isGraphDReady()) {
       try {
         const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-        this.graphd!.sessionTouch(sessionKey, effectiveWorkingDir);
+        store.touch(effectiveWorkingDir);
         this.graphd!.setActive(true);
         if (!this.graphdSubscriber) {
-          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!);
+          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!, { batchMode: false });
           this.logger.debug('GraphDSubscriber created');
         }
       } catch (error) {
@@ -639,14 +674,15 @@ export class AgentHarness {
       }
     }
 
-    const contextWindow = this.getOrCreateContext(sessionKey);
+    const contextWindow = store.getContext();
 
     // NOTE: Per min_patch_spec.md, we no longer auto-inject @path references into context.
     // Users should use explicit tools (Read/Glob/Grep) to bring file contents into context.
 
     contextWindow.addMessage('user', inputText);
 
-    const emit = createEventEmitCallback(this.eventBus, requestId, runId);
+    const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, inputText);
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
     const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
       const bridgeEvent = translateAgentEvent(event);
@@ -710,28 +746,62 @@ export class AgentHarness {
 
         const llmAdapter = this.llmAdapter;
 
-        // Get model override from session metadata if set
-        let modelOverride: ModelOverride | undefined;
-        if (this.isGraphDReady()) {
+        // Get selected model from session store or GraphD metadata if set
+        let selectedModel: ModelOverride | undefined;
+        const cachedSelected = store.getModelOverride();
+        if (cachedSelected) {
+          selectedModel = cachedSelected;
+        } else if (this.isGraphDReady()) {
           try {
             const session = this.graphd!.sessionGet(sessionKey);
             const metadata = session?.metadata as Record<string, unknown> | undefined;
-            const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const selectedFromMeta = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const legacyOverride = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const override = selectedFromMeta ?? legacyOverride;
             if (override?.provider && override?.model) {
-              modelOverride = {
+              selectedModel = {
                 provider: override.provider,
                 model: override.model,
                 reasoning: override.reasoning,
               };
-              this.logger.debug('Using model override from session', { modelOverride });
+              store.setModelOverride(selectedModel);
+              this.logger.debug('Using selected model from session', { selectedModel });
             }
           } catch {
-            // Ignore errors getting model override - use default
+            // Ignore errors getting selected model - use default
           }
         }
 
         // All requests go through orchestrator (loop-until-goal architecture)
-        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, modelOverride);
+        let result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+
+        while (!result.paused) {
+          const queuedMessages = store.drainQueuedMessages();
+          if (queuedMessages.length > 0) {
+            this.logger.info('Queued messages detected after execution, continuing run', {
+              sessionKey,
+              requestId,
+              queuedCount: queuedMessages.length,
+            });
+            result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+            continue;
+          }
+
+          if (store.endExecutionIfIdle()) {
+            break;
+          }
+
+          const lateQueued = store.drainQueuedMessages();
+          if (lateQueued.length === 0) {
+            break;
+          }
+          this.logger.info('Late queued messages detected, continuing run', {
+            sessionKey,
+            requestId,
+            queuedCount: lateQueued.length,
+          });
+          result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+        }
 
         if (result.paused && result.userPrompt) {
           // Pausing for user input - only emit user prompt event, not response
@@ -741,7 +811,8 @@ export class AgentHarness {
             result.userPrompt.options,
             result.userPrompt.context,
             result.userPrompt.multiSelect,
-            result.userPrompt.questionType
+            result.userPrompt.questionType,
+            result.userPrompt.questions
           ));
         } else {
           // Execution completed (success or failure) - emit response event
@@ -760,7 +831,7 @@ export class AgentHarness {
 
         eventQueue.push(createStatusEvent('idle'));
 
-        this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs);
+        this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs, userMessagePersisted);
 
         return result;
       } catch (error) {
@@ -788,7 +859,7 @@ export class AgentHarness {
           } as RateLimitData));
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           // Create a user-friendly error message based on rate limit type
           let userMessage: string;
@@ -826,7 +897,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -855,7 +926,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -900,6 +971,16 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
+        // Mark execution as complete - allows new messages to start their own orchestrator
+        const queuedMessages = store.endExecution();
+        if (queuedMessages.length > 0) {
+          this.logger.info('Execution ended with queued messages', {
+            sessionKey,
+            requestId,
+            queuedCount: queuedMessages.length,
+          });
+        }
+
         // Run Stop hooks
         if (this.hookExecutor) {
           const hookContext: HookContext = {
@@ -916,7 +997,7 @@ export class AgentHarness {
         queueMicrotask(() => {
           try {
             unsubscribe();
-            this.persistContext(contextWindow);
+            store.persistContext();
 
             // Flush subscriber events to make them visible to dashboard immediately
             this.graphdSubscriber?.flush();
@@ -948,12 +1029,15 @@ export class AgentHarness {
     requestId: string,
     userInput: string,
     assistantResponse: string,
-    durationMs: number
+    durationMs: number,
+    userMessagePersisted = false
   ): void {
     if (!this.isGraphDReady()) return;
 
     try {
-      this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      if (!userMessagePersisted) {
+        this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      }
       this.graphd!.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
         duration_ms: durationMs,
       });
@@ -1032,7 +1116,8 @@ export class AgentHarness {
     agentType: AgentType = 'standard',
     workingDir?: string,
     planMode?: boolean,
-    modelOverride?: ModelOverride
+    selectedModel?: ModelOverride,
+    store?: SessionStore
   ): Promise<AgentRunResult> {
     const hooks = this.createAgentHooks(context.sessionKey, requestId);
 
@@ -1054,16 +1139,42 @@ export class AgentHarness {
       hooks,
       planModeOptions,
       this.eventBus,
-      modelOverride
+      selectedModel
     );
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const result = await orchestrator.execute(context, goal, agentType, effectiveWorkingDir);
 
+    // Handle handoff: clear context and restart with spec as new goal
+    if (result.handoffSpec && store) {
+      this.logger.info('Handoff detected, clearing context and starting execution phase', {
+        sessionKey: context.sessionKey,
+        specLength: result.handoffSpec.length,
+      });
+
+      // Clear context for fresh execution
+      const freshContext = store.clearContext();
+      store.clearPausedState();
+
+      // Recursively run with the spec as the new goal (execution mode, not planning)
+      return this.runOrchestrator(
+        freshContext,
+        result.handoffSpec,
+        requestId,
+        emit,
+        llm,
+        'standard', // Use standard agent for execution
+        effectiveWorkingDir,
+        false, // planMode: false - now in execution mode
+        selectedModel,
+        store
+      );
+    }
+
     // Store paused state for resume, or clear it on completion
     if (result.paused) {
-      this.pausedState.set(context.sessionKey, {
+      store?.setPausedState({
         goal,
         agentType,
         workingDir: effectiveWorkingDir,
@@ -1071,7 +1182,7 @@ export class AgentHarness {
         userPromptType: result.userPrompt?.questionType,
       });
     } else {
-      this.pausedState.delete(context.sessionKey);
+      store?.clearPausedState();
     }
 
     return {
@@ -1104,8 +1215,14 @@ export class AgentHarness {
 
     eventQueue.push(createStatusEvent('sending', 'Resuming with user input...'));
 
-    const paused = this.pausedState.get(sessionKey);
-    if (!paused) {
+    this.pruneSessionStores('resume');
+    const storeEntry = this.sessionStores.get(sessionKey);
+    const store = storeEntry?.store ?? null;
+    const paused = store?.getPausedState() ?? null;
+    if (storeEntry) {
+      storeEntry.lastAccessMs = Date.now();
+    }
+    if (!store || !paused) {
       const errorMessage = 'No paused session found for this sessionKey';
       eventQueue.push(createErrorEvent(errorMessage, false));
       eventQueue.push(createStatusEvent('error', errorMessage));
@@ -1123,8 +1240,52 @@ export class AgentHarness {
       return { result: resultPromise, events: eventQueue };
     }
 
-    const contextWindow = this.getOrCreateContext(sessionKey);
-    const emit = createEventEmitCallback(this.eventBus, requestId, runId);
+    // Attempt to mark execution as started; queue if another run is active.
+    if (!store.startExecution(requestId)) {
+      this.logger.warning('Resume called while another execution is in progress', {
+        sessionKey,
+        requestId,
+        executingRequestId: store.getExecutingRequestId(),
+      });
+
+      // Queue the answer as a user message for the running execution
+      const answerText = typeof answer === 'string' ? answer : JSON.stringify(answer);
+      store.queueUserMessage(requestId, answerText);
+      this.persistUserMessage(sessionKey, requestId, answerText);
+
+      eventQueue.push(createStatusEvent('idle', 'Answer queued - agent will see it on next turn'));
+
+      const resultPromise = Promise.resolve({
+        requestId,
+        sessionKey,
+        success: true,
+        finalText: '',
+        paused: false,
+        toolsUsed: [],
+        durationMs: 0,
+        metadata: { queued: true, executingRequestId: store.getExecutingRequestId() },
+      } as AgentRunResult);
+
+      queueMicrotask(() => eventQueue.finish());
+      return { result: resultPromise, events: eventQueue };
+    }
+
+    if (this.isGraphDReady()) {
+      try {
+        const effectiveWorkingDir = workingDir ?? paused.workingDir;
+        store.touch(effectiveWorkingDir);
+        this.graphd!.setActive(true);
+        if (!this.graphdSubscriber) {
+          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!, { batchMode: false });
+          this.logger.debug('GraphDSubscriber created');
+        }
+      } catch (error) {
+        this.logger.warning('GraphD session touch failed', { error: String(error) });
+      }
+    }
+
+    const contextWindow = store.getContext();
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
     const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
       const bridgeEvent = translateAgentEvent(event);
@@ -1138,23 +1299,30 @@ export class AgentHarness {
         // Add user's response to context (serialize if structured)
         const answerText = typeof answer === 'string' ? answer : JSON.stringify(answer);
         contextWindow.addMessage('user', answerText);
+        const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, answerText);
 
-        // Get model override from session metadata if set
-        let modelOverride: ModelOverride | undefined;
-        if (this.isGraphDReady()) {
+        // Get selected model from session store or GraphD metadata if set
+        let selectedModel: ModelOverride | undefined;
+        const cachedSelected = store.getModelOverride();
+        if (cachedSelected) {
+          selectedModel = cachedSelected;
+        } else if (this.isGraphDReady()) {
           try {
             const session = this.graphd!.sessionGet(sessionKey);
             const metadata = session?.metadata as Record<string, unknown> | undefined;
-            const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const selectedFromMeta = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const legacyOverride = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const override = selectedFromMeta ?? legacyOverride;
             if (override?.provider && override?.model) {
-              modelOverride = {
+              selectedModel = {
                 provider: override.provider,
                 model: override.model,
                 reasoning: override.reasoning,
               };
+              store.setModelOverride(selectedModel);
             }
           } catch {
-            // Ignore errors getting model override - use default
+            // Ignore errors getting selected model - use default
           }
         }
 
@@ -1162,9 +1330,11 @@ export class AgentHarness {
         const normalizedAnswer = typeof answer === 'string'
           ? answer.trim().toLowerCase()
           : answer;
+        // Check for approval - TUI sends option label text (e.g., "Yes, handoff now")
+        // so we check startsWith('yes') in addition to exact matches
         const approvedHandoff = isPlanModeExit && (
+          (typeof normalizedAnswer === 'string' && normalizedAnswer.startsWith('yes')) ||
           normalizedAnswer === '0' ||
-          normalizedAnswer === 'yes' ||
           normalizedAnswer === 'y' ||
           normalizedAnswer === 'true' ||
           normalizedAnswer === 0 ||
@@ -1174,14 +1344,14 @@ export class AgentHarness {
         if (approvedHandoff) {
           contextWindow.addMessage(
             'system',
-            'User approved handoff. Immediately call Skill({ skill: "handoff" }) and do not continue planning.'
+            'User approved handoff. Set action: "handoff" with your complete implementation spec in handoffSpec. The system will automatically clear context and start execution with your spec.'
           );
         }
 
         // Re-run orchestrator with the stored goal/agentType/workingDir
         const effectiveWorkingDir = workingDir ?? paused.workingDir;
         const planMode = approvedHandoff ? false : paused.planMode;
-        const result = await this.runOrchestrator(
+        let result = await this.runOrchestrator(
           contextWindow,
           paused.goal,
           requestId,
@@ -1190,8 +1360,59 @@ export class AgentHarness {
           paused.agentType,
           effectiveWorkingDir,
           planMode,
-          modelOverride
+          selectedModel,
+          store
         );
+
+        while (!result.paused) {
+          const queuedMessages = store.drainQueuedMessages();
+          if (queuedMessages.length > 0) {
+            this.logger.info('Queued messages detected after resume execution, continuing run', {
+              sessionKey,
+              requestId,
+              queuedCount: queuedMessages.length,
+            });
+            result = await this.runOrchestrator(
+              contextWindow,
+              paused.goal,
+              requestId,
+              emit,
+              this.llmAdapter,
+              paused.agentType,
+              effectiveWorkingDir,
+              planMode,
+              selectedModel,
+              store
+            );
+            continue;
+          }
+
+          if (store.endExecutionIfIdle()) {
+            break;
+          }
+
+          const lateQueued = store.drainQueuedMessages();
+          if (lateQueued.length === 0) {
+            break;
+          }
+          this.logger.info('Late queued messages detected after resume, continuing run', {
+            sessionKey,
+            requestId,
+            queuedCount: lateQueued.length,
+          });
+          result = await this.runOrchestrator(
+            contextWindow,
+            paused.goal,
+            requestId,
+            emit,
+            this.llmAdapter,
+            paused.agentType,
+            effectiveWorkingDir,
+            planMode,
+            selectedModel,
+            store
+          );
+        }
 
         if (result.paused && result.userPrompt) {
           // Pausing for user input - only emit user prompt event, not response
@@ -1201,7 +1422,8 @@ export class AgentHarness {
             result.userPrompt.options,
             result.userPrompt.context,
             result.userPrompt.multiSelect,
-            result.userPrompt.questionType
+            result.userPrompt.questionType,
+            result.userPrompt.questions
           ));
         } else {
           // Execution completed (success or failure) - emit response event
@@ -1219,7 +1441,8 @@ export class AgentHarness {
         }
 
         eventQueue.push(createStatusEvent('idle'));
-        this.persistContext(contextWindow);
+        this.persistToGraphD(sessionKey, requestId, answerText, result.finalText, result.durationMs, userMessagePersisted);
+        store.persistContext();
 
         return result;
       } catch (error) {
@@ -1235,7 +1458,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           // Create a user-friendly error message
           let userMessage: string;
@@ -1273,7 +1496,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -1302,7 +1525,7 @@ export class AgentHarness {
           });
 
           // Persist context so user doesn't lose work
-          this.persistContext(contextWindow);
+          store.persistContext();
 
           const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
 
@@ -1339,6 +1562,16 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
+        // Mark execution as complete
+        const queuedMessages = store.endExecution();
+        if (queuedMessages.length > 0) {
+          this.logger.info('Resume execution ended with queued messages', {
+            sessionKey,
+            requestId,
+            queuedCount: queuedMessages.length,
+          });
+        }
+
         // Run Stop hooks
         if (this.hookExecutor) {
           const hookContext: HookContext = {
@@ -1358,6 +1591,14 @@ export class AgentHarness {
           // Flush subscriber events to make them visible to dashboard immediately
           this.graphdSubscriber?.flush();
 
+          if (this.isGraphDReady()) {
+            try {
+              this.graphd!.setActive(false);
+            } catch {
+              // Ignore errors during cleanup
+            }
+          }
+
           eventQueue.finish();
         });
       }
@@ -1370,11 +1611,7 @@ export class AgentHarness {
    * Create a ready event for initialization.
    */
   createReadyEvent(sessionKey: string): BridgeEvent {
-    const defaultAgent = this.config.agents[this.config.defaultAgent];
-    const configSummary = defaultAgent
-      ? `Provider: ${defaultAgent.llm.provider}, Model: ${defaultAgent.llm.model}`
-      : 'No default agent configured';
-    return createReadyEvent(sessionKey, configSummary);
+    return createReadyEvent(sessionKey);
   }
 
   /**
@@ -1396,16 +1633,16 @@ export class AgentHarness {
 
     if (result.success) {
       // Pre-populate in-memory cache with cloned context
-      const sourceContext = this.contextWindows.get(sourceSessionKey);
-      if (sourceContext) {
-        const clonedSnapshot = sourceContext.serialize();
-        clonedSnapshot.sessionKey = targetSessionKey;
-        const clonedContext = ContextWindow.deserialize(clonedSnapshot);
-        this.contextWindows.set(targetSessionKey, clonedContext);
+      const sourceEntry = this.sessionStores.get(sourceSessionKey);
+      const sourceSnapshot = sourceEntry?.store.getCachedContextSnapshot() ?? null;
+      if (sourceSnapshot) {
+        const clonedSnapshot = { ...sourceSnapshot, sessionKey: targetSessionKey };
+        const targetStore = this.getOrCreateSessionStore(targetSessionKey);
+        targetStore.hydrateFromSnapshot(clonedSnapshot);
         this.logger.info('Forked session with in-memory context', {
           sourceSessionKey,
           targetSessionKey,
-          contextItems: clonedContext.items.length,
+          contextItems: clonedSnapshot.items.length,
         });
       } else {
         this.logger.info('Forked session (no in-memory context to clone)', {
@@ -1423,10 +1660,12 @@ export class AgentHarness {
    * This triggers immediate compaction regardless of current context usage.
    */
   compactContext(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string } {
-    const context = this.contextWindows.get(sessionKey);
-    if (!context) {
+    const entry = this.sessionStores.get(sessionKey);
+    if (!entry || !entry.store.getCachedContextSnapshot()) {
       return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: 'No context found for session' };
     }
+
+    const context = entry.store.getContext();
 
     try {
       const result = context.compact({
@@ -1442,7 +1681,7 @@ export class AgentHarness {
       });
 
       // Persist the compacted context
-      this.persistContext(context);
+      entry.store.persistContext();
 
       return {
         success: true,
@@ -1475,7 +1714,7 @@ export class AgentHarness {
     }
 
     if (this.isGraphDReady()) {
-      for (const sessionKey of this.contextWindows.keys()) {
+      for (const sessionKey of this.sessionStores.keys()) {
         try {
           this.graphd!.sessionClose(sessionKey);
           this.logger.debug('Closed GraphD session', { sessionKey });
@@ -1505,8 +1744,15 @@ export class AgentHarness {
       }
     }
 
-    this.contextWindows.clear();
+    for (const entry of this.sessionStores.values()) {
+      entry.store.close();
+    }
+    this.sessionStores.clear();
     this.toolRegistry.clearCache();
+
+    // Close provider key service (releases LocalProviderManager resources)
+    this.providerKeyService.close();
+
     this.logger.info('AgentHarness shutdown');
     this.logger.flush?.();
   }

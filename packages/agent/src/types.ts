@@ -103,6 +103,10 @@ export interface AgentResult {
   needsUserInput: boolean;
   /** User prompt info (if needsUserInput) */
   userPrompt?: UserPromptInfo;
+  /** Whether handoff is requested (planning → execution transition) */
+  needsHandoff?: boolean;
+  /** Handoff spec (if needsHandoff) */
+  handoffSpec?: string;
   /** Whether LLM refused to complete */
   isRefusal: boolean;
   /** Whether result is incomplete (e.g., iterations exhausted but has partial output) */
@@ -113,17 +117,40 @@ export interface AgentResult {
   artifacts?: ArtifactItem[];
   /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
   localContext: ContextWindow;
+  /** Rate limit info (if terminationReason is 'rate_limit') */
+  rateLimitInfo?: {
+    provider: string;
+    model: string;
+    type: string;
+    retryAfterMs?: number;
+    message: string;
+  };
 }
 
 /**
- * User prompt information for interactive requests.
+ * Single question in a multi-question prompt.
  */
-export interface UserPromptInfo {
+export interface UserPromptQuestion {
   question: string;
   options?: Array<string | { label: string; description?: string }>;
   context?: string;
   multiSelect?: boolean;
   questionType?: string;
+}
+
+/**
+ * User prompt information for interactive requests.
+ * Supports single question (backwards compatible) or multiple questions.
+ */
+export interface UserPromptInfo {
+  /** Single question (backwards compatible) */
+  question: string;
+  options?: Array<string | { label: string; description?: string }>;
+  context?: string;
+  multiSelect?: boolean;
+  questionType?: string;
+  /** Multiple questions to ask in sequence */
+  questions?: UserPromptQuestion[];
 }
 
 /**
@@ -226,6 +253,18 @@ export type InternalHookEvent =
       filesRead: string[];
       invalidatedPaths: string[];
     };
+
+/**
+ * Result from a stop hook - can block termination and re-inject a prompt.
+ */
+export interface StopHookResult {
+  /** Whether to block the stop and continue */
+  decision: 'allow' | 'block';
+  /** New prompt to inject (required if decision is 'block') */
+  reason?: string;
+  /** System message to prepend */
+  systemMessage?: string;
+}
 
 /**
  * Context passed to internal hook handlers.

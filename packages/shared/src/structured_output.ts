@@ -50,13 +50,61 @@ function tryParseJson(value: string): Record<string, unknown> | null {
   }
 }
 
-function extractJsonObject(value: string): Record<string, unknown> | null {
-  const start = value.indexOf('{');
-  const end = value.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) {
-    return null;
+function extractJsonFromFence(value: string): Record<string, unknown> | null {
+  const fenceMatch = value.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (!fenceMatch) return null;
+  const candidate = fenceMatch[1]?.trim();
+  if (!candidate) return null;
+  return tryParseJson(candidate) ?? findFirstJsonObject(candidate);
+}
+
+function findFirstJsonObject(value: string): Record<string, unknown> | null {
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let start = -1;
+
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+      continue;
+    }
+
+    if (ch === '}' && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        const candidate = value.slice(start, i + 1);
+        const parsed = tryParseJson(candidate);
+        if (parsed) return parsed;
+        start = -1;
+      }
+    }
   }
-  return tryParseJson(value.slice(start, end + 1));
+
+  return null;
 }
 
 /**
@@ -73,7 +121,11 @@ export function coerceStructuredOutput(
   const trimmed = value.trim();
   if (!trimmed) return null;
 
-  return tryParseJson(trimmed) ?? extractJsonObject(trimmed);
+  return (
+    tryParseJson(trimmed) ??
+    extractJsonFromFence(trimmed) ??
+    findFirstJsonObject(trimmed)
+  );
 }
 
 /**

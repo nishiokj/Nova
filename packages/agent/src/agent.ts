@@ -6,8 +6,18 @@
  */
 
 import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
+import {
+  resilientCall,
+  createCircuitState,
+  RateLimitError,
+  CircuitOpenError,
+  RetriesExhaustedError,
+  type CircuitBreakerState,
+  type ResilienceConfig,
+  DEFAULT_RESILIENCE_CONFIG,
+} from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind } from 'types';
+import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
@@ -28,7 +38,43 @@ import type { AgentRegistry } from './agent-registry.js';
 import { coerceStructuredOutput } from 'shared';
 import { createMicroQueue } from 'shared';
 
-type AgentAction = 'done' | 'need_user_input' | 'continue';
+type AgentAction = 'done' | 'need_user_input' | 'continue' | 'handoff';
+
+// ============================================
+// CIRCUIT BREAKER STATE (per provider)
+// ============================================
+
+/**
+ * Module-level circuit breaker state per provider.
+ * Shared across all Agent instances to properly track failures.
+ */
+const providerCircuitStates = new Map<string, CircuitBreakerState>();
+
+/**
+ * Get or create circuit breaker state for a provider.
+ */
+function getProviderCircuitState(provider: string): CircuitBreakerState {
+  let state = providerCircuitStates.get(provider);
+  if (!state) {
+    state = createCircuitState();
+    providerCircuitStates.set(provider, state);
+  }
+  return state;
+}
+
+/**
+ * Reset circuit breaker state for a provider (e.g., after API key update).
+ */
+export function resetProviderCircuit(provider: string): void {
+  providerCircuitStates.delete(provider);
+}
+
+/**
+ * Get current circuit breaker status for all providers.
+ */
+export function getCircuitStatus(): Map<string, CircuitBreakerState> {
+  return new Map(providerCircuitStates);
+}
 
 const MAX_IDENTICAL_TOOL_CALLS = 2;
 const MAX_TOOL_OUTPUT_LENGTH = 8000;
@@ -96,6 +142,78 @@ export class Agent {
   }
 
   /**
+   * Stream LLM response with resilience (retry + circuit breaker).
+   * Returns { response, buffer } on success, throws on unrecoverable error.
+   */
+  private async streamWithResilience(
+    params: {
+      messages: Message[];
+      tools?: ToolDefinition[];
+      toolChoice?: 'none' | 'auto' | 'required';
+      responseSchema?: StructuredOutputSchema;
+      onChunk?: (chunk: string) => void;
+    },
+    workItemId?: string
+  ): Promise<{ response: LLMResponse; buffer: string }> {
+    const provider = this.llmConfig.provider ?? 'unknown';
+    const circuitState = getProviderCircuitState(provider);
+    const circuitKey = `${provider}:${this.llmConfig.model ?? 'unknown'}`;
+
+    // Wrap the streaming operation in resilientCall
+    // Note: We wrap the entire stream consumption, not just the initial call
+    return resilientCall(
+      async () => {
+        const stream = this.llm.stream({
+          messages: params.messages,
+          tools: params.tools,
+          toolChoice: params.toolChoice,
+          llm: this.llmConfig,
+          responseSchema: params.responseSchema,
+          onChunk: params.onChunk,
+        });
+
+        let buffer = '';
+        let response: LLMResponse | undefined;
+
+        while (true) {
+          const { value, done } = await stream.next();
+          if (done) {
+            response = value;
+            break;
+          }
+          if (value) {
+            buffer += value;
+          }
+        }
+
+        if (!response) {
+          throw new Error('LLM stream completed without a final response');
+        }
+
+        // If content is empty but we have buffered data, use the buffer
+        if (!response.content || response.content.length === 0) {
+          response = { ...response, content: buffer };
+        }
+
+        return { response, buffer };
+      },
+      {
+        circuitState,
+        circuitKey,
+        config: {
+          ...DEFAULT_RESILIENCE_CONFIG,
+          maxRetries: 2, // Retry up to 2 times for transient errors
+        },
+        onRetry: (attempt, error, delayMs) => {
+          console.error(`[AGENT] Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
+          // Note: Not emitting an event here since llm_retry isn't a standard event type
+          // The retry is logged to stderr for debugging
+        },
+      }
+    );
+  }
+
+  /**
    * Execute the agent on a work item.
    * Agent reads from globalContext, writes to its own localContext.
    * GlobalContext is never mutated.
@@ -137,7 +255,28 @@ export class Agent {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.error = message;
-      result.terminationReason = `exception:${message}`;
+
+      // Classify the error and set appropriate termination reason
+      if (error instanceof RateLimitError) {
+        result.terminationReason = 'rate_limit';
+        result.rateLimitInfo = {
+          provider: error.provider,
+          model: error.model,
+          type: error.info.type,
+          retryAfterMs: error.info.retryAfterMs,
+          message: error.info.message,
+        };
+        console.error(`[AGENT] Rate limit hit for ${error.provider}/${error.model}: ${error.info.message}`);
+      } else if (error instanceof CircuitOpenError) {
+        result.terminationReason = 'circuit_open';
+        console.error(`[AGENT] Circuit breaker open: ${message}`);
+      } else if (error instanceof RetriesExhaustedError) {
+        result.terminationReason = 'retries_exhausted';
+        console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
+      } else {
+        result.terminationReason = `exception:${message}`;
+      }
+
       this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
 
       // Synthesize response from accumulated work if we have any
@@ -224,6 +363,10 @@ export class Agent {
           });
         }
         console.error(`[AGENT DEBUG] Compacted context: removed=${compactResult.itemsRemoved}, truncated=${compactResult.outputsTruncated}, recovered=${compactResult.bytesRecovered}b`);
+        localReadFiles.clear();
+        for (const path of localContext.getReadFilesArray()) {
+          localReadFiles.add(path);
+        }
         this.internalHookQueue.enqueue({
           type: 'context_threshold',
           usagePercent: localContext.metrics.percentageUsed,
@@ -287,37 +430,28 @@ export class Agent {
 
       const llmStartTime = Date.now();
       this.lastRequestConfig = this.llmConfig;
-      const stream = this.llm.stream({
-        messages: messages as unknown as Message[],
-        tools: toolsForThisCall,
-        toolChoice: toolChoiceForThisCall,
-        llm: this.llmConfig,
-        responseSchema: this.config.outputSchema,
-        onChunk: (chunk) => {
-          this.emit(createEvent('agent_message', {
-            agentType: this.config.type,
-            message: chunk,
-          }, workItem.workId));
+      // Don't stream raw chunks when using structured output (they're JSON garbage)
+      // The extracted response field will be emitted after parsing
+      const hasStructuredOutput = !!this.config.outputSchema;
+
+      // Use resilient streaming with retry + circuit breaker
+      const { response, buffer } = await this.streamWithResilience(
+        {
+          messages: messages as unknown as Message[],
+          tools: toolsForThisCall,
+          toolChoice: toolChoiceForThisCall,
+          responseSchema: this.config.outputSchema,
+          onChunk: (chunk) => {
+            if (hasStructuredOutput) return; // Skip raw JSON streaming
+            this.emit(createEvent('agent_message', {
+              agentType: this.config.type,
+              message: chunk,
+            }, workItem.workId));
+          },
         },
-      });
-      let buffer = '';
-      let response: LLMResponse | undefined;
-      while (true) {
-        const { value, done } = await stream.next();
-        if (done) {
-          response = value;
-          break;
-        }
-        if (value) {
-          buffer += value;
-        }
-      }
-      if (!response) {
-        throw new Error('LLM stream completed without a final response');
-      }
-      if (!response.content || response.content.length === 0) {
-        response = { ...response, content: buffer };
-      }
+        workItem.workId
+      );
+
       const llmDurationMs = Date.now() - llmStartTime;
       metrics.llmCallsMade++;
 
@@ -333,6 +467,12 @@ export class Agent {
 
       const content = response.content ?? '';
       const toolCalls = response.toolCalls ?? [];
+
+      // Add reasoning content to context for multi-turn salience (GLM-4.7)
+      // This preserves the thinking trace across turns so the model can reference it
+      if (response.reasoningContent) {
+        localContext.addReasoning(response.reasoningContent);
+      }
 
       const structuredOutput = this.parseStructuredOutput(content);
       if (structuredOutput) {
@@ -355,10 +495,10 @@ export class Agent {
         }, this.buildHookContext(workItem));
       };
 
-      // Emit intermediate text for TUI display (when LLM outputs text alongside tool calls)
-      // Use extracted responseText from structured output if available, otherwise skip
-      // (raw content may be JSON which shouldn't be displayed)
-      if (toolCalls.length > 0 && responseText && responseText.trim().length > 0) {
+      // Emit extracted responseText for TUI display
+      // For structured output agents, we skip raw JSON chunk streaming, so emit the clean response here
+      // The TUI will use this streamed content instead of the response event content
+      if (hasStructuredOutput && responseText && responseText.trim().length > 0) {
         this.emit(createEvent('agent_message', {
           agentType: this.config.type,
           message: responseText,
@@ -438,6 +578,24 @@ export class Agent {
           return;
         }
 
+        // Handle handoff request after tool calls
+        if (action === 'handoff') {
+          const handoffSpec = typeof structuredOutput?.handoffSpec === 'string'
+            ? structuredOutput.handoffSpec
+            : null;
+          if (handoffSpec) {
+            result.needsHandoff = true;
+            result.handoffSpec = handoffSpec;
+            result.terminationReason = 'handoff_requested';
+            result.filesRead = Array.from(localReadFiles);
+            emitTurnCompleted(!!responseText);
+            return;
+          }
+          // No valid handoffSpec provided, continue execution
+          emitTurnCompleted(!!responseText);
+          continue;
+        }
+
         // Capture partial response even when continuing (in case we hit bounds later)
         if (responseText && responseText.trim().length > 0) {
           result.response = responseText;
@@ -479,6 +637,23 @@ export class Agent {
           return;
         }
         // No valid userPrompt provided, continue execution
+        emitTurnCompleted(!!responseText);
+        continue;
+      }
+
+      if (action === 'handoff') {
+        const handoffSpec = typeof structuredOutput?.handoffSpec === 'string'
+          ? structuredOutput.handoffSpec
+          : null;
+        if (handoffSpec) {
+          result.needsHandoff = true;
+          result.handoffSpec = handoffSpec;
+          result.terminationReason = 'handoff_requested';
+          result.filesRead = Array.from(localReadFiles);
+          emitTurnCompleted(!!responseText);
+          return;
+        }
+        // No valid handoffSpec provided, continue execution
         emitTurnCompleted(!!responseText);
         continue;
       }
@@ -658,6 +833,9 @@ export class Agent {
           role: (item as any).role,
           content: (item as any).content,
         });
+      } else if (item.type === 'reasoning') {
+        // Pass reasoning items through - formatMessages will attach to assistant messages
+        messages.push(item);
       } else if (item.type === 'function_call') {
         // Only include function_calls that have matching outputs
         const callId = (item as any).call_id;
@@ -740,8 +918,19 @@ export class Agent {
         metrics.toolCallsSucceeded++;
 
         const nameLower = call.name.toLowerCase();
-        if (nameLower === 'read' && call.arguments.path) {
-          localReadFiles.add(String(call.arguments.path));
+        if (nameLower === 'read') {
+          const readPath = call.arguments.path ?? call.arguments.file_path;
+          if (typeof readPath === 'string') {
+            localReadFiles.add(readPath);
+            if (!localContext.hasReadFile(readPath)) {
+              const rawOutput = toolResult.output ?? '';
+              const maxLen = getMaxOutputLength(call.name);
+              const truncatedOutput = rawOutput.length > maxLen
+                ? rawOutput.slice(0, maxLen) + `\n... [truncated ${rawOutput.length - maxLen} chars]`
+                : rawOutput;
+              localContext.addFileContent(readPath, truncatedOutput);
+            }
+          }
         }
 
         if ((nameLower === 'write' || nameLower === 'edit') && call.arguments.path) {
@@ -861,7 +1050,7 @@ export class Agent {
       // Intercept Read calls for files already in context
       if (nameLower === 'read') {
         const readPath = call.arguments.path ?? call.arguments.file_path;
-        if (typeof readPath === 'string' && localReadFiles.has(readPath)) {
+        if (typeof readPath === 'string' && localContext.hasReadFile(readPath)) {
           // File already in context - don't re-read
           const msg = `File "${readPath}" is already in your context. Look above for its contents instead of re-reading.`;
           console.error(`[AGENT DEBUG] Intercepted duplicate Read for: ${readPath}`);
@@ -1372,18 +1561,22 @@ export class Agent {
     if (normalized === 'done') return 'done';
     if (normalized === 'need_user_input') return 'need_user_input';
     if (normalized === 'continue') return 'continue';
+    if (normalized === 'handoff') return 'handoff';
     return null;
   }
 
   /**
    * Extract response text from structured output.
+   * Handles LLMs that output literal \n strings instead of actual newlines.
    */
   private extractStructuredResponse(
     structuredOutput: Record<string, unknown> | null
   ): string | undefined {
     if (!structuredOutput) return undefined;
     const raw = structuredOutput.response;
-    return typeof raw === 'string' ? raw : undefined;
+    if (typeof raw !== 'string') return undefined;
+    // Unescape literal \n and \t that LLMs sometimes output in JSON response fields
+    return raw.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
   }
 
   /**
@@ -1397,7 +1590,32 @@ export class Agent {
   }
 
   /**
+   * Parse options array from user prompt data.
+   */
+  private parseOptionsArray(
+    optionsRaw: unknown
+  ): UserPromptInfo['options'] | undefined {
+    if (!Array.isArray(optionsRaw)) return undefined;
+    const normalized = optionsRaw
+      .map((opt) => {
+        if (typeof opt === 'string') return opt;
+        if (opt && typeof opt === 'object' && !Array.isArray(opt)) {
+          const optObj = opt as Record<string, unknown>;
+          const label = typeof optObj.label === 'string' ? optObj.label : '';
+          if (!label) return null;
+          const description =
+            typeof optObj.description === 'string' ? optObj.description : undefined;
+          return description ? { label, description } : { label };
+        }
+        return null;
+      })
+      .filter((opt): opt is string | { label: string; description?: string } => opt !== null);
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  /**
    * Parse user prompt payload safely.
+   * Supports both single question and multiple questions formats.
    */
   private parseUserPromptValue(
     value: unknown
@@ -1406,31 +1624,44 @@ export class Agent {
       return null;
     }
     const data = value as Record<string, unknown>;
-    const question = typeof data.question === 'string' ? data.question.trim() : '';
-    if (!question) return null;
 
-    const optionsRaw = data.options;
-    let options: UserPromptInfo['options'] | undefined;
-    if (Array.isArray(optionsRaw)) {
-      const normalized = optionsRaw
-        .map((opt) => {
-          if (typeof opt === 'string') return opt;
-          if (opt && typeof opt === 'object' && !Array.isArray(opt)) {
-            const optObj = opt as Record<string, unknown>;
-            const label = typeof optObj.label === 'string' ? optObj.label : '';
-            if (!label) return null;
-            const description =
-              typeof optObj.description === 'string' ? optObj.description : undefined;
-            return description ? { label, description } : { label };
-          }
-          return null;
+    // Check for multiple questions format first
+    if (Array.isArray(data.questions) && data.questions.length > 0) {
+      const questions = data.questions
+        .map((q) => {
+          if (!q || typeof q !== 'object' || Array.isArray(q)) return null;
+          const qData = q as Record<string, unknown>;
+          const question = typeof qData.question === 'string' ? qData.question.trim() : '';
+          if (!question) return null;
+          return {
+            question,
+            options: this.parseOptionsArray(qData.options),
+            context: typeof qData.context === 'string' ? qData.context : undefined,
+            multiSelect: typeof qData.multiSelect === 'boolean' ? qData.multiSelect : undefined,
+            questionType: typeof qData.questionType === 'string' ? qData.questionType : undefined,
+          };
         })
-        .filter((opt): opt is string | { label: string; description?: string } => opt !== null);
-      if (normalized.length > 0) {
-        options = normalized;
+        .filter((q): q is NonNullable<typeof q> => q !== null);
+
+      if (questions.length > 0) {
+        // Use first question as the primary (backwards compatible)
+        const first = questions[0];
+        return {
+          question: first.question,
+          options: first.options,
+          context: first.context,
+          multiSelect: first.multiSelect,
+          questionType: first.questionType,
+          questions: questions.length > 1 ? questions : undefined,
+        };
       }
     }
 
+    // Single question format (backwards compatible)
+    const question = typeof data.question === 'string' ? data.question.trim() : '';
+    if (!question) return null;
+
+    const options = this.parseOptionsArray(data.options);
     const context = typeof data.context === 'string' ? data.context : undefined;
     const multiSelect =
       typeof data.multiSelect === 'boolean' ? data.multiSelect : undefined;
