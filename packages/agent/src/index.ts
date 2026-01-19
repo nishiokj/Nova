@@ -2,7 +2,7 @@
  * Agent Module - Barrel Export
  */
 
-export { Agent } from './agent.js';
+export { Agent, resetProviderCircuit, getCircuitStatus } from './agent.js';
 export { AgentRegistry } from './agent-registry.js';
 export type {
   AgentType,

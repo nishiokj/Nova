@@ -81,6 +81,7 @@ export interface StoreSnapshot {
   modelsCursor: number;
   modelDeletePending: boolean;
   selectedModel: string | null;
+  selectedProvider: string | null;
   selectedReasoningLevel: string | null;
   // Sessions selection
   sessionsList: SessionEntry[];
@@ -165,6 +166,7 @@ export class Store {
   private modelsCursor = 0;
   private modelDeletePending = false;
   private selectedModel: string | null = null;
+  private selectedProvider: string | null = null;
   private selectedReasoningLevel: string | null = null;
 
   // Sessions selection
@@ -191,9 +193,8 @@ export class Store {
   private batchDirty = false;
 
   // Streaming throttle
-  private streamingThrottleMs = 32; // ~30fps during streaming
+  private streamingThrottleMs = 16; // ~60fps during streaming for lower latency
   private lastStreamingEmit = 0;
-  private pendingStreamingEmit: ReturnType<typeof setTimeout> | null = null;
 
   constructor(maxHistory = DEFAULT_MAX_HISTORY) {
     this.maxHistory = maxHistory;
@@ -260,6 +261,7 @@ export class Store {
       modelsCursor: this.modelsCursor,
       modelDeletePending: this.modelDeletePending,
       selectedModel: this.selectedModel,
+      selectedProvider: this.selectedProvider,
       selectedReasoningLevel: this.selectedReasoningLevel,
       // Sessions selection
       sessionsList: [...this.sessionsList],
@@ -546,30 +548,16 @@ export class Store {
 
     this.streamingText += chunk;
     this.historyVersion += 1;
-    this.historyCache = null;
 
     // Throttle emissions during streaming for better performance
     const now = Date.now();
     if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
       this.lastStreamingEmit = now;
       this.emit();
-    } else if (!this.pendingStreamingEmit) {
-      // Schedule a trailing emit to ensure we don't miss the last chunk
-      this.pendingStreamingEmit = setTimeout(() => {
-        this.pendingStreamingEmit = null;
-        this.lastStreamingEmit = Date.now();
-        this.emit();
-      }, this.streamingThrottleMs);
     }
   }
 
   finalizeStreaming(): void {
-    // Cancel any pending throttled emit
-    if (this.pendingStreamingEmit) {
-      clearTimeout(this.pendingStreamingEmit);
-      this.pendingStreamingEmit = null;
-    }
-
     this.streamingRequestId = null;
     this.streamingText = "";
     this.streamingTruncated = false;
@@ -1049,14 +1037,7 @@ export class Store {
    */
   updateModelsList(models: ModelEntry[]): void {
     this.modelsList = models;
-    // Auto-select first model if none selected
-    if (!this.selectedModel && models.length > 0) {
-      this.selectedModel = models[0].id;
-      this.selectedReasoningLevel = models[0].reasoning?.[0] ?? null;
-    }
-    const selected = this.selectedModel
-      ? models.find((model) => model.id === this.selectedModel)
-      : null;
+    const selected = this.getCurrentModelEntry();
     if (selected?.reasoning && selected.reasoning.length > 0) {
       if (!this.selectedReasoningLevel || !selected.reasoning.includes(this.selectedReasoningLevel)) {
         this.selectedReasoningLevel = selected.reasoning[0];
@@ -1065,8 +1046,8 @@ export class Store {
       this.selectedReasoningLevel = null;
     }
     // Update cursor position
-    const currentIdx = this.selectedModel
-      ? models.findIndex((m) => m.id === this.selectedModel)
+    const currentIdx = selected
+      ? models.findIndex((m) => m.id === selected.id && (!this.selectedProvider || m.provider === this.selectedProvider))
       : 0;
     this.modelsCursor = Math.max(0, currentIdx);
     this.emit();
@@ -1100,6 +1081,7 @@ export class Store {
     const model = this.modelsList[this.modelsCursor];
     if (model) {
       this.selectedModel = model.id;
+      this.selectedProvider = model.provider ?? null;
       this.selectedReasoningLevel = model.reasoning?.[0] ?? null;
       this.emit();
       return model;
@@ -1112,11 +1094,20 @@ export class Store {
    */
   setSelectedModel(modelId: string | null): void {
     this.selectedModel = modelId;
-    if (modelId && this.modelsList.length > 0) {
-      const idx = this.modelsList.findIndex((m) => m.id === modelId);
+    if (!modelId) {
+      this.selectedProvider = null;
+      this.selectedReasoningLevel = null;
+      this.emit();
+      return;
+    }
+    if (this.modelsList.length > 0) {
+      const idx = this.selectedProvider
+        ? this.modelsList.findIndex((m) => m.id === modelId && m.provider === this.selectedProvider)
+        : this.modelsList.findIndex((m) => m.id === modelId);
       if (idx >= 0) {
         this.modelsCursor = idx;
         const model = this.modelsList[idx];
+        this.selectedProvider = model.provider ?? this.selectedProvider;
         // Preserve reasoning level if supported, otherwise reset
         if (model.reasoning && model.reasoning.length > 0) {
           if (!this.selectedReasoningLevel || !model.reasoning.includes(this.selectedReasoningLevel)) {
@@ -1125,8 +1116,18 @@ export class Store {
         } else {
           this.selectedReasoningLevel = null;
         }
+      } else {
+        this.selectedReasoningLevel = null;
       }
     }
+    this.emit();
+  }
+
+  /**
+   * Sets the selected model provider (used for backend sync).
+   */
+  setSelectedProvider(provider: string | null): void {
+    this.selectedProvider = provider;
     this.emit();
   }
 
@@ -1135,6 +1136,13 @@ export class Store {
    */
   getSelectedModel(): string | null {
     return this.selectedModel;
+  }
+
+  /**
+   * Gets the currently selected model provider.
+   */
+  getSelectedProvider(): string | null {
+    return this.selectedProvider;
   }
 
   /**
@@ -1172,18 +1180,6 @@ export class Store {
       this.modelsCursor = Math.max(0, this.modelsList.length - 1);
     }
 
-    // If removed model was selected, select another
-    if (this.selectedModel === removed.id) {
-      if (this.modelsList.length > 0) {
-        const newSelected = this.modelsList[this.modelsCursor];
-        this.selectedModel = newSelected?.id ?? null;
-        this.selectedReasoningLevel = newSelected?.reasoning?.[0] ?? null;
-      } else {
-        this.selectedModel = null;
-        this.selectedReasoningLevel = null;
-      }
-    }
-
     this.emit();
     return removed;
   }
@@ -1206,6 +1202,7 @@ export class Store {
 
     if (nextModel) {
       this.selectedModel = nextModel.id;
+      this.selectedProvider = nextModel.provider ?? null;
       this.modelsCursor = nextIdx;
       // Reset reasoning level when switching models
       this.selectedReasoningLevel = nextModel.reasoning?.[0] ?? null;
@@ -1269,6 +1266,10 @@ export class Store {
    */
   getCurrentModelEntry(): ModelEntry | null {
     if (!this.selectedModel) return null;
+    const provider = this.selectedProvider;
+    if (provider) {
+      return this.modelsList.find((m) => m.id === this.selectedModel && m.provider === provider) ?? null;
+    }
     return this.modelsList.find((m) => m.id === this.selectedModel) ?? null;
   }
 
@@ -1277,8 +1278,9 @@ export class Store {
    */
   getCurrentProviderModels(): ModelEntry[] {
     const currentModel = this.getCurrentModelEntry();
-    if (!currentModel?.provider) return this.modelsList; // No provider = show all
-    return this.modelsList.filter((m) => m.provider === currentModel.provider);
+    const provider = currentModel?.provider ?? this.selectedProvider;
+    if (!provider) return this.modelsList; // No provider = show all
+    return this.modelsList.filter((m) => m.provider === provider);
   }
 
   // ==================== Sessions Selection Methods ====================
@@ -1567,10 +1569,16 @@ function buildHistoryLines(
       lines[lines.length - 1].isBlockEnd = true;
     }
 
-    // Add a blank separator line after each message
-    // Use a space character so Ink renders it with actual height
+    // Add blank separator lines after each message for visual breathing room
+    // Use space characters so Ink renders them with actual height
     lines.push({
       id: `${entryLinePrefix}:${lineIndex}`,
+      text: " ",
+      role: undefined,
+      requestId: entry.requestId,
+    });
+    lines.push({
+      id: `${entryLinePrefix}:${lineIndex + 1}`,
       text: " ",
       role: undefined,
       requestId: entry.requestId,

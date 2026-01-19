@@ -83,6 +83,9 @@ export interface ResolvedFallbackConfig {
  * Credentials are resolved at request time via ProviderService.
  * This allows the harness to start without any configured providers,
  * and for users to add/change API keys at runtime.
+ *
+ * Note: thinking config is derived from provider registry at request time
+ * via getModelThinkingConfig() - not stored here.
  */
 export interface ResolvedLLMConfig {
   provider: LLMProvider;

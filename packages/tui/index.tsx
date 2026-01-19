@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { BridgeClient, type ConnectionState } from "./bridge_client.js";
 import { FileCache } from "./file_cache.js";
-import { Store } from "./store.js";
+import { Store, type HistoryLine } from "./store.js";
 import { HELP_LINES, parseSlashCommand } from "./commands.js";
 import {
   type ErrorData,
@@ -539,6 +539,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Cleanup function for both useEffect and signal handlers
     // Gracefully closes session before disconnecting
     const cleanup = () => {
+      const snapshot = store.getSnapshot();
+      const currentEntry = store.getCurrentModelEntry();
+      const selectedModel = snapshot.selectedModel;
+      const selectedProvider = snapshot.selectedProvider ?? currentEntry?.provider ?? null;
+      if (selectedModel && selectedProvider) {
+        client.send({
+          type: "set_model",
+          data: {
+            provider: selectedProvider,
+            model: selectedModel,
+            ...(snapshot.selectedReasoningLevel ? { reasoning: snapshot.selectedReasoningLevel } : {}),
+          },
+        });
+      }
       // Signal session close to harness (don't await - best effort)
       // This marks the session as inactive so it shows correctly in /sessions
       client.sessionClose().catch(() => {
@@ -644,6 +658,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
     }
+    store.batch(() => {
+      store.setSelectedModel(null);
+      store.setSelectedProvider(null);
+      store.setReasoningLevel(null);
+    });
     if (data?.capabilities) {
       // Convert snake_case from bridge to camelCase for store
       store.setCapabilities({
@@ -660,7 +679,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     // Check if any API keys are configured and prompt user if not
     try {
-      const result = await clientRef.current.providersList();
+      const client = clientRef.current;
+      if (!client) {
+        return;
+      }
+      const result = await client.providersList();
       if (result.success && result.providers) {
         const configuredProviders = result.providers.filter((p) => p.configured);
         if (configuredProviders.length === 0) {
@@ -860,17 +883,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     if (kind === "get_model") {
       const payload = metadata.payload as {
-        model_override?: { provider?: string; model?: string; reasoning?: string };
-        config_default?: { provider?: string; model?: string };
-        active?: { provider?: string; model?: string; reasoning?: string };
+        selectedModel?: string | null;
+        selectedProvider?: string | null;
+        provider?: string | null;
+        model?: string | null;
+        reasoning?: string | null;
       } | undefined;
-      const active = payload?.active ?? payload?.model_override ?? payload?.config_default;
-      if (active?.model) {
-        store.setSelectedModel(active.model);
-        if (typeof active.reasoning === "string") {
-          store.setReasoningLevel(active.reasoning);
-        }
-      }
+      const selectedModel = payload?.selectedModel ?? payload?.model ?? null;
+      const selectedProvider = payload?.selectedProvider ?? payload?.provider ?? null;
+      const reasoning = typeof payload?.reasoning === "string" ? payload.reasoning : null;
+      store.batch(() => {
+        store.setSelectedProvider(selectedProvider);
+        store.setSelectedModel(selectedModel);
+        store.setReasoningLevel(reasoning);
+      });
       return;
     }
     if (kind === "skills") {
@@ -943,10 +969,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         }
       }
 
-      if (content && requestId && messageExists(store.getSnapshot().history, requestId)) {
-        store.updateMessageText(requestId, content, meta);
-      } else if (content && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
-        store.addMessage("agent", content, meta, requestId);
+      // Use streamed content if available, otherwise use response content
+      const streamedContent = store.getSnapshot().streamingText;
+      const finalContent = streamedContent && streamedContent.trim().length > 0
+        ? streamedContent
+        : content;
+
+      if (finalContent && requestId && messageExists(store.getSnapshot().history, requestId)) {
+        store.updateMessageText(requestId, finalContent, meta);
+      } else if (finalContent && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
+        store.addMessage("agent", finalContent, meta, requestId);
       }
 
       store.finalizeStreaming();
@@ -999,11 +1031,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       type: inferQuestionType(q.options, q.multi_select, q.question_type),
       question: q.question,
       context: q.context,
-      options: q.options?.map((opt, i) => ({
-        id: String(i),
-        label: typeof opt === "string" ? opt : opt.label,
-        description: typeof opt === "object" ? opt.description : undefined,
-      })),
+      options: q.options?.map((opt) => {
+        const label = typeof opt === "string" ? opt : opt.label;
+        return {
+          id: label, // Use label as ID so agent sees meaningful answer text
+          label,
+          description: typeof opt === "object" ? opt.description : undefined,
+        };
+      }),
     });
 
     // Handle multiple questions
@@ -1021,11 +1056,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       type: inferQuestionType(data.options, data.multi_select, data.question_type),
       question: data.question,
       context: data.context,
-      options: data.options?.map((opt, i) => ({
-        id: String(i),
-        label: typeof opt === "string" ? opt : opt.label,
-        description: typeof opt === "object" ? opt.description : undefined,
-      })),
+      options: data.options?.map((opt) => {
+        const label = typeof opt === "string" ? opt : opt.label;
+        return {
+          id: label, // Use label as ID so agent sees meaningful answer text
+          label,
+          description: typeof opt === "object" ? opt.description : undefined,
+        };
+      }),
     };
 
     store.setActiveQuestion(question, data.request_id);
@@ -1044,12 +1082,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const handleModelChanged = (data?: ModelChangedData) => {
-    if (!data?.model) return;
-    store.setSelectedModel(data.model ?? null);
-    // Also restore reasoning level if provided
-    if (data.reasoning) {
-      store.setReasoningLevel(data.reasoning);
-    }
+    const selectedModel = data?.selectedModel ?? data?.model ?? null;
+    const selectedProvider = data?.selectedProvider ?? data?.provider ?? null;
+    const reasoning = typeof data?.reasoning === "string" ? data.reasoning : null;
+    store.batch(() => {
+      store.setSelectedProvider(selectedProvider);
+      store.setSelectedModel(selectedModel);
+      store.setReasoningLevel(reasoning);
+    });
   };
 
   const handleError = (data?: ErrorData) => {
@@ -1160,19 +1200,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   useInput((input, key) => {
+    const keyExtras = key as typeof key & { f1?: boolean; home?: boolean; end?: boolean };
     if (key.ctrl && input === "c") {
       handleQuit();
       return;
     }
 
     if (snapshot.helpVisible) {
-      if (key.escape || key.return || key.f1 || (key.ctrl && input === "k")) {
+      if (key.escape || key.return || keyExtras.f1 || (key.ctrl && input === "k")) {
         store.setHelpVisible(false);
       }
       return;
     }
 
-    if (key.f1 || (key.ctrl && input === "k")) {
+    if (keyExtras.f1 || (key.ctrl && input === "k")) {
       store.toggleHelp();
       return;
     }
@@ -1371,9 +1412,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           }
 
           // Handle plan_mode_exit: if user selected first option ("Yes, exit"), disable plan mode
+          // Use questionCursor since toggleQuestionSelection sets selection = [cursor]
           if (questionType === "plan_mode_exit") {
-            const selectedIdx = snapshot.questionSelection[0];
-            if (selectedIdx === 0) {
+            if (snapshot.questionCursor === 0) {
               store.batch(() => {
                 store.setPlanMode(false);
                 store.addMessage("system", "Plan mode disabled. Full tool access restored.");
@@ -1679,12 +1720,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
-    if (key.home) {
+    if (keyExtras.home) {
       store.scrollToTop(maxScrollRef.current);
       return;
     }
 
-    if (key.end) {
+    if (keyExtras.end) {
       store.scrollToBottom();
       return;
     }
@@ -1702,7 +1743,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
       const currentId = snapshot.selectedModel;
-      let currentIdx = currentId ? models.findIndex((m) => m.id === currentId) : -1;
+      const currentProvider = snapshot.selectedProvider;
+      let currentIdx = currentId
+        ? models.findIndex((m) => m.id === currentId && (!currentProvider || m.provider === currentProvider))
+        : -1;
       if (currentIdx < 0) currentIdx = Math.max(0, snapshot.modelsCursor);
       const nextIdx = (currentIdx + 1) % models.length;
       const nextModel = models[nextIdx];
@@ -1715,7 +1759,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     };
 
     const cycleReasoning = () => {
-      const currentModel = snapshot.modelsList.find((m) => m.id === snapshot.selectedModel);
+      const currentModel = snapshot.modelsList.find((m) => m.id === snapshot.selectedModel && (!snapshot.selectedProvider || m.provider === snapshot.selectedProvider));
       const levels = currentModel?.reasoning ?? [];
       if (!currentModel || levels.length === 0) {
         store.addMessage("system", "Current model does not support reasoning levels.");
@@ -2206,31 +2250,35 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     items: Record<string, unknown>[],
     errors: string[],
     isSkills: boolean = false,
-  ): { text: string; role?: Role }[] => {
-    const lines: { text: string; role?: Role }[] = [];
-    lines.push({ text: `${title} (${items.length}) - Read Only`, role: "system" });
+  ): HistoryLine[] => {
+    const lines: HistoryLine[] = [];
+    let index = 0;
+    const pushLine = (text: string, role: Role) => {
+      lines.push({ id: `list-${index++}`, text, role });
+    };
+    pushLine(`${title} (${items.length}) - Read Only`, "system");
     if (items.length === 0) {
-      lines.push({ text: "No items found.", role: "system" });
+      pushLine("No items found.", "system");
     } else {
       for (const item of items) {
         const enabled = item.enabled === true ? "enabled" : "disabled";
         const name = typeof item.name === "string" ? item.name : "";
         const id = typeof item.id === "string" ? item.id : "";
-        lines.push({ text: `- ${id} [${enabled}] ${name}`, role: "system" });
+        pushLine(`- ${id} [${enabled}] ${name}`, "system");
       }
     }
     if (errors.length > 0) {
-      lines.push({ text: "", role: "system" });
-      lines.push({ text: "Errors:", role: "system" });
+      pushLine("", "system");
+      pushLine("Errors:", "system");
       for (const err of errors) {
-        lines.push({ text: `- ${err}`, role: "system" });
+        pushLine(`- ${err}`, "system");
       }
     }
-    lines.push({ text: "", role: "system" });
-    lines.push({ text: "-".repeat(40), role: "system" });
+    pushLine("", "system");
+    pushLine("-".repeat(40), "system");
     const itemType = isSkills ? "skills" : "hooks";
-    lines.push({ text: `To create/edit ${itemType}, ask the agent to write ${itemType.toUpperCase().slice(0, -1)}.md files.`, role: "system" });
-    lines.push({ text: "Press Esc to return to chat.", role: "system" });
+    pushLine(`To create/edit ${itemType}, ask the agent to write ${itemType.toUpperCase().slice(0, -1)}.md files.`, "system");
+    pushLine("Press Esc to return to chat.", "system");
     return lines;
   };
 
@@ -2345,6 +2393,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const renderModelsSelector = () => {
     const colors = getColors();
     const currentModel = store.getSelectedModel();
+    const currentProvider = store.getSelectedProvider();
     const currentReasoning = store.getSelectedReasoningLevel();
     const reasoningOptions = store.getCurrentModelReasoningOptions();
     const reasoningInfo = reasoningOptions && reasoningOptions.length > 0
@@ -2364,7 +2413,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <Text> </Text>
         {snapshot.modelsList.map((model, index) => {
           const isSelected = index === snapshot.modelsCursor;
-          const isCurrent = model.id === currentModel;
+          const isCurrent = currentProvider
+            ? model.id === currentModel && model.provider === currentProvider
+            : model.id === currentModel;
           const isPendingDelete = isSelected && deletePending;
           const pointer = isSelected ? "▸ " : "  ";
           const marker = isCurrent ? ` (current${reasoningInfo})` : "";
@@ -2422,12 +2473,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           width={contentWidth}
           height={historyHeight + inputBoxHeight}
         />
-      ) : isProvidersMode ? (
+      ) : isProvidersMode && clientRef.current ? (
         <ProvidersView
           width={contentWidth}
           bridgeClient={clientRef.current}
           onClose={() => store.setUIMode("chat")}
         />
+      ) : isProvidersMode ? (
+        <Box height={historyHeight + inputBoxHeight} width={contentWidth} justifyContent="center" alignItems="center">
+          <Text color={colors.error}>Bridge not connected.</Text>
+        </Box>
       ) : isThemeMode ? (
         renderThemeSelector()
       ) : isModelsMode ? (
@@ -2480,7 +2535,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {/* Model indicator row: model (Esc+M) | reasoning (Esc+T) */}
           <Text>
             {(() => {
-              const modelName = currentModelEntry?.name ?? "no model";
+              const modelName = snapshot.selectedModel
+                ? (currentModelEntry?.name ?? snapshot.selectedModel)
+                : "no model selected";
               const reasoningLevel = hasReasoning ? (snapshot.selectedReasoningLevel ?? "off") : "n/a";
               // Layout: modelName (Esc+M) | reasoning (Esc+T) or n/a
               const rightContent = hasReasoning

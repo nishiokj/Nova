@@ -1241,6 +1241,10 @@ export class ContextWindow {
     if (result.localContext) {
       for (const item of result.localContext.items) {
         if (item.type === 'function_call' || item.type === 'function_call_output') {
+          const callId = item.callId;
+          if (callId && callId.startsWith('hook-')) {
+            continue;
+          }
           this.appendItem(item);
         }
       }

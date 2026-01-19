@@ -188,7 +188,7 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         type: 'stream',
         data: {
           request_id: requestId,
-          chunk: msgData.message + '\n\n',
+          chunk: msgData.message,
           chunk_index: -1,  // intermediate, not part of final response indexing
           is_final: false,
         },

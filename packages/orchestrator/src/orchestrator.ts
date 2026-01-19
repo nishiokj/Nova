@@ -71,6 +71,7 @@ export type TerminationReason =
   | 'max_tool_calls_exceeded'
   | 'max_duration_exceeded'
   | 'user_input_required'
+  | 'handoff_requested'
   | 'agent_error'
   | 'refusal';
 
@@ -93,6 +94,8 @@ export interface OrchestratorResult {
   error?: string;
   paused: boolean;
   userPrompt?: UserPromptInfo;
+  /** Handoff spec for planning → execution transition */
+  handoffSpec?: string;
   terminationReason: TerminationReason;
   metrics: OrchestratorMetrics;
 }
@@ -532,53 +535,76 @@ export class Orchestrator {
       }
 
       // AGENT EXECUTION - run all in-progress items in parallel
+      // Each execution is wrapped in try-catch to preserve all results even if some fail
       const executions = Array.from(inProgress.entries()).map(async ([workId, { item, agent }]) => {
-        const hookParams = item.params as {
-          isInternalHook?: boolean;
-          handler?: unknown;
-          hookType?: unknown;
-          event?: InternalHookEvent;
-          hookContext?: InternalHookContext;
-        } | undefined;
-        const handler = hookParams?.handler;
-        if (hookParams?.isInternalHook && typeof handler === 'function') {
-          this.runHookHandler({
-            handler: handler as () => Promise<void>,
-            hookType: String(hookParams?.hookType ?? 'unknown'),
-            workItemId: workId,
-            event: hookParams?.event,
-            hookContext: hookParams?.hookContext,
-            contextWindow: context,
-          });
-          return {
-            workId,
-            item,
-            result: {
-              success: true,
-              response: '',
-              metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
-              filesRead: [],
-              invalidatedPaths: [],
-              toolErrors: [],
-              terminationReason: 'hook_completed',
-              needsUserInput: false,
-              isRefusal: false,
-              localContext: context,
-            } as AgentResult,
-          };
-        }
+        try {
+          const hookParams = item.params as {
+            isInternalHook?: boolean;
+            handler?: unknown;
+            hookType?: unknown;
+            event?: InternalHookEvent;
+            hookContext?: InternalHookContext;
+          } | undefined;
+          const handler = hookParams?.handler;
+          if (hookParams?.isInternalHook && typeof handler === 'function') {
+            this.runHookHandler({
+              handler: handler as () => Promise<void>,
+              hookType: String(hookParams?.hookType ?? 'unknown'),
+              workItemId: workId,
+              event: hookParams?.event,
+              hookContext: hookParams?.hookContext,
+              contextWindow: context,
+            });
+            return {
+              workId,
+              item,
+              result: {
+                success: true,
+                response: '',
+                metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
+                filesRead: [],
+                invalidatedPaths: [],
+                toolErrors: [],
+                terminationReason: 'goal_state_reached',
+                needsUserInput: false,
+                isRefusal: false,
+                localContext: context,
+              } as AgentResult,
+            };
+          }
 
-        if (!agent) {
-          throw new Error(`Missing agent for work item: ${workId}`);
+          if (!agent) {
+            throw new Error(`Missing agent for work item: ${workId}`);
+          }
+          const result = await agent.run({ globalContext: context, workItem: item, cwd });
+          return { workId, item, result };
+        } catch (err) {
+          // Construct synthetic failure result to preserve all results on Promise.all
+          const errorResult: AgentResult = {
+            success: false,
+            response: '',
+            error: err instanceof Error ? err.message : String(err),
+            metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
+            filesRead: [],
+            invalidatedPaths: [],
+            toolErrors: [],
+            terminationReason: 'agent_error',
+            needsUserInput: false,
+            isRefusal: false,
+            localContext: context,
+          };
+          return { workId, item, result: errorResult };
         }
-        const result = await agent.run({ globalContext: context, workItem: item, cwd });
-        return { workId, item, result };
       });
 
       const results = await Promise.all(executions);
 
       // Process results and check for terminal conditions
       let terminalResult: OrchestratorResult | null = null;
+
+      // Track initial work completion to defer return until after processing all results (race condition fix)
+      let initialWorkCompleted = false;
+      let initialWorkResponse = '';
 
       for (const { workId, item, result } of results) {
         const hookParams = item.params as { isInternalHook?: boolean } | undefined;
@@ -591,9 +617,9 @@ export class Orchestrator {
         totalLlmCalls += result.metrics.llmCallsMade;
         totalToolCalls += result.metrics.toolCallsMade;
 
-        // Merge token metrics
+        // Merge token metrics (use totalOutputTokens for cumulative count across all LLM calls in this run)
         const localMetrics = result.localContext.metrics;
-        context.updateMetrics(localMetrics.inputTokens, localMetrics.outputTokens);
+        context.updateMetrics(localMetrics.inputTokens, localMetrics.totalOutputTokens);
 
         // Emit iteration_completed
         const responsePreview = result.response && result.response.length > 200
@@ -623,6 +649,21 @@ export class Orchestrator {
               paused: true,
               userPrompt: result.userPrompt,
               terminationReason: 'user_input_required',
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // TERMINAL: Handoff requested
+          if (result.needsHandoff && result.handoffSpec) {
+            this.log('info', 'Handoff requested', { workId, specLength: result.handoffSpec.length });
+            context.addAgentResultContext(result);
+            terminalResult = this.createResult({
+              success: true,
+              response: '',
+              paused: true,
+              handoffSpec: result.handoffSpec,
+              terminationReason: 'handoff_requested',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
             continue;
@@ -688,24 +729,30 @@ export class Orchestrator {
           context.addAgentResultContext(result);
           inProgress.delete(workId);
 
-          // If initial item completed and no more work, return success
-          if (workId === this.initialWorkId && this.workQueue.length === 0 && inProgress.size === 0) {
-            this.emit(createEvent('goal_achieved', {
-              goal,
-              completed: this.completedWork.size,
-              skipped: 0,
-            }));
-            return this.createResult({
-              success: true,
-              response: result.response,
-              terminationReason: 'goal_state_reached',
-              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
-            });
+          // Track initial work completion (deferred until after processing all results)
+          if (workId === this.initialWorkId) {
+            initialWorkCompleted = true;
+            initialWorkResponse = result.response;
           }
         } else {
           // Item needs more iterations - keep in progress, merge context
           context.addAgentResultContext(result);
         }
+      }
+
+      // Check if initial work completed after processing ALL results (fixes race condition in parallel execution)
+      if (initialWorkCompleted && this.workQueue.length === 0 && inProgress.size === 0) {
+        this.emit(createEvent('goal_achieved', {
+          goal,
+          completed: this.completedWork.size,
+          skipped: 0,
+        }));
+        return this.createResult({
+          success: true,
+          response: initialWorkResponse,
+          terminationReason: 'goal_state_reached',
+          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+        });
       }
 
       // If we hit a terminal condition, return it
@@ -895,6 +942,7 @@ export class Orchestrator {
       error: partial.error,
       paused: partial.paused ?? false,
       userPrompt: partial.userPrompt,
+      handoffSpec: partial.handoffSpec,
       terminationReason: partial.terminationReason,
       metrics: partial.metrics,
     };

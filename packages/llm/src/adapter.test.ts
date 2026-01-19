@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test';
 import { createAdapter } from './adapter.js';
-import type { LLMClientConfig, LLMRequestConfig } from '../types/llm.js';
+import type { LLMClientConfig, LLMRequestConfig } from 'types';
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;

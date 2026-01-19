@@ -131,6 +131,8 @@ export interface ProviderKeyRequiredData {
 }
 
 export interface ModelChangedData {
+  selectedModel?: string | null;
+  selectedProvider?: string | null;
   provider?: string;
   model?: string;
   reasoning?: string;

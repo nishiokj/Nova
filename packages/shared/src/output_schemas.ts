@@ -60,7 +60,7 @@ export const RoutingOutputSchema = z.object({
 /**
  * Action enum - what the agent wants to do next.
  */
-export const AgentActionSchema = z.enum(['done', 'need_user_input', 'continue']);
+export const AgentActionSchema = z.enum(['done', 'need_user_input', 'continue', 'handoff']);
 
 /**
  * Base agent action output - common fields for all action-based agents.
@@ -70,6 +70,8 @@ export const AgentActionOutputSchema = z.object({
   response: z.string().nullable(),
   goalStateReached: z.boolean().nullable(),
   userPrompt: UserPromptSchema.nullable(),
+  /** Handoff spec for transitioning from planning to execution (when action: 'handoff') */
+  handoffSpec: z.string().nullable(),
 });
 
 /**

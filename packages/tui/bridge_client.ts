@@ -368,7 +368,7 @@ export class BridgeClient extends EventEmitter {
       // Timeout after 30 seconds
       setTimeout(() => {
         this.off('event', handler);
-        resolve({ success: false, error: 'Request timeout' } as T);
+        resolve({ success: false, error: 'Request timeout' } as unknown as T);
       }, 30000);
 
       this.send({ type, data });

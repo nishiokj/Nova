@@ -95,13 +95,13 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
 
   toolRegistry.register({
     name: 'Skill',
-    description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like handoff, code review, etc.',
+    description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like code review, design, etc.',
     parameters: {
       type: 'object',
       properties: {
         skill: {
           type: 'string',
-          description: 'Skill name to execute (e.g., "handoff"), or "list" to see available skills',
+          description: 'Skill name to execute (e.g., "design-fork"), or "list" to see available skills',
         },
         args: {
           type: 'string',

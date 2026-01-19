@@ -51,7 +51,8 @@ interface HarnessLike {
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string): boolean;
-  setSessionModelOverride?(sessionKey: string, override: import('orchestrator').ModelOverride | null): void;
+  setSessionSelectedModel?(sessionKey: string, selectedModel: import('orchestrator').ModelOverride | null): void;
+  getSessionSelectedModel?(sessionKey: string): import('orchestrator').ModelOverride | null;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
@@ -298,22 +299,45 @@ export class BridgeGateway {
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
 
-    // Load and emit last model preference if available
+    // Load and emit selected model preference if available
     if (graphd) {
-      const lastModel = graphd.getUserPreference<{ provider: string; model: string; reasoning?: string }>('user_prefs:last_model');
-      const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
-      const isHidden = lastModel?.model
-        ? hiddenModels.some((hidden) => hidden.trim().toLowerCase() === lastModel.model.trim().toLowerCase())
-        : false;
-      if (lastModel?.provider && !isHidden && this.harness.hasApiKey(lastModel.provider)) {
-        // Store in session metadata and emit event
-        graphd.sessionUpdateMetadata(sessionKey, { model_override: lastModel });
-        this.harness.setSessionModelOverride?.(sessionKey, lastModel);
-        this.sendEvent(connectionId, {
-          type: 'model_changed',
-          data: lastModel,
-        }, sessionChannel(sessionKey));
+      const selectedModel =
+        graphd.getUserPreference<{ provider: string; model: string; reasoning?: string }>('user_prefs:selected_model')
+        ?? graphd.getUserPreference<{ provider: string; model: string; reasoning?: string }>('user_prefs:last_model');
+      if (selectedModel) {
+        graphd.setUserPreference('user_prefs:selected_model', selectedModel);
+        graphd.deleteUserPreference('user_prefs:last_model');
       }
+      const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+      const isHidden = selectedModel?.model
+        ? hiddenModels.some((hidden) => hidden.trim().toLowerCase() === selectedModel.model.trim().toLowerCase())
+        : false;
+      const resolved = isHidden ? null : selectedModel;
+      if (resolved) {
+        graphd.sessionUpdateMetadata(sessionKey, { selected_model: resolved });
+        this.harness.setSessionSelectedModel?.(sessionKey, resolved);
+      }
+      this.sendEvent(connectionId, {
+        type: 'model_changed',
+        data: {
+          selectedModel: resolved?.model ?? null,
+          selectedProvider: resolved?.provider ?? null,
+          provider: resolved?.provider ?? null,
+          model: resolved?.model ?? null,
+          reasoning: resolved?.reasoning ?? null,
+        },
+      }, sessionChannel(sessionKey));
+    } else {
+      this.sendEvent(connectionId, {
+        type: 'model_changed',
+        data: {
+          selectedModel: null,
+          selectedProvider: null,
+          provider: null,
+          model: null,
+          reasoning: null,
+        },
+      }, sessionChannel(sessionKey));
     }
   }
 
@@ -325,6 +349,23 @@ export class BridgeGateway {
     const sessionKey = state.sessionKey;
     if (!sessionKey) {
       this.sendError(connectionId, 'Session not initialized. Call init first.');
+      return;
+    }
+    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey);
+    if (!activeSelection?.model || !activeSelection?.provider) {
+      this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
+      return;
+    }
+    if (!this.harness.hasApiKey(activeSelection.provider)) {
+      this.sendEvent(connectionId, {
+        type: 'provider_key_required',
+        data: {
+          provider: activeSelection.provider,
+          model: activeSelection.model,
+          reasoning: activeSelection.reasoning,
+        },
+      });
+      this.sendError(connectionId, `No API key configured for provider: ${activeSelection.provider}`);
       return;
     }
 
@@ -496,39 +537,38 @@ export class BridgeGateway {
 
     const sessionKey = state.sessionKey;
     const normalizedModelId = modelId.trim().toLowerCase();
-    let clearedOverride = false;
+    let clearedSelection = false;
 
     // Clear last-model preference if it matches the deleted model
-    const lastModel = graphd.getUserPreference<{ provider?: string; model?: string }>('user_prefs:last_model');
-    if (lastModel?.model && lastModel.model.trim().toLowerCase() === normalizedModelId) {
+    const selectedModel = graphd.getUserPreference<{ provider?: string; model?: string }>('user_prefs:selected_model');
+    if (selectedModel?.model && selectedModel.model.trim().toLowerCase() === normalizedModelId) {
+      graphd.deleteUserPreference('user_prefs:selected_model');
       graphd.deleteUserPreference('user_prefs:last_model');
     }
 
-    // Clear session override if it matches the deleted model
+    // Clear session selection if it matches the deleted model
     if (sessionKey) {
       const session = graphd.sessionGet(sessionKey);
       const metadata = session?.metadata as Record<string, unknown> | undefined;
-      const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+      const override = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
       if (override?.model && override.model.trim().toLowerCase() === normalizedModelId) {
-        graphd.sessionUpdateMetadata(sessionKey, { model_override: null });
-        this.harness.setSessionModelOverride?.(sessionKey, null);
-        clearedOverride = true;
+        graphd.sessionUpdateMetadata(sessionKey, { selected_model: null });
+        this.harness.setSessionSelectedModel?.(sessionKey, null);
+        clearedSelection = true;
       }
     }
 
-    if (clearedOverride) {
-      const config = this.harness.getConfig();
-      const defaultAgent = config.agents[config.defaultAgent];
-      const configDefault = defaultAgent ? {
-        provider: defaultAgent.llm.provider,
-        model: defaultAgent.llm.model,
-      } : null;
-      if (configDefault) {
-        this.sendEvent(connectionId, {
-          type: 'model_changed',
-          data: configDefault,
-        });
-      }
+    if (clearedSelection) {
+      this.sendEvent(connectionId, {
+        type: 'model_changed',
+        data: {
+          selectedModel: null,
+          selectedProvider: null,
+          provider: null,
+          model: null,
+          reasoning: null,
+        },
+      });
     }
 
     this.sendAuthResponse(connectionId, 'models_delete', {
@@ -1103,7 +1143,7 @@ export class BridgeGateway {
   }
 
   // =========================================================================
-  // Model Override Handlers
+  // Model Selection Handlers
   // =========================================================================
 
   private handleSetModel(
@@ -1122,20 +1162,30 @@ export class BridgeGateway {
 
     const provider = typeof data?.provider === 'string' ? data.provider : null;
     const model = typeof data?.model === 'string' ? data.model : null;
-    const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : undefined;
+    const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : null;
 
     // Handle reset to default
     if (data?.reset === true || (!provider && !model)) {
       const graphd = this.harness.getGraphD?.();
       if (graphd) {
-        graphd.sessionUpdateMetadata(sessionKey, { model_override: null });
+        graphd.sessionUpdateMetadata(sessionKey, { selected_model: null });
+        graphd.deleteUserPreference('user_prefs:selected_model');
         graphd.deleteUserPreference('user_prefs:last_model');
       }
-      this.harness.setSessionModelOverride?.(sessionKey, null);
+      this.harness.setSessionSelectedModel?.(sessionKey, null);
       this.sendAuthResponse(connectionId, 'set_model', {
         success: true,
-        model_override: null,
-        message: 'Model reset to config default',
+        selected_model: null,
+        message: 'Model selection cleared',
+      });
+      this.sendEvent(connectionId, {
+        type: 'model_changed',
+        data: {
+          selectedModel: null,
+          provider: null,
+          model: null,
+          reasoning: null,
+        },
       });
       return;
     }
@@ -1156,46 +1206,45 @@ export class BridgeGateway {
       return;
     }
 
-    // Check if we have an API key for this provider
+    // Store selected model in session metadata AND as global preference
+    const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
+    const graphd = this.harness.getGraphD?.();
+    if (graphd) {
+      graphd.sessionUpdateMetadata(sessionKey, { selected_model: selectedModel });
+      // Also persist as global preference for next session
+      graphd.setUserPreference('user_prefs:selected_model', selectedModel);
+    }
+    this.harness.setSessionSelectedModel?.(sessionKey, selectedModel);
+
+    // Emit model_changed event
+    this.sendEvent(connectionId, {
+      type: 'model_changed',
+      data: {
+        selectedModel: selectedModel.model,
+        selectedProvider: selectedModel.provider,
+        provider: selectedModel.provider,
+        model: selectedModel.model,
+        reasoning,
+      },
+    });
+
+    // Emit provider_key_required event if missing, but keep selection persisted
     const hasKey = this.harness.hasApiKey(provider);
     if (!hasKey) {
-      // Emit provider_key_required event - TUI will route to providers screen
       this.sendEvent(connectionId, {
         type: 'provider_key_required',
         data: {
           provider,
           model,
-          reasoning,
+          reasoning: reasoning ?? undefined,
         },
       });
-      this.sendAuthResponse(connectionId, 'set_model', {
-        success: false,
-        error: `No API key configured for provider: ${provider}`,
-        provider_key_required: true,
-        provider,
-      });
-      return;
     }
-
-    // Store model override in session metadata AND as global preference
-    const modelOverride = { provider, model, reasoning };
-    const graphd = this.harness.getGraphD?.();
-    if (graphd) {
-      graphd.sessionUpdateMetadata(sessionKey, { model_override: modelOverride });
-      // Also persist as global preference for next session
-      graphd.setUserPreference('user_prefs:last_model', modelOverride);
-    }
-    this.harness.setSessionModelOverride?.(sessionKey, modelOverride);
-
-    // Emit model_changed event
-    this.sendEvent(connectionId, {
-      type: 'model_changed',
-      data: modelOverride,
-    });
 
     this.sendAuthResponse(connectionId, 'set_model', {
       success: true,
-      model_override: modelOverride,
+      selected_model: selectedModel,
+      provider_key_required: !hasKey,
     });
   }
 
@@ -1209,27 +1258,41 @@ export class BridgeGateway {
       return;
     }
 
-    // Get current model override from GraphD session metadata
+    // Get current selected model from GraphD session metadata
     const graphd = this.harness.getGraphD?.();
-    let modelOverride = null;
+    let selectedModel: { provider?: string; model?: string; reasoning?: string } | null = null;
     if (graphd) {
       const session = graphd.sessionGet(sessionKey);
-      modelOverride = (session?.metadata as Record<string, unknown>)?.model_override ?? null;
+      const metadata = (session?.metadata as Record<string, unknown>) ?? {};
+      selectedModel = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | null;
+      if (!selectedModel) {
+        selectedModel = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | null;
+        if (selectedModel) {
+          graphd.sessionUpdateMetadata(sessionKey, { selected_model: selectedModel, model_override: null });
+        }
+      }
+      if (!selectedModel) {
+        const storedSelected = graphd.getUserPreference<{ provider?: string; model?: string; reasoning?: string }>('user_prefs:selected_model');
+        if (storedSelected?.provider && storedSelected?.model) {
+          const normalized = storedSelected.reasoning
+            ? { provider: storedSelected.provider, model: storedSelected.model, reasoning: storedSelected.reasoning }
+            : { provider: storedSelected.provider, model: storedSelected.model };
+          selectedModel = normalized;
+          graphd.sessionUpdateMetadata(sessionKey, { selected_model: normalized, model_override: null });
+          this.harness.setSessionSelectedModel?.(sessionKey, normalized);
+        }
+      }
+    } else {
+      selectedModel = this.harness.getSessionSelectedModel?.(sessionKey) ?? null;
     }
-
-    // Get config default
-    const config = this.harness.getConfig();
-    const defaultAgent = config.agents[config.defaultAgent];
-    const configDefault = defaultAgent ? {
-      provider: defaultAgent.llm.provider,
-      model: defaultAgent.llm.model,
-    } : null;
 
     this.sendAuthResponse(connectionId, 'get_model', {
       success: true,
-      model_override: modelOverride,
-      config_default: configDefault,
-      active: modelOverride ?? configDefault,
+      selectedModel: selectedModel?.model ?? null,
+      selectedProvider: selectedModel?.provider ?? null,
+      provider: selectedModel?.provider ?? null,
+      model: selectedModel?.model ?? null,
+      reasoning: selectedModel?.reasoning ?? null,
     });
   }
 

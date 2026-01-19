@@ -82,7 +82,7 @@ export interface ProviderModelDefinition {
   /**
    * Available reasoning levels for this model.
    * - undefined: model does not support reasoning
-   * - ['on', 'off']: simple on/off reasoning (e.g., Claude extended thinking)
+   * - ['on', 'off']: simple on/off reasoning (e.g., Claude extended thinking, GLM thinking)
    * - ['low', 'medium', 'high']: OpenAI-style reasoning effort levels
    */
   reasoning?: ReasoningOptions;
@@ -179,7 +179,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     envVar: 'OPENAI_API_KEY',
     testEndpoint: 'https://api.openai.com/v1/models',
-    dashboardUrl: 'https://platform.openai.com/usage',
+    dashboardUrl: 'https://platform.openai.com/settings/organization/billing/overview',
   },
   'openai-compat': {
     id: 'openai-compat',
@@ -199,7 +199,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     envVar: 'CEREBRAS_API_KEY',
     testEndpoint: 'https://api.cerebras.ai/v1/models',
-    dashboardUrl: 'https://cloud.cerebras.ai/billing',
+    dashboardUrl: 'https://cloud.cerebras.ai/',
   },
   groq: {
     id: 'groq',
@@ -228,7 +228,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     envVar: 'GOOGLE_API_KEY',
     // Gemini uses query param auth, not header
     testEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
-    dashboardUrl: 'https://aistudio.google.com/apikey',
+    dashboardUrl: 'https://aistudio.google.com/app/apikey',
   },
   'z.ai-coder': {
     id: 'z.ai-coder',
@@ -237,11 +237,16 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
     responseFormat: 'json_object',
     models: [
-      { id: 'glm-4.7', name: 'GLM-4.7', description: 'Z.AI coding model' },
+      {
+        id: 'glm-4.7',
+        name: 'GLM-4.7',
+        description: 'Z.AI coding model with interleaved thinking',
+        reasoning: ['on', 'off'],
+      },
     ],
     envVar: 'ZAI_CODER_API_KEY',
     testEndpoint: 'https://api.z.ai/api/coding/paas/v4/models',
-    dashboardUrl: 'https://bigmodel.cn/console/finance',
+    dashboardUrl: 'https://open.bigmodel.cn/finance-center/bill/recharge-details',
   },
 };
 

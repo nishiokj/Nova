@@ -56,6 +56,7 @@ import { LocalProviderManager } from './local_providers.js';
 import { HookExecutor } from './hook_executor.js';
 import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
+import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -141,12 +142,13 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
       llm: {
         model: resolved.llm.model,
         provider: resolved.llm.provider,
-        displayProvider: resolved.llm.displayProvider,  // Original provider name for error messages
+        displayProvider: resolved.llm.displayProvider,
         maxTokens: resolved.llm.maxTokens,
         temperature: resolved.llm.temperature,
         baseUrl: resolved.llm.baseUrl,
         reasoning: resolved.llm.reasoning,
         fallback: resolved.llm.fallback,
+        // thinking config comes from provider registry at request time
       },
     };
   });
@@ -217,71 +219,6 @@ class AsyncEventQueue {
       },
     };
   }
-}
-
-/**
- * Logger interface for harness.
- */
-interface HarnessLogger {
-  info(msg: string, meta?: Record<string, unknown>): void;
-  debug(msg: string, meta?: Record<string, unknown>): void;
-  warning(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
-  flush?(): void;
-}
-
-/**
- * File-based logger for TUI compatibility.
- * Writes to logs/harness.log since console is captured by TUI.
- */
-function createFileLogger(logDir: string = 'logs'): HarnessLogger {
-  const logPath = path.join(logDir, 'harness.log');
-  try {
-    fs.mkdirSync(logDir, { recursive: true });
-  } catch {
-    // Directory may already exist
-  }
-
-  const stream = fs.createWriteStream(logPath, { flags: 'a' });
-  stream.on('error', () => {
-    // Swallow log write errors to avoid disrupting the harness.
-  });
-  const pendingLines: string[] = [];
-  let flushScheduled = false;
-
-  const flush = () => {
-    flushScheduled = false;
-    if (pendingLines.length === 0) return;
-    const chunk = pendingLines.join('');
-    pendingLines.length = 0;
-    try {
-      stream.write(chunk);
-    } catch {
-      // Ignore logging failures
-    }
-  };
-
-  const scheduleFlush = () => {
-    if (flushScheduled) return;
-    flushScheduled = true;
-    queueMicrotask(flush);
-  };
-
-  const write = (level: string, msg: string, meta?: Record<string, unknown>) => {
-    const timestamp = new Date().toISOString();
-    const metaStr = meta ? ` ${JSON.stringify(meta)}` : '';
-    const line = `${timestamp} [${level}] ${msg}${metaStr}\n`;
-    pendingLines.push(line);
-    scheduleFlush();
-  };
-
-  return {
-    info: (msg, meta) => write('INFO', msg, meta),
-    debug: (msg, meta) => write('DEBUG', msg, meta),
-    warning: (msg, meta) => write('WARN', msg, meta),
-    error: (msg, meta) => write('ERROR', msg, meta),
-    flush,
-  };
 }
 
 const consoleLogger: HarnessLogger = createFileLogger();
@@ -436,13 +373,13 @@ export class AgentHarness {
 
     this.toolRegistry.register({
       name: 'Skill',
-      description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like handoff, code review, etc.',
+      description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like code review, design, etc.',
       parameters: {
         type: 'object',
         properties: {
           skill: {
             type: 'string',
-            description: 'Skill name to execute (e.g., "handoff"), or "list" to see available skills',
+            description: 'Skill name to execute (e.g., "design-fork"), or "list" to see available skills',
           },
           args: {
             type: 'string',
@@ -634,16 +571,16 @@ export class AgentHarness {
     return store;
   }
 
-  setSessionModelOverride(sessionKey: string, override: ModelOverride | null): void {
+  setSessionSelectedModel(sessionKey: string, selectedModel: ModelOverride | null): void {
     const store = this.getOrCreateSessionStore(sessionKey);
-    if (override) {
-      store.setModelOverride(override);
+    if (selectedModel) {
+      store.setModelOverride(selectedModel);
     } else {
       store.clearModelOverride();
     }
   }
 
-  getSessionModelOverride(sessionKey: string): ModelOverride | null {
+  getSessionSelectedModel(sessionKey: string): ModelOverride | null {
     const entry = this.sessionStores.get(sessionKey);
     return entry?.store.getModelOverride() ?? null;
   }
@@ -688,6 +625,40 @@ export class AgentHarness {
 
     this.pruneSessionStores('run');
     const store = this.getOrCreateSessionStore(sessionKey);
+
+    // Attempt to mark execution as started; if another run is active, queue instead.
+    if (!store.startExecution(requestId)) {
+      this.logger.info('Message received during active execution, queueing for agent', {
+        sessionKey,
+        requestId,
+        executingRequestId: store.getExecutingRequestId(),
+        messagePreview: inputText.slice(0, 100),
+      });
+
+      // Queue the message - this adds it to context immediately
+      store.queueUserMessage(requestId, inputText);
+
+      // Persist to GraphD if available
+      this.persistUserMessage(sessionKey, requestId, inputText);
+
+      // Emit a status event indicating the message was queued
+      eventQueue.push(createStatusEvent('idle', 'Message queued - agent will see it on next turn'));
+
+      // Return a "queued" result - not an error, but also not a full response
+      const resultPromise = Promise.resolve({
+        requestId,
+        sessionKey,
+        success: true,
+        finalText: '',
+        paused: false,
+        toolsUsed: [],
+        durationMs: 0,
+        metadata: { queued: true, executingRequestId: store.getExecutingRequestId() },
+      } as AgentRunResult);
+
+      queueMicrotask(() => eventQueue.finish());
+      return { result: resultPromise, events: eventQueue };
+    }
 
     if (this.isGraphDReady()) {
       try {
@@ -775,32 +746,62 @@ export class AgentHarness {
 
         const llmAdapter = this.llmAdapter;
 
-        // Get model override from session store or GraphD metadata if set
-        let modelOverride: ModelOverride | undefined;
-        const cachedOverride = store.getModelOverride();
-        if (cachedOverride) {
-          modelOverride = cachedOverride;
+        // Get selected model from session store or GraphD metadata if set
+        let selectedModel: ModelOverride | undefined;
+        const cachedSelected = store.getModelOverride();
+        if (cachedSelected) {
+          selectedModel = cachedSelected;
         } else if (this.isGraphDReady()) {
           try {
             const session = this.graphd!.sessionGet(sessionKey);
             const metadata = session?.metadata as Record<string, unknown> | undefined;
-            const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const selectedFromMeta = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const legacyOverride = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const override = selectedFromMeta ?? legacyOverride;
             if (override?.provider && override?.model) {
-              modelOverride = {
+              selectedModel = {
                 provider: override.provider,
                 model: override.model,
                 reasoning: override.reasoning,
               };
-              store.setModelOverride(modelOverride);
-              this.logger.debug('Using model override from session', { modelOverride });
+              store.setModelOverride(selectedModel);
+              this.logger.debug('Using selected model from session', { selectedModel });
             }
           } catch {
-            // Ignore errors getting model override - use default
+            // Ignore errors getting selected model - use default
           }
         }
 
         // All requests go through orchestrator (loop-until-goal architecture)
-        const result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, modelOverride, store);
+        let result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+
+        while (!result.paused) {
+          const queuedMessages = store.drainQueuedMessages();
+          if (queuedMessages.length > 0) {
+            this.logger.info('Queued messages detected after execution, continuing run', {
+              sessionKey,
+              requestId,
+              queuedCount: queuedMessages.length,
+            });
+            result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+            continue;
+          }
+
+          if (store.endExecutionIfIdle()) {
+            break;
+          }
+
+          const lateQueued = store.drainQueuedMessages();
+          if (lateQueued.length === 0) {
+            break;
+          }
+          this.logger.info('Late queued messages detected, continuing run', {
+            sessionKey,
+            requestId,
+            queuedCount: lateQueued.length,
+          });
+          result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+        }
 
         if (result.paused && result.userPrompt) {
           // Pausing for user input - only emit user prompt event, not response
@@ -810,7 +811,8 @@ export class AgentHarness {
             result.userPrompt.options,
             result.userPrompt.context,
             result.userPrompt.multiSelect,
-            result.userPrompt.questionType
+            result.userPrompt.questionType,
+            result.userPrompt.questions
           ));
         } else {
           // Execution completed (success or failure) - emit response event
@@ -969,6 +971,16 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
+        // Mark execution as complete - allows new messages to start their own orchestrator
+        const queuedMessages = store.endExecution();
+        if (queuedMessages.length > 0) {
+          this.logger.info('Execution ended with queued messages', {
+            sessionKey,
+            requestId,
+            queuedCount: queuedMessages.length,
+          });
+        }
+
         // Run Stop hooks
         if (this.hookExecutor) {
           const hookContext: HookContext = {
@@ -1104,7 +1116,7 @@ export class AgentHarness {
     agentType: AgentType = 'standard',
     workingDir?: string,
     planMode?: boolean,
-    modelOverride?: ModelOverride,
+    selectedModel?: ModelOverride,
     store?: SessionStore
   ): Promise<AgentRunResult> {
     const hooks = this.createAgentHooks(context.sessionKey, requestId);
@@ -1127,12 +1139,38 @@ export class AgentHarness {
       hooks,
       planModeOptions,
       this.eventBus,
-      modelOverride
+      selectedModel
     );
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const result = await orchestrator.execute(context, goal, agentType, effectiveWorkingDir);
+
+    // Handle handoff: clear context and restart with spec as new goal
+    if (result.handoffSpec && store) {
+      this.logger.info('Handoff detected, clearing context and starting execution phase', {
+        sessionKey: context.sessionKey,
+        specLength: result.handoffSpec.length,
+      });
+
+      // Clear context for fresh execution
+      const freshContext = store.clearContext();
+      store.clearPausedState();
+
+      // Recursively run with the spec as the new goal (execution mode, not planning)
+      return this.runOrchestrator(
+        freshContext,
+        result.handoffSpec,
+        requestId,
+        emit,
+        llm,
+        'standard', // Use standard agent for execution
+        effectiveWorkingDir,
+        false, // planMode: false - now in execution mode
+        selectedModel,
+        store
+      );
+    }
 
     // Store paused state for resume, or clear it on completion
     if (result.paused) {
@@ -1202,6 +1240,36 @@ export class AgentHarness {
       return { result: resultPromise, events: eventQueue };
     }
 
+    // Attempt to mark execution as started; queue if another run is active.
+    if (!store.startExecution(requestId)) {
+      this.logger.warning('Resume called while another execution is in progress', {
+        sessionKey,
+        requestId,
+        executingRequestId: store.getExecutingRequestId(),
+      });
+
+      // Queue the answer as a user message for the running execution
+      const answerText = typeof answer === 'string' ? answer : JSON.stringify(answer);
+      store.queueUserMessage(requestId, answerText);
+      this.persistUserMessage(sessionKey, requestId, answerText);
+
+      eventQueue.push(createStatusEvent('idle', 'Answer queued - agent will see it on next turn'));
+
+      const resultPromise = Promise.resolve({
+        requestId,
+        sessionKey,
+        success: true,
+        finalText: '',
+        paused: false,
+        toolsUsed: [],
+        durationMs: 0,
+        metadata: { queued: true, executingRequestId: store.getExecutingRequestId() },
+      } as AgentRunResult);
+
+      queueMicrotask(() => eventQueue.finish());
+      return { result: resultPromise, events: eventQueue };
+    }
+
     if (this.isGraphDReady()) {
       try {
         const effectiveWorkingDir = workingDir ?? paused.workingDir;
@@ -1233,26 +1301,28 @@ export class AgentHarness {
         contextWindow.addMessage('user', answerText);
         const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, answerText);
 
-        // Get model override from session store or GraphD metadata if set
-        let modelOverride: ModelOverride | undefined;
-        const cachedOverride = store.getModelOverride();
-        if (cachedOverride) {
-          modelOverride = cachedOverride;
+        // Get selected model from session store or GraphD metadata if set
+        let selectedModel: ModelOverride | undefined;
+        const cachedSelected = store.getModelOverride();
+        if (cachedSelected) {
+          selectedModel = cachedSelected;
         } else if (this.isGraphDReady()) {
           try {
             const session = this.graphd!.sessionGet(sessionKey);
             const metadata = session?.metadata as Record<string, unknown> | undefined;
-            const override = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const selectedFromMeta = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const legacyOverride = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
+            const override = selectedFromMeta ?? legacyOverride;
             if (override?.provider && override?.model) {
-              modelOverride = {
+              selectedModel = {
                 provider: override.provider,
                 model: override.model,
                 reasoning: override.reasoning,
               };
-              store.setModelOverride(modelOverride);
+              store.setModelOverride(selectedModel);
             }
           } catch {
-            // Ignore errors getting model override - use default
+            // Ignore errors getting selected model - use default
           }
         }
 
@@ -1260,9 +1330,11 @@ export class AgentHarness {
         const normalizedAnswer = typeof answer === 'string'
           ? answer.trim().toLowerCase()
           : answer;
+        // Check for approval - TUI sends option label text (e.g., "Yes, handoff now")
+        // so we check startsWith('yes') in addition to exact matches
         const approvedHandoff = isPlanModeExit && (
+          (typeof normalizedAnswer === 'string' && normalizedAnswer.startsWith('yes')) ||
           normalizedAnswer === '0' ||
-          normalizedAnswer === 'yes' ||
           normalizedAnswer === 'y' ||
           normalizedAnswer === 'true' ||
           normalizedAnswer === 0 ||
@@ -1272,14 +1344,14 @@ export class AgentHarness {
         if (approvedHandoff) {
           contextWindow.addMessage(
             'system',
-            'User approved handoff. Immediately call Skill({ skill: "handoff" }) and do not continue planning.'
+            'User approved handoff. Set action: "handoff" with your complete implementation spec in handoffSpec. The system will automatically clear context and start execution with your spec.'
           );
         }
 
         // Re-run orchestrator with the stored goal/agentType/workingDir
         const effectiveWorkingDir = workingDir ?? paused.workingDir;
         const planMode = approvedHandoff ? false : paused.planMode;
-        const result = await this.runOrchestrator(
+        let result = await this.runOrchestrator(
           contextWindow,
           paused.goal,
           requestId,
@@ -1288,9 +1360,59 @@ export class AgentHarness {
           paused.agentType,
           effectiveWorkingDir,
           planMode,
-          modelOverride,
+          selectedModel,
           store
         );
+
+        while (!result.paused) {
+          const queuedMessages = store.drainQueuedMessages();
+          if (queuedMessages.length > 0) {
+            this.logger.info('Queued messages detected after resume execution, continuing run', {
+              sessionKey,
+              requestId,
+              queuedCount: queuedMessages.length,
+            });
+            result = await this.runOrchestrator(
+              contextWindow,
+              paused.goal,
+              requestId,
+              emit,
+              this.llmAdapter,
+              paused.agentType,
+              effectiveWorkingDir,
+              planMode,
+              selectedModel,
+              store
+            );
+            continue;
+          }
+
+          if (store.endExecutionIfIdle()) {
+            break;
+          }
+
+          const lateQueued = store.drainQueuedMessages();
+          if (lateQueued.length === 0) {
+            break;
+          }
+          this.logger.info('Late queued messages detected after resume, continuing run', {
+            sessionKey,
+            requestId,
+            queuedCount: lateQueued.length,
+          });
+          result = await this.runOrchestrator(
+            contextWindow,
+            paused.goal,
+            requestId,
+            emit,
+            this.llmAdapter,
+            paused.agentType,
+            effectiveWorkingDir,
+            planMode,
+            selectedModel,
+            store
+          );
+        }
 
         if (result.paused && result.userPrompt) {
           // Pausing for user input - only emit user prompt event, not response
@@ -1300,7 +1422,8 @@ export class AgentHarness {
             result.userPrompt.options,
             result.userPrompt.context,
             result.userPrompt.multiSelect,
-            result.userPrompt.questionType
+            result.userPrompt.questionType,
+            result.userPrompt.questions
           ));
         } else {
           // Execution completed (success or failure) - emit response event
@@ -1439,6 +1562,16 @@ export class AgentHarness {
           durationMs: 0,
         };
       } finally {
+        // Mark execution as complete
+        const queuedMessages = store.endExecution();
+        if (queuedMessages.length > 0) {
+          this.logger.info('Resume execution ended with queued messages', {
+            sessionKey,
+            requestId,
+            queuedCount: queuedMessages.length,
+          });
+        }
+
         // Run Stop hooks
         if (this.hookExecutor) {
           const hookContext: HookContext = {

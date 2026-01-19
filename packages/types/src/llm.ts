@@ -228,6 +228,8 @@ export interface LLMResponse {
   durationMs: number;
   responseId?: string; // OpenAI Responses API response ID
   usedFallback?: boolean; // True if fallback model was used due to primary failure
+  /** Reasoning/thinking trace from models that support it (e.g., GLM-4.7, Claude extended thinking) */
+  reasoningContent?: string;
 }
 
 // ============================================
