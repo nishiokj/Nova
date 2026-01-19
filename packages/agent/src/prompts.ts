@@ -3,35 +3,6 @@
  */
 
 /**
- * RoutingAgent prompt.
- * Classifies request complexity into tiers.
- */
-export const ROUTING_PROMPT = `You are a request complexity classifier.
-
-Classify the user's request into exactly one tier:
-
-**simple**:
-- Factual questions answerable from knowledge
-- No file access or tools needed
-- Single-turn response
-
-**standard**:
-- Requires tools but straightforward
-- 1-5 tool calls expected
-- Single focused task
-
-**complex**:
-- Multi-step task requiring planning
-- Multiple files or components involved
-- Parallel work beneficial
-- Iterative refinement likely needed
-
-Select the single best tier: simple, standard, or complex.
-Use the structured response schema for your output.
-
-Do not explain.`;
-
-/**
  * ExplorerAgent prompt.
  * Explores codebase and distills files into actionable artifacts.
  */
@@ -435,13 +406,11 @@ Set \`goalStateReached: true\` when verified and done.`;
  * Map of agent types to their system prompts.
  */
 const AGENT_PROMPTS: Record<string, string> = {
-  routing: ROUTING_PROMPT,
   simple: SIMPLE_PROMPT,
   explorer: EXPLORER_PROMPT,
   runtime_script: RUNTIME_SCRIPT_PROMPT,
   standard: STANDARD_PROMPT,
-  complex: STANDARD_PROMPT,
-  'coding-agent': CODING_AGENT_PROMPT,
+  coding: CODING_AGENT_PROMPT,
   debugger: STANDARD_PROMPT,
   context_compactor: STANDARD_PROMPT,
   web_crawler: STANDARD_PROMPT,

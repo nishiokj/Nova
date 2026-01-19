@@ -1603,15 +1603,64 @@ function buildHistoryLines(
   return lines;
 }
 
+/**
+ * Pre-process markdown text to add proper spacing around block elements.
+ * This ensures headers, code blocks, blockquotes, lists, and HRs have
+ * visual breathing room without requiring a full markdown AST parser.
+ */
+function normalizeMarkdownSpacing(text: string): string {
+  let result = text;
+
+  // Normalize line endings
+  result = result.replace(/\r\n/g, "\n");
+
+  // Headers: ensure blank line before (unless at start) and after
+  // Matches: # Header, ## Header, etc.
+  result = result.replace(/([^\n])\n(#{1,6}\s+)/g, "$1\n\n$2");  // blank before
+  result = result.replace(/(#{1,6}\s+[^\n]+)\n(?!\n)/g, "$1\n\n"); // blank after
+
+  // Code blocks (```): ensure blank line before and after
+  result = result.replace(/([^\n])\n(```)/g, "$1\n\n$2");  // blank before opening
+  result = result.replace(/(```[^\n]*)\n(?!\n)/g, "$1\n\n"); // blank after opening (for content)
+  result = result.replace(/([^\n])\n(```\s*$)/gm, "$1\n\n$2"); // blank before closing
+  result = result.replace(/(```)\n(?!\n)/g, "$1\n\n"); // blank after closing
+
+  // Horizontal rules (---, ***, ___): ensure blank line before and after
+  result = result.replace(/([^\n])\n([-*_]{3,}\s*)$/gm, "$1\n\n$2");  // blank before
+  result = result.replace(/^([-*_]{3,}\s*)\n(?!\n)/gm, "$1\n\n"); // blank after
+
+  // Blockquotes (> text): ensure blank line before first quote and after last
+  // Before: non-quote line followed by quote line
+  result = result.replace(/([^\n>].*)\n(>\s+)/g, "$1\n\n$2");
+  // After: quote line followed by non-quote, non-blank line
+  result = result.replace(/(^>\s+[^\n]*)\n(?!>)(?!\n)(.)/gm, "$1\n\n$2");
+
+  // Lists: ensure blank line before first item (when preceded by non-list content)
+  // Matches lines starting with -, *, +, or number.
+  result = result.replace(/([^\n\-*+\d].*)\n([\s]*[-*+]\s+)/g, "$1\n\n$2");
+  result = result.replace(/([^\n\-*+\d].*)\n([\s]*\d+\.\s+)/g, "$1\n\n$2");
+
+  // Collapse excessive blank lines (more than 2 consecutive) to just 2
+  result = result.replace(/\n{3,}/g, "\n\n");
+
+  // Trim leading/trailing whitespace but preserve internal structure
+  result = result.trim();
+
+  return result;
+}
+
 function wrapText(text: string, width: number): string[] {
   if (!text) {
     return [""];
   }
 
+  // Pre-process to add proper markdown block spacing
+  const normalized = normalizeMarkdownSpacing(text);
+
   const lines: string[] = [];
   const safeWidth = Math.max(10, width);
 
-  const rawLines = text.split("\n");
+  const rawLines = normalized.split("\n");
   for (const rawLine of rawLines) {
     if (!rawLine) {
       lines.push("");

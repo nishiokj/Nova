@@ -15,6 +15,9 @@ import { handle as handleAgentCompleted } from './agent-completed.js';
 import { handle as handleToolBatchCompleted } from './tool-batch-completed.js';
 import { handle as handleHookTest } from './hook-test.js';
 
+// Re-export stop hook types (used by OrchestratorConfig.stopHook)
+export { type StopHookHandler, type StopHookContext } from './stop-hook.js';
+
 type InternalHookType = InternalHookEvent['type'];
 type InternalHookEventMap = {
   [K in InternalHookType]: Extract<InternalHookEvent, { type: K }>;

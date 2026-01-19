@@ -255,6 +255,18 @@ export type InternalHookEvent =
     };
 
 /**
+ * Result from a stop hook - can block termination and re-inject a prompt.
+ */
+export interface StopHookResult {
+  /** Whether to block the stop and continue */
+  decision: 'allow' | 'block';
+  /** New prompt to inject (required if decision is 'block') */
+  reason?: string;
+  /** System message to prepend */
+  systemMessage?: string;
+}
+
+/**
  * Context passed to internal hook handlers.
  */
 export interface InternalHookContext {

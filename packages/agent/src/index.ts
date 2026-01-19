@@ -20,6 +20,7 @@ export type {
   InternalHookContext,
   InternalHookHandler,
   InternalHookQueue,
+  StopHookResult,
 } from './types.js';
 
 export { DEFAULT_AGENT_BUDGET, noopEmit, noopHookQueue } from './types.js';

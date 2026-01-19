@@ -49,6 +49,8 @@ export interface OrchestratorConfig {
   compactMaxFileCount: number;
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
+  /** Per-request stop hook - intercepts goal completion */
+  stopHook?: import('./hooks/stop-hook.js').StopHookHandler;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -128,6 +130,7 @@ export interface ModelOverride {
   model: string;
   reasoning?: string;
 }
+
 
 // --- Orchestrator ---
 
@@ -742,6 +745,46 @@ export class Orchestrator {
 
       // Check if initial work completed after processing ALL results (fixes race condition in parallel execution)
       if (initialWorkCompleted && this.workQueue.length === 0 && inProgress.size === 0) {
+        // Execute per-request stop hook before terminating - allows Ralph Loop and similar patterns
+        if (this.config.stopHook) {
+          const stopContext = {
+            workId: this.initialWorkId,
+            response: initialWorkResponse,
+            terminationReason: 'goal_state_reached',
+            iteration,
+            agentType,
+            sessionKey: context.sessionKey,
+          };
+
+          const stopResult = await this.config.stopHook(stopContext);
+
+          if (stopResult.decision === 'block' && stopResult.reason) {
+            // Re-inject prompt and continue the loop
+            this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
+              iteration,
+              promptPreview: stopResult.reason.slice(0, 100),
+            });
+
+            // Add system message if provided
+            if (stopResult.systemMessage) {
+              context.addMessage('system', stopResult.systemMessage);
+            }
+
+            // Create new work item with the injected prompt
+            const newItem = this.createWorkItem(stopResult.reason, agentType);
+            this.enqueue(newItem);
+
+            // Reset completion tracking
+            initialWorkCompleted = false;
+            initialWorkResponse = '';
+            this.completedWork.delete(this.initialWorkId);
+            this.initialWorkId = newItem.workId;
+
+            // Continue the loop
+            continue;
+          }
+        }
+
         this.emit(createEvent('goal_achieved', {
           goal,
           completed: this.completedWork.size,

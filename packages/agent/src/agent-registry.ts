@@ -6,11 +6,10 @@ import type { AgentConfig } from './types.js';
 import type { LLMRequestConfig, ToolDefinition } from 'types';
 
 const DEFAULT_AGENT_TOOL_DESCRIPTIONS: Record<string, string> = {
-  routing: 'Classify a request into simple/standard/complex.',
   explorer: 'Understand code before acting. Pass an objective ("how does auth work?", "find where X is implemented") and receive distilled artifacts—signatures, call graphs, side effects—without polluting your context with full files. ~50 tokens/artifact vs ~2000 tokens/file. Use Read only AFTER you know which specific file to edit.',
   runtime_script: 'Generate an executable WorkItem DAG for parallelizing multiple independent tasks. Use when you have 3+ independent subtasks that can run concurrently.',
   standard: 'Execute a focused task using available tools.',
-  'coding-agent': 'Delegate a self-contained programming task that can execute independently. Use for substantial coding work (new features, refactors) that doesn\'t require your intermediate results.',
+  coding: 'Delegate a self-contained programming task that can execute independently. Use for substantial coding work (new features, refactors) that doesn\'t require your intermediate results.',
   context_compactor: 'Compact conversation context to fit limits.',
   debugger: 'Diagnose and fix bugs or failures in the task.',
   web_crawler: 'Fetch and summarize information from the web.',
