@@ -53,9 +53,9 @@ interface HarnessLike {
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string): boolean;
-  setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('orchestrator').ModelOverride | null): void;
-  getSessionSelectedModel?(sessionKey: string, agentType: string): import('orchestrator').ModelOverride | null;
-  getAllSessionSelectedModels?(sessionKey: string): Map<string, import('orchestrator').ModelOverride>;
+  setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('agent').ModelSelection | null): void;
+  getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
+  getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
@@ -1556,10 +1556,16 @@ export class BridgeGateway {
 
   private streamRunEvents(requestId: string, handle: AgentRunHandle): void {
     const channel = runChannel(requestId);
+    console.error(`[GATEWAY DEBUG] streamRunEvents started: requestId=${requestId}, channel=${channel}`);
 
     void (async () => {
       try {
         for await (const event of handle.events) {
+          // Debug: trace events being published to bus
+          if (event.type === 'stream') {
+            const streamData = event.data as Record<string, unknown>;
+            console.error(`[GATEWAY DEBUG] Publishing stream event: channel=${channel}, request_id=${streamData?.request_id}, chunk_len=${String(streamData?.chunk ?? '').length}`);
+          }
           this.bus.publish(channel, event);
         }
       } catch (error) {

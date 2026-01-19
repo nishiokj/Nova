@@ -26,6 +26,11 @@ export {
   type RuntimeScriptOutput,
 } from './structured_output.js';
 export { createMicroQueue, type MicroQueue, type MicroQueueOptions } from './microqueue.js';
+export {
+  buildLLMRequestConfig,
+  type ModelSelectionInput,
+  type LLMParamsInput,
+} from './llm_config.js';
 
 // Re-export Zod for use across packages
 export { z } from 'zod';

@@ -45,10 +45,36 @@ import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
 import { formatDiffAsText } from "./diff.js";
-
-const DEFAULT_MAX_INPUT_LINES = 6;
-const STREAM_CURSOR_FRAMES = ["|", " "];
-const STATUS_SPINNER_FRAMES = ["-", "\\", "|", "/"];
+import {
+  DEFAULT_MAX_INPUT_LINES,
+  STREAM_CURSOR_FRAMES,
+  STATUS_SPINNER_FRAMES,
+  HORIZONTAL_PADDING,
+  TOP_PADDING,
+  BOTTOM_PADDING,
+  MIN_TERMINAL_WIDTH,
+  MIN_TERMINAL_HEIGHT,
+  DEFAULT_TERMINAL_WIDTH,
+  DEFAULT_TERMINAL_HEIGHT,
+  SCROLL_AMOUNT,
+  STATUS_TICK_INTERVAL,
+  SESSION_STALE_THRESHOLD,
+  NETWORK_TIMEOUT,
+  FILE_CACHE_REFRESH_INTERVAL,
+  CLEANUP_DELAY,
+  GRACEFUL_SHUTDOWN_DELAY,
+  ERROR_EXIT_DELAY,
+  RALPH_MAX_ITERATIONS,
+  RALPH_DEFAULT_PROMISE,
+  DEFAULT_GRAPHD_HOST,
+  DEFAULT_GRAPHD_PORT,
+  DEFAULT_EVENT_BUS_HOST,
+  DEFAULT_EVENT_BUS_PORT,
+  RANDOM_HEX_RADIX,
+  REQUEST_ID_SLICE_START,
+  REQUEST_ID_SLICE_END,
+  ISO_DATE_SLICE,
+} from "./constants.js";
 
 // ==================== Ralph Loop Argument Parsing ====================
 
@@ -84,8 +110,8 @@ function parseRalphArgs(arg: string): RalphArgs | null {
   }
 
   let remaining = trimmed;
-  let maxIterations = 20;
-  let completionPromise = "TASK COMPLETE";
+  let maxIterations = RALPH_MAX_ITERATIONS;
+  let completionPromise = RALPH_DEFAULT_PROMISE;
 
   // Extract --max-iterations=N or -n N
   const maxIterMatch = remaining.match(/--max-iterations=(\d+)/i);
@@ -153,17 +179,17 @@ function resolveGraphdUrl(): string {
   if (process.env.GRAPHD_URL) {
     return process.env.GRAPHD_URL;
   }
-  const host = process.env.GRAPHD_HOST ?? "127.0.0.1";
-  const port = process.env.GRAPHD_PORT ?? "9444";
+  const host = process.env.GRAPHD_HOST ?? DEFAULT_GRAPHD_HOST;
+  const port = process.env.GRAPHD_PORT ?? DEFAULT_GRAPHD_PORT;
   return `http://${host}:${port}`;
 }
 
 function resolveBusConfig(): { host: string; port: number } {
-  const host = process.env.EVENT_BUS_HOST ?? "127.0.0.1";
-  const portValue = Number(process.env.EVENT_BUS_PORT ?? "9555");
+  const host = process.env.EVENT_BUS_HOST ?? DEFAULT_EVENT_BUS_HOST;
+  const portValue = Number(process.env.EVENT_BUS_PORT ?? String(DEFAULT_EVENT_BUS_PORT));
   return {
     host,
-    port: Number.isFinite(portValue) ? portValue : 9555,
+    port: Number.isFinite(portValue) ? portValue : DEFAULT_EVENT_BUS_PORT,
   };
 }
 
@@ -270,7 +296,7 @@ async function fetchUsageData(): Promise<{
 
   // Build session summaries
   const now = Date.now() / 1000;
-  const staleThreshold = 5 * 60; // 5 minutes
+  const staleThreshold = SESSION_STALE_THRESHOLD;
 
   const sessions: UsageSessionSummary[] = rawSessions.map((raw) => {
     const messages = messagesBySession.get(raw.session_key) ?? [];
@@ -346,7 +372,7 @@ async function fetchUsageData(): Promise<{
   // Compute day stats
   const dayStatsMap = new Map<string, UsageDayStats>();
   for (const session of sessions) {
-    const date = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+    const date = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, ISO_DATE_SLICE);
     const existing = dayStatsMap.get(date) ?? {
       date,
       inputTokens: 0,
@@ -363,14 +389,14 @@ async function fetchUsageData(): Promise<{
   const dayStats = Array.from(dayStatsMap.values()).sort((a, b) => b.date.localeCompare(a.date));
 
   // Compute provider stats from actual provider data
-  const todayDate = new Date().toISOString().slice(0, 10);
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const todayDate = new Date().toISOString().slice(0, ISO_DATE_SLICE);
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, ISO_DATE_SLICE);
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, ISO_DATE_SLICE);
 
   const providerStatsMap = new Map<string, { today: number; week: number; month: number }>();
 
   for (const session of sessions) {
-    const sessionDate = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+    const sessionDate = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, ISO_DATE_SLICE);
 
     // Aggregate tokens by provider from actual session data
     for (const [provider, tokens] of session.providerTokens) {
@@ -444,7 +470,7 @@ function useTerminalSize() {
       stdout.write("\x1b[2J\x1b[H\x1b[3J");
 
       // Update size
-      setSize({ columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+      setSize({ columns: stdout.columns ?? DEFAULT_TERMINAL_WIDTH, rows: stdout.rows ?? DEFAULT_TERMINAL_HEIGHT });
 
       // Force a full re-render by updating a counter
       // This helps Ink recalculate its entire virtual buffer
@@ -482,11 +508,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   } | null>(null);
   const maxScrollRef = useRef(0);
   const historyHeightRef = useRef(0);
-  const width = Math.max(40, size.columns || 80);
-  const height = Math.max(10, size.rows || 24);
-  const HORIZONTAL_PADDING = 2;
-  const TOP_PADDING = 1;
-  const BOTTOM_PADDING = 3;
+  const width = Math.max(MIN_TERMINAL_WIDTH, size.columns || DEFAULT_TERMINAL_WIDTH);
+  const height = Math.max(MIN_TERMINAL_HEIGHT, size.rows || DEFAULT_TERMINAL_HEIGHT);
   const contentWidth = width - HORIZONTAL_PADDING * 2;
   const prompt = "> ";
   const widthRef = useRef(width);
@@ -532,7 +555,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     const interval = setInterval(() => {
       setStatusTick((tick) => tick + 1);
-    }, 150);
+    }, STATUS_TICK_INTERVAL);
     return () => {
       clearInterval(interval);
     };
@@ -563,7 +586,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       fileCache.refreshIfNeeded().catch(() => {
         // Ignore refresh failures.
       });
-    }, 5000);
+    }, FILE_CACHE_REFRESH_INTERVAL);
 
     fileCache.buildInitial();
 
@@ -654,7 +677,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       // Small delay to allow the close message to be sent
       setTimeout(() => {
         client.close();
-      }, 50);
+      }, CLEANUP_DELAY);
       clearInterval(refreshInterval);
       logger.close();
     };
@@ -670,13 +693,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   }, [width, snapshot.inputText, snapshot.cursor, store]);
 
   // Mouse wheel scrolling
-  const scrollAmount = 3; // lines to scroll per wheel tick
+
   useMouse({
     onScrollUp: () => {
-      store.scrollBy(scrollAmount, maxScrollRef.current);
+      store.scrollBy(SCROLL_AMOUNT, maxScrollRef.current);
     },
     onScrollDown: () => {
-      store.scrollBy(-scrollAmount, maxScrollRef.current);
+      store.scrollBy(-SCROLL_AMOUNT, maxScrollRef.current);
     },
   });
 
@@ -886,7 +909,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const handleStream = (data?: StreamData) => {
+    // Debug: trace stream events in TUI
+    console.error(`[TUI DEBUG] handleStream called: request_id=${data?.request_id}, chunk_len=${data?.chunk?.length ?? 0}, is_reasoning=${data?.is_reasoning}, is_final=${data?.is_final}`);
+
     if (!data?.request_id || data.chunk === undefined) {
+      console.error(`[TUI DEBUG] handleStream returning early - missing request_id or chunk`);
       return;
     }
 
@@ -2623,9 +2650,21 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   const scrollOffset = Math.min(snapshot.scrollOffset, maxScroll);
 
-  const endIndex = Math.max(0, totalHistoryLines - scrollOffset);
-  const startIndex = Math.max(0, endIndex - historyHeight);
-  const visibleHistoryLines = historyLines.slice(startIndex, endIndex);
+  // Calculate visible lines: we slice the content and pad top if needed
+  // scrollOffset = 0 = show most recent (bottom), maxScroll = show oldest (top)
+  const maxStartIndex = Math.max(0, totalHistoryLines - historyHeight);
+  const startIndex = Math.max(0, maxStartIndex - scrollOffset);
+  const slicedLines = historyLines.slice(startIndex, Math.min(startIndex + historyHeight, totalHistoryLines));
+
+  // Pad with empty lines at the top if content is shorter than viewport
+  // This keeps content at the bottom without using flex-end (which causes clipping)
+  const paddingCount = Math.max(0, historyHeight - slicedLines.length);
+  const paddingLines: HistoryLine[] = Array.from({ length: paddingCount }, (_, i) => ({
+    id: `padding-${i}`,
+    text: " ",
+    role: undefined,
+  }));
+  const visibleHistoryLines = [...paddingLines, ...slicedLines];
 
   const renderInputLines = () => {
     const lines = [...inputLayout.lines];
@@ -2824,7 +2863,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, contentWidth)}</Text>
       ))}
       {!isFullScreenMode && (
-        <Box flexDirection="column" flexGrow={1} justifyContent="flex-end">
+        <Box flexDirection="column" height={historyHeight}>
           {visibleHistoryLines.map((line, index) => {
             const isUserLine = line.role === "user";
             const bgColor = isUserLine ? colors.userBg : undefined;
@@ -3245,7 +3284,7 @@ const handleSignal = (signal: string) => {
     globalCleanup();
   }
   // Give cleanup time to complete before exit (session close + connection close)
-  setTimeout(() => process.exit(0), 500);
+  setTimeout(() => process.exit(0), GRACEFUL_SHUTDOWN_DELAY);
 };
 
 // Process-level last resort handlers - catch anything that slips through
@@ -3264,7 +3303,7 @@ process.on('uncaughtException', (error: Error) => {
   }
 
   // Exit with error code after brief delay for cleanup
-  setTimeout(() => process.exit(1), 100);
+  setTimeout(() => process.exit(1), ERROR_EXIT_DELAY);
 });
 
 process.on('unhandledRejection', (reason: unknown) => {

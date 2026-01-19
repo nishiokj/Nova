@@ -54,7 +54,7 @@ export class FileCache {
     }
   }
 
-  async refreshIfNeeded(minIntervalMs = 5000): Promise<void> {
+  async refreshIfNeeded(minIntervalMs = FILE_CACHE_REFRESH_INTERVAL): Promise<void> {
     const now = Date.now();
     if (this.refreshing || now - this.lastUpdate < minIntervalMs) {
       return;

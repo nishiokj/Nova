@@ -334,8 +334,21 @@ export interface AgentRegistry {
 }
 
 /**
+ * Model selection from SessionStore - identifies WHICH model to use.
+ * This is the runtime type for getModelSelection callback.
+ */
+export interface ModelSelectionInfo {
+  provider: string;
+  model: string;
+  reasoning?: string;
+}
+
+/**
  * Runtime configuration for Agent.
  * Groups all runtime dependencies into a single object.
+ *
+ * NOTE: llmConfig is REQUIRED - agents must receive pre-resolved config at creation.
+ * getModelSelection is only needed for sub-agent spawning.
  */
 export interface AgentRuntimeConfig {
   /** LLM adapter for inference */
@@ -348,10 +361,12 @@ export interface AgentRuntimeConfig {
   requestId: string;
   /** Optional agent registry for agent-as-tool */
   agentRegistry?: AgentRegistry;
-  /** LLM configuration for this agent */
-  llmConfig?: LLMRequestConfig;
+  /** LLM configuration for this agent - REQUIRED, pre-resolved at creation */
+  llmConfig: LLMRequestConfig;
   /** Optional lifecycle hooks */
   hooks?: AgentHooks;
   /** Optional internal hook queue */
   internalHookQueue?: InternalHookQueue;
+  /** Model selection callback for sub-agent spawning */
+  getModelSelection?: (agentType: string) => ModelSelectionInfo | null;
 }

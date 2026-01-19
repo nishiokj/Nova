@@ -18,14 +18,17 @@ import type {
   InternalHookEvent,
   InternalHookContext,
   InternalHookQueue,
+  ModelSelection,
 } from 'agent';
 import { Agent } from 'agent';
 import type { AgentRegistry } from 'agent';
 import { createWorkItem, type WorkItem } from 'work';
-import { createEvent, getCanonicalProvider, getProviderBaseUrl } from 'types';
-import type { ArtifactKind, ArtifactDiscoveredData, AgentEvent, LLMProvider, LLMRequestConfig } from 'types';
+import { createEvent } from 'types';
+import type { ArtifactKind, ArtifactDiscoveredData, AgentEvent, LLMRequestConfig } from 'types';
 import type { EventBusProtocol } from 'comms-bus';
+import { buildLLMRequestConfig } from 'shared';
 import { getHandlers } from './hooks/index.js';
+import { BoundsChecker } from './bounds-checker.js';
 
 // --- Types ---
 
@@ -121,17 +124,6 @@ export interface PlanModeOptions {
   toolFilter: (tools: string[]) => string[];
 }
 
-/**
- * Model override for session-level model selection.
- * When set, overrides the default agent LLM config.
- */
-export interface ModelOverride {
-  provider: string;
-  model: string;
-  reasoning?: string;
-}
-
-
 // --- Orchestrator ---
 
 /**
@@ -147,9 +139,10 @@ export class Orchestrator {
   private agentRegistry?: AgentRegistry;
   private hooks?: AgentHooks;
   private planModeOptions?: PlanModeOptions;
-  private getModelSelection?: (agentType: string) => ModelOverride | null;
+  private getModelSelection?: (agentType: string) => ModelSelection | null;
   private eventBus?: EventBusProtocol;
   private hookQueue: InternalHookQueue;
+  private boundsChecker: BoundsChecker;
 
   // Work queue state for DAG-based execution
   private workQueue: WorkItem[] = [];
@@ -167,7 +160,7 @@ export class Orchestrator {
     hooks?: AgentHooks,
     planModeOptions?: PlanModeOptions,
     eventBus?: EventBusProtocol,
-    getModelSelection?: (agentType: string) => ModelOverride | null
+    getModelSelection?: (agentType: string) => ModelSelection | null
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
@@ -181,6 +174,11 @@ export class Orchestrator {
     this.getModelSelection = getModelSelection;
     this.eventBus = eventBus;
     this.hookQueue = this.createHookQueue();
+    this.boundsChecker = new BoundsChecker({
+      maxIterations: this.config.maxIterations,
+      maxDurationMs: this.config.maxDurationMs,
+      maxToolCalls: this.config.maxToolCalls,
+    });
   }
 
   /**
@@ -650,7 +648,7 @@ export class Orchestrator {
             context.addAgentResultContext(result);
             terminalResult = this.createResult({
               success: false,
-              response: '',
+              response: result.response ?? '',
               paused: true,
               userPrompt: result.userPrompt,
               terminationReason: 'user_input_required',
@@ -859,25 +857,11 @@ export class Orchestrator {
   ): LLMRequestConfig {
     const modelSelection = this.getModelSelection?.(agentType);
     if (!modelSelection) {
-      // NO SILENT FALLBACK: Fail explicitly if no model selection
       this.log('error', `No model selection for agent type '${agentType}'. User must select a model via /models.`, { agentType });
       throw new Error(`No model configured for agent type '${agentType}'. Please select a model using /models before using this agent.`);
     }
 
-    const canonicalProvider = getCanonicalProvider(modelSelection.provider);
-    const baseUrl = getProviderBaseUrl(modelSelection.provider);
-
-    return {
-      provider: canonicalProvider,
-      model: modelSelection.model,
-      maxTokens: llmParams.maxTokens,
-      temperature: llmParams.temperature,
-      displayProvider: modelSelection.provider,
-      ...(baseUrl ? { baseUrl } : {}),
-      ...(modelSelection.reasoning ? {
-        reasoning: { effort: modelSelection.reasoning as 'low' | 'medium' | 'high' }
-      } : {}),
-    };
+    return buildLLMRequestConfig(modelSelection, llmParams);
   }
 
   /**
@@ -946,20 +930,7 @@ export class Orchestrator {
     }
 
     const config = this.agentRegistry.getConfig(agentType);
-    const canonicalProvider = getCanonicalProvider(modelSelection.provider);
-    const baseUrl = getProviderBaseUrl(modelSelection.provider);
-
-    return {
-      provider: canonicalProvider,
-      model: modelSelection.model,
-      maxTokens: config.llmParams.maxTokens,
-      temperature: config.llmParams.temperature,
-      displayProvider: modelSelection.provider,
-      ...(baseUrl ? { baseUrl } : {}),
-      ...(modelSelection.reasoning ? {
-        reasoning: { effort: modelSelection.reasoning as 'low' | 'medium' | 'high' }
-      } : {}),
-    };
+    return buildLLMRequestConfig(modelSelection, config.llmParams);
   }
 
   private createWorkItem(goal: string, agentType: string): WorkItem {

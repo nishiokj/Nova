@@ -2,8 +2,14 @@
  * Agent Module - Barrel Export
  */
 
-export { Agent, resetProviderCircuit, getCircuitStatus, type ModelSelection } from './agent.js';
+export { Agent, type ModelSelection } from './agent.js';
 export { AgentRegistry } from './agent-registry.js';
+export {
+  circuitBreakerRegistry,
+  resetProviderCircuit,
+  getCircuitStatus,
+} from './circuit-breaker-registry.js';
+export { TOOL_LIMITS, getMaxOutputLength, isRefusal, REFUSAL_PATTERNS } from './constants.js';
 export type {
   AgentType,
   AgentBudget,

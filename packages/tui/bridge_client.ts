@@ -352,11 +352,14 @@ export class BridgeClient extends EventEmitter {
     data: Record<string, unknown>
   ): Promise<T> {
     return new Promise((resolve) => {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
       const handler = (event: BridgeEvent) => {
         if (event.type === 'response') {
           const responseData = event.data as ResponseData;
           const metadata = responseData?.metadata as { kind?: string; payload?: unknown } | undefined;
           if (metadata?.kind === type) {
+            if (timeoutId) clearTimeout(timeoutId);
             this.off('event', handler);
             resolve((metadata.payload ?? { success: false }) as T);
           }
@@ -365,8 +368,7 @@ export class BridgeClient extends EventEmitter {
 
       this.on('event', handler);
 
-      // Timeout after 30 seconds
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         this.off('event', handler);
         resolve({ success: false, error: 'Request timeout' } as unknown as T);
       }, 30000);
@@ -376,8 +378,16 @@ export class BridgeClient extends EventEmitter {
   }
 
   private handleBusEvent(payload: unknown): void {
+    // Debug: trace events received from bus
+    const payloadType = (payload as Record<string, unknown>)?.type;
+    if (payloadType === 'stream') {
+      const streamData = (payload as Record<string, unknown>)?.data as Record<string, unknown>;
+      console.error(`[BRIDGE_CLIENT DEBUG] stream event received: request_id=${streamData?.request_id}, chunk_len=${String(streamData?.chunk ?? '').length}`);
+    }
+
     const event = validateBridgeEvent(payload);
     if (!event) {
+      console.error(`[BRIDGE_CLIENT DEBUG] validateBridgeEvent returned null for type=${payloadType}`);
       this.emit('error', { message: 'Malformed event from bridge' });
       return;
     }

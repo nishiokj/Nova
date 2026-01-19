@@ -12,8 +12,15 @@ export {
   type OrchestratorLogger,
   type TerminationReason,
   type PlanModeOptions,
-  type ModelOverride,
 } from './orchestrator.js';
+
+export {
+  BoundsChecker,
+  type ExecutionLimits,
+  type ExecutionState,
+  type BoundViolation,
+  type BoundsCheckResult,
+} from './bounds-checker.js';
 
 export {
   registerHook,

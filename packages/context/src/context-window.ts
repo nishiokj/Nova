@@ -320,20 +320,11 @@ export function buildSystemMessage(
   goal: string,
   objective: string,
   behavioralRules: string = '',
-  workspaceRoot: string = '',
-  constraints?: {
-    iteration?: number;
-    maxIterations?: number;
-    toolCallsUsed?: number;
-    maxToolCalls?: number;
-    elapsedMs?: number;
-    maxDurationMs?: number;
-  }
+  workspaceRoot: string = ''
 ): string {
   const workspaceInfo = workspaceRoot
     ? `\nWORKSPACE ROOT: ${workspaceRoot}\nAll file paths are relative to this workspace unless specified as absolute.\n`
     : '';
-  const constraintsInfo = constraints ? formatConstraints(constraints) : '';
 
   // Only show GOAL if it differs meaningfully from OBJECTIVE
   const goalSection = goal !== objective && goal.length > 0
@@ -342,40 +333,13 @@ export function buildSystemMessage(
 
   return `OBJECTIVE: ${objective}
 ${goalSection}${workspaceInfo}
-${behavioralRules}${constraintsInfo ? `\n${constraintsInfo}` : ''}
-
+${behavioralRules}
 RESPONSE ACTIONS:
 - action: "done" + goalStateReached: true → objective complete
 - action: "need_user_input" + userPrompt → blocked, need user decision
 - action: "continue" → progress made, more work needed
 
 Do not repeat identical tool calls.`;
-}
-
-function formatConstraints(constraints: {
-  iteration?: number;
-  maxIterations?: number;
-  toolCallsUsed?: number;
-  maxToolCalls?: number;
-  elapsedMs?: number;
-  maxDurationMs?: number;
-}): string {
-  const lines: string[] = [];
-  if (typeof constraints.iteration === 'number' && typeof constraints.maxIterations === 'number') {
-    lines.push(`- Iteration: ${constraints.iteration} of ${constraints.maxIterations}`);
-  }
-  if (typeof constraints.toolCallsUsed === 'number' && typeof constraints.maxToolCalls === 'number') {
-    lines.push(`- Tool calls used: ${constraints.toolCallsUsed} of ${constraints.maxToolCalls}`);
-  } else if (typeof constraints.maxToolCalls === 'number') {
-    lines.push(`- Max tool calls: ${constraints.maxToolCalls}`);
-  }
-  if (typeof constraints.elapsedMs === 'number' && typeof constraints.maxDurationMs === 'number') {
-    lines.push(`- Elapsed time: ${constraints.elapsedMs}ms of ${constraints.maxDurationMs}ms`);
-  } else if (typeof constraints.maxDurationMs === 'number') {
-    lines.push(`- Max duration: ${constraints.maxDurationMs}ms`);
-  }
-  if (lines.length === 0) return '';
-  return `  CONSTRAINTS:\n  ${lines.join('\n  ')}`;
 }
 
 // =========================================================================

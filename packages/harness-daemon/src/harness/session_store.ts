@@ -1,7 +1,7 @@
 import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
 import type { ContextWindowSnapshot } from 'types';
-import type { ModelOverride } from 'orchestrator';
+import type { ModelSelection } from 'agent';
 
 export interface HarnessLogger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -35,7 +35,7 @@ export class SessionStore {
   private readonly logger: HarnessLogger;
   private context: ContextWindow | null = null;
   private pausedState: PausedState | null = null;
-  private modelSelections = new Map<string, ModelOverride>();
+  private modelSelections = new Map<string, ModelSelection>();
 
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
@@ -151,7 +151,7 @@ export class SessionStore {
   /**
    * Set model selection for a specific agent type.
    */
-  setModelSelection(agentType: string, selection: ModelOverride): void {
+  setModelSelection(agentType: string, selection: ModelSelection): void {
     this.modelSelections.set(agentType, selection);
   }
 
@@ -159,14 +159,14 @@ export class SessionStore {
    * Get model selection for a specific agent type.
    * Returns null if no selection exists for that agent type.
    */
-  getModelSelection(agentType: string): ModelOverride | null {
+  getModelSelection(agentType: string): ModelSelection | null {
     return this.modelSelections.get(agentType) ?? null;
   }
 
   /**
    * Get all model selections (for persistence).
    */
-  getAllModelSelections(): Map<string, ModelOverride> {
+  getAllModelSelections(): Map<string, ModelSelection> {
     return new Map(this.modelSelections);
   }
 

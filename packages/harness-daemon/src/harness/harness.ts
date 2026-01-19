@@ -17,13 +17,14 @@ import {
   type AgentHooks,
   type ToolHookResult,
   type EnvironmentContext,
+  type ModelSelection,
   getAgentPrompt,
   buildAgentConfig,
   getPlanningPromptAddendum,
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
-import { Orchestrator, type ModelOverride } from 'orchestrator';
+import { Orchestrator } from 'orchestrator';
 import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
@@ -564,7 +565,7 @@ export class AgentHarness {
     return store;
   }
 
-  setSessionSelectedModel(sessionKey: string, agentType: string, selectedModel: ModelOverride | null): void {
+  setSessionSelectedModel(sessionKey: string, agentType: string, selectedModel: ModelSelection | null): void {
     const store = this.getOrCreateSessionStore(sessionKey);
     if (selectedModel) {
       store.setModelSelection(agentType, selectedModel);
@@ -575,12 +576,12 @@ export class AgentHarness {
     }
   }
 
-  getSessionSelectedModel(sessionKey: string, agentType: string): ModelOverride | null {
+  getSessionSelectedModel(sessionKey: string, agentType: string): ModelSelection | null {
     const entry = this.sessionStores.get(sessionKey);
     return entry?.store.getModelSelection(agentType) ?? null;
   }
 
-  getAllSessionSelectedModels(sessionKey: string): Map<string, ModelOverride> {
+  getAllSessionSelectedModels(sessionKey: string): Map<string, ModelSelection> {
     const entry = this.sessionStores.get(sessionKey);
     return entry?.store.getAllModelSelections() ?? new Map();
   }
@@ -685,8 +686,17 @@ export class AgentHarness {
     const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
     const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
+      // Debug: trace event flow from EventBus to TUI
+      if (event.type === 'agent_message') {
+        const msgData = event.data as { message?: string };
+        console.error(`[HARNESS DEBUG] agent_message received: requestId=${event.requestId}, runId=${runId}, msgLen=${msgData?.message?.length ?? 0}`);
+      }
       const bridgeEvent = translateAgentEvent(event);
       if (bridgeEvent) {
+        if (bridgeEvent.type === 'stream' && bridgeEvent.data) {
+          const streamData = bridgeEvent.data as { request_id?: string; chunk?: string };
+          console.error(`[HARNESS DEBUG] stream event translated: request_id=${streamData.request_id}, chunkLen=${streamData.chunk?.length ?? 0}`);
+        }
         eventQueue.push(bridgeEvent);
       }
     });
@@ -802,7 +812,20 @@ export class AgentHarness {
         }
 
         if (result.paused && result.userPrompt) {
-          // Pausing for user input - only emit user prompt event, not response
+          // Pausing for user input - emit response first (if any), then user prompt
+          if (result.finalText) {
+            eventQueue.push(
+              createResponseEvent(
+                requestId,
+                true, // Partial success - got response before pause
+                result.finalText,
+                result.toolsUsed,
+                result.durationMs,
+                undefined,
+                result.metadata
+              )
+            );
+          }
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
             result.userPrompt.question,
@@ -1405,7 +1428,20 @@ export class AgentHarness {
         }
 
         if (result.paused && result.userPrompt) {
-          // Pausing for user input - only emit user prompt event, not response
+          // Pausing for user input - emit response first (if any), then user prompt
+          if (result.finalText) {
+            eventQueue.push(
+              createResponseEvent(
+                requestId,
+                true, // Partial success - got response before pause
+                result.finalText,
+                result.toolsUsed,
+                result.durationMs,
+                undefined,
+                result.metadata
+              )
+            );
+          }
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
             result.userPrompt.question,
