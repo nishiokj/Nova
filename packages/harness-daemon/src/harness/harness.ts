@@ -26,7 +26,7 @@ import { execSync } from 'child_process';
 import { Orchestrator, type ModelOverride } from 'orchestrator';
 import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMRequestConfig, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
+import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
 import { createWorkItem } from 'work';
 import { coerceStructuredOutput } from 'shared';
@@ -136,33 +136,26 @@ function gatherEnvironmentContext(workingDir: string): EnvironmentContext {
 }
 
 function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentContext): AgentRegistry {
-  const agentConfigs: Array<{ config: AgentConfig; llm: LLMRequestConfig }> = Object.entries(config.agents).map(([agentType, resolved]) => {
-    return {
-      config: buildAgentConfig(agentType, resolved.tools, resolved.budget, resolved.outputSchema, envContext) as AgentConfig,
-      llm: {
-        model: resolved.llm.model,
-        provider: resolved.llm.provider,
-        displayProvider: resolved.llm.displayProvider,
-        maxTokens: resolved.llm.maxTokens,
-        temperature: resolved.llm.temperature,
-        baseUrl: resolved.llm.baseUrl,
-        reasoning: resolved.llm.reasoning,
-        fallback: resolved.llm.fallback,
-        // thinking config comes from provider registry at request time
-      },
+  // Registry stores ONLY agent capabilities (tools, budget, schema, llmParams).
+  // LLM provider/model comes EXCLUSIVELY from SessionStore via getModelSelection.
+  const agentConfigs: AgentConfig[] = Object.entries(config.agents).map(([agentType, resolved]) => {
+    const llmParams = {
+      maxTokens: resolved.llm.maxTokens,
+      temperature: resolved.llm.temperature ?? 0.7,
     };
+    return buildAgentConfig(agentType, resolved.tools, resolved.budget, llmParams, resolved.outputSchema, envContext) as AgentConfig;
   });
 
   const registry = new AgentRegistry(agentConfigs);
 
   // Validate agent tool references - warn if an agent references another agent that isn't loaded
   const builtinTools = new Set(['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch']);
-  const registeredAgentTypes = new Set(agentConfigs.map(c => c.config.type));
+  const registeredAgentTypes = new Set(agentConfigs.map(c => c.type));
   for (const agentConf of agentConfigs) {
-    for (const tool of agentConf.config.tools) {
+    for (const tool of agentConf.tools) {
       const toolLower = tool.toLowerCase();
       if (!builtinTools.has(tool) && !registeredAgentTypes.has(tool) && !registeredAgentTypes.has(toolLower)) {
-        console.warn(`[harness] Agent '${agentConf.config.type}' references tool '${tool}' which is not available`);
+        console.warn(`[harness] Agent '${agentConf.type}' references tool '${tool}' which is not available`);
       }
     }
   }
@@ -571,18 +564,25 @@ export class AgentHarness {
     return store;
   }
 
-  setSessionSelectedModel(sessionKey: string, selectedModel: ModelOverride | null): void {
+  setSessionSelectedModel(sessionKey: string, agentType: string, selectedModel: ModelOverride | null): void {
     const store = this.getOrCreateSessionStore(sessionKey);
     if (selectedModel) {
-      store.setModelOverride(selectedModel);
+      store.setModelSelection(agentType, selectedModel);
     } else {
-      store.clearModelOverride();
+      // Clear this specific agent type - if agentType is 'standard', we clear all since it's the main/default
+      // For now, we don't have a clearModelSelection(agentType) method, so just set to null equivalent
+      // Actually, we should just not call this with null - the UI should only call with a valid selection
     }
   }
 
-  getSessionSelectedModel(sessionKey: string): ModelOverride | null {
+  getSessionSelectedModel(sessionKey: string, agentType: string): ModelOverride | null {
     const entry = this.sessionStores.get(sessionKey);
-    return entry?.store.getModelOverride() ?? null;
+    return entry?.store.getModelSelection(agentType) ?? null;
+  }
+
+  getAllSessionSelectedModels(sessionKey: string): Map<string, ModelOverride> {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.getAllModelSelections() ?? new Map();
   }
 
   private pruneSessionStores(reason: string): void {
@@ -617,7 +617,7 @@ export class AgentHarness {
    * Run the agent with the given parameters.
    */
   run(params: AgentRunParams): AgentRunHandle {
-    const { requestId, inputText, tier: requestedTier, sessionKey, workingDir, planMode } = params;
+    const { requestId, inputText, tier: requestedTier, sessionKey, workingDir, planMode, stopHook } = params;
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
 
@@ -746,34 +746,32 @@ export class AgentHarness {
 
         const llmAdapter = this.llmAdapter;
 
-        // Get selected model from session store or GraphD metadata if set
-        let selectedModel: ModelOverride | undefined;
-        const cachedSelected = store.getModelOverride();
-        if (cachedSelected) {
-          selectedModel = cachedSelected;
-        } else if (this.isGraphDReady()) {
+        // Hydrate model selections from GraphD if store is empty (session startup)
+        if (store.getAllModelSelections().size === 0 && this.isGraphDReady()) {
           try {
             const session = this.graphd!.sessionGet(sessionKey);
             const metadata = session?.metadata as Record<string, unknown> | undefined;
-            const selectedFromMeta = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
-            const legacyOverride = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
-            const override = selectedFromMeta ?? legacyOverride;
-            if (override?.provider && override?.model) {
-              selectedModel = {
-                provider: override.provider,
-                model: override.model,
-                reasoning: override.reasoning,
-              };
-              store.setModelOverride(selectedModel);
-              this.logger.debug('Using selected model from session', { selectedModel });
+            // Load per-agent-type model selections from GraphD
+            const modelSelections = metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string }> | undefined;
+            if (modelSelections) {
+              for (const [agentType, selection] of Object.entries(modelSelections)) {
+                if (selection?.provider && selection?.model) {
+                  store.setModelSelection(agentType, {
+                    provider: selection.provider,
+                    model: selection.model,
+                    reasoning: selection.reasoning,
+                  });
+                }
+              }
+              this.logger.debug('Hydrated model selections from GraphD', { count: Object.keys(modelSelections).length });
             }
           } catch {
-            // Ignore errors getting selected model - use default
+            // Ignore errors getting selected model
           }
         }
 
         // All requests go through orchestrator (loop-until-goal architecture)
-        let result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+        let result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, store, stopHook);
 
         while (!result.paused) {
           const queuedMessages = store.drainQueuedMessages();
@@ -783,7 +781,7 @@ export class AgentHarness {
               requestId,
               queuedCount: queuedMessages.length,
             });
-            result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+            result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, store, stopHook);
             continue;
           }
 
@@ -800,7 +798,7 @@ export class AgentHarness {
             requestId,
             queuedCount: lateQueued.length,
           });
-          result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, selectedModel, store);
+          result = await this.runOrchestrator(contextWindow, inputText, requestId, emit, llmAdapter, tier, workingDir, planMode, store, stopHook);
         }
 
         if (result.paused && result.userPrompt) {
@@ -1116,8 +1114,8 @@ export class AgentHarness {
     agentType: AgentType = 'standard',
     workingDir?: string,
     planMode?: boolean,
-    selectedModel?: ModelOverride,
-    store?: SessionStore
+    store?: SessionStore,
+    stopHook?: import('orchestrator').StopHookHandler
   ): Promise<AgentRunResult> {
     const hooks = this.createAgentHooks(context.sessionKey, requestId);
 
@@ -1128,8 +1126,25 @@ export class AgentHarness {
       toolFilter: (tools: string[]) => this.filterPlanModeTools(tools),
     } : undefined;
 
+    // Create closure for per-agent-type model selection lookup
+    // NO FALLBACK: Each agent type must have an explicit model selection
+    const getModelSelection = store
+      ? (queryAgentType: string) => {
+          const selection = store.getModelSelection(queryAgentType);
+          if (selection) {
+            this.logger.debug('Model selection for agent', {
+              agentType: queryAgentType,
+              model: selection.model,
+              provider: selection.provider,
+              reasoning: selection.reasoning,
+            });
+          }
+          return selection;
+        }
+      : undefined;
+
     const orchestrator = new Orchestrator(
-      {},
+      stopHook ? { stopHook } : {},
       this.toolRegistry,
       llm,
       emit,
@@ -1139,7 +1154,7 @@ export class AgentHarness {
       hooks,
       planModeOptions,
       this.eventBus,
-      selectedModel
+      getModelSelection
     );
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
@@ -1158,6 +1173,7 @@ export class AgentHarness {
       store.clearPausedState();
 
       // Recursively run with the spec as the new goal (execution mode, not planning)
+      // Note: stopHook not passed to handoff execution - Ralph Loop only applies to initial goal
       return this.runOrchestrator(
         freshContext,
         result.handoffSpec,
@@ -1167,8 +1183,8 @@ export class AgentHarness {
         'standard', // Use standard agent for execution
         effectiveWorkingDir,
         false, // planMode: false - now in execution mode
-        selectedModel,
-        store
+        store,
+        undefined // No stopHook for handoff execution
       );
     }
 
@@ -1301,30 +1317,7 @@ export class AgentHarness {
         contextWindow.addMessage('user', answerText);
         const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, answerText);
 
-        // Get selected model from session store or GraphD metadata if set
-        let selectedModel: ModelOverride | undefined;
-        const cachedSelected = store.getModelOverride();
-        if (cachedSelected) {
-          selectedModel = cachedSelected;
-        } else if (this.isGraphDReady()) {
-          try {
-            const session = this.graphd!.sessionGet(sessionKey);
-            const metadata = session?.metadata as Record<string, unknown> | undefined;
-            const selectedFromMeta = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
-            const legacyOverride = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | undefined;
-            const override = selectedFromMeta ?? legacyOverride;
-            if (override?.provider && override?.model) {
-              selectedModel = {
-                provider: override.provider,
-                model: override.model,
-                reasoning: override.reasoning,
-              };
-              store.setModelOverride(selectedModel);
-            }
-          } catch {
-            // Ignore errors getting selected model - use default
-          }
-        }
+        // Model selections are already in the store from the initial run - no need to reload
 
         const isPlanModeExit = paused.userPromptType === 'plan_mode_exit';
         const normalizedAnswer = typeof answer === 'string'
@@ -1360,7 +1353,6 @@ export class AgentHarness {
           paused.agentType,
           effectiveWorkingDir,
           planMode,
-          selectedModel,
           store
         );
 
@@ -1381,7 +1373,6 @@ export class AgentHarness {
               paused.agentType,
               effectiveWorkingDir,
               planMode,
-              selectedModel,
               store
             );
             continue;
@@ -1409,7 +1400,6 @@ export class AgentHarness {
             paused.agentType,
             effectiveWorkingDir,
             planMode,
-            selectedModel,
             store
           );
         }

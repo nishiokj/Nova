@@ -195,6 +195,22 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
       };
     }
 
+    case 'agent_reasoning': {
+      const reasoningData = data as { content?: string; agentType?: string; isFinal?: boolean };
+      // Handle both content chunks and final marker (empty content with isFinal=true)
+      if (!reasoningData.content && !reasoningData.isFinal) return null;
+      return {
+        type: 'stream',
+        data: {
+          request_id: requestId,
+          chunk: reasoningData.content ?? '',
+          chunk_index: -1,
+          is_final: reasoningData.isFinal ?? false,
+          is_reasoning: true,  // Flag for TUI to render distinctly
+        },
+      };
+    }
+
     case 'artifact_discovered': {
       const artData = data as {
         artifact: { name?: string; kind?: string };

@@ -56,7 +56,7 @@ export interface OrchestratorConfig {
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   maxIterations: 70,
   maxToolCalls: 250,
-  maxDurationMs: 1000_000, // 5 minutes
+  maxDurationMs: 300_000, // 5 minutes
   hookTimeoutMs: 5000,
   compactTriggerPercent: 0.70,
   compactResetPercent: 0.7,
@@ -147,7 +147,7 @@ export class Orchestrator {
   private agentRegistry?: AgentRegistry;
   private hooks?: AgentHooks;
   private planModeOptions?: PlanModeOptions;
-  private modelOverride?: ModelOverride;
+  private getModelSelection?: (agentType: string) => ModelOverride | null;
   private eventBus?: EventBusProtocol;
   private hookQueue: InternalHookQueue;
 
@@ -167,7 +167,7 @@ export class Orchestrator {
     hooks?: AgentHooks,
     planModeOptions?: PlanModeOptions,
     eventBus?: EventBusProtocol,
-    modelOverride?: ModelOverride
+    getModelSelection?: (agentType: string) => ModelOverride | null
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
@@ -178,7 +178,7 @@ export class Orchestrator {
     this.agentRegistry = agentRegistry;
     this.hooks = hooks;
     this.planModeOptions = planModeOptions;
-    this.modelOverride = modelOverride;
+    this.getModelSelection = getModelSelection;
     this.eventBus = eventBus;
     this.hookQueue = this.createHookQueue();
   }
@@ -500,6 +500,7 @@ export class Orchestrator {
       if (iteration > this.config.maxIterations) {
         this.log('warning', 'Max iterations exceeded', { iteration, completedWork: this.completedWork.size });
         emitGoalNotAchieved('max_iterations_exceeded');
+        await this.notifyStopHook(context, 'max_iterations_exceeded', '', iteration, agentType);
         const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_iterations_exceeded');
         const hasContent = this.completedWork.size > 0;
         return this.createResult({
@@ -514,6 +515,7 @@ export class Orchestrator {
       if (elapsed > this.config.maxDurationMs) {
         this.log('warning', 'Max duration exceeded', { elapsed, completedWork: this.completedWork.size });
         emitGoalNotAchieved('max_duration_exceeded');
+        await this.notifyStopHook(context, 'max_duration_exceeded', '', iteration, agentType);
         const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_duration_exceeded');
         const hasContent = this.completedWork.size > 0;
         return this.createResult({
@@ -676,6 +678,7 @@ export class Orchestrator {
           if (result.isRefusal) {
             this.log('warning', 'Agent refused', { workId, response: result.response });
             emitGoalNotAchieved('refusal', 1);
+            await this.notifyStopHook(context, 'refusal', result.response, iteration, agentType);
             context.addAgentResultContext(result);
             terminalResult = this.createResult({
               success: false,
@@ -693,6 +696,7 @@ export class Orchestrator {
           if (result.error && !result.success && !actionIsContinue) {
             this.log('error', 'Agent error', { workId, error: result.error });
             emitGoalNotAchieved(result.error, 1);
+            await this.notifyStopHook(context, 'agent_error', result.response, iteration, agentType);
             context.addAgentResultContext(result);
             terminalResult = this.createResult({
               success: false,
@@ -708,6 +712,7 @@ export class Orchestrator {
           if (totalToolCalls >= this.config.maxToolCalls) {
             this.log('warning', 'Max tool calls exceeded', { totalToolCalls, completedWork: this.completedWork.size });
             emitGoalNotAchieved('max_tool_calls_exceeded');
+            await this.notifyStopHook(context, 'max_tool_calls_exceeded', result.response, iteration, agentType);
             context.addAgentResultContext(result);
             // Use result.response if available, otherwise harvest completed work
             const response = result.response || this.harvestCompletedWork(inProgress, 'max_tool_calls_exceeded');
@@ -836,19 +841,43 @@ export class Orchestrator {
   // --- Private helpers ---
 
   /**
-   * Dequeue the next ready work item (all dependencies satisfied).
-   * Returns null if all items are blocked on dependencies.
+   * Build LLM config from model selection + agent's operational params.
+   * NO FALLBACK: If no model selection exists for this agent type, throws an error.
+   * Users must explicitly select models for each agent type they want to use.
+   *
+   * Model selection (provider/model) comes from SessionStore - this is the SINGLE SOURCE OF TRUTH.
+   * Operational params (maxTokens, temperature) come from AgentConfig.
+   *
+   * @param llmParams - Operational params from AgentConfig (maxTokens, temperature)
+   * @param agentType - Agent type for model selection lookup
+   * @returns Complete LLM config ready for use
+   * @throws Error if no model selection exists for this agent type
    */
-  private dequeueNext(): WorkItem | null {
-    for (let i = 0; i < this.workQueue.length; i++) {
-      const item = this.workQueue[i];
-      const ready = item.dependencies.every(d => this.completedWork.has(d));
-      if (ready) {
-        this.workQueue.splice(i, 1);
-        return item;
-      }
+  private buildLlmConfig(
+    llmParams: { maxTokens: number; temperature: number },
+    agentType: string
+  ): LLMRequestConfig {
+    const modelSelection = this.getModelSelection?.(agentType);
+    if (!modelSelection) {
+      // NO SILENT FALLBACK: Fail explicitly if no model selection
+      this.log('error', `No model selection for agent type '${agentType}'. User must select a model via /models.`, { agentType });
+      throw new Error(`No model configured for agent type '${agentType}'. Please select a model using /models before using this agent.`);
     }
-    return null;
+
+    const canonicalProvider = getCanonicalProvider(modelSelection.provider);
+    const baseUrl = getProviderBaseUrl(modelSelection.provider);
+
+    return {
+      provider: canonicalProvider,
+      model: modelSelection.model,
+      maxTokens: llmParams.maxTokens,
+      temperature: llmParams.temperature,
+      displayProvider: modelSelection.provider,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(modelSelection.reasoning ? {
+        reasoning: { effort: modelSelection.reasoning as 'low' | 'medium' | 'high' }
+      } : {}),
+    };
   }
 
   /**
@@ -877,15 +906,11 @@ export class Orchestrator {
   }
 
   private createAgent(agentType: string): Agent | null {
-    // Try requested type first, then fallback to 'standard' if different
-    let runtime = this.agentRegistry?.getRuntimeConfig(agentType);
-    if (!runtime && agentType !== 'standard') {
-      runtime = this.agentRegistry?.getRuntimeConfig('standard');
-    }
-    if (!runtime) return null;
+    // NO FALLBACK: If the requested agent type doesn't exist, fail explicitly
+    if (!this.agentRegistry?.has(agentType)) return null;
+    let config = this.agentRegistry.getConfig(agentType);
 
     // Apply plan mode modifications if enabled
-    let config = runtime.config;
     if (this.planModeOptions?.enabled) {
       config = {
         ...config,
@@ -894,27 +919,8 @@ export class Orchestrator {
       };
     }
 
-    // Apply model override if set (session-level model selection)
-    let llmConfig = runtime.llm;
-    if (this.modelOverride) {
-      // Get canonical provider (e.g., 'cerebras' -> 'openai-compat') and base URL from registry
-      const canonicalProvider = getCanonicalProvider(this.modelOverride.provider);
-      const baseUrl = getProviderBaseUrl(this.modelOverride.provider);
-
-      llmConfig = {
-        ...llmConfig,
-        provider: canonicalProvider,
-        model: this.modelOverride.model,
-        // Preserve user-facing provider name for error messages
-        displayProvider: this.modelOverride.provider,
-        // Set base URL for the provider
-        ...(baseUrl ? { baseUrl } : {}),
-        // Map reasoning string to ReasoningConfig if provided
-        ...(this.modelOverride.reasoning ? {
-          reasoning: { effort: this.modelOverride.reasoning as 'low' | 'medium' | 'high' }
-        } : {}),
-      };
-    }
+    // Build LLM config from model selection (source of truth) + agent's llmParams
+    const llmConfig = this.buildLlmConfig(config.llmParams, agentType);
 
     return new Agent(config, {
       llm: this.llm,
@@ -925,41 +931,42 @@ export class Orchestrator {
       llmConfig,
       hooks: this.hooks,
       internalHookQueue: this.hookQueue,
+      getModelSelection: this.getModelSelection,
     });
   }
 
   private resolveCompactionLlmConfig(agentType: string): LLMRequestConfig | null {
-    let runtime = this.agentRegistry?.getRuntimeConfig(agentType);
-    if (!runtime && agentType !== 'standard') {
-      runtime = this.agentRegistry?.getRuntimeConfig('standard');
-    }
-    if (!runtime) return null;
+    // For compaction, gracefully return null if no model selection - will use simple compaction
+    if (!this.agentRegistry?.has(agentType)) return null;
 
-    let llmConfig = runtime.llm;
-    if (this.modelOverride) {
-      const canonicalProvider = getCanonicalProvider(this.modelOverride.provider);
-      const baseUrl = getProviderBaseUrl(this.modelOverride.provider);
-
-      llmConfig = {
-        ...llmConfig,
-        provider: canonicalProvider,
-        model: this.modelOverride.model,
-        displayProvider: this.modelOverride.provider,
-        ...(baseUrl ? { baseUrl } : {}),
-        ...(this.modelOverride.reasoning ? {
-          reasoning: { effort: this.modelOverride.reasoning as 'low' | 'medium' | 'high' }
-        } : {}),
-      };
+    const modelSelection = this.getModelSelection?.(agentType);
+    if (!modelSelection) {
+      // No model selection - caller will use simple compaction instead
+      return null;
     }
 
-    return llmConfig;
+    const config = this.agentRegistry.getConfig(agentType);
+    const canonicalProvider = getCanonicalProvider(modelSelection.provider);
+    const baseUrl = getProviderBaseUrl(modelSelection.provider);
+
+    return {
+      provider: canonicalProvider,
+      model: modelSelection.model,
+      maxTokens: config.llmParams.maxTokens,
+      temperature: config.llmParams.temperature,
+      displayProvider: modelSelection.provider,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(modelSelection.reasoning ? {
+        reasoning: { effort: modelSelection.reasoning as 'low' | 'medium' | 'high' }
+      } : {}),
+    };
   }
 
   private createWorkItem(goal: string, agentType: string): WorkItem {
     // Get agent's budget from registry, fallback to orchestrator config
     let agentBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
     try {
-      agentBudget = this.agentRegistry?.getRuntimeConfig(agentType)?.config.budget;
+      agentBudget = this.agentRegistry?.getConfig(agentType)?.budget;
     } catch {
       // Agent not in registry, use orchestrator defaults
     }
@@ -993,6 +1000,33 @@ export class Orchestrator {
 
   private log(level: keyof OrchestratorLogger, msg: string, meta?: Record<string, unknown>): void {
     this.logger?.[level](msg, { component: 'orchestrator', requestId: this.requestId, ...meta });
+  }
+
+  /**
+   * Notify stop hook of termination (for non-goal cases).
+   * Fire-and-forget - result is ignored for error terminations.
+   */
+  private async notifyStopHook(
+    context: ContextWindow,
+    terminationReason: TerminationReason,
+    response: string,
+    iteration: number,
+    agentType: string
+  ): Promise<void> {
+    if (!this.config.stopHook) return;
+
+    try {
+      await this.config.stopHook({
+        workId: this.initialWorkId,
+        response,
+        terminationReason,
+        iteration,
+        agentType,
+        sessionKey: context.sessionKey,
+      });
+    } catch (err) {
+      this.log('warning', 'Stop hook error (non-blocking)', { error: String(err) });
+    }
   }
 
   /**

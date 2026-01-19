@@ -18,7 +18,7 @@ import {
 } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema } from 'types';
-import { createEvent, errorResult, successResult } from 'types';
+import { createEvent, errorResult, successResult, getCanonicalProvider, getProviderBaseUrl } from 'types';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -94,6 +94,15 @@ const REFUSAL_PATTERNS = [
 ];
 
 /**
+ * Model selection override for per-agent-type model configuration.
+ */
+export interface ModelSelection {
+  provider: string;
+  model: string;
+  reasoning?: string;
+}
+
+/**
  * Pure execution agent.
  */
 export class Agent {
@@ -107,6 +116,7 @@ export class Agent {
   private lastRequestConfig: LLMRequestConfig | null = null;
   private hooks?: AgentHooks;
   private internalHookQueue: InternalHookQueue;
+  private getModelSelection?: (agentType: string) => ModelSelection | null;
 
   constructor(config: AgentConfig, runtime: {
     llm: LLMAdapter;
@@ -117,6 +127,7 @@ export class Agent {
     llmConfig?: LLMRequestConfig;
     hooks?: AgentHooks;
     internalHookQueue?: InternalHookQueue;
+    getModelSelection?: (agentType: string) => ModelSelection | null;
   }) {
     this.config = config;
     this.llm = runtime.llm;
@@ -127,6 +138,7 @@ export class Agent {
     this.llmConfig = runtime.llmConfig ?? { model: 'unknown' };
     this.hooks = runtime.hooks;
     this.internalHookQueue = runtime.internalHookQueue ?? noopHookQueue;
+    this.getModelSelection = runtime.getModelSelection;
   }
 
   /**
@@ -1311,9 +1323,34 @@ export class Agent {
     let agentConfig: AgentConfig;
     let llmConfig: LLMRequestConfig;
     try {
-      const runtimeConfig = this.agentRegistry.getRuntimeConfig(call.name);
-      agentConfig = runtimeConfig.config;
-      llmConfig = runtimeConfig.llm;
+      // Get agent capabilities (tools, budget, llmParams) from registry
+      agentConfig = this.agentRegistry.getConfig(call.name);
+
+      // Build LLM config from model selection (source of truth) + agent's llmParams
+      // NO FALLBACK: model selection MUST exist
+      const modelSelection = this.getModelSelection?.(agentConfig.type);
+      if (modelSelection) {
+        const canonicalProvider = getCanonicalProvider(modelSelection.provider);
+        const baseUrl = getProviderBaseUrl(modelSelection.provider);
+        llmConfig = {
+          provider: canonicalProvider,
+          model: modelSelection.model,
+          maxTokens: agentConfig.llmParams.maxTokens,
+          temperature: agentConfig.llmParams.temperature,
+          displayProvider: modelSelection.provider,
+          ...(baseUrl ? { baseUrl } : {}),
+          ...(modelSelection.reasoning ? {
+            reasoning: { effort: modelSelection.reasoning as 'low' | 'medium' | 'high' }
+          } : {}),
+        };
+      } else {
+        // NO SILENT FALLBACK: Fail explicitly if no model selection for this agent type
+        return errorResult(
+          call.name,
+          `No model configured for agent type '${agentConfig.type}'. Please select a model using /models before using this agent.`,
+          0
+        );
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return errorResult(call.name, message, 0);
@@ -1368,6 +1405,7 @@ export class Agent {
       llmConfig,
       hooks: this.hooks,
       internalHookQueue: this.internalHookQueue,
+      getModelSelection: this.getModelSelection,
     });
 
     // Create merged context for sub-agent: combines global context with parent's discoveries

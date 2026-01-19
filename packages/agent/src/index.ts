@@ -2,12 +2,13 @@
  * Agent Module - Barrel Export
  */
 
-export { Agent, resetProviderCircuit, getCircuitStatus } from './agent.js';
+export { Agent, resetProviderCircuit, getCircuitStatus, type ModelSelection } from './agent.js';
 export { AgentRegistry } from './agent-registry.js';
 export type {
   AgentType,
   AgentBudget,
   AgentConfig,
+  LLMParams,
   AgentRunParams,
   AgentMetrics,
   AgentResult,
@@ -23,9 +24,8 @@ export type {
   StopHookResult,
 } from './types.js';
 
-export { DEFAULT_AGENT_BUDGET, noopEmit, noopHookQueue } from './types.js';
+export { DEFAULT_AGENT_BUDGET, DEFAULT_LLM_PARAMS, noopEmit, noopHookQueue } from './types.js';
 export {
-  ROUTING_PROMPT,
   SIMPLE_PROMPT,
   EXPLORER_PROMPT,
   RUNTIME_SCRIPT_PROMPT,

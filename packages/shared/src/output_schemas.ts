@@ -51,13 +51,6 @@ export const UserPromptSchema = z.object({
 // ============================================
 
 /**
- * Routing agent output - determines request complexity tier.
- */
-export const RoutingOutputSchema = z.object({
-  tier: z.enum(['simple', 'standard', 'complex']),
-});
-
-/**
  * Action enum - what the agent wants to do next.
  */
 export const AgentActionSchema = z.enum(['done', 'need_user_input', 'continue', 'handoff']);
@@ -159,7 +152,6 @@ export const RuntimeScriptOutputSchema = AgentActionOutputSchema.extend({
  * Registry mapping schema names to Zod schemas.
  */
 export const OUTPUT_SCHEMAS = {
-  routing: RoutingOutputSchema,
   agent_action: AgentActionOutputSchema,
   goal_driven: GoalDrivenOutputSchema,
   explorer: ExplorerOutputSchema,
@@ -175,7 +167,6 @@ export type OutputSchemaName = keyof typeof OUTPUT_SCHEMAS;
 export type UserPromptOption = z.infer<typeof UserPromptOptionSchema>;
 export type SingleQuestion = z.infer<typeof SingleQuestionSchema>;
 export type UserPrompt = z.infer<typeof UserPromptSchema>;
-export type RoutingOutput = z.infer<typeof RoutingOutputSchema>;
 export type AgentAction = z.infer<typeof AgentActionSchema>;
 export type AgentActionOutput = z.infer<typeof AgentActionOutputSchema>;
 export type GoalDrivenOutput = z.infer<typeof GoalDrivenOutputSchema>;

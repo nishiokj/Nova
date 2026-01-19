@@ -16,20 +16,6 @@ export const DEFAULT_CONFIG = {
     gemini: "${GEMINI_API_KEY}",
   },
   agents: {
-    routing: {
-      llm: {
-        provider: "openai",
-        model: "gpt-4o-mini",
-        max_tokens: 200,
-        temperature: 0.1,
-      },
-      budget: {
-        max_iterations: 1,
-        max_tool_calls: 0,
-        max_duration_ms: 3000,
-      },
-      output_schema: "routing",
-    },
     simple: {
       llm: {
         provider: "openai",
@@ -85,12 +71,12 @@ export const DEFAULT_CONFIG = {
         "Glob",
         "Grep",
         "Bash",
-        "coding-agent",
+        "coding",
         "explorer",
       ],
       output_schema: "goal_driven",
     },
-    "coding-agent": {
+    coding: {
       llm: {
         provider: "openai",
         model: "gpt-4o",

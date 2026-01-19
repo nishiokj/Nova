@@ -22,6 +22,7 @@ export type AgentCoreEventType =
   | 'rate_limit'
   | 'agent_bounds_hit'
   | 'agent_message'
+  | 'agent_reasoning'
   | 'artifact_discovered'
   | 'agent_progress';
 
@@ -294,6 +295,19 @@ export interface AgentProgressData {
   agentType: string;
   category?: 'search' | 'analysis' | 'discovery' | 'synthesis';
   count?: { current: number; total?: number; label: string };
+}
+
+/**
+ * Data for agent_reasoning event.
+ * Emitted when the LLM produces reasoning/thinking content.
+ */
+export interface AgentReasoningData {
+  /** The reasoning/thinking content from the model */
+  content: string;
+  /** Agent type that produced this reasoning */
+  agentType: string;
+  /** Whether this is a final chunk or streaming */
+  isFinal?: boolean;
 }
 
 // ============================================

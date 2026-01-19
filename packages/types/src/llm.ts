@@ -261,6 +261,8 @@ export interface RespondParams {
  */
 export interface StreamParams extends RespondParams {
   onChunk?: (chunk: string) => void;
+  /** Callback for reasoning/thinking content chunks (e.g., GLM-4.7 thinking traces) */
+  onReasoningChunk?: (chunk: string) => void;
 }
 
 /**

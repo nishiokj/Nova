@@ -27,6 +27,7 @@ import type { AuthService } from './auth_service.js';
 import { LocalProviderManager } from './local_providers.js';
 import { isOpenAICompatProvider } from 'types';
 import { getAllModels } from 'types';
+import { createRalphStopHook, type RalphCompletionReason, type RalphLoopState } from 'orchestrator';
 
 interface BridgeCommand {
   type: string;
@@ -42,6 +43,7 @@ interface HarnessLike {
     workingDir: string;
     context?: string;
     planMode?: boolean;
+    stopHook?: import('orchestrator').StopHookHandler;
   }): AgentRunHandle;
   resume(requestId: string, answer: unknown, sessionKey: string, workingDir?: string): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
@@ -51,12 +53,18 @@ interface HarnessLike {
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string): boolean;
-  setSessionSelectedModel?(sessionKey: string, selectedModel: import('orchestrator').ModelOverride | null): void;
-  getSessionSelectedModel?(sessionKey: string): import('orchestrator').ModelOverride | null;
+  setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('orchestrator').ModelOverride | null): void;
+  getSessionSelectedModel?(sessionKey: string, agentType: string): import('orchestrator').ModelOverride | null;
+  getAllSessionSelectedModels?(sessionKey: string): Map<string, import('orchestrator').ModelOverride>;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
+}
+
+interface RalphLoopInfo {
+  requestId: string;
+  cancelled: boolean;
 }
 
 interface ConnectionState {
@@ -64,6 +72,7 @@ interface ConnectionState {
   workingDir: string | null;
   activeRequestId: string | null;
   planMode: boolean;
+  ralphLoop: RalphLoopInfo | null;
 }
 
 export class BridgeGateway {
@@ -245,7 +254,13 @@ export class BridgeGateway {
           this.handleSetModel(connectionId, command.data, state);
           return;
         case 'get_model':
-          this.handleGetModel(connectionId, state);
+          this.handleGetModel(connectionId, command.data, state);
+          return;
+        case 'ralph_loop_start':
+          this.handleRalphLoopStart(connectionId, command.data, state);
+          return;
+        case 'ralph_loop_cancel':
+          this.handleRalphLoopCancel(connectionId, state);
           return;
         case 'shutdown':
           this.sendError(connectionId, 'Shutdown is not supported via bridge');
@@ -299,46 +314,79 @@ export class BridgeGateway {
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
 
-    // Load and emit selected model preference if available
+    // Load and emit per-agent-type model selections if available
     if (graphd) {
-      const selectedModel =
-        graphd.getUserPreference<{ provider: string; model: string; reasoning?: string }>('user_prefs:selected_model')
-        ?? graphd.getUserPreference<{ provider: string; model: string; reasoning?: string }>('user_prefs:last_model');
-      if (selectedModel) {
-        graphd.setUserPreference('user_prefs:selected_model', selectedModel);
-        graphd.deleteUserPreference('user_prefs:last_model');
+      this.hydrateSessionModelSelections(sessionKey);
+
+      // Send persisted selections directly to this connection to avoid session-channel races
+      const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
+      for (const [type, selection] of selections) {
+        selectionsObject[type] = selection;
       }
-      const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
-      const isHidden = selectedModel?.model
-        ? hiddenModels.some((hidden) => hidden.trim().toLowerCase() === selectedModel.model.trim().toLowerCase())
-        : false;
-      const resolved = isHidden ? null : selectedModel;
-      if (resolved) {
-        graphd.sessionUpdateMetadata(sessionKey, { selected_model: resolved });
-        this.harness.setSessionSelectedModel?.(sessionKey, resolved);
+      this.sendAuthResponse(connectionId, 'get_model', {
+        success: true,
+        model_selections: selectionsObject,
+      });
+
+      // Emit model_changed for all agent types with persisted selections
+      const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      const agentTypes = ['standard', 'explorer', 'coding'];
+      for (const agentType of agentTypes) {
+        const selection = allSelections.get(agentType) ?? null;
+        this.sendEvent(connectionId, {
+          type: 'model_changed',
+          data: {
+            agentType,
+            selectedModel: selection?.model ?? null,
+            selectedProvider: selection?.provider ?? null,
+            provider: selection?.provider ?? null,
+            model: selection?.model ?? null,
+            reasoning: selection?.reasoning ?? null,
+          },
+        }, sessionChannel(sessionKey));
       }
-      this.sendEvent(connectionId, {
-        type: 'model_changed',
-        data: {
-          selectedModel: resolved?.model ?? null,
-          selectedProvider: resolved?.provider ?? null,
-          provider: resolved?.provider ?? null,
-          model: resolved?.model ?? null,
-          reasoning: resolved?.reasoning ?? null,
-        },
-      }, sessionChannel(sessionKey));
     } else {
-      this.sendEvent(connectionId, {
-        type: 'model_changed',
-        data: {
-          selectedModel: null,
-          selectedProvider: null,
-          provider: null,
-          model: null,
-          reasoning: null,
-        },
-      }, sessionChannel(sessionKey));
+      // No GraphD - emit null selections for all agent types
+      const agentTypes = ['standard', 'explorer', 'coding'];
+      for (const agentType of agentTypes) {
+        this.sendEvent(connectionId, {
+          type: 'model_changed',
+          data: {
+            agentType,
+            selectedModel: null,
+            selectedProvider: null,
+            provider: null,
+            model: null,
+            reasoning: null,
+          },
+        }, sessionChannel(sessionKey));
+      }
     }
+  }
+
+  private hydrateSessionModelSelections(sessionKey: string): void {
+    const graphd = this.harness.getGraphD?.();
+    if (!graphd) {
+      return;
+    }
+
+    const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+    const modelSelectionsMap = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections');
+
+    if (!modelSelectionsMap) {
+      return;
+    }
+
+    for (const [agentType, selection] of Object.entries(modelSelectionsMap)) {
+      if (selection?.provider && selection?.model) {
+        const isHidden = hiddenModels.some((hidden) => hidden.trim().toLowerCase() === selection.model.trim().toLowerCase());
+        if (!isHidden) {
+          this.harness.setSessionSelectedModel?.(sessionKey, agentType, selection);
+        }
+      }
+    }
+    graphd.sessionUpdateMetadata(sessionKey, { model_selections: modelSelectionsMap });
   }
 
   private handleSendText(
@@ -351,7 +399,8 @@ export class BridgeGateway {
       this.sendError(connectionId, 'Session not initialized. Call init first.');
       return;
     }
-    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey);
+    // Check 'standard' agent type selection - this is the main/default that must be set
+    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
     if (!activeSelection?.model || !activeSelection?.provider) {
       this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
       return;
@@ -537,31 +586,56 @@ export class BridgeGateway {
 
     const sessionKey = state.sessionKey;
     const normalizedModelId = modelId.trim().toLowerCase();
-    let clearedSelection = false;
+    const clearedAgentTypes: string[] = [];
 
-    // Clear last-model preference if it matches the deleted model
+    // Clear from model_selections user preference if any agent type matches
+    const modelSelections = graphd.getUserPreference<Record<string, { provider?: string; model?: string; reasoning?: string }>>('user_prefs:model_selections') ?? {};
+    let modelSelectionsUpdated = false;
+    for (const [agentType, selection] of Object.entries(modelSelections)) {
+      if (selection?.model && selection.model.trim().toLowerCase() === normalizedModelId) {
+        delete modelSelections[agentType];
+        modelSelectionsUpdated = true;
+      }
+    }
+    if (modelSelectionsUpdated) {
+      if (Object.keys(modelSelections).length === 0) {
+        graphd.deleteUserPreference('user_prefs:model_selections');
+      } else {
+        graphd.setUserPreference('user_prefs:model_selections', modelSelections);
+      }
+    }
+
+    // Also clear legacy preferences if they match
     const selectedModel = graphd.getUserPreference<{ provider?: string; model?: string }>('user_prefs:selected_model');
     if (selectedModel?.model && selectedModel.model.trim().toLowerCase() === normalizedModelId) {
       graphd.deleteUserPreference('user_prefs:selected_model');
       graphd.deleteUserPreference('user_prefs:last_model');
     }
 
-    // Clear session selection if it matches the deleted model
+    // Clear session selections if they match the deleted model
     if (sessionKey) {
       const session = graphd.sessionGet(sessionKey);
       const metadata = session?.metadata as Record<string, unknown> | undefined;
-      const override = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | undefined;
-      if (override?.model && override.model.trim().toLowerCase() === normalizedModelId) {
-        graphd.sessionUpdateMetadata(sessionKey, { selected_model: null });
-        this.harness.setSessionSelectedModel?.(sessionKey, null);
-        clearedSelection = true;
+      const sessionSelections = (metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string }>) ?? {};
+      let sessionSelectionsUpdated = false;
+      for (const [agentType, selection] of Object.entries(sessionSelections)) {
+        if (selection?.model && selection.model.trim().toLowerCase() === normalizedModelId) {
+          delete sessionSelections[agentType];
+          sessionSelectionsUpdated = true;
+          clearedAgentTypes.push(agentType);
+        }
+      }
+      if (sessionSelectionsUpdated) {
+        graphd.sessionUpdateMetadata(sessionKey, { model_selections: sessionSelections });
       }
     }
 
-    if (clearedSelection) {
+    // Emit model_changed event for each cleared agent type
+    for (const agentType of clearedAgentTypes) {
       this.sendEvent(connectionId, {
         type: 'model_changed',
         data: {
+          agentType,
           selectedModel: null,
           selectedProvider: null,
           provider: null,
@@ -574,6 +648,7 @@ export class BridgeGateway {
     this.sendAuthResponse(connectionId, 'models_delete', {
       success: true,
       model: modelId,
+      clearedAgentTypes,
     });
   }
 
@@ -1160,27 +1235,33 @@ export class BridgeGateway {
       return;
     }
 
+    // Extract agentType, default to 'standard'
+    const agentType = typeof data?.agent_type === 'string' ? data.agent_type : 'standard';
     const provider = typeof data?.provider === 'string' ? data.provider : null;
     const model = typeof data?.model === 'string' ? data.model : null;
     const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : null;
 
-    // Handle reset to default
-    if (data?.reset === true || (!provider && !model)) {
-      const graphd = this.harness.getGraphD?.();
+    const graphd = this.harness.getGraphD?.();
+
+    // Handle reset - clear all model selections
+    if (data?.reset === true) {
       if (graphd) {
-        graphd.sessionUpdateMetadata(sessionKey, { selected_model: null });
+        graphd.sessionUpdateMetadata(sessionKey, { model_selections: null });
+        graphd.deleteUserPreference('user_prefs:model_selections');
         graphd.deleteUserPreference('user_prefs:selected_model');
         graphd.deleteUserPreference('user_prefs:last_model');
       }
-      this.harness.setSessionSelectedModel?.(sessionKey, null);
+      // Note: harness.clearModelSelections would be needed, but we don't have that exposed
+      // The store will be cleared on next session init
       this.sendAuthResponse(connectionId, 'set_model', {
         success: true,
         selected_model: null,
-        message: 'Model selection cleared',
+        message: 'All model selections cleared',
       });
       this.sendEvent(connectionId, {
         type: 'model_changed',
         data: {
+          agentType,
           selectedModel: null,
           provider: null,
           model: null,
@@ -1206,20 +1287,27 @@ export class BridgeGateway {
       return;
     }
 
-    // Store selected model in session metadata AND as global preference
+    // Store selected model for this agent type
     const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
-    const graphd = this.harness.getGraphD?.();
-    if (graphd) {
-      graphd.sessionUpdateMetadata(sessionKey, { selected_model: selectedModel });
-      // Also persist as global preference for next session
-      graphd.setUserPreference('user_prefs:selected_model', selectedModel);
-    }
-    this.harness.setSessionSelectedModel?.(sessionKey, selectedModel);
+    this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
 
-    // Emit model_changed event
+    // Persist to GraphD as per-agent-type model_selections map
+    if (graphd) {
+      // Read from GLOBAL user preferences first (source of truth), then merge new selection
+      // This ensures selections from other sessions aren't lost
+      const globalSelections = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections') ?? {};
+      const updatedSelections = { ...globalSelections, [agentType]: selectedModel };
+
+      // Persist to both session metadata and global preferences
+      graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
+      graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
+    }
+
+    // Emit model_changed event with agentType
     this.sendEvent(connectionId, {
       type: 'model_changed',
       data: {
+        agentType,
         selectedModel: selectedModel.model,
         selectedProvider: selectedModel.provider,
         provider: selectedModel.provider,
@@ -1243,12 +1331,17 @@ export class BridgeGateway {
 
     this.sendAuthResponse(connectionId, 'set_model', {
       success: true,
+      agent_type: agentType,
       selected_model: selectedModel,
       provider_key_required: !hasKey,
     });
   }
 
-  private handleGetModel(connectionId: string, state: ConnectionState): void {
+  private handleGetModel(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): void {
     const sessionKey = state.sessionKey;
     if (!sessionKey) {
       this.sendAuthResponse(connectionId, 'get_model', {
@@ -1258,42 +1351,207 @@ export class BridgeGateway {
       return;
     }
 
-    // Get current selected model from GraphD session metadata
-    const graphd = this.harness.getGraphD?.();
-    let selectedModel: { provider?: string; model?: string; reasoning?: string } | null = null;
-    if (graphd) {
-      const session = graphd.sessionGet(sessionKey);
-      const metadata = (session?.metadata as Record<string, unknown>) ?? {};
-      selectedModel = metadata?.selected_model as { provider?: string; model?: string; reasoning?: string } | null;
-      if (!selectedModel) {
-        selectedModel = metadata?.model_override as { provider?: string; model?: string; reasoning?: string } | null;
-        if (selectedModel) {
-          graphd.sessionUpdateMetadata(sessionKey, { selected_model: selectedModel, model_override: null });
-        }
+    // Extract agentType from data, default to returning all if not specified
+    const agentType = typeof data?.agent_type === 'string' ? data.agent_type : null;
+    const returnAll = data?.all === true || !agentType;
+
+    if (returnAll) {
+      const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      if (existingSelections.size === 0) {
+        this.hydrateSessionModelSelections(sessionKey);
       }
-      if (!selectedModel) {
-        const storedSelected = graphd.getUserPreference<{ provider?: string; model?: string; reasoning?: string }>('user_prefs:selected_model');
-        if (storedSelected?.provider && storedSelected?.model) {
-          const normalized = storedSelected.reasoning
-            ? { provider: storedSelected.provider, model: storedSelected.model, reasoning: storedSelected.reasoning }
-            : { provider: storedSelected.provider, model: storedSelected.model };
-          selectedModel = normalized;
-          graphd.sessionUpdateMetadata(sessionKey, { selected_model: normalized, model_override: null });
-          this.harness.setSessionSelectedModel?.(sessionKey, normalized);
-        }
+      // Return all model selections
+      const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
+      for (const [type, selection] of allSelections) {
+        selectionsObject[type] = selection;
       }
-    } else {
-      selectedModel = this.harness.getSessionSelectedModel?.(sessionKey) ?? null;
+
+      this.sendAuthResponse(connectionId, 'get_model', {
+        success: true,
+        model_selections: selectionsObject,
+      });
+      return;
+    }
+
+    // Return selection for specific agent type
+    let selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
+    if (!selectedModel) {
+      this.hydrateSessionModelSelections(sessionKey);
+      selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
     }
 
     this.sendAuthResponse(connectionId, 'get_model', {
       success: true,
+      agent_type: agentType,
       selectedModel: selectedModel?.model ?? null,
       selectedProvider: selectedModel?.provider ?? null,
       provider: selectedModel?.provider ?? null,
       model: selectedModel?.model ?? null,
       reasoning: selectedModel?.reasoning ?? null,
     });
+  }
+
+  // =========================================================================
+  // Ralph Loop Handlers
+  // =========================================================================
+
+  private handleRalphLoopStart(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendError(connectionId, 'Session not initialized. Call init first.');
+      return;
+    }
+
+    // Check if already running a Ralph loop
+    if (state.ralphLoop) {
+      this.sendError(connectionId, 'A Ralph Loop is already running. Cancel it first.');
+      return;
+    }
+
+    // Check model selection
+    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
+    if (!activeSelection?.model || !activeSelection?.provider) {
+      this.sendError(connectionId, 'No model selected. Use /models to choose one before starting a Ralph Loop.');
+      return;
+    }
+    if (!this.harness.hasApiKey(activeSelection.provider)) {
+      this.sendEvent(connectionId, {
+        type: 'provider_key_required',
+        data: {
+          provider: activeSelection.provider,
+          model: activeSelection.model,
+          reasoning: activeSelection.reasoning,
+        },
+      });
+      this.sendError(connectionId, `No API key configured for provider: ${activeSelection.provider}`);
+      return;
+    }
+
+    // Extract Ralph Loop config from data
+    const prompt = typeof data?.prompt === 'string' ? data.prompt : '';
+    const maxIterations = typeof data?.maxIterations === 'number' ? data.maxIterations : 20;
+    const completionPromise = typeof data?.completionPromise === 'string' ? data.completionPromise : 'TASK COMPLETE';
+
+    if (!prompt.trim()) {
+      this.sendError(connectionId, 'Ralph Loop requires a prompt.');
+      return;
+    }
+
+    // Generate a request ID for this Ralph loop run
+    const requestId = generateRequestId();
+    // Per-request working_dir takes precedence (same pattern as handleSendText)
+    const requestWorkingDir = typeof data?.working_dir === 'string' && data.working_dir.length > 0
+      ? data.working_dir
+      : null;
+    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
+
+    // Create Ralph loop tracking state
+    state.ralphLoop = {
+      requestId,
+      cancelled: false,
+    };
+    state.activeRequestId = requestId;
+
+    // Create Ralph stop hook with callbacks
+    const ralphState = state.ralphLoop;
+    const stopHook = createRalphStopHook({
+      prompt,
+      maxIterations,
+      completionPromise,
+      onIteration: (loopState: RalphLoopState) => {
+        // Check if cancelled
+        if (ralphState.cancelled) {
+          return;
+        }
+        // Emit progress event with Ralph iteration info
+        const channel = runChannel(requestId);
+        this.bus.publish(channel, {
+          type: 'progress',
+          data: {
+            request_id: requestId,
+            message: `🔄 Ralph iteration ${loopState.iteration} of ${loopState.maxIterations}`,
+            level: 'info',
+            kind: 'work',
+            ralph_iteration: {
+              type: 'ralph_iteration',
+              iteration: loopState.iteration,
+              maxIterations: loopState.maxIterations,
+              completionPromise: loopState.completionPromise,
+            },
+          },
+        });
+      },
+      onComplete: (loopState: RalphLoopState, reason: RalphCompletionReason) => {
+        // Clear Ralph loop state
+        state.ralphLoop = null;
+
+        // Emit completion response
+        this.sendEvent(connectionId, {
+          type: 'response',
+          data: {
+            success: reason === 'promise_detected',
+            content: '',
+            metadata: {
+              kind: 'ralph_loop_complete',
+              payload: {
+                reason,
+                iterations: loopState.iteration,
+                lastResponse: loopState.lastResponse.slice(0, 500), // Truncate for summary
+              },
+            },
+          },
+        }, sessionChannel(sessionKey));
+      },
+    });
+
+    // Start the harness run with the Ralph stop hook
+    const handle = this.harness.run({
+      requestId,
+      inputText: prompt,
+      sessionKey,
+      workingDir,
+      planMode: state.planMode,
+      stopHook,
+    });
+
+    this.streamRunEvents(requestId, handle);
+  }
+
+  private handleRalphLoopCancel(connectionId: string, state: ConnectionState): void {
+    if (!state.ralphLoop) {
+      this.sendError(connectionId, 'No Ralph Loop is currently running.');
+      return;
+    }
+
+    // Mark as cancelled
+    state.ralphLoop.cancelled = true;
+
+    // Clear Ralph loop state
+    const iterations = 0; // We don't track exact iteration count here
+    const sessionKey = state.sessionKey;
+    state.ralphLoop = null;
+
+    // Emit cancellation response
+    this.sendEvent(connectionId, {
+      type: 'response',
+      data: {
+        success: true,
+        content: '',
+        metadata: {
+          kind: 'ralph_loop_complete',
+          payload: {
+            reason: 'manual_cancel',
+            iterations,
+            lastResponse: '',
+          },
+        },
+      },
+    }, sessionKey ? sessionChannel(sessionKey) : 'direct');
   }
 
   private streamRunEvents(requestId: string, handle: AgentRunHandle): void {
@@ -1320,7 +1578,7 @@ export class BridgeGateway {
   private getOrCreateConnectionState(connectionId: string): ConnectionState {
     const existing = this.connections.get(connectionId);
     if (existing) return existing;
-    const state: ConnectionState = { sessionKey: null, workingDir: null, activeRequestId: null, planMode: false };
+    const state: ConnectionState = { sessionKey: null, workingDir: null, activeRequestId: null, planMode: false, ralphLoop: null };
     this.connections.set(connectionId, state);
     return state;
   }

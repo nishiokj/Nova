@@ -17,7 +17,6 @@ export {
   type OutputSchemaName,
   type UserPromptOption,
   type UserPrompt,
-  type RoutingOutput,
   type AgentAction,
   type AgentActionOutput,
   type GoalDrivenOutput,

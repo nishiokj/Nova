@@ -42,6 +42,7 @@ You can emit MULTIPLE tool calls in a single response. The system executes them 
 - Need 5 files? Call Read 5 times in ONE response—not 5 iterations.
 - Unsure which pattern matches? Call Glob with \`**/*.ts\`, \`**/*.js\`, \`../**/*.ts\` simultaneously.
 - Searching for a term? Grep with variations in parallel: \`className\`, \`ClassName\`, \`class_name\`.
+- Example (single response): Read \`src/a.ts\`, Read \`src/b.ts\`, Grep \`foo\` in \`src/\`.
 
 **Never serialize independent calls.** If call B doesn't depend on call A's result, they belong in the same response.
 
@@ -107,11 +108,11 @@ Artifacts are **distilled knowledge** from source files. They must stand alone.
   line: number;          // Line number for navigation
   kind: ArtifactKind;    // function | class | interface | import | export | constant | pattern | summary
   name: string;          // Identifier name
-  signature?: string;    // Full signature for functions/methods
-  modifies?: string[];   // Side effects: state, files, globals this touches
-  calls?: string[];      // Call graph: significant functions this invokes
-  insight?: string;      // Non-obvious info NOT derivable from name/signature
-  reduces: UncertaintyCategory;  // REQUIRED: structural | relational | behavioral | contractual
+  signature: string | null;    // Full signature for functions/methods (use null if unknown)
+  modifies: string[] | null;   // Side effects: state, files, globals this touches
+  calls: string[] | null;      // Call graph: significant functions this invokes
+  insight: string | null;      // Non-obvious info NOT derivable from name/signature
+  reduces: UncertaintyCategory | null;  // REQUIRED: structural | relational | behavioral | contractual
 }
 \`\`\`
 
@@ -123,20 +124,20 @@ Artifacts are **distilled knowledge** from source files. They must stand alone.
 
 ### What Goes Where:
 
-**signature**: The full type signature. \`async run(params: RunParams): Promise<Result>\`
+**signature**: The full type signature. Use null if unknown. \`async run(params: RunParams): Promise<Result>\`
 
-**modifies**: Side effects only. What state does this change?
+**modifies**: Side effects only. What state does this change? Use null if none/unknown.
 - \`["this._items", "this._version"]\` - mutates instance state
 - \`["fs:config.json"]\` - writes to filesystem
 - \`["db:users"]\` - modifies database table
 - Leave empty if pure function
 
-**calls**: Significant callees that matter for understanding behavior.
+**calls**: Significant callees that matter for understanding behavior. Use null if none/unknown.
 - \`["llm.complete", "tools.execute", "context.addMessage"]\`
 - Skip trivial calls (console.log, array methods)
 - Include what's architecturally significant
 
-**insight**: The non-obvious stuff. Things you can't infer from name + signature.
+**insight**: The non-obvious stuff. Things you can't infer from name + signature. Use null if none/unknown.
 - "Retries 3x with exponential backoff on network errors"
 - "Caches result for 5 minutes"
 - "Throws if called before initialize()"
@@ -304,6 +305,7 @@ Two tools for understanding code. They are **orthogonal**:
 
 Bad: Read file A → wait → Read file B → wait → Read file C (3 iterations)
 Good: Read file A, Read file B, Read file C in ONE response (1 iteration)
+Example (single response): Read \`src/a.ts\`, Read \`src/b.ts\`, Grep \`foo\` in \`src/\`.
 
 If you need 5 files, call Read 5 times in ONE response. Never serialize independent operations.
 
@@ -388,6 +390,7 @@ Be conversational. Keep the user informed:
 Emit ALL independent tool calls in ONE response. The system runs them concurrently.
 Bad: Read A → wait → Read B (2 iterations)
 Good: Read A, Read B in ONE response (1 iteration)
+Example (single response): Read \`src/a.ts\`, Read \`src/b.ts\`, Grep \`foo\` in \`src/\`.
 
 ## Anti-Patterns
 
@@ -475,12 +478,13 @@ export function buildEnvironmentPrompt(env: EnvironmentContext): string {
 
 /**
  * Build a full AgentConfig from agent type.
- * Uses prompts from this module; tools/budgets are supplied by config.
+ * Uses prompts from this module; tools/budgets/llmParams are supplied by config.
  */
 export function buildAgentConfig(
   agentType: string,
   tools: string[],
   budget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number },
+  llmParams: { maxTokens: number; temperature: number },
   outputSchema?: import('types').StructuredOutputSchema,
   envContext?: EnvironmentContext
 ): {
@@ -488,6 +492,7 @@ export function buildAgentConfig(
   systemPrompt: string;
   tools: string[];
   budget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number };
+  llmParams: { maxTokens: number; temperature: number };
   outputSchema?: import('types').StructuredOutputSchema;
 } {
   const basePrompt = getAgentPrompt(agentType);
@@ -500,6 +505,7 @@ export function buildAgentConfig(
     systemPrompt,
     tools,
     budget,
+    llmParams,
     outputSchema,
   };
 }

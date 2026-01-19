@@ -48,6 +48,7 @@ export type {
   RateLimitData,
   ArtifactDiscoveredData,
   AgentProgressData,
+  AgentReasoningData,
   EventCallback,
 } from './events.js';
 

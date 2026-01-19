@@ -29,12 +29,28 @@ export const DEFAULT_AGENT_BUDGET: AgentBudget = {
 };
 
 /**
+ * LLM operational parameters - NOT provider/model selection.
+ * These control HOW the model runs, not WHICH model runs.
+ */
+export interface LLMParams {
+  /** Maximum tokens in response */
+  maxTokens: number;
+  /** Temperature for sampling (0-1) */
+  temperature: number;
+}
+
+export const DEFAULT_LLM_PARAMS: LLMParams = {
+  maxTokens: 16000,
+  temperature: 0.7,
+};
+
+/**
  * Agent configuration - wired at instantiation.
  * Determines the agent's capabilities and constraints.
  *
- * NOTE: The LLM model is NOT specified here. Agents receive an LLMAdapter
- * at construction time. Model selection is handled by the harness/orchestrator
- * via llm_configs in harness_config.json.
+ * NOTE: The LLM provider/model is NOT specified here. Model selection
+ * comes EXCLUSIVELY from SessionStore via getModelSelection.
+ * Only operational params (maxTokens, temperature) are stored here.
  */
 export interface AgentConfig {
   /** Agent type identifier */
@@ -45,6 +61,8 @@ export interface AgentConfig {
   tools: string[];
   /** Resource budget */
   budget: AgentBudget;
+  /** LLM operational parameters (NOT provider/model) */
+  llmParams: LLMParams;
   /** Structured output schema for responses */
   outputSchema?: StructuredOutputSchema;
 }
@@ -311,7 +329,7 @@ export const noopHookQueue: InternalHookQueue = {
 // Forward declaration for AgentRegistry to avoid circular import
 export interface AgentRegistry {
   has(agentType: string): boolean;
-  getRuntimeConfig(agentType: string): { config: AgentConfig; llm: LLMRequestConfig };
+  getConfig(agentType: string): AgentConfig;
   listToolDefinitions(): Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
 }
 

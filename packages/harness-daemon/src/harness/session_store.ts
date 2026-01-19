@@ -35,7 +35,7 @@ export class SessionStore {
   private readonly logger: HarnessLogger;
   private context: ContextWindow | null = null;
   private pausedState: PausedState | null = null;
-  private modelOverride: ModelOverride | null = null;
+  private modelSelections = new Map<string, ModelOverride>();
 
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
@@ -145,19 +145,36 @@ export class SessionStore {
     this.persistContext();
     this.context = null;
     this.pausedState = null;
-    this.modelOverride = null;
+    this.modelSelections.clear();
   }
 
-  setModelOverride(override: ModelOverride | null): void {
-    this.modelOverride = override;
+  /**
+   * Set model selection for a specific agent type.
+   */
+  setModelSelection(agentType: string, selection: ModelOverride): void {
+    this.modelSelections.set(agentType, selection);
   }
 
-  getModelOverride(): ModelOverride | null {
-    return this.modelOverride;
+  /**
+   * Get model selection for a specific agent type.
+   * Returns null if no selection exists for that agent type.
+   */
+  getModelSelection(agentType: string): ModelOverride | null {
+    return this.modelSelections.get(agentType) ?? null;
   }
 
-  clearModelOverride(): void {
-    this.modelOverride = null;
+  /**
+   * Get all model selections (for persistence).
+   */
+  getAllModelSelections(): Map<string, ModelOverride> {
+    return new Map(this.modelSelections);
+  }
+
+  /**
+   * Clear all model selections.
+   */
+  clearModelSelections(): void {
+    this.modelSelections.clear();
   }
 
   // --- Execution tracking ---

@@ -18,6 +18,7 @@ export interface AgentRunParams {
   workingDir: string;
   context?: string;
   planMode?: boolean;
+  stopHook?: import('orchestrator').StopHookHandler;
 }
 
 /**
@@ -141,6 +142,8 @@ export interface StreamEventData {
   chunk: string;
   chunk_index?: number;
   is_final?: boolean;
+  /** True if this is reasoning/thinking content from the model */
+  is_reasoning?: boolean;
 }
 
 /**

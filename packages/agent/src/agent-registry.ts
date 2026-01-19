@@ -3,7 +3,7 @@
  */
 
 import type { AgentConfig } from './types.js';
-import type { LLMRequestConfig, ToolDefinition } from 'types';
+import type { ToolDefinition } from 'types';
 
 const DEFAULT_AGENT_TOOL_DESCRIPTIONS: Record<string, string> = {
   explorer: 'Understand code before acting. Pass an objective ("how does auth work?", "find where X is implemented") and receive distilled artifacts—signatures, call graphs, side effects—without polluting your context with full files. ~50 tokens/artifact vs ~2000 tokens/file. Use Read only AFTER you know which specific file to edit.',
@@ -66,15 +66,17 @@ function buildAgentToolDefinition(agentType: string): ToolDefinition {
 
 /**
  * Registry for agent configs and their tool definitions.
+ * NOTE: This registry stores ONLY agent capabilities (tools, budget, schema).
+ * LLM provider/model selection comes EXCLUSIVELY from SessionStore via getModelSelection.
  */
 export class AgentRegistry {
-  private configs = new Map<string, { config: AgentConfig; llm: LLMRequestConfig }>();
+  private configs = new Map<string, AgentConfig>();
   private toolDefinitions = new Map<string, ToolDefinition>();
 
-  constructor(configs: Array<{ config: AgentConfig; llm: LLMRequestConfig }>) {
-    for (const entry of configs) {
-      this.configs.set(entry.config.type, entry);
-      this.toolDefinitions.set(entry.config.type, buildAgentToolDefinition(entry.config.type));
+  constructor(configs: AgentConfig[]) {
+    for (const config of configs) {
+      this.configs.set(config.type, config);
+      this.toolDefinitions.set(config.type, buildAgentToolDefinition(config.type));
     }
   }
 
@@ -83,23 +85,15 @@ export class AgentRegistry {
   }
 
   getConfig(type: string): AgentConfig {
-    const entry = this.configs.get(type);
-    if (!entry) {
+    const config = this.configs.get(type);
+    if (!config) {
       throw new Error(`Unknown agent type: ${type}`);
     }
-    return entry.config;
-  }
-
-  getRuntimeConfig(type: string): { config: AgentConfig; llm: LLMRequestConfig } {
-    const entry = this.configs.get(type);
-    if (!entry) {
-      throw new Error(`Unknown agent type: ${type}`);
-    }
-    return entry;
+    return config;
   }
 
   listConfigs(): AgentConfig[] {
-    return Array.from(this.configs.values()).map((entry) => entry.config);
+    return Array.from(this.configs.values());
   }
 
   getToolDefinition(type: string): ToolDefinition | undefined {

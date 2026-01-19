@@ -27,7 +27,6 @@ export {
 export type {
   UserPromptOption,
   UserPrompt,
-  RoutingOutput,
   AgentAction,
   AgentActionOutput,
   GoalDrivenOutput,

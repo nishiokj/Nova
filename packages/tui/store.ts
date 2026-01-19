@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
@@ -38,9 +38,11 @@ export interface StoreSnapshot {
   history: MessageEntry[];
   streamingText: string;
   streamingRequestId: string | null;
+  /** Reasoning/thinking content being streamed (displayed distinctly from response) */
+  reasoningText: string;
+  reasoningRequestId: string | null;
   scrollOffset: number;
   newMessages: boolean;
-  compact: boolean;
   voiceMode: boolean;
   helpVisible: boolean;
   sessionKey: string | null;
@@ -80,9 +82,9 @@ export interface StoreSnapshot {
   modelsList: ModelEntry[];
   modelsCursor: number;
   modelDeletePending: boolean;
-  selectedModel: string | null;
-  selectedProvider: string | null;
-  selectedReasoningLevel: string | null;
+  modelSelections: Map<string, { model: string; provider: string; reasoning?: string }>;
+  stagedModelSelections: Map<string, { model: string; provider: string; reasoning?: string }>;
+  modelsActiveTab: string;
   // Sessions selection
   sessionsList: SessionEntry[];
   sessionsCursor: number;
@@ -93,6 +95,11 @@ export interface StoreSnapshot {
   usageDayStats: UsageDayStats[];
   usageProviderStats: UsageProviderStats[];
   usageLoading: boolean;
+  // Ralph Loop state
+  ralphActive: boolean;
+  ralphIteration: number;
+  ralphMaxIterations: number;
+  ralphCompletionPromise: string | null;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -117,9 +124,10 @@ export class Store {
   private streamingText = "";
   private streamingRequestId: string | null = null;
   private streamingTruncated = false;
+  private reasoningText = "";
+  private reasoningRequestId: string | null = null;
   private scrollOffset = 0;
   private newMessages = false;
-  private compact = false;
   private voiceMode = false;
   private helpVisible = false;
   private sessionKey: string | null = null;
@@ -165,9 +173,9 @@ export class Store {
   private modelsList: ModelEntry[] = [];
   private modelsCursor = 0;
   private modelDeletePending = false;
-  private selectedModel: string | null = null;
-  private selectedProvider: string | null = null;
-  private selectedReasoningLevel: string | null = null;
+  private modelSelections = new Map<string, { model: string; provider: string; reasoning?: string }>();
+  private stagedModelSelections = new Map<string, { model: string; provider: string; reasoning?: string }>();
+  private modelsActiveTab = 'standard';
 
   // Sessions selection
   private sessionsList: SessionEntry[] = [];
@@ -181,9 +189,14 @@ export class Store {
   private usageProviderStats: UsageProviderStats[] = [];
   private usageLoading = false;
 
+  // Ralph Loop state
+  private ralphActive = false;
+  private ralphIteration = 0;
+  private ralphMaxIterations = 0;
+  private ralphCompletionPromise: string | null = null;
+
   private historyCache: {
     width: number;
-    compact: boolean;
     version: number;
     lines: HistoryLine[];
   } | null = null;
@@ -221,9 +234,10 @@ export class Store {
       history: this.history.slice(this.historyStart),
       streamingText: this.streamingText,
       streamingRequestId: this.streamingRequestId,
+      reasoningText: this.reasoningText,
+      reasoningRequestId: this.reasoningRequestId,
       scrollOffset: this.scrollOffset,
       newMessages: this.newMessages,
-      compact: this.compact,
       voiceMode: this.voiceMode,
       helpVisible: this.helpVisible,
       sessionKey: this.sessionKey,
@@ -260,9 +274,9 @@ export class Store {
       modelsList: [...this.modelsList],
       modelsCursor: this.modelsCursor,
       modelDeletePending: this.modelDeletePending,
-      selectedModel: this.selectedModel,
-      selectedProvider: this.selectedProvider,
-      selectedReasoningLevel: this.selectedReasoningLevel,
+      modelSelections: new Map(this.modelSelections),
+      stagedModelSelections: new Map(this.stagedModelSelections),
+      modelsActiveTab: this.modelsActiveTab,
       // Sessions selection
       sessionsList: [...this.sessionsList],
       sessionsCursor: this.sessionsCursor,
@@ -273,6 +287,11 @@ export class Store {
       usageDayStats: [...this.usageDayStats],
       usageProviderStats: [...this.usageProviderStats],
       usageLoading: this.usageLoading,
+      // Ralph Loop state
+      ralphActive: this.ralphActive,
+      ralphIteration: this.ralphIteration,
+      ralphMaxIterations: this.ralphMaxIterations,
+      ralphCompletionPromise: this.ralphCompletionPromise,
     };
   }
 
@@ -429,13 +448,6 @@ export class Store {
     }
   }
 
-  toggleCompact(): boolean {
-    this.compact = !this.compact;
-    this.historyCache = null;
-    this.emit();
-    return this.compact;
-  }
-
   /**
    * Invalidates the history cache, forcing a full re-wrap on next render.
    * Call this on terminal resize to ensure text is re-wrapped for new width.
@@ -565,6 +577,41 @@ export class Store {
     this.historyCache = null;
     // Always emit immediately on finalize - user needs to see the final response
     this.lastStreamingEmit = 0;
+    this.emit();
+  }
+
+  // ==================== Reasoning Stream Methods ====================
+
+  setReasoning(requestId: string, text: string): void {
+    this.reasoningRequestId = requestId;
+    this.reasoningText = text;
+    this.historyVersion += 1;
+    this.historyCache = null;
+    this.emit();
+  }
+
+  appendReasoning(chunk: string): void {
+    // Use same limit as streaming to prevent memory exhaustion
+    if (this.reasoningText.length + chunk.length > MAX_STREAMING_BYTES) {
+      return;
+    }
+
+    this.reasoningText += chunk;
+    this.historyVersion += 1;
+
+    // Throttle emissions during streaming for better performance
+    const now = Date.now();
+    if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
+      this.lastStreamingEmit = now;
+      this.emit();
+    }
+  }
+
+  finalizeReasoning(): void {
+    this.reasoningRequestId = null;
+    this.reasoningText = "";
+    this.historyVersion += 1;
+    this.historyCache = null;
     this.emit();
   }
 
@@ -769,11 +816,10 @@ export class Store {
     }
   }
 
-  getHistoryLines(width: number, compact: boolean, streamCursor: string): HistoryLine[] {
+  getHistoryLines(width: number, streamCursor: string): HistoryLine[] {
     if (
       this.historyCache &&
       this.historyCache.width === width &&
-      this.historyCache.compact === compact &&
       this.historyCache.version === this.historyVersion
     ) {
       return this.historyCache.lines;
@@ -782,13 +828,12 @@ export class Store {
     const lines = buildHistoryLines(
       this.history.slice(this.historyStart),
       this.streamingText ? `${this.streamingText}${streamCursor}` : "",
+      this.reasoningText, // Pass reasoning text for distinct display
       width,
-      compact,
     );
 
     this.historyCache = {
       width,
-      compact,
       version: this.historyVersion,
       lines,
     };
@@ -1032,32 +1077,79 @@ export class Store {
   // ==================== Models Selection Methods ====================
 
   /**
+   * Sets model selection for a specific agent type.
+   */
+  setModelSelection(agentType: string, selection: { model: string; provider: string; reasoning?: string } | null): void {
+    if (selection) {
+      this.modelSelections.set(agentType, selection);
+    } else {
+      this.modelSelections.delete(agentType);
+    }
+    this.emit();
+  }
+
+  /**
+   * Gets model selection for a specific agent type.
+   */
+  getModelSelection(agentType: string): { model: string; provider: string; reasoning?: string } | null {
+    return this.modelSelections.get(agentType) ?? null;
+  }
+
+  /**
+   * Gets all model selections.
+   */
+  getAllModelSelections(): Map<string, { model: string; provider: string; reasoning?: string }> {
+    return new Map(this.modelSelections);
+  }
+
+  /**
+   * Sets the active tab for models view.
+   */
+  setModelsActiveTab(tab: string): void {
+    this.modelsActiveTab = tab;
+    // Update cursor to point to the selected model for this tab
+    const selection = this.modelSelections.get(tab);
+    if (selection && this.modelsList.length > 0) {
+      const idx = this.modelsList.findIndex((m) => m.id === selection.model && m.provider === selection.provider);
+      if (idx >= 0) {
+        this.modelsCursor = idx;
+      }
+    }
+    this.emit();
+  }
+
+  /**
+   * Gets the active tab for models view.
+   */
+  getModelsActiveTab(): string {
+    return this.modelsActiveTab;
+  }
+
+  /**
    * Updates the models list without changing UI mode.
-   * Auto-selects first model if none selected.
+   * Updates cursor to point to the selected model for the active tab.
    */
   updateModelsList(models: ModelEntry[]): void {
     this.modelsList = models;
-    const selected = this.getCurrentModelEntry();
-    if (selected?.reasoning && selected.reasoning.length > 0) {
-      if (!this.selectedReasoningLevel || !selected.reasoning.includes(this.selectedReasoningLevel)) {
-        this.selectedReasoningLevel = selected.reasoning[0];
-      }
-    } else if (selected) {
-      this.selectedReasoningLevel = null;
+    // Update cursor position based on active tab's selection
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (selection && models.length > 0) {
+      const idx = models.findIndex((m) => m.id === selection.model && m.provider === selection.provider);
+      this.modelsCursor = Math.max(0, idx);
+    } else {
+      this.modelsCursor = 0;
     }
-    // Update cursor position
-    const currentIdx = selected
-      ? models.findIndex((m) => m.id === selected.id && (!this.selectedProvider || m.provider === this.selectedProvider))
-      : 0;
-    this.modelsCursor = Math.max(0, currentIdx);
     this.emit();
   }
 
   /**
    * Sets the models list and enters models selection mode.
+   * Copies current modelSelections to stagedModelSelections for editing.
    */
   setModelsList(models: ModelEntry[]): void {
     this.updateModelsList(models);
+    // Initialize staged selections from current applied selections
+    this.stagedModelSelections = new Map(this.modelSelections);
     this.uiMode = "models";
     this.emit();
   }
@@ -1074,15 +1166,18 @@ export class Store {
   }
 
   /**
-   * Selects the model at the current cursor position.
-   * Returns the selected model entry.
+   * Stages the model at the current cursor position for the active tab.
+   * Does not apply to backend until applyAllStagedSelections is called.
+   * Returns the staged model entry.
    */
-  selectModel(): ModelEntry | null {
+  stageModelAtCursor(): ModelEntry | null {
     const model = this.modelsList[this.modelsCursor];
     if (model) {
-      this.selectedModel = model.id;
-      this.selectedProvider = model.provider ?? null;
-      this.selectedReasoningLevel = model.reasoning?.[0] ?? null;
+      this.stagedModelSelections.set(this.modelsActiveTab, {
+        model: model.id,
+        provider: model.provider ?? '',
+        reasoning: model.reasoning?.[0],
+      });
       this.emit();
       return model;
     }
@@ -1090,66 +1185,114 @@ export class Store {
   }
 
   /**
-   * Sets the selected model by ID (used for external updates).
+   * Gets the staged selection for a specific agent type.
    */
-  setSelectedModel(modelId: string | null): void {
-    this.selectedModel = modelId;
+  getStagedSelection(agentType: string): { model: string; provider: string; reasoning?: string } | null {
+    return this.stagedModelSelections.get(agentType) ?? null;
+  }
+
+  /**
+   * Applies all staged selections - copies staged to modelSelections.
+   * Returns the map of selections that changed (for sending to backend).
+   */
+  applyAllStagedSelections(): Map<string, { model: string; provider: string; reasoning?: string }> {
+    // Find which selections actually changed
+    const changed = new Map<string, { model: string; provider: string; reasoning?: string }>();
+    for (const [agentType, staged] of this.stagedModelSelections) {
+      const current = this.modelSelections.get(agentType);
+      if (!current || current.model !== staged.model || current.provider !== staged.provider || current.reasoning !== staged.reasoning) {
+        changed.set(agentType, staged);
+      }
+    }
+    // Apply staged to actual selections
+    this.modelSelections = new Map(this.stagedModelSelections);
+    this.emit();
+    return changed;
+  }
+
+  /**
+   * Clears staged selections without applying.
+   */
+  clearStagedSelections(): void {
+    this.stagedModelSelections.clear();
+    this.emit();
+  }
+
+  /**
+   * Legacy: Selects the model at the current cursor position for the active tab.
+   * Returns the selected model entry.
+   * @deprecated Use stageModelAtCursor and applyAllStagedSelections instead
+   */
+  selectModel(): ModelEntry | null {
+    const model = this.modelsList[this.modelsCursor];
+    if (model) {
+      this.modelSelections.set(this.modelsActiveTab, {
+        model: model.id,
+        provider: model.provider ?? '',
+        reasoning: model.reasoning?.[0],
+      });
+      this.emit();
+      return model;
+    }
+    return null;
+  }
+
+  /**
+   * Sets the selected model by ID for a specific agent type (used for external updates).
+   */
+  setSelectedModel(modelId: string | null, agentType?: string): void {
+    const targetTab = agentType ?? this.modelsActiveTab;
     if (!modelId) {
-      this.selectedProvider = null;
-      this.selectedReasoningLevel = null;
+      this.modelSelections.delete(targetTab);
       this.emit();
       return;
     }
-    if (this.modelsList.length > 0) {
-      const idx = this.selectedProvider
-        ? this.modelsList.findIndex((m) => m.id === modelId && m.provider === this.selectedProvider)
-        : this.modelsList.findIndex((m) => m.id === modelId);
-      if (idx >= 0) {
-        this.modelsCursor = idx;
-        const model = this.modelsList[idx];
-        this.selectedProvider = model.provider ?? this.selectedProvider;
-        // Preserve reasoning level if supported, otherwise reset
-        if (model.reasoning && model.reasoning.length > 0) {
-          if (!this.selectedReasoningLevel || !model.reasoning.includes(this.selectedReasoningLevel)) {
-            this.selectedReasoningLevel = model.reasoning[0];
-          }
-        } else {
-          this.selectedReasoningLevel = null;
-        }
-      } else {
-        this.selectedReasoningLevel = null;
+    const model = this.modelsList.find((m) => m.id === modelId);
+    if (model) {
+      this.modelSelections.set(targetTab, {
+        model: model.id,
+        provider: model.provider ?? '',
+        reasoning: model.reasoning?.[0],
+      });
+      if (targetTab === this.modelsActiveTab) {
+        const idx = this.modelsList.findIndex((m) => m.id === modelId);
+        if (idx >= 0) this.modelsCursor = idx;
       }
     }
     this.emit();
   }
 
   /**
-   * Sets the selected model provider (used for backend sync).
+   * Sets the selected model provider for the active tab (used for backend sync).
    */
   setSelectedProvider(provider: string | null): void {
-    this.selectedProvider = provider;
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (selection && provider) {
+      this.modelSelections.set(this.modelsActiveTab, { ...selection, provider });
+    }
     this.emit();
   }
 
   /**
-   * Gets the currently selected model ID.
+   * Gets the currently selected model ID for the active tab.
    */
   getSelectedModel(): string | null {
-    return this.selectedModel;
+    return this.modelSelections.get(this.modelsActiveTab)?.model ?? null;
   }
 
   /**
-   * Gets the currently selected model provider.
+   * Gets the currently selected model provider for the active tab.
    */
   getSelectedProvider(): string | null {
-    return this.selectedProvider;
+    return this.modelSelections.get(this.modelsActiveTab)?.provider ?? null;
   }
 
   /**
-   * Exits models mode and returns to chat. Clears pending delete.
+   * Exits models mode and returns to chat. Clears pending delete and staged selections.
    */
   exitModelsMode(): void {
     this.modelDeletePending = false;
+    this.stagedModelSelections.clear();
     this.uiMode = "chat";
     this.emit();
   }
@@ -1180,20 +1323,27 @@ export class Store {
       this.modelsCursor = Math.max(0, this.modelsList.length - 1);
     }
 
+    // Clear any selections using this model
+    for (const [agentType, selection] of this.modelSelections) {
+      if (selection.model === removed.id) {
+        this.modelSelections.delete(agentType);
+      }
+    }
+
     this.emit();
     return removed;
   }
 
   /**
-   * Cycles to the next model in the models list.
+   * Cycles to the next model in the models list for the active tab.
    * Returns the new model entry or null if no models available.
    */
   cycleToNextModel(): ModelEntry | null {
     if (this.modelsList.length === 0) return null;
 
-    // Find current model index
-    let currentIdx = this.selectedModel
-      ? this.modelsList.findIndex((m) => m.id === this.selectedModel)
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    let currentIdx = selection
+      ? this.modelsList.findIndex((m) => m.id === selection.model)
       : -1;
 
     // Move to next model (wrap around)
@@ -1201,11 +1351,12 @@ export class Store {
     const nextModel = this.modelsList[nextIdx];
 
     if (nextModel) {
-      this.selectedModel = nextModel.id;
-      this.selectedProvider = nextModel.provider ?? null;
+      this.modelSelections.set(this.modelsActiveTab, {
+        model: nextModel.id,
+        provider: nextModel.provider ?? '',
+        reasoning: nextModel.reasoning?.[0],
+      });
       this.modelsCursor = nextIdx;
-      // Reset reasoning level when switching models
-      this.selectedReasoningLevel = nextModel.reasoning?.[0] ?? null;
       this.emit();
       return nextModel;
     }
@@ -1213,74 +1364,80 @@ export class Store {
   }
 
   /**
-   * Gets the currently selected reasoning level.
+   * Gets the currently selected reasoning level for the active tab.
    */
   getSelectedReasoningLevel(): string | null {
-    return this.selectedReasoningLevel;
+    return this.modelSelections.get(this.modelsActiveTab)?.reasoning ?? null;
   }
 
   /**
-   * Sets the reasoning level.
+   * Sets the reasoning level for the active tab.
    */
   setReasoningLevel(level: string | null): void {
-    this.selectedReasoningLevel = level;
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (selection) {
+      if (level) {
+        this.modelSelections.set(this.modelsActiveTab, { ...selection, reasoning: level });
+      } else {
+        const { reasoning: _, ...rest } = selection;
+        this.modelSelections.set(this.modelsActiveTab, rest as { model: string; provider: string });
+      }
+    }
     this.emit();
   }
 
   /**
-   * Cycles to the next reasoning level for the current model.
+   * Cycles to the next reasoning level for the current model on the active tab.
    * Returns the new reasoning level or null if model doesn't support reasoning.
    */
   cycleReasoningLevel(): string | null {
-    // Find current model's reasoning options
-    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection) return null;
+
+    const currentModel = this.modelsList.find((m) => m.id === selection.model);
     if (!currentModel?.reasoning || currentModel.reasoning.length === 0) {
       return null;
     }
 
     const levels = currentModel.reasoning;
-    if (levels.length === 0) return null;
-
-    // Find current level index
-    let currentIdx = this.selectedReasoningLevel
-      ? levels.indexOf(this.selectedReasoningLevel)
+    let currentIdx = selection.reasoning
+      ? levels.indexOf(selection.reasoning)
       : -1;
 
     // Move to next level (wrap around)
     const nextIdx = (currentIdx + 1) % levels.length;
-    this.selectedReasoningLevel = levels[nextIdx];
+    const nextLevel = levels[nextIdx];
+    this.modelSelections.set(this.modelsActiveTab, { ...selection, reasoning: nextLevel });
     this.emit();
-    return this.selectedReasoningLevel;
+    return nextLevel;
   }
 
   /**
-   * Gets reasoning options for the currently selected model.
+   * Gets reasoning options for the currently selected model on the active tab.
    */
   getCurrentModelReasoningOptions(): string[] | null {
-    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection) return null;
+    const currentModel = this.modelsList.find((m) => m.id === selection.model);
     return currentModel?.reasoning ?? null;
   }
 
   /**
-   * Gets the currently selected model entry.
+   * Gets the currently selected model entry for the active tab.
    */
   getCurrentModelEntry(): ModelEntry | null {
-    if (!this.selectedModel) return null;
-    const provider = this.selectedProvider;
-    if (provider) {
-      return this.modelsList.find((m) => m.id === this.selectedModel && m.provider === provider) ?? null;
-    }
-    return this.modelsList.find((m) => m.id === this.selectedModel) ?? null;
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection) return null;
+    return this.modelsList.find((m) => m.id === selection.model && m.provider === selection.provider) ?? null;
   }
 
   /**
-   * Gets models for the currently selected model's provider.
+   * Gets models for the currently selected model's provider on the active tab.
    */
   getCurrentProviderModels(): ModelEntry[] {
-    const currentModel = this.getCurrentModelEntry();
-    const provider = currentModel?.provider ?? this.selectedProvider;
-    if (!provider) return this.modelsList; // No provider = show all
-    return this.modelsList.filter((m) => m.provider === provider);
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection?.provider) return this.modelsList;
+    return this.modelsList.filter((m) => m.provider === selection.provider);
   }
 
   // ==================== Sessions Selection Methods ====================
@@ -1390,6 +1547,42 @@ export class Store {
     this.usageLoading = false;
     this.uiMode = "chat";
     this.emit();
+  }
+
+  // ==================== Ralph Loop Methods ====================
+
+  /**
+   * Sets the Ralph Loop state.
+   */
+  setRalphState(
+    active: boolean,
+    iteration: number,
+    maxIterations: number,
+    completionPromise: string | null
+  ): void {
+    this.ralphActive = active;
+    this.ralphIteration = iteration;
+    this.ralphMaxIterations = maxIterations;
+    this.ralphCompletionPromise = completionPromise;
+    this.emit();
+  }
+
+  /**
+   * Clears the Ralph Loop state.
+   */
+  clearRalphState(): void {
+    this.ralphActive = false;
+    this.ralphIteration = 0;
+    this.ralphMaxIterations = 0;
+    this.ralphCompletionPromise = null;
+    this.emit();
+  }
+
+  /**
+   * Checks if a Ralph Loop is active.
+   */
+  isRalphActive(): boolean {
+    return this.ralphActive;
   }
 
   // ==================== Response Pane Methods ====================
@@ -1528,8 +1721,8 @@ function isWhitespace(ch: string): boolean {
 function buildHistoryLines(
   history: MessageEntry[],
   streamingText: string,
+  reasoningText: string,
   width: number,
-  _compact: boolean,
 ): HistoryLine[] {
   const lines: HistoryLine[] = [];
   const safeWidth = Math.max(20, width);
@@ -1571,17 +1764,41 @@ function buildHistoryLines(
 
     // Add blank separator lines after each message for visual breathing room
     // Use space characters so Ink renders them with actual height
+    for (let i = 0; i < 3; i++) {
+      lines.push({
+        id: `${entryLinePrefix}:${lineIndex + i}`,
+        text: " ",
+        role: undefined,
+        requestId: entry.requestId,
+      });
+    }
+  }
+
+  // Display reasoning content before the main response (dimmed in TUI)
+  if (reasoningText) {
+    // Add a thinking indicator prefix
     lines.push({
-      id: `${entryLinePrefix}:${lineIndex}`,
-      text: " ",
-      role: undefined,
-      requestId: entry.requestId,
+      id: "reasoning:header",
+      text: "💭 Thinking...",
+      role: "reasoning",
+      isBlockStart: true,
     });
+    const wrapped = wrapText(reasoningText, safeWidth);
+    wrapped.forEach((line, index) => {
+      lines.push({
+        id: `reasoning:${index}`,
+        text: line,
+        role: "reasoning",
+      });
+    });
+    if (lines.length > 0 && lines[lines.length - 1].role === "reasoning") {
+      lines[lines.length - 1].isBlockEnd = true;
+    }
+    // Add separator after reasoning
     lines.push({
-      id: `${entryLinePrefix}:${lineIndex + 1}`,
+      id: "reasoning:sep",
       text: " ",
       role: undefined,
-      requestId: entry.requestId,
     });
   }
 
@@ -1613,6 +1830,13 @@ function normalizeMarkdownSpacing(text: string): string {
 
   // Normalize line endings
   result = result.replace(/\r\n/g, "\n");
+
+  // Fix common LLM escape sequence issues:
+  // - Literal \n strings that should be newlines
+  // - Malformed ''n patterns (corrupted \n)
+  result = result.replace(/\\n/g, "\n");
+  result = result.replace(/'+'n/g, "\n");
+  result = result.replace(/''n/g, "\n");
 
   // Headers: ensure blank line before (unless at start) and after
   // Matches: # Header, ## Header, etc.
@@ -1649,6 +1873,42 @@ function normalizeMarkdownSpacing(text: string): string {
   return result;
 }
 
+/**
+ * Find positions of markdown inline spans (bold, italic, code) in text.
+ * Returns array of [start, end] positions that should not be broken.
+ */
+function findMarkdownSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const patterns = [
+    /\*\*.+?\*\*/g,     // Bold **text**
+    /__.+?__/g,         // Bold __text__
+    /\*.+?\*/g,         // Italic *text* (after bold to avoid overlap)
+    /_.+?_/g,           // Italic _text_
+    /`.+?`/g,           // Inline code `text`
+    /~~.+?~~/g,         // Strikethrough ~~text~~
+  ];
+  for (const pattern of patterns) {
+    let m;
+    while ((m = pattern.exec(text)) !== null) {
+      spans.push([m.index, m.index + m[0].length]);
+    }
+  }
+  // Sort by start position
+  spans.sort((a, b) => a[0] - b[0]);
+  return spans;
+}
+
+/**
+ * Check if a position is inside a markdown span.
+ */
+function isInsideSpan(pos: number, spans: Array<[number, number]>): boolean {
+  for (const [start, end] of spans) {
+    if (pos > start && pos < end) return true;
+    if (start > pos) break; // Spans are sorted, no need to check further
+  }
+  return false;
+}
+
 function wrapText(text: string, width: number): string[] {
   if (!text) {
     return [""];
@@ -1667,8 +1927,12 @@ function wrapText(text: string, width: number): string[] {
       continue;
     }
 
-    // Word-wrap: try to break at word boundaries
+    // Find markdown spans to avoid breaking inside them
+    const spans = findMarkdownSpans(rawLine);
+
+    // Word-wrap: try to break at word boundaries, avoiding markdown spans
     let remaining = rawLine;
+    let offset = 0; // Track position in original rawLine for span checking
     while (remaining.length > 0) {
       if (remaining.length <= safeWidth) {
         lines.push(remaining);
@@ -1683,9 +1947,30 @@ function wrapText(text: string, width: number): string[] {
         breakPoint = safeWidth;
       }
 
+      // Check if break point is inside a markdown span
+      const absolutePos = offset + breakPoint;
+      if (isInsideSpan(absolutePos, spans)) {
+        // Find an earlier break point outside the span
+        let newBreak = breakPoint - 1;
+        while (newBreak > 0 && isInsideSpan(offset + newBreak, spans)) {
+          newBreak--;
+        }
+        // Find actual space near the new break point
+        if (newBreak > safeWidth / 3) {
+          const spacePos = remaining.lastIndexOf(" ", newBreak);
+          if (spacePos > safeWidth / 3) {
+            breakPoint = spacePos;
+          }
+          // If no good space found, keep original break (will split the span, but better than infinite loop)
+        }
+      }
+
       lines.push(remaining.slice(0, breakPoint));
+      offset += breakPoint;
       // Skip the space if we broke at a space
-      remaining = remaining.slice(breakPoint).trimStart();
+      const trimmed = remaining.slice(breakPoint).trimStart();
+      offset += remaining.length - breakPoint - trimmed.length;
+      remaining = trimmed;
     }
   }
 

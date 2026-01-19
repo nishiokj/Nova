@@ -36,7 +36,9 @@ export type BridgeCommandType =
   | "list_sessions"
   | "compact_context"
   | "set_model"
-  | "get_model";
+  | "get_model"
+  | "ralph_loop_start"
+  | "ralph_loop_cancel";
 
 export type BridgeEventType =
   | "ready"
@@ -74,7 +76,7 @@ export type EventLevel = "info" | "success" | "warning" | "error";
 /** Event kind for categorization */
 export type EventKind = "work" | "tool" | "planning" | "system";
 
-export type Role = "user" | "agent" | "system" | "status";
+export type Role = "user" | "agent" | "system" | "status" | "reasoning";
 
 export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response" | "models" | "sessions" | "usage";
 export type WizardType = "skill" | "hook";
@@ -111,6 +113,8 @@ export interface StreamData {
   chunk: string;
   chunk_index?: number;
   is_final?: boolean;
+  /** True if this is reasoning/thinking content from the model */
+  is_reasoning?: boolean;
 }
 
 export interface ResponseData {
@@ -288,3 +292,18 @@ export interface UsageProviderStats {
   week: number;
   month: number;
 }
+
+/** Ralph Loop progress data for iteration updates */
+export interface RalphProgressData {
+  type: "ralph_iteration";
+  iteration: number;
+  maxIterations: number;
+  completionPromise: string | null;
+}
+
+/** Ralph Loop completion reason */
+export type RalphCompletionReason =
+  | "promise_detected"
+  | "max_iterations"
+  | "manual_cancel"
+  | "error";

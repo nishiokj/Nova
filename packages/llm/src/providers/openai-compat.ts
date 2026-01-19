@@ -461,11 +461,29 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     // For GLM models, map reasoning config to thinking parameter
     // GLM uses thinking: { type: 'enabled' } instead of standard reasoning
     const isGlmModel = resolved.model.toLowerCase().startsWith('glm-');
+    const fs = await import('fs');
+    const debugLog = (msg: string) => fs.appendFileSync('/tmp/llm-debug.log', msg + '\n');
+    debugLog(`[LLM DEBUG] stream() called - model: ${resolved.model}, isGlm: ${isGlmModel}, reasoning: ${JSON.stringify(resolved.reasoning)}`);
     if (isGlmModel && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
       body.thinking = {
         type: 'enabled',
         clear_thinking: false, // Preserve thinking across turns for multi-turn salience
       };
+      // Enable tool_stream to get reasoning_content with tool calls
+      body.tool_stream = true;
+      debugLog(`[LLM DEBUG] GLM thinking ENABLED for stream - model: ${resolved.model}, effort: ${resolved.reasoning.effort}, tool_stream: true`);
+      logger.debug('GLM thinking enabled for stream', {
+        model: resolved.model,
+        effort: resolved.reasoning.effort,
+      });
+    } else if (isGlmModel) {
+      // Log when GLM model is used but thinking is not enabled
+      debugLog(`[LLM DEBUG] GLM thinking NOT enabled - model: ${resolved.model}, hasReasoning: ${!!resolved.reasoning}, effort: ${resolved.reasoning?.effort}`);
+      logger.debug('GLM model without thinking', {
+        model: resolved.model,
+        hasReasoning: !!resolved.reasoning,
+        effort: resolved.reasoning?.effort,
+      });
     }
 
     if (params.tools && params.tools.length > 0) {
@@ -490,6 +508,17 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
           },
         };
       }
+    }
+
+    // Debug: log request body for GLM models
+    if (isGlmModel) {
+      debugLog(`[LLM DEBUG] Request body for GLM: ${JSON.stringify({
+        model: body.model,
+        thinking: body.thinking,
+        tool_stream: body.tool_stream,
+        stream: body.stream,
+        messageCount: Array.isArray(body.messages) ? body.messages.length : 0,
+      })}`);
     }
 
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
@@ -533,6 +562,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const toolCallBuilders: Map<number, { id: string; name: string; arguments: string }> = new Map();
     let model = resolved.model;
     let buffer = '';
+    let eventCount = 0;
 
     try {
       while (true) {
@@ -547,6 +577,12 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6);
           if (data === '[DONE]') continue;
+
+          // Debug: log first few SSE events to see raw response
+          if (isGlmModel && eventCount < 3) {
+            debugLog(`[LLM DEBUG] Raw SSE event #${eventCount}: ${data.slice(0, 500)}`);
+          }
+          eventCount++;
 
           try {
             const event = JSON.parse(data) as {
@@ -584,15 +620,37 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
             const choice = event.choices?.[0];
             if (choice) {
-              // Accumulate reasoning content (GLM-4.7 thinking trace)
+              // Stream reasoning content (GLM-4.7 thinking trace)
               if (choice.delta?.reasoning_content) {
-                fullReasoningContent += choice.delta.reasoning_content;
+                const reasoningChunk = choice.delta.reasoning_content;
+                fullReasoningContent += reasoningChunk;
+                debugLog(`[LLM DEBUG] Received reasoning chunk - length: ${reasoningChunk.length}, total: ${fullReasoningContent.length}`);
+                logger.debug('Received reasoning chunk', {
+                  model: resolved.model,
+                  chunkLength: reasoningChunk.length,
+                  totalLength: fullReasoningContent.length,
+                });
+                params.onReasoningChunk?.(reasoningChunk);
               }
 
-              if (choice.delta?.content) {
-                fullContent += choice.delta.content;
-                params.onChunk?.(choice.delta.content);
-                yield choice.delta.content;
+              const deltaContent = (choice.delta as { content?: unknown }).content;
+              if (deltaContent !== undefined) {
+                const normalized = this.normalizeContent(deltaContent);
+                if (normalized) {
+                  fullContent += normalized;
+                  params.onChunk?.(normalized);
+                  yield normalized;
+                }
+              }
+
+              const messageContent = (choice as { message?: { content?: unknown } }).message?.content;
+              if (fullContent.length === 0 && messageContent !== undefined) {
+                const normalized = this.normalizeContent(messageContent);
+                if (normalized) {
+                  fullContent += normalized;
+                  params.onChunk?.(normalized);
+                  yield normalized;
+                }
               }
 
               if (choice.delta?.tool_calls) {

@@ -205,6 +205,8 @@ async function startTui(): Promise<void> {
       ...process.env,
       EVENT_BUS_HOST: DAEMON_HOST,
       EVENT_BUS_PORT: String(DAEMON_PORT),
+      // Force color support for markdown rendering (chalk detection fails under Bun)
+      FORCE_COLOR: '3',
     },
     stdout: 'inherit',
     stderr: 'inherit',

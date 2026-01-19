@@ -988,11 +988,6 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
   };
 
   const agents: Record<string, ResolvedAgentConfig> = {
-    routing: {
-      llm: { ...defaultLLM, maxTokens: 100, temperature: 0.1 },
-      budget: { maxIterations: 1, maxToolCalls: 0, maxDurationMs: 3000 },
-      tools: [],
-    },
     simple: {
       llm: { ...defaultLLM, maxTokens: 4000, temperature: 0.5 },
       budget: { maxIterations: 3, maxToolCalls: 5, maxDurationMs: 30000 },
@@ -1013,7 +1008,7 @@ export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
       budget: defaultBudget,
       tools: DEFAULT_ENABLED_TOOLS,
     },
-    complex: {
+    coding: {
       llm: { ...defaultLLM, maxTokens: 32000 },
       budget: { ...defaultBudget, maxIterations: 15, maxToolCalls: 25, maxDurationMs: 180000 },
       tools: DEFAULT_ENABLED_TOOLS,

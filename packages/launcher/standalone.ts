@@ -4,6 +4,10 @@
  * For distribution builds only.
  */
 
+// Force color support for markdown rendering (chalk detection fails under Bun)
+// Must be set before any color-dependent modules are imported
+process.env.FORCE_COLOR = process.env.FORCE_COLOR ?? '3';
+
 import { parseArgs } from 'util';
 import { mkdirSync, existsSync, writeFileSync } from 'fs';
 import { homedir } from 'os';

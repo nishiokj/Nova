@@ -289,12 +289,65 @@ export async function runRalphLoop<T>(
  * await orchestrator.execute(context, 'Build a REST API', 'standard', cwd);
  * ```
  */
+/** Minimum ms between iterations before triggering death spiral detection */
+const DEATH_SPIRAL_THRESHOLD_MS = 2000;
+/** Number of rapid iterations before aborting */
+const DEATH_SPIRAL_COUNT = 3;
+
+/** Termination reasons that should continue the Ralph loop */
+const CONTINUABLE_TERMINATIONS = new Set([
+  'goal_state_reached',
+  'max_iterations_exceeded',
+  'max_tool_calls_exceeded',
+  'max_duration_exceeded',
+  'handoff_requested', // Orchestrator handles handoffs internally
+  'user_input_required', // Handled specially with async mode message
+]);
+
+/** Message sent when agent tries to ask user questions in async Ralph mode */
+const ASYNC_MODE_MESSAGE = 'You are in async mode. User cannot answer questions. Do not ask again. Continue working autonomously.';
+
 export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
   const state = createRalphState(config);
+  let lastIterationTime = Date.now();
+  let rapidFireCount = 0;
 
   return (context): StopHookResult => {
-    state.iteration++;
     state.lastResponse = context.response;
+
+    // For non-continuable terminations (errors, refusals), end the loop
+    if (!CONTINUABLE_TERMINATIONS.has(context.terminationReason)) {
+      config.onComplete?.(state, 'error');
+      return { decision: 'allow' };
+    }
+
+    // Death spiral detection - abort if iterations are completing too fast
+    const now = Date.now();
+    const elapsed = now - lastIterationTime;
+    lastIterationTime = now;
+
+    if (elapsed < DEATH_SPIRAL_THRESHOLD_MS) {
+      rapidFireCount++;
+      if (rapidFireCount >= DEATH_SPIRAL_COUNT) {
+        config.onComplete?.(state, 'error');
+        return { decision: 'allow' };
+      }
+    } else {
+      rapidFireCount = 0; // Reset on normal iteration
+    }
+
+    // Handle user_input_required specially - tell agent it's in async mode
+    // Don't increment iteration count for this, it's not real progress
+    if (context.terminationReason === 'user_input_required') {
+      return {
+        decision: 'block',
+        reason: ASYNC_MODE_MESSAGE,
+        systemMessage: `🔄 Ralph iteration ${state.iteration + 1} (async mode - no user input available)`,
+      };
+    }
+
+    // Increment iteration count for actual progress
+    state.iteration++;
 
     // Check for completion promise
     if (config.completionPromise && checkCompletionPromise(context.response, config.completionPromise)) {

@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { BridgeClient, type ConnectionState } from "./bridge_client.js";
 import { FileCache } from "./file_cache.js";
@@ -28,6 +29,8 @@ import {
   type UsageSessionSummary,
   type UsageDayStats,
   type UsageProviderStats,
+  type RalphProgressData,
+  type RalphCompletionReason,
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
@@ -46,6 +49,95 @@ import { formatDiffAsText } from "./diff.js";
 const DEFAULT_MAX_INPUT_LINES = 6;
 const STREAM_CURSOR_FRAMES = ["|", " "];
 const STATUS_SPINNER_FRAMES = ["-", "\\", "|", "/"];
+
+// ==================== Ralph Loop Argument Parsing ====================
+
+interface RalphArgs {
+  prompt: string;
+  fromFile: boolean;
+  maxIterations: number;
+  completionPromise: string;
+}
+
+/**
+ * Parse Ralph Loop command arguments.
+ *
+ * Syntax:
+ *   /ralph-loop <prompt> [options]
+ *   /ralph-loop @<file.md> [options]
+ *   /ralph-loop cancel
+ *
+ * Options:
+ *   --max-iterations=N or -n N: Max iterations (default: 20)
+ *   --complete="PHRASE": Completion promise (default: "TASK COMPLETE")
+ */
+function parseRalphArgs(arg: string): RalphArgs | null {
+  if (!arg || arg.trim() === "") {
+    return null;
+  }
+
+  const trimmed = arg.trim();
+
+  // Check for cancel command
+  if (trimmed.toLowerCase() === "cancel") {
+    return null; // Signal for cancel
+  }
+
+  let remaining = trimmed;
+  let maxIterations = 20;
+  let completionPromise = "TASK COMPLETE";
+
+  // Extract --max-iterations=N or -n N
+  const maxIterMatch = remaining.match(/--max-iterations=(\d+)/i);
+  if (maxIterMatch) {
+    maxIterations = parseInt(maxIterMatch[1], 10);
+    remaining = remaining.replace(maxIterMatch[0], "").trim();
+  } else {
+    const shortMaxMatch = remaining.match(/-n\s+(\d+)/);
+    if (shortMaxMatch) {
+      maxIterations = parseInt(shortMaxMatch[1], 10);
+      remaining = remaining.replace(shortMaxMatch[0], "").trim();
+    }
+  }
+
+  // Extract --complete="PHRASE" or --complete='PHRASE'
+  const completeMatch = remaining.match(/--complete=["']([^"']+)["']/i);
+  if (completeMatch) {
+    completionPromise = completeMatch[1];
+    remaining = remaining.replace(completeMatch[0], "").trim();
+  }
+
+  // Remaining is the prompt source
+  const promptSource = remaining.trim();
+
+  if (!promptSource) {
+    return null;
+  }
+
+  // Check if it's a file reference
+  let prompt = promptSource;
+  let fromFile = false;
+
+  if (promptSource.startsWith("@")) {
+    const filePath = promptSource.slice(1);
+    const resolvedPath = path.resolve(process.cwd(), filePath);
+
+    try {
+      prompt = fs.readFileSync(resolvedPath, "utf-8");
+      fromFile = true;
+    } catch (err) {
+      // Return null to indicate error - caller should show message
+      return null;
+    }
+  }
+
+  return {
+    prompt,
+    fromFile,
+    maxIterations,
+    completionPromise,
+  };
+}
 
 interface GraphDSession {
   session_key: string;
@@ -540,18 +632,19 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Gracefully closes session before disconnecting
     const cleanup = () => {
       const snapshot = store.getSnapshot();
-      const currentEntry = store.getCurrentModelEntry();
-      const selectedModel = snapshot.selectedModel;
-      const selectedProvider = snapshot.selectedProvider ?? currentEntry?.provider ?? null;
-      if (selectedModel && selectedProvider) {
-        client.send({
-          type: "set_model",
-          data: {
-            provider: selectedProvider,
-            model: selectedModel,
-            ...(snapshot.selectedReasoningLevel ? { reasoning: snapshot.selectedReasoningLevel } : {}),
-          },
-        });
+      // Persist all model selections (standard, explorer, coding) on cleanup
+      for (const [agentType, selection] of snapshot.modelSelections) {
+        if (selection?.model && selection?.provider) {
+          client.send({
+            type: "set_model",
+            data: {
+              agent_type: agentType,
+              provider: selection.provider,
+              model: selection.model,
+              ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
+            },
+          });
+        }
       }
       // Signal session close to harness (don't await - best effort)
       // This marks the session as inactive so it shows correctly in /sessions
@@ -658,10 +751,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
     }
+    // Clear all model selections on session start - will be repopulated by model_changed events
     store.batch(() => {
-      store.setSelectedModel(null);
-      store.setSelectedProvider(null);
-      store.setReasoningLevel(null);
+      store.setModelSelection('standard', null);
+      store.setModelSelection('explorer', null);
+      store.setModelSelection('coding', null);
     });
     if (data?.capabilities) {
       // Convert snake_case from bridge to camelCase for store
@@ -745,6 +839,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (!data?.message) {
       return;
     }
+
+    // Handle Ralph Loop iteration progress
+    const ralphData = data as unknown as { ralph_iteration?: RalphProgressData };
+    if (ralphData.ralph_iteration) {
+      const ralph = ralphData.ralph_iteration;
+      store.setRalphState(
+        true,
+        ralph.iteration,
+        ralph.maxIterations,
+        ralph.completionPromise
+      );
+      // Don't return - continue to show progress message
+    }
+
     const message = data.tool_name ? `${data.tool_name}: ${data.message}` : data.message;
     store.setProgress(message, data.level, data.kind);
 
@@ -781,8 +889,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (!data?.request_id || data.chunk === undefined) {
       return;
     }
+
+    // Route reasoning content separately from main response
+    if (data.is_reasoning) {
+      // Handle reasoning final marker (empty chunk with is_final=true)
+      // Don't clear reasoning yet - it stays visible until main response completes
+      if (data.is_final) {
+        return;
+      }
+      // Append reasoning chunks
+      const currentSnapshot = store.getSnapshot();
+      if (currentSnapshot.reasoningRequestId !== data.request_id) {
+        store.setReasoning(data.request_id, data.chunk);
+      } else {
+        store.appendReasoning(data.chunk);
+      }
+      store.setState("streaming");
+      return;
+    }
+
+    // Handle regular response streaming
     const currentSnapshot = store.getSnapshot();
     if (currentSnapshot.streamingRequestId !== data.request_id) {
+      // New response stream - finalize any active reasoning first
+      if (currentSnapshot.reasoningRequestId === data.request_id) {
+        store.finalizeReasoning();
+      }
       store.setStreaming(data.request_id, data.chunk);
     } else {
       store.appendStreaming(data.chunk);
@@ -797,6 +929,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           store.addMessage("agent", finalText, undefined, data.request_id);
         }
         store.finalizeStreaming();
+        store.finalizeReasoning(); // Clear any remaining reasoning
         store.clearProgress();
         store.setState("idle");
       });
@@ -881,21 +1014,94 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
       return;
     }
-    if (kind === "get_model") {
+    if (kind === "set_model") {
+      if (data.success === false) {
+        if (error) {
+          store.addMessage("system", error);
+        }
+        sendCommand("get_model");
+        return;
+      }
       const payload = metadata.payload as {
+        agent_type?: string | null;
+        selected_model?: { provider?: string; model?: string; reasoning?: string } | null;
         selectedModel?: string | null;
         selectedProvider?: string | null;
         provider?: string | null;
         model?: string | null;
         reasoning?: string | null;
       } | undefined;
+      const agentType = typeof payload?.agent_type === "string" ? payload.agent_type : "standard";
+      const selectedModelObj = payload?.selected_model ?? null;
+      const selectedModel =
+        selectedModelObj?.model ?? payload?.selectedModel ?? payload?.model ?? null;
+      const selectedProvider =
+        selectedModelObj?.provider ?? payload?.selectedProvider ?? payload?.provider ?? null;
+      const reasoning =
+        selectedModelObj?.reasoning ?? (typeof payload?.reasoning === "string" ? payload.reasoning : null);
+      store.batch(() => {
+        if (selectedModel && selectedProvider) {
+          store.setModelSelection(agentType, {
+            model: selectedModel,
+            provider: selectedProvider,
+            reasoning: reasoning ?? undefined,
+          });
+        } else {
+          store.setModelSelection(agentType, null);
+        }
+      });
+      return;
+    }
+    if (kind === "get_model") {
+      if (data.success === false) {
+        if (error) {
+          store.addMessage("system", error);
+        }
+        return;
+      }
+      const payload = metadata.payload as {
+        model_selections?: Record<string, { provider?: string; model?: string; reasoning?: string }>;
+        selectedModel?: string | null;
+        selectedProvider?: string | null;
+        provider?: string | null;
+        model?: string | null;
+        reasoning?: string | null;
+        agent_type?: string | null;
+      } | undefined;
+      const modelSelections = payload?.model_selections;
+      if (modelSelections && typeof modelSelections === "object") {
+        store.batch(() => {
+          const agentTypes = ["standard", "explorer", "coding"];
+          for (const agentType of agentTypes) {
+            const selection = modelSelections[agentType];
+            if (selection?.model && selection?.provider) {
+              store.setModelSelection(agentType, {
+                model: selection.model,
+                provider: selection.provider,
+                reasoning: selection.reasoning ?? undefined,
+              });
+            } else {
+              store.setModelSelection(agentType, null);
+            }
+          }
+        });
+        return;
+      }
+
       const selectedModel = payload?.selectedModel ?? payload?.model ?? null;
       const selectedProvider = payload?.selectedProvider ?? payload?.provider ?? null;
       const reasoning = typeof payload?.reasoning === "string" ? payload.reasoning : null;
+      const agentType = typeof payload?.agent_type === "string" ? payload.agent_type : "standard";
       store.batch(() => {
-        store.setSelectedProvider(selectedProvider);
-        store.setSelectedModel(selectedModel);
-        store.setReasoningLevel(reasoning);
+        if (selectedModel && selectedProvider) {
+          store.setModelSelection(agentType, {
+            model: selectedModel,
+            provider: selectedProvider,
+            reasoning: reasoning ?? undefined,
+          });
+        } else {
+          store.setModelSelection(agentType, null);
+        }
       });
       return;
     }
@@ -928,6 +1134,24 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           const errorMsg = payload?.error ?? "Unknown error";
           store.addMessage("system", `Context compaction failed: ${errorMsg}`);
         }
+        store.clearProgress();
+        store.setState("idle");
+      });
+      return;
+    }
+    if (kind === "ralph_loop_complete") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      const reason = (payload?.reason as RalphCompletionReason) ?? "error";
+      const iterations = (payload?.iterations as number) ?? 0;
+      store.batch(() => {
+        store.clearRalphState();
+        const reasonMessages: Record<RalphCompletionReason, string> = {
+          promise_detected: `✅ Ralph Loop completed successfully after ${iterations} iteration(s) - completion promise detected`,
+          max_iterations: `⏹️ Ralph Loop stopped after ${iterations} iteration(s) - max iterations reached`,
+          manual_cancel: `🛑 Ralph Loop cancelled after ${iterations} iteration(s)`,
+          error: `❌ Ralph Loop failed after ${iterations} iteration(s)`,
+        };
+        store.addMessage("system", reasonMessages[reason]);
         store.clearProgress();
         store.setState("idle");
       });
@@ -1085,11 +1309,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const selectedModel = data?.selectedModel ?? data?.model ?? null;
     const selectedProvider = data?.selectedProvider ?? data?.provider ?? null;
     const reasoning = typeof data?.reasoning === "string" ? data.reasoning : null;
-    store.batch(() => {
-      store.setSelectedProvider(selectedProvider);
-      store.setSelectedModel(selectedModel);
-      store.setReasoningLevel(reasoning);
-    });
+    const agentType = (data as { agentType?: string })?.agentType ?? 'standard';
+
+    if (selectedModel && selectedProvider) {
+      store.setModelSelection(agentType, {
+        model: selectedModel,
+        provider: selectedProvider,
+        reasoning: reasoning ?? undefined,
+      });
+    } else {
+      store.setModelSelection(agentType, null);
+    }
   };
 
   const handleError = (data?: ErrorData) => {
@@ -1130,7 +1360,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     // Always include working_dir with requests that trigger agent execution
     // This ensures tools run in the correct directory regardless of where daemon was started
-    const needsWorkingDir = type === "send_text" || type === "user_prompt_response";
+    const needsWorkingDir = type === "send_text" || type === "user_prompt_response" || type === "ralph_loop_start";
     const payload = needsWorkingDir
       ? { ...data, working_dir: process.cwd() }
       : data;
@@ -1286,6 +1516,24 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
 
+      // Tab switching with left/right arrows
+      const AGENT_TABS = ['standard', 'explorer', 'coding'];
+      if (key.leftArrow) {
+        const currentTab = store.getModelsActiveTab();
+        const currentIdx = AGENT_TABS.indexOf(currentTab);
+        const newIdx = (currentIdx - 1 + AGENT_TABS.length) % AGENT_TABS.length;
+        store.setModelsActiveTab(AGENT_TABS[newIdx]);
+        return;
+      }
+
+      if (key.rightArrow) {
+        const currentTab = store.getModelsActiveTab();
+        const currentIdx = AGENT_TABS.indexOf(currentTab);
+        const newIdx = (currentIdx + 1) % AGENT_TABS.length;
+        store.setModelsActiveTab(AGENT_TABS[newIdx]);
+        return;
+      }
+
       if (key.upArrow) {
         store.moveModelsCursor(-1);
         return;
@@ -1296,13 +1544,22 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
 
+      // Space to stage the current model for this agent type
+      if (input === " ") {
+        store.stageModelAtCursor();
+        return;
+      }
+
       if (key.return) {
-        const selectedModel = snapshot.modelsList[snapshot.modelsCursor];
-        if (selectedModel) {
+        // Apply all staged selections and persist full state
+        store.applyAllStagedSelections();
+        const selections = store.getAllModelSelections();
+        for (const [agentType, selection] of selections) {
           sendCommand("set_model", {
-            provider: selectedModel.provider,
-            model: selectedModel.id,
-            ...(selectedModel.reasoning?.[0] ? { reasoning: selectedModel.reasoning[0] } : {}),
+            agent_type: agentType,
+            provider: selection.provider,
+            model: selection.model,
+            ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
           });
         }
         store.exitModelsMode();
@@ -1742,8 +1999,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.addMessage("system", "No models available. Run /models to fetch model list.");
         return;
       }
-      const currentId = snapshot.selectedModel;
-      const currentProvider = snapshot.selectedProvider;
+      // Cycle the 'standard' agent type model (main/default)
+      const selection = snapshot.modelSelections.get('standard');
+      const currentId = selection?.model;
+      const currentProvider = selection?.provider;
       let currentIdx = currentId
         ? models.findIndex((m) => m.id === currentId && (!currentProvider || m.provider === currentProvider))
         : -1;
@@ -1752,6 +2011,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       const nextModel = models[nextIdx];
       if (!nextModel) return;
       sendCommand("set_model", {
+        agent_type: 'standard',
         provider: nextModel.provider,
         model: nextModel.id,
         ...(nextModel.reasoning?.[0] ? { reasoning: nextModel.reasoning[0] } : {}),
@@ -1759,13 +2019,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     };
 
     const cycleReasoning = () => {
-      const currentModel = snapshot.modelsList.find((m) => m.id === snapshot.selectedModel && (!snapshot.selectedProvider || m.provider === snapshot.selectedProvider));
+      // Cycle reasoning for 'standard' agent type (main/default)
+      const selection = snapshot.modelSelections.get('standard');
+      const currentModel = selection
+        ? snapshot.modelsList.find((m) => m.id === selection.model && m.provider === selection.provider)
+        : null;
       const levels = currentModel?.reasoning ?? [];
       if (!currentModel || levels.length === 0) {
         store.addMessage("system", "Current model does not support reasoning levels.");
         return;
       }
-      const currentLevel = snapshot.selectedReasoningLevel;
+      const currentLevel = selection?.reasoning;
       let currentIdx = currentLevel ? levels.indexOf(currentLevel) : -1;
       if (currentIdx < 0) currentIdx = 0;
       const nextIdx = (currentIdx + 1) % levels.length;
@@ -1775,6 +2039,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
       sendCommand("set_model", {
+        agent_type: 'standard',
         provider: currentModel.provider,
         model: currentModel.id,
         reasoning: nextLevel,
@@ -2076,6 +2341,61 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         });
         return;
       }
+      case "/ralph-loop": {
+        // Handle cancel command
+        if (arg?.trim().toLowerCase() === "cancel") {
+          if (!store.isRalphActive()) {
+            store.addMessage("system", "No Ralph Loop is currently active.");
+            return;
+          }
+          sendCommand("ralph_loop_cancel");
+          store.batch(() => {
+            store.addMessage("system", "Cancelling Ralph Loop...");
+            store.clearRalphState();
+          });
+          return;
+        }
+
+        // Check if loop is already active
+        if (store.isRalphActive()) {
+          store.addMessage("system", "A Ralph Loop is already active. Use /ralph-loop cancel to stop it first.");
+          return;
+        }
+
+        // Parse arguments
+        const ralphArgs = parseRalphArgs(arg ?? "");
+        if (!ralphArgs) {
+          store.addMessage(
+            "system",
+            "Usage: /ralph-loop <prompt> [--max-iterations=N] [--complete=\"PHRASE\"]\n" +
+            "       /ralph-loop @<file.md> [options]\n" +
+            "       /ralph-loop cancel\n\n" +
+            "Examples:\n" +
+            "  /ralph-loop \"Build a REST API\"\n" +
+            "  /ralph-loop @prompts/task.md --max-iterations=10\n" +
+            "  /ralph-loop \"Build tests\" --complete=\"ALL DONE\""
+          );
+          return;
+        }
+
+        // Start the Ralph Loop
+        store.batch(() => {
+          store.setRalphState(true, 0, ralphArgs.maxIterations, ralphArgs.completionPromise);
+          store.addMessage(
+            "system",
+            `🔄 Starting Ralph Loop (max ${ralphArgs.maxIterations} iterations)\n` +
+            `Completion phrase: "${ralphArgs.completionPromise}"\n` +
+            (ralphArgs.fromFile ? `Prompt loaded from file` : `Prompt: ${ralphArgs.prompt.slice(0, 100)}${ralphArgs.prompt.length > 100 ? "..." : ""}`)
+          );
+        });
+
+        sendCommand("ralph_loop_start", {
+          prompt: ralphArgs.prompt,
+          maxIterations: ralphArgs.maxIterations,
+          completionPromise: ralphArgs.completionPromise,
+        });
+        return;
+      }
       case "/theme": {
         // Enter interactive theme selection mode
         const themeNames = getThemeNames();
@@ -2223,7 +2543,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   // Header lines with theme colors
   const headerConfig: Array<{ text: string; color?: string; bold?: boolean }> = [
-    { text: `Bloom ${snapshot.compact ? " [compact]" : ""}`, color: colors.accent, bold: true },
+    { text: "Bloom", color: colors.accent, bold: true },
     { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}${snapshot.planMode ? " | [PLAN]" : ""}`, color: colors.muted },
     { text: `Status: ${statusText}`, color: statusColor },
     { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
@@ -2285,7 +2605,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const streamCursor = snapshot.state === "streaming"
     ? STREAM_CURSOR_FRAMES[statusTick % STREAM_CURSOR_FRAMES.length]
     : "";
-  let historyLines = store.getHistoryLines(contentWidth, snapshot.compact, streamCursor);
+  let historyLines = store.getHistoryLines(contentWidth, streamCursor);
   if (snapshot.uiMode === "skills") {
     historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors, true);
   } else if (snapshot.uiMode === "hooks") {
@@ -2330,9 +2650,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // Simple horizontal line for input separator
   const horizontalLine = "─".repeat(contentWidth);
 
-  // Get current model/reasoning for footer display
-  const currentModelEntry = store.getCurrentModelEntry();
-  const reasoningOptions = store.getCurrentModelReasoningOptions() ?? [];
+  // Get current model/reasoning for footer display (uses 'standard' agent type)
+  const standardSelection = snapshot.modelSelections.get('standard');
+  const currentModelEntry = standardSelection
+    ? snapshot.modelsList.find((m) => m.id === standardSelection.model && m.provider === standardSelection.provider)
+    : null;
+  const reasoningOptions = currentModelEntry?.reasoning ?? [];
   const hasReasoning = reasoningOptions.length > 0;
 
   if (snapshot.helpVisible) {
@@ -2389,21 +2712,55 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     );
   };
 
-  // Models selector rendering
+  // Models selector rendering with tabbed UI for per-agent-type configuration
   const renderModelsSelector = () => {
     const colors = getColors();
-    const currentModel = store.getSelectedModel();
-    const currentProvider = store.getSelectedProvider();
-    const currentReasoning = store.getSelectedReasoningLevel();
-    const reasoningOptions = store.getCurrentModelReasoningOptions();
-    const reasoningInfo = reasoningOptions && reasoningOptions.length > 0
-      ? ` | Reasoning: ${currentReasoning ?? 'off'}`
-      : '';
+    const AGENT_TABS = ['standard', 'explorer', 'coding'];
+    const TAB_LABELS: Record<string, string> = {
+      standard: 'Standard',
+      explorer: 'Explorer',
+      coding: 'Coding',
+    };
+    const activeTab = snapshot.modelsActiveTab;
+    // Staged selection for active tab (what will be applied on Enter)
+    const stagedSelection = snapshot.stagedModelSelections.get(activeTab);
+    const stagedModel = stagedSelection?.model ?? null;
+    const stagedProvider = stagedSelection?.provider ?? null;
+    // Applied selection for active tab (what's currently active in backend)
+    const appliedSelection = snapshot.modelSelections.get(activeTab);
+    const appliedModel = appliedSelection?.model ?? null;
+    const appliedProvider = appliedSelection?.provider ?? null;
     const deletePending = snapshot.modelDeletePending;
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
+        {/* Tabbed header for agent types */}
+        <Box marginBottom={1}>
+          <Text color={colors.muted}>←/→ tab  Space select  Enter apply  </Text>
+          {AGENT_TABS.map((tab, index) => {
+            const isActive = tab === activeTab;
+            const label = TAB_LABELS[tab];
+            const tabStaged = snapshot.stagedModelSelections.get(tab);
+            const tabApplied = snapshot.modelSelections.get(tab);
+            // Check if staged differs from applied (pending change)
+            const hasChange = tabStaged && (!tabApplied || tabStaged.model !== tabApplied.model || tabStaged.provider !== tabApplied.provider);
+            const hasApplied = !!tabApplied;
+            return (
+              <Text key={tab}>
+                {index > 0 && <Text color={colors.muted}> | </Text>}
+                <Text color={isActive ? colors.accent : colors.muted} bold={isActive}>
+                  {label}
+                </Text>
+                {hasChange ? (
+                  <Text color={colors.success}>✓</Text>
+                ) : hasApplied ? (
+                  <Text color={colors.func}>*</Text>
+                ) : null}
+              </Text>
+            );
+          })}
+        </Box>
         <Box>
-          <Text bold color={colors.accent}>Select Model</Text>
+          <Text bold color={colors.accent}>Select Model for {TAB_LABELS[activeTab]}</Text>
           {deletePending ? (
             <Text color={colors.error}>  d to confirm delete</Text>
           ) : (
@@ -2413,27 +2770,41 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <Text> </Text>
         {snapshot.modelsList.map((model, index) => {
           const isSelected = index === snapshot.modelsCursor;
-          const isCurrent = currentProvider
-            ? model.id === currentModel && model.provider === currentProvider
-            : model.id === currentModel;
+          // Check if this model is staged for current tab
+          const isStaged = stagedProvider
+            ? model.id === stagedModel && model.provider === stagedProvider
+            : model.id === stagedModel;
+          // Check if this model is currently applied in backend
+          const isApplied = appliedProvider
+            ? model.id === appliedModel && model.provider === appliedProvider
+            : model.id === appliedModel;
           const isPendingDelete = isSelected && deletePending;
           const pointer = isSelected ? "▸ " : "  ";
-          const marker = isCurrent ? ` (current${reasoningInfo})` : "";
+          // Show markers: ✓ for staged, * for applied (if different)
+          let marker = "";
+          if (isStaged && isApplied) {
+            marker = " (current)";
+          } else if (isStaged) {
+            marker = " (selected)";
+          } else if (isApplied) {
+            marker = " (current)";
+          }
           const provider = model.provider;
           const hasReasoning = model.reasoning && model.reasoning.length > 0;
           return (
             <Text key={`${provider ?? 'unknown'}:${model.id}`}>
               <Text color={isPendingDelete ? colors.error : (isSelected ? colors.accent : colors.muted)}>{pointer}</Text>
+              {isStaged && <Text color={colors.success}>✓ </Text>}
               <Text
-                color={isPendingDelete ? colors.error : (isSelected ? colors.text : colors.muted)}
-                bold={isSelected}
+                color={isPendingDelete ? colors.error : (isStaged ? colors.success : (isSelected ? colors.text : colors.muted))}
+                bold={isSelected || isStaged}
                 strikethrough={isPendingDelete}
               >
                 {model.name}
               </Text>
               {provider && <Text color={isPendingDelete ? colors.error : colors.muted} strikethrough={isPendingDelete}> [{provider}]</Text>}
               {hasReasoning && <Text color={isPendingDelete ? colors.error : colors.func} strikethrough={isPendingDelete}> [R]</Text>}
-              <Text color={isPendingDelete ? colors.error : colors.muted} strikethrough={isPendingDelete}>{marker}</Text>
+              <Text color={isPendingDelete ? colors.error : (isStaged ? colors.success : colors.muted)} strikethrough={isPendingDelete}>{marker}</Text>
             </Text>
           );
         })}
@@ -2448,12 +2819,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode;
 
   return (
-    <Box flexDirection="column" width={width} paddingX={HORIZONTAL_PADDING} paddingTop={TOP_PADDING} paddingBottom={BOTTOM_PADDING}>
+    <Box flexDirection="column" width={width} height={height} paddingX={HORIZONTAL_PADDING} paddingTop={TOP_PADDING} paddingBottom={BOTTOM_PADDING}>
       {headerConfig.map((item, index) => (
         <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, contentWidth)}</Text>
       ))}
       {!isFullScreenMode && (
-        <Box flexDirection="column" height={historyHeight}>
+        <Box flexDirection="column" flexGrow={1} justifyContent="flex-end">
           {visibleHistoryLines.map((line, index) => {
             const isUserLine = line.role === "user";
             const bgColor = isUserLine ? colors.userBg : undefined;
@@ -2535,10 +2906,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {/* Model indicator row: model (Esc+M) | reasoning (Esc+T) */}
           <Text>
             {(() => {
-              const modelName = snapshot.selectedModel
-                ? (currentModelEntry?.name ?? snapshot.selectedModel)
+              const modelName = standardSelection?.model
+                ? (currentModelEntry?.name ?? standardSelection.model)
                 : "no model selected";
-              const reasoningLevel = hasReasoning ? (snapshot.selectedReasoningLevel ?? "off") : "n/a";
+              const reasoningLevel = hasReasoning ? (standardSelection?.reasoning ?? "off") : "n/a";
               // Layout: modelName (Esc+M) | reasoning (Esc+T) or n/a
               const rightContent = hasReasoning
                 ? `${modelName} (Esc+M) | ${reasoningLevel} (Esc+T)`
@@ -2590,6 +2961,9 @@ function roleColor(role?: Role): string | undefined {
     case "system":
     case "status":
       return colors.text;
+    case "reasoning":
+      // Reasoning/thinking content displayed in muted color to distinguish from main response
+      return colors.muted;
     default:
       return undefined;
   }
@@ -2657,8 +3031,8 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
   // Task list items (- [ ] or - [x])
   { pattern: /^[\s]*[-*+]\s+\[[ xX]\]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/\[[ ]\]/, "☐").replace(/\[[xX]\]/, "☑").replace(/[-*+]/, "") },
 
-  // Strikethrough (~~text~~)
-  { pattern: /~~[^~]+~~/g, colorKey: "strikethrough", transform: (s) => s.slice(2, -2) },
+  // Strikethrough (~~text~~) - non-greedy to handle content with tildes
+  { pattern: /~~.+?~~/g, colorKey: "strikethrough", transform: (s) => s.slice(2, -2) },
 
   // Markdown links [text](url) - render as "text" with link color
   { pattern: /\[([^\]]+)\]\([^)]+\)/g, colorKey: "linkText", transform: (s) => {
@@ -2666,16 +3040,16 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
     return match ? match[1] : s;
   }},
 
-  // Bold text (**text** or __text__)
-  { pattern: /\*\*[^*]+\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
-  { pattern: /__[^_]+__/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
+  // Bold text (**text** or __text__) - non-greedy to handle content with asterisks/underscores
+  { pattern: /\*\*.+?\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
+  { pattern: /__.+?__/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
 
-  // Italic text (*text* or _text_) - single asterisk/underscore, not followed by another
-  { pattern: /(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
-  { pattern: /(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
+  // Italic text (*text* or _text_) - single markers, non-greedy
+  { pattern: /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
+  { pattern: /(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
 
-  // Inline code
-  { pattern: /`[^`]+`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
+  // Inline code - non-greedy
+  { pattern: /`.+?`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
 
   // Code block delimiters (``` or ```language on their own line)
   { pattern: /^```\w*\s*$/gm, colorKey: "border", transform: (s) => {
