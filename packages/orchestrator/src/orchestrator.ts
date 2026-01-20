@@ -595,7 +595,7 @@ export class Orchestrator {
 
         // Merge token metrics (use totalOutputTokens for cumulative count across all LLM calls in this run)
         const localMetrics = result.localContext.metrics;
-        context.updateMetrics(localMetrics.inputTokens, localMetrics.totalOutputTokens);
+        context.updateMetrics(localMetrics.inputTokens, localMetrics.totalOutputTokens, localMetrics.cachedTokens);
 
         // Emit iteration_completed
         const responsePreview = result.response && result.response.length > 200

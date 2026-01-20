@@ -197,6 +197,7 @@ function createRequestFromEvents(
           totalTokens: (callData.total_tokens as number) ?? (callData.totalTokens as number) ?? 0,
           promptTokens: (callData.prompt_tokens as number) ?? (callData.promptTokens as number) ?? 0,
           completionTokens: (callData.completion_tokens as number) ?? (callData.completionTokens as number) ?? 0,
+          cachedTokens: (callData.cached_tokens as number) ?? (callData.cachedTokens as number) ?? undefined,
           durationMs: (callData.duration_ms as number) ?? (callData.durationMs as number) ?? 0,
           model: (callData.model as string) ?? 'unknown',
           toolCallsCount: (callData.tool_calls_count as number) ?? (callData.toolCallsCount as number) ?? 0,
@@ -389,6 +390,8 @@ function createRequestFromEvents(
     const peakInputTokens = Math.max(...llmCalls.map(c => c.promptTokens), 0)
     const outputTokens = lastCall?.completionTokens ?? 0 // Last request output
     const totalOutputTokens = llmCalls.reduce((sum, c) => sum + c.completionTokens, 0)
+    const cachedTokens = lastCall?.cachedTokens // Cached tokens from last call
+    const totalCachedTokens = llmCalls.reduce((sum, c) => sum + (c.cachedTokens ?? 0), 0)
     const maxTokens = 200000 // Default context window size
     contextWindow = {
       inputTokens,
@@ -398,6 +401,8 @@ function createRequestFromEvents(
       maxTokens,
       percentageUsed: inputTokens / maxTokens,
       messageCount: llmCalls.length,
+      cachedTokens,
+      totalCachedTokens: totalCachedTokens > 0 ? totalCachedTokens : undefined,
       timestamp: lastCall?.timestamp ?? lastEventTime,
     }
   }

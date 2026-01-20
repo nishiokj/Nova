@@ -183,10 +183,12 @@ export class AnthropicProvider implements LLMProviderAdapter {
     const stopReason: StopReason =
       stopReasonMap[data.stop_reason] ?? 'end_turn';
 
+    const usageData = data.usage as { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number };
     const usage: TokenUsage = {
-      promptTokens: data.usage.input_tokens,
-      completionTokens: data.usage.output_tokens,
-      totalTokens: data.usage.input_tokens + data.usage.output_tokens,
+      promptTokens: usageData.input_tokens,
+      completionTokens: usageData.output_tokens,
+      totalTokens: usageData.input_tokens + usageData.output_tokens,
+      cachedTokens: usageData.cache_read_input_tokens,
     };
 
     return {
@@ -312,11 +314,13 @@ export class AnthropicProvider implements LLMProviderAdapter {
             }
 
             if (event.type === 'message_delta' && event.usage) {
+              const eventUsage = event.usage as { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number };
               usage = {
-                promptTokens: event.usage.input_tokens,
-                completionTokens: event.usage.output_tokens,
+                promptTokens: eventUsage.input_tokens,
+                completionTokens: eventUsage.output_tokens,
                 totalTokens:
-                  event.usage.input_tokens + event.usage.output_tokens,
+                  eventUsage.input_tokens + eventUsage.output_tokens,
+                cachedTokens: eventUsage.cache_read_input_tokens,
               };
             }
           } catch {

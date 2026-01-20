@@ -502,7 +502,8 @@ export class Agent {
       if (response.usage) {
         localContext.updateMetrics(
           response.usage.promptTokens ?? 0,
-          response.usage.completionTokens ?? 0
+          response.usage.completionTokens ?? 0,
+          response.usage.cachedTokens
         );
       }
 
@@ -1714,7 +1715,7 @@ export class Agent {
    * Emit llm_call event.
    */
   private emitLlmCall(
-    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number }; model?: string },
+    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number; cachedTokens?: number }; model?: string },
     messages: Array<Record<string, unknown>>,
     durationMs: number,
     tools: ToolDefinition[],
@@ -1731,6 +1732,7 @@ export class Agent {
       totalTokens: response.usage?.totalTokens ?? 0,
       promptTokens: response.usage?.promptTokens ?? 0,
       completionTokens: response.usage?.completionTokens ?? 0,
+      cachedTokens: response.usage?.cachedTokens,
       durationMs,
       model: response.model ?? 'unknown',
       toolCallsCount: toolCalls.length,

@@ -45,7 +45,6 @@ interface HarnessLike {
     planMode?: boolean;
     stopHook?: import('orchestrator').StopHookHandler;
   }): AgentRunHandle;
-  resume(requestId: string, answer: unknown, sessionKey: string, workingDir?: string): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
   getConfig(): FullHarnessConfig;
   isShuttingDown(): boolean;
