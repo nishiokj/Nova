@@ -9,45 +9,37 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
-import type {
-  FullHarnessConfig,
-  ResolvedAgentConfig,
-  ResolvedLLMConfig,
-  ResolvedFallbackConfig,
-  ProvidersConfigSection,
-} from './config_types.js';
-import {
-  DEFAULT_TOOLS_CONFIG,
-  DEFAULT_GRAPHD_CONFIG,
-  DEFAULT_CONTEXT_CONFIG,
-  DEFAULT_ENABLED_TOOLS,
-  DEFAULT_SKILLS_CONFIG,
-  DEFAULT_HOOKS_CONFIG,
-  DEFAULT_AUTH_CONFIG,
-  DEFAULT_MODELS_CONFIG,
-} from './config_types.js';
 import {
   HarnessConfigFileSchema,
   normalizeReasoningEffort,
   extractReasoningEffort,
+  DEFAULT_TOOLS_CONFIG,
+  DEFAULT_GRAPHD_CONFIG,
+  DEFAULT_CONTEXT_CONFIG,
+  DEFAULT_SKILLS_CONFIG,
+  DEFAULT_HOOKS_CONFIG,
+  DEFAULT_AUTH_CONFIG,
+  DEFAULT_MODELS_CONFIG,
+  type FullHarnessConfig,
+  type ResolvedAgentConfig,
+  type ResolvedLLMConfig,
+  type ResolvedFallbackConfig,
   type LLMProvider,
   type AgentConfigEntry,
   type HarnessConfigFile,
-} from './config_schema.js';
+} from './config.js';
+
 import {
   isSupportedProvider,
   getCanonicalProvider,
-  getProviderEnvVar,
   getProviderBaseUrl as getCentralProviderBaseUrl,
-  OPENAI_COMPAT_PROVIDERS,
   PROVIDER_MODEL_DEFAULTS,
   getAllModels,
   getProviderForModel,
   type ModelRole,
 } from 'types';
 
-const DEFAULT_CONFIG_PATH = 'config/harness_config.json';
-const DEFAULTS_CONFIG_PATH = 'config/defaults.json';
+const DEFAULT_CONFIG_PATH = 'config/defaults.json';
 const USER_CONFIG_PATH = '~/.rex/config.json';
 const OUTPUT_SCHEMAS_PATH = 'config/output_schemas.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
@@ -129,33 +121,10 @@ interface OutputSchemasFile {
 // ============================================
 
 /**
- * Walk up the directory tree, yielding each parent directory.
- */
-function* walkParents(startDir: string): Iterable<string> {
-  let dir = startDir;
-  const root = '/';
-  while (true) {
-    yield dir;
-    if (dir === root) break;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-}
-
-/**
- * Resolve the repository root by walking up from startDir looking for .git.
- * Falls back to startDir if no .git is found.
+ * Resolve the repository root - uses cwd directly without walking.
  */
 export function resolveRepoRoot(startDir: string): string {
-  const resolved = resolve(startDir);
-  for (const dir of walkParents(resolved)) {
-    const gitPath = resolve(dir, '.git');
-    if (existsSync(gitPath)) {
-      return dir;
-    }
-  }
-  return resolved;
+  return resolve(startDir);
 }
 
 // ============================================
@@ -166,16 +135,15 @@ export function resolveRepoRoot(startDir: string): string {
  * Load behavioral rules from config/behavioral_rules.md.
  */
 export function loadBehavioralRules(): string {
-  // Check cwd parents first (development)
-  for (const dir of walkParents(process.cwd())) {
-    const path = resolve(dir, BEHAVIORAL_RULES_PATH);
-    if (!existsSync(path)) continue;
+  // Check cwd first
+  const cwdPath = resolve(process.cwd(), BEHAVIORAL_RULES_PATH);
+  if (existsSync(cwdPath)) {
     try {
-      const content = readFileSync(path, 'utf-8');
-      console.log(`[config] Loaded behavioral rules from ${path}`);
+      const content = readFileSync(cwdPath, 'utf-8');
+      console.log(`[config] Loaded behavioral rules from ${cwdPath}`);
       return content;
     } catch (e) {
-      console.warn(`[config] Failed to read behavioral rules from ${path}:`, e);
+      console.warn(`[config] Failed to read behavioral rules from ${cwdPath}:`, e);
     }
   }
 
@@ -252,21 +220,29 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
     }
   }
 
-  // 2. Walk up from cwd (development mode / local project configs)
-  for (const dir of walkParents(process.cwd())) {
-    const path = resolve(dir, DEFAULT_CONFIG_PATH);
-    if (!existsSync(path)) continue;
-
-    const content = readFileSync(path, 'utf-8');
-    const parsed = validateConfig(content, path);
+  // 2. Check cwd + /config/harness_config.json
+  const cwdPath = resolve(process.cwd(), DEFAULT_CONFIG_PATH);
+  if (existsSync(cwdPath)) {
+    const content = readFileSync(cwdPath, 'utf-8');
+    const parsed = validateConfig(content, cwdPath);
     if (parsed) {
-      console.log(`[config] Loaded from ${path}`);
-      // dir is the repo root (where config/ directory lives)
-      return { config: parsed, configDir: dir, configPath: path };
+      console.log(`[config] Loaded from ${cwdPath}`);
+      return { config: parsed, configDir: process.cwd(), configPath: cwdPath };
     }
   }
 
-  // 3. Check relative to package install location (fallback for globally installed packages)
+  // 3. Check user config (~/.rex/config.json)
+  const userPath = expandHome(USER_CONFIG_PATH);
+  if (existsSync(userPath)) {
+    const content = readFileSync(userPath, 'utf-8');
+    const parsed = validateConfig(content, userPath);
+    if (parsed) {
+      console.log(`[config] Loaded user config from ${userPath}`);
+      return { config: parsed, configDir: dirname(userPath), configPath: userPath };
+    }
+  }
+
+  // 4. Check package location (fallback for globally installed packages)
   const packageRoot = getPackageRoot();
   const packageConfigPath = resolve(packageRoot, DEFAULT_CONFIG_PATH);
   if (existsSync(packageConfigPath)) {
@@ -294,19 +270,17 @@ function loadOutputSchemas(): OutputSchemasFile | null {
     return cachedOutputSchemas;
   }
 
-  // Check cwd parents first (development)
-  for (const dir of walkParents(process.cwd())) {
-    const path = resolve(dir, OUTPUT_SCHEMAS_PATH);
-    if (!existsSync(path)) continue;
-
+  // Check cwd first
+  const cwdPath = resolve(process.cwd(), OUTPUT_SCHEMAS_PATH);
+  if (existsSync(cwdPath)) {
     try {
-      const content = readFileSync(path, 'utf-8');
+      const content = readFileSync(cwdPath, 'utf-8');
       const parsed = JSON.parse(content) as OutputSchemasFile;
-      console.log(`[config] Loaded output schemas from ${path}`);
+      console.log(`[config] Loaded output schemas from ${cwdPath}`);
       cachedOutputSchemas = parsed;
       return parsed;
     } catch (e) {
-      console.warn(`[config] Failed to parse output schemas ${path}:`, e);
+      console.warn(`[config] Failed to parse output schemas ${cwdPath}:`, e);
     }
   }
 
@@ -362,80 +336,6 @@ function resolveOutputSchema(
     schema: definition.schema,
     strict: definition.strict,
   };
-}
-
-// ============================================
-// API KEY RESOLUTION
-// ============================================
-
-// API_KEY_ENV_MAP and OPENAI_COMPAT_BASE_URLS are now in packages/types/src/providers.ts
-// Use getProviderEnvVar() and getCentralProviderBaseUrl() from types
-
-/** Module-level providers cache (set by createConfigFromFile) */
-let configProviders: ProvidersConfigSection = {};
-
-const DEFAULT_PROVIDER_PRIORITY: string[] = [
-  'anthropic',
-  'openai',
-  'groq',
-  'cerebras',
-  'gemini',
-  'z.ai-coder',
-  'openai-compat',
-];
-
-/** Module-level provider priority (set by createConfigFromFile) */
-let configProviderPriority: string[] | undefined;
-
-/**
- * Set providers from config file (called during config loading).
- */
-export function setConfigProviders(providers: ProvidersConfigSection): void {
-  configProviders = providers;
-}
-
-export function setProviderPriority(priority?: string[]): void {
-  configProviderPriority = priority;
-}
-
-function getProviderPriority(): string[] {
-  if (configProviderPriority && configProviderPriority.length > 0) {
-    return configProviderPriority;
-  }
-  return DEFAULT_PROVIDER_PRIORITY;
-}
-
-/**
- * Get the current config providers.
- */
-export function getConfigProviders(): ProvidersConfigSection {
-  return configProviders;
-}
-
-/**
- * Resolve API key from config file or environment.
- * Config file takes precedence over environment variables.
- */
-export function resolveApiKey(provider: string, providers?: ProvidersConfigSection): string {
-  // Check config file providers first (passed directly or from module cache)
-  const configKey = (providers ?? configProviders)[provider];
-  if (configKey) {
-    return configKey;
-  }
-
-  // Fall back to environment variable (using central registry)
-  const envVar = getProviderEnvVar(provider);
-  const key = process.env[envVar];
-  if (!key) {
-    const canonicalHint = OPENAI_COMPAT_PROVIDERS.has(provider) && provider !== 'openai-compat'
-      ? ` (routes to openai-compat adapter)`
-      : '';
-    throw new Error(
-      `API key not found for provider '${provider}'${canonicalHint}. ` +
-      `Set in ~/.rex/config.json providers section or ${envVar} environment variable.`
-    );
-  }
-  return key;
 }
 
 /**
@@ -497,7 +397,18 @@ function resolveModelForRole(
   role: ModelRole,
   providerHint?: string
 ): { provider: string; model: string } | null {
-  const providerOrder = providerHint ? [providerHint] : getProviderPriority();
+  // Default provider priority order for role-based resolution
+  const DEFAULT_PROVIDER_PRIORITY: string[] = [
+    'anthropic',
+    'openai',
+    'groq',
+    'cerebras',
+    'gemini',
+    'z.ai-coder',
+    'openai-compat',
+  ];
+
+  const providerOrder = providerHint ? [providerHint] : DEFAULT_PROVIDER_PRIORITY;
 
   for (const provider of providerOrder) {
     if (!isSupportedProvider(provider)) continue;
@@ -653,62 +564,11 @@ function resolvePathRelativeTo(basePath: string, relativePath: string): string {
 // ============================================
 
 /**
- * Load the defaults.json config file.
- * This contains the full schema with sensible defaults.
+ * Load user config overrides from ~/.rex/config.json.
+ * This is a PARTIAL config - it doesn't need to pass full schema validation.
+ * Only the final merged config needs to be valid.
  */
-function loadDefaultsConfig(): HarnessConfigFile | null {
-  // Check cwd parents first (development)
-  for (const dir of walkParents(process.cwd())) {
-    const path = resolve(dir, DEFAULTS_CONFIG_PATH);
-    if (!existsSync(path)) continue;
-
-    try {
-      const content = readFileSync(path, 'utf-8');
-      const json = JSON.parse(content);
-      // Strip $comment and $schema fields (JSON5-style metadata)
-      const stripped = stripJsonComments(json);
-      const result = HarnessConfigFileSchema.safeParse(stripped);
-      if (result.success) {
-        console.log(`[config] Loaded defaults from ${path}`);
-        return result.data;
-      }
-      // Log validation errors for debugging
-      console.warn(`[config] Schema validation failed for ${path}:`, result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', '));
-    } catch (e) {
-      console.warn(`[config] Failed to parse defaults ${path}:`, e);
-    }
-  }
-
-  // Check package location (fallback for global installs)
-  const packagePath = resolve(getPackageRoot(), DEFAULTS_CONFIG_PATH);
-  if (existsSync(packagePath)) {
-    try {
-      const content = readFileSync(packagePath, 'utf-8');
-      const json = JSON.parse(content);
-      const stripped = stripJsonComments(json);
-      const result = HarnessConfigFileSchema.safeParse(stripped);
-      if (result.success) {
-        console.log(`[config] Loaded defaults from package: ${packagePath}`);
-        return result.data;
-      }
-      // Log validation errors for debugging
-      console.warn(`[config] Schema validation failed for package defaults ${packagePath}:`, result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', '));
-    } catch (e) {
-      console.warn(`[config] Failed to parse package defaults ${packagePath}:`, e);
-    }
-  } else {
-    console.warn(`[config] Package defaults not found at ${packagePath}`);
-  }
-
-  console.warn('[config] No defaults.json found - this will cause issues!');
-  return null;
-}
-
-/**
- * Load the user config from ~/.rex/config.json.
- * This contains user overrides for providers, models, etc.
- */
-function loadUserConfig(): { config: HarnessConfigFile; path: string } | null {
+function loadUserConfigOverrides(): { config: Partial<HarnessConfigFile>; path: string } | null {
   const userPath = expandHome(USER_CONFIG_PATH);
 
   if (!existsSync(userPath)) {
@@ -719,14 +579,13 @@ function loadUserConfig(): { config: HarnessConfigFile; path: string } | null {
   try {
     const content = readFileSync(userPath, 'utf-8');
     const json = JSON.parse(content);
-    // Strip $comment and $schema fields
-    const stripped = stripJsonComments(json);
-    const result = HarnessConfigFileSchema.safeParse(stripped);
-    if (result.success) {
-      console.log(`[config] Loaded user config from ${userPath}`);
-      return { config: result.data, path: userPath };
+    // User config is partial - don't validate against full schema
+    // Just ensure it's a valid object we can merge
+    if (typeof json === 'object' && json !== null && !Array.isArray(json)) {
+      console.log(`[config] Loaded user config overrides from ${userPath}`);
+      return { config: json as Partial<HarnessConfigFile>, path: userPath };
     }
-    console.warn(`[config] User config invalid: ${result.error.message}`);
+    console.warn(`[config] User config at ${userPath} is not an object`);
   } catch (e) {
     console.warn(`[config] Failed to parse user config ${userPath}:`, e);
   }
@@ -735,87 +594,48 @@ function loadUserConfig(): { config: HarnessConfigFile; path: string } | null {
 }
 
 /**
- * Strip $comment, $schema, and other JSON5-style metadata fields recursively.
- */
-function stripJsonComments(obj: unknown): unknown {
-  if (Array.isArray(obj)) {
-    return obj.map(stripJsonComments);
-  }
-  if (isPlainObject(obj)) {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      // Skip comment fields
-      if (key === '$comment' || key === '$schema') continue;
-      result[key] = stripJsonComments(value);
-    }
-    return result;
-  }
-  return obj;
-}
-
-/**
- * Load layered config: defaults + user config + project config.
- * Priority (highest to lowest):
- * 1. Explicit configPath (if provided)
- * 2. Project harness_config.json (if in a project with config/)
- * 3. User config (~/.rex/config.json)
- * 4. Package defaults (config/defaults.json)
+ * Load layered config: base defaults + user overrides.
+ *
+ * Strategy:
+ * 1. Load base config (config/defaults.json) - MUST be complete and valid
+ * 2. Load user config overrides (~/.rex/config.json) - PARTIAL, merged on top
+ * 3. Explicit configPath overrides all (if provided)
+ *
+ * This allows users to have minimal configs with just their preferences,
+ * while the base defaults provide all required fields.
  */
 function loadLayeredConfig(configPath?: string): LoadedConfigFile | null {
-  // Load defaults first
-  const defaults = loadDefaultsConfig();
-
-  // Load user config
-  const userConfig = loadUserConfig();
-
-  // Load project config (existing behavior)
-  const projectConfig = loadConfigFile(configPath);
-
-  // Merge: defaults <- user <- project
-  let merged: HarnessConfigFile | null = null;
-  let configDir: string = process.cwd();
-  let finalConfigPath: string | undefined = undefined;
-
-  if (defaults) {
-    merged = defaults;
-    // configDir for defaults is the package root
-    configDir = getPackageRoot();
-  }
-
-  if (userConfig) {
-    if (merged) {
-      merged = deepMerge(merged, userConfig.config) as HarnessConfigFile;
-    } else {
-      merged = userConfig.config;
+  // If explicit config path provided, use it as the sole source (no layering)
+  if (configPath) {
+    const explicit = loadConfigFile(configPath);
+    if (explicit) {
+      return explicit;
     }
-    // Keep configDir from defaults/project, not user config
+    console.warn(`[config] Explicit config path not found: ${configPath}`);
+    // Fall through to layered loading
   }
 
-  if (projectConfig) {
-    if (merged) {
-      merged = deepMerge(merged, projectConfig.config) as HarnessConfigFile;
-    } else {
-      merged = projectConfig.config;
-    }
-    // Project config sets the configDir (repo root)
-    configDir = projectConfig.configDir;
-    finalConfigPath = projectConfig.configPath;
-  }
-
-  if (!merged) {
-    console.error('[config] CRITICAL: No config could be loaded (defaults, user, or project). Agent initialization will fail.');
+  // Load base config (defaults.json) - this must be complete and valid
+  const baseConfig = loadConfigFile();
+  if (!baseConfig) {
+    console.error('[config] CRITICAL: No base config (defaults.json) could be loaded.');
     return null;
   }
 
-  // Use user config path if no project config
-  if (!finalConfigPath && userConfig) {
-    finalConfigPath = userConfig.path;
+  // Load user config overrides (partial - doesn't need full validation)
+  const userOverrides = loadUserConfigOverrides();
+
+  // Merge: base <- user overrides
+  let merged = baseConfig.config;
+  if (userOverrides) {
+    merged = deepMerge(merged, userOverrides.config as Partial<HarnessConfigFile>) as HarnessConfigFile;
+    console.log(`[config] Merged user overrides from ${userOverrides.path}`);
   }
 
   return {
     config: merged,
-    configDir,
-    configPath: finalConfigPath ?? '',
+    configDir: baseConfig.configDir,
+    configPath: baseConfig.configPath,
   };
 }
 
@@ -840,22 +660,6 @@ export function createConfigFromFile(
   if ((fileConfig.models?.available ?? []).length > 0) {
     console.warn('[config] models.available is now derived from provider registry; config list is ignored');
   }
-
-  // Merge file providers with existing (preloaded GraphD providers take precedence)
-  const existingProviders = getConfigProviders();
-  const fileProviders = fileConfig.providers ?? {};
-  // GraphD providers (already in cache) take precedence over config file
-  const mergedProviders = { ...fileProviders, ...existingProviders };
-  setConfigProviders(mergedProviders);
-
-  const rawPriority = fileConfig.provider_priority;
-  const filteredPriority = (rawPriority && rawPriority.length > 0 ? rawPriority : DEFAULT_PROVIDER_PRIORITY)
-    .filter((provider) => {
-      if (isSupportedProvider(provider)) return true;
-      console.warn(`[config] Ignoring unsupported provider in provider_priority: ${provider}`);
-      return false;
-    });
-  setProviderPriority(filteredPriority.length > 0 ? filteredPriority : DEFAULT_PROVIDER_PRIORITY);
 
   // Resolve all agent configs
   const agents: Record<string, ResolvedAgentConfig> = {};
@@ -918,6 +722,7 @@ export function createConfigFromFile(
     context: {
       maxTokens: fileConfig.context?.max_tokens ?? DEFAULT_CONTEXT_CONFIG.max_tokens,
       sessionTtlMs: fileConfig.context?.session_ttl_ms ?? (DEFAULT_CONTEXT_CONFIG.session_ttl_ms ?? 0),
+      pauseTimeoutMs: fileConfig.context?.pause_timeout_ms ?? (DEFAULT_CONTEXT_CONFIG.pause_timeout_ms ?? 1_200_000),
     },
     skills: {
       enabled: fileConfig.skills?.enabled ?? DEFAULT_SKILLS_CONFIG.enabled,
@@ -938,7 +743,6 @@ export function createConfigFromFile(
         : (DEFAULT_AUTH_CONFIG.session_expiry_days ?? null),
     },
     behavioralRules: loadBehavioralRules(),
-    providers: mergedProviders,
     models: {
       available: getAllModels(),
       default: fileConfig.models?.default ?? DEFAULT_MODELS_CONFIG.default,
@@ -947,147 +751,16 @@ export function createConfigFromFile(
   };
 }
 
-/**
- * Create config from environment variables only (fallback mode).
- * NO API KEY requirement - the harness can start without any keys configured.
- * Users will be prompted to configure providers when they try to use the system.
- */
-export function createConfigFromEnv(workingDir?: string): FullHarnessConfig {
-  // Determine default provider/model from env or use anthropic as default
-  const explicitProvider = process.env.LLM_PROVIDER;
-  let provider: LLMProvider = 'anthropic';
-  let displayProvider = 'anthropic';
-  let baseUrl: string | undefined;
-
-  if (explicitProvider && isSupportedProvider(explicitProvider)) {
-    displayProvider = explicitProvider;
-    provider = getCanonicalProvider(explicitProvider);
-    baseUrl = getProviderBaseUrl(explicitProvider);
-  } else {
-    baseUrl = getProviderBaseUrl('anthropic');
-  }
-
-  // Default model - can be overridden via env
-  const defaultModel = process.env.LLM_MODEL ?? 'claude-sonnet-4.5';
-
-  // Create minimal agent configs - NO API KEYS
-  const defaultLLM: ResolvedLLMConfig = {
-    provider,
-    displayProvider,
-    model: defaultModel,
-    ...(baseUrl ? { baseUrl } : {}),
-    maxTokens: 16000,
-    temperature: 0.7,
-    reasoning: { effort: 'none' },
-  };
-
-  const defaultBudget = {
-    maxIterations: 10,
-    maxToolCalls: 15,
-    maxDurationMs: 120000,
-  };
-
-  const agents: Record<string, ResolvedAgentConfig> = {
-    simple: {
-      llm: { ...defaultLLM, maxTokens: 4000, temperature: 0.5 },
-      budget: { maxIterations: 3, maxToolCalls: 5, maxDurationMs: 30000 },
-      tools: ['Read', 'Glob', 'Grep', 'Bash'],
-    },
-    explorer: {
-      llm: { ...defaultLLM, maxTokens: 8000, temperature: 0.3 },
-      budget: { maxIterations: 5, maxToolCalls: 20, maxDurationMs: 60000 },
-      tools: ['Read', 'Glob', 'Grep', 'Bash'],
-    },
-    runtime_script: {
-      llm: { ...defaultLLM, maxTokens: 16000, temperature: 0.5 },
-      budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 30000 },
-      tools: [],
-    },
-    standard: {
-      llm: defaultLLM,
-      budget: defaultBudget,
-      tools: DEFAULT_ENABLED_TOOLS,
-    },
-    coding: {
-      llm: { ...defaultLLM, maxTokens: 32000 },
-      budget: { ...defaultBudget, maxIterations: 15, maxToolCalls: 25, maxDurationMs: 180000 },
-      tools: DEFAULT_ENABLED_TOOLS,
-    },
-    debugger: {
-      llm: { ...defaultLLM, maxTokens: 16000, temperature: 0.5 },
-      budget: defaultBudget,
-      tools: DEFAULT_ENABLED_TOOLS,
-    },
-    context_compactor: {
-      llm: { ...defaultLLM, maxTokens: 200000, temperature: 0.3 },
-      budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 30000 },
-      tools: [],
-    },
-    web_crawler: {
-      llm: { ...defaultLLM, maxTokens: 8000, temperature: 0.5 },
-      budget: defaultBudget,
-      tools: ['WebFetch', 'WebSearch'],
-    },
-  };
-
-  const resolvedWorkingDir = resolve(workingDir ?? process.cwd());
-
-  return {
-    agents,
-    defaultAgent: 'standard',
-    tools: {
-      workingDir: resolvedWorkingDir,
-      repoRoot: resolveRepoRoot(resolvedWorkingDir),
-      bashTimeoutMs: DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
-      maxOutputLength: DEFAULT_TOOLS_CONFIG.max_output_length,
-    },
-    graphd: {
-      enabled: DEFAULT_GRAPHD_CONFIG.enabled,
-      host: DEFAULT_GRAPHD_CONFIG.host,
-      port: DEFAULT_GRAPHD_CONFIG.port,
-      dbPath: DEFAULT_GRAPHD_CONFIG.db_path,
-    },
-    context: {
-      maxTokens: DEFAULT_CONTEXT_CONFIG.max_tokens,
-      sessionTtlMs: DEFAULT_CONTEXT_CONFIG.session_ttl_ms ?? 0,
-    },
-    skills: {
-      enabled: DEFAULT_SKILLS_CONFIG.enabled,
-      directory: DEFAULT_SKILLS_CONFIG.directory,
-      definitions: [],
-    },
-    hooks: {
-      enabled: DEFAULT_HOOKS_CONFIG.enabled,
-      directory: DEFAULT_HOOKS_CONFIG.directory,
-      definitions: [],
-    },
-    auth: {
-      enabled: DEFAULT_AUTH_CONFIG.enabled,
-      host: DEFAULT_AUTH_CONFIG.host,
-      port: DEFAULT_AUTH_CONFIG.port,
-      sessionExpiryDays: DEFAULT_AUTH_CONFIG.session_expiry_days ?? null,
-    },
-    behavioralRules: loadBehavioralRules(),
-    providers: {},
-    models: {
-      available: getAllModels(),
-      default: undefined,
-    },
-    configPath: undefined,
-  };
-}
-
 // ============================================
 // MAIN ENTRY POINT
 // ============================================
 
 /**
- * Load full config using layered approach: defaults + user + project.
+ * Load full config using layered approach: user + project.
  *
  * Config priority (highest to lowest):
  * 1. Project harness_config.json (repo-specific settings)
  * 2. User config ~/.rex/config.json (user API keys, preferences)
- * 3. Package defaults config/defaults.json (sensible defaults)
  *
  * Path resolution is BULLETPROOF:
  * - All relative paths in config are resolved relative to where the config file was found
@@ -1098,17 +771,20 @@ export function loadConfig(
   configPath?: string,
   workingDir?: string
 ): FullHarnessConfig {
-  // Use layered config loading (defaults + user + project)
+  // Use layered config loading (user + project)
   const loaded = loadLayeredConfig(configPath);
 
-  if (loaded) {
-    // configDir is where the config file was found (repo root)
-    // All relative paths in config will be resolved relative to this
-    const { config: fileConfig, configDir, configPath: loadedConfigPath } = loaded;
-    const result = createConfigFromFile(fileConfig, configDir, workingDir, loadedConfigPath);
-    return result;
+  if (!loaded) {
+    throw new Error(
+      'No configuration file found. Please create one of the following:\n' +
+      '  - ~/.rex/config.json (user config)\n' +
+      '  - <project>/config/harness_config.json (project config)\n' +
+      'Or specify an explicit config path via the --config option.'
+    );
   }
 
-  const result = createConfigFromEnv(workingDir);
-  return result;
+  // configDir is where the config file was found (repo root)
+  // All relative paths in config will be resolved relative to this
+  const { config: fileConfig, configDir, configPath: loadedConfigPath } = loaded;
+  return createConfigFromFile(fileConfig, configDir, workingDir, loadedConfigPath);
 }

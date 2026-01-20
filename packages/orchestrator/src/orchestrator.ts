@@ -26,8 +26,8 @@ import { createWorkItem, type WorkItem } from 'work';
 import { createEvent } from 'types';
 import type { ArtifactKind, ArtifactDiscoveredData, AgentEvent, LLMRequestConfig } from 'types';
 import type { EventBusProtocol } from 'comms-bus';
-import { buildLLMRequestConfig } from 'shared';
-import { getHandlers } from './hooks/index.js';
+import { buildLLMRequestConfig, type OrchestratorTerminationReason } from 'shared';
+import { executeHooks, type StopHookHandler } from './hooks.js';
 import { BoundsChecker } from './bounds-checker.js';
 
 // --- Types ---
@@ -53,7 +53,13 @@ export interface OrchestratorConfig {
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
   /** Per-request stop hook - intercepts goal completion */
-  stopHook?: import('./hooks/stop-hook.js').StopHookHandler;
+  stopHook?: StopHookHandler;
+  /**
+   * Check for pending user interruption that arrived during execution.
+   * Called before terminating on goal_state_reached.
+   * If returns true, orchestrator creates new work item and continues.
+   */
+  checkInterruption?: () => boolean;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -69,16 +75,9 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 
 /**
  * Why orchestration terminated.
+ * Re-exported from shared for backwards compatibility.
  */
-export type TerminationReason =
-  | 'goal_state_reached'
-  | 'max_iterations_exceeded'
-  | 'max_tool_calls_exceeded'
-  | 'max_duration_exceeded'
-  | 'user_input_required'
-  | 'handoff_requested'
-  | 'agent_error'
-  | 'refusal';
+export type TerminationReason = OrchestratorTerminationReason;
 
 /**
  * Orchestrator execution metrics.
@@ -199,9 +198,6 @@ export class Orchestrator {
   private createHookQueue(): InternalHookQueue {
     return {
       enqueue: (event: InternalHookEvent, context: InternalHookContext) => {
-        const handlers = getHandlers(event.type);
-        if (handlers.length === 0) return;
-
         const hookWorkItem = createWorkItem({
           goal: 'internal_hook',
           objective: `hook:${event.type}`,
@@ -217,15 +213,7 @@ export class Orchestrator {
             hookType: event.type,
             event,
             hookContext: context,
-            handler: async () => {
-              for (const handler of handlers) {
-                try {
-                  await handler(event, context);
-                } catch (err) {
-                  console.error(`[HOOK:${event.type}] Handler error:`, err);
-                }
-              }
-            },
+            handler: () => executeHooks(event.type, event, context),
           },
         });
 
@@ -378,7 +366,7 @@ export class Orchestrator {
     this.initialWorkId = initialItem.workId;
     this.enqueue(initialItem);
 
-    const startTime = Date.now();
+    let startTime = Date.now();
     let iteration = 0;
     let totalLlmCalls = 0;
     let totalToolCalls = 0;
@@ -419,7 +407,7 @@ export class Orchestrator {
             filesRead: [],
             invalidatedPaths: [],
             toolErrors: [],
-            terminationReason: 'agent_error',
+            terminationReason: 'exception', // Agent-level reason for orchestrator error
             needsUserInput: false,
             isRefusal: false,
             localContext: context,
@@ -509,21 +497,6 @@ export class Orchestrator {
         });
       }
 
-      // BOUND CHECK: Duration
-      if (elapsed > this.config.maxDurationMs) {
-        this.log('warning', 'Max duration exceeded', { elapsed, completedWork: this.completedWork.size });
-        emitGoalNotAchieved('max_duration_exceeded');
-        await this.notifyStopHook(context, 'max_duration_exceeded', '', iteration, agentType);
-        const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_duration_exceeded');
-        const hasContent = this.completedWork.size > 0;
-        return this.createResult({
-          success: hasContent, // Partial success if we have any completed work
-          response: harvestedResponse,
-          terminationReason: 'max_duration_exceeded',
-          metrics: { iterations: iteration - 1, totalLlmCalls, totalToolCalls, durationMs: elapsed },
-        });
-      }
-
       const itemIds = Array.from(inProgress.keys());
       const isParallel = inProgress.size > 1;
       this.log('info', `Iteration ${iteration}${isParallel ? ` (parallel: ${inProgress.size} items)` : ''}`, {
@@ -591,7 +564,7 @@ export class Orchestrator {
             filesRead: [],
             invalidatedPaths: [],
             toolErrors: [],
-            terminationReason: 'agent_error',
+            terminationReason: 'exception', // Agent-level reason for orchestrator-caught exception
             needsUserInput: false,
             isRefusal: false,
             localContext: context,
@@ -642,8 +615,28 @@ export class Orchestrator {
 
         // Check terminal conditions (first terminal condition wins)
         if (!terminalResult) {
-          // TERMINAL: User input needed
+          // Extract structured output early for use in multiple checks
+          const structured = result.structuredOutput as { action?: string; goalStateReached?: boolean } | undefined;
+          const actionIsContinue = structured?.action === 'continue';
+          const goalReached = structured?.goalStateReached === true || result.terminationReason === 'goal_state_reached';
+
+          // TERMINAL: User input needed (via PromptUser tool)
           if (result.needsUserInput && result.userPrompt) {
+            // Check for interruption - user message takes precedence over agent's question
+            if (this.config.checkInterruption?.()) {
+              this.log('info', 'Interruption preempts user prompt request', { iteration, workId });
+              context.addAgentResultContext(result);
+              const newItem = this.createWorkItem('Continue with user input', agentType);
+              this.enqueue(newItem);
+              // Reset completion tracking and duration timer for the new work
+              initialWorkCompleted = false;
+              initialWorkResponse = '';
+              this.completedWork.delete(this.initialWorkId);
+              this.initialWorkId = newItem.workId;
+              inProgress.delete(workId);
+              startTime = Date.now(); // Reset duration timer on interruption
+              continue;
+            }
             this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question });
             context.addAgentResultContext(result);
             terminalResult = this.createResult({
@@ -659,13 +652,44 @@ export class Orchestrator {
 
           // TERMINAL: Handoff requested
           if (result.needsHandoff && result.handoffSpec) {
+            // Check for interruption - user message takes precedence over handoff approval
+            if (this.config.checkInterruption?.()) {
+              this.log('info', 'Interruption preempts handoff request', { iteration, workId });
+              context.addAgentResultContext(result);
+              const newItem = this.createWorkItem('Continue with user input', agentType);
+              this.enqueue(newItem);
+              // Reset completion tracking and duration timer for the new work
+              initialWorkCompleted = false;
+              initialWorkResponse = '';
+              this.completedWork.delete(this.initialWorkId);
+              this.initialWorkId = newItem.workId;
+              inProgress.delete(workId);
+              startTime = Date.now(); // Reset duration timer on interruption
+              continue;
+            }
             this.log('info', 'Handoff requested', { workId, specLength: result.handoffSpec.length });
             context.addAgentResultContext(result);
+
+            // Create user prompt for handoff approval - the orchestrator-level gate
+            const specPreview = result.handoffSpec.length > 500
+              ? result.handoffSpec.slice(0, 500) + '... [truncated]'
+              : result.handoffSpec;
+
             terminalResult = this.createResult({
               success: true,
               response: '',
               paused: true,
               handoffSpec: result.handoffSpec,
+              userPrompt: {
+                question: 'The agent has completed planning and is ready to handoff to execution mode. Proceed with implementation?',
+                options: [
+                  'Yes, handoff now',
+                  'No, continue planning',
+                ],
+                context: `## Handoff Spec Preview\n\n\`\`\`\n${specPreview}\n\`\`\`\n\n**Spec length:** ${result.handoffSpec.length} chars`,
+                multiSelect: false,
+                questionType: 'handoff_approval',
+              },
               terminationReason: 'handoff_requested',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
@@ -689,8 +713,6 @@ export class Orchestrator {
           }
 
           // TERMINAL: Hard error
-          const structured = result.structuredOutput;
-          const actionIsContinue = structured?.action === 'continue';
           if (result.error && !result.success && !actionIsContinue) {
             this.log('error', 'Agent error', { workId, error: result.error });
             emitGoalNotAchieved(result.error, 1);
@@ -748,6 +770,25 @@ export class Orchestrator {
 
       // Check if initial work completed after processing ALL results (fixes race condition in parallel execution)
       if (initialWorkCompleted && this.workQueue.length === 0 && inProgress.size === 0) {
+        // Check for pending user interruption before terminating
+        // This catches messages that arrived during execution but weren't seen by the agent
+        if (this.config.checkInterruption?.()) {
+          this.log('info', 'Pending interruption detected, continuing execution', { iteration });
+
+          // Create new work item to continue - the interruption message is already in context
+          const newItem = this.createWorkItem('Continue with user input', agentType);
+          this.enqueue(newItem);
+
+          // Reset completion tracking and duration timer for the new work
+          initialWorkCompleted = false;
+          initialWorkResponse = '';
+          this.completedWork.delete(this.initialWorkId);
+          this.initialWorkId = newItem.workId;
+          startTime = Date.now(); // Reset duration timer on interruption
+
+          continue;
+        }
+
         // Execute per-request stop hook before terminating - allows Ralph Loop and similar patterns
         if (this.config.stopHook) {
           const stopContext = {

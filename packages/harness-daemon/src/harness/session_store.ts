@@ -17,6 +17,8 @@ export interface PausedState {
   workingDir: string;
   planMode?: boolean;
   userPromptType?: string;
+  handoffSpec?: string; // Stored for execution after user approval
+  pausedAt: number; // Timestamp when session entered paused state
 }
 
 interface SessionStoreOptions {
@@ -25,6 +27,22 @@ interface SessionStoreOptions {
   graphd: GraphDManager | null;
   isGraphDReady: () => boolean;
   logger: HarnessLogger;
+}
+
+/**
+ * Build an interruption directive that wraps the user's message with guidance.
+ * This helps the agent understand the message arrived mid-execution and how to handle it.
+ */
+function buildInterruptionDirective(userMessage: string): string {
+  return `**User Interruption**: "${userMessage}"
+
+Consider if the user is:
+- Asking you to stop current work
+- Requesting a pivot to a different task
+- Providing information that invalidates your current action
+- Adding context as an addendum
+
+Acknowledge the interruption and adjust your approach accordingly.`;
 }
 
 export class SessionStore {
@@ -125,8 +143,8 @@ export class SessionStore {
     this.graphd.sessionTouch(this.sessionKey, workingDir);
   }
 
-  setPausedState(state: PausedState): void {
-    this.pausedState = state;
+  setPausedState(state: Omit<PausedState, 'pausedAt'>): void {
+    this.pausedState = { ...state, pausedAt: Date.now() };
   }
 
   getPausedState(): PausedState | null {
@@ -230,13 +248,15 @@ export class SessionStore {
 
   /**
    * Queue a user message to be seen by the running agent on its next turn.
-   * The message is added to the context window immediately so the agent sees it.
+   * The message is added to the context window immediately (with interruption directive)
+   * so the agent sees it and understands it's an interruption.
    */
   queueUserMessage(requestId: string, message: string): void {
     this.queuedUserMessages.push({ requestId, message });
-    // Add to context immediately so agent sees it on next LLM call
+    // Add to context with interruption directive so agent understands it's mid-execution
     const ctx = this.getContext();
-    ctx.addMessage('user', message);
+    const directive = buildInterruptionDirective(message);
+    ctx.addMessage('user', directive);
     this.logger.debug('Queued user message during execution', {
       sessionKey: this.sessionKey,
       executingRequestId: this.executingRequestId,
@@ -259,5 +279,13 @@ export class SessionStore {
    */
   getQueuedMessages(): ReadonlyArray<{ requestId: string; message: string }> {
     return this.queuedUserMessages;
+  }
+
+  /**
+   * Check if there are pending user messages (interruptions) waiting.
+   * Used by orchestrator to avoid premature termination.
+   */
+  hasPendingInterruption(): boolean {
+    return this.queuedUserMessages.length > 0;
   }
 }

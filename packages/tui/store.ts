@@ -3,6 +3,42 @@ import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, Q
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
+/**
+ * TUI Store - Central state management for the terminal UI
+ *
+ * DOMAINS:
+ *   Core         - state, status, progress, session, request count
+ *   History      - message history, pruning, caching
+ *   Streaming    - response streaming with throttling
+ *   Reasoning    - extended thinking display
+ *   Input        - text buffer, cursor, autocomplete
+ *   UI Mode      - mode switching, scroll, visibility flags
+ *   Question     - interactive prompts, multi-question sequences
+ *   Models       - model list, cursor, selection per agent type
+ *   Sessions     - session list, cursor
+ *   Usage        - usage analytics, stats
+ *   Ralph Loop   - autonomous loop state
+ *   Wizard       - multi-step configuration flows
+ *   Skills/Hooks - extension lists
+ *   Capabilities - system feature flags
+ *   Paste        - large paste handling
+ *   Theme        - theme selection cursor
+ *   Plan Mode    - planning mode flag
+ *   Response     - modal content display
+ *
+ * PATTERNS:
+ *   - List domains (models, sessions, usage): list + cursor + move + getSelected
+ *   - All mutations call emit() at the end
+ *   - batch() groups mutations into single emit
+ *   - Streaming uses throttled emit for performance
+ *
+ * ADDING NEW STATE:
+ *   1. Add private field in the appropriate domain section below
+ *   2. Add to StoreSnapshot interface
+ *   3. Add to getSnapshot() method
+ *   4. Add methods in the corresponding METHODS section
+ */
+
 // Resource limits to prevent memory exhaustion
 const MAX_STREAMING_BYTES = 5 * 1024 * 1024;  // 5MB - cap streaming text
 const MAX_INPUT_LENGTH = 100 * 1024;           // 100KB - cap input buffer
@@ -105,48 +141,53 @@ export interface StoreSnapshot {
 const DEFAULT_MAX_HISTORY = 500;
 
 export class Store {
-  private inputBuffer = new InputBuffer();
-  private inputScrollOffset = 0;
-  private autocomplete: AutocompleteState = {
-    active: false,
-    suggestions: [],
-    selected: 0,
-    startIndex: -1,
-  };
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATE - All private fields grouped by domain
+  // ═══════════════════════════════════════════════════════════════════════════
 
+  // ─── Core ───
   private state: TUIState = "idle";
   private statusMessage = "Ready";
   private progressMessage = "";
   private progressLevel: EventLevel | null = null;
   private progressKind: EventKind | null = null;
+  private sessionKey: string | null = null;
+  private requestCount = 0;
+  private listeners = new Set<() => void>();
+  private batchDepth = 0;
+  private batchDirty = false;
+
+  // ─── History ───
   private history: MessageEntry[] = [];
   private historyStart = 0;
+  private historyVersion = 0;
+  private historyCache: { width: number; version: number; lines: HistoryLine[] } | null = null;
+  private maxHistory: number;
+
+  // ─── Streaming ───
   private streamingText = "";
   private streamingRequestId: string | null = null;
   private streamingTruncated = false;
+  private streamingThrottleMs = 16; // ~60fps
+  private lastStreamingEmit = 0;
+
+  // ─── Reasoning ───
   private reasoningText = "";
   private reasoningRequestId: string | null = null;
+
+  // ─── Input ───
+  private inputBuffer = new InputBuffer();
+  private inputScrollOffset = 0;
+  private autocomplete: AutocompleteState = { active: false, suggestions: [], selected: 0, startIndex: -1 };
+
+  // ─── UI Mode ───
+  private uiMode: UIMode = "chat";
   private scrollOffset = 0;
   private newMessages = false;
-  private voiceMode = false;
   private helpVisible = false;
-  private sessionKey: string | null = null;
-  private uiMode: UIMode = "chat";
-  private wizardType: WizardType | null = null;
-  private wizardStepIndex = 0;
-  private wizardData: Record<string, unknown> = {};
-  private wizardErrors: string[] = [];
-  private skillsList: Record<string, unknown>[] = [];
-  private hooksList: Record<string, unknown>[] = [];
-  private skillsErrors: string[] = [];
-  private hooksErrors: string[] = [];
-  private capabilities = { voiceAvailable: false, streamingSupported: true };
-  private requestCount = 0;
-  private historyVersion = 0;
-  private maxHistory: number;
-  private listeners = new Set<() => void>();
+  private voiceMode = false;
 
-  // Question flow state
+  // ─── Question Flow ───
   private activeQuestion: AgentQuestion | null = null;
   private questionSelection: number[] = [];
   private questionCursor = 0;
@@ -154,22 +195,9 @@ export class Store {
   private questionQueue: AgentQuestion[] = [];
   private questionAnswers = new Map<string, unknown>();
   private questionRequestId: string | null = null;
-  private questionProcessing = false;  // Re-entrance guard
+  private questionProcessing = false;
 
-  // Paste state
-  private pasteInProgress = false;
-  private pasteBytesReceived = 0;
-
-  // Theme selection
-  private themeCursor = 0;
-
-  // Plan mode
-  private planMode = false;
-
-  // Response pane content
-  private responseContent: ResponseContent | null = null;
-
-  // Models selection
+  // ─── Models ───
   private modelsList: ModelEntry[] = [];
   private modelsCursor = 0;
   private modelDeletePending = false;
@@ -177,11 +205,11 @@ export class Store {
   private stagedModelSelections = new Map<string, { model: string; provider: string; reasoning?: string }>();
   private modelsActiveTab = 'standard';
 
-  // Sessions selection
+  // ─── Sessions ───
   private sessionsList: SessionEntry[] = [];
   private sessionsCursor = 0;
 
-  // Usage view
+  // ─── Usage ───
   private usageSessions: UsageSessionSummary[] = [];
   private usageCursor = 0;
   private usageViewMode: "list" | "detail" | "analytics" = "list";
@@ -189,29 +217,51 @@ export class Store {
   private usageProviderStats: UsageProviderStats[] = [];
   private usageLoading = false;
 
-  // Ralph Loop state
+  // ─── Ralph Loop ───
   private ralphActive = false;
   private ralphIteration = 0;
   private ralphMaxIterations = 0;
   private ralphCompletionPromise: string | null = null;
 
-  private historyCache: {
-    width: number;
-    version: number;
-    lines: HistoryLine[];
-  } | null = null;
+  // ─── Wizard ───
+  private wizardType: WizardType | null = null;
+  private wizardStepIndex = 0;
+  private wizardData: Record<string, unknown> = {};
+  private wizardErrors: string[] = [];
 
-  // Batching support
-  private batchDepth = 0;
-  private batchDirty = false;
+  // ─── Skills/Hooks ───
+  private skillsList: Record<string, unknown>[] = [];
+  private hooksList: Record<string, unknown>[] = [];
+  private skillsErrors: string[] = [];
+  private hooksErrors: string[] = [];
 
-  // Streaming throttle
-  private streamingThrottleMs = 16; // ~60fps during streaming for lower latency
-  private lastStreamingEmit = 0;
+  // ─── Capabilities ───
+  private capabilities = { voiceAvailable: false, streamingSupported: true };
+
+  // ─── Paste ───
+  private pasteInProgress = false;
+  private pasteBytesReceived = 0;
+
+  // ─── Theme ───
+  private themeCursor = 0;
+
+  // ─── Plan Mode ───
+  private planMode = false;
+
+  // ─── Response Pane ───
+  private responseContent: ResponseContent | null = null;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONSTRUCTOR
+  // ═══════════════════════════════════════════════════════════════════════════
 
   constructor(maxHistory = DEFAULT_MAX_HISTORY) {
     this.maxHistory = maxHistory;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CORE METHODS - subscribe, snapshot, emit, batch
+  // ═══════════════════════════════════════════════════════════════════════════
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -343,15 +393,43 @@ export class Store {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SESSION METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setSessionKey(key: string | null): void {
     this.sessionKey = key;
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UI MODE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setUIMode(mode: UIMode): void {
+    const previousMode = this.uiMode;
     this.uiMode = mode;
+
+    // Reset scroll position based on mode type
+    // Chat: start at bottom (newest content)
+    // Lists (skills/hooks): start at top (first items)
+    if (mode !== previousMode) {
+      if (mode === "skills" || mode === "hooks") {
+        // Will be clamped to maxScroll by the render logic
+        this.scrollOffset = Number.MAX_SAFE_INTEGER;
+      } else {
+        // Chat and other modes: start at bottom
+        this.scrollOffset = 0;
+      }
+      this.newMessages = false;
+    }
+
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WIZARD METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   startWizard(type: WizardType, data: Record<string, unknown>): void {
     this.uiMode = "wizard";
@@ -385,6 +463,10 @@ export class Store {
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SKILLS/HOOKS METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setSkillsList(items: Record<string, unknown>[], errors?: string[]): void {
     this.skillsList = [...items];
     this.skillsErrors = errors ? [...errors] : [];
@@ -397,6 +479,10 @@ export class Store {
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CAPABILITIES METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setCapabilities(capabilities: { voiceAvailable?: boolean; streamingSupported?: boolean }): void {
     this.capabilities = {
       voiceAvailable: capabilities.voiceAvailable ?? this.capabilities.voiceAvailable,
@@ -404,6 +490,10 @@ export class Store {
     };
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATUS/STATE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   setState(state: TUIState, message?: string): void {
     this.state = state;
@@ -479,6 +569,10 @@ export class Store {
     return this.requestCount;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HISTORY METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   addMessage(role: Role, text: string, meta?: string, requestId?: string): void {
     const entry: MessageEntry = {
       id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -540,6 +634,10 @@ export class Store {
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STREAMING METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setStreaming(requestId: string, text: string): void {
     this.streamingRequestId = requestId;
     this.streamingText = text;
@@ -580,7 +678,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Reasoning Stream Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // REASONING METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   setReasoning(requestId: string, text: string): void {
     this.reasoningRequestId = requestId;
@@ -615,6 +715,10 @@ export class Store {
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SCROLL METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setScrollOffset(offset: number): void {
     this.scrollOffset = Math.max(0, offset);
     if (this.scrollOffset === 0) {
@@ -642,6 +746,10 @@ export class Store {
     this.newMessages = false;
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INPUT METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   insertInput(text: string): void {
     this.inputBuffer.insertText(text);
@@ -694,6 +802,10 @@ export class Store {
     this.inputBuffer.deleteWordBack();
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUTOCOMPLETE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   updateAutocomplete(fileCache: { getFiles: () => string[] }): void {
     const text = this.inputBuffer.getText();
@@ -841,7 +953,9 @@ export class Store {
     return lines;
   }
 
-  // ==================== Question Flow Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // QUESTION FLOW METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets the active question and enters question mode.
@@ -1036,7 +1150,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Theme Selection Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THEME METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Enters theme selection mode with cursor at current theme.
@@ -1064,7 +1180,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Plan Mode Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PLAN MODE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets plan mode on or off.
@@ -1074,7 +1192,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Models Selection Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MODELS METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets model selection for a specific agent type.
@@ -1440,7 +1560,9 @@ export class Store {
     return this.modelsList.filter((m) => m.provider === selection.provider);
   }
 
-  // ==================== Sessions Selection Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SESSIONS METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets the sessions list and enters sessions selection mode.
@@ -1479,7 +1601,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Usage View Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // USAGE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets usage loading state.
@@ -1549,7 +1673,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Ralph Loop Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RALPH LOOP METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets the Ralph Loop state.
@@ -1585,7 +1711,9 @@ export class Store {
     return this.ralphActive;
   }
 
-  // ==================== Response Pane Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RESPONSE PANE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets response content and enters response mode.
@@ -1605,7 +1733,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Paste Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PASTE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Updates paste progress for large paste operations.
@@ -1645,6 +1775,10 @@ export class Store {
     this.emit();
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Formats bytes into a human-readable string.
@@ -1764,7 +1898,9 @@ function buildHistoryLines(
 
     // Add blank separator lines after each message for visual breathing room
     // Use space characters so Ink renders them with actual height
-    for (let i = 0; i < 3; i++) {
+    // System/status messages get minimal spacing to avoid wasting vertical space
+    const separatorCount = entry.role === "system" || entry.role === "status" ? 1 : 3;
+    for (let i = 0; i < separatorCount; i++) {
       lines.push({
         id: `${entryLinePrefix}:${lineIndex + i}`,
         text: " ",

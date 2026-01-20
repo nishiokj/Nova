@@ -42,12 +42,14 @@ export {
   EditArgsSchema,
   GlobArgsSchema,
   GrepArgsSchema,
+  PromptUserArgsSchema,
   type BashArgs,
   type ReadArgs,
   type WriteArgs,
   type EditArgs,
   type GlobArgs,
   type GrepArgs,
+  type PromptUserArgs,
 } from './tool_schemas.js';
 
 // Built-in tools
@@ -58,12 +60,14 @@ export {
   executeEdit,
   executeGrep,
   executeGlob,
+  executePromptUser,
   bashToolOptions,
   readToolOptions,
   writeToolOptions,
   editToolOptions,
   grepToolOptions,
   globToolOptions,
+  promptUserToolOptions,
   builtinToolOptions,
 } from './builtins/index.js';
 

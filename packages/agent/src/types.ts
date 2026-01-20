@@ -3,6 +3,7 @@ import type { WorkItem } from 'work';
 import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMRequestConfig } from 'types';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
+import type { AgentTerminationReason } from 'shared';
 
 /**
  * Agent type identifier - any string, defined via config.
@@ -116,7 +117,7 @@ export interface AgentResult {
   /** Tool errors encountered */
   toolErrors: string[];
   /** Why execution terminated */
-  terminationReason: string;
+  terminationReason: AgentTerminationReason;
   /** Whether user input is needed */
   needsUserInput: boolean;
   /** User prompt info (if needsUserInput) */
@@ -240,7 +241,7 @@ export type InternalHookEvent =
       toolCallsMade: number;
       llmCallsMade: number;
       hasResponse: boolean;
-      terminationReason?: string;
+      terminationReason?: AgentTerminationReason;
     }
   | {
       type: 'tool_batch_completed';
@@ -267,7 +268,7 @@ export type InternalHookEvent =
       type: 'agent_completed';
       workId: string;
       success: boolean;
-      terminationReason: string;
+      terminationReason: AgentTerminationReason;
       filesRead: string[];
       invalidatedPaths: string[];
     };

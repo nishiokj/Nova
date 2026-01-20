@@ -25,6 +25,7 @@ import {
   type UserPromptData,
   type UserPromptQuestion,
   type AgentQuestion,
+  type QuestionOption,
   type QuestionType,
   type UsageSessionSummary,
   type UsageDayStats,
@@ -937,17 +938,21 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     // Handle regular response streaming
     const currentSnapshot = store.getSnapshot();
+    console.error(`[TUI DEBUG] handleStream: currentStreamingRequestId=${currentSnapshot.streamingRequestId}, data.request_id=${data.request_id}, currentStreamingText=${currentSnapshot.streamingText?.length ?? 0} chars`);
     if (currentSnapshot.streamingRequestId !== data.request_id) {
       // New response stream - finalize any active reasoning first
       if (currentSnapshot.reasoningRequestId === data.request_id) {
         store.finalizeReasoning();
       }
+      console.error(`[TUI DEBUG] Calling store.setStreaming with ${data.chunk.length} chars`);
       store.setStreaming(data.request_id, data.chunk);
     } else {
+      console.error(`[TUI DEBUG] Calling store.appendStreaming with ${data.chunk.length} chars`);
       store.appendStreaming(data.chunk);
     }
 
     store.setState("streaming");
+    console.error(`[TUI DEBUG] After setState, streamingText=${store.getSnapshot().streamingText?.length ?? 0} chars`);
 
     if (data.is_final) {
       const finalText = store.getSnapshot().streamingText;
@@ -1226,10 +1231,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         ? streamedContent
         : content;
 
+      console.error(`[TUI DEBUG] handleResponse: streamedContent=${streamedContent?.length ?? 0} chars, content=${content?.length ?? 0} chars, finalContent=${finalContent?.length ?? 0} chars, requestId=${requestId}`);
+      console.error(`[TUI DEBUG] handleResponse: messageExists=${requestId ? messageExists(store.getSnapshot().history, requestId) : 'no requestId'}`);
+
       if (finalContent && requestId && messageExists(store.getSnapshot().history, requestId)) {
+        console.error(`[TUI DEBUG] handleResponse: updating existing message`);
         store.updateMessageText(requestId, finalContent, meta);
       } else if (finalContent && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
+        console.error(`[TUI DEBUG] handleResponse: adding new agent message`);
         store.addMessage("agent", finalContent, meta, requestId);
+      } else {
+        console.error(`[TUI DEBUG] handleResponse: NOT adding message - finalContent empty or other condition`);
       }
 
       store.finalizeStreaming();
@@ -1251,8 +1263,62 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.ensureInputCursorVisible(widthRef.current - 2, prompt, DEFAULT_MAX_INPUT_LINES);
   };
 
+  /**
+   * Validates user prompt event data at the boundary.
+   * Returns { valid: boolean, error?: string } with detailed error message if invalid.
+   */
+  const validateUserPromptData = (data: unknown): { valid: boolean; error?: string } => {
+    if (!data || typeof data !== 'object') {
+      return { valid: false, error: 'Data is missing or not an object' };
+    }
+
+    const payload = data as Record<string, unknown>;
+
+    // Validate required request_id field
+    if (!payload.request_id || typeof payload.request_id !== 'string') {
+      return { valid: false, error: 'Missing or invalid request_id (must be a string)' };
+    }
+
+    // Validate that either question (single) or questions (array) is present
+    const hasSingleQuestion = 'question' in payload && typeof payload.question === 'string';
+    const hasMultipleQuestions = 'questions' in payload && Array.isArray(payload.questions);
+
+    if (!hasSingleQuestion && !hasMultipleQuestions) {
+      return { valid: false, error: 'Missing question or questions array' };
+    }
+
+    // Validate questions array is not empty
+    if (hasMultipleQuestions && (payload.questions as unknown[]).length === 0) {
+      return { valid: false, error: 'questions array must not be empty' };
+    }
+
+    // Validate questions array elements have required fields
+    if (hasMultipleQuestions) {
+      for (let i = 0; i < (payload.questions as unknown[]).length; i++) {
+        const q = (payload.questions as unknown[])[i];
+        if (!q || typeof q !== 'object') {
+          return { valid: false, error: `questions[${i}] is not an object` };
+        }
+        const questionObj = q as Record<string, unknown>;
+        if (!questionObj.question || typeof questionObj.question !== 'string') {
+          return { valid: false, error: `questions[${i}] missing or invalid question field` };
+        }
+      }
+    }
+
+    return { valid: true };
+  };
+
   const handleUserPrompt = (data?: UserPromptData) => {
-    if (!data) return;
+    // Validate at the entry point
+    const validation = validateUserPromptData(data);
+    if (!validation.valid) {
+      store.addMessage('system', `Invalid user prompt event: ${validation.error}`);
+      return;
+    }
+
+    // After validation, we know data is an object with required fields
+    const validatedData = data as { request_id: string; question?: string; questions?: unknown[] };
 
     // Helper to infer question type from options and flags
     const inferQuestionType = (
@@ -1272,52 +1338,107 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return "multiple_choice";
     };
 
-    // Helper to convert raw question data to AgentQuestion
+    // Helper to convert raw question data to AgentQuestion with defensive field guards
     const toAgentQuestion = (
       q: UserPromptQuestion,
       requestId: string,
       index: number
-    ): AgentQuestion => ({
-      requestId: `${requestId}_q${index}`,
-      type: inferQuestionType(q.options, q.multi_select, q.question_type),
-      question: q.question,
-      context: q.context,
-      options: q.options?.map((opt) => {
-        const label = typeof opt === "string" ? opt : opt.label;
-        return {
-          id: label, // Use label as ID so agent sees meaningful answer text
-          label,
-          description: typeof opt === "object" ? opt.description : undefined,
-        };
-      }),
-    });
+    ): AgentQuestion => {
+      // Guard against missing or empty question field (though validation should have caught this)
+      const questionText = q.question || 'Question text missing';
+
+      // Guard against missing options - default to empty array
+      const rawOptions = q.options || [];
+
+      // Safely map options, filtering out malformed ones
+      const processedOptions = rawOptions
+        .map((opt): QuestionOption | null => {
+          // Guard against null/undefined options
+          if (!opt) return null;
+
+          let label: string;
+          let description: string | undefined;
+
+          if (typeof opt === 'string') {
+            label = opt;
+          } else if (typeof opt === 'object' && opt.label) {
+            label = opt.label;
+            description = opt.description;
+          } else {
+            // Option object missing label - skip it
+            return null;
+          }
+
+          return {
+            id: label,
+            label,
+            description,
+          };
+        })
+        .filter((opt): opt is QuestionOption => opt !== null);
+
+      return {
+        requestId: `${requestId}_q${index}`,
+        type: inferQuestionType(rawOptions, q.multi_select, q.question_type),
+        question: questionText,
+        context: q.context,
+        options: processedOptions,
+      };
+    };
 
     // Handle multiple questions
-    if (data.questions && data.questions.length > 0) {
-      const questions = data.questions.map((q, i) => toAgentQuestion(q, data.request_id, i));
-      store.setQuestionQueue(questions, data.request_id);
+    if (validatedData.questions && validatedData.questions.length > 0) {
+      const questions = validatedData.questions.map((q, i) =>
+        toAgentQuestion(q as UserPromptQuestion, validatedData.request_id, i)
+      );
+      store.setQuestionQueue(questions, validatedData.request_id);
       return;
     }
 
     // Handle single question (backwards compatible)
-    if (!data.question) return;
+    if (!validatedData.question) return;
+
+    // Guard against malformed options in single question branch
+    const rawSingleOptions = (data as UserPromptData).options || [];
+    const processedSingleOptions = rawSingleOptions
+      .map((opt): QuestionOption | null => {
+        // Guard against null/undefined options
+        if (!opt) return null;
+
+        let label: string;
+        let description: string | undefined;
+
+        if (typeof opt === 'string') {
+          label = opt;
+        } else if (typeof opt === 'object' && opt.label) {
+          label = opt.label;
+          description = opt.description;
+        } else {
+          // Option object missing label - skip it
+          return null;
+        }
+
+        return {
+          id: label,
+          label,
+          description,
+        };
+      })
+      .filter((opt): opt is QuestionOption => opt !== null);
 
     const question: AgentQuestion = {
-      requestId: data.request_id,
-      type: inferQuestionType(data.options, data.multi_select, data.question_type),
-      question: data.question,
-      context: data.context,
-      options: data.options?.map((opt) => {
-        const label = typeof opt === "string" ? opt : opt.label;
-        return {
-          id: label, // Use label as ID so agent sees meaningful answer text
-          label,
-          description: typeof opt === "object" ? opt.description : undefined,
-        };
-      }),
+      requestId: validatedData.request_id,
+      type: inferQuestionType(
+        rawSingleOptions,
+        (data as UserPromptData).multi_select,
+        (data as UserPromptData).question_type
+      ),
+      question: validatedData.question,
+      context: (data as UserPromptData).context,
+      options: processedSingleOptions,
     };
 
-    store.setActiveQuestion(question, data.request_id);
+    store.setActiveQuestion(question, validatedData.request_id);
   };
 
   const handleProviderKeyRequired = (data?: ProviderKeyRequiredData) => {
@@ -2650,21 +2771,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   const scrollOffset = Math.min(snapshot.scrollOffset, maxScroll);
 
-  // Calculate visible lines: we slice the content and pad top if needed
-  // scrollOffset = 0 = show most recent (bottom), maxScroll = show oldest (top)
-  const maxStartIndex = Math.max(0, totalHistoryLines - historyHeight);
-  const startIndex = Math.max(0, maxStartIndex - scrollOffset);
-  const slicedLines = historyLines.slice(startIndex, Math.min(startIndex + historyHeight, totalHistoryLines));
-
-  // Pad with empty lines at the top if content is shorter than viewport
-  // This keeps content at the bottom without using flex-end (which causes clipping)
-  const paddingCount = Math.max(0, historyHeight - slicedLines.length);
-  const paddingLines: HistoryLine[] = Array.from({ length: paddingCount }, (_, i) => ({
-    id: `padding-${i}`,
-    text: " ",
-    role: undefined,
-  }));
-  const visibleHistoryLines = [...paddingLines, ...slicedLines];
+  // Slice historyLines to only render the visible portion
+  // scrollOffset = 0 means at bottom (newest), scrollOffset = N means N lines up from bottom
+  const totalLines = historyLines.length;
+  const visibleEndIndex = totalLines - scrollOffset;
+  const visibleStartIndex = Math.max(0, visibleEndIndex - historyHeight);
+  const visibleHistoryLines = historyLines.slice(visibleStartIndex, visibleEndIndex);
 
   const renderInputLines = () => {
     const lines = [...inputLayout.lines];
@@ -2867,7 +2979,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {visibleHistoryLines.map((line, index) => {
             const isUserLine = line.role === "user";
             const bgColor = isUserLine ? colors.userBg : undefined;
-            // Pad user lines to full width for consistent background
             const paddedText = isUserLine ? line.text.padEnd(contentWidth, " ") : line.text;
             return (
               <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>

@@ -10,9 +10,16 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { GraphStore } from 'graphd';
-import type { ProvidersConfigSection } from './config_types.js';
-import { setConfigProviders } from './config_loader.js';
 import { SUPPORTED_PROVIDER_IDS, getProviderDefinition } from 'types';
+
+/**
+ * Provider API keys configuration type.
+ * NOTE: This is now internal-only - no longer used in config files.
+ * API keys are stored exclusively in GraphD.
+ */
+export interface ProvidersConfigSection {
+  [provider: string]: string | undefined;
+}
 
 // ============================================
 // TYPES
@@ -80,9 +87,6 @@ export class LocalProviderManager {
     // Ensure local user exists
     this.ensureLocalUser();
 
-    // Load stored provider keys into config cache for hasApiKey() checks.
-    this.updateConfigCache();
-
     console.log(`[local-providers] Initialized with GraphD at ${graphdDbPath}`);
   }
 
@@ -145,9 +149,6 @@ export class LocalProviderManager {
         encrypted.iv
       );
 
-      // Update module-level cache for immediate use by config resolution
-      this.updateConfigCache();
-
       console.log(`[local-providers] Saved ${provider} key to GraphD`);
       return { success: true };
     } catch (err) {
@@ -164,9 +165,6 @@ export class LocalProviderManager {
   deleteProviderKey(provider: string): ProviderSaveResult {
     try {
       this.store.deleteProviderCredential(LOCAL_USER_ID, provider);
-
-      // Update module-level cache
-      this.updateConfigCache();
 
       console.log(`[local-providers] Deleted ${provider} key from GraphD`);
       return { success: true };
@@ -255,25 +253,10 @@ export class LocalProviderManager {
   // =========================================================================
 
   /**
-   * Update the module-level config cache with current provider keys.
-   */
-  private updateConfigCache(): void {
-    const providers = this.getProviders();
-    setConfigProviders(providers);
-  }
-
-  /**
    * Get or generate the master encryption key.
    */
   private getMasterKey(): Buffer {
     if (this.masterKey) {
-      return this.masterKey;
-    }
-
-    // Check env var first
-    const envKey = process.env.REX_ENCRYPTION_KEY;
-    if (envKey) {
-      this.masterKey = scryptSync(envKey, 'rex-local-salt', KEY_LENGTH);
       return this.masterKey;
     }
 

@@ -225,6 +225,7 @@ export interface LLMCallData {
   totalTokens: number;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens?: number;
   durationMs: number;
   model: string;
   toolCallsCount: number;

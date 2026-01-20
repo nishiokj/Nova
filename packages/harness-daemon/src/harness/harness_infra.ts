@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { errorResult, successResult } from 'types';
-import type { FullHarnessConfig } from './config_types.js';
+import type { FullHarnessConfig } from './config.js';
 import { loadSkillDefinitions, getSkillDefinition } from './skills_loader.js';
 
 export interface HarnessLogger {

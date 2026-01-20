@@ -238,12 +238,14 @@ export class OpenAIProvider implements LLMProviderAdapter {
       ? 'tool_use'
       : (stopReasonMap[finalStatus] ?? 'end_turn');
 
-    const usageData = data.usage as Record<string, number> | undefined;
+    const usageData = data.usage as Record<string, unknown> | undefined;
+    const promptDetails = usageData?.prompt_tokens_details as Record<string, number> | undefined;
     const usage: TokenUsage = usageData
       ? {
-          promptTokens: usageData.input_tokens ?? 0,
-          completionTokens: usageData.output_tokens ?? 0,
-          totalTokens: usageData.total_tokens ?? 0,
+          promptTokens: (usageData.input_tokens as number) ?? 0,
+          completionTokens: (usageData.output_tokens as number) ?? 0,
+          totalTokens: (usageData.total_tokens as number) ?? 0,
+          cachedTokens: promptDetails?.cached_tokens,
         }
       : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
@@ -458,6 +460,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
     const decoder = new TextDecoder();
 
     let fullContent = '';
+    let fullReasoningContent = '';
     let stopReason: StopReason = 'end_turn';
     let usage: TokenUsage = {
       promptTokens: 0,
@@ -511,6 +514,22 @@ export class OpenAIProvider implements LLMProviderAdapter {
               }
             }
 
+            if (event.type === 'response.reasoning.delta') {
+              const delta = event.delta as string;
+              if (delta) {
+                fullReasoningContent += delta;
+                params.onReasoningChunk?.(delta);
+              }
+            }
+
+            if (event.type === 'response.reasoning.done') {
+              const reasoning = event.reasoning as string;
+              if (reasoning && fullReasoningContent.length === 0) {
+                fullReasoningContent += reasoning;
+                params.onReasoningChunk?.(reasoning);
+              }
+            }
+
             if (event.type === 'response.completed') {
               const responseObj = event.response as Record<string, unknown> | undefined;
               if (responseObj) {
@@ -523,12 +542,14 @@ export class OpenAIProvider implements LLMProviderAdapter {
                   toolCalls.length = 0;
                   toolCalls.push(...parsedCalls.filter((call) => !!call.name));
                 }
-                const usageData = responseObj.usage as Record<string, number> | undefined;
+                const usageData = responseObj.usage as Record<string, unknown> | undefined;
+                const promptDetails = usageData?.prompt_tokens_details as Record<string, number> | undefined;
                 if (usageData) {
                   usage = {
-                    promptTokens: usageData.input_tokens ?? 0,
-                    completionTokens: usageData.output_tokens ?? 0,
-                    totalTokens: usageData.total_tokens ?? 0,
+                    promptTokens: (usageData.input_tokens as number) ?? 0,
+                    completionTokens: (usageData.output_tokens as number) ?? 0,
+                    totalTokens: (usageData.total_tokens as number) ?? 0,
+                    cachedTokens: promptDetails?.cached_tokens,
                   };
                 }
                 model = (responseObj.model as string) ?? model;
@@ -570,6 +591,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       model,
       durationMs: Date.now() - context.startTime,
       responseId,
+      reasoningContent: fullReasoningContent || undefined,
     };
   }
 

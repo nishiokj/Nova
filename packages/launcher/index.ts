@@ -17,24 +17,13 @@ import { homedir } from 'os';
 
 /**
  * Minimal user config template.
- * This is created on first run - users only need to add their API keys.
+ * This is created on first run for user preferences.
+ * API keys are stored in GraphD (use `rex providers set <provider> <key>`).
  * All other settings come from config/defaults.json
  */
 const MINIMAL_USER_CONFIG = {
-  $comment: "Add your API keys below. All other settings are inherited from defaults.",
-  providers: {
-    anthropic: "",
-    openai: "",
-    cerebras: "",
-    together: "",
-    groq: "",
-    fireworks: "",
-    gemini: "",
-    replicate: "",
-    "z.ai-coder": ""
-  },
+  $comment: "User preferences. API keys are stored securely in GraphD - use 'rex providers set <provider> <key>' to configure them.",
   models: {
-    available: [],
     default: ""
   }
 };
@@ -94,10 +83,10 @@ const ensureUserConfig = (): string => {
       console.log(`[rex] Created config directory: ${userConfigDir}`);
     }
 
-    // Write minimal user config (just providers - all else from defaults)
+    // Write minimal user config for preferences (API keys stored in GraphD)
     writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
     console.log(`[rex] Created user config: ${userConfig}`);
-    console.log('[rex] Add your API keys to the providers section. All other settings are inherited from defaults.');
+    console.log('[rex] To add API keys, use: rex providers set <provider> <key>');
     return userConfig;
   } catch (err) {
     console.warn(`[rex] Could not create user config: ${err}`);
@@ -171,7 +160,7 @@ async function startDaemon(): Promise<Subprocess> {
       EVENT_BUS_PORT: String(DAEMON_PORT),
     },
     stdout: 'ignore',
-    stderr: 'pipe',
+    stderr: 'inherit', // Changed from 'pipe' to see debug output
   });
 
   // Wait for daemon to be ready
@@ -186,8 +175,7 @@ async function startDaemon(): Promise<Subprocess> {
 
   // Check if daemon failed
   if (daemon.exitCode !== null) {
-    const stderr = await new Response(daemon.stderr).text();
-    throw new Error(`Daemon failed to start: ${stderr}`);
+    throw new Error(`Daemon failed to start (check stderr output above)`);
   }
 
   throw new Error('Daemon startup timeout');

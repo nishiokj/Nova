@@ -16,7 +16,7 @@ import {
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, createMicroQueue } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -27,6 +27,7 @@ import type {
   AgentMetrics,
   EventEmitCallback,
   UserPromptInfo,
+  UserPromptQuestion,
   AgentHooks,
   InternalHookQueue,
   InternalHookContext,
@@ -43,7 +44,7 @@ import { TOOL_LIMITS, getMaxOutputLength, isRefusal } from './constants.js';
 // Re-export circuit breaker functions for backwards compatibility
 export { resetProviderCircuit, getCircuitStatus };
 
-type AgentAction = 'done' | 'need_user_input' | 'continue' | 'handoff';
+type AgentAction = 'done' | 'continue' | 'handoff';
 
 /**
  * Model selection override for per-agent-type model configuration.
@@ -124,6 +125,31 @@ export class Agent {
       hasResponse,
       terminationReason: result.terminationReason || undefined,
     }, this.buildHookContext(workItem));
+  }
+
+  /**
+   * Handle awaitingUserInput from structured output.
+   * This is a fallback for conversational questions when PromptUser isn't used.
+   * Returns true if we should pause for user input, false otherwise.
+   */
+  private handleAwaitingUserInput(
+    result: AgentResult,
+    structuredOutput: Record<string, unknown> | null,
+    responseText: string | undefined,
+    content: string
+  ): boolean {
+    // Skip if PromptUser already set needsUserInput (it takes precedence)
+    if (result.needsUserInput) return false;
+
+    // Check if agent explicitly declared it's waiting for input
+    if (structuredOutput?.awaitingUserInput !== true) return false;
+
+    result.needsUserInput = true;
+    result.userPrompt = {
+      question: responseText || content || 'Waiting for your response...',
+    };
+    result.terminationReason = 'user_input_required';
+    return true;
   }
 
   /**
@@ -267,7 +293,7 @@ export class Agent {
       filesRead: [],
       invalidatedPaths: [],
       toolErrors: [],
-      terminationReason: '',
+      terminationReason: 'exception', // Default; overwritten by executeLoop or catch block
       needsUserInput: false,
       isRefusal: false,
       localContext,
@@ -294,10 +320,13 @@ export class Agent {
         result.terminationReason = 'circuit_open';
         console.error(`[AGENT] Circuit breaker open: ${message}`);
       } else if (error instanceof RetriesExhaustedError) {
-        result.terminationReason = 'retries_exhausted';
+        // For now, treat retries_exhausted as exception. Phase 3 will unwrap the underlying error.
+        result.terminationReason = 'exception';
+        result.error = `Retries exhausted after ${error.attempts} attempts: ${message}`;
         console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
       } else {
-        result.terminationReason = `exception:${message}`;
+        result.terminationReason = 'exception';
+        // Error detail is in result.error, not terminationReason
       }
 
       this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
@@ -365,7 +394,6 @@ export class Agent {
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       const elapsedMs = Date.now() - startTime;
-      console.error(`[AGENT DEBUG] Starting iteration ${iteration}/${maxIterations}, elapsed=${elapsedMs}ms, toolCallsMade=${metrics.toolCallsMade}, agent=${this.config.type}`);
 
       // Auto-compact if context is near full
       if (localContext.isNearFull()) {
@@ -385,7 +413,6 @@ export class Agent {
             truncateOutputsTo: 4000,
           });
         }
-        console.error(`[AGENT DEBUG] Compacted context: removed=${compactResult.itemsRemoved}, truncated=${compactResult.outputsTruncated}, recovered=${compactResult.bytesRecovered}b`);
         localReadFiles.clear();
         for (const path of localContext.getReadFilesArray()) {
           localReadFiles.add(path);
@@ -436,9 +463,6 @@ export class Agent {
       const toolsForThisCall = allowedTools.length > 0 ? allowedTools : undefined;
       const toolChoiceForThisCall = isLastIteration && toolsForThisCall ? 'none' as const : undefined;
 
-      if (isLastIteration && toolsForThisCall) {
-        console.error(`[AGENT DEBUG] Last iteration - setting tool_choice=none to force synthesis: iteration=${iteration}/${maxIterations}, agent=${this.config.type}`);
-      }
 
       const llmStartTime = Date.now();
       // Don't stream raw chunks when using structured output (they're JSON garbage)
@@ -460,7 +484,6 @@ export class Agent {
             }, workItem.workId));
           },
           onReasoningChunk: (chunk) => {
-            console.error(`[AGENT DEBUG] Emitting agent_reasoning event: ${chunk.length} chars`);
             this.emit(createEvent('agent_reasoning', {
               agentType: this.config.type,
               content: chunk,
@@ -534,15 +557,19 @@ export class Agent {
               discoveredBy: this.config.type,
             });
           }
-          console.error(`[AGENT DEBUG] Extracted ${validArtifacts.length} artifacts from structured output, iteration=${iteration}, agent=${this.config.type}`);
         }
       }
 
       this.addAssistantMessage(localContext, content, toolCalls);
 
       const action = this.extractStructuredAction(structuredOutput);
-      const responseText = this.extractStructuredResponse(structuredOutput);
-      const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
+      const parsedResponseText = this.extractStructuredResponse(structuredOutput);
+
+      // For LLMs that output prose before JSON (e.g., GLM), extract that text
+      // and combine with the parsed response field for complete display
+      const preJsonText = extractPreJsonText(content);
+      const responseText = this.combineResponseText(preJsonText, parsedResponseText);
+
       const emitTurnCompleted = (hasResponse: boolean): void => {
         this.internalHookQueue.enqueue({
           type: 'turn_completed',
@@ -564,10 +591,7 @@ export class Agent {
         }, workItem.workId));
       }
 
-      console.error(`[AGENT DEBUG] LLM response: iteration=${iteration}, agent=${this.config.type}, action=${action}, hasResponseText=${!!responseText}, responseTextLength=${responseText?.length ?? 0}, toolCallCount=${toolCalls.length}, contentLength=${content.length}`);
-
       if (toolCalls.length > 0) {
-        console.error(`[AGENT DEBUG] Processing ${toolCalls.length} tool calls, iteration=${iteration}, agent=${this.config.type}`);
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
         const toolCallsFailedBefore = metrics.toolCallsFailed;
 
@@ -595,25 +619,19 @@ export class Agent {
           }, this.buildHookContext(workItem));
         }
 
-        console.error(`[AGENT DEBUG] After processToolCalls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}, toolCallsMade=${metrics.toolCallsMade}, maxToolCalls=${workItem.bounds.maxToolCalls}`);
-
         if (result.needsUserInput || result.terminationReason) {
-          console.error(`[AGENT DEBUG] Early exit after tool calls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}`);
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+          return;
+        }
+
+        // Check awaitingUserInput from structured output (fallback for conversational questions)
+        if (this.handleAwaitingUserInput(result, structuredOutput, responseText, content as string)) {
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
         }
 
         // Handle completion after tool calls
         if (this.handleCompletionAction(result, responseText, content as string, action, structuredOutput)) {
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
-        }
-
-        // Handle user input request after tool calls
-        if (action === 'need_user_input' && structuredPrompt) {
-          result.needsUserInput = true;
-          result.userPrompt = structuredPrompt;
-          result.terminationReason = 'user_input_required';
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
         }
@@ -644,6 +662,12 @@ export class Agent {
         continue;
       }
 
+      // Check awaitingUserInput from structured output (fallback for conversational questions)
+      if (this.handleAwaitingUserInput(result, structuredOutput, responseText, content as string)) {
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+        return;
+      }
+
       // Handle completion action (done)
       if (this.handleCompletionAction(result, responseText, content as string, action, structuredOutput)) {
         this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
@@ -651,20 +675,6 @@ export class Agent {
           break;
         }
         return;
-      }
-
-      // Handle user input request
-      if (action === 'need_user_input') {
-        if (structuredPrompt) {
-          result.needsUserInput = true;
-          result.userPrompt = structuredPrompt;
-          result.terminationReason = 'user_input_required';
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
-        }
-        // No valid userPrompt provided, continue execution
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-        continue;
       }
 
       // Handle handoff request
@@ -705,7 +715,6 @@ export class Agent {
         // the model likely output conversational text instead of JSON.
         // Treat this as implicit "continue" to allow the agent to keep working.
         if (this.config.outputSchema && !action) {
-          console.error(`[AGENT DEBUG] No action extracted from structured output, treating as implicit continue: agent=${this.config.type}, contentLength=${content.length}`);
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
           continue;
         }
@@ -726,7 +735,6 @@ export class Agent {
       const assistantContents = messages
         .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
         .map(m => m.content as string);
-      console.error(`[AGENT DEBUG] Fallback response capture: found ${assistantContents.length} assistant messages, agent=${this.config.type}, terminationReason=${result.terminationReason}`);
 
       // Try to extract structured response from assistant content
       for (const content of assistantContents) {
@@ -752,13 +760,13 @@ export class Agent {
           const summary = `Exploration incomplete. Tools called: ${toolNames.join(', ')}. ` +
             `${successfulOutputs.length} successful results obtained but not synthesized.`;
           result.response = summary;
-          console.error(`[AGENT DEBUG] Using tool call summary as fallback response for ${this.config.type}`);
         }
       }
     }
 
     // Handle exhausted resources - treat as partial success if we have content
-    if (!result.terminationReason) {
+    // If terminationReason is still the default 'exception', we exhausted iterations without a specific termination
+    if (result.terminationReason === 'exception') {
       result.terminationReason = 'iterations_exhausted';
     }
 
@@ -877,8 +885,6 @@ export class Agent {
       }
     }
 
-    console.error(`[AGENT DEBUG] buildMessages: agent=${this.config.type}, messageCount=${messages.length}, functionCalls=${functionCallCount}, functionOutputs=${functionOutputCount}`);
-
     return messages;
   }
 
@@ -972,11 +978,6 @@ export class Agent {
         }
       }
 
-      // Debug: log tool result for Edit to diagnose "(no output)" issue
-      if (call.name.toLowerCase() === 'edit') {
-        console.error(`[TOOL_RESULT_DEBUG] Edit tool result: output=${toolResult.output?.slice(0, 200)}, isSuccess=${toolResult.isSuccess}, error=${toolResult.error}`);
-      }
-
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
@@ -988,7 +989,10 @@ export class Agent {
 
       // Truncate tool outputs at storage to reduce context size
       // File reads get higher limit (30KB) vs general tools (8KB)
-      const rawOutput = toolResult.output ?? '';
+      // For failed tools, include the error message so the LLM knows what went wrong
+      const rawOutput = toolResult.isSuccess
+        ? (toolResult.output ?? '')
+        : (toolResult.error ?? toolResult.output ?? 'Unknown error');
       const maxLen = getMaxOutputLength(call.name);
       const truncatedOutput = rawOutput.length > maxLen
         ? rawOutput.slice(0, maxLen) + `\n... [truncated ${rawOutput.length - maxLen} chars]`
@@ -1079,9 +1083,7 @@ export class Agent {
       if (nameLower === 'read') {
         const readPath = call.arguments.path ?? call.arguments.file_path;
         if (typeof readPath === 'string' && localContext.hasReadFile(readPath)) {
-          // File already in context - don't re-read
           const msg = `File "${readPath}" is already in your context. Look above for its contents instead of re-reading.`;
-          console.error(`[AGENT DEBUG] Intercepted duplicate Read for: ${readPath}`);
           localContext.appendItem({
             type: 'function_call_output',
             callId: call.id,
@@ -1091,6 +1093,45 @@ export class Agent {
           });
           continue;
         }
+      }
+
+      // Intercept PromptUser tool - signal pause for user input
+      if (nameLower === 'promptuser') {
+        await flushParallel();
+        const args = call.arguments;
+        const question = typeof args.question === 'string' ? args.question : '';
+        if (!question) {
+          localContext.appendItem({
+            type: 'function_call_output',
+            callId: call.id,
+            output: 'PromptUser requires a question',
+            isError: true,
+            timestamp: Date.now(),
+          });
+          continue;
+        }
+
+        // Build UserPromptInfo from validated args
+        result.needsUserInput = true;
+        result.userPrompt = {
+          question,
+          options: Array.isArray(args.options) ? args.options as UserPromptInfo['options'] : undefined,
+          context: typeof args.context === 'string' ? args.context : undefined,
+          multiSelect: typeof args.multiSelect === 'boolean' ? args.multiSelect : undefined,
+          questionType: typeof args.questionType === 'string' ? args.questionType : undefined,
+          questions: Array.isArray(args.questions) ? args.questions as UserPromptQuestion[] : undefined,
+        };
+        result.terminationReason = 'user_input_required';
+
+        localContext.appendItem({
+          type: 'function_call_output',
+          callId: call.id,
+          output: 'Waiting for user input...',
+          isError: false,
+          timestamp: Date.now(),
+        });
+
+        return;
       }
 
       const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
@@ -1336,6 +1377,11 @@ export class Agent {
       return errorResult(call.name, 'Agent tool registry not available', 0);
     }
 
+    // Prevent recursive self-calls
+    if (call.name.toLowerCase() === this.config.type.toLowerCase()) {
+      return errorResult(call.name, `Agent '${this.config.type}' cannot call itself`, 0);
+    }
+
     let agentConfig: AgentConfig;
     let llmConfig: LLMRequestConfig;
     try {
@@ -1528,7 +1574,29 @@ export class Agent {
       return successResult(call.name, JSON.stringify(payload), 0);
     }
 
-    return errorResult(call.name, JSON.stringify(payload), 0);
+    // Build human-readable error message for failed sub-agents
+    // Include key details without requiring JSON parsing
+    const errorParts = [
+      `Sub-agent '${agentConfig.type}' failed`,
+      subResult.error ? `: ${subResult.error}` : '',
+      subResult.terminationReason ? ` (reason: ${subResult.terminationReason})` : '',
+    ];
+    const toolsUsed = subResult.metrics?.toolCallsMade ?? 0;
+    if (toolsUsed > 0) {
+      errorParts.push(`\nTools called: ${toolsUsed} (${subResult.metrics?.toolCallsSucceeded ?? 0} succeeded, ${subResult.metrics?.toolCallsFailed ?? 0} failed)`);
+    }
+    if (subResult.toolErrors && subResult.toolErrors.length > 0) {
+      errorParts.push(`\nTool errors: ${subResult.toolErrors.slice(0, 3).join('; ')}${subResult.toolErrors.length > 3 ? '...' : ''}`);
+    }
+    // Include partial response if available
+    if (enhancedResponse && enhancedResponse.trim().length > 0) {
+      const preview = enhancedResponse.length > 500
+        ? enhancedResponse.slice(0, 500) + '... [truncated]'
+        : enhancedResponse;
+      errorParts.push(`\nPartial output:\n${preview}`);
+    }
+
+    return errorResult(call.name, errorParts.join(''), 0);
   }
 
   /**
@@ -1599,7 +1667,6 @@ export class Agent {
     if (typeof raw !== 'string') return null;
     const normalized = raw.trim().toLowerCase();
     if (normalized === 'done') return 'done';
-    if (normalized === 'need_user_input') return 'need_user_input';
     if (normalized === 'continue') return 'continue';
     if (normalized === 'handoff') return 'handoff';
     return null;
@@ -1620,103 +1687,28 @@ export class Agent {
   }
 
   /**
-   * Extract user prompt from structured output.
+   * Combine pre-JSON text with parsed response text.
+   * Some LLMs (e.g., GLM) output prose before the JSON structured output.
+   * This combines both to preserve all user-facing content.
    */
-  private extractStructuredUserPrompt(
-    structuredOutput: Record<string, unknown> | null
-  ): AgentResult['userPrompt'] | null {
-    if (!structuredOutput) return null;
-    return this.parseUserPromptValue(structuredOutput.userPrompt);
-  }
+  private combineResponseText(
+    preJsonText: string,
+    parsedResponseText: string | undefined
+  ): string | undefined {
+    const pre = preJsonText?.trim() ?? '';
+    const parsed = parsedResponseText?.trim() ?? '';
 
-  /**
-   * Parse options array from user prompt data.
-   */
-  private parseOptionsArray(
-    optionsRaw: unknown
-  ): UserPromptInfo['options'] | undefined {
-    if (!Array.isArray(optionsRaw)) return undefined;
-    const normalized = optionsRaw
-      .map((opt) => {
-        if (typeof opt === 'string') return opt;
-        if (opt && typeof opt === 'object' && !Array.isArray(opt)) {
-          const optObj = opt as Record<string, unknown>;
-          const label = typeof optObj.label === 'string' ? optObj.label : '';
-          if (!label) return null;
-          const description =
-            typeof optObj.description === 'string' ? optObj.description : undefined;
-          return description ? { label, description } : { label };
-        }
-        return null;
-      })
-      .filter((opt): opt is string | { label: string; description?: string } => opt !== null);
-    return normalized.length > 0 ? normalized : undefined;
-  }
-
-  /**
-   * Parse user prompt payload safely.
-   * Supports both single question and multiple questions formats.
-   */
-  private parseUserPromptValue(
-    value: unknown
-  ): AgentResult['userPrompt'] | null {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return null;
+    if (pre && parsed) {
+      return `${pre}\n\n${parsed}`;
     }
-    const data = value as Record<string, unknown>;
-
-    // Check for multiple questions format first
-    if (Array.isArray(data.questions) && data.questions.length > 0) {
-      const questions = data.questions
-        .map((q) => {
-          if (!q || typeof q !== 'object' || Array.isArray(q)) return null;
-          const qData = q as Record<string, unknown>;
-          const question = typeof qData.question === 'string' ? qData.question.trim() : '';
-          if (!question) return null;
-          return {
-            question,
-            options: this.parseOptionsArray(qData.options),
-            context: typeof qData.context === 'string' ? qData.context : undefined,
-            multiSelect: typeof qData.multiSelect === 'boolean' ? qData.multiSelect : undefined,
-            questionType: typeof qData.questionType === 'string' ? qData.questionType : undefined,
-          };
-        })
-        .filter((q): q is NonNullable<typeof q> => q !== null);
-
-      if (questions.length > 0) {
-        // Use first question as the primary (backwards compatible)
-        const first = questions[0];
-        return {
-          question: first.question,
-          options: first.options,
-          context: first.context,
-          multiSelect: first.multiSelect,
-          questionType: first.questionType,
-          questions: questions.length > 1 ? questions : undefined,
-        };
-      }
+    if (pre) {
+      return pre;
     }
-
-    // Single question format (backwards compatible)
-    const question = typeof data.question === 'string' ? data.question.trim() : '';
-    if (!question) return null;
-
-    const options = this.parseOptionsArray(data.options);
-    const context = typeof data.context === 'string' ? data.context : undefined;
-    const multiSelect =
-      typeof data.multiSelect === 'boolean' ? data.multiSelect : undefined;
-    const questionType =
-      typeof data.questionType === 'string' ? data.questionType : undefined;
-
-    return {
-      question,
-      options,
-      context,
-      multiSelect,
-      questionType,
-    };
+    if (parsed) {
+      return parsed;
+    }
+    return undefined;
   }
-
 
   /**
    * Emit llm_call event.

@@ -6,7 +6,7 @@ import { pathToFileURL } from 'url';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
 import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
-import { createAuthServiceFromEnv, type AuthService } from './auth_service.js';
+import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
 
 export interface HarnessDaemonOptions {
   host?: string;
@@ -30,15 +30,16 @@ export class HarnessDaemon {
   private bus: BusServer | null = null;
   private gateway: BridgeGateway | null = null;
   private authService: AuthService | null = null;
+  private authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownRequested = false;
 
   constructor(options: HarnessDaemonOptions = {}) {
-    this.host = options.host ?? process.env.EVENT_BUS_HOST ?? '127.0.0.1';
-    const rawPort = options.port ?? Number(process.env.EVENT_BUS_PORT ?? '9555');
+    this.host = options.host ?? '127.0.0.1';
+    const rawPort = options.port ?? 9555;
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
-    this.workingDir = options.workingDir ?? process.env.HARNESS_WORKING_DIR ?? process.cwd();
-    this.configPath = options.configPath ?? process.env.HARNESS_CONFIG_PATH;
+    this.workingDir = options.workingDir ?? process.cwd();
+    this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   }
 
@@ -83,14 +84,17 @@ export class HarnessDaemon {
   async start(): Promise<{ host: string; port: number }> {
     if (!this.harness) {
       // Create harness - API keys are resolved at request time via ProviderKeyService
-      // No preloading needed - the harness queries GraphD/config/env at runtime
+      // No preloading needed - harness queries GraphD at runtime
       this.harness = createHarnessFromEnv(this.workingDir, this.configPath);
       await this.harness.start();
+
+      // Capture auth config from loaded harness config
+      this.authConfig = this.harness.getAuthConfig?.() ?? null;
     }
 
-    // Initialize auth service (optional - depends on env vars)
-    if (!this.authService) {
-      this.authService = createAuthServiceFromEnv();
+    // Initialize auth service from config (optional - depends on config.auth section)
+    if (!this.authService && this.authConfig) {
+      this.authService = createAuthServiceFromConfig(this.authConfig);
       if (this.authService) {
         console.log('[harness-daemon] Auth service initialized');
       }

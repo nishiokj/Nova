@@ -1,85 +1,54 @@
 /**
- * Zod schemas for harness configuration.
+ * Harness configuration - schemas, types, and defaults.
  *
- * These schemas validate and type the config/harness_config.json file.
- * Use z.infer<typeof Schema> to derive types instead of manual interfaces.
+ * This is the SINGLE SOURCE OF TRUTH for config structure.
+ * - Zod schemas validate config/defaults.json
+ * - Types are inferred from schemas (no manual duplication)
+ * - Resolved types represent runtime config after processing
+ * - Defaults provide fallbacks for optional sections
  */
 
 import { z } from 'zod';
 import {
   SUPPORTED_PROVIDER_IDS,
-  OPENAI_COMPAT_PROVIDERS as CENTRAL_OPENAI_COMPAT_PROVIDERS,
-  isSupportedProvider as centralIsSupportedProvider,
-  isOpenAICompatProvider as centralIsOpenAICompatProvider,
-  getCanonicalProvider as centralGetCanonicalProvider,
-  type LLMProvider as CentralLLMProvider,
   type SupportedProvider as CentralSupportedProvider,
+  type StructuredOutputSchema,
 } from 'types';
 
 // ============================================
-// ENUMS & PRIMITIVES
+// ZOD SCHEMAS - Config File Validation
 // ============================================
 
-/**
- * Canonical LLM providers (what the adapter routes to).
- * Derived from central types.
- */
+/** Canonical LLM providers (what the adapter routes to) */
 export const LLMProviderSchema = z.enum(['anthropic', 'openai', 'openai-compat']);
 
-/**
- * All supported provider names (config input).
- * Uses central provider registry for validation.
- */
+/** All supported provider names (config input) */
 export const SupportedProviderSchema = z.enum(
   SUPPORTED_PROVIDER_IDS as [CentralSupportedProvider, ...CentralSupportedProvider[]]
 );
 
-/**
- * Reasoning effort levels across all providers.
- */
+/** Reasoning effort levels */
 export const ReasoningEffortSchema = z.enum([
-  'none',
-  'standard',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
+  'none', 'standard', 'minimal', 'low', 'medium', 'high', 'xhigh',
 ]);
 
-/**
- * Role-based model selection.
- */
+/** Role-based model selection */
 export const ModelRoleSchema = z.enum(['fast', 'standard', 'powerful', 'reasoning']);
 
-// ============================================
-// FALLBACK CONFIG
-// ============================================
-
-/**
- * Fallback LLM configuration (raw from JSON).
- */
+/** Fallback LLM configuration */
 export const AgentFallbackConfigSchema = z.object({
   provider: z.string().optional(),
   model: z.string(),
   api_base: z.string().optional(),
 });
 
-// ============================================
-// LLM CONFIG (RAW)
-// ============================================
-
-/**
- * Reasoning config can be a string or object with effort field.
- */
+/** Reasoning config - string or object */
 export const AgentReasoningConfigSchema = z.union([
   ReasoningEffortSchema,
   z.object({ effort: ReasoningEffortSchema }),
 ]);
 
-/**
- * LLM configuration for an agent (raw from JSON).
- */
+/** LLM configuration for an agent */
 export const AgentLLMConfigSchema = z.object({
   role: ModelRoleSchema.optional(),
   provider: z.string().optional(),
@@ -98,64 +67,35 @@ export const AgentLLMConfigSchema = z.object({
   }
 });
 
-// ============================================
-// BUDGET CONFIG
-// ============================================
-
-/**
- * Budget constraints for an agent.
- */
+/** Budget constraints for an agent */
 export const AgentBudgetConfigSchema = z.object({
   max_iterations: z.number().positive().int(),
   max_tool_calls: z.number().nonnegative().int(),
   max_duration_ms: z.number().positive(),
 });
 
-// ============================================
-// OUTPUT SCHEMA
-// ============================================
-
-/**
- * Inline structured output schema definition.
- */
+/** Inline structured output schema */
 export const StructuredOutputSchemaSchema = z.object({
   name: z.string(),
   schema: z.record(z.string(), z.unknown()),
   strict: z.boolean().optional(),
 });
 
-// ============================================
-// AGENT CONFIG ENTRY
-// ============================================
-
-/**
- * Full agent configuration entry (raw from JSON).
- */
+/** Full agent configuration entry */
 export const AgentConfigEntrySchema = z.object({
   llm: AgentLLMConfigSchema,
   budget: AgentBudgetConfigSchema,
   tools: z.array(z.string()).optional(),
-  output_schema: z.union([
-    z.string(),
-    StructuredOutputSchemaSchema,
-  ]).optional(),
+  output_schema: z.union([z.string(), StructuredOutputSchemaSchema]).optional(),
 });
 
-// ============================================
-// CONFIG SECTIONS
-// ============================================
-
-/**
- * Tools configuration section.
- */
+/** Tools configuration */
 export const ToolsConfigSchema = z.object({
   bash_timeout_ms: z.number().positive(),
   max_output_length: z.number().positive(),
 });
 
-/**
- * GraphD configuration section.
- */
+/** GraphD configuration */
 export const GraphDConfigSchema = z.object({
   enabled: z.boolean(),
   host: z.string(),
@@ -163,17 +103,14 @@ export const GraphDConfigSchema = z.object({
   db_path: z.string(),
 });
 
-/**
- * Context configuration section.
- */
+/** Context configuration */
 export const ContextConfigSchema = z.object({
   max_tokens: z.number().positive().int(),
   session_ttl_ms: z.number().int().nonnegative().optional(),
+  pause_timeout_ms: z.number().int().nonnegative().optional(),
 });
 
-/**
- * Skill definition.
- */
+/** Skill definition */
 export const SkillConfigEntrySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -184,9 +121,7 @@ export const SkillConfigEntrySchema = z.object({
   prompt: z.string().optional(),
 });
 
-/**
- * Hook definition.
- */
+/** Hook definition */
 export const HookConfigEntrySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -197,49 +132,33 @@ export const HookConfigEntrySchema = z.object({
   command: z.string().optional(),
 });
 
-/**
- * Skills configuration section.
- */
+/** Skills configuration */
 export const SkillsConfigSchema = z.object({
   enabled: z.boolean(),
   directory: z.string().optional(),
   definitions: z.array(SkillConfigEntrySchema).optional(),
 });
 
-/**
- * Hooks configuration section.
- */
+/** Hooks configuration */
 export const HooksConfigSchema = z.object({
   enabled: z.boolean(),
   directory: z.string().optional(),
   definitions: z.array(HookConfigEntrySchema).optional(),
 });
 
-/**
- * Auth configuration section.
- */
+/** Auth configuration */
 export const AuthConfigSchema = z.object({
   enabled: z.boolean(),
   host: z.string(),
   port: z.number().int().positive(),
   session_expiry_days: z.number().nullable().optional(),
+  google_client_id: z.string().optional(),
+  google_redirect_uri: z.string().optional(),
+  master_key_path: z.string().optional(),
+  graphd_db_path: z.string().optional(),
 });
 
-/**
- * Provider API keys configuration.
- */
-export const ProvidersConfigSchema = z.record(z.string(), z.string().optional());
-
-/**
- * Provider priority order for role-based resolution.
- */
-export const ProviderPrioritySchema = z.array(z.string());
-
-/**
- * Model entry for the models list.
- * Provider is the actual provider name (anthropic, openai, cerebras, etc.)
- * not the canonical adapter (openai-compat).
- */
+/** Model entry */
 export const ModelConfigEntrySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -249,26 +168,14 @@ export const ModelConfigEntrySchema = z.object({
   supports_reasoning: z.boolean().optional(),
 });
 
-/**
- * Models configuration section.
- */
+/** Models configuration */
 export const ModelsConfigSchema = z.object({
-  /** List of available models */
   available: z.array(ModelConfigEntrySchema).optional(),
-  /** Default model ID to use */
   default: z.string().optional(),
 });
 
-// ============================================
-// ROOT CONFIG (RAW FROM FILE)
-// ============================================
-
-/**
- * Root structure of harness_config.json.
- */
+/** Root config file structure */
 export const HarnessConfigFileSchema = z.object({
-  providers: ProvidersConfigSchema.optional(),
-  provider_priority: ProviderPrioritySchema.optional(),
   models: ModelsConfigSchema.optional(),
   agents: z.record(z.string(), AgentConfigEntrySchema),
   tools: ToolsConfigSchema.optional(),
@@ -280,7 +187,7 @@ export const HarnessConfigFileSchema = z.object({
 });
 
 // ============================================
-// INFERRED TYPES (RAW)
+// INFERRED TYPES - From Zod Schemas
 // ============================================
 
 export type LLMProvider = z.infer<typeof LLMProviderSchema>;
@@ -300,27 +207,148 @@ export type HookConfigEntry = z.infer<typeof HookConfigEntrySchema>;
 export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
 export type HooksConfigSection = z.infer<typeof HooksConfigSchema>;
 export type AuthConfigSection = z.infer<typeof AuthConfigSchema>;
-export type ProvidersConfigSection = z.infer<typeof ProvidersConfigSchema>;
-export type ProviderPriority = z.infer<typeof ProviderPrioritySchema>;
 export type ModelConfigEntry = z.infer<typeof ModelConfigEntrySchema>;
 export type ModelsConfigSection = z.infer<typeof ModelsConfigSchema>;
 export type HarnessConfigFile = z.infer<typeof HarnessConfigFileSchema>;
 
+/** Agent type is just a string */
+export type AgentType = string;
+
 // ============================================
-// VALIDATION HELPERS
+// RESOLVED TYPES - Runtime Config After Processing
 // ============================================
 
-/**
- * Re-export central provider helpers for backwards compatibility.
- */
-export const OPENAI_COMPAT_PROVIDERS = CENTRAL_OPENAI_COMPAT_PROVIDERS;
-export const isSupportedProvider = centralIsSupportedProvider;
-export const isOpenAICompatProvider = centralIsOpenAICompatProvider;
-export const getCanonicalProvider = centralGetCanonicalProvider;
+/** Resolved fallback config (no API key - resolved at request time) */
+export interface ResolvedFallbackConfig {
+  provider: LLMProvider;
+  model: string;
+  baseUrl?: string;
+}
 
-/**
- * Normalize reasoning effort, validating against provider constraints.
- */
+/** Resolved LLM config (no API key - resolved at request time) */
+export interface ResolvedLLMConfig {
+  provider: LLMProvider;
+  displayProvider: string; // Original provider name for error messages
+  model: string;
+  maxTokens: number;
+  temperature?: number;
+  baseUrl?: string;
+  reasoning?: { effort: ReasoningEffort };
+  fallback?: ResolvedFallbackConfig;
+}
+
+/** Resolved agent config ready for runtime */
+export interface ResolvedAgentConfig {
+  llm: ResolvedLLMConfig;
+  budget: {
+    maxIterations: number;
+    maxToolCalls: number;
+    maxDurationMs: number;
+  };
+  tools: string[];
+  outputSchema?: StructuredOutputSchema;
+}
+
+/** Full resolved harness config - what the harness uses at runtime */
+export interface FullHarnessConfig {
+  agents: Record<string, ResolvedAgentConfig>;
+  defaultAgent: string;
+  tools: {
+    workingDir: string;
+    repoRoot: string;
+    bashTimeoutMs: number;
+    maxOutputLength: number;
+  };
+  graphd: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    dbPath: string;
+  };
+  context: {
+    maxTokens: number;
+    sessionTtlMs: number;
+    pauseTimeoutMs: number;
+  };
+  skills: {
+    enabled: boolean;
+    directory?: string;
+    definitions: SkillConfigEntry[];
+  };
+  hooks: {
+    enabled: boolean;
+    directory?: string;
+    definitions: HookConfigEntry[];
+  };
+  auth: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    sessionExpiryDays: number | null;
+    google_client_id?: string;
+    google_redirect_uri?: string;
+    master_key_path?: string;
+    graphd_db_path?: string;
+  };
+  behavioralRules?: string;
+  models: {
+    available: ModelConfigEntry[];
+    default?: string;
+  };
+  configPath?: string;
+}
+
+// ============================================
+// DEFAULTS - Fallbacks for optional config sections
+// ============================================
+
+export const DEFAULT_TOOLS_CONFIG: ToolsConfigSection = {
+  bash_timeout_ms: 30000,
+  max_output_length: 10000,
+};
+
+export const DEFAULT_GRAPHD_CONFIG: GraphDConfigSection = {
+  enabled: false,
+  host: 'localhost',
+  port: 9444,
+  db_path: '~/.graphd/graphd.db',
+};
+
+export const DEFAULT_CONTEXT_CONFIG: ContextConfigSection = {
+  max_tokens: 200_000,
+  session_ttl_ms: 1_800_000,
+  pause_timeout_ms: 1_200_000, // 20 minutes
+};
+
+export const DEFAULT_SKILLS_CONFIG: SkillsConfigSection = {
+  enabled: true,
+  directory: 'config/skills',
+  definitions: [],
+};
+
+export const DEFAULT_HOOKS_CONFIG: HooksConfigSection = {
+  enabled: true,
+  directory: 'config/hooks',
+  definitions: [],
+};
+
+export const DEFAULT_AUTH_CONFIG: AuthConfigSection = {
+  enabled: true,
+  host: '127.0.0.1',
+  port: 9556,
+  session_expiry_days: null,
+};
+
+export const DEFAULT_MODELS_CONFIG: ModelsConfigSection = {
+  available: [],
+  default: undefined,
+};
+
+// ============================================
+// HELPERS
+// ============================================
+
+/** Normalize reasoning effort, validating against provider constraints */
 export function normalizeReasoningEffort(
   provider: LLMProvider,
   effort?: string
@@ -342,9 +370,7 @@ export function normalizeReasoningEffort(
   return result.data;
 }
 
-/**
- * Extract reasoning effort from config (handles string or object).
- */
+/** Extract reasoning effort from config (handles string or object) */
 export function extractReasoningEffort(
   reasoning?: AgentReasoningConfig
 ): string | undefined {

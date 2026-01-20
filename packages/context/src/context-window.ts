@@ -336,8 +336,9 @@ ${goalSection}${workspaceInfo}
 ${behavioralRules}
 RESPONSE ACTIONS:
 - action: "done" + goalStateReached: true → objective complete
-- action: "need_user_input" + userPrompt → blocked, need user decision
 - action: "continue" → progress made, more work needed
+- action: "handoff" → transition to execution mode (planning agents only)
+- Use PromptUser tool when you need user input
 
 Do not repeat identical tool calls.`;
 }
@@ -495,12 +496,13 @@ export class ContextWindow {
   /**
    * Update metrics after an LLM response.
    */
-  updateMetrics(promptTokens: number, completionTokens: number): void {
+  updateMetrics(promptTokens: number, completionTokens: number, cachedTokens?: number): void {
     this._metrics = updateContextMetrics(
       this._metrics,
       promptTokens,
       completionTokens,
-      this._items.filter(i => i.type === 'message').length
+      this._items.filter(i => i.type === 'message').length,
+      cachedTokens
     );
     this._version++;
   }

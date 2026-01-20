@@ -24,11 +24,19 @@ export {
 
 export {
   registerHook,
-  getHandlers,
-  HOOK_REGISTRY,
+  clearHooks,
+  getHooks,
+  executeHooks,
+  loadHooksFromConfig,
+  getHandlers, // deprecated
+  type HookEventType,
+  type HookCallback,
+  type ShellHook,
+  type HookEntry,
+  type HooksConfig,
   type StopHookHandler,
   type StopHookContext,
-} from './hooks/index.js';
+} from './hooks.js';
 
 // Ralph Loop - iterative self-referential development
 export {

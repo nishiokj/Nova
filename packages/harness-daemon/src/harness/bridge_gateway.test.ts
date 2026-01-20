@@ -7,7 +7,7 @@ import { BusServer, BusClient, BRIDGE_COMMAND_CHANNEL, runChannel } from 'comms-
 import { BridgeGateway } from './bridge_gateway.js';
 import { createReadyEvent } from './event_translator.js';
 import type { AgentRunHandle, BridgeEvent } from './types.js';
-import type { FullHarnessConfig } from './config_types.js';
+import type { FullHarnessConfig } from './config.js';
 
 function waitFor(predicate: () => boolean, timeoutMs = 300): Promise<void> {
   return new Promise((resolve, reject) => {

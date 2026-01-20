@@ -18,7 +18,7 @@
  * ```
  */
 
-import type { StopHookHandler } from './hooks/stop-hook.js';
+import type { StopHookHandler, StopHookContext } from './hooks.js';
 import type { StopHookResult } from 'agent';
 
 export interface RalphLoopConfig {
@@ -312,7 +312,7 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
   let lastIterationTime = Date.now();
   let rapidFireCount = 0;
 
-  return (context): StopHookResult => {
+  return (context: StopHookContext): StopHookResult => {
     state.lastResponse = context.response;
 
     // For non-continuable terminations (errors, refusals), end the loop

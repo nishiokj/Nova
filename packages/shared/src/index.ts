@@ -9,14 +9,13 @@ export {
 } from './logger.js';
 export {
   coerceStructuredOutput,
+  extractPreJsonText,
   parseAgentOutput,
   parseAndValidateOutput,
   isValidOutput,
   getOutputSchema,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
-  type UserPromptOption,
-  type UserPrompt,
   type AgentAction,
   type AgentActionOutput,
   type GoalDrivenOutput,
@@ -35,3 +34,6 @@ export {
 // Re-export Zod for use across packages
 export { z } from 'zod';
 export type { ZodType, ZodError, ZodSchema, ZodIssue } from 'zod';
+
+// Termination reason types
+export type { AgentTerminationReason, OrchestratorTerminationReason } from './termination.js';

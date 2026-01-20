@@ -34,14 +34,12 @@ export type {
 // Re-export EventBus for external subscribers
 export { EventBus, type EventBusProtocol } from 'comms-bus';
 
-// Config loading
+// Config loading and types
 export {
   loadConfig,
   loadConfigFile,
   getAgentConfig,
   createConfigFromFile,
-  createConfigFromEnv,
-  resolveApiKey,
 } from './config_loader.js';
 export type {
   LLMProvider,
@@ -61,15 +59,14 @@ export type {
   HooksConfigSection,
   SkillConfigEntry,
   HookConfigEntry,
-} from './config_types.js';
+} from './config.js';
 export {
   DEFAULT_TOOLS_CONFIG,
   DEFAULT_GRAPHD_CONFIG,
   DEFAULT_CONTEXT_CONFIG,
-  DEFAULT_ENABLED_TOOLS,
   DEFAULT_SKILLS_CONFIG,
   DEFAULT_HOOKS_CONFIG,
-} from './config_types.js';
+} from './config.js';
 
 // Skills and hooks loading
 export {

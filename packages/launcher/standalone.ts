@@ -12,7 +12,18 @@ import { parseArgs } from 'util';
 import { mkdirSync, existsSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
-import { DEFAULT_CONFIG } from './default-config.js';
+
+/**
+ * Minimal user config template.
+ * API keys are stored in GraphD (use `rex providers set <provider> <key>`).
+ * All other settings come from config/defaults.json
+ */
+const MINIMAL_USER_CONFIG = {
+  $comment: "User preferences. API keys are stored securely in GraphD - use 'rex providers set <provider> <key>' to configure them.",
+  models: {
+    default: ""
+  }
+};
 
 const { values, positionals } = parseArgs({
   args: process.argv.slice(2),
@@ -66,9 +77,9 @@ function ensureConfig(): string {
   }
 
   if (!existsSync(configPath)) {
-    writeFileSync(configPath, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf-8');
-    console.log(`[rex] Created default config: ${configPath}`);
-    console.log('[rex] Edit this file to configure your LLM providers and API keys');
+    writeFileSync(configPath, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n', 'utf-8');
+    console.log(`[rex] Created user config: ${configPath}`);
+    console.log('[rex] To add API keys, use: rex providers set <provider> <key>');
   }
 
   return configPath;

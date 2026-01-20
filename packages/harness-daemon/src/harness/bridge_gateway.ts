@@ -6,7 +6,7 @@ import path from 'path';
 import { type BusServer, BRIDGE_COMMAND_CHANNEL, runChannel, sessionChannel } from 'comms-bus';
 import type { AgentRunHandle, BridgeEvent } from './types.js';
 import { createErrorEvent } from './event_translator.js';
-import type { FullHarnessConfig } from './config_types.js';
+import type { FullHarnessConfig } from './config.js';
 import {
   loadHookDefinitions,
   loadSkillDefinitions,
@@ -484,7 +484,14 @@ export class BridgeGateway {
       return;
     }
 
-    const handle = this.harness.resume(requestId, answer, sessionKey, workingDir);
+    // Convert answer to string - run() will detect paused state and treat it as a resume
+    const answerText = typeof answer === 'string' ? answer : JSON.stringify(answer);
+    const handle = this.harness.run({
+      requestId,
+      inputText: answerText,
+      sessionKey,
+      workingDir,
+    });
     this.streamRunEvents(requestId, handle);
   }
 
@@ -1556,16 +1563,10 @@ export class BridgeGateway {
 
   private streamRunEvents(requestId: string, handle: AgentRunHandle): void {
     const channel = runChannel(requestId);
-    console.error(`[GATEWAY DEBUG] streamRunEvents started: requestId=${requestId}, channel=${channel}`);
 
     void (async () => {
       try {
         for await (const event of handle.events) {
-          // Debug: trace events being published to bus
-          if (event.type === 'stream') {
-            const streamData = event.data as Record<string, unknown>;
-            console.error(`[GATEWAY DEBUG] Publishing stream event: channel=${channel}, request_id=${streamData?.request_id}, chunk_len=${String(streamData?.chunk ?? '').length}`);
-          }
           this.bus.publish(channel, event);
         }
       } catch (error) {
