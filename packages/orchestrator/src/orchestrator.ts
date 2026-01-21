@@ -26,7 +26,7 @@ import { createWorkItem, type WorkItem } from 'work';
 import { createEvent } from 'types';
 import type { ArtifactKind, ArtifactDiscoveredData, AgentEvent, LLMRequestConfig } from 'types';
 import type { EventBusProtocol } from 'comms-bus';
-import { buildLLMRequestConfig, type OrchestratorTerminationReason } from 'shared';
+import { buildLLMRequestConfig, type OrchestratorTerminationReason, profiler } from 'shared';
 import { executeHooks, type StopHookHandler } from './hooks.js';
 import { BoundsChecker } from './bounds-checker.js';
 
@@ -385,6 +385,7 @@ export class Orchestrator {
 
     this.log('info', 'Starting orchestration', { goal, agentType });
     this.emit(createEvent('orchestration_started', { goal, agentType, requestId: this.requestId }));
+    profiler.instant('orchestration:start', 'orchestrator', 'p', { goal: goal.slice(0, 100), agentType });
 
     // Track in-progress work items (for multi-iteration execution)
     const inProgress: Map<string, { item: WorkItem; agent: Agent | null }> = new Map();
@@ -443,6 +444,11 @@ export class Orchestrator {
       }
 
       iteration++;
+      profiler.instant(`orch.iteration:${iteration}`, 'orchestrator', 'p', {
+        workItems: Array.from(inProgress.keys()),
+        totalToolCalls,
+        totalLlmCalls,
+      });
       const now = Date.now();
       const elapsed = now - startTime;
 
@@ -452,6 +458,7 @@ export class Orchestrator {
         compactedRecently = false;
       }
       if (!compactedRecently && percentUsed >= this.config.compactTriggerPercent) {
+        const compactAsyncId = profiler.asyncBegin('orch.compact', 'orchestrator');
         const llmConfig = this.resolveCompactionLlmConfig(agentType);
         let compactResult;
         if (llmConfig) {
@@ -480,6 +487,10 @@ export class Orchestrator {
           });
         }
         compactedRecently = true;
+        profiler.asyncEnd('orch.compact', compactAsyncId, 'orchestrator', {
+          itemsRemoved: compactResult.itemsRemoved,
+          bytesRecovered: compactResult.bytesRecovered,
+        });
         this.log('info', 'Auto-compacted context', {
           percentUsed,
           itemsRemoved: compactResult.itemsRemoved,
@@ -557,7 +568,9 @@ export class Orchestrator {
           if (!agent) {
             throw new Error(`Missing agent for work item: ${workId}`);
           }
+          const agentAsyncId = profiler.asyncBegin(`agent:${item.agent}`, 'agent');
           const result = await agent.run({ globalContext: context, workItem: item, cwd });
+          profiler.asyncEnd(`agent:${item.agent}`, agentAsyncId, 'agent', { llmCalls: result.metrics.llmCallsMade, toolCalls: result.metrics.toolCallsMade });
           return { workId, item, result };
         } catch (err) {
           // Construct synthetic failure result to preserve all results on Promise.all
@@ -725,6 +738,56 @@ export class Orchestrator {
               success: false,
               response: result.response || 'Execution stopped by user.',
               terminationReason: 'user_stopped',
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // CONTINUABLE ERRORS: no_action, invalid_action - pass to stop hook with actual reason
+          // These are recoverable formatting issues where Ralph Loop can retry
+          if (result.terminationReason === 'no_action' || result.terminationReason === 'invalid_action') {
+            this.log('warning', `Agent ${result.terminationReason}`, { workId, error: result.error });
+            context.addAgentResultContext(result);
+
+            // Check stop hook - Ralph Loop can continue on these
+            const stopContext = {
+              workId,
+              response: result.response,
+              terminationReason: result.terminationReason,
+              iteration,
+              agentType,
+              sessionKey: context.sessionKey,
+            };
+
+            if (this.config.stopHook) {
+              const stopResult = await this.config.stopHook(stopContext);
+              if (stopResult.decision === 'block' && stopResult.reason) {
+                // Re-inject prompt and continue the loop
+                this.log('info', 'Stop hook blocked termination on no_action, re-injecting prompt', {
+                  iteration,
+                  promptPreview: stopResult.reason.slice(0, 100),
+                });
+
+                if (stopResult.systemMessage) {
+                  context.addMessage('system', stopResult.systemMessage);
+                }
+
+                const newItem = this.createWorkItem(stopResult.reason, agentType);
+                this.enqueue(newItem);
+                this.completedWork.delete(this.initialWorkId);
+                this.initialWorkId = newItem.workId;
+                inProgress.delete(workId);
+                continue;
+              }
+            }
+
+            // No stop hook or hook allowed termination
+            emitGoalNotAchieved(result.error || result.terminationReason, 1);
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response,
+              error: result.error,
+              terminationReason: result.terminationReason,
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
             continue;

@@ -26,7 +26,9 @@ export type SupportedProvider =
   | 'cerebras'
   | 'groq'
   | 'gemini'
-  | 'z.ai-coder';
+  | 'z.ai-coder'
+  | 'lmstudio'
+  | 'replicate';
 
 /**
  * Provider definition containing all metadata about a provider.
@@ -45,7 +47,9 @@ export interface ProviderDefinition {
   /** Structured output response format for openai-compat providers */
   responseFormat?: ProviderResponseFormat;
   /** Environment variable name for API key */
-  envVar: string;
+  envVar?: string;
+  /** Whether this provider requires authentication (defaults to true) */
+  authRequired?: boolean;
   /** Endpoint for testing API key validity */
   testEndpoint?: string;
   /** HTTP method for test endpoint (defaults to GET) */
@@ -80,6 +84,11 @@ export interface ProviderModelDefinition {
   description?: string;
   max_tokens?: number;
   /**
+   * Context window size in tokens.
+   * This is the maximum number of tokens the model can process in a single request.
+   */
+  context_window?: number;
+  /**
    * Available reasoning levels for this model.
    * - undefined: model does not support reasoning
    * - ['on', 'off']: simple on/off reasoning (e.g., Claude extended thinking, GLM thinking)
@@ -95,7 +104,7 @@ export interface ProviderModelEntry extends ProviderModelDefinition {
   provider: SupportedProvider;
 }
 
-export type ProviderResponseFormat = 'json_schema' | 'json_object';
+export type ProviderResponseFormat = 'json_schema' | 'json_object' | 'none';
 
 /**
  * Provider defaults for each model role.
@@ -152,8 +161,8 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     canonicalProvider: 'anthropic',
     baseUrl: 'https://api.anthropic.com',
     models: [
-      { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', reasoning: ['on', 'off'] },
-      { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', reasoning: ['on', 'off'] },
+      { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', context_window: 200_000, reasoning: ['on', 'off'] },
+      { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', context_window: 200_000, reasoning: ['on', 'off'] },
     ],
     envVar: 'ANTHROPIC_API_KEY',
     testEndpoint: 'https://api.anthropic.com/v1/messages',
@@ -172,10 +181,10 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     canonicalProvider: 'openai',
     baseUrl: 'https://api.openai.com',
     models: [
-      { id: 'gpt-5.2', name: 'gpt-5.2', reasoning: ['low', 'medium', 'high'] },
-      { id: 'gpt-5-mini', name: 'gpt-5-mini', reasoning: ['low', 'medium', 'high'] },
-      { id: 'gpt-5-nano', name: 'gpt-5-nano' },
-      { id: 'gpt-5.2-codex', name: 'gpt-5.2-codex', reasoning: ['low', 'medium', 'high'] },
+      { id: 'gpt-5.2', name: 'gpt-5.2', context_window: 256_000, reasoning: ['low', 'medium', 'high'] },
+      { id: 'gpt-5-mini', name: 'gpt-5-mini', context_window: 128_000, reasoning: ['low', 'medium', 'high'] },
+      { id: 'gpt-5-nano', name: 'gpt-5-nano', context_window: 128_000 },
+      { id: 'gpt-5.2-codex', name: 'gpt-5.2-codex', context_window: 256_000, reasoning: ['low', 'medium', 'high'] },
     ],
     envVar: 'OPENAI_API_KEY',
     testEndpoint: 'https://api.openai.com/v1/models',
@@ -195,7 +204,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     canonicalProvider: 'openai-compat',
     baseUrl: 'https://api.cerebras.ai/v1',
     models: [
-      { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', description: 'Fast inference on Cerebras' },
+      { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', context_window: 128_000, description: 'Fast inference on Cerebras' },
     ],
     envVar: 'CEREBRAS_API_KEY',
     testEndpoint: 'https://api.cerebras.ai/v1/models',
@@ -210,6 +219,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
       {
         id: 'llama-3.3-70b-versatile',
         name: 'Llama 3.3 70B',
+        context_window: 128_000,
         description: 'Ultra-fast inference on Groq',
       },
     ],
@@ -222,8 +232,8 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     displayName: 'Google Gemini',
     canonicalProvider: 'openai-compat',
     models: [
-      { id: 'gemini-3.0-flash', name: 'Gemini 3.0 Flash', description: 'Fast Gemini model' },
-      { id: 'gemini-3.0-pro', name: 'Gemini 3.0 Pro' },
+      { id: 'gemini-3.0-flash', name: 'Gemini 3.0 Flash', context_window: 1_000_000, description: 'Fast Gemini model' },
+      { id: 'gemini-3.0-pro', name: 'Gemini 3.0 Pro', context_window: 2_000_000 },
     ],
     envVar: 'GOOGLE_API_KEY',
     // Gemini uses query param auth, not header
@@ -240,6 +250,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
       {
         id: 'glm-4.7',
         name: 'GLM-4.7',
+        context_window: 128_000,
         description: 'Z.AI coding model with interleaved thinking',
         reasoning: ['on', 'off'],
       },
@@ -247,6 +258,32 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     envVar: 'ZAI_CODER_API_KEY',
     testEndpoint: 'https://api.z.ai/api/coding/paas/v4/models',
     dashboardUrl: 'https://open.bigmodel.cn/finance-center/bill/recharge-details',
+  },
+  lmstudio: {
+    id: 'lmstudio',
+    displayName: 'LM Studio',
+    canonicalProvider: 'openai-compat',
+    baseUrl: 'http://localhost:1234/v1',
+    responseFormat: 'none',
+    models: [
+      {
+        id: 'zai-org/glm-4.7-flash',
+        name: 'GLM-4.7 Flash',
+        context_window: 32000,
+        reasoning: ['on', 'off'],
+      },
+    ],
+    authRequired: false,
+    testEndpoint: 'http://localhost:1234/v1/models',
+  },
+  replicate: {
+    id: 'replicate',
+    displayName: 'Replicate',
+    canonicalProvider: 'openai-compat',
+    baseUrl: 'https://api.replicate.com/v1',
+    envVar: 'REPLICATE_API_TOKEN',
+    testEndpoint: 'https://api.replicate.com/v1/models',
+    dashboardUrl: 'https://replicate.com/account/api-tokens',
   },
 };
 
@@ -311,7 +348,7 @@ export function getProviderBaseUrl(provider: string): string | undefined {
  */
 export function getProviderEnvVar(provider: string): string {
   if (isSupportedProvider(provider)) {
-    return PROVIDER_REGISTRY[provider].envVar;
+    return PROVIDER_REGISTRY[provider].envVar ?? `${provider.toUpperCase()}_API_KEY`;
   }
   return `${provider.toUpperCase()}_API_KEY`;
 }
@@ -357,6 +394,17 @@ export function getProviderResponseFormat(provider: string): ProviderResponseFor
     return PROVIDER_REGISTRY[provider].responseFormat ?? 'json_schema';
   }
   return 'json_schema';
+}
+
+/**
+ * Check if a provider requires authentication.
+ * Defaults to true for unknown providers.
+ */
+export function providerRequiresAuth(provider: string): boolean {
+  if (isSupportedProvider(provider)) {
+    return PROVIDER_REGISTRY[provider].authRequired !== false;
+  }
+  return true;
 }
 
 /**
@@ -458,4 +506,16 @@ export function getModelReasoningOptions(modelId: string): ReasoningOptions | un
 export function modelSupportsReasoning(modelId: string): boolean {
   const options = getModelReasoningOptions(modelId);
   return options !== undefined && options.length > 0;
+}
+
+/** Default context window size when model doesn't specify one */
+export const DEFAULT_CONTEXT_WINDOW = 200_000;
+
+/**
+ * Get the context window size for a model.
+ * Falls back to DEFAULT_CONTEXT_WINDOW if not specified.
+ */
+export function getModelContextWindow(modelId: string): number {
+  const model = getModelDefinition(modelId);
+  return model?.context_window ?? DEFAULT_CONTEXT_WINDOW;
 }

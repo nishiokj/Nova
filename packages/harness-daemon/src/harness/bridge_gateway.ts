@@ -4,6 +4,7 @@
 
 import path from 'path';
 import { type BusServer, BRIDGE_COMMAND_CHANNEL, runChannel, sessionChannel } from 'comms-bus';
+import { profiler } from 'shared';
 import type { AgentRunHandle, BridgeEvent } from './types.js';
 import { createErrorEvent } from './event_translator.js';
 import type { FullHarnessConfig } from './config.js';
@@ -28,6 +29,7 @@ import { LocalProviderManager } from './local_providers.js';
 import { isOpenAICompatProvider } from 'types';
 import { getAllModels } from 'types';
 import { createRalphStopHook, type RalphCompletionReason, type RalphLoopState } from 'orchestrator';
+import type { PermissionChecker } from './permissions.js';
 
 interface BridgeCommand {
   type: string;
@@ -59,6 +61,7 @@ interface HarnessLike {
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
+  getPermissionChecker?(): PermissionChecker;
 }
 
 interface RalphLoopInfo {
@@ -136,6 +139,7 @@ export class BridgeGateway {
     const command = payload as BridgeCommand;
     const state = this.getOrCreateConnectionState(connectionId);
 
+    profiler.begin(`cmd:${command.type}`, 'bridge');
     try {
       switch (command.type) {
         case 'init':
@@ -261,6 +265,9 @@ export class BridgeGateway {
         case 'ralph_loop_cancel':
           this.handleRalphLoopCancel(connectionId, state);
           return;
+        case 'permission_response':
+          this.handlePermissionResponse(connectionId, command.data);
+          return;
         case 'shutdown':
           this.sendError(connectionId, 'Shutdown is not supported via bridge');
           return;
@@ -270,6 +277,8 @@ export class BridgeGateway {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.sendEvent(connectionId, createErrorEvent(message, false));
+    } finally {
+      profiler.end(`cmd:${command.type}`, 'bridge');
     }
   }
 
@@ -393,9 +402,11 @@ export class BridgeGateway {
     data: Record<string, unknown> | undefined,
     state: ConnectionState
   ): void {
+    profiler.begin('handleSendText', 'handler');
     const sessionKey = state.sessionKey;
     if (!sessionKey) {
       this.sendError(connectionId, 'Session not initialized. Call init first.');
+      profiler.end('handleSendText', 'handler');
       return;
     }
     // Check 'standard' agent type selection - this is the main/default that must be set
@@ -443,6 +454,7 @@ export class BridgeGateway {
 
     state.activeRequestId = clientRequestId;
 
+    profiler.instant('harness.run:start', 'harness', 'p', { requestId: clientRequestId, tier });
     const handle = this.harness.run({
       requestId: clientRequestId,
       inputText: text,
@@ -453,6 +465,7 @@ export class BridgeGateway {
     });
 
     this.streamRunEvents(clientRequestId, handle);
+    profiler.end('handleSendText', 'handler');
   }
 
   private handleUserPromptResponse(
@@ -1560,13 +1573,55 @@ export class BridgeGateway {
     }, sessionKey ? sessionChannel(sessionKey) : 'direct');
   }
 
+  // =========================================================================
+  // Permission Response Handler
+  // =========================================================================
+
+  private handlePermissionResponse(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const requestId = typeof data?.request_id === 'string' ? data.request_id : '';
+    const decision = typeof data?.decision === 'string' ? data.decision : '';
+    const pattern = typeof data?.pattern === 'string' ? data.pattern : undefined;
+
+    if (!requestId) {
+      this.sendError(connectionId, 'Missing request_id in permission_response');
+      return;
+    }
+
+    if (!decision || !['allow', 'always_allow', 'deny'].includes(decision)) {
+      this.sendError(connectionId, 'Invalid decision in permission_response');
+      return;
+    }
+
+    const checker = this.harness.getPermissionChecker?.();
+    if (!checker) {
+      this.sendError(connectionId, 'Permission checker not available');
+      return;
+    }
+
+    // Handle the response - this resolves the pending promise in harness
+    checker.handleResponse({
+      requestId,
+      decision: decision as 'allow' | 'always_allow' | 'deny',
+      pattern,
+    });
+  }
+
   private streamRunEvents(requestId: string, handle: AgentRunHandle): void {
     const channel = runChannel(requestId);
+    const asyncId = profiler.asyncBegin(`stream:${requestId}`, 'stream');
 
     void (async () => {
+      let eventCount = 0;
       try {
         for await (const event of handle.events) {
+          eventCount++;
+          const eventType = (event as BridgeEvent).type ?? 'unknown';
+          profiler.begin(`stream.publish:${eventType}`, 'stream');
           this.bus.publish(channel, event);
+          profiler.end(`stream.publish:${eventType}`, 'stream');
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1577,6 +1632,7 @@ export class BridgeGateway {
         } catch {
           // Errors are already emitted via events.
         }
+        profiler.asyncEnd(`stream:${requestId}`, asyncId, 'stream', { eventCount });
       }
     })();
   }
@@ -1590,8 +1646,10 @@ export class BridgeGateway {
   }
 
   private sendEvent(connectionId: string, event: BridgeEvent, channel?: string): void {
+    profiler.begin(`gateway.sendEvent:${event.type}`, 'bridge');
     const targetChannel = channel ?? 'direct';
     this.bus.sendTo(connectionId, targetChannel, event);
+    profiler.end(`gateway.sendEvent:${event.type}`, 'bridge');
   }
 
   private sendError(connectionId: string, message: string): void {

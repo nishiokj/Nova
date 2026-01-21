@@ -165,6 +165,7 @@ export const ModelConfigEntrySchema = z.object({
   provider: z.string(),
   description: z.string().optional(),
   max_tokens: z.number().positive().optional(),
+  context_window: z.number().positive().optional(),
   supports_reasoning: z.boolean().optional(),
 });
 
@@ -296,6 +297,8 @@ export interface FullHarnessConfig {
     default?: string;
   };
   configPath?: string;
+  /** Dangerous mode - bypasses all permission checks. Set via --dangerous CLI flag. */
+  dangerousMode: boolean;
 }
 
 // ============================================

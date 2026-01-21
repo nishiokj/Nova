@@ -4,6 +4,7 @@
 
 import net from 'net';
 import { EventEmitter } from 'events';
+import { profiler } from 'shared';
 import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
 
 export interface BusClientOptions {
@@ -74,6 +75,7 @@ export class BusClient extends EventEmitter {
   }
 
   private handleData(chunk: string): void {
+    profiler.begin('bus.client.handleData', 'bus');
     this.buffer += chunk;
     let newlineIndex = this.buffer.indexOf('\n');
 
@@ -85,30 +87,38 @@ export class BusClient extends EventEmitter {
       }
       newlineIndex = this.buffer.indexOf('\n');
     }
+    profiler.end('bus.client.handleData', 'bus');
   }
 
   private handleLine(line: string): void {
+    profiler.begin('bus.client.parse', 'bus');
     let message: BusMessage;
     try {
       message = JSON.parse(line) as BusMessage;
     } catch (error) {
+      profiler.end('bus.client.parse', 'bus');
       this.emit('error', { message: 'invalid_json', detail: String(error) });
       return;
     }
+    profiler.end('bus.client.parse', 'bus');
 
     if (!message || typeof message !== 'object' || !('type' in message)) {
       this.emit('error', { message: 'invalid_message', detail: line });
       return;
     }
 
+    profiler.begin(`bus.client.emit:${message.type}`, 'bus');
     switch (message.type) {
       case 'event':
         this.emit('event', message.payload, message.channel);
+        profiler.end(`bus.client.emit:${message.type}`, 'bus');
         return;
       case 'error':
         this.emit('error', { message: message.message, detail: message.detail });
+        profiler.end(`bus.client.emit:${message.type}`, 'bus');
         return;
       default:
+        profiler.end(`bus.client.emit:${message.type}`, 'bus');
         this.emit('error', { message: 'unexpected_message', detail: message });
     }
   }
@@ -119,9 +129,15 @@ export class BusClient extends EventEmitter {
       return;
     }
 
+    profiler.begin('bus.client.serialize', 'bus');
     try {
-      this.socket.write(`${JSON.stringify(message)}\n`);
+      const serialized = JSON.stringify(message);
+      profiler.end('bus.client.serialize', 'bus');
+      profiler.begin('bus.client.write', 'bus');
+      this.socket.write(`${serialized}\n`);
+      profiler.end('bus.client.write', 'bus');
     } catch (error) {
+      profiler.end('bus.client.serialize', 'bus');
       this.emit('error', { message: 'bus_send_failed', detail: String(error) });
     }
   }

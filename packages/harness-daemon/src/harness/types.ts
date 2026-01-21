@@ -73,7 +73,8 @@ export type BridgeEventType =
   | 'user_prompt'
   | 'error'
   | 'provider_key_required'
-  | 'model_changed';
+  | 'model_changed'
+  | 'permission_request';
 
 /**
  * Bridge event structure matching TUI expectations.
@@ -204,4 +205,16 @@ export interface ErrorEventData {
   fatal?: boolean;
   /** Error code for programmatic handling */
   code?: string;
+}
+
+/**
+ * Permission request data for permission_request events.
+ */
+export interface PermissionRequestEventData {
+  request_id: string;
+  tool: 'Bash' | 'Write' | 'Edit';
+  target: string;
+  suggested_pattern: string;
+  working_directory: string;
+  description: string;
 }

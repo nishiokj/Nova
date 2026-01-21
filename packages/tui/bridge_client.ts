@@ -9,6 +9,7 @@ import {
   runChannel,
   sessionChannel,
 } from "comms-bus";
+import { profiler } from "shared";
 import type { BridgeCommand, BridgeCommandType, BridgeEvent, BridgeEventType, ReadyData, ResponseData } from "./types.js";
 
 // Valid bridge event types for runtime validation (Set for O(1) lookups)
@@ -23,6 +24,7 @@ const VALID_EVENT_TYPES = new Set<BridgeEventType>([
   'error',
   'provider_key_required',
   'model_changed',
+  'permission_request',
 ]);
 
 /**
@@ -125,6 +127,7 @@ export class BridgeClient extends EventEmitter {
   }
 
   send(command: BridgeCommand): boolean {
+    profiler.instant(`tui:send:${command.type}`, 'tui', 'p');
     if (this.connectionState !== 'connected') {
       this.emit("error", { message: "Not connected to bridge" });
       return false;
@@ -143,6 +146,15 @@ export class BridgeClient extends EventEmitter {
     }
 
     if (command.type === "user_prompt_response") {
+      const data = command.data ?? {};
+      const requestId = typeof data.request_id === "string" ? data.request_id : "";
+      if (requestId && !this.activeRuns.has(requestId)) {
+        this.activeRuns.add(requestId);
+        this.bus.subscribe(runChannel(requestId));
+      }
+    }
+
+    if (command.type === "permission_response") {
       const data = command.data ?? {};
       const requestId = typeof data.request_id === "string" ? data.request_id : "";
       if (requestId && !this.activeRuns.has(requestId)) {
@@ -403,11 +415,16 @@ export class BridgeClient extends EventEmitter {
   }
 
   private handleBusEvent(payload: unknown): void {
+    profiler.begin('bridge.client.validate', 'tui');
     const event = validateBridgeEvent(payload);
     if (!event) {
+      profiler.end('bridge.client.validate', 'tui');
       this.emit('error', { message: 'Malformed event from bridge' });
       return;
     }
+    profiler.end('bridge.client.validate', 'tui');
+
+    profiler.begin(`bridge.client.process:${event.type}`, 'tui');
     if (event.type === "ready") {
       const data = (event.data ?? {}) as ReadyData;
       if (data.session_key && data.session_key !== this.sessionKey) {
@@ -427,7 +444,9 @@ export class BridgeClient extends EventEmitter {
         this.bus.unsubscribe(runChannel(requestId));
       }
     }
+    profiler.end(`bridge.client.process:${event.type}`, 'tui');
 
+    profiler.instant(`bridge.client.emit:${event.type}`, 'tui', 'p');
     this.emit("event", event);
   }
 

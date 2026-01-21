@@ -23,6 +23,7 @@ export type BridgeCommandType =
   | "hooks_enable"
   | "hooks_disable"
   | "user_prompt_response"
+  | "permission_response"
   | "auth_start"
   | "auth_poll"
   | "auth_verify"
@@ -50,7 +51,8 @@ export type BridgeEventType =
   | "user_prompt"
   | "error"
   | "provider_key_required"
-  | "model_changed";
+  | "model_changed"
+  | "permission_request";
 
 export interface BridgeCommand {
   type: BridgeCommandType;
@@ -78,7 +80,7 @@ export type EventKind = "work" | "tool" | "planning" | "system";
 
 export type Role = "user" | "agent" | "system" | "status" | "reasoning";
 
-export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response" | "models" | "sessions" | "usage";
+export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response" | "models" | "sessions" | "usage" | "permission";
 export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {
@@ -307,3 +309,27 @@ export type RalphCompletionReason =
   | "max_iterations"
   | "manual_cancel"
   | "error";
+
+// ============================================
+// PERMISSION TYPES
+// ============================================
+
+/** Tools that require permission checks */
+export type PermissionedTool = "Bash" | "Write" | "Edit";
+
+/** Permission request data from harness */
+export interface PermissionRequestData {
+  request_id: string;
+  tool: PermissionedTool;
+  target: string;
+  suggested_pattern: string;
+  working_directory: string;
+  description: string;
+}
+
+/** Permission response to send back to harness */
+export interface PermissionResponseData {
+  request_id: string;
+  decision: "allow" | "always_allow" | "deny";
+  pattern?: string;
+}

@@ -37,3 +37,11 @@ export type { ZodType, ZodError, ZodSchema, ZodIssue } from 'zod';
 
 // Termination reason types
 export type { AgentTerminationReason, OrchestratorTerminationReason } from './termination.js';
+
+// Profiler for Chrome Trace format output
+export {
+  profiler,
+  isProfilingEnabled,
+  traced,
+  tracedAsync,
+} from './profiler.js';

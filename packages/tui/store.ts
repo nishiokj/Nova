@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason, PermissionRequestData } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
@@ -136,6 +136,9 @@ export interface StoreSnapshot {
   ralphIteration: number;
   ralphMaxIterations: number;
   ralphCompletionPromise: string | null;
+  // Permission prompt state
+  activePermissionRequest: PermissionRequestData | null;
+  permissionCursor: number;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -251,6 +254,10 @@ export class Store {
   // ─── Response Pane ───
   private responseContent: ResponseContent | null = null;
 
+  // ─── Permission Prompt ───
+  private activePermissionRequest: PermissionRequestData | null = null;
+  private permissionCursor = 0; // 0=Allow, 1=Always Allow, 2=Deny
+
   // ═══════════════════════════════════════════════════════════════════════════
   // CONSTRUCTOR
   // ═══════════════════════════════════════════════════════════════════════════
@@ -342,6 +349,9 @@ export class Store {
       ralphIteration: this.ralphIteration,
       ralphMaxIterations: this.ralphMaxIterations,
       ralphCompletionPromise: this.ralphCompletionPromise,
+      // Permission prompt state
+      activePermissionRequest: this.activePermissionRequest,
+      permissionCursor: this.permissionCursor,
     };
   }
 
@@ -1712,6 +1722,61 @@ export class Store {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // PERMISSION PROMPT METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Sets the active permission request and enters permission mode.
+   */
+  setActivePermissionRequest(request: PermissionRequestData | null): void {
+    this.activePermissionRequest = request;
+    this.permissionCursor = 0; // Default to "Allow"
+    if (request) {
+      this.uiMode = "permission";
+    }
+    this.emit();
+  }
+
+  /**
+   * Moves the permission cursor up or down through options.
+   * Options: 0=Allow, 1=Always Allow, 2=Deny
+   */
+  movePermissionCursor(delta: number): void {
+    const count = 3; // Allow, Always Allow, Deny
+    this.permissionCursor = (this.permissionCursor + delta + count) % count;
+    this.emit();
+  }
+
+  /**
+   * Gets the current permission decision based on cursor position.
+   */
+  getPermissionDecision(): "allow" | "always_allow" | "deny" {
+    switch (this.permissionCursor) {
+      case 0: return "allow";
+      case 1: return "always_allow";
+      case 2: return "deny";
+      default: return "allow";
+    }
+  }
+
+  /**
+   * Gets the active permission request.
+   */
+  getActivePermissionRequest(): PermissionRequestData | null {
+    return this.activePermissionRequest;
+  }
+
+  /**
+   * Clears the permission request and returns to chat mode.
+   */
+  clearPermissionRequest(): void {
+    this.activePermissionRequest = null;
+    this.permissionCursor = 0;
+    this.uiMode = "chat";
+    this.emit();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // RESPONSE PANE METHODS
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1896,10 +1961,9 @@ function buildHistoryLines(
       lines[lines.length - 1].isBlockEnd = true;
     }
 
-    // Add blank separator lines after each message for visual breathing room
+    // Add blank separator line after each message for visual breathing room
     // Use space characters so Ink renders them with actual height
-    // System/status messages get minimal spacing to avoid wasting vertical space
-    const separatorCount = entry.role === "system" || entry.role === "status" ? 1 : 3;
+    const separatorCount = 1;
     for (let i = 0; i < separatorCount; i++) {
       lines.push({
         id: `${entryLinePrefix}:${lineIndex + i}`,

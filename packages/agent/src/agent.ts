@@ -16,7 +16,7 @@ import {
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -269,6 +269,7 @@ export class Agent {
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
     const { globalContext, workItem, cwd } = params;
+    const runAsyncId = profiler.asyncBegin(`agent.run:${this.config.type}`, 'agent');
 
     // Create fresh local context for this agent's work
     const localContext = new ContextWindow(
@@ -293,7 +294,7 @@ export class Agent {
       filesRead: [],
       invalidatedPaths: [],
       toolErrors: [],
-      terminationReason: 'exception', // Default; overwritten by executeLoop or catch block
+      terminationReason: undefined,
       needsUserInput: false,
       isRefusal: false,
       localContext,
@@ -304,17 +305,18 @@ export class Agent {
     } catch (error) {
       // Capture error message - ensure we always have SOME diagnostic info
       let message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
       if (!message || message.trim().length === 0) {
         // Error has no message - capture what we can
         const errorType = error instanceof Error ? error.constructor.name : typeof error;
-        const stack = error instanceof Error ? error.stack?.split('\n').slice(0, 3).join('\n') : undefined;
-        message = `[Empty error message] type=${errorType}${stack ? `, stack:\n${stack}` : ''}`;
+        const stackPreview = stack?.split('\n').slice(0, 3).join('\n');
+        message = `[Empty error message] type=${errorType}${stackPreview ? `, stack:\n${stackPreview}` : ''}`;
       }
-      result.error = message;
 
       // Classify the error and set appropriate termination reason
       if (error instanceof RateLimitError) {
         result.terminationReason = 'rate_limit';
+        result.error = message;
         result.rateLimitInfo = {
           provider: error.provider,
           model: error.model,
@@ -325,6 +327,7 @@ export class Agent {
         console.error(`[AGENT] Rate limit hit for ${error.provider}/${error.model}: ${error.info.message}`);
       } else if (error instanceof CircuitOpenError) {
         result.terminationReason = 'circuit_open';
+        result.error = message;
         console.error(`[AGENT] Circuit breaker open: ${message}`);
       } else if (error instanceof RetriesExhaustedError) {
         // For now, treat retries_exhausted as exception. Phase 3 will unwrap the underlying error.
@@ -333,8 +336,11 @@ export class Agent {
         console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
       } else {
         result.terminationReason = 'exception';
-        // Log all unclassified exceptions for debugging
-        console.error(`[AGENT] Exception in ${this.config.type}: ${message}`, error instanceof Error ? error.stack : '');
+        // Include stack trace in error message for debugging (truncated to first 5 lines)
+        const stackPreview = stack?.split('\n').slice(0, 5).join('\n');
+        result.error = stackPreview ? `${message}\n\nStack:\n${stackPreview}` : message;
+        // Log full stack to console for detailed debugging
+        console.error(`[AGENT] Exception in ${this.config.type}: ${message}`, stack ?? '');
       }
 
       this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
@@ -363,10 +369,17 @@ export class Agent {
       type: 'agent_completed',
       workId: workItem.workId,
       success: result.success,
-      terminationReason: result.terminationReason,
+      terminationReason: result.terminationReason ?? 'exception',
       filesRead: result.filesRead,
       invalidatedPaths: result.invalidatedPaths,
     }, this.buildHookContext(workItem));
+
+    profiler.asyncEnd(`agent.run:${this.config.type}`, runAsyncId, 'agent', {
+      success: result.success,
+      terminationReason: result.terminationReason,
+      llmCalls: metrics.llmCallsMade,
+      toolCalls: metrics.toolCallsMade,
+    });
 
     return result;
   }
@@ -401,6 +414,8 @@ export class Agent {
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
+      profiler.instant(`agent.iteration:${iteration}`, 'agent', 'p', { agentType: this.config.type });
+
       // Check for user stop request at the start of each iteration
       if (this.hooks?.shouldStop?.()) {
         result.terminationReason = 'user_stopped';
@@ -484,6 +499,7 @@ export class Agent {
       const hasStructuredOutput = !!this.config.outputSchema;
 
       // Use resilient streaming with retry + circuit breaker
+      const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
       const { response, buffer } = await this.streamWithResilience(
         {
           messages: messages as unknown as Message[],
@@ -508,6 +524,11 @@ export class Agent {
       );
 
       const llmDurationMs = Date.now() - llmStartTime;
+      profiler.asyncEnd(`agent.llmCall:${this.config.type}`, llmAsyncId, 'llm', {
+        promptTokens: response.usage?.promptTokens,
+        completionTokens: response.usage?.completionTokens,
+        toolCalls: response.toolCalls?.length ?? 0,
+      });
       metrics.llmCallsMade++;
 
       this.emitLlmCall(response, messages, llmDurationMs, allowedTools, workItem.workId);
@@ -789,8 +810,8 @@ export class Agent {
     }
 
     // Handle exhausted resources - treat as partial success if we have content
-    // If terminationReason is still the default 'exception', we exhausted iterations without a specific termination
-    if (result.terminationReason === 'exception') {
+    // If terminationReason is unset, we exhausted iterations without a specific termination
+    if (!result.terminationReason) {
       result.terminationReason = 'iterations_exhausted';
     }
 
@@ -1354,13 +1375,21 @@ export class Agent {
     subResult: AgentResult
   ): void {
     // 1. Merge files read (so parent doesn't re-read them)
-    for (const path of subResult.filesRead) {
-      parentLocalContext.markFileRead(path);
+    // Defensive: filesRead should always be an array, but check anyway
+    const filesRead = subResult.filesRead ?? [];
+    for (const path of filesRead) {
+      if (typeof path === 'string' && path.length > 0) {
+        parentLocalContext.markFileRead(path);
+      }
     }
 
     // 2. Merge artifacts - prefer explicit artifacts field, fallback to localContext
     const subArtifacts = subResult.artifacts ?? subResult.localContext?.getArtifacts() ?? [];
     for (const artifact of subArtifacts) {
+      // Skip malformed artifacts (defensive: all artifacts should have sourcePath, kind, name)
+      if (!artifact || typeof artifact.sourcePath !== 'string' || typeof artifact.name !== 'string') {
+        continue;
+      }
       // Avoid duplicates by checking sourcePath + name + line
       const existing = parentLocalContext.getArtifactsByPath(artifact.sourcePath);
       const isDuplicate = existing.some(e =>
@@ -1387,6 +1416,10 @@ export class Agent {
     if (subResult.localContext) {
       const subFileItems = subResult.localContext.getItemsByType<FileContentItem>('file_content');
       for (const fileItem of subFileItems) {
+        // Defensive: ensure fileItem has required properties
+        if (!fileItem?.path || typeof fileItem.content !== 'string') {
+          continue;
+        }
         if (!parentLocalContext.hasReadFile(fileItem.path)) {
           parentLocalContext.addFileContent(fileItem.path, fileItem.content, fileItem.language);
         }
@@ -1498,6 +1531,10 @@ export class Agent {
 
     const subResult = await agent.run({ globalContext: mergedContextForSubAgent, workItem: subWorkItem, cwd });
 
+    // Track post-processing errors separately - we want to preserve sub-agent results
+    // even if artifact extraction or merging fails
+    let postProcessingError: string | null = null;
+
     // Extract key findings from sub-agent's tool outputs to include in response
     let enhancedResponse = subResult.response;
     if (!enhancedResponse && subResult.localContext) {
@@ -1556,23 +1593,10 @@ export class Agent {
     }
 
     // Extract artifacts from structured output and add to parent's local context
-    // Artifacts use of rich schema: sourcePath, line, kind, name, signature, modifies, calls, insight, reduces
+    // Wrapped in try-catch to preserve sub-agent results even if merging fails
     const artifacts = subResult.structuredOutput?.artifacts;
-    let extractedArtifacts: Array<{
-      sourcePath: string;
-      line?: number | null;
-      kind: string;
-      name: string;
-      signature?: string | null;
-      modifies?: string[] | null;
-      calls?: string[] | null;
-      insight?: string | null;
-      reduces?: string | null;
-    }> = [];
-
-    // Try to extract artifacts from structured output first
-    if (Array.isArray(artifacts) && artifacts.length > 0) {
-      const validArtifacts = artifacts.filter((a): a is {
+    try {
+      let extractedArtifacts: Array<{
         sourcePath: string;
         line?: number | null;
         kind: string;
@@ -1582,49 +1606,70 @@ export class Agent {
         calls?: string[] | null;
         insight?: string | null;
         reduces?: string | null;
-      } => (
-        typeof a === 'object' &&
-        a !== null &&
-        typeof a.sourcePath === 'string' &&
-        typeof a.kind === 'string' &&
-        typeof a.name === 'string'
-      ));
-      extractedArtifacts.push(...validArtifacts);
-    }
+      }> = [];
 
-    // FALLBACK: If structured output parsing failed, extract directly from sub-agent's local context.
-    // This handles cases where tool call exceptions caused JSON parsing to fail.
-    // The sub-agent may have discovered artifacts but structuredOutput is null.
-    if (extractedArtifacts.length === 0 && subResult.localContext) {
-      const contextArtifacts = subResult.localContext.getArtifacts();
-      if (contextArtifacts.length > 0) {
-        extractedArtifacts.push(...contextArtifacts);
-        this.emit(createEvent('agent_message', {
-          agentType: this.config.type,
-          message: `[Sub-agent artifact extraction] Retrieved ${contextArtifacts.length} artifacts from local context after structured output parsing failed`,
-        }, subWorkItem.workId));
+      // Try to extract artifacts from structured output first
+      if (Array.isArray(artifacts) && artifacts.length > 0) {
+        const validArtifacts = artifacts.filter((a): a is {
+          sourcePath: string;
+          line?: number | null;
+          kind: string;
+          name: string;
+          signature?: string | null;
+          modifies?: string[] | null;
+          calls?: string[] | null;
+          insight?: string | null;
+          reduces?: string | null;
+        } => (
+          typeof a === 'object' &&
+          a !== null &&
+          typeof a.sourcePath === 'string' &&
+          typeof a.kind === 'string' &&
+          typeof a.name === 'string'
+        ));
+        extractedArtifacts.push(...validArtifacts);
       }
-    }
 
-    if (extractedArtifacts.length > 0) {
-      parentLocalContext.addArtifacts(extractedArtifacts.map(a => ({
-        sourcePath: a.sourcePath,
-        line: typeof a.line === 'number' ? a.line : undefined,
-        kind: a.kind as ArtifactKind,
-        name: a.name,
-        signature: typeof a.signature === 'string' ? a.signature : undefined,
-        modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
-        calls: Array.isArray(a.calls) ? a.calls : undefined,
-        insight: typeof a.insight === 'string' ? a.insight : undefined,
-        reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
-        relevance: 1.0, // Default: explorer returns what's relevant
-        discoveredBy: agentConfig.type,
-      })));
-    }
+      // FALLBACK: If structured output parsing failed, extract directly from sub-agent's local context.
+      // This handles cases where tool call exceptions caused JSON parsing to fail.
+      // The sub-agent may have discovered artifacts but structuredOutput is null.
+      if (extractedArtifacts.length === 0 && subResult.localContext) {
+        const contextArtifacts = subResult.localContext.getArtifacts();
+        if (contextArtifacts.length > 0) {
+          extractedArtifacts.push(...contextArtifacts);
+          this.emit(createEvent('agent_message', {
+            agentType: this.config.type,
+            message: `[Sub-agent artifact extraction] Retrieved ${contextArtifacts.length} artifacts from local context after structured output parsing failed`,
+          }, subWorkItem.workId));
+        }
+      }
 
-    // Merge sub-agent's discoveries back into parent's local context
-    // This includes file reads, artifacts, and file content not captured above
-    this.mergeSubAgentResults(parentLocalContext, subResult);
+      if (extractedArtifacts.length > 0) {
+        parentLocalContext.addArtifacts(extractedArtifacts.map(a => ({
+          sourcePath: a.sourcePath,
+          line: typeof a.line === 'number' ? a.line : undefined,
+          kind: a.kind as ArtifactKind,
+          name: a.name,
+          signature: typeof a.signature === 'string' ? a.signature : undefined,
+          modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
+          calls: Array.isArray(a.calls) ? a.calls : undefined,
+          insight: typeof a.insight === 'string' ? a.insight : undefined,
+          reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
+          relevance: 1.0, // Default: explorer returns what's relevant
+          discoveredBy: agentConfig.type,
+        })));
+      }
+
+      // Merge sub-agent's discoveries back into parent's local context
+      // This includes file reads, artifacts, and file content not captured above
+      this.mergeSubAgentResults(parentLocalContext, subResult);
+    } catch (mergeError) {
+      // Log but don't fail - the sub-agent's response is more important than artifact merging
+      const message = mergeError instanceof Error ? mergeError.message : String(mergeError);
+      const stack = mergeError instanceof Error ? mergeError.stack : undefined;
+      postProcessingError = `Artifact extraction/merging failed: ${message}`;
+      console.error(`[AGENT] Sub-agent post-processing error: ${message}`, stack ?? '');
+    }
 
     // Include full structured output so calling agent can see artifacts, patterns, etc.
     // Also include explicit filesRead so calling agent knows not to re-read these
@@ -1637,13 +1682,18 @@ export class Agent {
       workId: subWorkItem.workId,
       success: subResult.success,
       response: enhancedResponse,
-      filesRead: subResult.filesRead, // Explicit list - do not re-read these
+      filesRead: subResult.filesRead ?? [], // Explicit list - do not re-read these
       artifacts: Array.isArray(artifacts) ? artifacts : [], // Full artifact content for downstream use
       error: subResult.error,
+      postProcessingError, // Non-null if artifact merging failed
       metrics: subResult.metrics,
     };
 
     if (subResult.success || subResult.needsUserInput) {
+      // Even on success, include any post-processing errors in the result
+      if (postProcessingError) {
+        (payload as Record<string, unknown>).warning = postProcessingError;
+      }
       return successResult(call.name, JSON.stringify(payload), 0);
     }
 
@@ -1675,6 +1725,10 @@ export class Agent {
         ? enhancedResponse.slice(0, 500) + '... [truncated]'
         : enhancedResponse;
       errorParts.push(`\nPartial output:\n${preview}`);
+    }
+    // Include post-processing error if artifact merging failed
+    if (postProcessingError) {
+      errorParts.push(`\nPost-processing warning: ${postProcessingError}`);
     }
 
     return errorResult(call.name, errorParts.join(''), 0);

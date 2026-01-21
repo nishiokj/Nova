@@ -116,8 +116,8 @@ export interface AgentResult {
   invalidatedPaths: string[];
   /** Tool errors encountered */
   toolErrors: string[];
-  /** Why execution terminated */
-  terminationReason: AgentTerminationReason;
+  /** Why execution terminated (undefined while still running) */
+  terminationReason?: AgentTerminationReason;
   /** Whether user input is needed */
   needsUserInput: boolean;
   /** User prompt info (if needsUserInput) */

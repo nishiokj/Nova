@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import path from "path";
+import { profiler } from "shared";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { BridgeClient, type ConnectionState } from "./bridge_client.js";
@@ -32,12 +33,14 @@ import {
   type UsageProviderStats,
   type RalphProgressData,
   type RalphCompletionReason,
+  type PermissionRequestData,
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
 import { useMouse } from "./useMouse.js";
 import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
 import { QuestionPrompt } from "./components/QuestionPrompt.js";
+import { PermissionPrompt } from "./components/PermissionPrompt.js";
 import { ProvidersView } from "./components/ProvidersView.js";
 import { ResponsePane, parseDiffToResponseContent } from "./components/ResponsePane.js";
 import { SessionsView } from "./components/SessionsView.js";
@@ -727,6 +730,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   });
 
   const handleBridgeEvent = (event: BridgeEvent) => {
+    profiler.begin(`tui.handleEvent:${event.type}`, 'tui');
     try {
       switch (event.type) {
         case "ready":
@@ -759,6 +763,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         case "model_changed":
           handleModelChanged(event.data as ModelChangedData | undefined);
           break;
+        case "permission_request":
+          handlePermissionRequest(event.data as PermissionRequestData | undefined);
+          break;
         default:
           break;
       }
@@ -769,6 +776,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.setError(errorMessage);
       });
     }
+    profiler.end(`tui.handleEvent:${event.type}`, 'tui');
   };
 
   const handleReady = async (data?: ReadyData) => {
@@ -914,6 +922,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return;
     }
 
+    profiler.begin('tui.stream.process', 'tui');
+
     // Single getSnapshot for hot path - avoid repeated state copies
     const currentSnapshot = store.getSnapshot();
 
@@ -922,19 +932,24 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       // Handle reasoning final marker (empty chunk with is_final=true)
       // Don't clear reasoning yet - it stays visible until main response completes
       if (data.is_final) {
+        profiler.end('tui.stream.process', 'tui');
         return;
       }
       // Append reasoning chunks
+      profiler.begin('tui.stream.reasoning', 'tui');
       if (currentSnapshot.reasoningRequestId !== data.request_id) {
         store.setReasoning(data.request_id, data.chunk);
       } else {
         store.appendReasoning(data.chunk);
       }
       store.setState("streaming");
+      profiler.end('tui.stream.reasoning', 'tui');
+      profiler.end('tui.stream.process', 'tui');
       return;
     }
 
     // Handle regular response streaming
+    profiler.begin('tui.stream.text', 'tui');
     if (currentSnapshot.streamingRequestId !== data.request_id) {
       // New response stream - finalize any active reasoning first
       if (currentSnapshot.reasoningRequestId === data.request_id) {
@@ -942,13 +957,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         // Update snapshot after finalizing reasoning
       }
       store.setStreaming(data.request_id, data.chunk);
+      profiler.instant('tui.stream.firstChunk', 'tui', 'p', { requestId: data.request_id });
     } else {
       store.appendStreaming(data.chunk);
     }
 
     store.setState("streaming");
+    profiler.end('tui.stream.text', 'tui');
 
     if (data.is_final) {
+      profiler.begin('tui.stream.finalize', 'tui');
       const finalText = store.getSnapshot().streamingText;
       store.batch(() => {
         if (!messageExists(store.getSnapshot().history, data.request_id)) {
@@ -959,7 +977,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.clearProgress();
         store.setState("idle");
       });
+      profiler.end('tui.stream.finalize', 'tui');
+      profiler.instant('tui.stream.complete', 'tui', 'p', { requestId: data.request_id });
     }
+    profiler.end('tui.stream.process', 'tui');
   };
 
   const handleSkillsPayload = (payload: Record<string, unknown> | undefined, content: string) => {
@@ -1333,6 +1354,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     };
 
     // Helper to convert raw question data to AgentQuestion with defensive field guards
+    // Supports both snake_case (wire format) and camelCase (legacy) for robustness
     const toAgentQuestion = (
       q: UserPromptQuestion,
       requestId: string,
@@ -1371,9 +1393,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         })
         .filter((opt): opt is QuestionOption => opt !== null);
 
+      // Support both snake_case (wire format) and camelCase (legacy/agent format)
+      const qAny = q as unknown as Record<string, unknown>;
+      const multiSelect = q.multi_select ?? (qAny.multiSelect as boolean | undefined);
+      const questionType = q.question_type ?? (qAny.questionType as string | undefined);
+
       return {
         requestId: `${requestId}_q${index}`,
-        type: inferQuestionType(rawOptions, q.multi_select, q.question_type),
+        type: inferQuestionType(rawOptions, multiSelect, questionType),
         question: questionText,
         context: q.context,
         options: processedOptions,
@@ -1462,6 +1489,15 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     } else {
       store.setModelSelection(agentType, null);
     }
+  };
+
+  const handlePermissionRequest = (data?: PermissionRequestData) => {
+    if (!data || !data.request_id) {
+      store.addMessage("system", "Invalid permission request received");
+      return;
+    }
+
+    store.setActivePermissionRequest(data);
   };
 
   const handleError = (data?: ErrorData) => {
@@ -1821,6 +1857,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             }
           }
 
+          // Format the answer for display before advancing
+          const currentQuestion = snapshot.activeQuestion;
+          let displayAnswer = '';
+          if (currentQuestion?.options && snapshot.questionSelection.length > 0) {
+            const selectedLabels = snapshot.questionSelection
+              .map(i => currentQuestion.options?.[i]?.label)
+              .filter(Boolean);
+            displayAnswer = selectedLabels.join(', ');
+          }
+
           // Check if there are more questions in the queue
           const hasMoreQuestions = store.saveAnswerAndAdvance();
           if (!hasMoreQuestions) {
@@ -1831,6 +1877,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const answer = allAnswers.size === 1
               ? allAnswers.values().next().value
               : Object.fromEntries(allAnswers);
+
+            // Add user's answer to chat history for visibility
+            if (displayAnswer) {
+              store.addMessage("user", displayAnswer);
+            }
+
             sendCommand("user_prompt_response", {
               request_id: requestId,
               answer,
@@ -1855,6 +1907,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
         // Enter submits
         if (key.return && !key.shift) {
+          // Capture the answer text before advancing
+          const answerText = snapshot.questionInput;
+
           // Check if there are more questions in the queue
           const hasMoreQuestions = store.saveAnswerAndAdvance();
           if (!hasMoreQuestions) {
@@ -1864,6 +1919,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const answer = allAnswers.size === 1
               ? allAnswers.values().next().value
               : Object.fromEntries(allAnswers);
+
+            // Add user's answer to chat history for visibility
+            if (answerText) {
+              store.addMessage("user", answerText);
+            }
+
             sendCommand("user_prompt_response", {
               request_id: requestId,
               answer,
@@ -1900,6 +1961,73 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       // Consume all input in question mode to prevent interference
+      return;
+    }
+
+    // Permission mode input handling
+    if (snapshot.uiMode === "permission" && snapshot.activePermissionRequest) {
+      // Navigation with j/k and arrow keys
+      if (key.upArrow || input === "k") {
+        store.movePermissionCursor(-1);
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        store.movePermissionCursor(1);
+        return;
+      }
+
+      // Enter selects the current option
+      if (key.return) {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          const decision = store.getPermissionDecision();
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision,
+            pattern: decision === "always_allow" ? request.suggested_pattern : undefined,
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+
+      // Quick keys: 1=Allow, 2=Always Allow, 3=Deny
+      if (input === "1") {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision: "allow",
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+      if (input === "2") {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision: "always_allow",
+            pattern: request.suggested_pattern,
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+      if (input === "3") {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision: "deny",
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+
+      // Consume all other input in permission mode
       return;
     }
 
@@ -2031,6 +2159,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       store.batch(() => {
+        // Commit any active streaming content to history before adding the user message
+        // This ensures proper chronological ordering when user sends follow-up during streaming
+        if (snapshot.streamingText) {
+          store.addMessage("agent", snapshot.streamingText, undefined, snapshot.streamingRequestId ?? undefined);
+          store.finalizeStreaming();
+          store.finalizeReasoning();
+        }
         if (effectivePlanMode && !snapshot.planMode) {
           store.setPlanMode(true);
           store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
@@ -2776,7 +2911,22 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const totalLines = historyLines.length;
   const visibleEndIndex = totalLines - scrollOffset;
   const visibleStartIndex = Math.max(0, visibleEndIndex - historyHeight);
-  const visibleHistoryLines = historyLines.slice(visibleStartIndex, visibleEndIndex);
+  const sliced = historyLines.slice(visibleStartIndex, visibleEndIndex);
+
+  // Bottom-alignment padding: when content is less than viewport height,
+  // pad the array with empty lines at the beginning so content renders at the bottom
+  // Use space character (not empty string) so Ink renders with actual height
+  const padding = Math.max(0, historyHeight - sliced.length);
+  const visibleHistoryLines: HistoryLine[] = [
+    // Padding lines at TOP of viewport (pushes content to bottom)
+    ...Array(padding).fill(null).map((_, i) => ({
+      id: `pad:${i}`,
+      text: " ",
+      role: undefined as Role | undefined,
+    })),
+    // Actual content at BOTTOM of viewport
+    ...sliced,
+  ];
 
   const renderInputLines = () => {
     const lines = [...inputLayout.lines];
@@ -2827,6 +2977,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   // Question mode: show QuestionPrompt instead of input box
   const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
+  const isPermissionMode = snapshot.uiMode === "permission" && snapshot.activePermissionRequest;
   const isThemeMode = snapshot.uiMode === "theme";
   const isModelsMode = snapshot.uiMode === "models";
   const isSessionsMode = snapshot.uiMode === "sessions";
@@ -3040,6 +3191,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           inputText={snapshot.questionInput}
           width={contentWidth}
           queueInfo={store.getQuestionQueueInfo()}
+        />
+      ) : isPermissionMode ? (
+        <PermissionPrompt
+          request={snapshot.activePermissionRequest!}
+          cursor={snapshot.permissionCursor}
+          width={contentWidth}
         />
       ) : (
         <>
@@ -3488,6 +3645,9 @@ process.on('SIGHUP', () => handleSignal('SIGHUP'));
 export const setGlobalCleanup = (cleanup: () => void) => {
   globalCleanup = cleanup;
 };
+
+// Initialize profiler for TUI (enabled via PROFILE=1 env var)
+profiler.init('tui', './profile-tui.json');
 
 render(
   <ErrorBoundary>

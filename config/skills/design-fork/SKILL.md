@@ -15,9 +15,19 @@ Use **image generation for visual entropy** (Flux Schnell produces diverse mocku
 
 ## Prerequisites
 
-The user must have their Replicate API key configured via `/providers`. The scripts automatically read from the provider store.
+The user must have their Replicate API key configured. There are two options:
 
-**Pre-flight check**: When the user invokes `/design-fork`, run the image-gen script with `--help` or a minimal prompt to verify the key is configured:
+**Option 1: Environment Variable (Recommended for CLI)**
+```bash
+export REPLICATE_API_TOKEN="r8_your_token_here"
+```
+
+**Option 2: TUI Provider Management**
+Run `/providers` in the TUI, select Replicate, and paste your API key.
+
+Get your API key at: https://replicate.com/account/api-tokens
+
+**Pre-flight check**: When the user invokes `/design-fork`, run the image-gen script with `--count 0` to verify the key is configured:
 
 ```bash
 cd config/skills/design-fork && bun run scripts/image-gen.ts --prompt "test" --count 0
@@ -25,7 +35,7 @@ cd config/skills/design-fork && bun run scripts/image-gen.ts --prompt "test" --c
 
 If it outputs `"error": "Replicate API key not configured..."`, tell the user:
 
-> Your Replicate API key isn't configured. Run `/providers`, select Replicate, and paste your API key. You can get one at https://replicate.com/account/api-tokens
+> Your Replicate API key isn't configured. Either set `REPLICATE_API_TOKEN` in your environment, or run `/providers` and select Replicate. Get a key at https://replicate.com/account/api-tokens
 
 ## Workflow
 

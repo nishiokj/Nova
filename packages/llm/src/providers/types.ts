@@ -61,7 +61,8 @@ export interface ResolvedRequestConfig {
   /** Original provider name from config (e.g., 'z.ai-coder', 'cerebras') for display in errors */
   displayProvider: string;
   model: string;
-  apiKey: string;
+  /** API key (optional for local providers that don't require auth) */
+  apiKey?: string;
   baseUrl: string;
   maxTokens?: number;
   temperature?: number;

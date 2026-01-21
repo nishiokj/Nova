@@ -27,10 +27,10 @@ import { execSync } from 'child_process';
 import { Orchestrator } from 'orchestrator';
 import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
+import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
 import { ContextWindow } from 'context';
 import { createWorkItem } from 'work';
-import { coerceStructuredOutput } from 'shared';
+import { coerceStructuredOutput, profiler } from 'shared';
 import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
@@ -58,6 +58,9 @@ import { HookExecutor } from './hook_executor.js';
 import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
 import { createFileLogger, type HarnessLogger } from './harness_infra.js';
+import { PermissionChecker } from './permissions.js';
+import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
+import { isPermissionedTool, normalizeToolName } from 'types';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -265,6 +268,10 @@ class HarnessProviderKeyService implements ProviderKeyService {
   }
 
   hasApiKey(provider: string): boolean {
+    // Providers that don't require auth (e.g., lmstudio) always return true
+    if (!providerRequiresAuth(provider)) {
+      return true;
+    }
     return this.getApiKey(provider) !== null;
   }
 
@@ -293,6 +300,7 @@ export class AgentHarness {
   private llmAdapter: ReturnType<typeof createAdapter>;
   private hookExecutor: HookExecutor | null = null;
   private providerKeyService: HarnessProviderKeyService;
+  private permissionChecker: PermissionChecker;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
     this.config = config;
@@ -439,6 +447,14 @@ export class AgentHarness {
       const hooksDir = path.resolve(workingDir, config.hooks.directory);
       this.hookExecutor = new HookExecutor(hooksDir, workingDir);
       this.logger.info('HookExecutor initialized', { hooksDir });
+    }
+
+    // Initialize PermissionChecker - handles permission prompts for Bash/Write/Edit
+    this.permissionChecker = new PermissionChecker(workingDir, config.dangerousMode);
+    if (config.dangerousMode) {
+      this.logger.warning('Permission checks DISABLED - running in dangerous mode');
+    } else {
+      this.logger.info('PermissionChecker initialized', { workingDir });
     }
 
     const defaultAgent = config.agents[config.defaultAgent];
@@ -644,6 +660,7 @@ export class AgentHarness {
    */
   run(params: AgentRunParams): AgentRunHandle {
     const { requestId, inputText, tier: requestedTier, sessionKey, workingDir, planMode, stopHook } = params;
+    profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier, planMode });
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
 
@@ -1132,33 +1149,99 @@ export class AgentHarness {
   }
 
   /**
-   * Create AgentHooks that delegate to HookExecutor.
+   * Create AgentHooks that handle permission checking and delegate to HookExecutor.
    */
-  private createAgentHooks(sessionKey: string, requestId: string): AgentHooks | undefined {
-    if (!this.hookExecutor) return undefined;
-
+  private createAgentHooks(sessionKey: string, requestId: string, emit?: (event: AgentEvent) => void): AgentHooks {
     const executor = this.hookExecutor;
     const workingDir = this.config.tools.workingDir;
+    const permissionChecker = this.permissionChecker;
+    const logger = this.logger;
 
     return {
       preToolUse: async (toolName: string, args: Record<string, unknown>): Promise<ToolHookResult> => {
-        const context: HookContext = {
-          event: 'PreToolUse',
-          toolName,
-          toolParams: args,
-          sessionKey,
-          requestId,
-          workingDir,
-        };
-        const result = await executor.execute('PreToolUse', context);
-        return {
-          action: result.action,
-          message: result.message,
-          modifiedArgs: result.modified as Record<string, unknown> | undefined,
-        };
+        // Check permissions for Bash, Write, Edit tools
+        if (isPermissionedTool(toolName)) {
+          const tool = normalizeToolName(toolName);
+          if (tool) {
+            const target = PermissionChecker.extractTarget(tool, args);
+            const decision = permissionChecker.check(tool, target);
+
+            if (decision.granted === false) {
+              logger.info('Permission denied', { tool, target, reason: decision.reason });
+              return {
+                action: 'block',
+                message: `Permission denied: ${decision.reason}`,
+              };
+            }
+
+            if (decision.granted === 'ask') {
+              // Create permission request and wait for user response
+              const request = permissionChecker.createRequest(tool, target, workingDir);
+              logger.info('Requesting permission', { tool, target, requestId: request.requestId });
+
+              // Emit permission_request event via emit callback if available
+              if (emit) {
+                emit({
+                  type: 'permission_request',
+                  requestId,
+                  sessionKey,
+                  timestamp: Date.now() / 1000,
+                  data: {
+                    requestId: request.requestId,
+                    tool: request.tool,
+                    target: request.target,
+                    suggestedPattern: request.suggestedPattern,
+                    workingDirectory: request.workingDirectory,
+                    description: request.description,
+                  },
+                });
+              }
+
+              // Wait for user response via promise
+              const response = await new Promise<PermissionResponse>((resolve) => {
+                permissionChecker.registerPendingRequest(request.requestId, request, resolve);
+              });
+
+              if (response.decision === 'deny') {
+                logger.info('User denied permission', { tool, target });
+                return {
+                  action: 'block',
+                  message: 'Permission denied by user',
+                };
+              }
+
+              // 'allow' or 'always_allow' - proceed with tool execution
+              logger.info('Permission granted', { tool, target, decision: response.decision });
+            }
+          }
+        }
+
+        // Run hook executor if available
+        if (executor) {
+          const context: HookContext = {
+            event: 'PreToolUse',
+            toolName,
+            toolParams: args,
+            sessionKey,
+            requestId,
+            workingDir,
+          };
+          const result = await executor.execute('PreToolUse', context);
+          return {
+            action: result.action,
+            message: result.message,
+            modifiedArgs: result.modified as Record<string, unknown> | undefined,
+          };
+        }
+
+        return { action: 'allow' };
       },
 
       postToolUse: async (toolName: string, args: Record<string, unknown>, toolResult: ToolResult): Promise<ToolHookResult> => {
+        if (!executor) {
+          return { action: 'allow' };
+        }
+
         const context: HookContext = {
           event: 'PostToolUse',
           toolName,
@@ -1179,6 +1262,13 @@ export class AgentHarness {
   }
 
   /**
+   * Get the permission checker for external access (e.g., bridge gateway).
+   */
+  getPermissionChecker(): PermissionChecker {
+    return this.permissionChecker;
+  }
+
+  /**
    * Run via Orchestrator with specified agent type.
    */
   private async runOrchestrator(
@@ -1193,7 +1283,7 @@ export class AgentHarness {
     store?: SessionStore,
     stopHook?: import('orchestrator').StopHookHandler
   ): Promise<AgentRunResult> {
-    const hooks = this.createAgentHooks(context.sessionKey, requestId);
+    const hooks = this.createAgentHooks(context.sessionKey, requestId, emit);
 
     // Build plan mode options if enabled
     const planModeOptions = planMode ? {
@@ -1256,7 +1346,9 @@ export class AgentHarness {
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
     const result = await orchestrator.execute(context, goal, agentType, effectiveWorkingDir);
+    profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls, paused: result.paused });
 
     // Handle handoff: store handoffSpec for approval in paused state
     if (result.handoffSpec && store && result.userPrompt?.questionType === 'handoff_approval') {
@@ -1466,8 +1558,11 @@ export class AgentHarness {
  */
 export function createHarnessFromEnv(
   workingDir?: string,
-  configPath?: string
+  configPath?: string,
+  dangerousMode = false
 ): AgentHarness {
   const config = loadConfig(configPath, workingDir);
+  // Override dangerousMode from CLI flag
+  config.dangerousMode = dangerousMode;
   return new AgentHarness(config);
 }

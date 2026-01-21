@@ -748,6 +748,7 @@ export function createConfigFromFile(
       default: fileConfig.models?.default ?? DEFAULT_MODELS_CONFIG.default,
     },
     configPath,
+    dangerousMode: false, // Set at runtime via CLI flag
   };
 }
 

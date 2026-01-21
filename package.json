@@ -45,7 +45,9 @@
     "lint": "bun run --cwd packages/types lint && bun run --cwd packages/shared lint && bun run --cwd packages/llm lint && bun run --cwd packages/context lint && bun run --cwd packages/tools lint && bun run --cwd packages/agent lint && bun run --cwd packages/orchestrator lint && bun run --cwd packages/graphd lint && bun run --cwd packages/comms-bus lint",
     "start:daemon": "bun run --cwd packages/harness-daemon start",
     "start:tui": "bun run --cwd packages/tui start",
-    "start": "bun run --cwd packages/launcher start"
+    "start": "bun run --cwd packages/launcher start",
+    "profile": "PROFILE=1 bun run start",
+    "profile:daemon": "PROFILE=1 bun run start:daemon"
   },
   "dependencies": {
     "@types/uuid": "^11.0.0",

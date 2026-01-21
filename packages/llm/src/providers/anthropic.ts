@@ -127,7 +127,7 @@ export class AnthropicProvider implements LLMProviderAdapter {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': resolved.apiKey,
+        'x-api-key': resolved.apiKey!,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
@@ -249,7 +249,7 @@ export class AnthropicProvider implements LLMProviderAdapter {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': resolved.apiKey,
+        'x-api-key': resolved.apiKey!,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),

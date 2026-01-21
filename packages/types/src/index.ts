@@ -50,6 +50,7 @@ export type {
   AgentProgressData,
   AgentReasoningData,
   EventCallback,
+  PermissionRequestEventData,
 } from './events.js';
 
 export {
@@ -204,6 +205,7 @@ export {
   OPENAI_COMPAT_PROVIDERS,
   PROVIDER_MODEL_DEFAULTS,
   SUPPORTED_PROVIDER_IDS,
+  DEFAULT_CONTEXT_WINDOW,
   isSupportedProvider,
   isOpenAICompatProvider,
   getCanonicalProvider,
@@ -213,6 +215,7 @@ export {
   getProviderTestEndpoint,
   getProviderDashboardUrl,
   getProviderResponseFormat,
+  providerRequiresAuth,
   getProviderDefinition,
   getAllProviders,
   getProvidersByCanonical,
@@ -222,4 +225,28 @@ export {
   getModelDefinition,
   getModelReasoningOptions,
   modelSupportsReasoning,
+  getModelContextWindow,
 } from './providers.js';
+
+// ============================================
+// PERMISSIONS
+// ============================================
+export type {
+  PermissionedTool,
+  PermissionRule,
+  PermissionConfig,
+  PermissionSettings,
+  SessionPermissionState,
+  PermissionDecision,
+  PermissionRequest,
+  PermissionResponse,
+  PermissionRequestEvent,
+  PermissionResponseCommand,
+} from './permissions.js';
+
+export {
+  PERMISSIONED_TOOLS,
+  isPermissionedTool,
+  normalizeToolName,
+  DEFAULT_PERMISSION_SETTINGS,
+} from './permissions.js';

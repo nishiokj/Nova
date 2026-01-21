@@ -6,6 +6,7 @@
 
 import type { ToolResult, ToolDefinition } from 'types';
 import { successResult, errorResult, timeoutResult } from 'types';
+import { profiler } from 'shared';
 import type {
   Tool,
   ToolExecutor,
@@ -245,6 +246,7 @@ export class ToolRegistry {
     // Execute with timeout
     const timeout = options?.timeout ?? tool.timeoutMs;
     const startTime = Date.now();
+    const asyncId = profiler.asyncBegin(`tool:${name}`, 'tool');
 
     try {
       const result = await this.executeWithTimeout(
@@ -255,6 +257,11 @@ export class ToolRegistry {
       );
 
       result.durationMs = Date.now() - startTime;
+      profiler.asyncEnd(`tool:${name}`, asyncId, 'tool', {
+        success: result.isSuccess,
+        durationMs: result.durationMs,
+        cacheHit: isCacheable && cacheKey ? !!this.cache.get(cacheKey) : false,
+      });
 
       // Cache successful read-only results
       if (isCacheable && cacheKey && result.isSuccess) {
@@ -273,6 +280,7 @@ export class ToolRegistry {
       return result;
     } catch (error) {
       const durationMs = Date.now() - startTime;
+      profiler.asyncEnd(`tool:${name}`, asyncId, 'tool', { error: true, durationMs });
       const message =
         error instanceof Error ? error.message : String(error);
       return errorResult(name, message, durationMs);

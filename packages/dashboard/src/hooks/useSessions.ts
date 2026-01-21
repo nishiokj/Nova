@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { Session, FilterCounts, FilterType } from '../domain/models'
 import { fetchAPI, type ExportResponse, type GraphDSession, type GraphDMessage } from '../lib/api'
 import { mapGraphDSession, parseJSONL } from '../lib/mappers'
@@ -13,15 +13,17 @@ interface UseSessionsResult {
   hasRunningRequests: boolean
 }
 
-export function useSessions(pollInterval = 500): UseSessionsResult {
+export function useSessions(pollInterval = 2000): UseSessionsResult {
   const [sessions, setSessions] = useState<Session[]>([])
   const [state, setState] = useState<FetchState>('idle')
   const [error, setError] = useState<string | null>(null)
+  const isFirstFetch = useRef(true)
 
   const fetchSessions = useCallback(async () => {
     // Only show loading on first fetch
-    if (state === 'idle') {
+    if (isFirstFetch.current) {
       setState('loading')
+      isFirstFetch.current = false
     }
     setError(null)
 
@@ -60,24 +62,25 @@ export function useSessions(pollInterval = 500): UseSessionsResult {
       setError(err instanceof Error ? err.message : 'Unknown error')
       setState('error')
     }
-  }, [state])
+  }, [])
 
   // Check if any session has running requests (for auto-polling)
   const hasRunningRequests = useMemo(() => {
     return sessions.some((s) => s.insights.requestsRunning > 0 || s.state === 'active')
   }, [sessions])
 
+  // Initial fetch on mount
   useEffect(() => {
     fetchSessions()
-  }, []) // Only fetch on mount
+  }, [fetchSessions])
 
-  // Auto-poll when there are running requests
+  // Auto-poll ONLY when there are running requests
   useEffect(() => {
-    if (pollInterval > 0 && (hasRunningRequests || state === 'success')) {
+    if (pollInterval > 0 && hasRunningRequests) {
       const interval = setInterval(fetchSessions, pollInterval)
       return () => clearInterval(interval)
     }
-  }, [pollInterval, hasRunningRequests, state])
+  }, [pollInterval, hasRunningRequests, fetchSessions])
 
   return { sessions, state, error, refetch: fetchSessions, hasRunningRequests }
 }

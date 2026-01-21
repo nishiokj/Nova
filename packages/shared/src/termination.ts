@@ -52,4 +52,7 @@ export type OrchestratorTerminationReason =
   | 'rate_limit'
   | 'circuit_open'
   | 'refusal'
-  | 'agent_error';
+  | 'agent_error'
+  // Semantic errors (continuable by Ralph Loop)
+  | 'no_action'
+  | 'invalid_action';

@@ -19,7 +19,8 @@ import type {
   LLMProvider,
   LLMRequestConfig,
 } from 'types';
-import { getProviderBaseUrl, isSupportedProvider } from 'types';
+import { getProviderBaseUrl, isSupportedProvider, providerRequiresAuth } from 'types';
+import { profiler } from 'shared';
 import { getProvider } from './providers/registry.js';
 import type { ResolvedRequestConfig, ProviderContext, AdapterLogger } from './providers/types.js';
 import { PartialStreamError } from './providers/types.js';
@@ -184,7 +185,7 @@ class LLMRouterAdapter implements LLMAdapter {
       hasStoredKey: !!this.apiKeys[provider],
     });
 
-    if (!apiKey) {
+    if (!apiKey && providerRequiresAuth(displayProvider)) {
       throw new Error(
         `API key not configured for provider '${displayProvider}'. Use /providers to add your API key.`
       );
@@ -214,7 +215,18 @@ class LLMRouterAdapter implements LLMAdapter {
       logger: this.logger,
       startTime: Date.now(),
     };
-    return provider.respond(context, params);
+    const asyncId = profiler.asyncBegin(`llm:${resolved.provider}:${resolved.model}`, 'llm');
+    try {
+      const response = await provider.respond(context, params);
+      profiler.asyncEnd(`llm:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
+        promptTokens: response.usage?.promptTokens,
+        completionTokens: response.usage?.completionTokens,
+      });
+      return response;
+    } catch (error) {
+      profiler.asyncEnd(`llm:${resolved.provider}:${resolved.model}`, asyncId, 'llm', { error: true });
+      throw error;
+    }
   }
 
   /**
@@ -229,7 +241,18 @@ class LLMRouterAdapter implements LLMAdapter {
       logger: this.logger,
       startTime: Date.now(),
     };
-    return yield* provider.stream(context, params);
+    const asyncId = profiler.asyncBegin(`llm:stream:${resolved.provider}:${resolved.model}`, 'llm');
+    try {
+      const response = yield* provider.stream(context, params);
+      profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
+        promptTokens: response.usage?.promptTokens,
+        completionTokens: response.usage?.completionTokens,
+      });
+      return response;
+    } catch (error) {
+      profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', { error: true });
+      throw error;
+    }
   }
 }
 
