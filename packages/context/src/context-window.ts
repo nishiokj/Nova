@@ -1012,6 +1012,7 @@ export class ContextWindow {
             type: 'function_call_output',
             call_id: item.callId,
             output: item.output,
+            isError: item.isError,
           });
           break;
 

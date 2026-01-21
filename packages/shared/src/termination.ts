@@ -17,6 +17,7 @@ export type AgentTerminationReason =
   // User interaction
   | 'user_input_required'
   | 'handoff_requested'
+  | 'user_stopped'
 
   // Bounds exceeded (agent-level)
   | 'iterations_exhausted'
@@ -44,6 +45,7 @@ export type OrchestratorTerminationReason =
   | 'goal_state_reached'
   | 'user_input_required'
   | 'handoff_requested'
+  | 'user_stopped'
   | 'max_iterations_exceeded'
   | 'max_tool_calls_exceeded'
   | 'max_duration_exceeded'

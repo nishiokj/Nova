@@ -910,13 +910,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const handleStream = (data?: StreamData) => {
-    // Debug: trace stream events in TUI
-    console.error(`[TUI DEBUG] handleStream called: request_id=${data?.request_id}, chunk_len=${data?.chunk?.length ?? 0}, is_reasoning=${data?.is_reasoning}, is_final=${data?.is_final}`);
-
     if (!data?.request_id || data.chunk === undefined) {
-      console.error(`[TUI DEBUG] handleStream returning early - missing request_id or chunk`);
       return;
     }
+
+    // Single getSnapshot for hot path - avoid repeated state copies
+    const currentSnapshot = store.getSnapshot();
 
     // Route reasoning content separately from main response
     if (data.is_reasoning) {
@@ -926,7 +925,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
       // Append reasoning chunks
-      const currentSnapshot = store.getSnapshot();
       if (currentSnapshot.reasoningRequestId !== data.request_id) {
         store.setReasoning(data.request_id, data.chunk);
       } else {
@@ -937,22 +935,18 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
 
     // Handle regular response streaming
-    const currentSnapshot = store.getSnapshot();
-    console.error(`[TUI DEBUG] handleStream: currentStreamingRequestId=${currentSnapshot.streamingRequestId}, data.request_id=${data.request_id}, currentStreamingText=${currentSnapshot.streamingText?.length ?? 0} chars`);
     if (currentSnapshot.streamingRequestId !== data.request_id) {
       // New response stream - finalize any active reasoning first
       if (currentSnapshot.reasoningRequestId === data.request_id) {
         store.finalizeReasoning();
+        // Update snapshot after finalizing reasoning
       }
-      console.error(`[TUI DEBUG] Calling store.setStreaming with ${data.chunk.length} chars`);
       store.setStreaming(data.request_id, data.chunk);
     } else {
-      console.error(`[TUI DEBUG] Calling store.appendStreaming with ${data.chunk.length} chars`);
       store.appendStreaming(data.chunk);
     }
 
     store.setState("streaming");
-    console.error(`[TUI DEBUG] After setState, streamingText=${store.getSnapshot().streamingText?.length ?? 0} chars`);
 
     if (data.is_final) {
       const finalText = store.getSnapshot().streamingText;
@@ -2759,13 +2753,19 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   } else if (snapshot.uiMode === "hooks") {
     historyLines = buildListLines("Hooks", snapshot.hooksList, snapshot.hooksErrors, false);
   }
+  // Apply markdown-aware spacing in chat mode
+  if (snapshot.uiMode === "chat") {
+    historyLines = applyVisualSpacing(historyLines);
+  }
   const totalHistoryLines = historyLines.length;
   const maxScroll = Math.max(0, totalHistoryLines - historyHeight);
   maxScrollRef.current = maxScroll;
 
   useEffect(() => {
+    // If scrollOffset exceeds maxScroll (content shrunk or window grew),
+    // snap to bottom rather than clamping to maxScroll
     if (snapshot.scrollOffset > maxScroll) {
-      store.setScrollOffset(maxScroll);
+      store.setScrollOffset(0);
     }
   }, [snapshot.scrollOffset, maxScroll, store]);
 
@@ -2979,7 +2979,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {visibleHistoryLines.map((line, index) => {
             const isUserLine = line.role === "user";
             const bgColor = isUserLine ? colors.userBg : undefined;
-            const paddedText = isUserLine ? line.text.padEnd(contentWidth, " ") : line.text;
+            // Minimal padding (1 char each side) instead of full width
+            const paddedText = isUserLine ? ` ${line.text} ` : line.text;
             return (
               <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
                 <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
@@ -3137,15 +3138,14 @@ function levelColor(level?: string | null): string | undefined {
 }
 
 /** Syntax highlight patterns - use color keys, resolved at runtime */
-type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg";
+type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg" | "diffContextBg";
 
-// Hardcoded diff colors - bright and consistent regardless of theme
+// Hardcoded diff colors for add/remove - bright and consistent for visibility
 const DIFF_ADD_FG = "#ffffff";    // White text for visibility
 const DIFF_ADD_BG = "#166534";    // Solid green background
 const DIFF_REMOVE_FG = "#ffffff"; // White text for visibility
 const DIFF_REMOVE_BG = "#991b1b"; // Solid red background
-const DIFF_CONTEXT_FG = "#d4d4d8"; // Light grey text for context lines
-const DIFF_CONTEXT_BG = "#27272a"; // Darker grey background for context
+// Context uses theme's diffContextBg (same as userBg) - resolved at runtime
 
 const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: ColorKey; hardcodedColor?: string; hardcodedBg?: string; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
   // Diff/Edit tool header - format: "✓ Edit /path/to/file.ts  +3 / -2 (123ms)"
@@ -3153,7 +3153,7 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
   // Diff lines with line numbers - format: "  42 + content" or "  42 - content" or "  42   content"
   { pattern: /^\s*\d+\s+\+ .*$/gm, hardcodedColor: DIFF_ADD_FG, hardcodedBg: DIFF_ADD_BG },
   { pattern: /^\s*\d+\s+- .*$/gm, hardcodedColor: DIFF_REMOVE_FG, hardcodedBg: DIFF_REMOVE_BG },
-  { pattern: /^\s*\d+\s{3}.*$/gm, hardcodedColor: DIFF_CONTEXT_FG, hardcodedBg: DIFF_CONTEXT_BG },
+  { pattern: /^\s*\d+\s{3}.*$/gm, colorKey: "text", bgKey: "diffContextBg" },
 
   // Horizontal rules (---, ***, ___)
   { pattern: /^[-*_]{3,}\s*$/gm, colorKey: "hr", transform: (s) => "─".repeat(Math.max(3, s.trim().length)) },
@@ -3190,13 +3190,11 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
     return match ? match[1] : s;
   }},
 
-  // Bold text (**text** or __text__) - non-greedy to handle content with asterisks/underscores
+  // Bold text (**text**) - underscore emphasis disabled to avoid mangling identifiers
   { pattern: /\*\*.+?\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
-  { pattern: /__.+?__/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
 
-  // Italic text (*text* or _text_) - single markers, non-greedy
+  // Italic text (*text*) - underscore emphasis disabled to avoid mangling identifiers
   { pattern: /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
-  { pattern: /(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
 
   // Inline code - non-greedy
   { pattern: /`.+?`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
@@ -3327,6 +3325,64 @@ function StyledLine({ text, baseColor }: { text: string; baseColor?: string }): 
       ))}
     </>
   );
+}
+
+/** Check if line is a markdown code fence */
+function isMarkdownFenceLine(text: string): boolean {
+  return /^```/.test(text.trim());
+}
+
+/** Check if line is a markdown header */
+function isMarkdownHeaderLine(text: string): boolean {
+  return /^#{1,6}\s+\S/.test(text);
+}
+
+/**
+ * Apply visual spacing rules to history lines:
+ * - Collapse multiple blank lines (outside code blocks)
+ * - Add spacing after markdown headers
+ * - Add spacing after reasoning blocks
+ */
+function applyVisualSpacing(lines: HistoryLine[]): HistoryLine[] {
+  const out: HistoryLine[] = [];
+  let inCodeBlock = false;
+  let prevWasBlank = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const baseId = line.id ?? `line-${i}`;
+    const text = line.text ?? "";
+    const trimmed = text.trim();
+    const isBlank = trimmed.length === 0;
+
+    const isFence = isMarkdownFenceLine(text);
+    if (isFence) inCodeBlock = !inCodeBlock;
+
+    // Collapse blank-line runs (but never inside code blocks)
+    if (!inCodeBlock && isBlank && prevWasBlank) continue;
+
+    out.push(line);
+    prevWasBlank = isBlank;
+
+    if (inCodeBlock) continue;
+
+    const next = lines[i + 1];
+    const nextIsBlank = (next?.text ?? "").trim().length === 0;
+
+    // Add spacing after markdown headers
+    if (isMarkdownHeaderLine(text) && !nextIsBlank) {
+      out.push({ id: `${baseId}-sp-h`, text: "", role: line.role });
+      prevWasBlank = true;
+    }
+
+    // Add spacing after reasoning blocks
+    if (line.role === "reasoning" && next && next.role !== "reasoning" && !isBlank && !nextIsBlank) {
+      out.push({ id: `${baseId}-sp-r`, text: "", role: "reasoning" });
+      prevWasBlank = true;
+    }
+  }
+
+  return out;
 }
 
 function messageExists(history: MessageEntry[], requestId: string): boolean {

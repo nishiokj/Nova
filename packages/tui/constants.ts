@@ -19,7 +19,7 @@ export const HORIZONTAL_PADDING = 2;
 export const TOP_PADDING = 1;
 
 /** Bottom padding (in lines) */
-export const BOTTOM_PADDING = 3;
+export const BOTTOM_PADDING = 1;
 
 /** Minimum terminal width (characters) */
 export const MIN_TERMINAL_WIDTH = 40;

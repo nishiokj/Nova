@@ -224,6 +224,12 @@ export interface AgentHooks {
     args: Record<string, unknown>,
     result: ToolResult
   ) => Promise<ToolHookResult>;
+
+  /**
+   * Called at the start of each agent iteration to check for stop signal.
+   * Returns true if agent should stop immediately (e.g., user typed "stop").
+   */
+  shouldStop?: () => boolean;
 }
 
 // ============================================

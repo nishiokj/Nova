@@ -74,7 +74,8 @@ export interface ThemeColors {
   diffAddBg: string;
   diffRemoveBg: string;
   diffHeader: string;     // File header text (e.g., "✓ Edit /path/to/file.ts")
-  diffHeaderBg: string;   // File header background
+  diffHeaderBg: string;   // File header background (matches userBg for cohesion)
+  diffContextBg: string;  // Context line background (matches userBg for cohesion)
 }
 
 export interface Theme {
@@ -122,7 +123,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1e3a1e",   // Dark green background
       diffRemoveBg: "#3a1e1e", // Dark red background
       diffHeader: "#89b4fa", // Blue - file path header
-      diffHeaderBg: "#313244", // Surface0 - subtle background
+      diffHeaderBg: "#45475a", // Same as userBg for cohesion
+      diffContextBg: "#45475a", // Same as userBg for cohesion
     },
   },
 
@@ -159,7 +161,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1e3a1e",   // Dark green background
       diffRemoveBg: "#3a1e1e", // Dark red background
       diffHeader: "#8caaee", // Blue - file path header
-      diffHeaderBg: "#414559", // Surface0 - subtle background
+      diffHeaderBg: "#51576d", // Same as userBg for cohesion
+      diffContextBg: "#51576d", // Same as userBg for cohesion
     },
   },
 
@@ -197,7 +200,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1a2e2e",   // Dark teal background
       diffRemoveBg: "#2e1a22", // Dark rose background
       diffHeader: "#9ccfd8", // Foam - file path header
-      diffHeaderBg: "#26233a", // Highlight low - subtle background
+      diffHeaderBg: "#403d52", // Same as userBg for cohesion
+      diffContextBg: "#403d52", // Same as userBg for cohesion
     },
   },
 
@@ -234,7 +238,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1a2e2e",   // Dark teal background
       diffRemoveBg: "#2e1a22", // Dark rose background
       diffHeader: "#9ccfd8", // Foam - file path header
-      diffHeaderBg: "#2a273f", // Highlight low - subtle background
+      diffHeaderBg: "#44415a", // Same as userBg for cohesion
+      diffContextBg: "#44415a", // Same as userBg for cohesion
     },
   },
 
@@ -272,7 +277,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1a2e1a",   // Dark green background
       diffRemoveBg: "#2e1a1e", // Dark red background
       diffHeader: "#7aa2f7", // Blue - file path header
-      diffHeaderBg: "#1f2335", // Background highlight - subtle background
+      diffHeaderBg: "#3b4261", // Same as userBg for cohesion
+      diffContextBg: "#3b4261", // Same as userBg for cohesion
     },
   },
 
@@ -310,7 +316,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1e2e1e",   // Dark green background
       diffRemoveBg: "#2e1e1e", // Dark red background
       diffHeader: "#88C0D0", // Nord8 - file path header
-      diffHeaderBg: "#3B4252", // Nord1 - subtle background
+      diffHeaderBg: "#4C566A", // Same as userBg for cohesion
+      diffContextBg: "#4C566A", // Same as userBg for cohesion
     },
   },
 
@@ -348,7 +355,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#2a2e1a",   // Dark olive background
       diffRemoveBg: "#2e1a1a", // Dark red background
       diffHeader: "#83a598", // Bright blue - file path header
-      diffHeaderBg: "#3c3836", // Dark1 - subtle background
+      diffHeaderBg: "#504945", // Same as userBg for cohesion
+      diffContextBg: "#504945", // Same as userBg for cohesion
     },
   },
 
@@ -386,7 +394,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1e2a1e",   // Dark green background
       diffRemoveBg: "#2a1e1e", // Dark red background
       diffHeader: "#7E9CD8", // Crystal blue - file path header
-      diffHeaderBg: "#2A2A37", // Sumi ink4 - subtle background
+      diffHeaderBg: "#54546D", // Same as userBg for cohesion
+      diffContextBg: "#54546D", // Same as userBg for cohesion
     },
   },
 
@@ -424,7 +433,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1e2a1e",   // Dark green background
       diffRemoveBg: "#2a1e1e", // Dark red background
       diffHeader: "#7fbbb3", // Aqua - file path header
-      diffHeaderBg: "#374145", // Bg2 - subtle background
+      diffHeaderBg: "#4f5b58", // Same as userBg for cohesion
+      diffContextBg: "#4f5b58", // Same as userBg for cohesion
     },
   },
 
@@ -462,7 +472,8 @@ export const themes: Record<string, Theme> = {
       diffAddBg: "#1e2a1e",   // Dark green background
       diffRemoveBg: "#2a1e1e", // Dark red background
       diffHeader: "#61afef", // Blue - file path header
-      diffHeaderBg: "#2c323c", // Gutter bg - subtle background
+      diffHeaderBg: "#3e4451", // Same as userBg for cohesion
+      diffContextBg: "#3e4451", // Same as userBg for cohesion
     },
   },
 };

@@ -288,4 +288,12 @@ export class SessionStore {
   hasPendingInterruption(): boolean {
     return this.queuedUserMessages.length > 0;
   }
+
+  /**
+   * Check if any pending user message is a stop request.
+   * Used by agent to exit loop early on explicit user stop.
+   */
+  hasPendingStopRequest(): boolean {
+    return this.queuedUserMessages.some(({ message }) => /\bstop\b/i.test(message));
+  }
 }

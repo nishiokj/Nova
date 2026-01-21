@@ -84,9 +84,15 @@ export class EventBus implements EventBusProtocol {
     const runId = (event as any).runId ?? event.requestId;
     const runHandlers = runId ? this.runHandlers.get(runId) : undefined;
 
+    // Optimized: fast-path for agent_message/reasoning events (high-frequency streaming)
+    // Skip global handlers for streaming events - they're only needed by run-specific subscribers
+    const isStreamingEvent = event.type === 'agent_message' || event.type === 'agent_reasoning';
+
     try {
       this.emitter.emit(event.type, event);
-      this.emitter.emit(this.ALL_EVENTS, event);
+      if (!isStreamingEvent) {
+        this.emitter.emit(this.ALL_EVENTS, event);
+      }
     } catch (err) {
       console.error('[EventBus] Handler error:', err);
     }
@@ -101,7 +107,7 @@ export class EventBus implements EventBusProtocol {
       }
     }
 
-    if (this.globalHandlers.size) {
+    if (!isStreamingEvent && this.globalHandlers.size) {
       for (const handler of this.globalHandlers) {
         try {
           handler(event);

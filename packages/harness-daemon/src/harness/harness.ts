@@ -1220,7 +1220,11 @@ export class AgentHarness {
       : undefined;
 
     // Build orchestrator config with optional hooks
-    const orchestratorConfig: { stopHook?: typeof stopHook; checkInterruption?: () => boolean } = {};
+    const orchestratorConfig: {
+      stopHook?: typeof stopHook;
+      checkInterruption?: () => boolean;
+      checkStopRequest?: () => boolean;
+    } = {};
     if (stopHook) {
       orchestratorConfig.stopHook = stopHook;
     }
@@ -1232,6 +1236,8 @@ export class AgentHarness {
         const pending = store.drainQueuedMessages();
         return pending.length > 0;
       };
+      // Pass stop request check so agent can exit loop early on explicit "stop" from user
+      orchestratorConfig.checkStopRequest = () => store.hasPendingStopRequest();
     }
 
     const orchestrator = new Orchestrator(

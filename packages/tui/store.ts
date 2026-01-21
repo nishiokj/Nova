@@ -657,12 +657,12 @@ export class Store {
     }
 
     this.streamingText += chunk;
-    this.historyVersion += 1;
 
     // Throttle emissions during streaming for better performance
     const now = Date.now();
     if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
       this.lastStreamingEmit = now;
+      this.historyVersion += 1;  // Only increment when emitting
       this.emit();
     }
   }
@@ -697,12 +697,12 @@ export class Store {
     }
 
     this.reasoningText += chunk;
-    this.historyVersion += 1;
 
     // Throttle emissions during streaming for better performance
     const now = Date.now();
     if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
       this.lastStreamingEmit = now;
+      this.historyVersion += 1;  // Only increment when emitting
       this.emit();
     }
   }

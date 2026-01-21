@@ -294,7 +294,7 @@ const DEATH_SPIRAL_THRESHOLD_MS = 2000;
 /** Number of rapid iterations before aborting */
 const DEATH_SPIRAL_COUNT = 3;
 
-/** Termination reasons that should continue the Ralph loop */
+/** Termination reasons that should always continue the Ralph loop */
 const CONTINUABLE_TERMINATIONS = new Set([
   'goal_state_reached',
   'max_iterations_exceeded',
@@ -302,7 +302,17 @@ const CONTINUABLE_TERMINATIONS = new Set([
   'max_duration_exceeded',
   'handoff_requested', // Orchestrator handles handoffs internally
   'user_input_required', // Handled specially with async mode message
+  'no_action', // LLM didn't output proper action field - common formatting issue
+  'invalid_action', // Invalid action value - try again
 ]);
+
+/** Termination reasons that can continue IF there's substantial response content */
+const CONDITIONAL_CONTINUABLE = new Set([
+  'agent_error', // Agent errors might be recoverable if LLM produced output
+]);
+
+/** Minimum response length to consider an error recoverable */
+const MIN_RESPONSE_FOR_RECOVERY = 50;
 
 /** Message sent when agent tries to ask user questions in async Ralph mode */
 const ASYNC_MODE_MESSAGE = 'You are in async mode. User cannot answer questions. Do not ask again. Continue working autonomously.';
@@ -315,8 +325,14 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
   return (context: StopHookContext): StopHookResult => {
     state.lastResponse = context.response;
 
-    // For non-continuable terminations (errors, refusals), end the loop
-    if (!CONTINUABLE_TERMINATIONS.has(context.terminationReason)) {
+    // Check if this termination reason allows continuation
+    const isAlwaysContinuable = CONTINUABLE_TERMINATIONS.has(context.terminationReason);
+    const isConditionalContinuable = CONDITIONAL_CONTINUABLE.has(context.terminationReason);
+    const hasSubstantialResponse = (context.response?.length ?? 0) >= MIN_RESPONSE_FOR_RECOVERY;
+
+    // For non-continuable terminations (refusals, circuit_open, rate_limit), end the loop
+    // agent_error can continue ONLY if there's substantial response (indicates LLM did work)
+    if (!isAlwaysContinuable && !(isConditionalContinuable && hasSubstantialResponse)) {
       config.onComplete?.(state, 'error');
       return { decision: 'allow' };
     }
@@ -345,6 +361,14 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
         systemMessage: `🔄 Ralph iteration ${state.iteration + 1} (async mode - no user input available)`,
       };
     }
+
+    // Handle error conditions that we're retrying - add context about the issue
+    const isErrorRetry = context.terminationReason === 'agent_error' ||
+                         context.terminationReason === 'no_action' ||
+                         context.terminationReason === 'invalid_action';
+    const errorHint = isErrorRetry
+      ? `\n\nPrevious iteration ended with ${context.terminationReason}. Make sure to use proper structured output with action field.`
+      : '';
 
     // Increment iteration count for actual progress
     state.iteration++;
@@ -376,7 +400,7 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
     // Block termination and re-inject the same prompt
     return {
       decision: 'block',
-      reason: config.prompt,
+      reason: config.prompt + errorHint,
       systemMessage: parts.join(' '),
     };
   };

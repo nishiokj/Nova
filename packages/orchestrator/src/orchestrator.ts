@@ -60,6 +60,11 @@ export interface OrchestratorConfig {
    * If returns true, orchestrator creates new work item and continues.
    */
   checkInterruption?: () => boolean;
+  /**
+   * Check for user stop request (e.g., user typed "stop").
+   * Passed to agent's shouldStop hook. Called each agent iteration.
+   */
+  checkStopRequest?: () => boolean;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -712,6 +717,19 @@ export class Orchestrator {
             continue;
           }
 
+          // TERMINAL: User stopped (explicit "stop" from user)
+          if (result.terminationReason === 'user_stopped') {
+            this.log('info', 'User stopped execution', { workId });
+            context.addAgentResultContext(result);
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response || 'Execution stopped by user.',
+              terminationReason: 'user_stopped',
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
           // TERMINAL: Hard error
           if (result.error && !result.success && !actionIsContinue) {
             this.log('error', 'Agent error', { workId, error: result.error });
@@ -947,6 +965,11 @@ export class Orchestrator {
     // Build LLM config from model selection (source of truth) + agent's llmParams
     const llmConfig = this.buildLlmConfig(config.llmParams, agentType);
 
+    // Merge hooks with shouldStop wired to checkStopRequest
+    const mergedHooks = this.config.checkStopRequest
+      ? { ...this.hooks, shouldStop: this.config.checkStopRequest }
+      : this.hooks;
+
     return new Agent(config, {
       llm: this.llm,
       toolRegistry: this.toolRegistry,
@@ -954,7 +977,7 @@ export class Orchestrator {
       requestId: this.requestId,
       agentRegistry: this.agentRegistry,
       llmConfig,
-      hooks: this.hooks,
+      hooks: mergedHooks,
       internalHookQueue: this.hookQueue,
       getModelSelection: this.getModelSelection,
     });

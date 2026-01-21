@@ -117,11 +117,16 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
         }
 
         const callId = (item.call_id ?? item.callId) as string;
-        const output = item.output as string;
+        const rawOutput = item.output as string;
+        const isError = item.isError as boolean | undefined;
+        // Prefix error outputs so the LLM knows it's an error (OpenAI doesn't have is_error field)
+        const content = isError && rawOutput && !rawOutput.startsWith('Error')
+          ? `Error: ${rawOutput}`
+          : rawOutput;
         result.push({
           role: 'tool',
           tool_call_id: callId,
-          content: output,
+          content,
         });
         continue;
       }

@@ -624,10 +624,16 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
       if (item.type === 'function_call_output') {
         const outputCallId = (item.call_id ?? item.callId) as string;
+        const rawOutput = item.output as string;
+        const isError = item.isError as boolean | undefined;
+        // Prefix error outputs so the LLM knows it's an error
+        const output = isError && rawOutput && !rawOutput.startsWith('Error')
+          ? `Error: ${rawOutput}`
+          : rawOutput;
         input.push({
           type: 'function_call_output',
           call_id: outputCallId,
-          output: item.output,
+          output,
         });
         continue;
       }
@@ -734,44 +740,63 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
   private parseToolCalls(response: Record<string, unknown>): ToolCall[] {
     const output = response.output as Array<Record<string, unknown>> | undefined;
-    if (!output) return [];
+    if (!output || !Array.isArray(output)) return [];
 
     const toolCalls: ToolCall[] = [];
     const isValidToolName = (name: unknown): name is string =>
-      typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
+      typeof name === 'string' && name.length > 0 && /^[A-Za-z0-9_-]+$/.test(name);
+
+    const isValidCallId = (id: unknown): id is string =>
+      typeof id === 'string' && id.length > 0;
 
     for (const item of output) {
+      if (!item || typeof item !== 'object') continue;
+
       if (item.type === 'function_call') {
         const callId = (item.call_id ?? item.id) as string;
         const name = item.name as string;
-        if (!isValidToolName(name)) continue;
-        const argsJson = item.arguments as string;
+        if (!isValidToolName(name) || !isValidCallId(callId)) continue;
+
         let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(argsJson);
-        } catch {
-          args = {};
+        const argsJson = item.arguments as string;
+        if (typeof argsJson === 'string' && argsJson.length > 0) {
+          try {
+            const parsed = JSON.parse(argsJson);
+            if (parsed && typeof parsed === 'object') {
+              args = parsed as Record<string, unknown>;
+            }
+          } catch {
+            // Invalid JSON, keep empty args
+          }
         }
+
         toolCalls.push({ id: callId, name, arguments: args });
         continue;
       }
 
       if (item.type !== 'message') continue;
       const contentBlocks = item.content as Array<Record<string, unknown>> | undefined;
-      if (!contentBlocks) continue;
+      if (!contentBlocks || !Array.isArray(contentBlocks)) continue;
 
       for (const block of contentBlocks) {
         if (block.type !== 'tool_call') continue;
         const callId = block.id as string;
         const name = block.name as string;
-        if (!isValidToolName(name)) continue;
-        const argsJson = block.arguments as string;
+        if (!isValidToolName(name) || !isValidCallId(callId)) continue;
+
         let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(argsJson);
-        } catch {
-          args = {};
+        const argsJson = block.arguments as string;
+        if (typeof argsJson === 'string' && argsJson.length > 0) {
+          try {
+            const parsed = JSON.parse(argsJson);
+            if (parsed && typeof parsed === 'object') {
+              args = parsed as Record<string, unknown>;
+            }
+          } catch {
+            // Invalid JSON, keep empty args
+          }
         }
+
         toolCalls.push({ id: callId, name, arguments: args });
       }
     }

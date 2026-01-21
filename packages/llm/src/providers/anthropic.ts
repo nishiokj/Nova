@@ -164,14 +164,21 @@ export class AnthropicProvider implements LLMProviderAdapter {
       model: string;
     };
 
-    const textBlocks = data.content.filter((c) => c.type === 'text');
-    const content = textBlocks.map((c) => c.text ?? '').join('');
+    const content = data.content
+      .filter((c): c is { type: string; text?: string } => c?.type === 'text' && typeof c.text === 'string')
+      .map((c) => c.text ?? '')
+      .join('');
 
-    const toolUseBlocks = data.content.filter((c) => c.type === 'tool_use');
+    const toolUseBlocks = data.content
+      .filter((c): c is { type: string; id?: string; name?: string; input?: Record<string, unknown> } =>
+        c?.type === 'tool_use' &&
+        typeof c.id === 'string' && c.id.length > 0 &&
+        typeof c.name === 'string' && c.name.length > 0
+      );
     const toolCalls: ToolCall[] = toolUseBlocks.map((c) => ({
-      id: c.id ?? '',
-      name: c.name ?? '',
-      arguments: (c.input as Record<string, unknown>) ?? {},
+      id: c.id!,
+      name: c.name!,
+      arguments: (c.input && typeof c.input === 'object') ? c.input : {},
     }));
 
     const stopReasonMap: Record<string, StopReason> = {

@@ -302,14 +302,7 @@ export class Agent {
     try {
       await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd);
     } catch (error) {
-      // Capture error message - ensure we always have SOME diagnostic info
-      let message = error instanceof Error ? error.message : String(error);
-      if (!message || message.trim().length === 0) {
-        // Error has no message - capture what we can
-        const errorType = error instanceof Error ? error.constructor.name : typeof error;
-        const stack = error instanceof Error ? error.stack?.split('\n').slice(0, 3).join('\n') : undefined;
-        message = `[Empty error message] type=${errorType}${stack ? `, stack:\n${stack}` : ''}`;
-      }
+      const message = error instanceof Error ? error.message : String(error);
       result.error = message;
 
       // Classify the error and set appropriate termination reason
@@ -333,8 +326,7 @@ export class Agent {
         console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
       } else {
         result.terminationReason = 'exception';
-        // Log all unclassified exceptions for debugging
-        console.error(`[AGENT] Exception in ${this.config.type}: ${message}`, error instanceof Error ? error.stack : '');
+        // Error detail is in result.error, not terminationReason
       }
 
       this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
@@ -401,12 +393,6 @@ export class Agent {
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
-      // Check for user stop request at the start of each iteration
-      if (this.hooks?.shouldStop?.()) {
-        result.terminationReason = 'user_stopped';
-        break;
-      }
-
       const elapsedMs = Date.now() - startTime;
 
       // Auto-compact if context is near full
@@ -1002,15 +988,11 @@ export class Agent {
         }
       }
 
-      // For event emission, include error message for failed tools (output is empty in errorResult)
-      const eventResult = toolResult.isSuccess
-        ? toolResult.output?.slice(0, 10000)
-        : (toolResult.error ?? toolResult.output ?? 'Unknown error').slice(0, 10000);
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
         phase: 'completed',
-        result: eventResult,
+        result: toolResult.output?.slice(0, 10000),
         success: toolResult.isSuccess,
         durationMs: toolDurationMs,
       }, workItemId));
@@ -1516,10 +1498,8 @@ export class Agent {
       if (toolOutputs.length > 0) {
         // Build a summary of what was found
         const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
-        const errorOutputs = toolOutputs.filter(o => o.isError && o.output);
         const outputSummaries: string[] = [];
 
-        // First include successful outputs
         for (let i = 0; i < Math.min(successfulOutputs.length, 5); i++) {
           const output = successfulOutputs[i];
           // Find the corresponding tool call to know what tool was used
@@ -1531,46 +1511,18 @@ export class Agent {
           outputSummaries.push(`[${toolName}]: ${truncatedOutput}`);
         }
 
-        // If no successful outputs, include error outputs so parent knows what went wrong
-        if (successfulOutputs.length === 0 && errorOutputs.length > 0) {
-          for (let i = 0; i < Math.min(errorOutputs.length, 5); i++) {
-            const output = errorOutputs[i];
-            const matchingCall = toolCalls.find(tc => tc.callId === output.callId);
-            const toolName = matchingCall?.name ?? 'unknown';
-            const truncatedOutput = output.output.length > 2000
-              ? output.output.slice(0, 2000) + '... [truncated]'
-              : output.output;
-            outputSummaries.push(`[${toolName} ERROR]: ${truncatedOutput}`);
-          }
-        }
-
         if (outputSummaries.length > 0) {
-          const totalOutputs = successfulOutputs.length > 0 ? successfulOutputs.length : errorOutputs.length;
-          const outputType = successfulOutputs.length > 0 ? 'tool outputs' : 'tool errors';
-          enhancedResponse = `Sub-agent exploration results (${totalOutputs} ${outputType}):\n\n${outputSummaries.join('\n\n')}`;
-          if (totalOutputs > 5) {
-            enhancedResponse += `\n\n... and ${totalOutputs - 5} more results`;
+          enhancedResponse = `Sub-agent exploration results (${successfulOutputs.length} tool outputs):\n\n${outputSummaries.join('\n\n')}`;
+          if (successfulOutputs.length > 5) {
+            enhancedResponse += `\n\n... and ${successfulOutputs.length - 5} more results`;
           }
         }
       }
     }
 
     // Extract artifacts from structured output and add to parent's local context
-    // Artifacts use of rich schema: sourcePath, line, kind, name, signature, modifies, calls, insight, reduces
+    // Artifacts use the rich schema: sourcePath, line, kind, name, signature, modifies, calls, insight, reduces
     const artifacts = subResult.structuredOutput?.artifacts;
-    let extractedArtifacts: Array<{
-      sourcePath: string;
-      line?: number | null;
-      kind: string;
-      name: string;
-      signature?: string | null;
-      modifies?: string[] | null;
-      calls?: string[] | null;
-      insight?: string | null;
-      reduces?: string | null;
-    }> = [];
-
-    // Try to extract artifacts from structured output first
     if (Array.isArray(artifacts) && artifacts.length > 0) {
       const validArtifacts = artifacts.filter((a): a is {
         sourcePath: string;
@@ -1589,37 +1541,22 @@ export class Agent {
         typeof a.kind === 'string' &&
         typeof a.name === 'string'
       ));
-      extractedArtifacts.push(...validArtifacts);
-    }
 
-    // FALLBACK: If structured output parsing failed, extract directly from sub-agent's local context.
-    // This handles cases where tool call exceptions caused JSON parsing to fail.
-    // The sub-agent may have discovered artifacts but structuredOutput is null.
-    if (extractedArtifacts.length === 0 && subResult.localContext) {
-      const contextArtifacts = subResult.localContext.getArtifacts();
-      if (contextArtifacts.length > 0) {
-        extractedArtifacts.push(...contextArtifacts);
-        this.emit(createEvent('agent_message', {
-          agentType: this.config.type,
-          message: `[Sub-agent artifact extraction] Retrieved ${contextArtifacts.length} artifacts from local context after structured output parsing failed`,
-        }, subWorkItem.workId));
+      if (validArtifacts.length > 0) {
+        parentLocalContext.addArtifacts(validArtifacts.map(a => ({
+          sourcePath: a.sourcePath,
+          line: typeof a.line === 'number' ? a.line : undefined,
+          kind: a.kind as ArtifactKind,
+          name: a.name,
+          signature: typeof a.signature === 'string' ? a.signature : undefined,
+          modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
+          calls: Array.isArray(a.calls) ? a.calls : undefined,
+          insight: typeof a.insight === 'string' ? a.insight : undefined,
+          reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
+          relevance: 1.0, // Default: explorer returns what's relevant
+          discoveredBy: agentConfig.type,
+        })));
       }
-    }
-
-    if (extractedArtifacts.length > 0) {
-      parentLocalContext.addArtifacts(extractedArtifacts.map(a => ({
-        sourcePath: a.sourcePath,
-        line: typeof a.line === 'number' ? a.line : undefined,
-        kind: a.kind as ArtifactKind,
-        name: a.name,
-        signature: typeof a.signature === 'string' ? a.signature : undefined,
-        modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
-        calls: Array.isArray(a.calls) ? a.calls : undefined,
-        insight: typeof a.insight === 'string' ? a.insight : undefined,
-        reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
-        relevance: 1.0, // Default: explorer returns what's relevant
-        discoveredBy: agentConfig.type,
-      })));
     }
 
     // Merge sub-agent's discoveries back into parent's local context
@@ -1651,17 +1588,9 @@ export class Agent {
     // Include key details without requiring JSON parsing
     const errorParts = [
       `Sub-agent '${agentConfig.type}' failed`,
+      subResult.error ? `: ${subResult.error}` : '',
+      subResult.terminationReason ? ` (reason: ${subResult.terminationReason})` : '',
     ];
-    // Always include termination reason if we have one
-    if (subResult.terminationReason) {
-      errorParts.push(` (reason: ${subResult.terminationReason})`);
-    }
-    // Include error details - if missing, note that
-    if (subResult.error) {
-      errorParts.push(`: ${subResult.error}`);
-    } else if (subResult.terminationReason === 'exception') {
-      errorParts.push(` - no error message captured, check agent logs`);
-    }
     const toolsUsed = subResult.metrics?.toolCallsMade ?? 0;
     if (toolsUsed > 0) {
       errorParts.push(`\nTools called: ${toolsUsed} (${subResult.metrics?.toolCallsSucceeded ?? 0} succeeded, ${subResult.metrics?.toolCallsFailed ?? 0} failed)`);
