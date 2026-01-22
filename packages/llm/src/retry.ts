@@ -108,6 +108,45 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Error thrown when an operation times out.
+ */
+export class TimeoutError extends Error {
+  public readonly timeoutMs: number;
+
+  constructor(message: string, timeoutMs: number) {
+    super(message);
+    this.name = 'TimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Wrap a promise with a timeout.
+ * If the promise doesn't resolve within timeoutMs, rejects with TimeoutError.
+ */
+export function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  operationName: string = 'Operation'
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new TimeoutError(`${operationName} timed out after ${timeoutMs}ms`, timeoutMs));
+    }, timeoutMs);
+
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+/**
  * Check if an error is retryable.
  * RateLimitErrors are handled specially - only retry if worth waiting.
  * Other transient errors (timeout, overload) are retryable.
@@ -318,11 +357,15 @@ export interface ResilientCallOptions {
   config?: Partial<ResilienceConfig>;
   circuitState?: CircuitBreakerState;
   circuitKey?: string;
+  /** Timeout for each attempt in ms. If not set, no timeout is applied. */
+  timeoutMs?: number;
+  /** Name of the operation for timeout error messages */
+  operationName?: string;
   onRetry?: (attempt: number, error: Error, delayMs: number) => void;
 }
 
 /**
- * Execute a function with retry and circuit breaker logic.
+ * Execute a function with retry, circuit breaker, and optional timeout.
  */
 export async function resilientCall<T>(
   fn: () => Promise<T>,
@@ -335,6 +378,7 @@ export async function resilientCall<T>(
 
   const state = options.circuitState ?? createCircuitState();
   const key = options.circuitKey ?? 'default';
+  const { timeoutMs, operationName = 'LLM call' } = options;
 
   // Check circuit breaker
   if (!shouldAllowRequest(state, config)) {
@@ -345,14 +389,20 @@ export async function resilientCall<T>(
 
   for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
     try {
-      const result = await fn();
+      // Apply timeout wrapper if configured
+      const result = timeoutMs
+        ? await withTimeout(fn(), timeoutMs, operationName)
+        : await fn();
       recordSuccess(state, config);
       return result;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
 
+      // TimeoutError is retryable - the operation may have been transiently slow
+      const isTimeout = error instanceof TimeoutError;
+
       // Check if we should retry
-      if (attempt < config.maxRetries && isRetryableError(error)) {
+      if (attempt < config.maxRetries && (isRetryableError(error) || isTimeout)) {
         const delayMs = calculateBackoff(attempt, config);
         options.onRetry?.(attempt + 1, lastError, delayMs);
         await sleep(delayMs);

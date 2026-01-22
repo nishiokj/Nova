@@ -22,8 +22,10 @@ export type AgentCoreEventType =
   | 'rate_limit'
   | 'agent_bounds_hit'
   | 'agent_message'
+  | 'agent_reasoning'
   | 'artifact_discovered'
-  | 'agent_progress';
+  | 'agent_progress'
+  | 'permission_request';
 
 /**
  * Orchestrator event types.
@@ -224,6 +226,7 @@ export interface LLMCallData {
   totalTokens: number;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens?: number;
   durationMs: number;
   model: string;
   toolCallsCount: number;
@@ -294,6 +297,38 @@ export interface AgentProgressData {
   agentType: string;
   category?: 'search' | 'analysis' | 'discovery' | 'synthesis';
   count?: { current: number; total?: number; label: string };
+}
+
+/**
+ * Data for agent_reasoning event.
+ * Emitted when the LLM produces reasoning/thinking content.
+ */
+export interface AgentReasoningData {
+  /** The reasoning/thinking content from the model */
+  content: string;
+  /** Agent type that produced this reasoning */
+  agentType: string;
+  /** Whether this is a final chunk or streaming */
+  isFinal?: boolean;
+}
+
+/**
+ * Data for permission_request event.
+ * Emitted when a tool requires user permission.
+ */
+export interface PermissionRequestEventData {
+  /** Unique ID for this permission request */
+  requestId: string;
+  /** The tool requiring permission */
+  tool: 'Bash' | 'Write' | 'Edit';
+  /** Target: command for Bash, file path for Write/Edit */
+  target: string;
+  /** Suggested pattern for "Always Allow" option */
+  suggestedPattern: string;
+  /** Working directory for context */
+  workingDirectory: string;
+  /** Human-readable description of the action */
+  description: string;
 }
 
 // ============================================

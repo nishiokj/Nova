@@ -68,6 +68,10 @@ export interface ContextWindowMetrics {
   percentageUsed: number;
   /** Number of messages in context */
   messageCount: number;
+  /** Cached tokens from prompt (if provider supports prompt caching) */
+  cachedTokens?: number;
+  /** Cumulative cached tokens across all requests */
+  totalCachedTokens?: number;
 }
 
 /**
@@ -97,7 +101,8 @@ export function updateContextMetrics(
   metrics: ContextWindowMetrics,
   promptTokens: number,
   completionTokens: number,
-  messageCount: number
+  messageCount: number,
+  cachedTokens?: number
 ): ContextWindowMetrics {
   return {
     inputTokens: promptTokens,
@@ -107,6 +112,8 @@ export function updateContextMetrics(
     maxTokens: metrics.maxTokens,
     percentageUsed: promptTokens / metrics.maxTokens,
     messageCount,
+    cachedTokens,
+    totalCachedTokens: (metrics.totalCachedTokens ?? 0) + (cachedTokens ?? 0),
   };
 }
 

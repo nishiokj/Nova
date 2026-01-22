@@ -2,6 +2,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import path from "path";
+import { profiler } from "shared";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { BridgeClient, type ConnectionState } from "./bridge_client.js";
 import { FileCache } from "./file_cache.js";
@@ -24,16 +26,21 @@ import {
   type UserPromptData,
   type UserPromptQuestion,
   type AgentQuestion,
+  type QuestionOption,
   type QuestionType,
   type UsageSessionSummary,
   type UsageDayStats,
   type UsageProviderStats,
+  type RalphProgressData,
+  type RalphCompletionReason,
+  type PermissionRequestData,
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
 import { useMouse } from "./useMouse.js";
 import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
 import { QuestionPrompt } from "./components/QuestionPrompt.js";
+import { PermissionPrompt } from "./components/PermissionPrompt.js";
 import { ProvidersView } from "./components/ProvidersView.js";
 import { ResponsePane, parseDiffToResponseContent } from "./components/ResponsePane.js";
 import { SessionsView } from "./components/SessionsView.js";
@@ -42,10 +49,130 @@ import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
 import { formatDiffAsText } from "./diff.js";
+import {
+  DEFAULT_MAX_INPUT_LINES,
+  STREAM_CURSOR_FRAMES,
+  STATUS_SPINNER_FRAMES,
+  HORIZONTAL_PADDING,
+  TOP_PADDING,
+  BOTTOM_PADDING,
+  MIN_TERMINAL_WIDTH,
+  MIN_TERMINAL_HEIGHT,
+  DEFAULT_TERMINAL_WIDTH,
+  DEFAULT_TERMINAL_HEIGHT,
+  SCROLL_AMOUNT,
+  STATUS_TICK_INTERVAL,
+  SESSION_STALE_THRESHOLD,
+  NETWORK_TIMEOUT,
+  FILE_CACHE_REFRESH_INTERVAL,
+  CLEANUP_DELAY,
+  GRACEFUL_SHUTDOWN_DELAY,
+  ERROR_EXIT_DELAY,
+  RALPH_MAX_ITERATIONS,
+  RALPH_DEFAULT_PROMISE,
+  DEFAULT_GRAPHD_HOST,
+  DEFAULT_GRAPHD_PORT,
+  DEFAULT_EVENT_BUS_HOST,
+  DEFAULT_EVENT_BUS_PORT,
+  RANDOM_HEX_RADIX,
+  REQUEST_ID_SLICE_START,
+  REQUEST_ID_SLICE_END,
+  ISO_DATE_SLICE,
+  MIN_PROMPT_WIDTH,
+  MIN_PROMPT_HEIGHT,
+  MIN_PERMISSION_WIDTH,
+  MIN_PERMISSION_HEIGHT,
+  PROMPT_MAX_CONTENT_HEIGHT,
+} from "./constants.js";
 
-const DEFAULT_MAX_INPUT_LINES = 6;
-const STREAM_CURSOR_FRAMES = ["|", " "];
-const STATUS_SPINNER_FRAMES = ["-", "\\", "|", "/"];
+// ==================== Ralph Loop Argument Parsing ====================
+
+interface RalphArgs {
+  prompt: string;
+  fromFile: boolean;
+  maxIterations: number;
+  completionPromise: string;
+}
+
+/**
+ * Parse Ralph Loop command arguments.
+ *
+ * Syntax:
+ *   /ralph-loop <prompt> [options]
+ *   /ralph-loop @<file.md> [options]
+ *   /ralph-loop cancel
+ *
+ * Options:
+ *   --max-iterations=N or -n N: Max iterations (default: 20)
+ *   --complete="PHRASE": Completion promise (default: "TASK COMPLETE")
+ */
+function parseRalphArgs(arg: string): RalphArgs | null {
+  if (!arg || arg.trim() === "") {
+    return null;
+  }
+
+  const trimmed = arg.trim();
+
+  // Check for cancel command
+  if (trimmed.toLowerCase() === "cancel") {
+    return null; // Signal for cancel
+  }
+
+  let remaining = trimmed;
+  let maxIterations = RALPH_MAX_ITERATIONS;
+  let completionPromise = RALPH_DEFAULT_PROMISE;
+
+  // Extract --max-iterations=N or -n N
+  const maxIterMatch = remaining.match(/--max-iterations=(\d+)/i);
+  if (maxIterMatch) {
+    maxIterations = parseInt(maxIterMatch[1], 10);
+    remaining = remaining.replace(maxIterMatch[0], "").trim();
+  } else {
+    const shortMaxMatch = remaining.match(/-n\s+(\d+)/);
+    if (shortMaxMatch) {
+      maxIterations = parseInt(shortMaxMatch[1], 10);
+      remaining = remaining.replace(shortMaxMatch[0], "").trim();
+    }
+  }
+
+  // Extract --complete="PHRASE" or --complete='PHRASE'
+  const completeMatch = remaining.match(/--complete=["']([^"']+)["']/i);
+  if (completeMatch) {
+    completionPromise = completeMatch[1];
+    remaining = remaining.replace(completeMatch[0], "").trim();
+  }
+
+  // Remaining is the prompt source
+  const promptSource = remaining.trim();
+
+  if (!promptSource) {
+    return null;
+  }
+
+  // Check if it's a file reference
+  let prompt = promptSource;
+  let fromFile = false;
+
+  if (promptSource.startsWith("@")) {
+    const filePath = promptSource.slice(1);
+    const resolvedPath = path.resolve(process.cwd(), filePath);
+
+    try {
+      prompt = fs.readFileSync(resolvedPath, "utf-8");
+      fromFile = true;
+    } catch (err) {
+      // Return null to indicate error - caller should show message
+      return null;
+    }
+  }
+
+  return {
+    prompt,
+    fromFile,
+    maxIterations,
+    completionPromise,
+  };
+}
 
 interface GraphDSession {
   session_key: string;
@@ -61,17 +188,17 @@ function resolveGraphdUrl(): string {
   if (process.env.GRAPHD_URL) {
     return process.env.GRAPHD_URL;
   }
-  const host = process.env.GRAPHD_HOST ?? "127.0.0.1";
-  const port = process.env.GRAPHD_PORT ?? "9444";
+  const host = process.env.GRAPHD_HOST ?? DEFAULT_GRAPHD_HOST;
+  const port = process.env.GRAPHD_PORT ?? DEFAULT_GRAPHD_PORT;
   return `http://${host}:${port}`;
 }
 
 function resolveBusConfig(): { host: string; port: number } {
-  const host = process.env.EVENT_BUS_HOST ?? "127.0.0.1";
-  const portValue = Number(process.env.EVENT_BUS_PORT ?? "9555");
+  const host = process.env.EVENT_BUS_HOST ?? DEFAULT_EVENT_BUS_HOST;
+  const portValue = Number(process.env.EVENT_BUS_PORT ?? String(DEFAULT_EVENT_BUS_PORT));
   return {
     host,
-    port: Number.isFinite(portValue) ? portValue : 9555,
+    port: Number.isFinite(portValue) ? portValue : DEFAULT_EVENT_BUS_PORT,
   };
 }
 
@@ -178,7 +305,7 @@ async function fetchUsageData(): Promise<{
 
   // Build session summaries
   const now = Date.now() / 1000;
-  const staleThreshold = 5 * 60; // 5 minutes
+  const staleThreshold = SESSION_STALE_THRESHOLD;
 
   const sessions: UsageSessionSummary[] = rawSessions.map((raw) => {
     const messages = messagesBySession.get(raw.session_key) ?? [];
@@ -254,7 +381,7 @@ async function fetchUsageData(): Promise<{
   // Compute day stats
   const dayStatsMap = new Map<string, UsageDayStats>();
   for (const session of sessions) {
-    const date = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+    const date = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, ISO_DATE_SLICE);
     const existing = dayStatsMap.get(date) ?? {
       date,
       inputTokens: 0,
@@ -271,14 +398,14 @@ async function fetchUsageData(): Promise<{
   const dayStats = Array.from(dayStatsMap.values()).sort((a, b) => b.date.localeCompare(a.date));
 
   // Compute provider stats from actual provider data
-  const todayDate = new Date().toISOString().slice(0, 10);
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const todayDate = new Date().toISOString().slice(0, ISO_DATE_SLICE);
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, ISO_DATE_SLICE);
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, ISO_DATE_SLICE);
 
   const providerStatsMap = new Map<string, { today: number; week: number; month: number }>();
 
   for (const session of sessions) {
-    const sessionDate = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, 10);
+    const sessionDate = new Date(session.lastAccessedAt * 1000).toISOString().slice(0, ISO_DATE_SLICE);
 
     // Aggregate tokens by provider from actual session data
     for (const [provider, tokens] of session.providerTokens) {
@@ -352,7 +479,7 @@ function useTerminalSize() {
       stdout.write("\x1b[2J\x1b[H\x1b[3J");
 
       // Update size
-      setSize({ columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+      setSize({ columns: stdout.columns ?? DEFAULT_TERMINAL_WIDTH, rows: stdout.rows ?? DEFAULT_TERMINAL_HEIGHT });
 
       // Force a full re-render by updating a counter
       // This helps Ink recalculate its entire virtual buffer
@@ -390,11 +517,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   } | null>(null);
   const maxScrollRef = useRef(0);
   const historyHeightRef = useRef(0);
-  const width = Math.max(40, size.columns || 80);
-  const height = Math.max(10, size.rows || 24);
-  const HORIZONTAL_PADDING = 2;
-  const TOP_PADDING = 1;
-  const BOTTOM_PADDING = 3;
+  const width = Math.max(MIN_TERMINAL_WIDTH, size.columns || DEFAULT_TERMINAL_WIDTH);
+  const height = Math.max(MIN_TERMINAL_HEIGHT, size.rows || DEFAULT_TERMINAL_HEIGHT);
   const contentWidth = width - HORIZONTAL_PADDING * 2;
   const prompt = "> ";
   const widthRef = useRef(width);
@@ -440,7 +564,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     const interval = setInterval(() => {
       setStatusTick((tick) => tick + 1);
-    }, 150);
+    }, STATUS_TICK_INTERVAL);
     return () => {
       clearInterval(interval);
     };
@@ -471,7 +595,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       fileCache.refreshIfNeeded().catch(() => {
         // Ignore refresh failures.
       });
-    }, 5000);
+    }, FILE_CACHE_REFRESH_INTERVAL);
 
     fileCache.buildInitial();
 
@@ -530,6 +654,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           type: "init",
           data: initData,
         });
+
+        // Set dangerous mode for this session if requested
+        // Each session has its own dangerous mode state - does not affect other TUIs
+        if (options.dangerousMode) {
+          void client.setDangerousMode(true).catch((err) => {
+            console.error('[tui] Failed to set dangerous mode:', err);
+          });
+        }
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -540,18 +672,19 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Gracefully closes session before disconnecting
     const cleanup = () => {
       const snapshot = store.getSnapshot();
-      const currentEntry = store.getCurrentModelEntry();
-      const selectedModel = snapshot.selectedModel;
-      const selectedProvider = snapshot.selectedProvider ?? currentEntry?.provider ?? null;
-      if (selectedModel && selectedProvider) {
-        client.send({
-          type: "set_model",
-          data: {
-            provider: selectedProvider,
-            model: selectedModel,
-            ...(snapshot.selectedReasoningLevel ? { reasoning: snapshot.selectedReasoningLevel } : {}),
-          },
-        });
+      // Persist all model selections (standard, explorer, coding) on cleanup
+      for (const [agentType, selection] of snapshot.modelSelections) {
+        if (selection?.model && selection?.provider) {
+          client.send({
+            type: "set_model",
+            data: {
+              agent_type: agentType,
+              provider: selection.provider,
+              model: selection.model,
+              ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
+            },
+          });
+        }
       }
       // Signal session close to harness (don't await - best effort)
       // This marks the session as inactive so it shows correctly in /sessions
@@ -561,7 +694,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       // Small delay to allow the close message to be sent
       setTimeout(() => {
         client.close();
-      }, 50);
+      }, CLEANUP_DELAY);
       clearInterval(refreshInterval);
       logger.close();
     };
@@ -577,13 +710,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   }, [width, snapshot.inputText, snapshot.cursor, store]);
 
   // Mouse wheel scrolling
-  const scrollAmount = 3; // lines to scroll per wheel tick
+
   useMouse({
     onScrollUp: () => {
-      store.scrollBy(scrollAmount, maxScrollRef.current);
+      store.scrollBy(SCROLL_AMOUNT, maxScrollRef.current);
     },
     onScrollDown: () => {
-      store.scrollBy(-scrollAmount, maxScrollRef.current);
+      store.scrollBy(-SCROLL_AMOUNT, maxScrollRef.current);
     },
   });
 
@@ -610,6 +743,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   });
 
   const handleBridgeEvent = (event: BridgeEvent) => {
+    profiler.begin(`tui.handleEvent:${event.type}`, 'tui');
     try {
       switch (event.type) {
         case "ready":
@@ -642,6 +776,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         case "model_changed":
           handleModelChanged(event.data as ModelChangedData | undefined);
           break;
+        case "permission_request":
+          handlePermissionRequest(event.data as PermissionRequestData | undefined);
+          break;
         default:
           break;
       }
@@ -652,16 +789,18 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.setError(errorMessage);
       });
     }
+    profiler.end(`tui.handleEvent:${event.type}`, 'tui');
   };
 
   const handleReady = async (data?: ReadyData) => {
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
     }
+    // Clear all model selections on session start - will be repopulated by model_changed events
     store.batch(() => {
-      store.setSelectedModel(null);
-      store.setSelectedProvider(null);
-      store.setReasoningLevel(null);
+      store.setModelSelection('standard', null);
+      store.setModelSelection('explorer', null);
+      store.setModelSelection('coding', null);
     });
     if (data?.capabilities) {
       // Convert snake_case from bridge to camelCase for store
@@ -745,6 +884,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (!data?.message) {
       return;
     }
+
+    // Handle Ralph Loop iteration progress
+    const ralphData = data as unknown as { ralph_iteration?: RalphProgressData };
+    if (ralphData.ralph_iteration) {
+      const ralph = ralphData.ralph_iteration;
+      store.setRalphState(
+        true,
+        ralph.iteration,
+        ralph.maxIterations,
+        ralph.completionPromise
+      );
+      // Don't return - continue to show progress message
+    }
+
     const message = data.tool_name ? `${data.tool_name}: ${data.message}` : data.message;
     store.setProgress(message, data.level, data.kind);
 
@@ -781,26 +934,66 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (!data?.request_id || data.chunk === undefined) {
       return;
     }
+
+    profiler.begin('tui.stream.process', 'tui');
+
+    // Single getSnapshot for hot path - avoid repeated state copies
     const currentSnapshot = store.getSnapshot();
+
+    // Route reasoning content separately from main response
+    if (data.is_reasoning) {
+      // Handle reasoning final marker (empty chunk with is_final=true)
+      // Don't clear reasoning yet - it stays visible until main response completes
+      if (data.is_final) {
+        profiler.end('tui.stream.process', 'tui');
+        return;
+      }
+      // Append reasoning chunks
+      profiler.begin('tui.stream.reasoning', 'tui');
+      if (currentSnapshot.reasoningRequestId !== data.request_id) {
+        store.setReasoning(data.request_id, data.chunk);
+      } else {
+        store.appendReasoning(data.chunk);
+      }
+      store.setState("streaming");
+      profiler.end('tui.stream.reasoning', 'tui');
+      profiler.end('tui.stream.process', 'tui');
+      return;
+    }
+
+    // Handle regular response streaming
+    profiler.begin('tui.stream.text', 'tui');
     if (currentSnapshot.streamingRequestId !== data.request_id) {
+      // New response stream - finalize any active reasoning first
+      if (currentSnapshot.reasoningRequestId === data.request_id) {
+        store.finalizeReasoning();
+        // Update snapshot after finalizing reasoning
+      }
       store.setStreaming(data.request_id, data.chunk);
+      profiler.instant('tui.stream.firstChunk', 'tui', 'p', { requestId: data.request_id });
     } else {
       store.appendStreaming(data.chunk);
     }
 
     store.setState("streaming");
+    profiler.end('tui.stream.text', 'tui');
 
     if (data.is_final) {
+      profiler.begin('tui.stream.finalize', 'tui');
       const finalText = store.getSnapshot().streamingText;
       store.batch(() => {
         if (!messageExists(store.getSnapshot().history, data.request_id)) {
           store.addMessage("agent", finalText, undefined, data.request_id);
         }
         store.finalizeStreaming();
+        store.finalizeReasoning(); // Clear any remaining reasoning
         store.clearProgress();
         store.setState("idle");
       });
+      profiler.end('tui.stream.finalize', 'tui');
+      profiler.instant('tui.stream.complete', 'tui', 'p', { requestId: data.request_id });
     }
+    profiler.end('tui.stream.process', 'tui');
   };
 
   const handleSkillsPayload = (payload: Record<string, unknown> | undefined, content: string) => {
@@ -881,21 +1074,94 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
       return;
     }
-    if (kind === "get_model") {
+    if (kind === "set_model") {
+      if (data.success === false) {
+        if (error) {
+          store.addMessage("system", error);
+        }
+        sendCommand("get_model");
+        return;
+      }
       const payload = metadata.payload as {
+        agent_type?: string | null;
+        selected_model?: { provider?: string; model?: string; reasoning?: string } | null;
         selectedModel?: string | null;
         selectedProvider?: string | null;
         provider?: string | null;
         model?: string | null;
         reasoning?: string | null;
       } | undefined;
+      const agentType = typeof payload?.agent_type === "string" ? payload.agent_type : "standard";
+      const selectedModelObj = payload?.selected_model ?? null;
+      const selectedModel =
+        selectedModelObj?.model ?? payload?.selectedModel ?? payload?.model ?? null;
+      const selectedProvider =
+        selectedModelObj?.provider ?? payload?.selectedProvider ?? payload?.provider ?? null;
+      const reasoning =
+        selectedModelObj?.reasoning ?? (typeof payload?.reasoning === "string" ? payload.reasoning : null);
+      store.batch(() => {
+        if (selectedModel && selectedProvider) {
+          store.setModelSelection(agentType, {
+            model: selectedModel,
+            provider: selectedProvider,
+            reasoning: reasoning ?? undefined,
+          });
+        } else {
+          store.setModelSelection(agentType, null);
+        }
+      });
+      return;
+    }
+    if (kind === "get_model") {
+      if (data.success === false) {
+        if (error) {
+          store.addMessage("system", error);
+        }
+        return;
+      }
+      const payload = metadata.payload as {
+        model_selections?: Record<string, { provider?: string; model?: string; reasoning?: string }>;
+        selectedModel?: string | null;
+        selectedProvider?: string | null;
+        provider?: string | null;
+        model?: string | null;
+        reasoning?: string | null;
+        agent_type?: string | null;
+      } | undefined;
+      const modelSelections = payload?.model_selections;
+      if (modelSelections && typeof modelSelections === "object") {
+        store.batch(() => {
+          const agentTypes = ["standard", "explorer", "coding"];
+          for (const agentType of agentTypes) {
+            const selection = modelSelections[agentType];
+            if (selection?.model && selection?.provider) {
+              store.setModelSelection(agentType, {
+                model: selection.model,
+                provider: selection.provider,
+                reasoning: selection.reasoning ?? undefined,
+              });
+            } else {
+              store.setModelSelection(agentType, null);
+            }
+          }
+        });
+        return;
+      }
+
       const selectedModel = payload?.selectedModel ?? payload?.model ?? null;
       const selectedProvider = payload?.selectedProvider ?? payload?.provider ?? null;
       const reasoning = typeof payload?.reasoning === "string" ? payload.reasoning : null;
+      const agentType = typeof payload?.agent_type === "string" ? payload.agent_type : "standard";
       store.batch(() => {
-        store.setSelectedProvider(selectedProvider);
-        store.setSelectedModel(selectedModel);
-        store.setReasoningLevel(reasoning);
+        if (selectedModel && selectedProvider) {
+          store.setModelSelection(agentType, {
+            model: selectedModel,
+            provider: selectedProvider,
+            reasoning: reasoning ?? undefined,
+          });
+        } else {
+          store.setModelSelection(agentType, null);
+        }
       });
       return;
     }
@@ -928,6 +1194,24 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           const errorMsg = payload?.error ?? "Unknown error";
           store.addMessage("system", `Context compaction failed: ${errorMsg}`);
         }
+        store.clearProgress();
+        store.setState("idle");
+      });
+      return;
+    }
+    if (kind === "ralph_loop_complete") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      const reason = (payload?.reason as RalphCompletionReason) ?? "error";
+      const iterations = (payload?.iterations as number) ?? 0;
+      store.batch(() => {
+        store.clearRalphState();
+        const reasonMessages: Record<RalphCompletionReason, string> = {
+          promise_detected: `✅ Ralph Loop completed successfully after ${iterations} iteration(s) - completion promise detected`,
+          max_iterations: `⏹️ Ralph Loop stopped after ${iterations} iteration(s) - max iterations reached`,
+          manual_cancel: `🛑 Ralph Loop cancelled after ${iterations} iteration(s)`,
+          error: `❌ Ralph Loop failed after ${iterations} iteration(s)`,
+        };
+        store.addMessage("system", reasonMessages[reason]);
         store.clearProgress();
         store.setState("idle");
       });
@@ -975,10 +1259,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         ? streamedContent
         : content;
 
+      console.error(`[TUI DEBUG] handleResponse: streamedContent=${streamedContent?.length ?? 0} chars, content=${content?.length ?? 0} chars, finalContent=${finalContent?.length ?? 0} chars, requestId=${requestId}`);
+      console.error(`[TUI DEBUG] handleResponse: messageExists=${requestId ? messageExists(store.getSnapshot().history, requestId) : 'no requestId'}`);
+
       if (finalContent && requestId && messageExists(store.getSnapshot().history, requestId)) {
+        console.error(`[TUI DEBUG] handleResponse: updating existing message`);
         store.updateMessageText(requestId, finalContent, meta);
       } else if (finalContent && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
+        console.error(`[TUI DEBUG] handleResponse: adding new agent message`);
         store.addMessage("agent", finalContent, meta, requestId);
+      } else {
+        console.error(`[TUI DEBUG] handleResponse: NOT adding message - finalContent empty or other condition`);
       }
 
       store.finalizeStreaming();
@@ -1000,8 +1291,62 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.ensureInputCursorVisible(widthRef.current - 2, prompt, DEFAULT_MAX_INPUT_LINES);
   };
 
+  /**
+   * Validates user prompt event data at the boundary.
+   * Returns { valid: boolean, error?: string } with detailed error message if invalid.
+   */
+  const validateUserPromptData = (data: unknown): { valid: boolean; error?: string } => {
+    if (!data || typeof data !== 'object') {
+      return { valid: false, error: 'Data is missing or not an object' };
+    }
+
+    const payload = data as Record<string, unknown>;
+
+    // Validate required request_id field
+    if (!payload.request_id || typeof payload.request_id !== 'string') {
+      return { valid: false, error: 'Missing or invalid request_id (must be a string)' };
+    }
+
+    // Validate that either question (single) or questions (array) is present
+    const hasSingleQuestion = 'question' in payload && typeof payload.question === 'string';
+    const hasMultipleQuestions = 'questions' in payload && Array.isArray(payload.questions);
+
+    if (!hasSingleQuestion && !hasMultipleQuestions) {
+      return { valid: false, error: 'Missing question or questions array' };
+    }
+
+    // Validate questions array is not empty
+    if (hasMultipleQuestions && (payload.questions as unknown[]).length === 0) {
+      return { valid: false, error: 'questions array must not be empty' };
+    }
+
+    // Validate questions array elements have required fields
+    if (hasMultipleQuestions) {
+      for (let i = 0; i < (payload.questions as unknown[]).length; i++) {
+        const q = (payload.questions as unknown[])[i];
+        if (!q || typeof q !== 'object') {
+          return { valid: false, error: `questions[${i}] is not an object` };
+        }
+        const questionObj = q as Record<string, unknown>;
+        if (!questionObj.question || typeof questionObj.question !== 'string') {
+          return { valid: false, error: `questions[${i}] missing or invalid question field` };
+        }
+      }
+    }
+
+    return { valid: true };
+  };
+
   const handleUserPrompt = (data?: UserPromptData) => {
-    if (!data) return;
+    // Validate at the entry point
+    const validation = validateUserPromptData(data);
+    if (!validation.valid) {
+      store.addMessage('system', `Invalid user prompt event: ${validation.error}`);
+      return;
+    }
+
+    // After validation, we know data is an object with required fields
+    const validatedData = data as { request_id: string; question?: string; questions?: unknown[] };
 
     // Helper to infer question type from options and flags
     const inferQuestionType = (
@@ -1010,6 +1355,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       questionType?: string
     ): QuestionType => {
       if (questionType === "plan_mode_exit") return "plan_mode_exit";
+      if (questionType === "spec_review") return "spec_review";
       if (!opts || opts.length === 0) return "free_text";
       if (multiSelect) return "multi_select";
       const labels = opts.map((opt) =>
@@ -1021,52 +1367,113 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       return "multiple_choice";
     };
 
-    // Helper to convert raw question data to AgentQuestion
+    // Helper to convert raw question data to AgentQuestion with defensive field guards
+    // Supports both snake_case (wire format) and camelCase (legacy) for robustness
     const toAgentQuestion = (
       q: UserPromptQuestion,
       requestId: string,
       index: number
-    ): AgentQuestion => ({
-      requestId: `${requestId}_q${index}`,
-      type: inferQuestionType(q.options, q.multi_select, q.question_type),
-      question: q.question,
-      context: q.context,
-      options: q.options?.map((opt) => {
-        const label = typeof opt === "string" ? opt : opt.label;
-        return {
-          id: label, // Use label as ID so agent sees meaningful answer text
-          label,
-          description: typeof opt === "object" ? opt.description : undefined,
-        };
-      }),
-    });
+    ): AgentQuestion => {
+      // Guard against missing or empty question field (though validation should have caught this)
+      const questionText = q.question || 'Question text missing';
+
+      // Guard against missing options - default to empty array
+      const rawOptions = q.options || [];
+
+      // Safely map options, filtering out malformed ones
+      const processedOptions = rawOptions
+        .map((opt): QuestionOption | null => {
+          // Guard against null/undefined options
+          if (!opt) return null;
+
+          let label: string;
+          let description: string | undefined;
+
+          if (typeof opt === 'string') {
+            label = opt;
+          } else if (typeof opt === 'object' && opt.label) {
+            label = opt.label;
+            description = opt.description;
+          } else {
+            // Option object missing label - skip it
+            return null;
+          }
+
+          return {
+            id: label,
+            label,
+            description,
+          };
+        })
+        .filter((opt): opt is QuestionOption => opt !== null);
+
+      // Support both snake_case (wire format) and camelCase (legacy/agent format)
+      const qAny = q as unknown as Record<string, unknown>;
+      const multiSelect = q.multi_select ?? (qAny.multiSelect as boolean | undefined);
+      const questionType = q.question_type ?? (qAny.questionType as string | undefined);
+
+      return {
+        requestId: `${requestId}_q${index}`,
+        type: inferQuestionType(rawOptions, multiSelect, questionType),
+        question: questionText,
+        context: q.context,
+        options: processedOptions,
+      };
+    };
 
     // Handle multiple questions
-    if (data.questions && data.questions.length > 0) {
-      const questions = data.questions.map((q, i) => toAgentQuestion(q, data.request_id, i));
-      store.setQuestionQueue(questions, data.request_id);
+    if (validatedData.questions && validatedData.questions.length > 0) {
+      const questions = validatedData.questions.map((q, i) =>
+        toAgentQuestion(q as UserPromptQuestion, validatedData.request_id, i)
+      );
+      store.setQuestionQueue(questions, validatedData.request_id);
       return;
     }
 
     // Handle single question (backwards compatible)
-    if (!data.question) return;
+    if (!validatedData.question) return;
+
+    // Guard against malformed options in single question branch
+    const rawSingleOptions = (data as UserPromptData).options || [];
+    const processedSingleOptions = rawSingleOptions
+      .map((opt): QuestionOption | null => {
+        // Guard against null/undefined options
+        if (!opt) return null;
+
+        let label: string;
+        let description: string | undefined;
+
+        if (typeof opt === 'string') {
+          label = opt;
+        } else if (typeof opt === 'object' && opt.label) {
+          label = opt.label;
+          description = opt.description;
+        } else {
+          // Option object missing label - skip it
+          return null;
+        }
+
+        return {
+          id: label,
+          label,
+          description,
+        };
+      })
+      .filter((opt): opt is QuestionOption => opt !== null);
 
     const question: AgentQuestion = {
-      requestId: data.request_id,
-      type: inferQuestionType(data.options, data.multi_select, data.question_type),
-      question: data.question,
-      context: data.context,
-      options: data.options?.map((opt) => {
-        const label = typeof opt === "string" ? opt : opt.label;
-        return {
-          id: label, // Use label as ID so agent sees meaningful answer text
-          label,
-          description: typeof opt === "object" ? opt.description : undefined,
-        };
-      }),
+      requestId: validatedData.request_id,
+      type: inferQuestionType(
+        rawSingleOptions,
+        (data as UserPromptData).multi_select,
+        (data as UserPromptData).question_type
+      ),
+      question: validatedData.question,
+      context: (data as UserPromptData).context,
+      options: processedSingleOptions,
     };
 
-    store.setActiveQuestion(question, data.request_id);
+    store.setActiveQuestion(question, validatedData.request_id);
   };
 
   const handleProviderKeyRequired = (data?: ProviderKeyRequiredData) => {
@@ -1085,11 +1492,26 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const selectedModel = data?.selectedModel ?? data?.model ?? null;
     const selectedProvider = data?.selectedProvider ?? data?.provider ?? null;
     const reasoning = typeof data?.reasoning === "string" ? data.reasoning : null;
-    store.batch(() => {
-      store.setSelectedProvider(selectedProvider);
-      store.setSelectedModel(selectedModel);
-      store.setReasoningLevel(reasoning);
-    });
+    const agentType = (data as { agentType?: string })?.agentType ?? 'standard';
+
+    if (selectedModel && selectedProvider) {
+      store.setModelSelection(agentType, {
+        model: selectedModel,
+        provider: selectedProvider,
+        reasoning: reasoning ?? undefined,
+      });
+    } else {
+      store.setModelSelection(agentType, null);
+    }
+  };
+
+  const handlePermissionRequest = (data?: PermissionRequestData) => {
+    if (!data || !data.request_id) {
+      store.addMessage("system", "Invalid permission request received");
+      return;
+    }
+
+    store.setActivePermissionRequest(data);
   };
 
   const handleError = (data?: ErrorData) => {
@@ -1130,7 +1552,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     // Always include working_dir with requests that trigger agent execution
     // This ensures tools run in the correct directory regardless of where daemon was started
-    const needsWorkingDir = type === "send_text" || type === "user_prompt_response";
+    const needsWorkingDir = type === "send_text" || type === "user_prompt_response" || type === "ralph_loop_start";
     const payload = needsWorkingDir
       ? { ...data, working_dir: process.cwd() }
       : data;
@@ -1286,6 +1708,24 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
 
+      // Tab switching with left/right arrows
+      const AGENT_TABS = ['standard', 'explorer', 'coding'];
+      if (key.leftArrow) {
+        const currentTab = store.getModelsActiveTab();
+        const currentIdx = AGENT_TABS.indexOf(currentTab);
+        const newIdx = (currentIdx - 1 + AGENT_TABS.length) % AGENT_TABS.length;
+        store.setModelsActiveTab(AGENT_TABS[newIdx]);
+        return;
+      }
+
+      if (key.rightArrow) {
+        const currentTab = store.getModelsActiveTab();
+        const currentIdx = AGENT_TABS.indexOf(currentTab);
+        const newIdx = (currentIdx + 1) % AGENT_TABS.length;
+        store.setModelsActiveTab(AGENT_TABS[newIdx]);
+        return;
+      }
+
       if (key.upArrow) {
         store.moveModelsCursor(-1);
         return;
@@ -1296,13 +1736,22 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
 
+      // Space to stage the current model for this agent type
+      if (input === " ") {
+        store.stageModelAtCursor();
+        return;
+      }
+
       if (key.return) {
-        const selectedModel = snapshot.modelsList[snapshot.modelsCursor];
-        if (selectedModel) {
+        // Apply all staged selections and persist full state
+        store.applyAllStagedSelections();
+        const selections = store.getAllModelSelections();
+        for (const [agentType, selection] of selections) {
           sendCommand("set_model", {
-            provider: selectedModel.provider,
-            model: selectedModel.id,
-            ...(selectedModel.reasoning?.[0] ? { reasoning: selectedModel.reasoning[0] } : {}),
+            agent_type: agentType,
+            provider: selection.provider,
+            model: selection.model,
+            ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
           });
         }
         store.exitModelsMode();
@@ -1407,7 +1856,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
         // Enter selects for single-select or submits for multi-select
         if (key.return) {
-          if (questionType === "multiple_choice" || questionType === "yes_no" || questionType === "plan_mode_exit") {
+          if (questionType === "multiple_choice" || questionType === "yes_no" || questionType === "plan_mode_exit" || questionType === "spec_review") {
             store.toggleQuestionSelection();
           }
 
@@ -1422,6 +1871,26 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             }
           }
 
+          // Handle spec_review: if user selected first option ("Yes, execute"), disable plan mode
+          if (questionType === "spec_review") {
+            if (snapshot.questionCursor === 0) {
+              store.batch(() => {
+                store.setPlanMode(false);
+                store.addMessage("system", "Plan mode disabled. Executing implementation.");
+              });
+            }
+          }
+
+          // Format the answer for display before advancing
+          const currentQuestion = snapshot.activeQuestion;
+          let displayAnswer = '';
+          if (currentQuestion?.options && snapshot.questionSelection.length > 0) {
+            const selectedLabels = snapshot.questionSelection
+              .map(i => currentQuestion.options?.[i]?.label)
+              .filter(Boolean);
+            displayAnswer = selectedLabels.join(', ');
+          }
+
           // Check if there are more questions in the queue
           const hasMoreQuestions = store.saveAnswerAndAdvance();
           if (!hasMoreQuestions) {
@@ -1432,6 +1901,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const answer = allAnswers.size === 1
               ? allAnswers.values().next().value
               : Object.fromEntries(allAnswers);
+
+            // Add user's answer to chat history for visibility
+            if (displayAnswer) {
+              store.addMessage("user", displayAnswer);
+            }
+
             sendCommand("user_prompt_response", {
               request_id: requestId,
               answer,
@@ -1456,6 +1931,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
         // Enter submits
         if (key.return && !key.shift) {
+          // Capture the answer text before advancing
+          const answerText = snapshot.questionInput;
+
           // Check if there are more questions in the queue
           const hasMoreQuestions = store.saveAnswerAndAdvance();
           if (!hasMoreQuestions) {
@@ -1465,6 +1943,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const answer = allAnswers.size === 1
               ? allAnswers.values().next().value
               : Object.fromEntries(allAnswers);
+
+            // Add user's answer to chat history for visibility
+            if (answerText) {
+              store.addMessage("user", answerText);
+            }
+
             sendCommand("user_prompt_response", {
               request_id: requestId,
               answer,
@@ -1501,6 +1985,73 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       // Consume all input in question mode to prevent interference
+      return;
+    }
+
+    // Permission mode input handling
+    if (snapshot.uiMode === "permission" && snapshot.activePermissionRequest) {
+      // Navigation with j/k and arrow keys
+      if (key.upArrow || input === "k") {
+        store.movePermissionCursor(-1);
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        store.movePermissionCursor(1);
+        return;
+      }
+
+      // Enter selects the current option
+      if (key.return) {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          const decision = store.getPermissionDecision();
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision,
+            pattern: decision === "always_allow" ? request.suggested_pattern : undefined,
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+
+      // Quick keys: 1=Allow, 2=Always Allow, 3=Deny
+      if (input === "1") {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision: "allow",
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+      if (input === "2") {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision: "always_allow",
+            pattern: request.suggested_pattern,
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+      if (input === "3") {
+        const request = store.getActivePermissionRequest();
+        if (request) {
+          sendCommand("permission_response", {
+            request_id: request.request_id,
+            decision: "deny",
+          });
+          store.clearPermissionRequest();
+        }
+        return;
+      }
+
+      // Consume all other input in permission mode
       return;
     }
 
@@ -1632,6 +2183,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       store.batch(() => {
+        // Commit any active streaming content to history before adding the user message
+        // This ensures proper chronological ordering when user sends follow-up during streaming
+        if (snapshot.streamingText) {
+          store.addMessage("agent", snapshot.streamingText, undefined, snapshot.streamingRequestId ?? undefined);
+          store.finalizeStreaming();
+          store.finalizeReasoning();
+        }
         if (effectivePlanMode && !snapshot.planMode) {
           store.setPlanMode(true);
           store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
@@ -1742,8 +2300,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.addMessage("system", "No models available. Run /models to fetch model list.");
         return;
       }
-      const currentId = snapshot.selectedModel;
-      const currentProvider = snapshot.selectedProvider;
+      // Cycle the 'standard' agent type model (main/default)
+      const selection = snapshot.modelSelections.get('standard');
+      const currentId = selection?.model;
+      const currentProvider = selection?.provider;
       let currentIdx = currentId
         ? models.findIndex((m) => m.id === currentId && (!currentProvider || m.provider === currentProvider))
         : -1;
@@ -1752,6 +2312,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       const nextModel = models[nextIdx];
       if (!nextModel) return;
       sendCommand("set_model", {
+        agent_type: 'standard',
         provider: nextModel.provider,
         model: nextModel.id,
         ...(nextModel.reasoning?.[0] ? { reasoning: nextModel.reasoning[0] } : {}),
@@ -1759,13 +2320,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     };
 
     const cycleReasoning = () => {
-      const currentModel = snapshot.modelsList.find((m) => m.id === snapshot.selectedModel && (!snapshot.selectedProvider || m.provider === snapshot.selectedProvider));
+      // Cycle reasoning for 'standard' agent type (main/default)
+      const selection = snapshot.modelSelections.get('standard');
+      const currentModel = selection
+        ? snapshot.modelsList.find((m) => m.id === selection.model && m.provider === selection.provider)
+        : null;
       const levels = currentModel?.reasoning ?? [];
       if (!currentModel || levels.length === 0) {
         store.addMessage("system", "Current model does not support reasoning levels.");
         return;
       }
-      const currentLevel = snapshot.selectedReasoningLevel;
+      const currentLevel = selection?.reasoning;
       let currentIdx = currentLevel ? levels.indexOf(currentLevel) : -1;
       if (currentIdx < 0) currentIdx = 0;
       const nextIdx = (currentIdx + 1) % levels.length;
@@ -1775,6 +2340,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
       sendCommand("set_model", {
+        agent_type: 'standard',
         provider: currentModel.provider,
         model: currentModel.id,
         reasoning: nextLevel,
@@ -2076,6 +2642,61 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         });
         return;
       }
+      case "/ralph-loop": {
+        // Handle cancel command
+        if (arg?.trim().toLowerCase() === "cancel") {
+          if (!store.isRalphActive()) {
+            store.addMessage("system", "No Ralph Loop is currently active.");
+            return;
+          }
+          sendCommand("ralph_loop_cancel");
+          store.batch(() => {
+            store.addMessage("system", "Cancelling Ralph Loop...");
+            store.clearRalphState();
+          });
+          return;
+        }
+
+        // Check if loop is already active
+        if (store.isRalphActive()) {
+          store.addMessage("system", "A Ralph Loop is already active. Use /ralph-loop cancel to stop it first.");
+          return;
+        }
+
+        // Parse arguments
+        const ralphArgs = parseRalphArgs(arg ?? "");
+        if (!ralphArgs) {
+          store.addMessage(
+            "system",
+            "Usage: /ralph-loop <prompt> [--max-iterations=N] [--complete=\"PHRASE\"]\n" +
+            "       /ralph-loop @<file.md> [options]\n" +
+            "       /ralph-loop cancel\n\n" +
+            "Examples:\n" +
+            "  /ralph-loop \"Build a REST API\"\n" +
+            "  /ralph-loop @prompts/task.md --max-iterations=10\n" +
+            "  /ralph-loop \"Build tests\" --complete=\"ALL DONE\""
+          );
+          return;
+        }
+
+        // Start the Ralph Loop
+        store.batch(() => {
+          store.setRalphState(true, 0, ralphArgs.maxIterations, ralphArgs.completionPromise);
+          store.addMessage(
+            "system",
+            `🔄 Starting Ralph Loop (max ${ralphArgs.maxIterations} iterations)\n` +
+            `Completion phrase: "${ralphArgs.completionPromise}"\n` +
+            (ralphArgs.fromFile ? `Prompt loaded from file` : `Prompt: ${ralphArgs.prompt.slice(0, 100)}${ralphArgs.prompt.length > 100 ? "..." : ""}`)
+          );
+        });
+
+        sendCommand("ralph_loop_start", {
+          prompt: ralphArgs.prompt,
+          maxIterations: ralphArgs.maxIterations,
+          completionPromise: ralphArgs.completionPromise,
+        });
+        return;
+      }
       case "/theme": {
         // Enter interactive theme selection mode
         const themeNames = getThemeNames();
@@ -2223,7 +2844,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   // Header lines with theme colors
   const headerConfig: Array<{ text: string; color?: string; bold?: boolean }> = [
-    { text: `Bloom ${snapshot.compact ? " [compact]" : ""}`, color: colors.accent, bold: true },
+    { text: "Bloom", color: colors.accent, bold: true },
     { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}${snapshot.planMode ? " | [PLAN]" : ""}`, color: colors.muted },
     { text: `Status: ${statusText}`, color: statusColor },
     { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
@@ -2285,27 +2906,51 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const streamCursor = snapshot.state === "streaming"
     ? STREAM_CURSOR_FRAMES[statusTick % STREAM_CURSOR_FRAMES.length]
     : "";
-  let historyLines = store.getHistoryLines(contentWidth, snapshot.compact, streamCursor);
+  let historyLines = store.getHistoryLines(contentWidth, streamCursor);
   if (snapshot.uiMode === "skills") {
     historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors, true);
   } else if (snapshot.uiMode === "hooks") {
     historyLines = buildListLines("Hooks", snapshot.hooksList, snapshot.hooksErrors, false);
+  }
+  // Apply markdown-aware spacing in chat mode
+  if (snapshot.uiMode === "chat") {
+    historyLines = applyVisualSpacing(historyLines);
   }
   const totalHistoryLines = historyLines.length;
   const maxScroll = Math.max(0, totalHistoryLines - historyHeight);
   maxScrollRef.current = maxScroll;
 
   useEffect(() => {
+    // If scrollOffset exceeds maxScroll (content shrunk or window grew),
+    // snap to bottom rather than clamping to maxScroll
     if (snapshot.scrollOffset > maxScroll) {
-      store.setScrollOffset(maxScroll);
+      store.setScrollOffset(0);
     }
   }, [snapshot.scrollOffset, maxScroll, store]);
 
   const scrollOffset = Math.min(snapshot.scrollOffset, maxScroll);
 
-  const endIndex = Math.max(0, totalHistoryLines - scrollOffset);
-  const startIndex = Math.max(0, endIndex - historyHeight);
-  const visibleHistoryLines = historyLines.slice(startIndex, endIndex);
+  // Slice historyLines to only render the visible portion
+  // scrollOffset = 0 means at bottom (newest), scrollOffset = N means N lines up from bottom
+  const totalLines = historyLines.length;
+  const visibleEndIndex = totalLines - scrollOffset;
+  const visibleStartIndex = Math.max(0, visibleEndIndex - historyHeight);
+  const sliced = historyLines.slice(visibleStartIndex, visibleEndIndex);
+
+  // Bottom-alignment padding: when content is less than viewport height,
+  // pad the array with empty lines at the beginning so content renders at the bottom
+  // Use space character (not empty string) so Ink renders with actual height
+  const padding = Math.max(0, historyHeight - sliced.length);
+  const visibleHistoryLines: HistoryLine[] = [
+    // Padding lines at TOP of viewport (pushes content to bottom)
+    ...Array(padding).fill(null).map((_, i) => ({
+      id: `pad:${i}`,
+      text: " ",
+      role: undefined as Role | undefined,
+    })),
+    // Actual content at BOTTOM of viewport
+    ...sliced,
+  ];
 
   const renderInputLines = () => {
     const lines = [...inputLayout.lines];
@@ -2330,9 +2975,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // Simple horizontal line for input separator
   const horizontalLine = "─".repeat(contentWidth);
 
-  // Get current model/reasoning for footer display
-  const currentModelEntry = store.getCurrentModelEntry();
-  const reasoningOptions = store.getCurrentModelReasoningOptions() ?? [];
+  // Get current model/reasoning for footer display (uses 'standard' agent type)
+  const standardSelection = snapshot.modelSelections.get('standard');
+  const currentModelEntry = standardSelection
+    ? snapshot.modelsList.find((m) => m.id === standardSelection.model && m.provider === standardSelection.provider)
+    : null;
+  const reasoningOptions = currentModelEntry?.reasoning ?? [];
   const hasReasoning = reasoningOptions.length > 0;
 
   if (snapshot.helpVisible) {
@@ -2353,6 +3001,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   // Question mode: show QuestionPrompt instead of input box
   const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
+  const isPermissionMode = snapshot.uiMode === "permission" && snapshot.activePermissionRequest;
   const isThemeMode = snapshot.uiMode === "theme";
   const isModelsMode = snapshot.uiMode === "models";
   const isSessionsMode = snapshot.uiMode === "sessions";
@@ -2389,21 +3038,55 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     );
   };
 
-  // Models selector rendering
+  // Models selector rendering with tabbed UI for per-agent-type configuration
   const renderModelsSelector = () => {
     const colors = getColors();
-    const currentModel = store.getSelectedModel();
-    const currentProvider = store.getSelectedProvider();
-    const currentReasoning = store.getSelectedReasoningLevel();
-    const reasoningOptions = store.getCurrentModelReasoningOptions();
-    const reasoningInfo = reasoningOptions && reasoningOptions.length > 0
-      ? ` | Reasoning: ${currentReasoning ?? 'off'}`
-      : '';
+    const AGENT_TABS = ['standard', 'explorer', 'coding'];
+    const TAB_LABELS: Record<string, string> = {
+      standard: 'Standard',
+      explorer: 'Explorer',
+      coding: 'Coding',
+    };
+    const activeTab = snapshot.modelsActiveTab;
+    // Staged selection for active tab (what will be applied on Enter)
+    const stagedSelection = snapshot.stagedModelSelections.get(activeTab);
+    const stagedModel = stagedSelection?.model ?? null;
+    const stagedProvider = stagedSelection?.provider ?? null;
+    // Applied selection for active tab (what's currently active in backend)
+    const appliedSelection = snapshot.modelSelections.get(activeTab);
+    const appliedModel = appliedSelection?.model ?? null;
+    const appliedProvider = appliedSelection?.provider ?? null;
     const deletePending = snapshot.modelDeletePending;
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
+        {/* Tabbed header for agent types */}
+        <Box marginBottom={1}>
+          <Text color={colors.muted}>←/→ tab  Space select  Enter apply  </Text>
+          {AGENT_TABS.map((tab, index) => {
+            const isActive = tab === activeTab;
+            const label = TAB_LABELS[tab];
+            const tabStaged = snapshot.stagedModelSelections.get(tab);
+            const tabApplied = snapshot.modelSelections.get(tab);
+            // Check if staged differs from applied (pending change)
+            const hasChange = tabStaged && (!tabApplied || tabStaged.model !== tabApplied.model || tabStaged.provider !== tabApplied.provider);
+            const hasApplied = !!tabApplied;
+            return (
+              <Text key={tab}>
+                {index > 0 && <Text color={colors.muted}> | </Text>}
+                <Text color={isActive ? colors.accent : colors.muted} bold={isActive}>
+                  {label}
+                </Text>
+                {hasChange ? (
+                  <Text color={colors.success}>✓</Text>
+                ) : hasApplied ? (
+                  <Text color={colors.func}>*</Text>
+                ) : null}
+              </Text>
+            );
+          })}
+        </Box>
         <Box>
-          <Text bold color={colors.accent}>Select Model</Text>
+          <Text bold color={colors.accent}>Select Model for {TAB_LABELS[activeTab]}</Text>
           {deletePending ? (
             <Text color={colors.error}>  d to confirm delete</Text>
           ) : (
@@ -2413,27 +3096,41 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <Text> </Text>
         {snapshot.modelsList.map((model, index) => {
           const isSelected = index === snapshot.modelsCursor;
-          const isCurrent = currentProvider
-            ? model.id === currentModel && model.provider === currentProvider
-            : model.id === currentModel;
+          // Check if this model is staged for current tab
+          const isStaged = stagedProvider
+            ? model.id === stagedModel && model.provider === stagedProvider
+            : model.id === stagedModel;
+          // Check if this model is currently applied in backend
+          const isApplied = appliedProvider
+            ? model.id === appliedModel && model.provider === appliedProvider
+            : model.id === appliedModel;
           const isPendingDelete = isSelected && deletePending;
           const pointer = isSelected ? "▸ " : "  ";
-          const marker = isCurrent ? ` (current${reasoningInfo})` : "";
+          // Show markers: ✓ for staged, * for applied (if different)
+          let marker = "";
+          if (isStaged && isApplied) {
+            marker = " (current)";
+          } else if (isStaged) {
+            marker = " (selected)";
+          } else if (isApplied) {
+            marker = " (current)";
+          }
           const provider = model.provider;
           const hasReasoning = model.reasoning && model.reasoning.length > 0;
           return (
             <Text key={`${provider ?? 'unknown'}:${model.id}`}>
               <Text color={isPendingDelete ? colors.error : (isSelected ? colors.accent : colors.muted)}>{pointer}</Text>
+              {isStaged && <Text color={colors.success}>✓ </Text>}
               <Text
-                color={isPendingDelete ? colors.error : (isSelected ? colors.text : colors.muted)}
-                bold={isSelected}
+                color={isPendingDelete ? colors.error : (isStaged ? colors.success : (isSelected ? colors.text : colors.muted))}
+                bold={isSelected || isStaged}
                 strikethrough={isPendingDelete}
               >
                 {model.name}
               </Text>
               {provider && <Text color={isPendingDelete ? colors.error : colors.muted} strikethrough={isPendingDelete}> [{provider}]</Text>}
               {hasReasoning && <Text color={isPendingDelete ? colors.error : colors.func} strikethrough={isPendingDelete}> [R]</Text>}
-              <Text color={isPendingDelete ? colors.error : colors.muted} strikethrough={isPendingDelete}>{marker}</Text>
+              <Text color={isPendingDelete ? colors.error : (isStaged ? colors.success : colors.muted)} strikethrough={isPendingDelete}>{marker}</Text>
             </Text>
           );
         })}
@@ -2445,10 +3142,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const sessionsHeight = historyHeight + inputBoxHeight;
 
   // Full-screen modes that replace both history and input
-  const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode;
+  const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode || isQuestionMode || isPermissionMode;
 
   return (
-    <Box flexDirection="column" width={width} paddingX={HORIZONTAL_PADDING} paddingTop={TOP_PADDING} paddingBottom={BOTTOM_PADDING}>
+    <Box flexDirection="column" width={width} height={height} paddingX={HORIZONTAL_PADDING} paddingTop={TOP_PADDING} paddingBottom={BOTTOM_PADDING}>
       {headerConfig.map((item, index) => (
         <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, contentWidth)}</Text>
       ))}
@@ -2456,12 +3153,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <Box flexDirection="column" height={historyHeight}>
           {visibleHistoryLines.map((line, index) => {
             const isUserLine = line.role === "user";
+            const isReasoning = line.role === "reasoning";
             const bgColor = isUserLine ? colors.userBg : undefined;
-            // Pad user lines to full width for consistent background
-            const paddedText = isUserLine ? line.text.padEnd(contentWidth, " ") : line.text;
+            // User messages: 4 chars padding (2 left + 2 right)
+            // Agent messages: 2 chars padding (1 left + 1 right)
+            const paddedText = isUserLine ? `  ${line.text}  ` : ` ${line.text} `;
+            const remainingWidth = contentWidth - paddedText.length;
+            const paddingText = remainingWidth > 0 ? " ".repeat(remainingWidth) : "";
             return (
               <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
-                <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
+                <StyledLine text={paddedText + paddingText} baseColor={roleColor(line.role)} italic={isReasoning} />
               </Text>
             );
           })}
@@ -2511,14 +3212,26 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           onClose={() => store.exitUsageMode()}
         />
       ) : isQuestionMode ? (
-        <QuestionPrompt
-          question={snapshot.activeQuestion!}
-          cursor={snapshot.questionCursor}
-          selection={snapshot.questionSelection}
-          inputText={snapshot.questionInput}
-          width={contentWidth}
-          queueInfo={store.getQuestionQueueInfo()}
-        />
+        <Box flexDirection="column" justifyContent="center" alignItems="center" flexGrow={1}>
+          <QuestionPrompt
+            question={snapshot.activeQuestion!}
+            cursor={snapshot.questionCursor}
+            selection={snapshot.questionSelection}
+            inputText={snapshot.questionInput}
+            width={contentWidth}
+            height={PROMPT_MAX_CONTENT_HEIGHT}
+            queueInfo={store.getQuestionQueueInfo()}
+          />
+        </Box>
+      ) : isPermissionMode ? (
+        <Box flexDirection="column" justifyContent="center" alignItems="center" flexGrow={1}>
+          <PermissionPrompt
+            request={snapshot.activePermissionRequest!}
+            cursor={snapshot.permissionCursor}
+            width={contentWidth}
+            height={PROMPT_MAX_CONTENT_HEIGHT}
+          />
+        </Box>
       ) : (
         <>
           {/* Top separator line - runs edge to edge */}
@@ -2535,10 +3248,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {/* Model indicator row: model (Esc+M) | reasoning (Esc+T) */}
           <Text>
             {(() => {
-              const modelName = snapshot.selectedModel
-                ? (currentModelEntry?.name ?? snapshot.selectedModel)
+              const modelName = standardSelection?.model
+                ? (currentModelEntry?.name ?? standardSelection.model)
                 : "no model selected";
-              const reasoningLevel = hasReasoning ? (snapshot.selectedReasoningLevel ?? "off") : "n/a";
+              const reasoningLevel = hasReasoning ? (standardSelection?.reasoning ?? "off") : "n/a";
               // Layout: modelName (Esc+M) | reasoning (Esc+T) or n/a
               const rightContent = hasReasoning
                 ? `${modelName} (Esc+M) | ${reasoningLevel} (Esc+T)`
@@ -2590,6 +3303,9 @@ function roleColor(role?: Role): string | undefined {
     case "system":
     case "status":
       return colors.text;
+    case "reasoning":
+      // Reasoning/thinking content displayed in muted color to distinguish from main response
+      return colors.muted;
     default:
       return undefined;
   }
@@ -2613,23 +3329,34 @@ function levelColor(level?: string | null): string | undefined {
 }
 
 /** Syntax highlight patterns - use color keys, resolved at runtime */
-type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg";
+type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg" | "diffContextBg";
 
-// Hardcoded diff colors - bright and consistent regardless of theme
+type SyntaxPattern = {
+  pattern: RegExp;
+  colorKey?: ColorKey;
+  bgKey?: ColorKey;
+  hardcodedColor?: string;
+  hardcodedBg?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  transform?: (s: string) => string;
+};
+
+// Hardcoded diff colors for add/remove - bright and consistent for visibility
 const DIFF_ADD_FG = "#ffffff";    // White text for visibility
 const DIFF_ADD_BG = "#166534";    // Solid green background
 const DIFF_REMOVE_FG = "#ffffff"; // White text for visibility
 const DIFF_REMOVE_BG = "#991b1b"; // Solid red background
-const DIFF_CONTEXT_FG = "#d4d4d8"; // Light grey text for context lines
-const DIFF_CONTEXT_BG = "#27272a"; // Darker grey background for context
+// Context uses theme's diffContextBg (same as userBg) - resolved at runtime
 
-const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: ColorKey; hardcodedColor?: string; hardcodedBg?: string; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
+const syntaxPatterns: SyntaxPattern[] = [
   // Diff/Edit tool header - format: "✓ Edit /path/to/file.ts  +3 / -2 (123ms)"
   { pattern: /^[✓✗] Edit .+$/gm, colorKey: "diffHeader", bgKey: "diffHeaderBg", bold: true },
   // Diff lines with line numbers - format: "  42 + content" or "  42 - content" or "  42   content"
   { pattern: /^\s*\d+\s+\+ .*$/gm, hardcodedColor: DIFF_ADD_FG, hardcodedBg: DIFF_ADD_BG },
   { pattern: /^\s*\d+\s+- .*$/gm, hardcodedColor: DIFF_REMOVE_FG, hardcodedBg: DIFF_REMOVE_BG },
-  { pattern: /^\s*\d+\s{3}.*$/gm, hardcodedColor: DIFF_CONTEXT_FG, hardcodedBg: DIFF_CONTEXT_BG },
+  { pattern: /^\s*\d+\s{3}.*$/gm, colorKey: "text", bgKey: "diffContextBg" },
 
   // Horizontal rules (---, ***, ___)
   { pattern: /^[-*_]{3,}\s*$/gm, colorKey: "hr", transform: (s) => "─".repeat(Math.max(3, s.trim().length)) },
@@ -2642,8 +3369,8 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
   // Markdown table rows (| cell | cell |) - style the pipes
   { pattern: /^\|.+\|\s*$/gm, colorKey: "text", transform: (s) => s.replace(/\|/g, "│") },
 
-  // Markdown headers (### Header text) - strip the hashes and bold
-  { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
+  // Markdown headers (### Header text) - strip the hashes and make them stand out
+  { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, underline: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
 
   // Blockquotes (> text) - preserve the > marker styled
   { pattern: /^>\s+.+$/gm, colorKey: "blockquote", italic: true, transform: (s) => "│ " + s.slice(2) },
@@ -2657,8 +3384,8 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
   // Task list items (- [ ] or - [x])
   { pattern: /^[\s]*[-*+]\s+\[[ xX]\]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/\[[ ]\]/, "☐").replace(/\[[xX]\]/, "☑").replace(/[-*+]/, "") },
 
-  // Strikethrough (~~text~~)
-  { pattern: /~~[^~]+~~/g, colorKey: "strikethrough", transform: (s) => s.slice(2, -2) },
+  // Strikethrough (~~text~~) - non-greedy to handle content with tildes
+  { pattern: /~~.+?~~/g, colorKey: "strikethrough", transform: (s) => s.slice(2, -2) },
 
   // Markdown links [text](url) - render as "text" with link color
   { pattern: /\[([^\]]+)\]\([^)]+\)/g, colorKey: "linkText", transform: (s) => {
@@ -2666,16 +3393,14 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
     return match ? match[1] : s;
   }},
 
-  // Bold text (**text** or __text__)
-  { pattern: /\*\*[^*]+\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
-  { pattern: /__[^_]+__/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
+  // Bold text (**text**) - underscore emphasis disabled to avoid mangling identifiers
+  { pattern: /\*\*.+?\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
 
-  // Italic text (*text* or _text_) - single asterisk/underscore, not followed by another
-  { pattern: /(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
-  { pattern: /(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
+  // Italic text (*text*) - underscore emphasis disabled to avoid mangling identifiers
+  { pattern: /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
 
-  // Inline code
-  { pattern: /`[^`]+`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
+  // Inline code - non-greedy
+  { pattern: /`.+?`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
 
   // Code block delimiters (``` or ```language on their own line)
   { pattern: /^```\w*\s*$/gm, colorKey: "border", transform: (s) => {
@@ -2712,6 +3437,7 @@ interface TextSegment {
   backgroundColor?: string;
   bold?: boolean;
   italic?: boolean;
+  underline?: boolean;
 }
 
 const MAX_PARSE_TEXT_LENGTH = 20000;
@@ -2734,9 +3460,9 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
   const segments: TextSegment[] = [];
 
   // Find all matches with positions
-  const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean }> = [];
+  const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean; underline?: boolean }> = [];
 
-  for (const { pattern, colorKey, bgKey, hardcodedColor, hardcodedBg, bold, italic, transform } of syntaxPatterns) {
+  for (const { pattern, colorKey, bgKey, hardcodedColor, hardcodedBg, bold, italic, underline, transform } of syntaxPatterns) {
     const regex = new RegExp(pattern.source, pattern.flags);
     let m;
     while ((m = regex.exec(text)) !== null) {
@@ -2751,6 +3477,7 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
         backgroundColor: hardcodedBg ?? (bgKey ? colors[bgKey] : undefined),
         bold,
         italic,
+        underline,
       });
     }
   }
@@ -2772,7 +3499,7 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
     if (m.start > pos) {
       segments.push({ text: text.slice(pos, m.start), color: baseColor });
     }
-    segments.push({ text: m.displayText, color: m.color, backgroundColor: m.backgroundColor, bold: m.bold, italic: m.italic });
+    segments.push({ text: m.displayText, color: m.color, backgroundColor: m.backgroundColor, bold: m.bold, italic: m.italic, underline: m.underline });
     pos = m.end;
   }
   if (pos < text.length) {
@@ -2791,18 +3518,76 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
 }
 
 /** Render text with syntax highlighting */
-function StyledLine({ text, baseColor }: { text: string; baseColor?: string }): JSX.Element {
+function StyledLine({ text, baseColor, italic: lineItalic }: { text: string; baseColor?: string; italic?: boolean }): JSX.Element {
   const segments = parseTextSegments(text, baseColor);
 
   return (
     <>
       {segments.map((seg, i) => (
-        <Text key={i} color={seg.color} backgroundColor={seg.backgroundColor} bold={seg.bold} italic={seg.italic}>
+        <Text key={i} color={seg.color} backgroundColor={seg.backgroundColor} bold={seg.bold} italic={lineItalic || seg.italic} underline={seg.underline}>
           {seg.text}
         </Text>
       ))}
     </>
   );
+}
+
+/** Check if line is a markdown code fence */
+function isMarkdownFenceLine(text: string): boolean {
+  return /^```/.test(text.trim());
+}
+
+/** Check if line is a markdown header */
+function isMarkdownHeaderLine(text: string): boolean {
+  return /^#{1,6}\s+\S/.test(text);
+}
+
+/**
+ * Apply visual spacing rules to history lines:
+ * - Collapse multiple blank lines (outside code blocks)
+ * - Add spacing after markdown headers
+ * - Add spacing after reasoning blocks
+ */
+function applyVisualSpacing(lines: HistoryLine[]): HistoryLine[] {
+  const out: HistoryLine[] = [];
+  let inCodeBlock = false;
+  let prevWasBlank = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const baseId = line.id ?? `line-${i}`;
+    const text = line.text ?? "";
+    const trimmed = text.trim();
+    const isBlank = trimmed.length === 0;
+
+    const isFence = isMarkdownFenceLine(text);
+    if (isFence) inCodeBlock = !inCodeBlock;
+
+    // Collapse blank-line runs (but never inside code blocks)
+    if (!inCodeBlock && isBlank && prevWasBlank) continue;
+
+    out.push(line);
+    prevWasBlank = isBlank;
+
+    if (inCodeBlock) continue;
+
+    const next = lines[i + 1];
+    const nextIsBlank = (next?.text ?? "").trim().length === 0;
+
+    // Add spacing after markdown headers
+    if (isMarkdownHeaderLine(text) && !nextIsBlank) {
+      out.push({ id: `${baseId}-sp-h`, text: "", role: line.role });
+      prevWasBlank = true;
+    }
+
+    // Add spacing after reasoning blocks
+    if (line.role === "reasoning" && next && next.role !== "reasoning" && !isBlank && !nextIsBlank) {
+      out.push({ id: `${baseId}-sp-r`, text: "", role: "reasoning" });
+      prevWasBlank = true;
+    }
+  }
+
+  return out;
 }
 
 function messageExists(history: MessageEntry[], requestId: string): boolean {
@@ -2815,6 +3600,7 @@ export function parseArgs(argv: string[]): AppOptions {
   let redactLogs = false;
   let logTranscripts = true;
   let sessionKey: string | null = null;
+  let dangerousMode = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -2826,6 +3612,10 @@ export function parseArgs(argv: string[]): AppOptions {
     if (arg === "--session" && argv[i + 1]) {
       sessionKey = argv[i + 1];
       i += 1;
+      continue;
+    }
+    if (arg === "--dangerous") {
+      dangerousMode = true;
       continue;
     }
     if (arg === "--no-voice") {
@@ -2850,7 +3640,7 @@ export function parseArgs(argv: string[]): AppOptions {
     logTranscripts = false;
   }
 
-  return { uiLogPath, enableVoice, redactLogs, logTranscripts, sessionKey };
+  return { uiLogPath, enableVoice, redactLogs, logTranscripts, sessionKey, dangerousMode };
 }
 
 const options = parseArgs(process.argv.slice(2));
@@ -2871,7 +3661,7 @@ const handleSignal = (signal: string) => {
     globalCleanup();
   }
   // Give cleanup time to complete before exit (session close + connection close)
-  setTimeout(() => process.exit(0), 500);
+  setTimeout(() => process.exit(0), GRACEFUL_SHUTDOWN_DELAY);
 };
 
 // Process-level last resort handlers - catch anything that slips through
@@ -2890,7 +3680,7 @@ process.on('uncaughtException', (error: Error) => {
   }
 
   // Exit with error code after brief delay for cleanup
-  setTimeout(() => process.exit(1), 100);
+  setTimeout(() => process.exit(1), ERROR_EXIT_DELAY);
 });
 
 process.on('unhandledRejection', (reason: unknown) => {
@@ -2908,6 +3698,9 @@ process.on('SIGHUP', () => handleSignal('SIGHUP'));
 export const setGlobalCleanup = (cleanup: () => void) => {
   globalCleanup = cleanup;
 };
+
+// Initialize profiler for TUI (enabled via PROFILE=1 env var)
+profiler.init('tui', './profile-tui.json');
 
 render(
   <ErrorBoundary>

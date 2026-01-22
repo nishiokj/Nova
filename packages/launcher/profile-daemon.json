@@ -1,0 +1,625 @@
+{
+  "traceEvents": [
+    {
+      "name": "profiler:init",
+      "cat": "profiler",
+      "ph": "i",
+      "ts": 23.79200000000128,
+      "pid": 12495,
+      "tid": 1,
+      "s": "g",
+      "args": {
+        "processName": "harness-daemon"
+      }
+    },
+    {
+      "name": "cmd:init",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 124428.125,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:init",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 125212.375,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:providers_list",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 126434.875,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:providers_list",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 126611.29200000002,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:get_models",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 129041.084,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:get_models",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 129164.16700000002,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:get_model",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 129171.91700000002,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:get_model",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 129241.25,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:send_text",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 6714056.25,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "handleSendText",
+      "cat": "handler",
+      "ph": "B",
+      "ts": 6714369.084,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "harness.run:start",
+      "cat": "harness",
+      "ph": "i",
+      "ts": 6716213.291999999,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "requestId": "ink_1768970211299_f5fdc2"
+      }
+    },
+    {
+      "name": "harness.run",
+      "cat": "harness",
+      "ph": "i",
+      "ts": 6716969.916999999,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "requestId": "ink_1768970211299_f5fdc2",
+        "planMode": false
+      }
+    },
+    {
+      "name": "stream:ink_1768970211299_f5fdc2",
+      "cat": "stream",
+      "ph": "b",
+      "ts": 6721625.875,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_1"
+    },
+    {
+      "name": "handleSendText",
+      "cat": "handler",
+      "ph": "E",
+      "ts": 6721959.541999999,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:send_text",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 6721964.959,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "orchestrator:standard",
+      "cat": "orchestrator",
+      "ph": "b",
+      "ts": 6722893.25,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_2"
+    },
+    {
+      "name": "orchestration:start",
+      "cat": "orchestrator",
+      "ph": "i",
+      "ts": 6725293.75,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "goal": "how does the @packages/orchestrator/src/orchestrator.ts work?",
+        "agentType": "standard"
+      }
+    },
+    {
+      "name": "orch.iteration:1",
+      "cat": "orchestrator",
+      "ph": "i",
+      "ts": 6725622.834,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "workItems": [
+          "7447dd5e"
+        ],
+        "totalToolCalls": 0,
+        "totalLlmCalls": 0
+      }
+    },
+    {
+      "name": "agent:standard",
+      "cat": "agent",
+      "ph": "b",
+      "ts": 6725893.709,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_3"
+    },
+    {
+      "name": "agent.run:standard",
+      "cat": "agent",
+      "ph": "b",
+      "ts": 6726259.834,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_4"
+    },
+    {
+      "name": "agent.iteration:0",
+      "cat": "agent",
+      "ph": "i",
+      "ts": 6727529.166999999,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "agentType": "standard"
+      }
+    },
+    {
+      "name": "agent.llmCall:standard",
+      "cat": "llm",
+      "ph": "b",
+      "ts": 6728063.084,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_5"
+    },
+    {
+      "name": "llm:stream:openai-compat:glm-4.7",
+      "cat": "llm",
+      "ph": "b",
+      "ts": 6729084.209,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_6"
+    },
+    {
+      "name": "llm:stream:openai-compat:glm-4.7",
+      "cat": "llm",
+      "ph": "e",
+      "ts": 10976167.209,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_6",
+      "args": {
+        "promptTokens": 3473,
+        "completionTokens": 201
+      }
+    },
+    {
+      "name": "agent.llmCall:standard",
+      "cat": "llm",
+      "ph": "e",
+      "ts": 10976233.125,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_5",
+      "args": {
+        "promptTokens": 3473,
+        "completionTokens": 201,
+        "toolCalls": 1
+      }
+    },
+    {
+      "name": "agent.run:explorer",
+      "cat": "agent",
+      "ph": "b",
+      "ts": 10979756.625,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_7"
+    },
+    {
+      "name": "tool:Read",
+      "cat": "tool",
+      "ph": "b",
+      "ts": 10981299.959,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_8"
+    },
+    {
+      "name": "tool:Read",
+      "cat": "tool",
+      "ph": "e",
+      "ts": 10982745.5,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_8",
+      "args": {
+        "success": true,
+        "durationMs": 2,
+        "cacheHit": false
+      }
+    },
+    {
+      "name": "agent.iteration:0",
+      "cat": "agent",
+      "ph": "i",
+      "ts": 10982885.209,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "agentType": "explorer"
+      }
+    },
+    {
+      "name": "agent.llmCall:explorer",
+      "cat": "llm",
+      "ph": "b",
+      "ts": 10983033,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_9"
+    },
+    {
+      "name": "llm:stream:openai-compat:glm-4.7",
+      "cat": "llm",
+      "ph": "b",
+      "ts": 10983232.75,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_10"
+    },
+    {
+      "name": "llm:stream:openai-compat:glm-4.7",
+      "cat": "llm",
+      "ph": "e",
+      "ts": 89142532.25,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_10",
+      "args": {
+        "promptTokens": 12618,
+        "completionTokens": 3941
+      }
+    },
+    {
+      "name": "agent.llmCall:explorer",
+      "cat": "llm",
+      "ph": "e",
+      "ts": 89142754.54200001,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_9",
+      "args": {
+        "promptTokens": 12618,
+        "completionTokens": 3941,
+        "toolCalls": 0
+      }
+    },
+    {
+      "name": "agent.run:explorer",
+      "cat": "agent",
+      "ph": "e",
+      "ts": 89145445.66700001,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_7",
+      "args": {
+        "success": true,
+        "terminationReason": "goal_state_reached",
+        "llmCalls": 1,
+        "toolCalls": 1
+      }
+    },
+    {
+      "name": "agent.run:standard",
+      "cat": "agent",
+      "ph": "e",
+      "ts": 89150188.334,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_4",
+      "args": {
+        "success": false,
+        "terminationReason": "exception",
+        "llmCalls": 1,
+        "toolCalls": 1
+      }
+    },
+    {
+      "name": "agent:standard",
+      "cat": "agent",
+      "ph": "e",
+      "ts": 89150216.875,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_3",
+      "args": {
+        "llmCalls": 1,
+        "toolCalls": 1
+      }
+    },
+    {
+      "name": "orch.iteration:2",
+      "cat": "orchestrator",
+      "ph": "i",
+      "ts": 89150627.834,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "workItems": [
+          "7447dd5e",
+          "3f9f4b44",
+          "7ff89e20",
+          "41e1b279",
+          "282a22f2",
+          "be57d737"
+        ],
+        "totalToolCalls": 1,
+        "totalLlmCalls": 1
+      }
+    },
+    {
+      "name": "agent:standard",
+      "cat": "agent",
+      "ph": "b",
+      "ts": 89150708.084,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_11"
+    },
+    {
+      "name": "agent.run:standard",
+      "cat": "agent",
+      "ph": "b",
+      "ts": 89150738.25,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_12"
+    },
+    {
+      "name": "agent.iteration:0",
+      "cat": "agent",
+      "ph": "i",
+      "ts": 89150843.91700001,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "agentType": "standard"
+      }
+    },
+    {
+      "name": "agent.llmCall:standard",
+      "cat": "llm",
+      "ph": "b",
+      "ts": 89151007,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_13"
+    },
+    {
+      "name": "llm:stream:openai-compat:glm-4.7",
+      "cat": "llm",
+      "ph": "b",
+      "ts": 89151298,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_14"
+    },
+    {
+      "name": "cmd:set_model",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 95744463.834,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:set_model",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 95745730.625,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:set_model",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 95745811.084,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:set_model",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 95746222.084,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:set_model",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 95746232.54200001,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:set_model",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 95746534.66700001,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:session_close",
+      "cat": "bridge",
+      "ph": "B",
+      "ts": 95746791.084,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "cmd:session_close",
+      "cat": "bridge",
+      "ph": "E",
+      "ts": 95747462.959,
+      "pid": 12495,
+      "tid": 1
+    },
+    {
+      "name": "llm:stream:openai-compat:glm-4.7",
+      "cat": "llm",
+      "ph": "e",
+      "ts": 99814303.66700001,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_14",
+      "args": {
+        "promptTokens": 5409,
+        "completionTokens": 752
+      }
+    },
+    {
+      "name": "agent.llmCall:standard",
+      "cat": "llm",
+      "ph": "e",
+      "ts": 99814618.75,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_13",
+      "args": {
+        "promptTokens": 5409,
+        "completionTokens": 752,
+        "toolCalls": 0
+      }
+    },
+    {
+      "name": "agent.run:standard",
+      "cat": "agent",
+      "ph": "e",
+      "ts": 99815863.625,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_12",
+      "args": {
+        "success": true,
+        "terminationReason": "goal_state_reached",
+        "llmCalls": 1,
+        "toolCalls": 0
+      }
+    },
+    {
+      "name": "agent:standard",
+      "cat": "agent",
+      "ph": "e",
+      "ts": 99817963.209,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_11",
+      "args": {
+        "llmCalls": 1,
+        "toolCalls": 0
+      }
+    },
+    {
+      "name": "orch.iteration:3",
+      "cat": "orchestrator",
+      "ph": "i",
+      "ts": 99818342.709,
+      "pid": 12495,
+      "tid": 1,
+      "s": "p",
+      "args": {
+        "workItems": [
+          "db7d634f",
+          "66e4ffb5"
+        ],
+        "totalToolCalls": 1,
+        "totalLlmCalls": 2
+      }
+    },
+    {
+      "name": "orchestrator:standard",
+      "cat": "orchestrator",
+      "ph": "e",
+      "ts": 99824391.875,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_2",
+      "args": {
+        "toolCalls": 1,
+        "paused": false
+      }
+    },
+    {
+      "name": "stream:ink_1768970211299_f5fdc2",
+      "cat": "stream",
+      "ph": "e",
+      "ts": 99825218.709,
+      "pid": 12495,
+      "tid": 1,
+      "id": "async_1",
+      "args": {
+        "eventCount": 9
+      }
+    }
+  ],
+  "metadata": {
+    "process_name": "harness-daemon",
+    "start_time": "2026-01-21T04:38:25.392Z"
+  }
+}

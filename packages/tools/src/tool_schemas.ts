@@ -132,6 +132,44 @@ export const SkillArgsSchema = z.object({
 });
 
 // ============================================
+// PROMPT USER TOOL
+// ============================================
+
+/**
+ * Option schema for user prompts.
+ */
+const PromptUserOptionSchema = z.union([
+  z.string(),
+  z.object({
+    label: z.string(),
+    description: z.string().optional(),
+  }),
+]);
+
+/**
+ * Question schema for sequential prompts.
+ */
+const PromptUserQuestionSchema = z.object({
+  question: z.string().min(1, 'Question cannot be empty'),
+  options: z.array(PromptUserOptionSchema).optional(),
+  context: z.string().optional(),
+  multiSelect: z.boolean().optional(),
+  questionType: z.enum(['multiple_choice', 'multi_select', 'fill_in_blank', 'yes_no', 'free_text']).optional(),
+});
+
+/**
+ * Arguments for PromptUser tool execution.
+ */
+export const PromptUserArgsSchema = z.object({
+  question: z.string().min(1, 'Question cannot be empty'),
+  options: z.array(PromptUserOptionSchema).optional(),
+  context: z.string().optional(),
+  multiSelect: z.boolean().optional(),
+  questionType: z.enum(['multiple_choice', 'multi_select', 'fill_in_blank', 'yes_no', 'free_text']).optional(),
+  questions: z.array(PromptUserQuestionSchema).optional(),
+});
+
+// ============================================
 // SCHEMA REGISTRY
 // ============================================
 
@@ -146,6 +184,7 @@ export const TOOL_SCHEMAS: Record<string, z.ZodType> = {
   Glob: GlobArgsSchema,
   Grep: GrepArgsSchema,
   Skill: SkillArgsSchema,
+  PromptUser: PromptUserArgsSchema,
 };
 
 // ============================================
@@ -159,6 +198,7 @@ export type EditArgs = z.infer<typeof EditArgsSchema>;
 export type GlobArgs = z.infer<typeof GlobArgsSchema>;
 export type GrepArgs = z.infer<typeof GrepArgsSchema>;
 export type SkillArgs = z.infer<typeof SkillArgsSchema>;
+export type PromptUserArgs = z.infer<typeof PromptUserArgsSchema>;
 
 // ============================================
 // VALIDATION FUNCTIONS

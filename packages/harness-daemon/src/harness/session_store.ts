@@ -1,7 +1,18 @@
 import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
 import type { ContextWindowSnapshot } from 'types';
-import type { ModelOverride } from 'orchestrator';
+import type { ModelSelection } from 'agent';
+import { PermissionChecker } from './permissions.js';
+
+interface SessionStoreOptions {
+  sessionKey: string;
+  maxTokens: number;
+  graphd: GraphDManager | null;
+  isGraphDReady: () => boolean;
+  logger: HarnessLogger;
+  dangerousMode?: boolean;  // Allow sessions to opt into dangerous mode independently
+  workingDir?: string;       // Working directory for permission checks
+}
 
 export interface HarnessLogger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -17,6 +28,8 @@ export interface PausedState {
   workingDir: string;
   planMode?: boolean;
   userPromptType?: string;
+  handoffSpec?: string; // Stored for execution after user approval
+  pausedAt: number; // Timestamp when session entered paused state
 }
 
 interface SessionStoreOptions {
@@ -27,15 +40,33 @@ interface SessionStoreOptions {
   logger: HarnessLogger;
 }
 
+/**
+ * Build an interruption directive that wraps the user's message with guidance.
+ * This helps the agent understand the message arrived mid-execution and how to handle it.
+ */
+function buildInterruptionDirective(userMessage: string): string {
+  return `**User Interruption**: "${userMessage}"
+
+Consider if the user is:
+- Asking you to stop current work
+- Requesting a pivot to a different task
+- Providing information that invalidates your current action
+- Adding context as an addendum
+
+Acknowledge the interruption and adjust your approach accordingly.`;
+}
+
 export class SessionStore {
   private readonly sessionKey: string;
   private readonly maxTokens: number;
   private readonly graphd: GraphDManager | null;
   private readonly isGraphDReady: () => boolean;
   private readonly logger: HarnessLogger;
+  private readonly workingDir: string;
+  private readonly permissionChecker: PermissionChecker;
   private context: ContextWindow | null = null;
   private pausedState: PausedState | null = null;
-  private modelOverride: ModelOverride | null = null;
+  private modelSelections = new Map<string, ModelSelection>();
 
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
@@ -47,6 +78,13 @@ export class SessionStore {
     this.graphd = options.graphd;
     this.isGraphDReady = options.isGraphDReady;
     this.logger = options.logger;
+    this.workingDir = options.workingDir ?? process.cwd();
+
+    // Per-session permission checker - each session has its own dangerous mode and grants
+    this.permissionChecker = new PermissionChecker(
+      this.workingDir,
+      options.dangerousMode ?? false
+    );
   }
 
   getContext(): ContextWindow {
@@ -125,8 +163,8 @@ export class SessionStore {
     this.graphd.sessionTouch(this.sessionKey, workingDir);
   }
 
-  setPausedState(state: PausedState): void {
-    this.pausedState = state;
+  setPausedState(state: Omit<PausedState, 'pausedAt'>): void {
+    this.pausedState = { ...state, pausedAt: Date.now() };
   }
 
   getPausedState(): PausedState | null {
@@ -145,19 +183,58 @@ export class SessionStore {
     this.persistContext();
     this.context = null;
     this.pausedState = null;
-    this.modelOverride = null;
+    this.modelSelections.clear();
   }
 
-  setModelOverride(override: ModelOverride | null): void {
-    this.modelOverride = override;
+  /**
+   * Set model selection for a specific agent type.
+   */
+  setModelSelection(agentType: string, selection: ModelSelection): void {
+    this.modelSelections.set(agentType, selection);
   }
 
-  getModelOverride(): ModelOverride | null {
-    return this.modelOverride;
+  /**
+   * Get model selection for a specific agent type.
+   * Returns null if no selection exists for that agent type.
+   */
+  getModelSelection(agentType: string): ModelSelection | null {
+    return this.modelSelections.get(agentType) ?? null;
   }
 
-  clearModelOverride(): void {
-    this.modelOverride = null;
+  /**
+   * Get all model selections (for persistence).
+   */
+  getAllModelSelections(): Map<string, ModelSelection> {
+    return new Map(this.modelSelections);
+  }
+
+  /**
+   * Clear all model selections.
+   */
+  clearModelSelections(): void {
+    this.modelSelections.clear();
+  }
+
+  // --- Permission management (per-session) ---
+
+  /**
+   * Get the permission checker for this session.
+   * Each session has its own permission state including dangerous mode.
+   */
+  getPermissionChecker(): PermissionChecker {
+    return this.permissionChecker;
+  }
+
+  /**
+   * Set dangerous mode for this session.
+   * Does not affect other sessions.
+   */
+  setDangerousMode(enabled: boolean): void {
+    this.permissionChecker.setDangerousMode(enabled);
+    this.logger.info('Dangerous mode changed', {
+      sessionKey: this.sessionKey,
+      enabled,
+    });
   }
 
   // --- Execution tracking ---
@@ -213,13 +290,15 @@ export class SessionStore {
 
   /**
    * Queue a user message to be seen by the running agent on its next turn.
-   * The message is added to the context window immediately so the agent sees it.
+   * The message is added to the context window immediately (with interruption directive)
+   * so the agent sees it and understands it's an interruption.
    */
   queueUserMessage(requestId: string, message: string): void {
     this.queuedUserMessages.push({ requestId, message });
-    // Add to context immediately so agent sees it on next LLM call
+    // Add to context with interruption directive so agent understands it's mid-execution
     const ctx = this.getContext();
-    ctx.addMessage('user', message);
+    const directive = buildInterruptionDirective(message);
+    ctx.addMessage('user', directive);
     this.logger.debug('Queued user message during execution', {
       sessionKey: this.sessionKey,
       executingRequestId: this.executingRequestId,
@@ -242,5 +321,21 @@ export class SessionStore {
    */
   getQueuedMessages(): ReadonlyArray<{ requestId: string; message: string }> {
     return this.queuedUserMessages;
+  }
+
+  /**
+   * Check if there are pending user messages (interruptions) waiting.
+   * Used by orchestrator to avoid premature termination.
+   */
+  hasPendingInterruption(): boolean {
+    return this.queuedUserMessages.length > 0;
+  }
+
+  /**
+   * Check if any pending user message is a stop request.
+   * Used by agent to exit loop early on explicit user stop.
+   */
+  hasPendingStopRequest(): boolean {
+    return this.queuedUserMessages.some(({ message }) => /\bstop\b/i.test(message));
   }
 }

@@ -25,9 +25,6 @@ export {
 
 // Re-export all inferred types
 export type {
-  UserPromptOption,
-  UserPrompt,
-  RoutingOutput,
   AgentAction,
   AgentActionOutput,
   GoalDrivenOutput,
@@ -58,7 +55,11 @@ function extractJsonFromFence(value: string): Record<string, unknown> | null {
   return tryParseJson(candidate) ?? findFirstJsonObject(candidate);
 }
 
-function findFirstJsonObject(value: string): Record<string, unknown> | null {
+/**
+ * Find the start position of the first valid JSON object in a string.
+ * Returns -1 if no valid JSON object is found.
+ */
+function findJsonStartPosition(value: string): number {
   let inString = false;
   let escaped = false;
   let depth = 0;
@@ -98,8 +99,57 @@ function findFirstJsonObject(value: string): Record<string, unknown> | null {
       if (depth === 0 && start >= 0) {
         const candidate = value.slice(start, i + 1);
         const parsed = tryParseJson(candidate);
-        if (parsed) return parsed;
+        if (parsed) return start;
         start = -1;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function findFirstJsonObject(value: string): Record<string, unknown> | null {
+  const start = findJsonStartPosition(value);
+  if (start < 0) return null;
+
+  // Find the matching closing brace
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+
+  for (let i = start; i < value.length; i++) {
+    const ch = value[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') {
+      depth++;
+      continue;
+    }
+
+    if (ch === '}' && depth > 0) {
+      depth--;
+      if (depth === 0) {
+        const candidate = value.slice(start, i + 1);
+        return tryParseJson(candidate);
       }
     }
   }
@@ -126,6 +176,39 @@ export function coerceStructuredOutput(
     extractJsonFromFence(trimmed) ??
     findFirstJsonObject(trimmed)
   );
+}
+
+/**
+ * Extract text that appears before the JSON object in a string.
+ * Useful for LLMs that output prose followed by structured JSON (e.g., GLM).
+ * Returns empty string if no pre-JSON text exists or content is pure JSON.
+ */
+export function extractPreJsonText(content: string): string {
+  if (!content || typeof content !== 'string') return '';
+
+  const trimmed = content.trim();
+  if (!trimmed) return '';
+
+  // If the content starts with '{', there's no pre-JSON text
+  if (trimmed.startsWith('{')) return '';
+
+  // Check for JSON in markdown fence first
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch) {
+    const fenceStart = trimmed.indexOf('```');
+    if (fenceStart > 0) {
+      return trimmed.slice(0, fenceStart).trim();
+    }
+    return '';
+  }
+
+  // Find where the JSON object starts
+  const jsonStart = findJsonStartPosition(trimmed);
+  if (jsonStart > 0) {
+    return trimmed.slice(0, jsonStart).trim();
+  }
+
+  return '';
 }
 
 /**

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import type { Session } from '../domain/models'
 import { StatusBadge, StatusDot, type StatusTone } from './StatusBadge'
 import { CollapsibleSection } from './CollapsibleSection'
@@ -23,17 +23,19 @@ function envTone(env: Session['env']): StatusTone {
   return env === 'prod' ? 'success' : 'neutral'
 }
 
-export function SessionCard({
-  session,
-  open,
-  onOpenChange,
-  onDelete,
-}: {
+interface SessionCardProps {
   session: Session
   open: boolean
   onOpenChange: (next: boolean) => void
   onDelete?: (sessionId: string) => void
-}) {
+}
+
+export const SessionCard = memo(function SessionCard({
+  session,
+  open,
+  onOpenChange,
+  onDelete,
+}: SessionCardProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const { insights } = session
   const hasErrors = insights.requestsFailed > 0
@@ -232,4 +234,4 @@ export function SessionCard({
       )}
     </>
   )
-}
+})

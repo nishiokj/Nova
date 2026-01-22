@@ -1,12 +1,20 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useSessions, useFilterCounts, useFilteredSessions } from './hooks/useSessions'
 import { mockSessions } from './domain/mockData'
-import type { FilterType } from './domain/models'
+import type { FilterType, Session } from './domain/models'
 import { SessionCard } from './components/SessionCard'
 import { QuickFilters } from './components/QuickFilters'
 import { LoadingSkeleton } from './components/LoadingSkeleton'
 import { EmptyState } from './components/EmptyState'
 import { StatusDot } from './components/StatusBadge'
+
+type SessionTab = 'active' | 'inactive'
+
+const INACTIVE_PAGE_SIZE = 5
+
+function isSessionActive(s: Session): boolean {
+  return s.state === 'active' || s.insights.requestsRunning > 0
+}
 
 export default function App() {
   const { sessions: fetchedSessions, state, error, refetch, hasRunningRequests } = useSessions()
@@ -22,20 +30,67 @@ export default function App() {
   const filterCounts = useFilterCounts(sessions)
   const filteredSessions = useFilteredSessions(sessions, filter)
 
+  // Active/Inactive tab state
+  const [tab, setTab] = useState<SessionTab>('active')
+  const [inactiveLimit, setInactiveLimit] = useState(INACTIVE_PAGE_SIZE)
+
+  // Split filtered sessions into active and inactive
+  const { activeSessions, inactiveSessions } = useMemo(() => {
+    const active: Session[] = []
+    const inactive: Session[] = []
+    for (const s of filteredSessions) {
+      if (isSessionActive(s)) {
+        active.push(s)
+      } else {
+        inactive.push(s)
+      }
+    }
+    return { activeSessions: active, inactiveSessions: inactive }
+  }, [filteredSessions])
+
+  // Lazy-load inactive sessions
+  const visibleInactiveSessions = useMemo(
+    () => inactiveSessions.slice(0, inactiveLimit),
+    [inactiveSessions, inactiveLimit]
+  )
+  const hasMoreInactive = inactiveLimit < inactiveSessions.length
+
+  const loadMoreInactive = useCallback(() => {
+    setInactiveLimit((prev) => prev + INACTIVE_PAGE_SIZE)
+  }, [])
+
+  // Reset inactive limit when filter changes
+  const handleFilterChange = useCallback((f: FilterType) => {
+    setFilter(f)
+    setInactiveLimit(INACTIVE_PAGE_SIZE)
+  }, [])
+
   // Session expansion state - initialize ALL sessions as COLLAPSED
-  const [open, setOpen] = useState<Record<string, boolean>>({})
-  const handleDelete = (sessionId: string) => {
+  const [open, setOpen] = useState<Set<string>>(new Set())
+  const handleOpenChange = useCallback((sessionId: string, next: boolean) => {
+    setOpen((prev) => {
+      const updated = new Set(prev)
+      if (next) {
+        updated.add(sessionId)
+      } else {
+        updated.delete(sessionId)
+      }
+      return updated
+    })
+  }, [])
+
+  const handleDelete = useCallback((sessionId: string) => {
     setDeletedSessions((prev) => {
       const next = new Set(prev)
       next.add(sessionId)
       return next
     })
     setOpen((prev) => {
-      const next = { ...prev }
-      delete next[sessionId]
+      const next = new Set(prev)
+      next.delete(sessionId)
       return next
     })
-  }
+  }, [])
 
   // Global stats
   const totals = useMemo(() => {
@@ -75,7 +130,7 @@ export default function App() {
             </div>
 
             {/* Quick filters */}
-            <QuickFilters active={filter} counts={filterCounts} onChange={setFilter} />
+            <QuickFilters active={filter} counts={filterCounts} onChange={handleFilterChange} />
           </div>
 
           {/* Summary stats bar */}
@@ -200,7 +255,7 @@ export default function App() {
                 No sessions match the "{filter}" filter
               </p>
               <button
-                onClick={() => setFilter('all')}
+                onClick={() => handleFilterChange('all')}
                 className="mt-2 text-sm text-[var(--running)] hover:underline"
               >
                 Show all sessions
@@ -208,22 +263,117 @@ export default function App() {
             </div>
           )}
 
-          {(state === 'success' || state === 'error') &&
-            filteredSessions.length > 0 &&
-            filteredSessions.map((s, i) => (
-              <div
-                key={s.id}
-                className="animate-fade-in"
-                style={{ animationDelay: `${i * 50}ms` }}
-              >
-                <SessionCard
-                  session={s}
-                  open={open[s.id] ?? false}
-                  onOpenChange={(next) => setOpen((m) => ({ ...m, [s.id]: next }))}
-                  onDelete={handleDelete}
-                />
+          {(state === 'success' || state === 'error') && filteredSessions.length > 0 && (
+            <>
+              {/* Active/Inactive Tabs */}
+              <div className="flex gap-1 p-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] w-fit">
+                <button
+                  onClick={() => setTab('active')}
+                  className={`px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                    tab === 'active'
+                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+                  }`}
+                >
+                  Active
+                  {activeSessions.length > 0 && (
+                    <span className="ml-1.5 px-1.5 py-0.5 text-xs rounded-full bg-[var(--running)]/20 text-[var(--running)]">
+                      {activeSessions.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => setTab('inactive')}
+                  className={`px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                    tab === 'inactive'
+                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+                  }`}
+                >
+                  Inactive
+                  {inactiveSessions.length > 0 && (
+                    <span className="ml-1.5 px-1.5 py-0.5 text-xs rounded-full bg-[var(--text-muted)]/20 text-[var(--text-muted)]">
+                      {inactiveSessions.length}
+                    </span>
+                  )}
+                </button>
               </div>
-            ))}
+
+              {/* Active Sessions */}
+              {tab === 'active' && (
+                <div className="space-y-3">
+                  {activeSessions.length === 0 ? (
+                    <div className="py-8 text-center">
+                      <p className="text-sm text-[var(--text-muted)]">No active sessions</p>
+                      <button
+                        onClick={() => setTab('inactive')}
+                        className="mt-2 text-sm text-[var(--running)] hover:underline"
+                      >
+                        View inactive sessions
+                      </button>
+                    </div>
+                  ) : (
+                    activeSessions.map((s, i) => (
+                      <div
+                        key={s.id}
+                        className="animate-fade-in"
+                        style={{ animationDelay: `${i * 50}ms` }}
+                      >
+                        <SessionCard
+                          session={s}
+                          open={open.has(s.id)}
+                          onOpenChange={(next) => handleOpenChange(s.id, next)}
+                          onDelete={handleDelete}
+                        />
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {/* Inactive Sessions (lazy loaded) */}
+              {tab === 'inactive' && (
+                <div className="space-y-3">
+                  {inactiveSessions.length === 0 ? (
+                    <div className="py-8 text-center">
+                      <p className="text-sm text-[var(--text-muted)]">No inactive sessions</p>
+                      <button
+                        onClick={() => setTab('active')}
+                        className="mt-2 text-sm text-[var(--running)] hover:underline"
+                      >
+                        View active sessions
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      {visibleInactiveSessions.map((s, i) => (
+                        <div
+                          key={s.id}
+                          className="animate-fade-in"
+                          style={{ animationDelay: `${i * 50}ms` }}
+                        >
+                          <SessionCard
+                            session={s}
+                            open={open.has(s.id)}
+                            onOpenChange={(next) => handleOpenChange(s.id, next)}
+                            onDelete={handleDelete}
+                          />
+                        </div>
+                      ))}
+                      {hasMoreInactive && (
+                        <button
+                          onClick={loadMoreInactive}
+                          className="w-full py-3 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded-lg transition-colors"
+                        >
+                          Load more ({inactiveSessions.length - inactiveLimit} remaining)
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </main>
 
         {/* Footer */}

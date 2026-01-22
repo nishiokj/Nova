@@ -18,14 +18,17 @@ import type {
   InternalHookEvent,
   InternalHookContext,
   InternalHookQueue,
+  ModelSelection,
 } from 'agent';
 import { Agent } from 'agent';
 import type { AgentRegistry } from 'agent';
 import { createWorkItem, type WorkItem } from 'work';
-import { createEvent, getCanonicalProvider, getProviderBaseUrl } from 'types';
-import type { ArtifactKind, ArtifactDiscoveredData, AgentEvent, LLMProvider, LLMRequestConfig } from 'types';
+import { createEvent } from 'types';
+import type { ArtifactKind, ArtifactDiscoveredData, AgentEvent, LLMRequestConfig } from 'types';
 import type { EventBusProtocol } from 'comms-bus';
-import { getHandlers } from './hooks/index.js';
+import { buildLLMRequestConfig, type OrchestratorTerminationReason, profiler } from 'shared';
+import { executeHooks, type StopHookHandler } from './hooks.js';
+import { BoundsChecker } from './bounds-checker.js';
 
 // --- Types ---
 
@@ -50,13 +53,24 @@ export interface OrchestratorConfig {
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
   /** Per-request stop hook - intercepts goal completion */
-  stopHook?: import('./hooks/stop-hook.js').StopHookHandler;
+  stopHook?: StopHookHandler;
+  /**
+   * Check for pending user interruption that arrived during execution.
+   * Called before terminating on goal_state_reached.
+   * If returns true, orchestrator creates new work item and continues.
+   */
+  checkInterruption?: () => boolean;
+  /**
+   * Check for user stop request (e.g., user typed "stop").
+   * Passed to agent's shouldStop hook. Called each agent iteration.
+   */
+  checkStopRequest?: () => boolean;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   maxIterations: 70,
   maxToolCalls: 250,
-  maxDurationMs: 1000_000, // 5 minutes
+  maxDurationMs: 300_000, // 5 minutes
   hookTimeoutMs: 5000,
   compactTriggerPercent: 0.70,
   compactResetPercent: 0.7,
@@ -66,16 +80,9 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 
 /**
  * Why orchestration terminated.
+ * Re-exported from shared for backwards compatibility.
  */
-export type TerminationReason =
-  | 'goal_state_reached'
-  | 'max_iterations_exceeded'
-  | 'max_tool_calls_exceeded'
-  | 'max_duration_exceeded'
-  | 'user_input_required'
-  | 'handoff_requested'
-  | 'agent_error'
-  | 'refusal';
+export type TerminationReason = OrchestratorTerminationReason;
 
 /**
  * Orchestrator execution metrics.
@@ -121,17 +128,6 @@ export interface PlanModeOptions {
   toolFilter: (tools: string[]) => string[];
 }
 
-/**
- * Model override for session-level model selection.
- * When set, overrides the default agent LLM config.
- */
-export interface ModelOverride {
-  provider: string;
-  model: string;
-  reasoning?: string;
-}
-
-
 // --- Orchestrator ---
 
 /**
@@ -147,9 +143,10 @@ export class Orchestrator {
   private agentRegistry?: AgentRegistry;
   private hooks?: AgentHooks;
   private planModeOptions?: PlanModeOptions;
-  private modelOverride?: ModelOverride;
+  private getModelSelection?: (agentType: string) => ModelSelection | null;
   private eventBus?: EventBusProtocol;
   private hookQueue: InternalHookQueue;
+  private boundsChecker: BoundsChecker;
 
   // Work queue state for DAG-based execution
   private workQueue: WorkItem[] = [];
@@ -167,7 +164,7 @@ export class Orchestrator {
     hooks?: AgentHooks,
     planModeOptions?: PlanModeOptions,
     eventBus?: EventBusProtocol,
-    modelOverride?: ModelOverride
+    getModelSelection?: (agentType: string) => ModelSelection | null
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
     this.toolRegistry = toolRegistry;
@@ -178,9 +175,14 @@ export class Orchestrator {
     this.agentRegistry = agentRegistry;
     this.hooks = hooks;
     this.planModeOptions = planModeOptions;
-    this.modelOverride = modelOverride;
+    this.getModelSelection = getModelSelection;
     this.eventBus = eventBus;
     this.hookQueue = this.createHookQueue();
+    this.boundsChecker = new BoundsChecker({
+      maxIterations: this.config.maxIterations,
+      maxDurationMs: this.config.maxDurationMs,
+      maxToolCalls: this.config.maxToolCalls,
+    });
   }
 
   /**
@@ -201,9 +203,6 @@ export class Orchestrator {
   private createHookQueue(): InternalHookQueue {
     return {
       enqueue: (event: InternalHookEvent, context: InternalHookContext) => {
-        const handlers = getHandlers(event.type);
-        if (handlers.length === 0) return;
-
         const hookWorkItem = createWorkItem({
           goal: 'internal_hook',
           objective: `hook:${event.type}`,
@@ -219,15 +218,7 @@ export class Orchestrator {
             hookType: event.type,
             event,
             hookContext: context,
-            handler: async () => {
-              for (const handler of handlers) {
-                try {
-                  await handler(event, context);
-                } catch (err) {
-                  console.error(`[HOOK:${event.type}] Handler error:`, err);
-                }
-              }
-            },
+            handler: () => executeHooks(event.type, event, context),
           },
         });
 
@@ -380,7 +371,7 @@ export class Orchestrator {
     this.initialWorkId = initialItem.workId;
     this.enqueue(initialItem);
 
-    const startTime = Date.now();
+    let startTime = Date.now();
     let iteration = 0;
     let totalLlmCalls = 0;
     let totalToolCalls = 0;
@@ -394,6 +385,7 @@ export class Orchestrator {
 
     this.log('info', 'Starting orchestration', { goal, agentType });
     this.emit(createEvent('orchestration_started', { goal, agentType, requestId: this.requestId }));
+    profiler.instant('orchestration:start', 'orchestrator', 'p', { goal: goal.slice(0, 100), agentType });
 
     // Track in-progress work items (for multi-iteration execution)
     const inProgress: Map<string, { item: WorkItem; agent: Agent | null }> = new Map();
@@ -421,7 +413,7 @@ export class Orchestrator {
             filesRead: [],
             invalidatedPaths: [],
             toolErrors: [],
-            terminationReason: 'agent_error',
+            terminationReason: 'exception', // Agent-level reason for orchestrator error
             needsUserInput: false,
             isRefusal: false,
             localContext: context,
@@ -452,6 +444,11 @@ export class Orchestrator {
       }
 
       iteration++;
+      profiler.instant(`orch.iteration:${iteration}`, 'orchestrator', 'p', {
+        workItems: Array.from(inProgress.keys()),
+        totalToolCalls,
+        totalLlmCalls,
+      });
       const now = Date.now();
       const elapsed = now - startTime;
 
@@ -461,6 +458,7 @@ export class Orchestrator {
         compactedRecently = false;
       }
       if (!compactedRecently && percentUsed >= this.config.compactTriggerPercent) {
+        const compactAsyncId = profiler.asyncBegin('orch.compact', 'orchestrator');
         const llmConfig = this.resolveCompactionLlmConfig(agentType);
         let compactResult;
         if (llmConfig) {
@@ -489,6 +487,10 @@ export class Orchestrator {
           });
         }
         compactedRecently = true;
+        profiler.asyncEnd('orch.compact', compactAsyncId, 'orchestrator', {
+          itemsRemoved: compactResult.itemsRemoved,
+          bytesRecovered: compactResult.bytesRecovered,
+        });
         this.log('info', 'Auto-compacted context', {
           percentUsed,
           itemsRemoved: compactResult.itemsRemoved,
@@ -499,27 +501,17 @@ export class Orchestrator {
       // BOUND CHECK: Iterations
       if (iteration > this.config.maxIterations) {
         this.log('warning', 'Max iterations exceeded', { iteration, completedWork: this.completedWork.size });
+        const stopResult = await this.callStopHook(context, 'max_iterations_exceeded', '', iteration, agentType);
+        if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+          continue; // Stop hook blocked - keep going
+        }
         emitGoalNotAchieved('max_iterations_exceeded');
         const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_iterations_exceeded');
         const hasContent = this.completedWork.size > 0;
         return this.createResult({
-          success: hasContent, // Partial success if we have any completed work
+          success: hasContent,
           response: harvestedResponse,
           terminationReason: 'max_iterations_exceeded',
-          metrics: { iterations: iteration - 1, totalLlmCalls, totalToolCalls, durationMs: elapsed },
-        });
-      }
-
-      // BOUND CHECK: Duration
-      if (elapsed > this.config.maxDurationMs) {
-        this.log('warning', 'Max duration exceeded', { elapsed, completedWork: this.completedWork.size });
-        emitGoalNotAchieved('max_duration_exceeded');
-        const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_duration_exceeded');
-        const hasContent = this.completedWork.size > 0;
-        return this.createResult({
-          success: hasContent, // Partial success if we have any completed work
-          response: harvestedResponse,
-          terminationReason: 'max_duration_exceeded',
           metrics: { iterations: iteration - 1, totalLlmCalls, totalToolCalls, durationMs: elapsed },
         });
       }
@@ -579,7 +571,9 @@ export class Orchestrator {
           if (!agent) {
             throw new Error(`Missing agent for work item: ${workId}`);
           }
+          const agentAsyncId = profiler.asyncBegin(`agent:${item.agent}`, 'agent');
           const result = await agent.run({ globalContext: context, workItem: item, cwd });
+          profiler.asyncEnd(`agent:${item.agent}`, agentAsyncId, 'agent', { llmCalls: result.metrics.llmCallsMade, toolCalls: result.metrics.toolCallsMade });
           return { workId, item, result };
         } catch (err) {
           // Construct synthetic failure result to preserve all results on Promise.all
@@ -591,7 +585,7 @@ export class Orchestrator {
             filesRead: [],
             invalidatedPaths: [],
             toolErrors: [],
-            terminationReason: 'agent_error',
+            terminationReason: 'exception', // Agent-level reason for orchestrator-caught exception
             needsUserInput: false,
             isRefusal: false,
             localContext: context,
@@ -622,7 +616,7 @@ export class Orchestrator {
 
         // Merge token metrics (use totalOutputTokens for cumulative count across all LLM calls in this run)
         const localMetrics = result.localContext.metrics;
-        context.updateMetrics(localMetrics.inputTokens, localMetrics.totalOutputTokens);
+        context.updateMetrics(localMetrics.inputTokens, localMetrics.totalOutputTokens, localMetrics.cachedTokens);
 
         // Emit iteration_completed
         const responsePreview = result.response && result.response.length > 200
@@ -642,15 +636,42 @@ export class Orchestrator {
 
         // Check terminal conditions (first terminal condition wins)
         if (!terminalResult) {
-          // TERMINAL: User input needed
+          // Extract structured output early for use in multiple checks
+          const structured = result.structuredOutput as { action?: string; goalStateReached?: boolean } | undefined;
+          const actionIsContinue = structured?.action === 'continue';
+          const goalReached = structured?.goalStateReached === true || result.terminationReason === 'goal_state_reached';
+
+          // TERMINAL: User input needed (via PromptUser tool)
           if (result.needsUserInput && result.userPrompt) {
-            this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question });
+            // Check for interruption - user message takes precedence over agent's question
+            if (this.config.checkInterruption?.()) {
+              this.log('info', 'Interruption preempts user prompt request', { iteration, workId });
+              context.addAgentResultContext(result);
+              const newItem = this.createWorkItem('Continue with user input', agentType);
+              this.enqueue(newItem);
+              // Reset completion tracking and duration timer for the new work
+              initialWorkCompleted = false;
+              initialWorkResponse = '';
+              this.completedWork.delete(this.initialWorkId);
+              this.initialWorkId = newItem.workId;
+              inProgress.delete(workId);
+              startTime = Date.now(); // Reset duration timer on interruption
+              continue;
+            }
+            this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question, questionType: result.userPrompt.questionType });
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'user_input_required', result.response ?? '', iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue; // Stop hook blocked (e.g., Ralph async mode) - keep going
+            }
+
             terminalResult = this.createResult({
               success: false,
-              response: '',
+              response: result.response ?? '',
               paused: true,
               userPrompt: result.userPrompt,
+              handoffSpec: result.handoffSpec, // Include handoffSpec if agent provided it
               terminationReason: 'user_input_required',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
@@ -658,14 +679,40 @@ export class Orchestrator {
           }
 
           // TERMINAL: Handoff requested
+          // Agent has already presented the spec to the user and received approval
           if (result.needsHandoff && result.handoffSpec) {
-            this.log('info', 'Handoff requested', { workId, specLength: result.handoffSpec.length });
+            // Check for interruption - user message takes precedence over handoff
+            if (this.config.checkInterruption?.()) {
+              this.log('info', 'Interruption preempts handoff request', { iteration, workId });
+              context.addAgentResultContext(result);
+              const newItem = this.createWorkItem('Continue with user input', agentType);
+              this.enqueue(newItem);
+              // Reset completion tracking and duration timer for the new work
+              initialWorkCompleted = false;
+              initialWorkResponse = '';
+              this.completedWork.delete(this.initialWorkId);
+              this.initialWorkId = newItem.workId;
+              inProgress.delete(workId);
+              startTime = Date.now(); // Reset duration timer on interruption
+              continue;
+            }
+            this.log('info', 'Handoff requested - executing with spec', { workId, specLength: result.handoffSpec.length });
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'handoff_requested', result.response ?? '', iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue; // Stop hook blocked - keep going
+            }
+
+            // Agent has already gotten user approval via PromptUser
+            // Create a terminal result with spec but WITHOUT another approval prompt
+            // The spec was already presented and approved by the user
             terminalResult = this.createResult({
               success: true,
-              response: '',
+              response: result.response ?? 'Planning complete. Ready to execute.',
               paused: true,
               handoffSpec: result.handoffSpec,
+              // No userPrompt - the agent already presented the spec and got approval
               terminationReason: 'handoff_requested',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
@@ -675,8 +722,13 @@ export class Orchestrator {
           // TERMINAL: Refusal
           if (result.isRefusal) {
             this.log('warning', 'Agent refused', { workId, response: result.response });
-            emitGoalNotAchieved('refusal', 1);
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'refusal', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved('refusal', 1);
             terminalResult = this.createResult({
               success: false,
               response: result.response,
@@ -687,13 +739,166 @@ export class Orchestrator {
             continue;
           }
 
-          // TERMINAL: Hard error
-          const structured = result.structuredOutput;
-          const actionIsContinue = structured?.action === 'continue';
-          if (result.error && !result.success && !actionIsContinue) {
-            this.log('error', 'Agent error', { workId, error: result.error });
-            emitGoalNotAchieved(result.error, 1);
+          // TERMINAL: User stopped (explicit "stop" from user)
+          if (result.terminationReason === 'user_stopped') {
+            this.log('info', 'User stopped execution', { workId });
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'user_stopped', result.response || '', iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response || 'Execution stopped by user.',
+              terminationReason: 'user_stopped',
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // CONTINUABLE ERRORS: no_action, invalid_action, stagnation - pass to stop hook with actual reason
+          // These are recoverable issues where Ralph Loop can retry with hints
+          const isContinuableError = result.terminationReason === 'no_action' ||
+                                     result.terminationReason === 'invalid_action' ||
+                                     result.terminationReason === 'stagnation:tool_repeat';
+          if (isContinuableError) {
+            const reason = result.terminationReason!; // Safe: just checked above
+            this.log('warning', `Agent ${reason}`, { workId, error: result.error });
+            context.addAgentResultContext(result);
+
+            // Check stop hook - Ralph Loop can continue on these
+            const stopContext = {
+              workId,
+              response: result.response,
+              terminationReason: reason,
+              iteration,
+              agentType,
+              sessionKey: context.sessionKey,
+            };
+
+            if (this.config.stopHook) {
+              try {
+                const stopResult = await this.config.stopHook(stopContext);
+                if (stopResult.decision === 'block' && stopResult.reason) {
+                  // Re-inject prompt and continue the loop
+                  this.log('info', `Stop hook blocked termination on ${reason}, re-injecting prompt`, {
+                    iteration,
+                    promptPreview: stopResult.reason.slice(0, 100),
+                  });
+
+                  // Emit progress event so TUI knows loop is continuing
+                  this.emit(createEvent('agent_progress', {
+                    kind: 'work',
+                    message: stopResult.systemMessage || `Stop hook continuing on ${reason} (iteration ${iteration})`,
+                    requestId: this.requestId,
+                  }));
+
+                  if (stopResult.systemMessage) {
+                    context.addMessage('system', stopResult.systemMessage);
+                  }
+
+                  const newItem = this.createWorkItem(stopResult.reason, agentType);
+                  this.enqueue(newItem);
+                  this.completedWork.delete(this.initialWorkId);
+                  this.initialWorkId = newItem.workId;
+                  inProgress.delete(workId);
+                  continue;
+                }
+              } catch (err) {
+                // Stop hook error - log and fall through to termination
+                this.log('error', `Stop hook threw error on ${reason}`, {
+                  error: err instanceof Error ? err.message : String(err),
+                  iteration,
+                });
+              }
+            }
+
+            // No stop hook or hook allowed termination - map to appropriate orchestrator reason
+            const orchReason = reason === 'stagnation:tool_repeat' ? 'agent_error' : reason;
+            emitGoalNotAchieved(result.error || reason, 1);
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response,
+              error: result.error || reason,
+              terminationReason: orchReason as TerminationReason,
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // AGENT BOUNDS EXCEEDED: Map agent-level bounds to orchestrator-level reasons
+          if (result.terminationReason === 'iterations_exhausted' ||
+              result.terminationReason === 'bounds:tool_calls' ||
+              result.terminationReason === 'bounds:duration') {
+            const orchReason = result.terminationReason === 'iterations_exhausted' ? 'max_iterations_exceeded'
+              : result.terminationReason === 'bounds:tool_calls' ? 'max_tool_calls_exceeded'
+              : 'max_duration_exceeded';
+            this.log('warning', `Agent bounds exceeded: ${result.terminationReason}`, { workId });
+            context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, orchReason, result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            terminalResult = this.createResult({
+              success: !!result.response,
+              response: result.response || `Agent terminated: ${result.terminationReason}`,
+              terminationReason: orchReason,
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // TERMINAL: rate_limit, circuit_open - transient errors that must stop
+          if (result.terminationReason === 'rate_limit' || result.terminationReason === 'circuit_open') {
+            this.log('warning', `Agent ${result.terminationReason}`, { workId });
+            context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, result.terminationReason, result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response || `Execution stopped: ${result.terminationReason}`,
+              error: result.terminationReason,
+              terminationReason: result.terminationReason,
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // TERMINAL: exception - agent caught an unexpected error
+          if (result.terminationReason === 'exception') {
+            this.log('error', 'Agent exception', { workId, error: result.error });
+            context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'agent_error', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved(result.error || 'exception', 1);
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response,
+              error: result.error || 'Agent encountered an unexpected exception',
+              terminationReason: 'agent_error',
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // TERMINAL: Hard error (catch-all for error + !success cases)
+          if (result.error && !result.success && !actionIsContinue) {
+            this.log('error', 'Agent error', { workId, error: result.error, terminationReason: result.terminationReason });
+            context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'agent_error', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved(result.error, 1);
             terminalResult = this.createResult({
               success: false,
               response: result.response,
@@ -707,13 +912,17 @@ export class Orchestrator {
           // BOUND CHECK: Total tool calls
           if (totalToolCalls >= this.config.maxToolCalls) {
             this.log('warning', 'Max tool calls exceeded', { totalToolCalls, completedWork: this.completedWork.size });
-            emitGoalNotAchieved('max_tool_calls_exceeded');
             context.addAgentResultContext(result);
-            // Use result.response if available, otherwise harvest completed work
+            const stopResult = await this.callStopHook(context, 'max_tool_calls_exceeded', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved('max_tool_calls_exceeded');
             const response = result.response || this.harvestCompletedWork(inProgress, 'max_tool_calls_exceeded');
             const hasContent = !!result.response || this.completedWork.size > 0;
             terminalResult = this.createResult({
-              success: hasContent, // Partial success if we have any content
+              success: hasContent,
               response,
               terminationReason: 'max_tool_calls_exceeded',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
@@ -745,43 +954,77 @@ export class Orchestrator {
 
       // Check if initial work completed after processing ALL results (fixes race condition in parallel execution)
       if (initialWorkCompleted && this.workQueue.length === 0 && inProgress.size === 0) {
+        // Check for pending user interruption before terminating
+        // This catches messages that arrived during execution but weren't seen by the agent
+        if (this.config.checkInterruption?.()) {
+          this.log('info', 'Pending interruption detected, continuing execution', { iteration });
+
+          // Create new work item to continue - the interruption message is already in context
+          const newItem = this.createWorkItem('Continue with user input', agentType);
+          this.enqueue(newItem);
+
+          // Reset completion tracking and duration timer for the new work
+          initialWorkCompleted = false;
+          initialWorkResponse = '';
+          this.completedWork.delete(this.initialWorkId);
+          this.initialWorkId = newItem.workId;
+          startTime = Date.now(); // Reset duration timer on interruption
+
+          continue;
+        }
+
         // Execute per-request stop hook before terminating - allows Ralph Loop and similar patterns
         if (this.config.stopHook) {
           const stopContext = {
             workId: this.initialWorkId,
             response: initialWorkResponse,
-            terminationReason: 'goal_state_reached',
+            terminationReason: 'goal_state_reached' as TerminationReason,
             iteration,
             agentType,
             sessionKey: context.sessionKey,
           };
 
-          const stopResult = await this.config.stopHook(stopContext);
+          try {
+            const stopResult = await this.config.stopHook(stopContext);
 
-          if (stopResult.decision === 'block' && stopResult.reason) {
-            // Re-inject prompt and continue the loop
-            this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
-              iteration,
-              promptPreview: stopResult.reason.slice(0, 100),
-            });
+            if (stopResult.decision === 'block' && stopResult.reason) {
+              // Re-inject prompt and continue the loop
+              this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
+                iteration,
+                promptPreview: stopResult.reason.slice(0, 100),
+              });
 
-            // Add system message if provided
-            if (stopResult.systemMessage) {
-              context.addMessage('system', stopResult.systemMessage);
+              // Emit progress event so TUI knows loop is continuing
+              this.emit(createEvent('agent_progress', {
+                kind: 'work',
+                message: stopResult.systemMessage || `Stop hook continuing (iteration ${iteration})`,
+                requestId: this.requestId,
+              }));
+
+              // Add system message if provided
+              if (stopResult.systemMessage) {
+                context.addMessage('system', stopResult.systemMessage);
+              }
+
+              // Create new work item with the injected prompt
+              const newItem = this.createWorkItem(stopResult.reason, agentType);
+              this.enqueue(newItem);
+
+              // Reset completion tracking
+              initialWorkCompleted = false;
+              initialWorkResponse = '';
+              this.completedWork.delete(this.initialWorkId);
+              this.initialWorkId = newItem.workId;
+
+              // Continue the loop
+              continue;
             }
-
-            // Create new work item with the injected prompt
-            const newItem = this.createWorkItem(stopResult.reason, agentType);
-            this.enqueue(newItem);
-
-            // Reset completion tracking
-            initialWorkCompleted = false;
-            initialWorkResponse = '';
-            this.completedWork.delete(this.initialWorkId);
-            this.initialWorkId = newItem.workId;
-
-            // Continue the loop
-            continue;
+          } catch (err) {
+            // Stop hook error should NOT crash the orchestrator - log and continue to termination
+            this.log('error', 'Stop hook threw error on goal_state_reached', {
+              error: err instanceof Error ? err.message : String(err),
+              iteration,
+            });
           }
         }
 
@@ -836,19 +1079,29 @@ export class Orchestrator {
   // --- Private helpers ---
 
   /**
-   * Dequeue the next ready work item (all dependencies satisfied).
-   * Returns null if all items are blocked on dependencies.
+   * Build LLM config from model selection + agent's operational params.
+   * NO FALLBACK: If no model selection exists for this agent type, throws an error.
+   * Users must explicitly select models for each agent type they want to use.
+   *
+   * Model selection (provider/model) comes from SessionStore - this is the SINGLE SOURCE OF TRUTH.
+   * Operational params (maxTokens, temperature) come from AgentConfig.
+   *
+   * @param llmParams - Operational params from AgentConfig (maxTokens, temperature)
+   * @param agentType - Agent type for model selection lookup
+   * @returns Complete LLM config ready for use
+   * @throws Error if no model selection exists for this agent type
    */
-  private dequeueNext(): WorkItem | null {
-    for (let i = 0; i < this.workQueue.length; i++) {
-      const item = this.workQueue[i];
-      const ready = item.dependencies.every(d => this.completedWork.has(d));
-      if (ready) {
-        this.workQueue.splice(i, 1);
-        return item;
-      }
+  private buildLlmConfig(
+    llmParams: { maxTokens: number; temperature: number },
+    agentType: string
+  ): LLMRequestConfig {
+    const modelSelection = this.getModelSelection?.(agentType);
+    if (!modelSelection) {
+      this.log('error', `No model selection for agent type '${agentType}'. User must select a model via /models.`, { agentType });
+      throw new Error(`No model configured for agent type '${agentType}'. Please select a model using /models before using this agent.`);
     }
-    return null;
+
+    return buildLLMRequestConfig(modelSelection, llmParams);
   }
 
   /**
@@ -877,15 +1130,11 @@ export class Orchestrator {
   }
 
   private createAgent(agentType: string): Agent | null {
-    // Try requested type first, then fallback to 'standard' if different
-    let runtime = this.agentRegistry?.getRuntimeConfig(agentType);
-    if (!runtime && agentType !== 'standard') {
-      runtime = this.agentRegistry?.getRuntimeConfig('standard');
-    }
-    if (!runtime) return null;
+    // NO FALLBACK: If the requested agent type doesn't exist, fail explicitly
+    if (!this.agentRegistry?.has(agentType)) return null;
+    let config = this.agentRegistry.getConfig(agentType);
 
     // Apply plan mode modifications if enabled
-    let config = runtime.config;
     if (this.planModeOptions?.enabled) {
       config = {
         ...config,
@@ -894,27 +1143,13 @@ export class Orchestrator {
       };
     }
 
-    // Apply model override if set (session-level model selection)
-    let llmConfig = runtime.llm;
-    if (this.modelOverride) {
-      // Get canonical provider (e.g., 'cerebras' -> 'openai-compat') and base URL from registry
-      const canonicalProvider = getCanonicalProvider(this.modelOverride.provider);
-      const baseUrl = getProviderBaseUrl(this.modelOverride.provider);
+    // Build LLM config from model selection (source of truth) + agent's llmParams
+    const llmConfig = this.buildLlmConfig(config.llmParams, agentType);
 
-      llmConfig = {
-        ...llmConfig,
-        provider: canonicalProvider,
-        model: this.modelOverride.model,
-        // Preserve user-facing provider name for error messages
-        displayProvider: this.modelOverride.provider,
-        // Set base URL for the provider
-        ...(baseUrl ? { baseUrl } : {}),
-        // Map reasoning string to ReasoningConfig if provided
-        ...(this.modelOverride.reasoning ? {
-          reasoning: { effort: this.modelOverride.reasoning as 'low' | 'medium' | 'high' }
-        } : {}),
-      };
-    }
+    // Merge hooks with shouldStop wired to checkStopRequest
+    const mergedHooks = this.config.checkStopRequest
+      ? { ...this.hooks, shouldStop: this.config.checkStopRequest }
+      : this.hooks;
 
     return new Agent(config, {
       llm: this.llm,
@@ -923,43 +1158,31 @@ export class Orchestrator {
       requestId: this.requestId,
       agentRegistry: this.agentRegistry,
       llmConfig,
-      hooks: this.hooks,
+      hooks: mergedHooks,
       internalHookQueue: this.hookQueue,
+      getModelSelection: this.getModelSelection,
     });
   }
 
   private resolveCompactionLlmConfig(agentType: string): LLMRequestConfig | null {
-    let runtime = this.agentRegistry?.getRuntimeConfig(agentType);
-    if (!runtime && agentType !== 'standard') {
-      runtime = this.agentRegistry?.getRuntimeConfig('standard');
-    }
-    if (!runtime) return null;
+    // For compaction, gracefully return null if no model selection - will use simple compaction
+    if (!this.agentRegistry?.has(agentType)) return null;
 
-    let llmConfig = runtime.llm;
-    if (this.modelOverride) {
-      const canonicalProvider = getCanonicalProvider(this.modelOverride.provider);
-      const baseUrl = getProviderBaseUrl(this.modelOverride.provider);
-
-      llmConfig = {
-        ...llmConfig,
-        provider: canonicalProvider,
-        model: this.modelOverride.model,
-        displayProvider: this.modelOverride.provider,
-        ...(baseUrl ? { baseUrl } : {}),
-        ...(this.modelOverride.reasoning ? {
-          reasoning: { effort: this.modelOverride.reasoning as 'low' | 'medium' | 'high' }
-        } : {}),
-      };
+    const modelSelection = this.getModelSelection?.(agentType);
+    if (!modelSelection) {
+      // No model selection - caller will use simple compaction instead
+      return null;
     }
 
-    return llmConfig;
+    const config = this.agentRegistry.getConfig(agentType);
+    return buildLLMRequestConfig(modelSelection, config.llmParams);
   }
 
   private createWorkItem(goal: string, agentType: string): WorkItem {
     // Get agent's budget from registry, fallback to orchestrator config
     let agentBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
     try {
-      agentBudget = this.agentRegistry?.getRuntimeConfig(agentType)?.config.budget;
+      agentBudget = this.agentRegistry?.getConfig(agentType)?.budget;
     } catch {
       // Agent not in registry, use orchestrator defaults
     }
@@ -993,6 +1216,65 @@ export class Orchestrator {
 
   private log(level: keyof OrchestratorLogger, msg: string, meta?: Record<string, unknown>): void {
     this.logger?.[level](msg, { component: 'orchestrator', requestId: this.requestId, ...meta });
+  }
+
+  /**
+   * Call stop hook and return its decision.
+   * Returns null if no stop hook configured or if hook throws.
+   */
+  private async callStopHook(
+    context: ContextWindow,
+    terminationReason: TerminationReason,
+    response: string,
+    iteration: number,
+    agentType: string
+  ): Promise<import('agent').StopHookResult | null> {
+    if (!this.config.stopHook) return null;
+
+    try {
+      return await this.config.stopHook({
+        workId: this.initialWorkId,
+        response,
+        terminationReason,
+        iteration,
+        agentType,
+        sessionKey: context.sessionKey,
+      });
+    } catch (err) {
+      this.log('warning', 'Stop hook error', { error: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * Handle stop hook "block" decision by re-injecting prompt and continuing.
+   * Returns true if loop should continue, false if termination should proceed.
+   */
+  private handleStopHookBlock(
+    stopResult: import('agent').StopHookResult | null,
+    context: ContextWindow,
+    agentType: string,
+    iteration: number
+  ): boolean {
+    if (!stopResult || stopResult.decision !== 'block' || !stopResult.reason) {
+      return false;
+    }
+
+    this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
+      iteration,
+      promptPreview: stopResult.reason.slice(0, 100),
+    });
+
+    if (stopResult.systemMessage) {
+      context.addMessage('system', stopResult.systemMessage);
+    }
+
+    const newItem = this.createWorkItem(stopResult.reason, agentType);
+    this.enqueue(newItem);
+    this.completedWork.delete(this.initialWorkId);
+    this.initialWorkId = newItem.workId;
+
+    return true;
   }
 
   /**

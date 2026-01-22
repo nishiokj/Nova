@@ -15,8 +15,13 @@
     "comms-bus": "workspace:*",
     "diff": "^8.0.3",
     "ink": "^4.4.1",
+    "marked": "^17.0.1",
+    "marked-terminal": "^7.3.0",
     "react": "^18.3.1",
-    "types": "workspace:*"
+    "string-width": "^8.1.0",
+    "strip-ansi": "^7.1.2",
+    "types": "workspace:*",
+    "wrap-ansi": "^9.0.2"
   },
   "devDependencies": {
     "@types/diff": "^8.0.0",

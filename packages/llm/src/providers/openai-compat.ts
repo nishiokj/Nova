@@ -33,6 +33,7 @@ function buildSchemaInstruction(schema: Record<string, unknown>): string {
   return `Return a single JSON object that matches this schema:\n${JSON.stringify(schema)}`;
 }
 
+
 export class OpenAICompatProvider implements LLMProviderAdapter {
   readonly name = 'openai-compat' as const;
 
@@ -117,11 +118,16 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
         }
 
         const callId = (item.call_id ?? item.callId) as string;
-        const output = item.output as string;
+        const rawOutput = item.output as string;
+        const isError = item.isError as boolean | undefined;
+        // Prefix error outputs so the LLM knows it's an error (OpenAI doesn't have is_error field)
+        const content = isError && rawOutput && !rawOutput.startsWith('Error')
+          ? `Error: ${rawOutput}`
+          : rawOutput;
         result.push({
           role: 'tool',
           tool_call_id: callId,
-          content: output,
+          content,
         });
         continue;
       }
@@ -250,10 +256,10 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       body.temperature = params.temperature ?? resolved.temperature;
     }
 
-    // For GLM models, map reasoning config to thinking parameter
-    // GLM uses thinking: { type: 'enabled' } instead of standard reasoning
-    const isGlmModel = resolved.model.toLowerCase().startsWith('glm-');
-    if (isGlmModel && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
+    // z.ai-coder uses GLM's thinking API instead of standard reasoning
+    const isZaiCoder = resolved.displayProvider === 'z.ai-coder';
+
+    if (isZaiCoder && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
       body.thinking = {
         type: 'enabled',
         clear_thinking: false, // Preserve thinking across turns for multi-turn salience
@@ -269,7 +275,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       body.tool_choice = 'auto';
     }
 
-    if (params.responseSchema) {
+    if (params.responseSchema && responseFormat !== 'none') {
       if (responseFormat === 'json_object') {
         body.response_format = { type: 'json_object' };
       } else {
@@ -310,12 +316,14 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       });
     }
 
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (resolved.apiKey) {
+      headers['Authorization'] = `Bearer ${resolved.apiKey}`;
+    }
+
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${resolved.apiKey}`,
-      },
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -458,14 +466,20 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       body.temperature = params.temperature ?? resolved.temperature;
     }
 
-    // For GLM models, map reasoning config to thinking parameter
-    // GLM uses thinking: { type: 'enabled' } instead of standard reasoning
-    const isGlmModel = resolved.model.toLowerCase().startsWith('glm-');
-    if (isGlmModel && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
+    // z.ai-coder uses GLM's thinking API instead of standard reasoning
+    const isZaiCoder = resolved.displayProvider === 'z.ai-coder';
+
+    if (isZaiCoder && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
       body.thinking = {
         type: 'enabled',
         clear_thinking: false, // Preserve thinking across turns for multi-turn salience
       };
+      // Enable tool_stream to get reasoning_content with tool calls
+      body.tool_stream = true;
+      logger.debug('z.ai-coder thinking enabled for stream', {
+        model: resolved.model,
+        effort: resolved.reasoning.effort,
+      });
     }
 
     if (params.tools && params.tools.length > 0) {
@@ -477,7 +491,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       body.tool_choice = 'auto';
     }
 
-    if (params.responseSchema) {
+    if (params.responseSchema && responseFormat !== 'none') {
       if (responseFormat === 'json_object') {
         body.response_format = { type: 'json_object' };
       } else {
@@ -492,12 +506,15 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       }
     }
 
+
+    const streamHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (resolved.apiKey) {
+      streamHeaders['Authorization'] = `Bearer ${resolved.apiKey}`;
+    }
+
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${resolved.apiKey}`,
-      },
+      headers: streamHeaders,
       body: JSON.stringify(body),
     });
 
@@ -533,6 +550,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const toolCallBuilders: Map<number, { id: string; name: string; arguments: string }> = new Map();
     let model = resolved.model;
     let buffer = '';
+    let eventCount = 0;
 
     try {
       while (true) {
@@ -547,6 +565,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6);
           if (data === '[DONE]') continue;
+
+          eventCount++;
 
           try {
             const event = JSON.parse(data) as {
@@ -584,15 +604,36 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
             const choice = event.choices?.[0];
             if (choice) {
-              // Accumulate reasoning content (GLM-4.7 thinking trace)
+              // Stream reasoning content (z.ai-coder thinking trace)
               if (choice.delta?.reasoning_content) {
-                fullReasoningContent += choice.delta.reasoning_content;
+                const reasoningChunk = choice.delta.reasoning_content;
+                fullReasoningContent += reasoningChunk;
+                logger.debug('Received reasoning chunk', {
+                  model: resolved.model,
+                  chunkLength: reasoningChunk.length,
+                  totalLength: fullReasoningContent.length,
+                });
+                params.onReasoningChunk?.(reasoningChunk);
               }
 
-              if (choice.delta?.content) {
-                fullContent += choice.delta.content;
-                params.onChunk?.(choice.delta.content);
-                yield choice.delta.content;
+              const deltaContent = (choice.delta as { content?: unknown }).content;
+              if (deltaContent !== undefined) {
+                const normalized = this.normalizeContent(deltaContent);
+                if (normalized) {
+                  fullContent += normalized;
+                  params.onChunk?.(normalized);
+                  yield normalized;
+                }
+              }
+
+              const messageContent = (choice as { message?: { content?: unknown } }).message?.content;
+              if (fullContent.length === 0 && messageContent !== undefined) {
+                const normalized = this.normalizeContent(messageContent);
+                if (normalized) {
+                  fullContent += normalized;
+                  params.onChunk?.(normalized);
+                  yield normalized;
+                }
               }
 
               if (choice.delta?.tool_calls) {

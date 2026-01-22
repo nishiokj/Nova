@@ -17,24 +17,13 @@ import { homedir } from 'os';
 
 /**
  * Minimal user config template.
- * This is created on first run - users only need to add their API keys.
+ * This is created on first run for user preferences.
+ * API keys are stored in GraphD (use `rex providers set <provider> <key>`).
  * All other settings come from config/defaults.json
  */
 const MINIMAL_USER_CONFIG = {
-  $comment: "Add your API keys below. All other settings are inherited from defaults.",
-  providers: {
-    anthropic: "",
-    openai: "",
-    cerebras: "",
-    together: "",
-    groq: "",
-    fireworks: "",
-    gemini: "",
-    replicate: "",
-    "z.ai-coder": ""
-  },
+  $comment: "User preferences. API keys are stored securely in GraphD - use 'rex providers set <provider> <key>' to configure them.",
   models: {
-    available: [],
     default: ""
   }
 };
@@ -94,10 +83,10 @@ const ensureUserConfig = (): string => {
       console.log(`[rex] Created config directory: ${userConfigDir}`);
     }
 
-    // Write minimal user config (just providers - all else from defaults)
+    // Write minimal user config for preferences (API keys stored in GraphD)
     writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
     console.log(`[rex] Created user config: ${userConfig}`);
-    console.log('[rex] Add your API keys to the providers section. All other settings are inherited from defaults.');
+    console.log('[rex] To add API keys, use: rex providers set <provider> <key>');
     return userConfig;
   } catch (err) {
     console.warn(`[rex] Could not create user config: ${err}`);
@@ -154,16 +143,27 @@ async function isDaemonRunning(): Promise<boolean> {
 }
 
 /**
+ * Build daemon args from launcher argv.
+ * Note: --dangerous is no longer forwarded to daemon - it's now per-session.
+ */
+function buildDaemonArgs(): string[] {
+  const daemonArgs: string[] = [];
+  // --dangerous is now handled per-session by the TUI, not the daemon
+  return daemonArgs;
+}
+
+/**
  * Start the daemon in background
  */
 async function startDaemon(): Promise<Subprocess> {
   const daemonPath = getDaemonPath();
   const configPath = resolveConfigPath();
+  const daemonArgs = buildDaemonArgs();
 
   console.log('[rex] Starting daemon...');
 
   const daemon = spawn({
-    cmd: ['bun', 'run', daemonPath],
+    cmd: ['bun', 'run', daemonPath, ...daemonArgs],
     env: {
       ...process.env,
       ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
@@ -171,7 +171,7 @@ async function startDaemon(): Promise<Subprocess> {
       EVENT_BUS_PORT: String(DAEMON_PORT),
     },
     stdout: 'ignore',
-    stderr: 'pipe',
+    stderr: 'inherit', // Changed from 'pipe' to see debug output
   });
 
   // Wait for daemon to be ready
@@ -186,8 +186,7 @@ async function startDaemon(): Promise<Subprocess> {
 
   // Check if daemon failed
   if (daemon.exitCode !== null) {
-    const stderr = await new Response(daemon.stderr).text();
-    throw new Error(`Daemon failed to start: ${stderr}`);
+    throw new Error(`Daemon failed to start (check stderr output above)`);
   }
 
   throw new Error('Daemon startup timeout');
@@ -205,6 +204,8 @@ async function startTui(): Promise<void> {
       ...process.env,
       EVENT_BUS_HOST: DAEMON_HOST,
       EVENT_BUS_PORT: String(DAEMON_PORT),
+      // Force color support for markdown rendering (chalk detection fails under Bun)
+      FORCE_COLOR: '3',
     },
     stdout: 'inherit',
     stderr: 'inherit',
@@ -251,10 +252,11 @@ async function main(): Promise<void> {
   if (process.argv.includes('--daemon-only')) {
     const daemonPath = getDaemonPath();
     const configPath = resolveConfigPath();
+    const daemonArgs = buildDaemonArgs();
 
     // Run daemon in foreground
     const daemon = spawn({
-      cmd: ['bun', 'run', daemonPath],
+      cmd: ['bun', 'run', daemonPath, ...daemonArgs],
       env: {
         ...process.env,
         ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
@@ -271,7 +273,14 @@ async function main(): Promise<void> {
   }
 
   // Check if daemon is already running
-  const running = await isDaemonRunning();
+  let running = await isDaemonRunning();
+
+  // Note: --dangerous is now per-session, NOT global.
+  // Starting a TUI with --dangerous enables dangerous mode for that session only.
+  // It does NOT require restarting the daemon or affect other sessions.
+  if (process.argv.includes('--dangerous')) {
+    console.log('[rex] --dangerous mode: Will enable for this session only');
+  }
 
   if (!running) {
     try {

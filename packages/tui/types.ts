@@ -23,6 +23,7 @@ export type BridgeCommandType =
   | "hooks_enable"
   | "hooks_disable"
   | "user_prompt_response"
+  | "permission_response"
   | "auth_start"
   | "auth_poll"
   | "auth_verify"
@@ -36,7 +37,9 @@ export type BridgeCommandType =
   | "list_sessions"
   | "compact_context"
   | "set_model"
-  | "get_model";
+  | "get_model"
+  | "ralph_loop_start"
+  | "ralph_loop_cancel";
 
 export type BridgeEventType =
   | "ready"
@@ -48,7 +51,8 @@ export type BridgeEventType =
   | "user_prompt"
   | "error"
   | "provider_key_required"
-  | "model_changed";
+  | "model_changed"
+  | "permission_request";
 
 export interface BridgeCommand {
   type: BridgeCommandType;
@@ -74,9 +78,9 @@ export type EventLevel = "info" | "success" | "warning" | "error";
 /** Event kind for categorization */
 export type EventKind = "work" | "tool" | "planning" | "system";
 
-export type Role = "user" | "agent" | "system" | "status";
+export type Role = "user" | "agent" | "system" | "status" | "reasoning";
 
-export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response" | "models" | "sessions" | "usage";
+export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response" | "models" | "sessions" | "usage" | "permission";
 export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {
@@ -111,6 +115,8 @@ export interface StreamData {
   chunk: string;
   chunk_index?: number;
   is_final?: boolean;
+  /** True if this is reasoning/thinking content from the model */
+  is_reasoning?: boolean;
 }
 
 export interface ResponseData {
@@ -178,7 +184,8 @@ export type QuestionType =
   | "fill_in_blank"
   | "yes_no"
   | "free_text"
-  | "plan_mode_exit";
+  | "plan_mode_exit"
+  | "spec_review";
 
 export interface QuestionOption {
   id: string;
@@ -235,6 +242,24 @@ export interface ResponseLine {
   type: "header" | "added" | "removed" | "context" | "text" | "separator";
 }
 
+/** A styled text segment for rendering within a HistoryLine */
+export interface TextSegment {
+  /** The text content of this segment */
+  text: string;
+  /** Optional bold modifier */
+  bold?: boolean;
+  /** Optional italic modifier */
+  italic?: boolean;
+  /** Optional underline modifier */
+  underline?: boolean;
+  /** Optional dim modifier */
+  dim?: boolean;
+  /** Optional color name (for theme mapping) */
+  color?: "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "gray" | "text" | "muted";
+  /** Optional background color */
+  bgColor?: "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "gray" | "userBg" | "diffContextBg";
+}
+
 /** Model entry from the harness */
 export interface ModelEntry {
   id: string;
@@ -287,4 +312,43 @@ export interface UsageProviderStats {
   today: number;
   week: number;
   month: number;
+}
+
+/** Ralph Loop progress data for iteration updates */
+export interface RalphProgressData {
+  type: "ralph_iteration";
+  iteration: number;
+  maxIterations: number;
+  completionPromise: string | null;
+}
+
+/** Ralph Loop completion reason */
+export type RalphCompletionReason =
+  | "promise_detected"
+  | "max_iterations"
+  | "manual_cancel"
+  | "error";
+
+// ============================================
+// PERMISSION TYPES
+// ============================================
+
+/** Tools that require permission checks */
+export type PermissionedTool = "Bash" | "Write" | "Edit";
+
+/** Permission request data from harness */
+export interface PermissionRequestData {
+  request_id: string;
+  tool: PermissionedTool;
+  target: string;
+  suggested_pattern: string;
+  working_directory: string;
+  description: string;
+}
+
+/** Permission response to send back to harness */
+export interface PermissionResponseData {
+  request_id: string;
+  decision: "allow" | "always_allow" | "deny";
+  pattern?: string;
 }

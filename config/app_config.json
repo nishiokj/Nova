@@ -3,7 +3,7 @@
     "mode": "multi",
     "max_agent_pending": 1,
     "health_check_interval_s": 2.0,
-    "agent_timeout_s": 30.0,
+    "agent_timeout_s": 120.0,
     "tts_timeout_s": 30.0,
     "enable_rl_worker": false
   },

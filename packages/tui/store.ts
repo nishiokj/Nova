@@ -1,7 +1,43 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason, PermissionRequestData, TextSegment } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
+
+/**
+ * TUI Store - Central state management for the terminal UI
+ *
+ * DOMAINS:
+ *   Core         - state, status, progress, session, request count
+ *   History      - message history, pruning, caching
+ *   Streaming    - response streaming with throttling
+ *   Reasoning    - extended thinking display
+ *   Input        - text buffer, cursor, autocomplete
+ *   UI Mode      - mode switching, scroll, visibility flags
+ *   Question     - interactive prompts, multi-question sequences
+ *   Models       - model list, cursor, selection per agent type
+ *   Sessions     - session list, cursor
+ *   Usage        - usage analytics, stats
+ *   Ralph Loop   - autonomous loop state
+ *   Wizard       - multi-step configuration flows
+ *   Skills/Hooks - extension lists
+ *   Capabilities - system feature flags
+ *   Paste        - large paste handling
+ *   Theme        - theme selection cursor
+ *   Plan Mode    - planning mode flag
+ *   Response     - modal content display
+ *
+ * PATTERNS:
+ *   - List domains (models, sessions, usage): list + cursor + move + getSelected
+ *   - All mutations call emit() at the end
+ *   - batch() groups mutations into single emit
+ *   - Streaming uses throttled emit for performance
+ *
+ * ADDING NEW STATE:
+ *   1. Add private field in the appropriate domain section below
+ *   2. Add to StoreSnapshot interface
+ *   3. Add to getSnapshot() method
+ *   4. Add methods in the corresponding METHODS section
+ */
 
 // Resource limits to prevent memory exhaustion
 const MAX_STREAMING_BYTES = 5 * 1024 * 1024;  // 5MB - cap streaming text
@@ -17,6 +53,8 @@ export interface AutocompleteState {
 export interface HistoryLine {
   id: string;
   text: string;
+  /** Optional styled segments (overrides text for rendering if present) */
+  segments?: TextSegment[];
   role?: Role;
   requestId?: string;
   isBlockStart?: boolean;  // First line of a message block
@@ -38,9 +76,11 @@ export interface StoreSnapshot {
   history: MessageEntry[];
   streamingText: string;
   streamingRequestId: string | null;
+  /** Reasoning/thinking content being streamed (displayed distinctly from response) */
+  reasoningText: string;
+  reasoningRequestId: string | null;
   scrollOffset: number;
   newMessages: boolean;
-  compact: boolean;
   voiceMode: boolean;
   helpVisible: boolean;
   sessionKey: string | null;
@@ -80,9 +120,9 @@ export interface StoreSnapshot {
   modelsList: ModelEntry[];
   modelsCursor: number;
   modelDeletePending: boolean;
-  selectedModel: string | null;
-  selectedProvider: string | null;
-  selectedReasoningLevel: string | null;
+  modelSelections: Map<string, { model: string; provider: string; reasoning?: string }>;
+  stagedModelSelections: Map<string, { model: string; provider: string; reasoning?: string }>;
+  modelsActiveTab: string;
   // Sessions selection
   sessionsList: SessionEntry[];
   sessionsCursor: number;
@@ -93,52 +133,66 @@ export interface StoreSnapshot {
   usageDayStats: UsageDayStats[];
   usageProviderStats: UsageProviderStats[];
   usageLoading: boolean;
+  // Ralph Loop state
+  ralphActive: boolean;
+  ralphIteration: number;
+  ralphMaxIterations: number;
+  ralphCompletionPromise: string | null;
+  // Permission prompt state
+  activePermissionRequest: PermissionRequestData | null;
+  permissionCursor: number;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
 
 export class Store {
-  private inputBuffer = new InputBuffer();
-  private inputScrollOffset = 0;
-  private autocomplete: AutocompleteState = {
-    active: false,
-    suggestions: [],
-    selected: 0,
-    startIndex: -1,
-  };
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATE - All private fields grouped by domain
+  // ═══════════════════════════════════════════════════════════════════════════
 
+  // ─── Core ───
   private state: TUIState = "idle";
   private statusMessage = "Ready";
   private progressMessage = "";
   private progressLevel: EventLevel | null = null;
   private progressKind: EventKind | null = null;
+  private sessionKey: string | null = null;
+  private requestCount = 0;
+  private listeners = new Set<() => void>();
+  private batchDepth = 0;
+  private batchDirty = false;
+
+  // ─── History ───
   private history: MessageEntry[] = [];
   private historyStart = 0;
+  private historyVersion = 0;
+  private historyCache: { width: number; version: number; lines: HistoryLine[] } | null = null;
+  private maxHistory: number;
+
+  // ─── Streaming ───
   private streamingText = "";
   private streamingRequestId: string | null = null;
   private streamingTruncated = false;
+  private streamingThrottleMs = 16; // ~60fps
+  private lastStreamingEmit = 0;
+
+  // ─── Reasoning ───
+  private reasoningText = "";
+  private reasoningRequestId: string | null = null;
+
+  // ─── Input ───
+  private inputBuffer = new InputBuffer();
+  private inputScrollOffset = 0;
+  private autocomplete: AutocompleteState = { active: false, suggestions: [], selected: 0, startIndex: -1 };
+
+  // ─── UI Mode ───
+  private uiMode: UIMode = "chat";
   private scrollOffset = 0;
   private newMessages = false;
-  private compact = false;
-  private voiceMode = false;
   private helpVisible = false;
-  private sessionKey: string | null = null;
-  private uiMode: UIMode = "chat";
-  private wizardType: WizardType | null = null;
-  private wizardStepIndex = 0;
-  private wizardData: Record<string, unknown> = {};
-  private wizardErrors: string[] = [];
-  private skillsList: Record<string, unknown>[] = [];
-  private hooksList: Record<string, unknown>[] = [];
-  private skillsErrors: string[] = [];
-  private hooksErrors: string[] = [];
-  private capabilities = { voiceAvailable: false, streamingSupported: true };
-  private requestCount = 0;
-  private historyVersion = 0;
-  private maxHistory: number;
-  private listeners = new Set<() => void>();
+  private voiceMode = false;
 
-  // Question flow state
+  // ─── Question Flow ───
   private activeQuestion: AgentQuestion | null = null;
   private questionSelection: number[] = [];
   private questionCursor = 0;
@@ -146,34 +200,21 @@ export class Store {
   private questionQueue: AgentQuestion[] = [];
   private questionAnswers = new Map<string, unknown>();
   private questionRequestId: string | null = null;
-  private questionProcessing = false;  // Re-entrance guard
+  private questionProcessing = false;
 
-  // Paste state
-  private pasteInProgress = false;
-  private pasteBytesReceived = 0;
-
-  // Theme selection
-  private themeCursor = 0;
-
-  // Plan mode
-  private planMode = false;
-
-  // Response pane content
-  private responseContent: ResponseContent | null = null;
-
-  // Models selection
+  // ─── Models ───
   private modelsList: ModelEntry[] = [];
   private modelsCursor = 0;
   private modelDeletePending = false;
-  private selectedModel: string | null = null;
-  private selectedProvider: string | null = null;
-  private selectedReasoningLevel: string | null = null;
+  private modelSelections = new Map<string, { model: string; provider: string; reasoning?: string }>();
+  private stagedModelSelections = new Map<string, { model: string; provider: string; reasoning?: string }>();
+  private modelsActiveTab = 'standard';
 
-  // Sessions selection
+  // ─── Sessions ───
   private sessionsList: SessionEntry[] = [];
   private sessionsCursor = 0;
 
-  // Usage view
+  // ─── Usage ───
   private usageSessions: UsageSessionSummary[] = [];
   private usageCursor = 0;
   private usageViewMode: "list" | "detail" | "analytics" = "list";
@@ -181,24 +222,55 @@ export class Store {
   private usageProviderStats: UsageProviderStats[] = [];
   private usageLoading = false;
 
-  private historyCache: {
-    width: number;
-    compact: boolean;
-    version: number;
-    lines: HistoryLine[];
-  } | null = null;
+  // ─── Ralph Loop ───
+  private ralphActive = false;
+  private ralphIteration = 0;
+  private ralphMaxIterations = 0;
+  private ralphCompletionPromise: string | null = null;
 
-  // Batching support
-  private batchDepth = 0;
-  private batchDirty = false;
+  // ─── Wizard ───
+  private wizardType: WizardType | null = null;
+  private wizardStepIndex = 0;
+  private wizardData: Record<string, unknown> = {};
+  private wizardErrors: string[] = [];
 
-  // Streaming throttle
-  private streamingThrottleMs = 16; // ~60fps during streaming for lower latency
-  private lastStreamingEmit = 0;
+  // ─── Skills/Hooks ───
+  private skillsList: Record<string, unknown>[] = [];
+  private hooksList: Record<string, unknown>[] = [];
+  private skillsErrors: string[] = [];
+  private hooksErrors: string[] = [];
+
+  // ─── Capabilities ───
+  private capabilities = { voiceAvailable: false, streamingSupported: true };
+
+  // ─── Paste ───
+  private pasteInProgress = false;
+  private pasteBytesReceived = 0;
+
+  // ─── Theme ───
+  private themeCursor = 0;
+
+  // ─── Plan Mode ───
+  private planMode = false;
+
+  // ─── Response Pane ───
+  private responseContent: ResponseContent | null = null;
+
+  // ─── Permission Prompt ───
+  private activePermissionRequest: PermissionRequestData | null = null;
+  private permissionCursor = 0; // 0=Allow, 1=Always Allow, 2=Deny
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONSTRUCTOR
+  // ═══════════════════════════════════════════════════════════════════════════
 
   constructor(maxHistory = DEFAULT_MAX_HISTORY) {
     this.maxHistory = maxHistory;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CORE METHODS - subscribe, snapshot, emit, batch
+  // ═══════════════════════════════════════════════════════════════════════════
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -221,9 +293,10 @@ export class Store {
       history: this.history.slice(this.historyStart),
       streamingText: this.streamingText,
       streamingRequestId: this.streamingRequestId,
+      reasoningText: this.reasoningText,
+      reasoningRequestId: this.reasoningRequestId,
       scrollOffset: this.scrollOffset,
       newMessages: this.newMessages,
-      compact: this.compact,
       voiceMode: this.voiceMode,
       helpVisible: this.helpVisible,
       sessionKey: this.sessionKey,
@@ -260,9 +333,9 @@ export class Store {
       modelsList: [...this.modelsList],
       modelsCursor: this.modelsCursor,
       modelDeletePending: this.modelDeletePending,
-      selectedModel: this.selectedModel,
-      selectedProvider: this.selectedProvider,
-      selectedReasoningLevel: this.selectedReasoningLevel,
+      modelSelections: new Map(this.modelSelections),
+      stagedModelSelections: new Map(this.stagedModelSelections),
+      modelsActiveTab: this.modelsActiveTab,
       // Sessions selection
       sessionsList: [...this.sessionsList],
       sessionsCursor: this.sessionsCursor,
@@ -273,6 +346,14 @@ export class Store {
       usageDayStats: [...this.usageDayStats],
       usageProviderStats: [...this.usageProviderStats],
       usageLoading: this.usageLoading,
+      // Ralph Loop state
+      ralphActive: this.ralphActive,
+      ralphIteration: this.ralphIteration,
+      ralphMaxIterations: this.ralphMaxIterations,
+      ralphCompletionPromise: this.ralphCompletionPromise,
+      // Permission prompt state
+      activePermissionRequest: this.activePermissionRequest,
+      permissionCursor: this.permissionCursor,
     };
   }
 
@@ -324,15 +405,43 @@ export class Store {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SESSION METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setSessionKey(key: string | null): void {
     this.sessionKey = key;
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UI MODE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setUIMode(mode: UIMode): void {
+    const previousMode = this.uiMode;
     this.uiMode = mode;
+
+    // Reset scroll position based on mode type
+    // Chat: start at bottom (newest content)
+    // Lists (skills/hooks): start at top (first items)
+    if (mode !== previousMode) {
+      if (mode === "skills" || mode === "hooks") {
+        // Will be clamped to maxScroll by the render logic
+        this.scrollOffset = Number.MAX_SAFE_INTEGER;
+      } else {
+        // Chat and other modes: start at bottom
+        this.scrollOffset = 0;
+      }
+      this.newMessages = false;
+    }
+
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WIZARD METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   startWizard(type: WizardType, data: Record<string, unknown>): void {
     this.uiMode = "wizard";
@@ -366,6 +475,10 @@ export class Store {
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SKILLS/HOOKS METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setSkillsList(items: Record<string, unknown>[], errors?: string[]): void {
     this.skillsList = [...items];
     this.skillsErrors = errors ? [...errors] : [];
@@ -378,6 +491,10 @@ export class Store {
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CAPABILITIES METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setCapabilities(capabilities: { voiceAvailable?: boolean; streamingSupported?: boolean }): void {
     this.capabilities = {
       voiceAvailable: capabilities.voiceAvailable ?? this.capabilities.voiceAvailable,
@@ -385,6 +502,10 @@ export class Store {
     };
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATUS/STATE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   setState(state: TUIState, message?: string): void {
     this.state = state;
@@ -429,13 +550,6 @@ export class Store {
     }
   }
 
-  toggleCompact(): boolean {
-    this.compact = !this.compact;
-    this.historyCache = null;
-    this.emit();
-    return this.compact;
-  }
-
   /**
    * Invalidates the history cache, forcing a full re-wrap on next render.
    * Call this on terminal resize to ensure text is re-wrapped for new width.
@@ -466,6 +580,10 @@ export class Store {
     this.emit();
     return this.requestCount;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HISTORY METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   addMessage(role: Role, text: string, meta?: string, requestId?: string): void {
     const entry: MessageEntry = {
@@ -528,6 +646,10 @@ export class Store {
     this.emit();
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STREAMING METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
   setStreaming(requestId: string, text: string): void {
     this.streamingRequestId = requestId;
     this.streamingText = text;
@@ -547,12 +669,12 @@ export class Store {
     }
 
     this.streamingText += chunk;
-    this.historyVersion += 1;
 
     // Throttle emissions during streaming for better performance
     const now = Date.now();
     if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
       this.lastStreamingEmit = now;
+      this.historyVersion += 1;  // Only increment when emitting
       this.emit();
     }
   }
@@ -567,6 +689,47 @@ export class Store {
     this.lastStreamingEmit = 0;
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // REASONING METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  setReasoning(requestId: string, text: string): void {
+    this.reasoningRequestId = requestId;
+    this.reasoningText = text;
+    this.historyVersion += 1;
+    this.historyCache = null;
+    this.emit();
+  }
+
+  appendReasoning(chunk: string): void {
+    // Use same limit as streaming to prevent memory exhaustion
+    if (this.reasoningText.length + chunk.length > MAX_STREAMING_BYTES) {
+      return;
+    }
+
+    this.reasoningText += chunk;
+
+    // Throttle emissions during streaming for better performance
+    const now = Date.now();
+    if (now - this.lastStreamingEmit >= this.streamingThrottleMs) {
+      this.lastStreamingEmit = now;
+      this.historyVersion += 1;  // Only increment when emitting
+      this.emit();
+    }
+  }
+
+  finalizeReasoning(): void {
+    this.reasoningRequestId = null;
+    this.reasoningText = "";
+    this.historyVersion += 1;
+    this.historyCache = null;
+    this.emit();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SCROLL METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   setScrollOffset(offset: number): void {
     this.scrollOffset = Math.max(0, offset);
@@ -595,6 +758,10 @@ export class Store {
     this.newMessages = false;
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INPUT METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   insertInput(text: string): void {
     this.inputBuffer.insertText(text);
@@ -647,6 +814,10 @@ export class Store {
     this.inputBuffer.deleteWordBack();
     this.emit();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUTOCOMPLETE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   updateAutocomplete(fileCache: { getFiles: () => string[] }): void {
     const text = this.inputBuffer.getText();
@@ -769,11 +940,10 @@ export class Store {
     }
   }
 
-  getHistoryLines(width: number, compact: boolean, streamCursor: string): HistoryLine[] {
+  getHistoryLines(width: number, streamCursor: string): HistoryLine[] {
     if (
       this.historyCache &&
       this.historyCache.width === width &&
-      this.historyCache.compact === compact &&
       this.historyCache.version === this.historyVersion
     ) {
       return this.historyCache.lines;
@@ -782,21 +952,24 @@ export class Store {
     const lines = buildHistoryLines(
       this.history.slice(this.historyStart),
       this.streamingText ? `${this.streamingText}${streamCursor}` : "",
+      this.reasoningText, // Pass reasoning text for distinct display
       width,
-      compact,
     );
+
+    const normalizedLines = normalizeHistoryLines(lines, width);
 
     this.historyCache = {
       width,
-      compact,
       version: this.historyVersion,
-      lines,
+      lines: normalizedLines,
     };
 
-    return lines;
+    return normalizedLines;
   }
 
-  // ==================== Question Flow Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // QUESTION FLOW METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets the active question and enters question mode.
@@ -861,7 +1034,8 @@ export class Store {
     if (
       this.activeQuestion.type === "multiple_choice" ||
       this.activeQuestion.type === "yes_no" ||
-      this.activeQuestion.type === "plan_mode_exit"
+      this.activeQuestion.type === "plan_mode_exit" ||
+      this.activeQuestion.type === "spec_review"
     ) {
       // Single selection - replace
       this.questionSelection = [this.questionCursor];
@@ -917,6 +1091,7 @@ export class Store {
       case "multiple_choice":
       case "yes_no":
       case "plan_mode_exit":
+      case "spec_review":
         if (this.questionSelection.length === 0) return null;
         return this.activeQuestion.options?.[this.questionSelection[0]]?.id;
       case "multi_select":
@@ -991,7 +1166,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Theme Selection Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THEME METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Enters theme selection mode with cursor at current theme.
@@ -1019,7 +1196,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Plan Mode Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PLAN MODE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets plan mode on or off.
@@ -1029,35 +1208,84 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Models Selection Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MODELS METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Sets model selection for a specific agent type.
+   */
+  setModelSelection(agentType: string, selection: { model: string; provider: string; reasoning?: string } | null): void {
+    if (selection) {
+      this.modelSelections.set(agentType, selection);
+    } else {
+      this.modelSelections.delete(agentType);
+    }
+    this.emit();
+  }
+
+  /**
+   * Gets model selection for a specific agent type.
+   */
+  getModelSelection(agentType: string): { model: string; provider: string; reasoning?: string } | null {
+    return this.modelSelections.get(agentType) ?? null;
+  }
+
+  /**
+   * Gets all model selections.
+   */
+  getAllModelSelections(): Map<string, { model: string; provider: string; reasoning?: string }> {
+    return new Map(this.modelSelections);
+  }
+
+  /**
+   * Sets the active tab for models view.
+   */
+  setModelsActiveTab(tab: string): void {
+    this.modelsActiveTab = tab;
+    // Update cursor to point to the selected model for this tab
+    const selection = this.modelSelections.get(tab);
+    if (selection && this.modelsList.length > 0) {
+      const idx = this.modelsList.findIndex((m) => m.id === selection.model && m.provider === selection.provider);
+      if (idx >= 0) {
+        this.modelsCursor = idx;
+      }
+    }
+    this.emit();
+  }
+
+  /**
+   * Gets the active tab for models view.
+   */
+  getModelsActiveTab(): string {
+    return this.modelsActiveTab;
+  }
 
   /**
    * Updates the models list without changing UI mode.
-   * Auto-selects first model if none selected.
+   * Updates cursor to point to the selected model for the active tab.
    */
   updateModelsList(models: ModelEntry[]): void {
     this.modelsList = models;
-    const selected = this.getCurrentModelEntry();
-    if (selected?.reasoning && selected.reasoning.length > 0) {
-      if (!this.selectedReasoningLevel || !selected.reasoning.includes(this.selectedReasoningLevel)) {
-        this.selectedReasoningLevel = selected.reasoning[0];
-      }
-    } else if (selected) {
-      this.selectedReasoningLevel = null;
+    // Update cursor position based on active tab's selection
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (selection && models.length > 0) {
+      const idx = models.findIndex((m) => m.id === selection.model && m.provider === selection.provider);
+      this.modelsCursor = Math.max(0, idx);
+    } else {
+      this.modelsCursor = 0;
     }
-    // Update cursor position
-    const currentIdx = selected
-      ? models.findIndex((m) => m.id === selected.id && (!this.selectedProvider || m.provider === this.selectedProvider))
-      : 0;
-    this.modelsCursor = Math.max(0, currentIdx);
     this.emit();
   }
 
   /**
    * Sets the models list and enters models selection mode.
+   * Copies current modelSelections to stagedModelSelections for editing.
    */
   setModelsList(models: ModelEntry[]): void {
     this.updateModelsList(models);
+    // Initialize staged selections from current applied selections
+    this.stagedModelSelections = new Map(this.modelSelections);
     this.uiMode = "models";
     this.emit();
   }
@@ -1074,15 +1302,18 @@ export class Store {
   }
 
   /**
-   * Selects the model at the current cursor position.
-   * Returns the selected model entry.
+   * Stages the model at the current cursor position for the active tab.
+   * Does not apply to backend until applyAllStagedSelections is called.
+   * Returns the staged model entry.
    */
-  selectModel(): ModelEntry | null {
+  stageModelAtCursor(): ModelEntry | null {
     const model = this.modelsList[this.modelsCursor];
     if (model) {
-      this.selectedModel = model.id;
-      this.selectedProvider = model.provider ?? null;
-      this.selectedReasoningLevel = model.reasoning?.[0] ?? null;
+      this.stagedModelSelections.set(this.modelsActiveTab, {
+        model: model.id,
+        provider: model.provider ?? '',
+        reasoning: model.reasoning?.[0],
+      });
       this.emit();
       return model;
     }
@@ -1090,66 +1321,114 @@ export class Store {
   }
 
   /**
-   * Sets the selected model by ID (used for external updates).
+   * Gets the staged selection for a specific agent type.
    */
-  setSelectedModel(modelId: string | null): void {
-    this.selectedModel = modelId;
+  getStagedSelection(agentType: string): { model: string; provider: string; reasoning?: string } | null {
+    return this.stagedModelSelections.get(agentType) ?? null;
+  }
+
+  /**
+   * Applies all staged selections - copies staged to modelSelections.
+   * Returns the map of selections that changed (for sending to backend).
+   */
+  applyAllStagedSelections(): Map<string, { model: string; provider: string; reasoning?: string }> {
+    // Find which selections actually changed
+    const changed = new Map<string, { model: string; provider: string; reasoning?: string }>();
+    for (const [agentType, staged] of this.stagedModelSelections) {
+      const current = this.modelSelections.get(agentType);
+      if (!current || current.model !== staged.model || current.provider !== staged.provider || current.reasoning !== staged.reasoning) {
+        changed.set(agentType, staged);
+      }
+    }
+    // Apply staged to actual selections
+    this.modelSelections = new Map(this.stagedModelSelections);
+    this.emit();
+    return changed;
+  }
+
+  /**
+   * Clears staged selections without applying.
+   */
+  clearStagedSelections(): void {
+    this.stagedModelSelections.clear();
+    this.emit();
+  }
+
+  /**
+   * Legacy: Selects the model at the current cursor position for the active tab.
+   * Returns the selected model entry.
+   * @deprecated Use stageModelAtCursor and applyAllStagedSelections instead
+   */
+  selectModel(): ModelEntry | null {
+    const model = this.modelsList[this.modelsCursor];
+    if (model) {
+      this.modelSelections.set(this.modelsActiveTab, {
+        model: model.id,
+        provider: model.provider ?? '',
+        reasoning: model.reasoning?.[0],
+      });
+      this.emit();
+      return model;
+    }
+    return null;
+  }
+
+  /**
+   * Sets the selected model by ID for a specific agent type (used for external updates).
+   */
+  setSelectedModel(modelId: string | null, agentType?: string): void {
+    const targetTab = agentType ?? this.modelsActiveTab;
     if (!modelId) {
-      this.selectedProvider = null;
-      this.selectedReasoningLevel = null;
+      this.modelSelections.delete(targetTab);
       this.emit();
       return;
     }
-    if (this.modelsList.length > 0) {
-      const idx = this.selectedProvider
-        ? this.modelsList.findIndex((m) => m.id === modelId && m.provider === this.selectedProvider)
-        : this.modelsList.findIndex((m) => m.id === modelId);
-      if (idx >= 0) {
-        this.modelsCursor = idx;
-        const model = this.modelsList[idx];
-        this.selectedProvider = model.provider ?? this.selectedProvider;
-        // Preserve reasoning level if supported, otherwise reset
-        if (model.reasoning && model.reasoning.length > 0) {
-          if (!this.selectedReasoningLevel || !model.reasoning.includes(this.selectedReasoningLevel)) {
-            this.selectedReasoningLevel = model.reasoning[0];
-          }
-        } else {
-          this.selectedReasoningLevel = null;
-        }
-      } else {
-        this.selectedReasoningLevel = null;
+    const model = this.modelsList.find((m) => m.id === modelId);
+    if (model) {
+      this.modelSelections.set(targetTab, {
+        model: model.id,
+        provider: model.provider ?? '',
+        reasoning: model.reasoning?.[0],
+      });
+      if (targetTab === this.modelsActiveTab) {
+        const idx = this.modelsList.findIndex((m) => m.id === modelId);
+        if (idx >= 0) this.modelsCursor = idx;
       }
     }
     this.emit();
   }
 
   /**
-   * Sets the selected model provider (used for backend sync).
+   * Sets the selected model provider for the active tab (used for backend sync).
    */
   setSelectedProvider(provider: string | null): void {
-    this.selectedProvider = provider;
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (selection && provider) {
+      this.modelSelections.set(this.modelsActiveTab, { ...selection, provider });
+    }
     this.emit();
   }
 
   /**
-   * Gets the currently selected model ID.
+   * Gets the currently selected model ID for the active tab.
    */
   getSelectedModel(): string | null {
-    return this.selectedModel;
+    return this.modelSelections.get(this.modelsActiveTab)?.model ?? null;
   }
 
   /**
-   * Gets the currently selected model provider.
+   * Gets the currently selected model provider for the active tab.
    */
   getSelectedProvider(): string | null {
-    return this.selectedProvider;
+    return this.modelSelections.get(this.modelsActiveTab)?.provider ?? null;
   }
 
   /**
-   * Exits models mode and returns to chat. Clears pending delete.
+   * Exits models mode and returns to chat. Clears pending delete and staged selections.
    */
   exitModelsMode(): void {
     this.modelDeletePending = false;
+    this.stagedModelSelections.clear();
     this.uiMode = "chat";
     this.emit();
   }
@@ -1180,20 +1459,27 @@ export class Store {
       this.modelsCursor = Math.max(0, this.modelsList.length - 1);
     }
 
+    // Clear any selections using this model
+    for (const [agentType, selection] of this.modelSelections) {
+      if (selection.model === removed.id) {
+        this.modelSelections.delete(agentType);
+      }
+    }
+
     this.emit();
     return removed;
   }
 
   /**
-   * Cycles to the next model in the models list.
+   * Cycles to the next model in the models list for the active tab.
    * Returns the new model entry or null if no models available.
    */
   cycleToNextModel(): ModelEntry | null {
     if (this.modelsList.length === 0) return null;
 
-    // Find current model index
-    let currentIdx = this.selectedModel
-      ? this.modelsList.findIndex((m) => m.id === this.selectedModel)
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    let currentIdx = selection
+      ? this.modelsList.findIndex((m) => m.id === selection.model)
       : -1;
 
     // Move to next model (wrap around)
@@ -1201,11 +1487,12 @@ export class Store {
     const nextModel = this.modelsList[nextIdx];
 
     if (nextModel) {
-      this.selectedModel = nextModel.id;
-      this.selectedProvider = nextModel.provider ?? null;
+      this.modelSelections.set(this.modelsActiveTab, {
+        model: nextModel.id,
+        provider: nextModel.provider ?? '',
+        reasoning: nextModel.reasoning?.[0],
+      });
       this.modelsCursor = nextIdx;
-      // Reset reasoning level when switching models
-      this.selectedReasoningLevel = nextModel.reasoning?.[0] ?? null;
       this.emit();
       return nextModel;
     }
@@ -1213,77 +1500,85 @@ export class Store {
   }
 
   /**
-   * Gets the currently selected reasoning level.
+   * Gets the currently selected reasoning level for the active tab.
    */
   getSelectedReasoningLevel(): string | null {
-    return this.selectedReasoningLevel;
+    return this.modelSelections.get(this.modelsActiveTab)?.reasoning ?? null;
   }
 
   /**
-   * Sets the reasoning level.
+   * Sets the reasoning level for the active tab.
    */
   setReasoningLevel(level: string | null): void {
-    this.selectedReasoningLevel = level;
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (selection) {
+      if (level) {
+        this.modelSelections.set(this.modelsActiveTab, { ...selection, reasoning: level });
+      } else {
+        const { reasoning: _, ...rest } = selection;
+        this.modelSelections.set(this.modelsActiveTab, rest as { model: string; provider: string });
+      }
+    }
     this.emit();
   }
 
   /**
-   * Cycles to the next reasoning level for the current model.
+   * Cycles to the next reasoning level for the current model on the active tab.
    * Returns the new reasoning level or null if model doesn't support reasoning.
    */
   cycleReasoningLevel(): string | null {
-    // Find current model's reasoning options
-    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection) return null;
+
+    const currentModel = this.modelsList.find((m) => m.id === selection.model);
     if (!currentModel?.reasoning || currentModel.reasoning.length === 0) {
       return null;
     }
 
     const levels = currentModel.reasoning;
-    if (levels.length === 0) return null;
-
-    // Find current level index
-    let currentIdx = this.selectedReasoningLevel
-      ? levels.indexOf(this.selectedReasoningLevel)
+    let currentIdx = selection.reasoning
+      ? levels.indexOf(selection.reasoning)
       : -1;
 
     // Move to next level (wrap around)
     const nextIdx = (currentIdx + 1) % levels.length;
-    this.selectedReasoningLevel = levels[nextIdx];
+    const nextLevel = levels[nextIdx];
+    this.modelSelections.set(this.modelsActiveTab, { ...selection, reasoning: nextLevel });
     this.emit();
-    return this.selectedReasoningLevel;
+    return nextLevel;
   }
 
   /**
-   * Gets reasoning options for the currently selected model.
+   * Gets reasoning options for the currently selected model on the active tab.
    */
   getCurrentModelReasoningOptions(): string[] | null {
-    const currentModel = this.modelsList.find((m) => m.id === this.selectedModel);
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection) return null;
+    const currentModel = this.modelsList.find((m) => m.id === selection.model);
     return currentModel?.reasoning ?? null;
   }
 
   /**
-   * Gets the currently selected model entry.
+   * Gets the currently selected model entry for the active tab.
    */
   getCurrentModelEntry(): ModelEntry | null {
-    if (!this.selectedModel) return null;
-    const provider = this.selectedProvider;
-    if (provider) {
-      return this.modelsList.find((m) => m.id === this.selectedModel && m.provider === provider) ?? null;
-    }
-    return this.modelsList.find((m) => m.id === this.selectedModel) ?? null;
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection) return null;
+    return this.modelsList.find((m) => m.id === selection.model && m.provider === selection.provider) ?? null;
   }
 
   /**
-   * Gets models for the currently selected model's provider.
+   * Gets models for the currently selected model's provider on the active tab.
    */
   getCurrentProviderModels(): ModelEntry[] {
-    const currentModel = this.getCurrentModelEntry();
-    const provider = currentModel?.provider ?? this.selectedProvider;
-    if (!provider) return this.modelsList; // No provider = show all
-    return this.modelsList.filter((m) => m.provider === provider);
+    const selection = this.modelSelections.get(this.modelsActiveTab);
+    if (!selection?.provider) return this.modelsList;
+    return this.modelsList.filter((m) => m.provider === selection.provider);
   }
 
-  // ==================== Sessions Selection Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SESSIONS METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets the sessions list and enters sessions selection mode.
@@ -1322,7 +1617,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Usage View Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // USAGE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets usage loading state.
@@ -1392,7 +1689,102 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Response Pane Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RALPH LOOP METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Sets the Ralph Loop state.
+   */
+  setRalphState(
+    active: boolean,
+    iteration: number,
+    maxIterations: number,
+    completionPromise: string | null
+  ): void {
+    this.ralphActive = active;
+    this.ralphIteration = iteration;
+    this.ralphMaxIterations = maxIterations;
+    this.ralphCompletionPromise = completionPromise;
+    this.emit();
+  }
+
+  /**
+   * Clears the Ralph Loop state.
+   */
+  clearRalphState(): void {
+    this.ralphActive = false;
+    this.ralphIteration = 0;
+    this.ralphMaxIterations = 0;
+    this.ralphCompletionPromise = null;
+    this.emit();
+  }
+
+  /**
+   * Checks if a Ralph Loop is active.
+   */
+  isRalphActive(): boolean {
+    return this.ralphActive;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PERMISSION PROMPT METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Sets the active permission request and enters permission mode.
+   */
+  setActivePermissionRequest(request: PermissionRequestData | null): void {
+    this.activePermissionRequest = request;
+    this.permissionCursor = 0; // Default to "Allow"
+    if (request) {
+      this.uiMode = "permission";
+    }
+    this.emit();
+  }
+
+  /**
+   * Moves the permission cursor up or down through options.
+   * Options: 0=Allow, 1=Always Allow, 2=Deny
+   */
+  movePermissionCursor(delta: number): void {
+    const count = 3; // Allow, Always Allow, Deny
+    this.permissionCursor = (this.permissionCursor + delta + count) % count;
+    this.emit();
+  }
+
+  /**
+   * Gets the current permission decision based on cursor position.
+   */
+  getPermissionDecision(): "allow" | "always_allow" | "deny" {
+    switch (this.permissionCursor) {
+      case 0: return "allow";
+      case 1: return "always_allow";
+      case 2: return "deny";
+      default: return "allow";
+    }
+  }
+
+  /**
+   * Gets the active permission request.
+   */
+  getActivePermissionRequest(): PermissionRequestData | null {
+    return this.activePermissionRequest;
+  }
+
+  /**
+   * Clears the permission request and returns to chat mode.
+   */
+  clearPermissionRequest(): void {
+    this.activePermissionRequest = null;
+    this.permissionCursor = 0;
+    this.uiMode = "chat";
+    this.emit();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RESPONSE PANE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets response content and enters response mode.
@@ -1412,7 +1804,9 @@ export class Store {
     this.emit();
   }
 
-  // ==================== Paste Methods ====================
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PASTE METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Updates paste progress for large paste operations.
@@ -1452,6 +1846,10 @@ export class Store {
     this.emit();
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Formats bytes into a human-readable string.
@@ -1525,43 +1923,354 @@ function isWhitespace(ch: string): boolean {
   return ch === " " || ch === "\n" || ch === "\t" || ch === "\r";
 }
 
+/**
+ * Parse markdown text and convert to TextSegment[].
+ * This handles bold, italic, code, and other inline markdown without rendering.
+ * IMPORTANT: This does NOT handle block elements like headers, lists, code blocks.
+ * Block elements must be split into separate HistoryLines before calling this.
+ */
+function parseMarkdownToSegments(text: string): TextSegment[] {
+  const segments: TextSegment[] = [];
+  let remaining = text;
+
+  // Define patterns for inline markdown (in order of priority)
+  const patterns = [
+    // Inline code `text`
+    {
+      regex: /`([^`]+)`/g,
+      process: (match: string) => ({ text: match, color: "yellow" as const }),
+    },
+    // Bold **text**
+    {
+      regex: /\*\*([^*]+)\*\*/g,
+      process: (match: string) => ({ text: match, bold: true }),
+    },
+    // Bold __text__
+    {
+      regex: /__([^_]+)__/g,
+      process: (match: string) => ({ text: match, bold: true }),
+    },
+    // Italic *text*
+    {
+      regex: /\*([^*]+)\*/g,
+      process: (match: string) => ({ text: match, italic: true }),
+    },
+    // Italic _text_
+    {
+      regex: /_([^_]+)_/g,
+      process: (match: string) => ({ text: match, italic: true }),
+    },
+    // Strikethrough ~~text~~
+    {
+      regex: /~~([^~]+)~~/g,
+      process: (match: string) => ({ text: match, dim: true }),
+    },
+    // Links [text](url) - show only text with blue underline
+    {
+      regex: /\[([^\]]+)\]\([^)]+\)/g,
+      process: (match: string) => ({ text: match, color: "blue" as const, underline: true }),
+    },
+  ];
+
+  let lastIndex = 0;
+
+  // For each pattern type, find all matches and build segments
+  for (const { regex, process } of patterns) {
+    let match;
+    regex.lastIndex = 0; // Reset regex state
+
+    while ((match = regex.exec(remaining)) !== null) {
+      // Add any text before the match as a plain segment
+      if (match.index > lastIndex) {
+        const plainText = remaining.slice(lastIndex, match.index);
+        if (plainText) {
+          segments.push({ text: plainText });
+        }
+      }
+
+      // Add the matched text with styling
+      const styled = process(match[1]);
+      segments.push(styled);
+
+      lastIndex = match.index + match[0].length;
+    }
+
+    // If we found matches, replace remaining with the text after the last match
+    // and continue with remaining patterns (already matched portions won't be re-matched)
+    if (lastIndex > 0) {
+      const prefix = remaining.slice(0, lastIndex);
+      remaining = remaining.slice(lastIndex);
+      // Continue processing remaining text with next patterns
+      lastIndex = 0;
+    } else {
+      // No matches found for this pattern, continue with next pattern
+    }
+  }
+
+  // Add any remaining text as a plain segment
+  if (remaining) {
+    segments.push({ text: remaining });
+  }
+
+  // Filter out empty segments
+  return segments.filter(s => s.text.length > 0);
+}
+
+/**
+ * Parse inline markdown in a HistoryLine and return text without markdown markers.
+ * This creates TextSegment[] for styled rendering.
+ *
+ * @param line - The HistoryLine to parse
+ * @returns A HistoryLine with parsed text and optional segments
+ */
+function parseInlineMarkdown(line: HistoryLine): HistoryLine {
+  let text = line.text;
+
+  // Check if text contains markdown-like patterns
+  const hasMarkdown = /\*\*|__|\*|_|`|~~|\[|\]/.test(text);
+
+  if (hasMarkdown) {
+    const segments = parseMarkdownToSegments(text);
+    const segmentTexts = segments.map(s => s.text);
+    text = segmentTexts.join(""); // Reconstruct text without markdown markers
+
+    // Attach segments to the line for rendering with styles
+    return { ...line, text, segments };
+  }
+
+  return line;
+}
+
+/**
+ * Render a single HistoryLine to the specified width.
+ * This handles width normalization (padding/truncation) but does NOT parse markdown.
+ * Markdown parsing should happen BEFORE wrapping via parseInlineMarkdown.
+ *
+ * Order of operations:
+ * 1. Sanitize: strip \r, expand \t to spaces
+ * 2. Handle empty strings: "" becomes " "
+ * 3. Width normalization: pad/truncate to exact width
+ *
+ * @param line - The HistoryLine to render (may already have segments from parseInlineMarkdown)
+ * @param width - Target width in terminal columns
+ * @returns A HistoryLine with normalized text and optional segments
+ */
+function renderLineToWidth(line: HistoryLine, width: number): HistoryLine {
+  const safeWidth = Math.max(10, width);
+  let text = line.text;
+
+  // Step 1: Sanitize - strip carriage returns
+  text = text.replace(/\r/g, "");
+
+  // Expand tabs to spaces (8-space intervals for consistency)
+  text = text.replace(/\t/g, "        ");
+
+  // Step 2: Handle empty strings - replace with single space
+  // This ensures empty content renders as a visible blank row
+  if (text === "") {
+    text = " ";
+  }
+
+  // Step 3: Truncate to width if necessary
+  if (text.length > safeWidth) {
+    text = text.slice(0, safeWidth);
+
+    // If we have segments, we also need to truncate them
+    if (line.segments) {
+      const truncatedSegments = truncateSegmentsToWidth(line.segments, safeWidth);
+      line.segments = truncatedSegments;
+    }
+  }
+
+  // Step 4: Pad to exact width with spaces
+  if (text.length < safeWidth) {
+    const paddingNeeded = safeWidth - text.length;
+    text += " ".repeat(paddingNeeded);
+
+    // If we have segments, add a filler segment for the padding
+    if (line.segments) {
+      line.segments.push({ text: " ".repeat(paddingNeeded) });
+    }
+  }
+
+  // Return the rendered line with updated text
+  return { ...line, text };
+}
+
+/**
+ * Truncate an array of TextSegment to fit within a maximum width.
+ * Preserves styles on the kept prefix segments.
+ *
+ * @param segments - The segments to truncate
+ * @param maxWidth - Maximum total width in columns
+ * @returns Truncated segments array
+ */
+function truncateSegmentsToWidth(segments: TextSegment[], maxWidth: number): TextSegment[] {
+  const result: TextSegment[] = [];
+  let currentWidth = 0;
+
+  for (const segment of segments) {
+    const segmentWidth = segment.text.length;
+
+    if (currentWidth + segmentWidth <= maxWidth) {
+      // Entire segment fits, add it
+      result.push(segment);
+      currentWidth += segmentWidth;
+    } else if (currentWidth < maxWidth) {
+      // Partial segment fits, truncate it
+      const remainingWidth = maxWidth - currentWidth;
+      result.push({
+        ...segment,
+        text: segment.text.slice(0, remainingWidth),
+      });
+      currentWidth = maxWidth;
+      break; // We've filled the width
+    } else {
+      // Segment doesn't fit, stop
+      break;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Split markdown text into separate HistoryLines for block elements.
+ * This handles headers, code blocks, lists, blockquotes that should be
+ * separate rows in the terminal.
+ *
+ * This function strips block-level markdown markers (###, - for lists, etc.)
+ * but keeps the text content. Inline markdown (bold, italic, code) is preserved
+ * for later processing by parseMarkdownToSegments.
+ *
+ * @param text - The markdown text to split
+ * @param role - The role to assign to each line
+ * @param requestId - Optional request ID
+ * @param baseId - Base ID for the lines
+ * @returns Array of HistoryLine objects
+ */
+function splitMarkdownIntoLines(
+  text: string,
+  role?: Role,
+  requestId?: string,
+  baseId?: string,
+): HistoryLine[] {
+  const lines: HistoryLine[] = [];
+
+  // First, normalize line endings and convert to array
+  let normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const rawLines = normalized.split("\n");
+
+  let lineIndex = 0;
+  for (let rawLine of rawLines) {
+    // Strip block-level markdown markers
+    // Headers: "### Header" -> "Header"
+    rawLine = rawLine.replace(/^#{1,6}\s+/, "");
+
+    // Lists: "- item" or "* item" or "1. item" -> "item"
+    rawLine = rawLine.replace(/^[-*+]\s+/, "");
+    rawLine = rawLine.replace(/^\d+\.\s+/, "");
+
+    // Blockquotes: "> quote" -> "quote"
+    rawLine = rawLine.replace(/^>\s+/, "");
+
+    // Code block fences: Remove ``` lines
+    if (rawLine.trim() === "```" || rawLine.trim().startsWith("```")) {
+      continue; // Skip fence lines entirely
+    }
+
+    // Horizontal rules: ---, ***, ___ - skip
+    if (/^[-*_]{3,}\s*$/.test(rawLine)) {
+      continue;
+    }
+
+    const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
+
+    lines.push({
+      id: lineId,
+      text: rawLine,
+      role,
+      requestId,
+    });
+
+    lineIndex++;
+  }
+
+  return lines;
+}
+
 function buildHistoryLines(
   history: MessageEntry[],
   streamingText: string,
+  reasoningText: string,
   width: number,
-  _compact: boolean,
 ): HistoryLine[] {
   const lines: HistoryLine[] = [];
   const safeWidth = Math.max(20, width);
 
   for (const entry of history) {
-    const wrapped = wrapText(entry.text || "", safeWidth);
     const entryLinePrefix = entry.id;
-    let lineIndex = 0;
     const blockStartIndex = lines.length;
 
-    wrapped.forEach((line, index) => {
-      lines.push({
-        id: `${entryLinePrefix}:${lineIndex}`,
-        text: line,
-        role: entry.role,
-        requestId: entry.requestId,
-        isBlockStart: index === 0,
-      });
-      lineIndex += 1;
-    });
+    // Split markdown into separate lines for block elements
+    const markdownLines = splitMarkdownIntoLines(
+      entry.text || "",
+      entry.role,
+      entry.requestId,
+      entryLinePrefix,
+    );
 
-    if (entry.meta) {
-      const metaLines = wrapText(entry.meta, safeWidth);
-      metaLines.forEach((line) => {
-        lines.push({
+    // Process each line:
+    // 1. Parse inline markdown (removes **, *, etc.) - BEFORE wrapping
+    // 2. Wrap text to width
+    // 3. Render to exact width (padding/truncation)
+    let lineIndex = 0;
+    for (const mdLine of markdownLines) {
+      // Step 1: Parse inline markdown
+      const parsedLine = parseInlineMarkdown(mdLine);
+
+      // Step 2: Wrap the parsed text (without markdown markers)
+      const wrapped = wrapText(parsedLine.text, safeWidth);
+      wrapped.forEach((wrappedLine, index) => {
+        const line: HistoryLine = {
           id: `${entryLinePrefix}:${lineIndex}`,
-          text: line,
+          text: wrappedLine,
           role: entry.role,
           requestId: entry.requestId,
-        });
+          segments: index === 0 ? parsedLine.segments : undefined, // Only keep segments on first wrapped line
+          isBlockStart: lineIndex === 0 && index === 0,
+        };
+        // Step 3: Final width normalization (padding to exact width)
+        const finalLine = renderLineToWidth(line, safeWidth);
+        lines.push(finalLine);
         lineIndex += 1;
       });
+    }
+
+    if (entry.meta) {
+      const metaLines = splitMarkdownIntoLines(
+        entry.meta,
+        entry.role,
+        entry.requestId,
+        `${entryLinePrefix}:meta`,
+      );
+
+      for (const metaLine of metaLines) {
+        const parsedLine = parseInlineMarkdown(metaLine);
+        const wrapped = wrapText(parsedLine.text, safeWidth);
+        wrapped.forEach((wrappedLine) => {
+          const line: HistoryLine = {
+            id: `${entryLinePrefix}:${lineIndex}`,
+            text: wrappedLine,
+            role: entry.role,
+            requestId: entry.requestId,
+            segments: parsedLine.segments,
+          };
+          const finalLine = renderLineToWidth(line, safeWidth);
+          lines.push(finalLine);
+          lineIndex += 1;
+        });
+      }
     }
 
     // Mark the last content line as block end
@@ -1569,38 +2278,159 @@ function buildHistoryLines(
       lines[lines.length - 1].isBlockEnd = true;
     }
 
-    // Add blank separator lines after each message for visual breathing room
+    // Add blank separator line after each message for visual breathing room
     // Use space characters so Ink renders them with actual height
-    lines.push({
-      id: `${entryLinePrefix}:${lineIndex}`,
+    const separatorCount = 1;
+    for (let i = 0; i < separatorCount; i++) {
+      const separatorLine: HistoryLine = {
+        id: `${entryLinePrefix}:sep:${i}`,
+        text: " ",
+        role: undefined,
+        requestId: entry.requestId,
+      };
+      const rendered = renderLineToWidth(separatorLine, safeWidth);
+      lines.push(rendered);
+    }
+  }
+
+  // Display reasoning content before the main response (dimmed in TUI)
+  if (reasoningText) {
+    // Add a thinking indicator prefix
+    const headerLine: HistoryLine = {
+      id: "reasoning:header",
+      text: "💭 Thinking...",
+      role: "reasoning",
+      isBlockStart: true,
+    };
+    lines.push(renderLineToWidth(headerLine, safeWidth));
+
+    const reasonLines = splitMarkdownIntoLines(
+      reasoningText,
+      "reasoning",
+      undefined,
+      "reasoning",
+    );
+
+    let reasonIndex = 0;
+    for (const reasonLine of reasonLines) {
+      const parsedLine = parseInlineMarkdown(reasonLine);
+      const wrapped = wrapText(parsedLine.text, safeWidth);
+      wrapped.forEach((wrappedLine) => {
+        const line: HistoryLine = {
+          id: `reasoning:${reasonIndex}`,
+          text: wrappedLine,
+          role: "reasoning",
+          segments: parsedLine.segments,
+        };
+        const finalLine = renderLineToWidth(line, safeWidth);
+        lines.push(finalLine);
+        reasonIndex += 1;
+      });
+    }
+
+    if (lines.length > 0 && lines[lines.length - 1].role === "reasoning") {
+      lines[lines.length - 1].isBlockEnd = true;
+    }
+
+    // Add separator after reasoning
+    const sepLine: HistoryLine = {
+      id: "reasoning:sep",
       text: " ",
       role: undefined,
-      requestId: entry.requestId,
-    });
-    lines.push({
-      id: `${entryLinePrefix}:${lineIndex + 1}`,
-      text: " ",
-      role: undefined,
-      requestId: entry.requestId,
-    });
+    };
+    lines.push(renderLineToWidth(sepLine, safeWidth));
   }
 
   if (streamingText) {
-    const wrapped = wrapText(streamingText, safeWidth);
-    wrapped.forEach((line, index) => {
-      lines.push({
-        id: `stream:${index}`,
-        text: line,
-        role: "agent",
-        isBlockStart: index === 0,
+    const streamLines = splitMarkdownIntoLines(
+      streamingText,
+      "agent",
+      undefined,
+      "stream",
+    );
+
+    let streamIndex = 0;
+    for (const streamLine of streamLines) {
+      const parsedLine = parseInlineMarkdown(streamLine);
+      const wrapped = wrapText(parsedLine.text, safeWidth);
+      wrapped.forEach((wrappedLine, index) => {
+        const line: HistoryLine = {
+          id: `stream:${streamIndex}`,
+          text: wrappedLine,
+          role: "agent",
+          segments: index === 0 ? parsedLine.segments : undefined,
+          isBlockStart: streamIndex === 0 && index === 0,
+        };
+        const finalLine = renderLineToWidth(line, safeWidth);
+        lines.push(finalLine);
+        streamIndex += 1;
       });
-    });
+    }
+
     if (lines.length > 0 && lines[lines.length - 1].role === "agent") {
       lines[lines.length - 1].isBlockEnd = true;
     }
   }
 
   return lines;
+}
+
+/**
+ * Normalize HistoryLine array to enforce viewport invariants.
+ *
+ * This is now a final safety net since most normalization happens in renderLineToWidth.
+ * It verifies that all lines are width-stable and handles any edge cases.
+ *
+ * @param lines - HistoryLine array from buildHistoryLines (already rendered)
+ * @param width - Target width in terminal columns
+ * @returns Normalized HistoryLine array
+ */
+function normalizeHistoryLines(lines: HistoryLine[], width: number): HistoryLine[] {
+  const normalized: HistoryLine[] = [];
+  const safeWidth = Math.max(10, width);
+
+  for (const line of lines) {
+    // If the line has embedded newlines, split it (should be rare after renderLineToWidth)
+    let textParts = line.text.split("\n");
+
+    for (let partIndex = 0; partIndex < textParts.length; partIndex++) {
+      let text = textParts[partIndex];
+
+      // Final safety: handle empty strings
+      if (text === "") {
+        text = " ";
+      }
+
+      // Final safety: truncate if somehow too long
+      if (text.length > safeWidth) {
+        text = text.slice(0, safeWidth);
+      }
+
+      // Final safety: pad to exact width
+      while (text.length < safeWidth) {
+        text += " ";
+      }
+
+      // Create the normalized line
+      const normalizedLine: HistoryLine = {
+        id: partIndex === 0 ? line.id : `${line.id}:${partIndex}`,
+        text,
+        role: line.role,
+        requestId: line.requestId,
+        segments: line.segments, // Preserve segments if present
+      };
+
+      // Preserve block markers on the original line only
+      if (partIndex === 0) {
+        normalizedLine.isBlockStart = line.isBlockStart;
+        normalizedLine.isBlockEnd = line.isBlockEnd;
+      }
+
+      normalized.push(normalizedLine);
+    }
+  }
+
+  return normalized;
 }
 
 /**
@@ -1613,6 +2443,13 @@ function normalizeMarkdownSpacing(text: string): string {
 
   // Normalize line endings
   result = result.replace(/\r\n/g, "\n");
+
+  // Fix common LLM escape sequence issues:
+  // - Literal \n strings that should be newlines
+  // - Malformed ''n patterns (corrupted \n)
+  result = result.replace(/\\n/g, "\n");
+  result = result.replace(/'+'n/g, "\n");
+  result = result.replace(/''n/g, "\n");
 
   // Headers: ensure blank line before (unless at start) and after
   // Matches: # Header, ## Header, etc.
@@ -1649,6 +2486,42 @@ function normalizeMarkdownSpacing(text: string): string {
   return result;
 }
 
+/**
+ * Find positions of markdown inline spans (bold, italic, code) in text.
+ * Returns array of [start, end] positions that should not be broken.
+ */
+function findMarkdownSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const patterns = [
+    /\*\*.+?\*\*/g,     // Bold **text**
+    /__.+?__/g,         // Bold __text__
+    /\*.+?\*/g,         // Italic *text* (after bold to avoid overlap)
+    /_.+?_/g,           // Italic _text_
+    /`.+?`/g,           // Inline code `text`
+    /~~.+?~~/g,         // Strikethrough ~~text~~
+  ];
+  for (const pattern of patterns) {
+    let m;
+    while ((m = pattern.exec(text)) !== null) {
+      spans.push([m.index, m.index + m[0].length]);
+    }
+  }
+  // Sort by start position
+  spans.sort((a, b) => a[0] - b[0]);
+  return spans;
+}
+
+/**
+ * Check if a position is inside a markdown span.
+ */
+function isInsideSpan(pos: number, spans: Array<[number, number]>): boolean {
+  for (const [start, end] of spans) {
+    if (pos > start && pos < end) return true;
+    if (start > pos) break; // Spans are sorted, no need to check further
+  }
+  return false;
+}
+
 function wrapText(text: string, width: number): string[] {
   if (!text) {
     return [""];
@@ -1667,8 +2540,12 @@ function wrapText(text: string, width: number): string[] {
       continue;
     }
 
-    // Word-wrap: try to break at word boundaries
+    // Find markdown spans to avoid breaking inside them
+    const spans = findMarkdownSpans(rawLine);
+
+    // Word-wrap: try to break at word boundaries, avoiding markdown spans
     let remaining = rawLine;
+    let offset = 0; // Track position in original rawLine for span checking
     while (remaining.length > 0) {
       if (remaining.length <= safeWidth) {
         lines.push(remaining);
@@ -1683,9 +2560,30 @@ function wrapText(text: string, width: number): string[] {
         breakPoint = safeWidth;
       }
 
+      // Check if break point is inside a markdown span
+      const absolutePos = offset + breakPoint;
+      if (isInsideSpan(absolutePos, spans)) {
+        // Find an earlier break point outside the span
+        let newBreak = breakPoint - 1;
+        while (newBreak > 0 && isInsideSpan(offset + newBreak, spans)) {
+          newBreak--;
+        }
+        // Find actual space near the new break point
+        if (newBreak > safeWidth / 3) {
+          const spacePos = remaining.lastIndexOf(" ", newBreak);
+          if (spacePos > safeWidth / 3) {
+            breakPoint = spacePos;
+          }
+          // If no good space found, keep original break (will split the span, but better than infinite loop)
+        }
+      }
+
       lines.push(remaining.slice(0, breakPoint));
+      offset += breakPoint;
       // Skip the space if we broke at a space
-      remaining = remaining.slice(breakPoint).trimStart();
+      const trimmed = remaining.slice(breakPoint).trimStart();
+      offset += remaining.length - breakPoint - trimmed.length;
+      remaining = trimmed;
     }
   }
 

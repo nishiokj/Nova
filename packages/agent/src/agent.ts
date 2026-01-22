@@ -8,17 +8,16 @@
 import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
 import {
   resilientCall,
-  createCircuitState,
   RateLimitError,
   CircuitOpenError,
   RetriesExhaustedError,
-  type CircuitBreakerState,
-  type ResilienceConfig,
+  TimeoutError,
   DEFAULT_RESILIENCE_CONFIG,
 } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -29,69 +28,39 @@ import type {
   AgentMetrics,
   EventEmitCallback,
   UserPromptInfo,
+  UserPromptQuestion,
   AgentHooks,
   InternalHookQueue,
   InternalHookContext,
 } from './types.js';
 import { noopEmit, noopHookQueue } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
-import { coerceStructuredOutput } from 'shared';
-import { createMicroQueue } from 'shared';
-
-type AgentAction = 'done' | 'need_user_input' | 'continue' | 'handoff';
-
-// ============================================
-// CIRCUIT BREAKER STATE (per provider)
-// ============================================
+import {
+  getProviderCircuitState,
+  resetProviderCircuit,
+  getCircuitStatus,
+} from './circuit-breaker-registry.js';
+import { TOOL_LIMITS, getMaxOutputLength, isRefusal } from './constants.js';
 
 /**
- * Module-level circuit breaker state per provider.
- * Shared across all Agent instances to properly track failures.
+ * Default timeout for LLM streaming calls in milliseconds.
+ * Set to 4 minutes - long enough for complex responses but prevents infinite hangs.
  */
-const providerCircuitStates = new Map<string, CircuitBreakerState>();
+const LLM_STREAM_TIMEOUT_MS = 240_000;
+
+// Re-export circuit breaker functions for backwards compatibility
+export { resetProviderCircuit, getCircuitStatus };
+
+type AgentAction = 'done' | 'continue' | 'handoff';
 
 /**
- * Get or create circuit breaker state for a provider.
+ * Model selection override for per-agent-type model configuration.
  */
-function getProviderCircuitState(provider: string): CircuitBreakerState {
-  let state = providerCircuitStates.get(provider);
-  if (!state) {
-    state = createCircuitState();
-    providerCircuitStates.set(provider, state);
-  }
-  return state;
+export interface ModelSelection {
+  provider: string;
+  model: string;
+  reasoning?: string;
 }
-
-/**
- * Reset circuit breaker state for a provider (e.g., after API key update).
- */
-export function resetProviderCircuit(provider: string): void {
-  providerCircuitStates.delete(provider);
-}
-
-/**
- * Get current circuit breaker status for all providers.
- */
-export function getCircuitStatus(): Map<string, CircuitBreakerState> {
-  return new Map(providerCircuitStates);
-}
-
-const MAX_IDENTICAL_TOOL_CALLS = 2;
-const MAX_TOOL_OUTPUT_LENGTH = 8000;
-const MAX_FILE_READ_OUTPUT_LENGTH = 50000;
-
-function getMaxOutputLength(toolName: string): number {
-  return toolName.toLowerCase() === 'read' ? MAX_FILE_READ_OUTPUT_LENGTH : MAX_TOOL_OUTPUT_LENGTH;
-}
-
-const REFUSAL_PATTERNS = [
-  /cannot be completed/i,
-  /can't be completed/i,
-  /cannot complete/i,
-  /unable to complete/i,
-  /exceeds? (?:the )?(?:budget|limit)/i,
-  /not (?:possible|achievable|feasible)/i,
-];
 
 /**
  * Pure execution agent.
@@ -104,9 +73,9 @@ export class Agent {
   private requestId: string;
   private agentRegistry?: AgentRegistry;
   private llmConfig: LLMRequestConfig;
-  private lastRequestConfig: LLMRequestConfig | null = null;
   private hooks?: AgentHooks;
   private internalHookQueue: InternalHookQueue;
+  private getModelSelection?: (agentType: string) => ModelSelection | null;
 
   constructor(config: AgentConfig, runtime: {
     llm: LLMAdapter;
@@ -114,9 +83,10 @@ export class Agent {
     emit?: EventEmitCallback;
     requestId?: string;
     agentRegistry?: AgentRegistry;
-    llmConfig?: LLMRequestConfig;
+    llmConfig: LLMRequestConfig;
     hooks?: AgentHooks;
     internalHookQueue?: InternalHookQueue;
+    getModelSelection?: (agentType: string) => ModelSelection | null;
   }) {
     this.config = config;
     this.llm = runtime.llm;
@@ -124,9 +94,10 @@ export class Agent {
     this.emit = runtime.emit ?? noopEmit;
     this.requestId = runtime.requestId ?? '';
     this.agentRegistry = runtime.agentRegistry;
-    this.llmConfig = runtime.llmConfig ?? { model: 'unknown' };
+    this.llmConfig = runtime.llmConfig;
     this.hooks = runtime.hooks;
     this.internalHookQueue = runtime.internalHookQueue ?? noopHookQueue;
+    this.getModelSelection = runtime.getModelSelection;
   }
 
   /**
@@ -142,6 +113,89 @@ export class Agent {
   }
 
   /**
+   * Finalize iteration by capturing filesRead and emitting turn completed.
+   */
+  private finalizeIteration(
+    localReadFiles: Set<string>,
+    workItem: WorkItem,
+    result: AgentResult,
+    metrics: AgentMetrics,
+    iteration: number,
+    hasResponse: boolean
+  ): void {
+    result.filesRead = Array.from(localReadFiles);
+    this.internalHookQueue.enqueue({
+      type: 'turn_completed',
+      iteration,
+      toolCallsMade: metrics.toolCallsMade,
+      llmCallsMade: metrics.llmCallsMade,
+      hasResponse,
+      terminationReason: result.terminationReason || undefined,
+    }, this.buildHookContext(workItem));
+  }
+
+  /**
+   * Handle awaitingUserInput from structured output.
+   * This is a fallback for conversational questions when PromptUser isn't used.
+   * Returns true if we should pause for user input, false otherwise.
+   */
+  private handleAwaitingUserInput(
+    result: AgentResult,
+    structuredOutput: Record<string, unknown> | null,
+    responseText: string | undefined,
+    content: string
+  ): boolean {
+    // Skip if PromptUser already set needsUserInput (it takes precedence)
+    if (result.needsUserInput) return false;
+
+    // Check if agent explicitly declared it's waiting for input
+    if (structuredOutput?.awaitingUserInput !== true) return false;
+
+    result.needsUserInput = true;
+    result.userPrompt = {
+      question: responseText || content || 'Waiting for your response...',
+    };
+    result.terminationReason = 'user_input_required';
+    return true;
+  }
+
+  /**
+   * Handle the 'done' action logic: goal state validation, refusal check, success/failure setup.
+   * Returns true if the action was handled and should return/break, false otherwise.
+   */
+  private handleCompletionAction(
+    result: AgentResult,
+    responseText: string | undefined,
+    content: string,
+    action: string | null,
+    structuredOutput: any
+  ): boolean {
+    if (action !== 'done') {
+      return false;
+    }
+
+    const goalReached = structuredOutput?.goalStateReached === true;
+    if (!goalReached) {
+      result.terminationReason = 'invalid_action';
+      result.error = 'Action "done" requires goalStateReached: true.';
+      return true; // Should break after this
+    }
+
+    const finalText = responseText ?? content;
+    if (isRefusal(finalText)) {
+      result.isRefusal = true;
+      result.error = 'LLM refused to complete the task';
+      result.terminationReason = 'refusal';
+    } else {
+      result.success = true;
+      result.response = finalText;
+      result.terminationReason = 'goal_state_reached';
+    }
+
+    return true;
+  }
+
+  /**
    * Stream LLM response with resilience (retry + circuit breaker).
    * Returns { response, buffer } on success, throws on unrecoverable error.
    */
@@ -152,6 +206,7 @@ export class Agent {
       toolChoice?: 'none' | 'auto' | 'required';
       responseSchema?: StructuredOutputSchema;
       onChunk?: (chunk: string) => void;
+      onReasoningChunk?: (chunk: string) => void;
     },
     workItemId?: string
   ): Promise<{ response: LLMResponse; buffer: string }> {
@@ -159,7 +214,7 @@ export class Agent {
     const circuitState = getProviderCircuitState(provider);
     const circuitKey = `${provider}:${this.llmConfig.model ?? 'unknown'}`;
 
-    // Wrap the streaming operation in resilientCall
+    // Wrap the streaming operation in resilientCall with timeout
     // Note: We wrap the entire stream consumption, not just the initial call
     return resilientCall(
       async () => {
@@ -170,6 +225,7 @@ export class Agent {
           llm: this.llmConfig,
           responseSchema: params.responseSchema,
           onChunk: params.onChunk,
+          onReasoningChunk: params.onReasoningChunk,
         });
 
         let buffer = '';
@@ -200,14 +256,14 @@ export class Agent {
       {
         circuitState,
         circuitKey,
+        timeoutMs: LLM_STREAM_TIMEOUT_MS,
+        operationName: `LLM stream (${this.config.type})`,
         config: {
           ...DEFAULT_RESILIENCE_CONFIG,
           maxRetries: 2, // Retry up to 2 times for transient errors
         },
         onRetry: (attempt, error, delayMs) => {
           console.error(`[AGENT] Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
-          // Note: Not emitting an event here since llm_retry isn't a standard event type
-          // The retry is logged to stderr for debugging
         },
       }
     );
@@ -220,6 +276,7 @@ export class Agent {
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
     const { globalContext, workItem, cwd } = params;
+    const runAsyncId = profiler.asyncBegin(`agent.run:${this.config.type}`, 'agent');
 
     // Create fresh local context for this agent's work
     const localContext = new ContextWindow(
@@ -244,7 +301,7 @@ export class Agent {
       filesRead: [],
       invalidatedPaths: [],
       toolErrors: [],
-      terminationReason: '',
+      terminationReason: undefined,
       needsUserInput: false,
       isRefusal: false,
       localContext,
@@ -253,12 +310,20 @@ export class Agent {
     try {
       await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      result.error = message;
+      // Capture error message - ensure we always have SOME diagnostic info
+      let message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      if (!message || message.trim().length === 0) {
+        // Error has no message - capture what we can
+        const errorType = error instanceof Error ? error.constructor.name : typeof error;
+        const stackPreview = stack?.split('\n').slice(0, 3).join('\n');
+        message = `[Empty error message] type=${errorType}${stackPreview ? `, stack:\n${stackPreview}` : ''}`;
+      }
 
       // Classify the error and set appropriate termination reason
       if (error instanceof RateLimitError) {
         result.terminationReason = 'rate_limit';
+        result.error = message;
         result.rateLimitInfo = {
           provider: error.provider,
           model: error.model,
@@ -269,12 +334,31 @@ export class Agent {
         console.error(`[AGENT] Rate limit hit for ${error.provider}/${error.model}: ${error.info.message}`);
       } else if (error instanceof CircuitOpenError) {
         result.terminationReason = 'circuit_open';
+        result.error = message;
         console.error(`[AGENT] Circuit breaker open: ${message}`);
+      } else if (error instanceof TimeoutError) {
+        result.terminationReason = 'timeout';
+        result.error = `LLM call timed out after ${error.timeoutMs}ms`;
+        console.error(`[AGENT] LLM timeout for ${this.config.type}: ${error.timeoutMs}ms`);
       } else if (error instanceof RetriesExhaustedError) {
-        result.terminationReason = 'retries_exhausted';
-        console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
+        // Check if underlying cause was a timeout
+        const cause = error.cause;
+        if (cause instanceof TimeoutError) {
+          result.terminationReason = 'timeout';
+          result.error = `LLM call timed out after ${cause.timeoutMs}ms (retries exhausted)`;
+          console.error(`[AGENT] LLM timeout after ${error.attempts} retries: ${cause.timeoutMs}ms`);
+        } else {
+          result.terminationReason = 'exception';
+          result.error = `Retries exhausted after ${error.attempts} attempts: ${message}`;
+          console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
+        }
       } else {
-        result.terminationReason = `exception:${message}`;
+        result.terminationReason = 'exception';
+        // Include stack trace in error message for debugging (truncated to first 5 lines)
+        const stackPreview = stack?.split('\n').slice(0, 5).join('\n');
+        result.error = stackPreview ? `${message}\n\nStack:\n${stackPreview}` : message;
+        // Log full stack to console for detailed debugging
+        console.error(`[AGENT] Exception in ${this.config.type}: ${message}`, stack ?? '');
       }
 
       this.emitLlmError(error instanceof Error ? error : new Error(message), workItem.workId);
@@ -292,6 +376,39 @@ export class Agent {
     // Bundle artifacts explicitly in result for clear contract
     result.artifacts = localContext.getArtifacts();
 
+    // HARD VALIDATION: Explorer agents MUST produce artifacts when reading files
+    // Reading files without extracting artifacts is unacceptable - it wastes context
+    // and provides zero value to downstream agents.
+    if (this.config.type === 'explorer' && result.filesRead.length > 0 && result.artifacts!.length === 0) {
+      result.success = false;
+      result.terminationReason = 'invalid_action';
+      result.error = `Explorer read ${result.filesRead.length} files but extracted 0 artifacts. ` +
+        `This is a hard failure. Every file read MUST produce artifacts. ` +
+        `Files read: ${result.filesRead.slice(0, 5).join(', ')}${result.filesRead.length > 5 ? '...' : ''}`;
+      console.error(`[AGENT:explorer] VALIDATION FAILURE: ${result.filesRead.length} files read, 0 artifacts produced`);
+    }
+
+    // HARD VALIDATION: Detect and reject planning-speak responses
+    // Responses that are just "I'll...", "Let me...", "Now I will..." are not actual work
+    if (result.success && result.response) {
+      const planningPatterns = [
+        /^I('ll| will) (analyze|explore|investigate|look|start|begin|check|examine)/i,
+        /^Let me (start|begin|first|analyze|explore|look|check)/i,
+        /^Now (let me|I('ll| will))/i,
+        /^First,? (I('ll| will)|let me)/i,
+      ];
+      const responseStart = result.response.trim().slice(0, 200);
+      const isPlanningSpeak = planningPatterns.some(p => p.test(responseStart));
+
+      // If the entire response is planning speak with no substantive content, fail
+      if (isPlanningSpeak && result.response.length < 500 && !result.response.includes('```')) {
+        result.success = false;
+        result.terminationReason = 'no_action';
+        result.error = `Response is planning text, not actual work: "${responseStart.slice(0, 100)}..."`;
+        console.error(`[AGENT:${this.config.type}] VALIDATION FAILURE: Response is planning-speak, not actual output`);
+      }
+    }
+
     if (result.invalidatedPaths.length > 0) {
       this.internalHookQueue.enqueue({
         type: 'files_modified',
@@ -303,10 +420,17 @@ export class Agent {
       type: 'agent_completed',
       workId: workItem.workId,
       success: result.success,
-      terminationReason: result.terminationReason,
+      terminationReason: result.terminationReason ?? 'exception',
       filesRead: result.filesRead,
       invalidatedPaths: result.invalidatedPaths,
     }, this.buildHookContext(workItem));
+
+    profiler.asyncEnd(`agent.run:${this.config.type}`, runAsyncId, 'agent', {
+      success: result.success,
+      terminationReason: result.terminationReason,
+      llmCalls: metrics.llmCallsMade,
+      toolCalls: metrics.toolCallsMade,
+    });
 
     return result;
   }
@@ -341,8 +465,15 @@ export class Agent {
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
+      profiler.instant(`agent.iteration:${iteration}`, 'agent', 'p', { agentType: this.config.type });
+
+      // Check for user stop request at the start of each iteration
+      if (this.hooks?.shouldStop?.()) {
+        result.terminationReason = 'user_stopped';
+        break;
+      }
+
       const elapsedMs = Date.now() - startTime;
-      console.error(`[AGENT DEBUG] Starting iteration ${iteration}/${maxIterations}, elapsed=${elapsedMs}ms, toolCallsMade=${metrics.toolCallsMade}, agent=${this.config.type}`);
 
       // Auto-compact if context is near full
       if (localContext.isNearFull()) {
@@ -362,7 +493,6 @@ export class Agent {
             truncateOutputsTo: 4000,
           });
         }
-        console.error(`[AGENT DEBUG] Compacted context: removed=${compactResult.itemsRemoved}, truncated=${compactResult.outputsTruncated}, recovered=${compactResult.bytesRecovered}b`);
         localReadFiles.clear();
         for (const path of localContext.getReadFilesArray()) {
           localReadFiles.add(path);
@@ -397,14 +527,7 @@ export class Agent {
         break;
       }
 
-      const systemMessage = this.buildSystemMessage(workItem, cwd, {
-        iteration: iteration + 1,
-        maxIterations,
-        toolCallsUsed: metrics.toolCallsMade,
-        maxToolCalls: workItem.bounds.maxToolCalls,
-        elapsedMs,
-        maxDurationMs: workItem.bounds.maxDurationMs,
-      });
+      const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
 
       const allTools = [
         ...this.toolRegistry.getDefinitions(),
@@ -412,29 +535,26 @@ export class Agent {
       ];
       const allowedTools = this.filterAllowedTools(allTools);
 
-      const messages = this.buildMessages(systemMessage, workItem, globalContext, localContext);
-
-      // On the last iteration OR when approaching bounds, don't provide tools to force synthesis
-      // This ensures the LLM produces structured output instead of more tool calls
+      // On the last iteration, withhold tools and inject instruction to synthesize
+      // This ensures the agent produces a meaningful final response before hitting iteration limit
       const isLastIteration = iteration === maxIterations - 1;
-      const toolBudgetNearlyExhausted = metrics.toolCallsMade >= workItem.bounds.maxToolCalls * 0.8;
-      const timeBudgetNearlyExhausted = elapsedMs >= workItem.bounds.maxDurationMs * 0.8;
-      const shouldWithholdTools = isLastIteration || toolBudgetNearlyExhausted || timeBudgetNearlyExhausted;
+      const lastIterationInstruction = isLastIteration
+        ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
+        : '';
+
+      const messages = this.buildMessages(system, taskContext + lastIterationInstruction, workItem, globalContext, localContext);
 
       const toolsForThisCall = allowedTools.length > 0 ? allowedTools : undefined;
-      const toolChoiceForThisCall = shouldWithholdTools ? 'none' : undefined;
+      const toolChoiceForThisCall = isLastIteration && toolsForThisCall ? 'none' as const : undefined;
 
-      if (shouldWithholdTools && allowedTools.length > 0) {
-        console.error(`[AGENT DEBUG] Setting tool_choice=none to force synthesis: iteration=${iteration}/${maxIterations}, toolCalls=${metrics.toolCallsMade}/${workItem.bounds.maxToolCalls}, elapsed=${elapsedMs}/${workItem.bounds.maxDurationMs}ms, agent=${this.config.type}`);
-      }
 
       const llmStartTime = Date.now();
-      this.lastRequestConfig = this.llmConfig;
       // Don't stream raw chunks when using structured output (they're JSON garbage)
       // The extracted response field will be emitted after parsing
       const hasStructuredOutput = !!this.config.outputSchema;
 
       // Use resilient streaming with retry + circuit breaker
+      const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
       const { response, buffer } = await this.streamWithResilience(
         {
           messages: messages as unknown as Message[],
@@ -448,11 +568,22 @@ export class Agent {
               message: chunk,
             }, workItem.workId));
           },
+          onReasoningChunk: (chunk) => {
+            this.emit(createEvent('agent_reasoning', {
+              agentType: this.config.type,
+              content: chunk,
+            }, workItem.workId));
+          },
         },
         workItem.workId
       );
 
       const llmDurationMs = Date.now() - llmStartTime;
+      profiler.asyncEnd(`agent.llmCall:${this.config.type}`, llmAsyncId, 'llm', {
+        promptTokens: response.usage?.promptTokens,
+        completionTokens: response.usage?.completionTokens,
+        toolCalls: response.toolCalls?.length ?? 0,
+      });
       metrics.llmCallsMade++;
 
       this.emitLlmCall(response, messages, llmDurationMs, allowedTools, workItem.workId);
@@ -461,11 +592,12 @@ export class Agent {
       if (response.usage) {
         localContext.updateMetrics(
           response.usage.promptTokens ?? 0,
-          response.usage.completionTokens ?? 0
+          response.usage.completionTokens ?? 0,
+          response.usage.cachedTokens
         );
       }
 
-      const content = response.content ?? '';
+      const content = (response.content ?? '') as string;
       const toolCalls = response.toolCalls ?? [];
 
       // Add reasoning content to context for multi-turn salience (GLM-4.7)
@@ -479,11 +611,56 @@ export class Agent {
         result.structuredOutput = structuredOutput;
       }
 
+      // Extract artifacts from structured output each iteration (explorer emits these)
+      // This allows incremental artifact accumulation rather than only at final response
+      if (structuredOutput?.artifacts && Array.isArray(structuredOutput.artifacts)) {
+        const validArtifacts = (structuredOutput.artifacts as unknown[]).filter((a): a is {
+          sourcePath: string;
+          line?: number | null;
+          kind: string;
+          name: string;
+          signature?: string | null;
+          modifies?: string[] | null;
+          calls?: string[] | null;
+          insight?: string | null;
+          reduces?: string | null;
+        } => (
+          typeof a === 'object' &&
+          a !== null &&
+          typeof (a as Record<string, unknown>).sourcePath === 'string' &&
+          typeof (a as Record<string, unknown>).kind === 'string' &&
+          typeof (a as Record<string, unknown>).name === 'string'
+        ));
+
+        if (validArtifacts.length > 0) {
+          for (const a of validArtifacts) {
+            localContext.addArtifact({
+              sourcePath: a.sourcePath,
+              line: typeof a.line === 'number' ? a.line : undefined,
+              kind: a.kind as ArtifactKind,
+              name: a.name,
+              signature: typeof a.signature === 'string' ? a.signature : undefined,
+              modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
+              calls: Array.isArray(a.calls) ? a.calls : undefined,
+              insight: typeof a.insight === 'string' ? a.insight : undefined,
+              reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
+              relevance: 1.0,
+              discoveredBy: this.config.type,
+            });
+          }
+        }
+      }
+
       this.addAssistantMessage(localContext, content, toolCalls);
 
       const action = this.extractStructuredAction(structuredOutput);
-      const responseText = this.extractStructuredResponse(structuredOutput);
-      const structuredPrompt = this.extractStructuredUserPrompt(structuredOutput);
+      const parsedResponseText = this.extractStructuredResponse(structuredOutput);
+
+      // For LLMs that output prose before JSON (e.g., GLM), extract that text
+      // and combine with the parsed response field for complete display
+      const preJsonText = extractPreJsonText(content);
+      const responseText = this.combineResponseText(preJsonText, parsedResponseText);
+
       const emitTurnCompleted = (hasResponse: boolean): void => {
         this.internalHookQueue.enqueue({
           type: 'turn_completed',
@@ -495,20 +672,26 @@ export class Agent {
         }, this.buildHookContext(workItem));
       };
 
-      // Emit extracted responseText for TUI display
-      // For structured output agents, we skip raw JSON chunk streaming, so emit the clean response here
-      // The TUI will use this streamed content instead of the response event content
-      if (hasStructuredOutput && responseText && responseText.trim().length > 0) {
-        this.emit(createEvent('agent_message', {
-          agentType: this.config.type,
-          message: responseText,
-        }, workItem.workId));
+      // Emit content for TUI display
+      // For structured output agents, we skip raw JSON chunk streaming (it's garbage to users).
+      // Instead, emit the clean parsed response OR raw content if JSON parsing failed.
+      if (hasStructuredOutput) {
+        if (responseText && responseText.trim().length > 0) {
+          // JSON parsed successfully - emit the clean response field
+          this.emit(createEvent('agent_message', {
+            agentType: this.config.type,
+            message: responseText,
+          }, workItem.workId));
+        } else if (!structuredOutput && content && content.trim().length > 0) {
+          // No JSON parsed but there's text content - emit it (LLM output plain text)
+          this.emit(createEvent('agent_message', {
+            agentType: this.config.type,
+            message: content,
+          }, workItem.workId));
+        }
       }
 
-      console.error(`[AGENT DEBUG] LLM response: iteration=${iteration}, agent=${this.config.type}, action=${action}, hasResponseText=${!!responseText}, responseTextLength=${responseText?.length ?? 0}, toolCallCount=${toolCalls.length}, contentLength=${content.length}`);
-
       if (toolCalls.length > 0) {
-        console.error(`[AGENT DEBUG] Processing ${toolCalls.length} tool calls, iteration=${iteration}, agent=${this.config.type}`);
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
         const toolCallsFailedBefore = metrics.toolCallsFailed;
 
@@ -536,45 +719,20 @@ export class Agent {
           }, this.buildHookContext(workItem));
         }
 
-        console.error(`[AGENT DEBUG] After processToolCalls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}, toolCallsMade=${metrics.toolCallsMade}, maxToolCalls=${workItem.bounds.maxToolCalls}`);
-
         if (result.needsUserInput || result.terminationReason) {
-          console.error(`[AGENT DEBUG] Early exit after tool calls: terminationReason=${result.terminationReason}, needsUserInput=${result.needsUserInput}`);
-          result.filesRead = Array.from(localReadFiles);
-          emitTurnCompleted(!!responseText);
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+          return;
+        }
+
+        // Check awaitingUserInput from structured output (fallback for conversational questions)
+        if (this.handleAwaitingUserInput(result, structuredOutput, responseText, content as string)) {
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
         }
 
         // Handle completion after tool calls
-        if (action === 'done') {
-          const goalReached = structuredOutput?.goalStateReached === true;
-          if (!goalReached) {
-            result.terminationReason = 'invalid_action';
-            result.error = 'Action "done" requires goalStateReached: true.';
-            break;
-          }
-          const finalText = responseText ?? content;
-          if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
-            result.isRefusal = true;
-            result.error = 'LLM refused to complete the task';
-            result.terminationReason = 'refusal';
-          } else {
-            result.success = true;
-            result.response = finalText;
-            result.terminationReason = 'goal_state_reached';
-          }
-          result.filesRead = Array.from(localReadFiles);
-          emitTurnCompleted(!!responseText);
-          return;
-        }
-
-        // Handle user input request after tool calls
-        if (action === 'need_user_input' && structuredPrompt) {
-          result.needsUserInput = true;
-          result.userPrompt = structuredPrompt;
-          result.terminationReason = 'user_input_required';
-          result.filesRead = Array.from(localReadFiles);
-          emitTurnCompleted(!!responseText);
+        if (this.handleCompletionAction(result, responseText, content as string, action, structuredOutput)) {
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
         }
 
@@ -587,12 +745,11 @@ export class Agent {
             result.needsHandoff = true;
             result.handoffSpec = handoffSpec;
             result.terminationReason = 'handoff_requested';
-            result.filesRead = Array.from(localReadFiles);
-            emitTurnCompleted(!!responseText);
+            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
             return;
           }
           // No valid handoffSpec provided, continue execution
-          emitTurnCompleted(!!responseText);
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           continue;
         }
 
@@ -601,46 +758,26 @@ export class Agent {
           result.response = responseText;
         }
 
-        emitTurnCompleted(!!responseText);
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
         continue;
       }
 
-      if (action === 'done') {
-        const goalReached = structuredOutput?.goalStateReached === true;
-        if (!goalReached) {
-          result.terminationReason = 'invalid_action';
-          result.error = 'Action "done" requires goalStateReached: true.';
-          break;
-        }
-        const finalText = responseText ?? content;
-        if (REFUSAL_PATTERNS.some((p) => p.test(finalText))) {
-          result.isRefusal = true;
-          result.error = 'LLM refused to complete the task';
-          result.terminationReason = 'refusal';
-        } else {
-          result.success = true;
-          result.response = finalText;
-          result.terminationReason = 'goal_state_reached';
-        }
-        result.filesRead = Array.from(localReadFiles);
-        emitTurnCompleted(!!responseText);
+      // Check awaitingUserInput from structured output (fallback for conversational questions)
+      if (this.handleAwaitingUserInput(result, structuredOutput, responseText, content as string)) {
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
         return;
       }
 
-      if (action === 'need_user_input') {
-        if (structuredPrompt) {
-          result.needsUserInput = true;
-          result.userPrompt = structuredPrompt;
-          result.terminationReason = 'user_input_required';
-          result.filesRead = Array.from(localReadFiles);
-          emitTurnCompleted(!!responseText);
-          return;
+      // Handle completion action (done)
+      if (this.handleCompletionAction(result, responseText, content as string, action, structuredOutput)) {
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+        if (result.terminationReason === 'invalid_action') {
+          break;
         }
-        // No valid userPrompt provided, continue execution
-        emitTurnCompleted(!!responseText);
-        continue;
+        return;
       }
 
+      // Handle handoff request
       if (action === 'handoff') {
         const handoffSpec = typeof structuredOutput?.handoffSpec === 'string'
           ? structuredOutput.handoffSpec
@@ -649,34 +786,46 @@ export class Agent {
           result.needsHandoff = true;
           result.handoffSpec = handoffSpec;
           result.terminationReason = 'handoff_requested';
-          result.filesRead = Array.from(localReadFiles);
-          emitTurnCompleted(!!responseText);
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
         }
         // No valid handoffSpec provided, continue execution
-        emitTurnCompleted(!!responseText);
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
         continue;
       }
 
+      // Handle continue action
       if (action === 'continue') {
         // Capture partial response even when continuing (in case we hit bounds later)
         if (responseText && responseText.trim().length > 0) {
           result.response = responseText;
         }
-        emitTurnCompleted(!!responseText);
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
         continue;
       }
 
+      // Handle missing action - this happens when models using json_object format
+      // (like GLM-4.7) output plain text instead of structured JSON after tool calls.
+      // Rather than terminating, treat substantive text as implicit "continue".
       const responseCandidate = responseText ?? content;
       if (responseCandidate.trim().length > 0) {
         result.response = responseCandidate;
+
+        // If we have an output schema configured but no valid action was extracted,
+        // the model likely output conversational text instead of JSON.
+        // Treat this as implicit "continue" to allow the agent to keep working.
+        if (this.config.outputSchema && !action) {
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
+          continue;
+        }
       }
+
       result.terminationReason = 'no_action';
       const preview = responseCandidate.trim().slice(0, 1000);
       result.error = preview
         ? `LLM response has no tools and no action directive. Response preview: ${preview}`
         : 'LLM response has no tools and no action directive';
-      emitTurnCompleted(!!responseText);
+      this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
       break;
     }
 
@@ -686,7 +835,6 @@ export class Agent {
       const assistantContents = messages
         .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
         .map(m => m.content as string);
-      console.error(`[AGENT DEBUG] Fallback response capture: found ${assistantContents.length} assistant messages, agent=${this.config.type}, terminationReason=${result.terminationReason}`);
 
       // Try to extract structured response from assistant content
       for (const content of assistantContents) {
@@ -712,12 +860,12 @@ export class Agent {
           const summary = `Exploration incomplete. Tools called: ${toolNames.join(', ')}. ` +
             `${successfulOutputs.length} successful results obtained but not synthesized.`;
           result.response = summary;
-          console.error(`[AGENT DEBUG] Using tool call summary as fallback response for ${this.config.type}`);
         }
       }
     }
 
     // Handle exhausted resources - treat as partial success if we have content
+    // If terminationReason is unset, we exhausted iterations without a specific termination
     if (!result.terminationReason) {
       result.terminationReason = 'iterations_exhausted';
     }
@@ -741,27 +889,18 @@ export class Agent {
     result.filesRead = Array.from(localReadFiles);
   }
 
-  private buildSystemMessage(
-    workItem: WorkItem,
-    cwd: string,
-    constraints?: {
-      iteration?: number;
-      maxIterations?: number;
-      toolCallsUsed?: number;
-      maxToolCalls?: number;
-      elapsedMs?: number;
-      maxDurationMs?: number;
-    }
-  ): string {
-    const base = this.config.systemPrompt ? `${this.config.systemPrompt}\n\n` : '';
-    const contextInfo = buildSystemMessage(
+  /**
+   * Build system prompt components for caching optimization.
+   * Static content goes in system prompt (cached), dynamic content goes in messages.
+   */
+  private buildSystemPromptComponents(workItem: WorkItem, cwd: string): { system: string; taskContext: string } {
+    const { system, taskContext } = buildSystemMessage(
       workItem.goal,
       workItem.objective,
-      undefined,
-      cwd, // Use per-request cwd, not registry default
-      constraints
+      this.config.systemPrompt,
+      cwd
     );
-    return `${base}${contextInfo}`.trim();
+    return { system, taskContext };
   }
 
   private filterAllowedTools(allTools: ToolDefinition[]): ToolDefinition[] {
@@ -773,15 +912,20 @@ export class Agent {
   /**
    * Build messages array for LLM call.
    * Merges global context (historical) with local context (this turn's work).
+   *
+   * For cache optimization:
+   * - systemPrompt: Static behavioral rules (goes in system parameter, cached)
+   * - taskContext: Dynamic goal/objective/workspace (first user message, not cached)
    */
   private buildMessages(
-    systemMessage: string,
+    systemPrompt: string,
+    taskContext: string,
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow
   ): Array<Record<string, unknown>> {
     const messages: Array<Record<string, unknown>> = [
-      { role: 'system', content: systemMessage },
+      { role: 'system', content: systemPrompt },
     ];
 
     // Merge global (historical) + local (this turn) items
@@ -808,19 +952,22 @@ export class Agent {
       (item) => item.type === 'message' && (item as any).role === 'user'
     );
 
+    // Task context (goal/objective/workspace) goes in first user message - NOT in system prompt
+    // This enables caching of the static system prompt across different tasks
     if (!hasUserInput) {
-      const objectiveWithContext = combinedSummary
-        ? `${combinedSummary}\n\n${workItem.objective}`
-        : workItem.objective;
+      const contextParts = [taskContext];
+      if (combinedSummary) contextParts.push(combinedSummary);
       messages.push({
         role: 'user',
-        content: objectiveWithContext,
+        content: contextParts.join('\n\n'),
       });
-    } else if (combinedSummary) {
-      // Inject context summary even if there's user input
+    } else {
+      // Inject task context + summary even if there's user input
+      const contextParts = [taskContext];
+      if (combinedSummary) contextParts.push(combinedSummary);
       messages.push({
         role: 'user',
-        content: combinedSummary,
+        content: contextParts.join('\n\n'),
       });
     }
 
@@ -848,8 +995,6 @@ export class Agent {
         functionOutputCount++;
       }
     }
-
-    console.error(`[AGENT DEBUG] buildMessages: agent=${this.config.type}, messageCount=${messages.length}, functionCalls=${functionCallCount}, functionOutputs=${functionOutputCount}`);
 
     return messages;
   }
@@ -944,23 +1089,25 @@ export class Agent {
         }
       }
 
-      // Debug: log tool result for Edit to diagnose "(no output)" issue
-      if (call.name.toLowerCase() === 'edit') {
-        console.error(`[TOOL_RESULT_DEBUG] Edit tool result: output=${toolResult.output?.slice(0, 200)}, isSuccess=${toolResult.isSuccess}, error=${toolResult.error}`);
-      }
-
+      // For event emission, include error message for failed tools (output is empty in errorResult)
+      const eventResult = toolResult.isSuccess
+        ? toolResult.output?.slice(0, 10000)
+        : (toolResult.error ?? toolResult.output ?? 'Unknown error').slice(0, 10000);
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
         phase: 'completed',
-        result: toolResult.output?.slice(0, 10000),
+        result: eventResult,
         success: toolResult.isSuccess,
         durationMs: toolDurationMs,
       }, workItemId));
 
       // Truncate tool outputs at storage to reduce context size
       // File reads get higher limit (30KB) vs general tools (8KB)
-      const rawOutput = toolResult.output ?? '';
+      // For failed tools, include the error message so the LLM knows what went wrong
+      const rawOutput = toolResult.isSuccess
+        ? (toolResult.output ?? '')
+        : (toolResult.error ?? toolResult.output ?? 'Unknown error');
       const maxLen = getMaxOutputLength(call.name);
       const truncatedOutput = rawOutput.length > maxLen
         ? rawOutput.slice(0, maxLen) + `\n... [truncated ${rawOutput.length - maxLen} chars]`
@@ -991,7 +1138,7 @@ export class Agent {
           toolRepeatState.repeats = 0;
         }
 
-        if (toolRepeatState.repeats >= MAX_IDENTICAL_TOOL_CALLS) {
+        if (toolRepeatState.repeats >= TOOL_LIMITS.MAX_IDENTICAL_CALLS) {
           result.terminationReason = 'stagnation:tool_repeat';
           result.error = `Repeated identical tool call without progress: ${call.name}`;
           return true;
@@ -1047,22 +1194,43 @@ export class Agent {
       // Normalize tool name to canonical form for case-insensitive lookup
       const canonicalName = canonicalNames.get(nameLower) ?? call.name;
 
-      // Intercept Read calls for files already in context
-      if (nameLower === 'read') {
-        const readPath = call.arguments.path ?? call.arguments.file_path;
-        if (typeof readPath === 'string' && localContext.hasReadFile(readPath)) {
-          // File already in context - don't re-read
-          const msg = `File "${readPath}" is already in your context. Look above for its contents instead of re-reading.`;
-          console.error(`[AGENT DEBUG] Intercepted duplicate Read for: ${readPath}`);
+      // Intercept PromptUser tool - signal pause for user input
+      if (nameLower === 'promptuser') {
+        await flushParallel();
+        const args = call.arguments;
+        const question = typeof args.question === 'string' ? args.question : '';
+        if (!question) {
           localContext.appendItem({
             type: 'function_call_output',
             callId: call.id,
-            output: msg,
-            isError: false,
+            output: 'PromptUser requires a question',
+            isError: true,
             timestamp: Date.now(),
           });
           continue;
         }
+
+        // Build UserPromptInfo from validated args
+        result.needsUserInput = true;
+        result.userPrompt = {
+          question,
+          options: Array.isArray(args.options) ? args.options as UserPromptInfo['options'] : undefined,
+          context: typeof args.context === 'string' ? args.context : undefined,
+          multiSelect: typeof args.multiSelect === 'boolean' ? args.multiSelect : undefined,
+          questionType: typeof args.questionType === 'string' ? args.questionType : undefined,
+          questions: Array.isArray(args.questions) ? args.questions as UserPromptQuestion[] : undefined,
+        };
+        result.terminationReason = 'user_input_required';
+
+        localContext.appendItem({
+          type: 'function_call_output',
+          callId: call.id,
+          output: 'Waiting for user input...',
+          isError: false,
+          timestamp: Date.now(),
+        });
+
+        return;
       }
 
       const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
@@ -1257,13 +1425,21 @@ export class Agent {
     subResult: AgentResult
   ): void {
     // 1. Merge files read (so parent doesn't re-read them)
-    for (const path of subResult.filesRead) {
-      parentLocalContext.markFileRead(path);
+    // Defensive: filesRead should always be an array, but check anyway
+    const filesRead = subResult.filesRead ?? [];
+    for (const path of filesRead) {
+      if (typeof path === 'string' && path.length > 0) {
+        parentLocalContext.markFileRead(path);
+      }
     }
 
     // 2. Merge artifacts - prefer explicit artifacts field, fallback to localContext
     const subArtifacts = subResult.artifacts ?? subResult.localContext?.getArtifacts() ?? [];
     for (const artifact of subArtifacts) {
+      // Skip malformed artifacts (defensive: all artifacts should have sourcePath, kind, name)
+      if (!artifact || typeof artifact.sourcePath !== 'string' || typeof artifact.name !== 'string') {
+        continue;
+      }
       // Avoid duplicates by checking sourcePath + name + line
       const existing = parentLocalContext.getArtifactsByPath(artifact.sourcePath);
       const isDuplicate = existing.some(e =>
@@ -1290,6 +1466,10 @@ export class Agent {
     if (subResult.localContext) {
       const subFileItems = subResult.localContext.getItemsByType<FileContentItem>('file_content');
       for (const fileItem of subFileItems) {
+        // Defensive: ensure fileItem has required properties
+        if (!fileItem?.path || typeof fileItem.content !== 'string') {
+          continue;
+        }
         if (!parentLocalContext.hasReadFile(fileItem.path)) {
           parentLocalContext.addFileContent(fileItem.path, fileItem.content, fileItem.language);
         }
@@ -1308,12 +1488,28 @@ export class Agent {
       return errorResult(call.name, 'Agent tool registry not available', 0);
     }
 
+    // Prevent recursive self-calls
+    if (call.name.toLowerCase() === this.config.type.toLowerCase()) {
+      return errorResult(call.name, `Agent '${this.config.type}' cannot call itself`, 0);
+    }
+
     let agentConfig: AgentConfig;
     let llmConfig: LLMRequestConfig;
     try {
-      const runtimeConfig = this.agentRegistry.getRuntimeConfig(call.name);
-      agentConfig = runtimeConfig.config;
-      llmConfig = runtimeConfig.llm;
+      // Get agent capabilities (tools, budget, llmParams) from registry
+      agentConfig = this.agentRegistry.getConfig(call.name);
+
+      // Build LLM config from model selection (source of truth) + agent's llmParams
+      // NO FALLBACK: model selection MUST exist
+      const modelSelection = this.getModelSelection?.(agentConfig.type);
+      if (!modelSelection) {
+        return errorResult(
+          call.name,
+          `No model configured for agent type '${agentConfig.type}'. Please select a model using /models before using this agent.`,
+          0
+        );
+      }
+      llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return errorResult(call.name, message, 0);
@@ -1368,6 +1564,7 @@ export class Agent {
       llmConfig,
       hooks: this.hooks,
       internalHookQueue: this.internalHookQueue,
+      getModelSelection: this.getModelSelection,
     });
 
     // Create merged context for sub-agent: combines global context with parent's discoveries
@@ -1383,6 +1580,10 @@ export class Agent {
     );
 
     const subResult = await agent.run({ globalContext: mergedContextForSubAgent, workItem: subWorkItem, cwd });
+
+    // Track post-processing errors separately - we want to preserve sub-agent results
+    // even if artifact extraction or merging fails
+    let postProcessingError: string | null = null;
 
     // Extract key findings from sub-agent's tool outputs to include in response
     let enhancedResponse = subResult.response;
@@ -1402,8 +1603,10 @@ export class Agent {
       if (toolOutputs.length > 0) {
         // Build a summary of what was found
         const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
+        const errorOutputs = toolOutputs.filter(o => o.isError && o.output);
         const outputSummaries: string[] = [];
 
+        // First include successful outputs
         for (let i = 0; i < Math.min(successfulOutputs.length, 5); i++) {
           const output = successfulOutputs[i];
           // Find the corresponding tool call to know what tool was used
@@ -1415,39 +1618,86 @@ export class Agent {
           outputSummaries.push(`[${toolName}]: ${truncatedOutput}`);
         }
 
+        // If no successful outputs, include error outputs so parent knows what went wrong
+        if (successfulOutputs.length === 0 && errorOutputs.length > 0) {
+          for (let i = 0; i < Math.min(errorOutputs.length, 5); i++) {
+            const output = errorOutputs[i];
+            const matchingCall = toolCalls.find(tc => tc.callId === output.callId);
+            const toolName = matchingCall?.name ?? 'unknown';
+            const truncatedOutput = output.output.length > 2000
+              ? output.output.slice(0, 2000) + '... [truncated]'
+              : output.output;
+            outputSummaries.push(`[${toolName} ERROR]: ${truncatedOutput}`);
+          }
+        }
+
         if (outputSummaries.length > 0) {
-          enhancedResponse = `Sub-agent exploration results (${successfulOutputs.length} tool outputs):\n\n${outputSummaries.join('\n\n')}`;
-          if (successfulOutputs.length > 5) {
-            enhancedResponse += `\n\n... and ${successfulOutputs.length - 5} more results`;
+          const totalOutputs = successfulOutputs.length > 0 ? successfulOutputs.length : errorOutputs.length;
+          const outputType = successfulOutputs.length > 0 ? 'tool outputs' : 'tool errors';
+          enhancedResponse = `Sub-agent exploration results (${totalOutputs} ${outputType}):\n\n${outputSummaries.join('\n\n')}`;
+          if (totalOutputs > 5) {
+            enhancedResponse += `\n\n... and ${totalOutputs - 5} more results`;
           }
         }
       }
     }
 
     // Extract artifacts from structured output and add to parent's local context
-    // Artifacts use the rich schema: sourcePath, line, kind, name, signature, modifies, calls, insight, reduces
+    // Wrapped in try-catch to preserve sub-agent results even if merging fails
     const artifacts = subResult.structuredOutput?.artifacts;
-    if (Array.isArray(artifacts) && artifacts.length > 0) {
-      const validArtifacts = artifacts.filter((a): a is {
-        sourcePath: string;
-        line?: number | null;
-        kind: string;
-        name: string;
-        signature?: string | null;
-        modifies?: string[] | null;
-        calls?: string[] | null;
-        insight?: string | null;
-        reduces?: string | null;
-      } => (
-        typeof a === 'object' &&
-        a !== null &&
-        typeof a.sourcePath === 'string' &&
-        typeof a.kind === 'string' &&
-        typeof a.name === 'string'
-      ));
+    // Declare outside try-catch for validation access
+    let extractedArtifacts: Array<{
+      sourcePath: string;
+      line?: number | null;
+      kind: string;
+      name: string;
+      signature?: string | null;
+      modifies?: string[] | null;
+      calls?: string[] | null;
+      insight?: string | null;
+      reduces?: string | null;
+    }> = [];
 
-      if (validArtifacts.length > 0) {
-        parentLocalContext.addArtifacts(validArtifacts.map(a => ({
+    try {
+
+      // Try to extract artifacts from structured output first
+      if (Array.isArray(artifacts) && artifacts.length > 0) {
+        const validArtifacts = artifacts.filter((a): a is {
+          sourcePath: string;
+          line?: number | null;
+          kind: string;
+          name: string;
+          signature?: string | null;
+          modifies?: string[] | null;
+          calls?: string[] | null;
+          insight?: string | null;
+          reduces?: string | null;
+        } => (
+          typeof a === 'object' &&
+          a !== null &&
+          typeof a.sourcePath === 'string' &&
+          typeof a.kind === 'string' &&
+          typeof a.name === 'string'
+        ));
+        extractedArtifacts.push(...validArtifacts);
+      }
+
+      // FALLBACK: If structured output parsing failed, extract directly from sub-agent's local context.
+      // This handles cases where tool call exceptions caused JSON parsing to fail.
+      // The sub-agent may have discovered artifacts but structuredOutput is null.
+      if (extractedArtifacts.length === 0 && subResult.localContext) {
+        const contextArtifacts = subResult.localContext.getArtifacts();
+        if (contextArtifacts.length > 0) {
+          extractedArtifacts.push(...contextArtifacts);
+          this.emit(createEvent('agent_message', {
+            agentType: this.config.type,
+            message: `[Sub-agent artifact extraction] Retrieved ${contextArtifacts.length} artifacts from local context after structured output parsing failed`,
+          }, subWorkItem.workId));
+        }
+      }
+
+      if (extractedArtifacts.length > 0) {
+        parentLocalContext.addArtifacts(extractedArtifacts.map(a => ({
           sourcePath: a.sourcePath,
           line: typeof a.line === 'number' ? a.line : undefined,
           kind: a.kind as ArtifactKind,
@@ -1461,11 +1711,17 @@ export class Agent {
           discoveredBy: agentConfig.type,
         })));
       }
-    }
 
-    // Merge sub-agent's discoveries back into parent's local context
-    // This includes file reads, artifacts, and file content not captured above
-    this.mergeSubAgentResults(parentLocalContext, subResult);
+      // Merge sub-agent's discoveries back into parent's local context
+      // This includes file reads, artifacts, and file content not captured above
+      this.mergeSubAgentResults(parentLocalContext, subResult);
+    } catch (mergeError) {
+      // Log but don't fail - the sub-agent's response is more important than artifact merging
+      const message = mergeError instanceof Error ? mergeError.message : String(mergeError);
+      const stack = mergeError instanceof Error ? mergeError.stack : undefined;
+      postProcessingError = `Artifact extraction/merging failed: ${message}`;
+      console.error(`[AGENT] Sub-agent post-processing error: ${message}`, stack ?? '');
+    }
 
     // Include full structured output so calling agent can see artifacts, patterns, etc.
     // Also include explicit filesRead so calling agent knows not to re-read these
@@ -1473,22 +1729,75 @@ export class Agent {
     // CRITICAL: Include actual artifact content, not just count. The calling agent
     // needs to see the rich semantic extractions (signatures, side effects, call graphs)
     // to act without re-reading files.
+    // HARD VALIDATION: Explorer must produce artifacts when reading files
+    // This catches cases where the validation in run() didn't fire (e.g., structured output issues)
+    const filesReadCount = (subResult.filesRead ?? []).length;
+    const artifactCount = extractedArtifacts.length;
+    let explorerValidationFailed = false;
+    let explorerValidationError = '';
+
+    if (agentConfig.type === 'explorer' && filesReadCount > 0 && artifactCount === 0) {
+      explorerValidationFailed = true;
+      explorerValidationError = `Explorer read ${filesReadCount} files but extracted 0 artifacts. ` +
+        `This is unacceptable - every file read MUST produce artifacts.`;
+      console.error(`[AGENT:explorer] SUB-AGENT VALIDATION FAILURE: ${filesReadCount} files, 0 artifacts`);
+    }
+
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
-      success: subResult.success,
+      success: explorerValidationFailed ? false : subResult.success,
       response: enhancedResponse,
-      filesRead: subResult.filesRead, // Explicit list - do not re-read these
+      filesRead: subResult.filesRead ?? [], // Explicit list - do not re-read these
       artifacts: Array.isArray(artifacts) ? artifacts : [], // Full artifact content for downstream use
-      error: subResult.error,
+      error: explorerValidationFailed ? explorerValidationError : subResult.error,
+      postProcessingError, // Non-null if artifact merging failed
       metrics: subResult.metrics,
     };
 
-    if (subResult.success || subResult.needsUserInput) {
+    if ((subResult.success && !explorerValidationFailed) || subResult.needsUserInput) {
+      // Even on success, include any post-processing errors in the result
+      if (postProcessingError) {
+        (payload as Record<string, unknown>).warning = postProcessingError;
+      }
       return successResult(call.name, JSON.stringify(payload), 0);
     }
 
-    return errorResult(call.name, JSON.stringify(payload), 0);
+    // Build human-readable error message for failed sub-agents
+    // Include key details without requiring JSON parsing
+    const errorParts = [
+      `Sub-agent '${agentConfig.type}' failed`,
+    ];
+    // Always include termination reason if we have one
+    if (subResult.terminationReason) {
+      errorParts.push(` (reason: ${subResult.terminationReason})`);
+    }
+    // Include error details - if missing, note that
+    if (subResult.error) {
+      errorParts.push(`: ${subResult.error}`);
+    } else if (subResult.terminationReason === 'exception') {
+      errorParts.push(` - no error message captured, check agent logs`);
+    }
+    const toolsUsed = subResult.metrics?.toolCallsMade ?? 0;
+    if (toolsUsed > 0) {
+      errorParts.push(`\nTools called: ${toolsUsed} (${subResult.metrics?.toolCallsSucceeded ?? 0} succeeded, ${subResult.metrics?.toolCallsFailed ?? 0} failed)`);
+    }
+    if (subResult.toolErrors && subResult.toolErrors.length > 0) {
+      errorParts.push(`\nTool errors: ${subResult.toolErrors.slice(0, 3).join('; ')}${subResult.toolErrors.length > 3 ? '...' : ''}`);
+    }
+    // Include partial response if available
+    if (enhancedResponse && enhancedResponse.trim().length > 0) {
+      const preview = enhancedResponse.length > 500
+        ? enhancedResponse.slice(0, 500) + '... [truncated]'
+        : enhancedResponse;
+      errorParts.push(`\nPartial output:\n${preview}`);
+    }
+    // Include post-processing error if artifact merging failed
+    if (postProcessingError) {
+      errorParts.push(`\nPost-processing warning: ${postProcessingError}`);
+    }
+
+    return errorResult(call.name, errorParts.join(''), 0);
   }
 
   /**
@@ -1507,8 +1816,6 @@ export class Agent {
     }
 
     for (const targetPath of targetPaths) {
-      if (localReadFiles.has(targetPath)) continue;
-
       try {
         metrics.toolCallsMade++;
         const result = await this.toolRegistry.execute('Read', { path: targetPath }, { cwd });
@@ -1521,8 +1828,8 @@ export class Agent {
             : JSON.stringify(result.output);
 
           // Truncate file content at context storage (30KB limit for reads)
-          const truncated = fileContent.length > MAX_FILE_READ_OUTPUT_LENGTH
-            ? fileContent.slice(0, MAX_FILE_READ_OUTPUT_LENGTH) + `\n... [truncated ${fileContent.length - MAX_FILE_READ_OUTPUT_LENGTH} chars]`
+          const truncated = fileContent.length > TOOL_LIMITS.MAX_FILE_READ_OUTPUT_LENGTH
+            ? fileContent.slice(0, TOOL_LIMITS.MAX_FILE_READ_OUTPUT_LENGTH) + `\n... [truncated ${fileContent.length - TOOL_LIMITS.MAX_FILE_READ_OUTPUT_LENGTH} chars]`
             : fileContent;
           localContext.addFileContent(targetPath, truncated);
         } else {
@@ -1539,12 +1846,8 @@ export class Agent {
    */
   private parseStructuredOutput(content: string): Record<string, unknown> | null {
     const parsed = coerceStructuredOutput(content);
-    if (!this.config.outputSchema) {
-      if (parsed && typeof parsed.action === 'string') {
-        return parsed;
-      }
-      return null;
-    }
+    // Return whatever was parsed - let callers decide what fields they need
+    // (artifacts, action, response, etc.)
     return parsed;
   }
 
@@ -1559,7 +1862,6 @@ export class Agent {
     if (typeof raw !== 'string') return null;
     const normalized = raw.trim().toLowerCase();
     if (normalized === 'done') return 'done';
-    if (normalized === 'need_user_input') return 'need_user_input';
     if (normalized === 'continue') return 'continue';
     if (normalized === 'handoff') return 'handoff';
     return null;
@@ -1580,109 +1882,34 @@ export class Agent {
   }
 
   /**
-   * Extract user prompt from structured output.
+   * Combine pre-JSON text with parsed response text.
+   * Some LLMs (e.g., GLM) output prose before the JSON structured output.
+   * This combines both to preserve all user-facing content.
    */
-  private extractStructuredUserPrompt(
-    structuredOutput: Record<string, unknown> | null
-  ): AgentResult['userPrompt'] | null {
-    if (!structuredOutput) return null;
-    return this.parseUserPromptValue(structuredOutput.userPrompt);
-  }
+  private combineResponseText(
+    preJsonText: string,
+    parsedResponseText: string | undefined
+  ): string | undefined {
+    const pre = preJsonText?.trim() ?? '';
+    const parsed = parsedResponseText?.trim() ?? '';
 
-  /**
-   * Parse options array from user prompt data.
-   */
-  private parseOptionsArray(
-    optionsRaw: unknown
-  ): UserPromptInfo['options'] | undefined {
-    if (!Array.isArray(optionsRaw)) return undefined;
-    const normalized = optionsRaw
-      .map((opt) => {
-        if (typeof opt === 'string') return opt;
-        if (opt && typeof opt === 'object' && !Array.isArray(opt)) {
-          const optObj = opt as Record<string, unknown>;
-          const label = typeof optObj.label === 'string' ? optObj.label : '';
-          if (!label) return null;
-          const description =
-            typeof optObj.description === 'string' ? optObj.description : undefined;
-          return description ? { label, description } : { label };
-        }
-        return null;
-      })
-      .filter((opt): opt is string | { label: string; description?: string } => opt !== null);
-    return normalized.length > 0 ? normalized : undefined;
-  }
-
-  /**
-   * Parse user prompt payload safely.
-   * Supports both single question and multiple questions formats.
-   */
-  private parseUserPromptValue(
-    value: unknown
-  ): AgentResult['userPrompt'] | null {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return null;
+    if (pre && parsed) {
+      return `${pre}\n\n${parsed}`;
     }
-    const data = value as Record<string, unknown>;
-
-    // Check for multiple questions format first
-    if (Array.isArray(data.questions) && data.questions.length > 0) {
-      const questions = data.questions
-        .map((q) => {
-          if (!q || typeof q !== 'object' || Array.isArray(q)) return null;
-          const qData = q as Record<string, unknown>;
-          const question = typeof qData.question === 'string' ? qData.question.trim() : '';
-          if (!question) return null;
-          return {
-            question,
-            options: this.parseOptionsArray(qData.options),
-            context: typeof qData.context === 'string' ? qData.context : undefined,
-            multiSelect: typeof qData.multiSelect === 'boolean' ? qData.multiSelect : undefined,
-            questionType: typeof qData.questionType === 'string' ? qData.questionType : undefined,
-          };
-        })
-        .filter((q): q is NonNullable<typeof q> => q !== null);
-
-      if (questions.length > 0) {
-        // Use first question as the primary (backwards compatible)
-        const first = questions[0];
-        return {
-          question: first.question,
-          options: first.options,
-          context: first.context,
-          multiSelect: first.multiSelect,
-          questionType: first.questionType,
-          questions: questions.length > 1 ? questions : undefined,
-        };
-      }
+    if (pre) {
+      return pre;
     }
-
-    // Single question format (backwards compatible)
-    const question = typeof data.question === 'string' ? data.question.trim() : '';
-    if (!question) return null;
-
-    const options = this.parseOptionsArray(data.options);
-    const context = typeof data.context === 'string' ? data.context : undefined;
-    const multiSelect =
-      typeof data.multiSelect === 'boolean' ? data.multiSelect : undefined;
-    const questionType =
-      typeof data.questionType === 'string' ? data.questionType : undefined;
-
-    return {
-      question,
-      options,
-      context,
-      multiSelect,
-      questionType,
-    };
+    if (parsed) {
+      return parsed;
+    }
+    return undefined;
   }
-
 
   /**
    * Emit llm_call event.
    */
   private emitLlmCall(
-    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number }; model?: string },
+    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number; cachedTokens?: number }; model?: string },
     messages: Array<Record<string, unknown>>,
     durationMs: number,
     tools: ToolDefinition[],
@@ -1693,12 +1920,13 @@ export class Agent {
 
     this.emit(createEvent('llm_call', {
       agentType: this.config.type,
-      provider: this.lastRequestConfig?.provider ?? 'unknown',
+      provider: this.llmConfig.provider ?? 'unknown',
       promptPreview: this.getPromptPreview(messages),
       responsePreview: content.slice(0, 4000) || this.buildToolCallPreview(toolCalls),
       totalTokens: response.usage?.totalTokens ?? 0,
       promptTokens: response.usage?.promptTokens ?? 0,
       completionTokens: response.usage?.completionTokens ?? 0,
+      cachedTokens: response.usage?.cachedTokens,
       durationMs,
       model: response.model ?? 'unknown',
       toolCallsCount: toolCalls.length,
@@ -1711,8 +1939,8 @@ export class Agent {
    * Emit llm_error event.
    */
   private emitLlmError(error: Error, workItemId?: string): void {
-    const provider = this.lastRequestConfig?.provider ?? 'unknown';
-    const model = this.lastRequestConfig?.model ?? 'unknown';
+    const provider = this.llmConfig.provider ?? 'unknown';
+    const model = this.llmConfig.model ?? 'unknown';
     this.emit(createEvent('llm_error', {
       agentType: this.config.type,
       provider,

@@ -532,13 +532,6 @@ export class AuthService {
       return this.masterKey;
     }
 
-    // Check env var first
-    const envKey = process.env.HARNESS_ENCRYPTION_KEY;
-    if (envKey) {
-      this.masterKey = scryptSync(envKey, 'harness-salt', KEY_LENGTH);
-      return this.masterKey;
-    }
-
     const keyPath = this.config.masterKeyPath;
 
     // Check if key file exists
@@ -719,6 +712,39 @@ export function createAuthServiceFromEnv(): AuthService | null {
     masterKeyPath,
     callbackHost: host,
     callbackPort: parseInt(port, 10),
+    google: { clientId, redirectUri },
+  });
+}
+
+/**
+ * Create auth service from config file.
+ * Reads configuration from the auth section of harness_config.json.
+ */
+export function createAuthServiceFromConfig(
+  authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | undefined
+): AuthService | null {
+  if (!authConfig?.enabled) {
+    console.log('[auth-service] Auth service not enabled in config');
+    return null;
+  }
+
+  const clientId = authConfig.google_client_id ?? DEFAULT_GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    console.log('[auth-service] Google OAuth not configured (no google_client_id in config)');
+    return null;
+  }
+
+  const host = authConfig.host ?? '127.0.0.1';
+  const port = authConfig.port ?? 9556;
+  const graphdDbPath = authConfig.graphd_db_path ?? join(homedir(), '.graphd', 'graphd.db');
+  const masterKeyPath = authConfig.master_key_path ?? join(homedir(), '.config', 'harness', 'master.key');
+  const redirectUri = authConfig.google_redirect_uri ?? `http://${host}:${port}/auth/google/callback`;
+
+  return new AuthService({
+    graphdDbPath,
+    masterKeyPath,
+    callbackHost: host,
+    callbackPort: port,
     google: { clientId, redirectUri },
   });
 }

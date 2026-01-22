@@ -10,9 +10,16 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { GraphStore } from 'graphd';
-import type { ProvidersConfigSection } from './config_types.js';
-import { setConfigProviders } from './config_loader.js';
 import { SUPPORTED_PROVIDER_IDS, getProviderDefinition } from 'types';
+
+/**
+ * Provider API keys configuration type.
+ * NOTE: This is now internal-only - no longer used in config files.
+ * API keys are stored exclusively in GraphD.
+ */
+export interface ProvidersConfigSection {
+  [provider: string]: string | undefined;
+}
 
 // ============================================
 // TYPES
@@ -80,9 +87,6 @@ export class LocalProviderManager {
     // Ensure local user exists
     this.ensureLocalUser();
 
-    // Load stored provider keys into config cache for hasApiKey() checks.
-    this.updateConfigCache();
-
     console.log(`[local-providers] Initialized with GraphD at ${graphdDbPath}`);
   }
 
@@ -145,9 +149,6 @@ export class LocalProviderManager {
         encrypted.iv
       );
 
-      // Update module-level cache for immediate use by config resolution
-      this.updateConfigCache();
-
       console.log(`[local-providers] Saved ${provider} key to GraphD`);
       return { success: true };
     } catch (err) {
@@ -164,9 +165,6 @@ export class LocalProviderManager {
   deleteProviderKey(provider: string): ProviderSaveResult {
     try {
       this.store.deleteProviderCredential(LOCAL_USER_ID, provider);
-
-      // Update module-level cache
-      this.updateConfigCache();
 
       console.log(`[local-providers] Deleted ${provider} key from GraphD`);
       return { success: true };
@@ -230,6 +228,28 @@ export class LocalProviderManager {
   }
 
   /**
+   * Export all stored provider keys to process.env.
+   * This makes them available to child processes (e.g., skill scripts via Bash tool).
+   * Uses each provider's standard env var name from PROVIDER_REGISTRY.
+   */
+  exportToEnv(): void {
+    let exportCount = 0;
+    for (const provider of SUPPORTED_PROVIDER_IDS) {
+      const key = this.getProviderKey(provider);
+      if (key) {
+        const definition = getProviderDefinition(provider);
+        if (definition?.envVar) {
+          process.env[definition.envVar] = key;
+          exportCount++;
+        }
+      }
+    }
+    if (exportCount > 0) {
+      console.log(`[local-providers] Exported ${exportCount} provider keys to process.env`);
+    }
+  }
+
+  /**
    * Test an API key for a provider.
    */
   async testProviderKey(provider: string): Promise<ProviderTestResult> {
@@ -255,25 +275,10 @@ export class LocalProviderManager {
   // =========================================================================
 
   /**
-   * Update the module-level config cache with current provider keys.
-   */
-  private updateConfigCache(): void {
-    const providers = this.getProviders();
-    setConfigProviders(providers);
-  }
-
-  /**
    * Get or generate the master encryption key.
    */
   private getMasterKey(): Buffer {
     if (this.masterKey) {
-      return this.masterKey;
-    }
-
-    // Check env var first
-    const envKey = process.env.REX_ENCRYPTION_KEY;
-    if (envKey) {
-      this.masterKey = scryptSync(envKey, 'rex-local-salt', KEY_LENGTH);
       return this.masterKey;
     }
 
@@ -342,7 +347,7 @@ export class LocalProviderManager {
       Object.assign(headers, definition.testHeaders);
     }
 
-    // Handle authentication - Gemini uses query param, others use Bearer/x-api-key
+    // Handle authentication - different providers use different methods
     let url = definition.testEndpoint;
     if (provider === 'gemini') {
       url = `${definition.testEndpoint}?key=${apiKey}`;

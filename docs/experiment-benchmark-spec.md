@@ -3,7 +3,7 @@
 ## Goal
 Enable fast experimentation across prompts, models, and context-engineering strategies with minimal new code. Start with a single sanity run (v1), then expand to parallel runs, session forking, and dashboard support (v2).
 
-## Principles
+##Principles
 - Single variable per run.
 - Same initial state for all runs (fork session from a base).
 - Fixed question set across runs.

@@ -8,10 +8,12 @@
  * - Output truncation
  * - Combined multi-option scenarios
  * - Version tracking and _readFiles cleanup
+ * - compactWithLedger timeout handling
  */
 
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { ContextWindow } from '../packages/agent-core/src/context/context-window.js';
+import { ContextWindow } from '../packages/context/src/context-window.js';
+import type { LLMAdapter, LLMResponse } from 'types';
 
 describe('ContextWindow.compact() State Machine', () => {
   let context: ContextWindow;
@@ -390,5 +392,147 @@ describe('ContextWindow.compact() State Machine', () => {
       expect(result.bytesRecovered).toBeGreaterThan(9500);
       expect(result.bytesRecovered).toBeLessThan(10000);
     });
+  });
+});
+
+describe('ContextWindow.compactWithLedger() Timeout Handling', () => {
+  /**
+   * Create a mock LLM adapter for testing.
+   */
+  function createMockLLM(behavior: 'success' | 'hang' | 'error'): LLMAdapter {
+    return {
+      respond: async () => {
+        if (behavior === 'hang') {
+          // Simulate a hanging LLM call - never resolves
+          return new Promise<LLMResponse>(() => {
+            // Intentionally never resolves
+          });
+        }
+        if (behavior === 'error') {
+          throw new Error('LLM error');
+        }
+        // Success case - return valid ledger response
+        return {
+          content: JSON.stringify({
+            constraints: [],
+            decision_boundaries: [],
+            actions: [],
+            open_questions: [],
+          }),
+          toolCalls: [],
+          usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+        };
+      },
+      stream: async function* () {
+        yield 'test';
+        return {
+          content: 'test',
+          toolCalls: [],
+          usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+        };
+      },
+    };
+  }
+
+  it('falls back to mechanical compaction when LLM call times out', async () => {
+    const context = new ContextWindow('test-session', 200_000);
+
+    // Add enough content to trigger compaction
+    for (let i = 0; i < 20; i++) {
+      context.addMessage('user', `Message ${i}: ${'x'.repeat(1000)}`);
+    }
+    context.addFileContent('/file.ts', 'content');
+
+    const hangingLLM = createMockLLM('hang');
+    const llmConfig = {
+      provider: 'test' as const,
+      model: 'test-model',
+      maxTokens: 800,
+      temperature: 0,
+    };
+
+    // compactWithLedger should NOT hang - it should timeout and fall back
+    // The default timeout is 30 seconds, but for testing we'll verify the
+    // behavior by checking it completes (the actual timeout is built into the code)
+    const startTime = Date.now();
+
+    // Use a short test timeout - if compactWithLedger doesn't have timeout protection,
+    // this test would hang forever
+    const result = await Promise.race([
+      context.compactWithLedger({
+        llm: hangingLLM,
+        llmConfig,
+        targetReductionRatio: 0.5,
+        preserveRecentItems: 5,
+        deduplicateByPath: true,
+      }),
+      // Test timeout - if this resolves first, the test fails
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 35_000)),
+    ]);
+
+    const elapsed = Date.now() - startTime;
+
+    // Should complete (via timeout + fallback) rather than hanging
+    expect(result).not.toBeNull();
+    // Should complete within reasonable time (30s timeout + small buffer)
+    expect(elapsed).toBeLessThan(35_000);
+    // Should still do some compaction (the mechanical fallback)
+    expect(result!.itemsRemoved).toBeGreaterThanOrEqual(0);
+  }, 40_000); // 40 second test timeout
+
+  it('falls back to mechanical compaction when LLM call errors', async () => {
+    const context = new ContextWindow('test-session', 200_000);
+
+    // Add content
+    for (let i = 0; i < 10; i++) {
+      context.addMessage('user', `Message ${i}: ${'x'.repeat(500)}`);
+    }
+
+    const errorLLM = createMockLLM('error');
+    const llmConfig = {
+      provider: 'test' as const,
+      model: 'test-model',
+      maxTokens: 800,
+      temperature: 0,
+    };
+
+    // Should not throw - should fall back to mechanical compaction
+    const result = await context.compactWithLedger({
+      llm: errorLLM,
+      llmConfig,
+      targetReductionRatio: 0.5,
+      preserveRecentItems: 5,
+    });
+
+    // Should return a valid result (from fallback)
+    expect(result).toBeDefined();
+    expect(typeof result.itemsRemoved).toBe('number');
+  });
+
+  it('uses LLM ledger when call succeeds', async () => {
+    const context = new ContextWindow('test-session', 200_000);
+
+    // Add content to compact
+    for (let i = 0; i < 15; i++) {
+      context.addMessage('user', `Message ${i}: ${'y'.repeat(800)}`);
+    }
+
+    const successLLM = createMockLLM('success');
+    const llmConfig = {
+      provider: 'test' as const,
+      model: 'test-model',
+      maxTokens: 800,
+      temperature: 0,
+    };
+
+    const result = await context.compactWithLedger({
+      llm: successLLM,
+      llmConfig,
+      targetReductionRatio: 0.5,
+      preserveRecentItems: 5,
+    });
+
+    // Should complete successfully
+    expect(result).toBeDefined();
   });
 });

@@ -64,6 +64,7 @@ export interface LLMCall {
   totalTokens: number;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens?: number;
   durationMs: number;
   model: string;
   toolCallsCount: number;
@@ -124,6 +125,10 @@ export interface ContextWindowMetrics {
   percentageUsed: number;
   /** Number of messages in context */
   messageCount: number;
+  /** Cached tokens from prompt (if provider supports prompt caching) */
+  cachedTokens?: number;
+  /** Cumulative cached tokens across all requests */
+  totalCachedTokens?: number;
   timestamp: ISODateTime;
 }
 

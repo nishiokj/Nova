@@ -238,12 +238,14 @@ export class OpenAIProvider implements LLMProviderAdapter {
       ? 'tool_use'
       : (stopReasonMap[finalStatus] ?? 'end_turn');
 
-    const usageData = data.usage as Record<string, number> | undefined;
+    const usageData = data.usage as Record<string, unknown> | undefined;
+    const promptDetails = usageData?.prompt_tokens_details as Record<string, number> | undefined;
     const usage: TokenUsage = usageData
       ? {
-          promptTokens: usageData.input_tokens ?? 0,
-          completionTokens: usageData.output_tokens ?? 0,
-          totalTokens: usageData.total_tokens ?? 0,
+          promptTokens: (usageData.input_tokens as number) ?? 0,
+          completionTokens: (usageData.output_tokens as number) ?? 0,
+          totalTokens: (usageData.total_tokens as number) ?? 0,
+          cachedTokens: promptDetails?.cached_tokens,
         }
       : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
@@ -458,6 +460,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
     const decoder = new TextDecoder();
 
     let fullContent = '';
+    let fullReasoningContent = '';
     let stopReason: StopReason = 'end_turn';
     let usage: TokenUsage = {
       promptTokens: 0,
@@ -511,6 +514,22 @@ export class OpenAIProvider implements LLMProviderAdapter {
               }
             }
 
+            if (event.type === 'response.reasoning.delta') {
+              const delta = event.delta as string;
+              if (delta) {
+                fullReasoningContent += delta;
+                params.onReasoningChunk?.(delta);
+              }
+            }
+
+            if (event.type === 'response.reasoning.done') {
+              const reasoning = event.reasoning as string;
+              if (reasoning && fullReasoningContent.length === 0) {
+                fullReasoningContent += reasoning;
+                params.onReasoningChunk?.(reasoning);
+              }
+            }
+
             if (event.type === 'response.completed') {
               const responseObj = event.response as Record<string, unknown> | undefined;
               if (responseObj) {
@@ -523,12 +542,14 @@ export class OpenAIProvider implements LLMProviderAdapter {
                   toolCalls.length = 0;
                   toolCalls.push(...parsedCalls.filter((call) => !!call.name));
                 }
-                const usageData = responseObj.usage as Record<string, number> | undefined;
+                const usageData = responseObj.usage as Record<string, unknown> | undefined;
+                const promptDetails = usageData?.prompt_tokens_details as Record<string, number> | undefined;
                 if (usageData) {
                   usage = {
-                    promptTokens: usageData.input_tokens ?? 0,
-                    completionTokens: usageData.output_tokens ?? 0,
-                    totalTokens: usageData.total_tokens ?? 0,
+                    promptTokens: (usageData.input_tokens as number) ?? 0,
+                    completionTokens: (usageData.output_tokens as number) ?? 0,
+                    totalTokens: (usageData.total_tokens as number) ?? 0,
+                    cachedTokens: promptDetails?.cached_tokens,
                   };
                 }
                 model = (responseObj.model as string) ?? model;
@@ -570,6 +591,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       model,
       durationMs: Date.now() - context.startTime,
       responseId,
+      reasoningContent: fullReasoningContent || undefined,
     };
   }
 
@@ -602,10 +624,16 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
       if (item.type === 'function_call_output') {
         const outputCallId = (item.call_id ?? item.callId) as string;
+        const rawOutput = item.output as string;
+        const isError = item.isError as boolean | undefined;
+        // Prefix error outputs so the LLM knows it's an error
+        const output = isError && rawOutput && !rawOutput.startsWith('Error')
+          ? `Error: ${rawOutput}`
+          : rawOutput;
         input.push({
           type: 'function_call_output',
           call_id: outputCallId,
-          output: item.output,
+          output,
         });
         continue;
       }
@@ -712,44 +740,63 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
   private parseToolCalls(response: Record<string, unknown>): ToolCall[] {
     const output = response.output as Array<Record<string, unknown>> | undefined;
-    if (!output) return [];
+    if (!output || !Array.isArray(output)) return [];
 
     const toolCalls: ToolCall[] = [];
     const isValidToolName = (name: unknown): name is string =>
-      typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
+      typeof name === 'string' && name.length > 0 && /^[A-Za-z0-9_-]+$/.test(name);
+
+    const isValidCallId = (id: unknown): id is string =>
+      typeof id === 'string' && id.length > 0;
 
     for (const item of output) {
+      if (!item || typeof item !== 'object') continue;
+
       if (item.type === 'function_call') {
         const callId = (item.call_id ?? item.id) as string;
         const name = item.name as string;
-        if (!isValidToolName(name)) continue;
-        const argsJson = item.arguments as string;
+        if (!isValidToolName(name) || !isValidCallId(callId)) continue;
+
         let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(argsJson);
-        } catch {
-          args = {};
+        const argsJson = item.arguments as string;
+        if (typeof argsJson === 'string' && argsJson.length > 0) {
+          try {
+            const parsed = JSON.parse(argsJson);
+            if (parsed && typeof parsed === 'object') {
+              args = parsed as Record<string, unknown>;
+            }
+          } catch {
+            // Invalid JSON, keep empty args
+          }
         }
+
         toolCalls.push({ id: callId, name, arguments: args });
         continue;
       }
 
       if (item.type !== 'message') continue;
       const contentBlocks = item.content as Array<Record<string, unknown>> | undefined;
-      if (!contentBlocks) continue;
+      if (!contentBlocks || !Array.isArray(contentBlocks)) continue;
 
       for (const block of contentBlocks) {
         if (block.type !== 'tool_call') continue;
         const callId = block.id as string;
         const name = block.name as string;
-        if (!isValidToolName(name)) continue;
-        const argsJson = block.arguments as string;
+        if (!isValidToolName(name) || !isValidCallId(callId)) continue;
+
         let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(argsJson);
-        } catch {
-          args = {};
+        const argsJson = block.arguments as string;
+        if (typeof argsJson === 'string' && argsJson.length > 0) {
+          try {
+            const parsed = JSON.parse(argsJson);
+            if (parsed && typeof parsed === 'object') {
+              args = parsed as Record<string, unknown>;
+            }
+          } catch {
+            // Invalid JSON, keep empty args
+          }
         }
+
         toolCalls.push({ id: callId, name, arguments: args });
       }
     }

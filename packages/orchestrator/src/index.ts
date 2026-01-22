@@ -12,16 +12,31 @@ export {
   type OrchestratorLogger,
   type TerminationReason,
   type PlanModeOptions,
-  type ModelOverride,
 } from './orchestrator.js';
 
 export {
+  BoundsChecker,
+  type ExecutionLimits,
+  type ExecutionState,
+  type BoundViolation,
+  type BoundsCheckResult,
+} from './bounds-checker.js';
+
+export {
   registerHook,
-  getHandlers,
-  HOOK_REGISTRY,
+  clearHooks,
+  getHooks,
+  executeHooks,
+  loadHooksFromConfig,
+  getHandlers, // deprecated
+  type HookEventType,
+  type HookCallback,
+  type ShellHook,
+  type HookEntry,
+  type HooksConfig,
   type StopHookHandler,
   type StopHookContext,
-} from './hooks/index.js';
+} from './hooks.js';
 
 // Ralph Loop - iterative self-referential development
 export {

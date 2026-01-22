@@ -195,6 +195,22 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
       };
     }
 
+    case 'agent_reasoning': {
+      const reasoningData = data as { content?: string; agentType?: string; isFinal?: boolean };
+      // Handle both content chunks and final marker (empty content with isFinal=true)
+      if (!reasoningData.content && !reasoningData.isFinal) return null;
+      return {
+        type: 'stream',
+        data: {
+          request_id: requestId,
+          chunk: reasoningData.content ?? '',
+          chunk_index: -1,
+          is_final: reasoningData.isFinal ?? false,
+          is_reasoning: true,  // Flag for TUI to render distinctly
+        },
+      };
+    }
+
     case 'artifact_discovered': {
       const artData = data as {
         artifact: { name?: string; kind?: string };
@@ -234,6 +250,28 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
           level: 'info',
           kind: 'thinking',
         } satisfies ProgressEventData,
+      };
+    }
+
+    case 'permission_request': {
+      const permData = data as {
+        requestId?: string;
+        tool?: 'Bash' | 'Write' | 'Edit';
+        target?: string;
+        suggestedPattern?: string;
+        workingDirectory?: string;
+        description?: string;
+      };
+      return {
+        type: 'permission_request',
+        data: {
+          request_id: permData.requestId || requestId,
+          tool: permData.tool || 'Bash',
+          target: permData.target || '',
+          suggested_pattern: permData.suggestedPattern || '',
+          working_directory: permData.workingDirectory || '',
+          description: permData.description || '',
+        },
       };
     }
 
@@ -335,8 +373,33 @@ export function createReadyEvent(sessionKey: string, configSummary?: string): Br
 }
 
 /**
+ * Agent's question format (camelCase).
+ */
+interface AgentQuestion {
+  question: string;
+  options?: Array<string | { label: string; description?: string }>;
+  context?: string;
+  multiSelect?: boolean;
+  questionType?: string;
+}
+
+/**
+ * Convert agent question (camelCase) to wire format (snake_case).
+ */
+function toWireQuestion(q: AgentQuestion): UserPromptEventQuestion {
+  return {
+    question: q.question,
+    options: q.options,
+    context: q.context,
+    multi_select: q.multiSelect,
+    question_type: q.questionType,
+  };
+}
+
+/**
  * Create a user prompt event for the TUI.
  * Supports single question (backwards compatible) or multiple questions.
+ * Converts from agent format (camelCase) to wire format (snake_case).
  */
 export function createUserPromptEvent(
   requestId: string,
@@ -345,15 +408,15 @@ export function createUserPromptEvent(
   context?: string,
   multiSelect?: boolean,
   questionType?: string,
-  questions?: UserPromptEventQuestion[]
+  questions?: AgentQuestion[]
 ): BridgeEvent {
   const data: UserPromptEventData = {
     request_id: requestId,
   };
 
-  // If multiple questions provided, use that format
+  // If multiple questions provided, convert each to wire format
   if (questions && questions.length > 0) {
-    data.questions = questions;
+    data.questions = questions.map(toWireQuestion);
   } else if (question) {
     // Single question format (backwards compatible)
     data.question = question;

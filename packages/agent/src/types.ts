@@ -3,6 +3,7 @@ import type { WorkItem } from 'work';
 import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMRequestConfig } from 'types';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
+import type { AgentTerminationReason } from 'shared';
 
 /**
  * Agent type identifier - any string, defined via config.
@@ -29,12 +30,28 @@ export const DEFAULT_AGENT_BUDGET: AgentBudget = {
 };
 
 /**
+ * LLM operational parameters - NOT provider/model selection.
+ * These control HOW the model runs, not WHICH model runs.
+ */
+export interface LLMParams {
+  /** Maximum tokens in response */
+  maxTokens: number;
+  /** Temperature for sampling (0-1) */
+  temperature: number;
+}
+
+export const DEFAULT_LLM_PARAMS: LLMParams = {
+  maxTokens: 16000,
+  temperature: 0.7,
+};
+
+/**
  * Agent configuration - wired at instantiation.
  * Determines the agent's capabilities and constraints.
  *
- * NOTE: The LLM model is NOT specified here. Agents receive an LLMAdapter
- * at construction time. Model selection is handled by the harness/orchestrator
- * via llm_configs in harness_config.json.
+ * NOTE: The LLM provider/model is NOT specified here. Model selection
+ * comes EXCLUSIVELY from SessionStore via getModelSelection.
+ * Only operational params (maxTokens, temperature) are stored here.
  */
 export interface AgentConfig {
   /** Agent type identifier */
@@ -45,6 +62,8 @@ export interface AgentConfig {
   tools: string[];
   /** Resource budget */
   budget: AgentBudget;
+  /** LLM operational parameters (NOT provider/model) */
+  llmParams: LLMParams;
   /** Structured output schema for responses */
   outputSchema?: StructuredOutputSchema;
 }
@@ -97,8 +116,8 @@ export interface AgentResult {
   invalidatedPaths: string[];
   /** Tool errors encountered */
   toolErrors: string[];
-  /** Why execution terminated */
-  terminationReason: string;
+  /** Why execution terminated (undefined while still running) */
+  terminationReason?: AgentTerminationReason;
   /** Whether user input is needed */
   needsUserInput: boolean;
   /** User prompt info (if needsUserInput) */
@@ -205,6 +224,12 @@ export interface AgentHooks {
     args: Record<string, unknown>,
     result: ToolResult
   ) => Promise<ToolHookResult>;
+
+  /**
+   * Called at the start of each agent iteration to check for stop signal.
+   * Returns true if agent should stop immediately (e.g., user typed "stop").
+   */
+  shouldStop?: () => boolean;
 }
 
 // ============================================
@@ -222,7 +247,7 @@ export type InternalHookEvent =
       toolCallsMade: number;
       llmCallsMade: number;
       hasResponse: boolean;
-      terminationReason?: string;
+      terminationReason?: AgentTerminationReason;
     }
   | {
       type: 'tool_batch_completed';
@@ -249,7 +274,7 @@ export type InternalHookEvent =
       type: 'agent_completed';
       workId: string;
       success: boolean;
-      terminationReason: string;
+      terminationReason: AgentTerminationReason;
       filesRead: string[];
       invalidatedPaths: string[];
     };
@@ -311,13 +336,26 @@ export const noopHookQueue: InternalHookQueue = {
 // Forward declaration for AgentRegistry to avoid circular import
 export interface AgentRegistry {
   has(agentType: string): boolean;
-  getRuntimeConfig(agentType: string): { config: AgentConfig; llm: LLMRequestConfig };
+  getConfig(agentType: string): AgentConfig;
   listToolDefinitions(): Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
+}
+
+/**
+ * Model selection from SessionStore - identifies WHICH model to use.
+ * This is the runtime type for getModelSelection callback.
+ */
+export interface ModelSelectionInfo {
+  provider: string;
+  model: string;
+  reasoning?: string;
 }
 
 /**
  * Runtime configuration for Agent.
  * Groups all runtime dependencies into a single object.
+ *
+ * NOTE: llmConfig is REQUIRED - agents must receive pre-resolved config at creation.
+ * getModelSelection is only needed for sub-agent spawning.
  */
 export interface AgentRuntimeConfig {
   /** LLM adapter for inference */
@@ -330,10 +368,12 @@ export interface AgentRuntimeConfig {
   requestId: string;
   /** Optional agent registry for agent-as-tool */
   agentRegistry?: AgentRegistry;
-  /** LLM configuration for this agent */
-  llmConfig?: LLMRequestConfig;
+  /** LLM configuration for this agent - REQUIRED, pre-resolved at creation */
+  llmConfig: LLMRequestConfig;
   /** Optional lifecycle hooks */
   hooks?: AgentHooks;
   /** Optional internal hook queue */
   internalHookQueue?: InternalHookQueue;
+  /** Model selection callback for sub-agent spawning */
+  getModelSelection?: (agentType: string) => ModelSelectionInfo | null;
 }

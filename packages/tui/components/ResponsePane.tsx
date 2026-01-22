@@ -13,17 +13,17 @@ import { Box, Text } from "ink";
 import type { ResponseContent, ResponseLine } from "../types.js";
 import { getColors } from "../theme.js";
 
-// Diff colors - header uses theme, others hardcoded for visibility
+// Diff colors - uses theme for header and context, hardcoded for add/remove visibility
 const getDiffColors = () => {
   const theme = getColors();
   return {
-    header: { fg: theme.diffHeader, bg: theme.diffHeaderBg }, // From theme
+    header: { fg: theme.diffHeader, bg: theme.diffHeaderBg }, // From theme (matches userBg)
     added: { fg: "#ffffff", bg: "#166534" },      // White text, solid green bg
     removed: { fg: "#ffffff", bg: "#991b1b" },    // White text, solid red bg
-    context: { fg: "#a1a1aa", bg: "#27272a" },    // Grey text, dark grey bg
-    separator: { fg: "#52525b", bg: "#18181b" },  // Muted separator
-    text: { fg: "#e4e4e7", bg: undefined },       // Normal text
-    pane: "#18181b",                               // Pane background
+    context: { fg: theme.text, bg: theme.diffContextBg }, // Theme colors (matches userBg)
+    separator: { fg: theme.muted, bg: theme.diffContextBg }, // Theme separator
+    text: { fg: theme.text, bg: undefined },       // Theme text
+    pane: theme.diffContextBg,                     // Theme pane background
   };
 };
 

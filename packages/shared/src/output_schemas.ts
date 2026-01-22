@@ -8,59 +8,13 @@
 import { z } from 'zod';
 
 // ============================================
-// SHARED COMPONENTS
-// ============================================
-
-/**
- * Option in a user prompt - can be a string or object with label/description.
- */
-export const UserPromptOptionSchema = z.union([
-  z.string(),
-  z.object({
-    label: z.string(),
-    description: z.string().nullable(),
-  }),
-]);
-
-/**
- * Single question structure for asking questions.
- */
-export const SingleQuestionSchema = z.object({
-  question: z.string(),
-  options: z.array(UserPromptOptionSchema).nullable(),
-  context: z.string().nullable(),
-  multiSelect: z.boolean().nullable(),
-});
-
-/**
- * User prompt structure for asking questions.
- * Supports single question (backwards compatible) or multiple questions.
- */
-export const UserPromptSchema = z.object({
-  /** Single question (backwards compatible) */
-  question: z.string().nullable(),
-  options: z.array(UserPromptOptionSchema).nullable(),
-  context: z.string().nullable(),
-  multiSelect: z.boolean().nullable(),
-  /** Multiple questions to ask in sequence */
-  questions: z.array(SingleQuestionSchema).nullable(),
-});
-
-// ============================================
 // OUTPUT SCHEMAS
 // ============================================
 
 /**
- * Routing agent output - determines request complexity tier.
- */
-export const RoutingOutputSchema = z.object({
-  tier: z.enum(['simple', 'standard', 'complex']),
-});
-
-/**
  * Action enum - what the agent wants to do next.
  */
-export const AgentActionSchema = z.enum(['done', 'need_user_input', 'continue', 'handoff']);
+export const AgentActionSchema = z.enum(['done', 'continue', 'handoff']);
 
 /**
  * Base agent action output - common fields for all action-based agents.
@@ -69,7 +23,6 @@ export const AgentActionOutputSchema = z.object({
   action: AgentActionSchema,
   response: z.string().nullable(),
   goalStateReached: z.boolean().nullable(),
-  userPrompt: UserPromptSchema.nullable(),
   /** Handoff spec for transitioning from planning to execution (when action: 'handoff') */
   handoffSpec: z.string().nullable(),
 });
@@ -159,7 +112,6 @@ export const RuntimeScriptOutputSchema = AgentActionOutputSchema.extend({
  * Registry mapping schema names to Zod schemas.
  */
 export const OUTPUT_SCHEMAS = {
-  routing: RoutingOutputSchema,
   agent_action: AgentActionOutputSchema,
   goal_driven: GoalDrivenOutputSchema,
   explorer: ExplorerOutputSchema,
@@ -172,10 +124,6 @@ export type OutputSchemaName = keyof typeof OUTPUT_SCHEMAS;
 // INFERRED TYPES
 // ============================================
 
-export type UserPromptOption = z.infer<typeof UserPromptOptionSchema>;
-export type SingleQuestion = z.infer<typeof SingleQuestionSchema>;
-export type UserPrompt = z.infer<typeof UserPromptSchema>;
-export type RoutingOutput = z.infer<typeof RoutingOutputSchema>;
 export type AgentAction = z.infer<typeof AgentActionSchema>;
 export type AgentActionOutput = z.infer<typeof AgentActionOutputSchema>;
 export type GoalDrivenOutput = z.infer<typeof GoalDrivenOutputSchema>;

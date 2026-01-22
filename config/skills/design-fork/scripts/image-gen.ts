@@ -103,6 +103,17 @@ async function main(): Promise<void> {
   // Create output directory
   await mkdir(outputDir, { recursive: true });
 
+  // If count is 0, this is just a pre-flight check to verify the API key is configured
+  if (count === 0) {
+    const output: Output = {
+      success: true,
+      images: [],
+      outputDir,
+    };
+    console.log(JSON.stringify(output));
+    return;
+  }
+
   // Select aesthetics
   let aesthetics;
   if (values.aesthetic) {
@@ -121,6 +132,11 @@ async function main(): Promise<void> {
 
   // Generate images
   for (let i = 0; i < Math.min(count, aesthetics.length); i++) {
+    // Add delay between requests to respect rate limits (15 seconds per request for < $5 credit tier)
+    if (i > 0) {
+      await new Promise(resolve => setTimeout(resolve, 15000));
+    }
+
     const aesthetic = aesthetics[i];
     const palettes = getPalettesForAesthetic(aesthetic.id);
     const palette = palettes[0];
@@ -147,13 +163,28 @@ async function main(): Promise<void> {
       apiKey,
     });
 
-    if (!result.success || !result.url) {
+    if (!result.success) {
       console.error(`[${i + 1}/${count}] Failed: ${result.error}`);
       continue;
     }
 
+    if (!result.url) {
+      console.error(`[${i + 1}/${count}] Failed: No URL returned from image generation`);
+      console.error(`Prediction ID: ${result.predictionId}`);
+      continue;
+    }
+
+    console.error(`[${i + 1}/${count}] Image URL: ${result.url}`);
+
     // Download and save locally
-    const imageBuffer = await downloadImage(result.url);
+    let imageBuffer;
+    try {
+      imageBuffer = await downloadImage(result.url);
+    } catch (error) {
+      console.error(`[${i + 1}/${count}] Failed to download image: ${error}`);
+      console.error(`URL was: ${result.url}`);
+      continue;
+    }
     const filename = `design-${i + 1}-${aesthetic.id}.png`;
     const localPath = join(outputDir, filename);
     await writeFile(localPath, imageBuffer);

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, memo } from 'react'
 import type { AgentRequest, AgentRequestState, WorkItem } from '../domain/models'
 import { cn } from '../lib/utils'
 import { StatusBadge, StatusDot } from './StatusBadge'
@@ -72,7 +72,7 @@ interface RequestRowProps {
   defaultExpanded?: boolean
 }
 
-export function RequestRow({ request, defaultExpanded = false }: RequestRowProps) {
+export const RequestRow = memo(function RequestRow({ request, defaultExpanded = false }: RequestRowProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
   const tone = getRequestTone(request.state)
 
@@ -365,4 +365,4 @@ export function RequestRow({ request, defaultExpanded = false }: RequestRowProps
       )}
     </div>
   )
-}
+})

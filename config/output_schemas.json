@@ -1,47 +1,6 @@
 {
   "$comment": "Output schema definitions. Referenced by harness_config.json agents via 'output_schema' key.",
 
-  "components": {
-    "user_prompt": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "question": { "type": "string" },
-        "options": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "anyOf": [
-                  { "type": "string" },
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "label": { "type": "string" },
-                      "description": { "type": ["string", "null"] }
-                    },
-                    "required": ["label", "description"]
-                  }
-                ]
-              }
-            },
-            { "type": "null" }
-          ]
-        },
-        "context": { "type": ["string", "null"] },
-        "multiSelect": { "type": ["boolean", "null"] }
-      },
-      "required": ["question", "options", "context", "multiSelect"]
-    },
-    "user_prompt_nullable": {
-      "anyOf": [
-        { "$ref": "#/components/user_prompt" },
-        { "type": "null" }
-      ]
-    }
-  },
-
   "schemas": {
     "routing": {
       "name": "routing_output",
@@ -68,49 +27,14 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["done", "need_user_input", "continue"]
+            "enum": ["done", "continue", "handoff"]
           },
           "response": { "type": ["string", "null"] },
           "goalStateReached": { "type": ["boolean", "null"] },
-          "userPrompt": {
-            "anyOf": [
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "question": { "type": "string" },
-                  "options": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "anyOf": [
-                            { "type": "string" },
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "label": { "type": "string" },
-                                "description": { "type": ["string", "null"] }
-                              },
-                              "required": ["label", "description"]
-                            }
-                          ]
-                        }
-                      },
-                      { "type": "null" }
-                    ]
-                  },
-                  "context": { "type": ["string", "null"] },
-                  "multiSelect": { "type": ["boolean", "null"] }
-                },
-                "required": ["question", "options", "context", "multiSelect"]
-              },
-              { "type": "null" }
-            ]
-          }
+          "handoffSpec": { "type": ["string", "null"] },
+          "awaitingUserInput": { "type": ["boolean", "null"], "description": "Set to true when asking the user a question and waiting for their response" }
         },
-        "required": ["action", "response", "goalStateReached", "userPrompt"]
+        "required": ["action", "response", "goalStateReached", "handoffSpec", "awaitingUserInput"]
       }
     },
 
@@ -123,50 +47,15 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["done", "need_user_input", "continue"]
+            "enum": ["done", "continue", "handoff"]
           },
           "response": { "type": ["string", "null"] },
           "goalStateReached": { "type": ["boolean", "null"] },
-          "userPrompt": {
-            "anyOf": [
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "question": { "type": "string" },
-                  "options": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "anyOf": [
-                            { "type": "string" },
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "label": { "type": "string" },
-                                "description": { "type": ["string", "null"] }
-                              },
-                              "required": ["label", "description"]
-                            }
-                          ]
-                        }
-                      },
-                      { "type": "null" }
-                    ]
-                  },
-                  "context": { "type": ["string", "null"] },
-                  "multiSelect": { "type": ["boolean", "null"] }
-                },
-                "required": ["question", "options", "context", "multiSelect"]
-              },
-              { "type": "null" }
-            ]
-          },
-          "work_done": { "type": ["string", "null"], "description": "Concrete work completed this turn: files read, edits made, commands run. NOT plans or intentions." }
+          "handoffSpec": { "type": ["string", "null"] },
+          "work_done": { "type": ["string", "null"], "description": "Concrete work completed this turn: files read, edits made, commands run. NOT plans or intentions." },
+          "awaitingUserInput": { "type": ["boolean", "null"], "description": "Set to true when asking the user a question and waiting for their response" }
         },
-        "required": ["action", "response", "goalStateReached", "userPrompt", "work_done"]
+        "required": ["action", "response", "goalStateReached", "handoffSpec", "work_done", "awaitingUserInput"]
       }
     },
 
@@ -179,47 +68,11 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["done", "need_user_input", "continue"]
+            "enum": ["done", "continue", "handoff"]
           },
           "response": { "type": ["string", "null"] },
           "goalStateReached": { "type": ["boolean", "null"] },
-          "userPrompt": {
-            "anyOf": [
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "question": { "type": "string" },
-                  "options": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "anyOf": [
-                            { "type": "string" },
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "label": { "type": "string" },
-                                "description": { "type": ["string", "null"] }
-                              },
-                              "required": ["label", "description"]
-                            }
-                          ]
-                        }
-                      },
-                      { "type": "null" }
-                    ]
-                  },
-                  "context": { "type": ["string", "null"] },
-                  "multiSelect": { "type": ["boolean", "null"] }
-                },
-                "required": ["question", "options", "context", "multiSelect"]
-              },
-              { "type": "null" }
-            ]
-          },
+          "handoffSpec": { "type": ["string", "null"] },
           "packageManagers": { "type": "array", "items": { "type": "string" } },
           "frameworks": { "type": "array", "items": { "type": "string" } },
           "languages": { "type": "array", "items": { "type": "string" } },
@@ -239,20 +92,33 @@
                   "description": "What type of code construct this represents"
                 },
                 "name": { "type": "string", "description": "Name of the artifact (function name, class name, etc.)" },
-                "signature": { "type": ["string", "null"], "description": "Signature or definition (e.g., 'async function run(params: RunParams): Promise<Result>')" },
-                "description": { "type": "string", "description": "Human-readable description of what this does" },
-                "relevance": { "type": "number", "description": "Relevance score 0.0-1.0 (how relevant to the current query)" },
+                "signature": { "type": ["string", "null"], "description": "Full type signature (e.g., 'async run(params: RunParams): Promise<Result>')" },
+                "modifies": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "Side effects: state, files, globals this touches (e.g., [\"this._items\", \"fs:config.json\", \"db:users\"])"
+                },
+                "calls": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "Call graph: significant functions this invokes (e.g., [\"llm.complete\", \"tools.execute\"])"
+                },
+                "insight": {
+                  "type": ["string", "null"],
+                  "description": "Non-obvious info NOT derivable from name/signature (e.g., \"Retries 3x with exponential backoff\")"
+                },
                 "reduces": {
-                  "type": "string",
+                  "type": ["string", "null"],
                   "enum": ["structural", "relational", "behavioral", "contractual"],
                   "description": "Which uncertainty category this artifact reduces: structural (what exists), relational (what connects), behavioral (what happens), contractual (what's promised)"
                 }
               },
-              "required": ["sourcePath", "line", "kind", "name", "signature", "description", "relevance", "reduces"]
+              "required": ["sourcePath", "line", "kind", "name", "signature", "modifies", "calls", "insight", "reduces"]
             }
-          }
+          },
+          "awaitingUserInput": { "type": ["boolean", "null"], "description": "Set to true when asking the user a question and waiting for their response" }
         },
-        "required": ["action", "response", "goalStateReached", "userPrompt", "packageManagers", "frameworks", "languages", "os", "artifacts"]
+        "required": ["action", "response", "goalStateReached", "handoffSpec", "packageManagers", "frameworks", "languages", "os", "artifacts", "awaitingUserInput"]
       }
     },
 
@@ -265,47 +131,11 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["done", "need_user_input", "continue"]
+            "enum": ["done", "continue", "handoff"]
           },
           "response": { "type": ["string", "null"] },
           "goalStateReached": { "type": ["boolean", "null"] },
-          "userPrompt": {
-            "anyOf": [
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "question": { "type": "string" },
-                  "options": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "anyOf": [
-                            { "type": "string" },
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "label": { "type": "string" },
-                                "description": { "type": ["string", "null"] }
-                              },
-                              "required": ["label", "description"]
-                            }
-                          ]
-                        }
-                      },
-                      { "type": "null" }
-                    ]
-                  },
-                  "context": { "type": ["string", "null"] },
-                  "multiSelect": { "type": ["boolean", "null"] }
-                },
-                "required": ["question", "options", "context", "multiSelect"]
-              },
-              { "type": "null" }
-            ]
-          },
+          "handoffSpec": { "type": ["string", "null"] },
           "goal": { "type": "string" },
           "workItems": {
             "type": "array",
@@ -324,9 +154,10 @@
               },
               "required": ["id", "objective", "delta", "agent", "dependencies", "toolHint", "targetPaths", "params"]
             }
-          }
+          },
+          "awaitingUserInput": { "type": ["boolean", "null"], "description": "Set to true when asking the user a question and waiting for their response" }
         },
-        "required": ["action", "response", "goalStateReached", "userPrompt", "goal", "workItems"]
+        "required": ["action", "response", "goalStateReached", "handoffSpec", "goal", "workItems", "awaitingUserInput"]
       }
     }
   }

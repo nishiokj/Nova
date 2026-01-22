@@ -1,19 +1,6 @@
 {
   "$schema": "./config-schema.json",
-  "$comment": "Default configuration for the harness. User config at ~/.rex/config.json overrides these values.",
-
-  "providers": {
-    "$comment": "API keys for each provider. Leave empty to use environment variables.",
-    "anthropic": "",
-    "openai": "",
-    "cerebras": "",
-    "together": "",
-    "groq": "",
-    "fireworks": "",
-    "gemini": "",
-    "replicate": "",
-    "z.ai-coder": ""
-  },
+  "$comment": "Default configuration for the harness. User config at ~/.rex/config.json overrides these values. API keys are stored in GraphD - use 'rex providers set <provider> <key>' to configure.",
 
   "models": {
     "$comment": "Available models are defined in packages/types/src/providers.ts.",
@@ -72,19 +59,19 @@
       "$comment": "Default agent for most tasks. Full tool access.",
       "llm": {
         "role": "standard",
-        "max_tokens": 64000,
+        "max_tokens": 128000,
         "temperature": 0.7
       },
       "budget": {
-        "max_iterations": 30,
+        "max_iterations": 50,
         "max_tool_calls": 225,
-        "max_duration_ms": 270000
+        "max_duration_ms": 1000000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "coding-agent", "explorer"],
-      "output_schema": "goal_driven"
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "coding", "explorer", "WebSearch"],
+  "output_schema": "goal_driven"
     },
 
-    "coding-agent": {
+    "coding": {
       "$comment": "Deep coding tasks with high reasoning effort.",
       "llm": {
         "role": "reasoning",
@@ -93,11 +80,11 @@
         "reasoning": { "effort": "high" }
       },
       "budget": {
-        "max_iterations": 45,
-        "max_tool_calls": 150,
-        "max_duration_ms": 900000
+        "max_iterations": 50,
+        "max_tool_calls": 250,
+        "max_duration_ms": 1000000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "standard"],
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "explorer"],
       "output_schema": "goal_driven"
     },
 
@@ -128,7 +115,7 @@
         "max_tool_calls": 45,
         "max_duration_ms": 180000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill"],
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser"],
       "output_schema": "agent_action"
     },
 
@@ -150,7 +137,7 @@
   },
 
   "tools": {
-    "bash_timeout_ms": 30000,
+    "bash_timeout_ms": 120000,
     "max_output_length": 10000
   },
 

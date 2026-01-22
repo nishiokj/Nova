@@ -95,6 +95,15 @@ export function moduleEdgeToDict(e: ModuleEdge): Record<string, unknown> {
   };
 }
 
+export function dictToModuleEdge(row: Record<string, unknown>): ModuleEdge {
+  return {
+    srcPath: String(row.src_path || row.srcPath),
+    dstPath: String(row.dst_path || row.dstPath),
+    kind: String(row.kind),
+    confidence: Number(row.confidence ?? 0.95),
+  };
+}
+
 // ============================================
 // EXPORT DEFINITION
 // ============================================
@@ -160,6 +169,35 @@ export function derivedEdgeToDict(e: DerivedEdge): Record<string, unknown> {
     confidence: e.confidence,
     provenance: e.provenance,
     expires_at: e.expiresAt,
+  };
+}
+
+export function createDerivedEdge(
+  src: string,
+  dst: string,
+  kind: string,
+  provenance: string,
+  confidence: number = 0.7,
+  expiresAt: number = 0
+): DerivedEdge {
+  return {
+    src,
+    dst,
+    kind,
+    confidence,
+    provenance,
+    expiresAt,
+  };
+}
+
+export function dictToDerivedEdge(row: Record<string, unknown>): DerivedEdge {
+  return {
+    src: String(row.src),
+    dst: String(row.dst),
+    kind: String(row.kind),
+    confidence: Number(row.confidence ?? 0.7),
+    provenance: String(row.provenance || ''),
+    expiresAt: Number(row.expires_at ?? row.expiresAt ?? 0),
   };
 }
 

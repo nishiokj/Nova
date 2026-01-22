@@ -9,10 +9,11 @@ import {
   runChannel,
   sessionChannel,
 } from "comms-bus";
+import { profiler } from "shared";
 import type { BridgeCommand, BridgeCommandType, BridgeEvent, BridgeEventType, ReadyData, ResponseData } from "./types.js";
 
-// Valid bridge event types for runtime validation
-const VALID_EVENT_TYPES: BridgeEventType[] = [
+// Valid bridge event types for runtime validation (Set for O(1) lookups)
+const VALID_EVENT_TYPES = new Set<BridgeEventType>([
   'ready',
   'status',
   'progress',
@@ -23,7 +24,8 @@ const VALID_EVENT_TYPES: BridgeEventType[] = [
   'error',
   'provider_key_required',
   'model_changed',
-];
+  'permission_request',
+]);
 
 /**
  * Validates an incoming bridge event at the boundary.
@@ -34,7 +36,7 @@ function validateBridgeEvent(payload: unknown): BridgeEvent | null {
   const p = payload as Record<string, unknown>;
 
   // Must have a valid type
-  if (typeof p.type !== 'string' || !VALID_EVENT_TYPES.includes(p.type as BridgeEventType)) {
+  if (typeof p.type !== 'string' || !VALID_EVENT_TYPES.has(p.type as BridgeEventType)) {
     return null;
   }
 
@@ -54,6 +56,12 @@ export interface BridgeClientOptions {
 // Connection state machine - explicit states instead of boolean
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
+// Constants for connection management
+const DEFAULT_RECONNECT_DELAY = 1000; // Base delay in ms
+const MAX_RECONNECT_DELAY = 30000; // Maximum delay in ms
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
+const DEFAULT_REQUEST_TIMEOUT = 120000; // 120 seconds
+
 function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -64,9 +72,11 @@ export class BridgeClient extends EventEmitter {
   private activeRuns = new Set<string>();
   private connectionState: ConnectionState = 'disconnected';
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectDelay = 1000; // doubles each attempt, caps at 30s
+  private maxReconnectAttempts: number;
+  private reconnectDelay: number;
+  private requestTimeout: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (reason?: any) => void }>();
 
   // Getter for backwards compatibility
   get connected(): boolean {
@@ -76,6 +86,9 @@ export class BridgeClient extends EventEmitter {
   constructor(options: BridgeClientOptions) {
     super();
     this.bus = new BusClient(options);
+    this.maxReconnectAttempts = DEFAULT_MAX_RECONNECT_ATTEMPTS;
+    this.reconnectDelay = DEFAULT_RECONNECT_DELAY;
+    this.requestTimeout = DEFAULT_REQUEST_TIMEOUT;
 
     this.bus.on("event", (payload, _channel) => {
       this.handleBusEvent(payload);
@@ -104,7 +117,7 @@ export class BridgeClient extends EventEmitter {
       await this.bus.connect();
       this.connectionState = 'connected';
       this.reconnectAttempts = 0;
-      this.reconnectDelay = 1000;
+      this.reconnectDelay = DEFAULT_RECONNECT_DELAY;
       this.emit('connection_state', this.connectionState);
     } catch (err) {
       this.connectionState = 'disconnected';
@@ -114,6 +127,7 @@ export class BridgeClient extends EventEmitter {
   }
 
   send(command: BridgeCommand): boolean {
+    profiler.instant(`tui:send:${command.type}`, 'tui', 'p');
     if (this.connectionState !== 'connected') {
       this.emit("error", { message: "Not connected to bridge" });
       return false;
@@ -140,6 +154,15 @@ export class BridgeClient extends EventEmitter {
       }
     }
 
+    if (command.type === "permission_response") {
+      const data = command.data ?? {};
+      const requestId = typeof data.request_id === "string" ? data.request_id : "";
+      if (requestId && !this.activeRuns.has(requestId)) {
+        this.activeRuns.add(requestId);
+        this.bus.subscribe(runChannel(requestId));
+      }
+    }
+
     this.bus.publish(BRIDGE_COMMAND_CHANNEL, command);
     return true;
   }
@@ -150,6 +173,8 @@ export class BridgeClient extends EventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // Reject all pending requests
+    this.rejectPendingRequests(new Error('Connection closed'));
     this.connectionState = 'disconnected';
     this.sessionKey = null;
     this.activeRuns.clear();
@@ -163,6 +188,8 @@ export class BridgeClient extends EventEmitter {
 
     this.sessionKey = null;
     this.activeRuns.clear();
+    // Reject pending requests on disconnect
+    this.rejectPendingRequests(new Error('Connection lost'));
     this.connectionState = 'reconnecting';
     this.emit('connection_state', this.connectionState);
     this.emit('close');
@@ -177,7 +204,7 @@ export class BridgeClient extends EventEmitter {
       return;
     }
 
-    const delay = Math.min(this.reconnectDelay, 30000);
+    const delay = Math.min(this.reconnectDelay, MAX_RECONNECT_DELAY);
     this.reconnectAttempts++;
     this.reconnectDelay *= 2;
 
@@ -347,40 +374,71 @@ export class BridgeClient extends EventEmitter {
     return this.sendAuthCommand('list_sessions', options);
   }
 
+  /**
+   * Set dangerous mode for the current session.
+   * When enabled, this session bypasses all permission checks.
+   * Does NOT affect other sessions.
+   */
+  async setDangerousMode(enabled: boolean): Promise<{
+    success: boolean;
+    enabled?: boolean;
+    sessionKey?: string;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('set_dangerous_mode', { enabled });
+  }
+
   private sendAuthCommand<T extends Record<string, unknown>>(
     type: BridgeCommandType,
     data: Record<string, unknown>
   ): Promise<T> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      // Validate connection before sending
+      if (this.connectionState !== 'connected') {
+        reject(new Error('Not connected to bridge'));
+        return;
+      }
+
+      const requestId = generateRequestId();
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
       const handler = (event: BridgeEvent) => {
         if (event.type === 'response') {
           const responseData = event.data as ResponseData;
           const metadata = responseData?.metadata as { kind?: string; payload?: unknown } | undefined;
           if (metadata?.kind === type) {
+            if (timeoutId) clearTimeout(timeoutId);
             this.off('event', handler);
+            this.pendingRequests.delete(requestId);
             resolve((metadata.payload ?? { success: false }) as T);
           }
         }
       };
 
+      this.pendingRequests.set(requestId, { resolve, reject });
       this.on('event', handler);
 
-      // Timeout after 30 seconds
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         this.off('event', handler);
-        resolve({ success: false, error: 'Request timeout' } as unknown as T);
-      }, 30000);
+        this.pendingRequests.delete(requestId);
+        reject(new Error('Request timeout'));
+      }, this.requestTimeout);
 
       this.send({ type, data });
     });
   }
 
   private handleBusEvent(payload: unknown): void {
+    profiler.begin('bridge.client.validate', 'tui');
     const event = validateBridgeEvent(payload);
     if (!event) {
+      profiler.end('bridge.client.validate', 'tui');
       this.emit('error', { message: 'Malformed event from bridge' });
       return;
     }
+    profiler.end('bridge.client.validate', 'tui');
+
+    profiler.begin(`bridge.client.process:${event.type}`, 'tui');
     if (event.type === "ready") {
       const data = (event.data ?? {}) as ReadyData;
       if (data.session_key && data.session_key !== this.sessionKey) {
@@ -400,7 +458,20 @@ export class BridgeClient extends EventEmitter {
         this.bus.unsubscribe(runChannel(requestId));
       }
     }
+    profiler.end(`bridge.client.process:${event.type}`, 'tui');
 
+    profiler.instant(`bridge.client.emit:${event.type}`, 'tui', 'p');
     this.emit("event", event);
+  }
+
+  /**
+   * Reject all pending requests with the given error.
+   * Called on disconnect or close to prevent hanging promises.
+   */
+  private rejectPendingRequests(error: Error): void {
+    this.pendingRequests.forEach(({ reject }) => {
+      reject(error);
+    });
+    this.pendingRequests.clear();
   }
 }

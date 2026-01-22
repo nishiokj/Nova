@@ -20,6 +20,8 @@ export interface ToolExecutionContext {
   workdirOverride?: string;
   /** Tool policy restrictions */
   allowedTools?: Set<string>;
+  /** Dangerous mode - bypasses safety checks */
+  dangerousMode?: boolean;
 }
 
 /**
@@ -159,13 +161,15 @@ export interface ToolRegistryConfig {
   maxOutputLength: number;
   /** Cache configuration */
   cache?: Partial<CacheConfig>;
+  /** Dangerous mode - bypasses all safety checks */
+  dangerousMode?: boolean;
 }
 
 /**
  * Default tool registry configuration.
  */
 export const DEFAULT_TOOL_CONFIG: ToolRegistryConfig = {
-  enabledTools: ['Read', 'Write', 'Edit', 'BatchEdit', 'Bash', 'Glob', 'Grep'],
+  enabledTools: ['Read', 'Write', 'Edit', 'BatchEdit', 'Bash', 'Glob', 'Grep', 'Skill', 'PromptUser'],
   bashTimeoutMs: 30000,
   maxOutputLength: 100000,
 };

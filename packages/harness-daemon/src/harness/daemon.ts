@@ -6,7 +6,7 @@ import { pathToFileURL } from 'url';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
 import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
-import { createAuthServiceFromEnv, type AuthService } from './auth_service.js';
+import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
 
 export interface HarnessDaemonOptions {
   host?: string;
@@ -15,6 +15,8 @@ export interface HarnessDaemonOptions {
   configPath?: string;
   /** Idle timeout in ms before daemon shuts down when no clients connected. Set to 0 to disable. */
   idleTimeoutMs?: number;
+  /** Dangerous mode - bypasses all permission checks. Use with extreme caution. */
+  dangerousMode?: boolean;
 }
 
 // Default idle timeout: 5 seconds
@@ -26,20 +28,23 @@ export class HarnessDaemon {
   private readonly workingDir: string;
   private readonly configPath?: string;
   private readonly idleTimeoutMs: number;
+  private readonly dangerousMode: boolean;
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
   private gateway: BridgeGateway | null = null;
   private authService: AuthService | null = null;
+  private authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownRequested = false;
 
   constructor(options: HarnessDaemonOptions = {}) {
-    this.host = options.host ?? process.env.EVENT_BUS_HOST ?? '127.0.0.1';
-    const rawPort = options.port ?? Number(process.env.EVENT_BUS_PORT ?? '9555');
+    this.host = options.host ?? '127.0.0.1';
+    const rawPort = options.port ?? 9555;
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
-    this.workingDir = options.workingDir ?? process.env.HARNESS_WORKING_DIR ?? process.cwd();
-    this.configPath = options.configPath ?? process.env.HARNESS_CONFIG_PATH;
+    this.workingDir = options.workingDir ?? process.cwd();
+    this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    this.dangerousMode = options.dangerousMode ?? false;
   }
 
   private cancelIdleTimer(): void {
@@ -83,14 +88,17 @@ export class HarnessDaemon {
   async start(): Promise<{ host: string; port: number }> {
     if (!this.harness) {
       // Create harness - API keys are resolved at request time via ProviderKeyService
-      // No preloading needed - the harness queries GraphD/config/env at runtime
-      this.harness = createHarnessFromEnv(this.workingDir, this.configPath);
+      // No preloading needed - harness queries GraphD at runtime
+      this.harness = createHarnessFromEnv(this.workingDir, this.configPath, this.dangerousMode);
       await this.harness.start();
+
+      // Capture auth config from loaded harness config
+      this.authConfig = this.harness.getAuthConfig?.() ?? null;
     }
 
-    // Initialize auth service (optional - depends on env vars)
-    if (!this.authService) {
-      this.authService = createAuthServiceFromEnv();
+    // Initialize auth service from config (optional - depends on config.auth section)
+    if (!this.authService && this.authConfig) {
+      this.authService = createAuthServiceFromConfig(this.authConfig);
       if (this.authService) {
         console.log('[harness-daemon] Auth service initialized');
       }
@@ -105,7 +113,7 @@ export class HarnessDaemon {
         onConnect: (connectionId) => this.handleConnect(connectionId),
         onDisconnect: (connectionId) => this.handleDisconnect(connectionId),
       });
-      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
+      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService, this);
     }
 
     return this.bus.start();
@@ -137,10 +145,53 @@ export class HarnessDaemon {
     }
     return this.bus.getAddress();
   }
+
+  /**
+   * Set dangerous mode dynamically without restarting the daemon.
+   * This allows a new TUI connection to request dangerous mode without
+   * disconnecting existing TUIs.
+   */
+  setDangerousMode(enabled: boolean): void {
+    const permissionChecker = this.harness?.getPermissionChecker?.();
+    if (permissionChecker) {
+      permissionChecker.setDangerousMode(enabled);
+      const status = enabled ? 'enabled' : 'disabled';
+      console.log(`[harness-daemon] Dangerous mode ${status} (dynamic)`);
+    }
+  }
+}
+
+/**
+ * Parse CLI arguments for daemon options.
+ */
+function parseDaemonArgs(): HarnessDaemonOptions {
+  const args = process.argv.slice(2);
+  const options: HarnessDaemonOptions = {};
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--dangerous') {
+      options.dangerousMode = true;
+      console.log('[harness-daemon] WARNING: Running in dangerous mode - all permission checks disabled');
+    } else if (arg === '--port' && i + 1 < args.length) {
+      options.port = parseInt(args[++i], 10);
+    } else if (arg === '--host' && i + 1 < args.length) {
+      options.host = args[++i];
+    } else if (arg === '--config' && i + 1 < args.length) {
+      options.configPath = args[++i];
+    } else if (arg === '--working-dir' && i + 1 < args.length) {
+      options.workingDir = args[++i];
+    } else if (arg === '--idle-timeout' && i + 1 < args.length) {
+      options.idleTimeoutMs = parseInt(args[++i], 10);
+    }
+  }
+
+  return options;
 }
 
 export async function runHarnessDaemon(): Promise<void> {
-  const daemon = new HarnessDaemon();
+  const options = parseDaemonArgs();
+  const daemon = new HarnessDaemon(options);
   const address = await daemon.start();
   console.log(`[harness-daemon] bus listening on ${address.host}:${address.port}`);
 

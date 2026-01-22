@@ -24,12 +24,27 @@ export { executeGrep, grepToolOptions } from './grep.js';
 // Glob
 export { executeGlob, globToolOptions } from './glob.js';
 
+// PromptUser
+export { executePromptUser, promptUserToolOptions } from './prompt_user.js';
+export type { PromptUserArgs, PromptUserOption, PromptUserQuestion } from './prompt_user.js';
+
+// WebSearch
+export { executeWebSearch, webSearchToolOptions } from './web_search.js';
+export type { WebSearchArgs } from './web_search.js';
+
+// WebFetch
+export { executeWebFetch, webFetchToolOptions } from './web_fetch.js';
+export type { WebFetchArgs } from './web_fetch.js';
+
 // Re-export all tool options for easy registration
 import { bashToolOptions } from './bash.js';
 import { readToolOptions } from './read.js';
 import { writeToolOptions, editToolOptions, batchEditToolOptions } from './write.js';
 import { grepToolOptions } from './grep.js';
 import { globToolOptions } from './glob.js';
+import { promptUserToolOptions } from './prompt_user.js';
+import { webSearchToolOptions } from './web_search.js';
+import { webFetchToolOptions } from './web_fetch.js';
 
 /**
  * All built-in tool options.
@@ -42,4 +57,7 @@ export const builtinToolOptions = [
   batchEditToolOptions,
   grepToolOptions,
   globToolOptions,
+  promptUserToolOptions,
+  webSearchToolOptions,
+  webFetchToolOptions,
 ];

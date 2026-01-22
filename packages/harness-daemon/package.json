@@ -14,15 +14,16 @@
   },
   "dependencies": {
     "agent": "workspace:*",
-    "orchestrator": "workspace:*",
+    "comms-bus": "workspace:*",
     "context": "workspace:*",
-    "types": "workspace:*",
-    "tools": "workspace:*",
-    "llm": "workspace:*",
-    "work": "workspace:*",
-    "shared": "workspace:*",
     "graphd": "workspace:*",
-    "comms-bus": "workspace:*"
+    "llm": "workspace:*",
+    "minimatch": "^10.1.1",
+    "orchestrator": "workspace:*",
+    "shared": "workspace:*",
+    "tools": "workspace:*",
+    "types": "workspace:*",
+    "work": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",
