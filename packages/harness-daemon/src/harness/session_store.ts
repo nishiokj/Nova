@@ -2,6 +2,17 @@ import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
 import type { ContextWindowSnapshot } from 'types';
 import type { ModelSelection } from 'agent';
+import { PermissionChecker } from './permissions.js';
+
+interface SessionStoreOptions {
+  sessionKey: string;
+  maxTokens: number;
+  graphd: GraphDManager | null;
+  isGraphDReady: () => boolean;
+  logger: HarnessLogger;
+  dangerousMode?: boolean;  // Allow sessions to opt into dangerous mode independently
+  workingDir?: string;       // Working directory for permission checks
+}
 
 export interface HarnessLogger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -51,6 +62,8 @@ export class SessionStore {
   private readonly graphd: GraphDManager | null;
   private readonly isGraphDReady: () => boolean;
   private readonly logger: HarnessLogger;
+  private readonly workingDir: string;
+  private readonly permissionChecker: PermissionChecker;
   private context: ContextWindow | null = null;
   private pausedState: PausedState | null = null;
   private modelSelections = new Map<string, ModelSelection>();
@@ -65,6 +78,13 @@ export class SessionStore {
     this.graphd = options.graphd;
     this.isGraphDReady = options.isGraphDReady;
     this.logger = options.logger;
+    this.workingDir = options.workingDir ?? process.cwd();
+
+    // Per-session permission checker - each session has its own dangerous mode and grants
+    this.permissionChecker = new PermissionChecker(
+      this.workingDir,
+      options.dangerousMode ?? false
+    );
   }
 
   getContext(): ContextWindow {
@@ -193,6 +213,28 @@ export class SessionStore {
    */
   clearModelSelections(): void {
     this.modelSelections.clear();
+  }
+
+  // --- Permission management (per-session) ---
+
+  /**
+   * Get the permission checker for this session.
+   * Each session has its own permission state including dangerous mode.
+   */
+  getPermissionChecker(): PermissionChecker {
+    return this.permissionChecker;
+  }
+
+  /**
+   * Set dangerous mode for this session.
+   * Does not affect other sessions.
+   */
+  setDangerousMode(enabled: boolean): void {
+    this.permissionChecker.setDangerousMode(enabled);
+    this.logger.info('Dangerous mode changed', {
+      sessionKey: this.sessionKey,
+      enabled,
+    });
   }
 
   // --- Execution tracking ---

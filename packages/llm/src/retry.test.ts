@@ -22,6 +22,8 @@ import {
   resilientCall,
   CircuitOpenError,
   RetriesExhaustedError,
+  TimeoutError,
+  withTimeout,
   type CircuitState,
   type CircuitBreakerState,
   type ResilienceConfig,
@@ -508,5 +510,139 @@ describe('createCircuitState', () => {
     expect(state.successes).toBe(0);
     expect(state.lastFailure).toBe(0);
     expect(state.lastSuccess).toBe(0);
+  });
+});
+
+describe('TimeoutError', () => {
+  it('should include timeout duration in error', () => {
+    const error = new TimeoutError('Test operation timed out', 5000);
+    expect(error.message).toContain('Test operation timed out');
+    expect(error.timeoutMs).toBe(5000);
+    expect(error.name).toBe('TimeoutError');
+  });
+});
+
+describe('withTimeout', () => {
+  it('should resolve when promise completes before timeout', async () => {
+    const result = await withTimeout(
+      Promise.resolve('success'),
+      1000,
+      'Test operation'
+    );
+    expect(result).toBe('success');
+  });
+
+  it('should reject with TimeoutError when promise exceeds timeout', async () => {
+    const neverResolves = new Promise<string>(() => {
+      // Intentionally never resolves
+    });
+
+    await expect(
+      withTimeout(neverResolves, 50, 'Slow operation')
+    ).rejects.toThrow(TimeoutError);
+  });
+
+  it('should include operation name in TimeoutError message', async () => {
+    const neverResolves = new Promise<string>(() => {});
+
+    try {
+      await withTimeout(neverResolves, 50, 'My custom operation');
+      expect(true).toBe(false); // Should not reach
+    } catch (error) {
+      expect(error).toBeInstanceOf(TimeoutError);
+      expect((error as TimeoutError).message).toContain('My custom operation');
+      expect((error as TimeoutError).message).toContain('50ms');
+    }
+  });
+
+  it('should pass through rejections from the original promise', async () => {
+    const error = new Error('Original error');
+    const rejectingPromise = Promise.reject(error);
+
+    await expect(
+      withTimeout(rejectingPromise, 1000, 'Test')
+    ).rejects.toThrow('Original error');
+  });
+
+  it('should clear timeout when promise resolves', async () => {
+    // This tests that we don't have memory leaks from dangling timeouts
+    const result = await withTimeout(
+      (async () => {
+        await sleep(10);
+        return 'fast';
+      })(),
+      1000,
+      'Test'
+    );
+    expect(result).toBe('fast');
+  });
+});
+
+describe('resilientCall with timeout', () => {
+  it('should timeout when operation hangs', async () => {
+    const hangingOperation = () => new Promise<string>(() => {
+      // Never resolves
+    });
+
+    // With maxRetries: 0, we get RetriesExhaustedError with TimeoutError as cause
+    try {
+      await resilientCall(hangingOperation, {
+        timeoutMs: 50,
+        operationName: 'Hanging test',
+        config: { maxRetries: 0 },
+      });
+      expect(true).toBe(false); // Should not reach
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetriesExhaustedError);
+      const retriesError = error as RetriesExhaustedError;
+      expect(retriesError.cause).toBeInstanceOf(TimeoutError);
+      expect(retriesError.message).toContain('timed out');
+    }
+  });
+
+  it('should retry on timeout', async () => {
+    let attempts = 0;
+
+    const sometimesHangs = async () => {
+      attempts++;
+      if (attempts < 2) {
+        // First attempt hangs
+        await new Promise(() => {});
+      }
+      return 'success';
+    };
+
+    const result = await resilientCall(sometimesHangs, {
+      timeoutMs: 50,
+      operationName: 'Flaky test',
+      config: { maxRetries: 2, initialBackoffMs: 10, jitter: 0 },
+    });
+
+    expect(result).toBe('success');
+    expect(attempts).toBe(2);
+  });
+
+  it('should throw RetriesExhaustedError with TimeoutError cause after max retries', async () => {
+    const alwaysHangs = () => new Promise<string>(() => {});
+
+    try {
+      await resilientCall(alwaysHangs, {
+        timeoutMs: 30,
+        operationName: 'Always hangs',
+        config: { maxRetries: 1, initialBackoffMs: 10, jitter: 0 },
+      });
+      expect(true).toBe(false); // Should not reach
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetriesExhaustedError);
+      const retriesError = error as RetriesExhaustedError;
+      expect(retriesError.cause).toBeInstanceOf(TimeoutError);
+    }
+  });
+
+  it('should work without timeout when not specified', async () => {
+    const result = await resilientCall(async () => 'no timeout', {
+      config: { maxRetries: 0 },
+    });
+    expect(result).toBe('no timeout');
   });
 });

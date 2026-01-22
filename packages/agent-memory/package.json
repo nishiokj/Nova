@@ -1,0 +1,30 @@
+{
+  "name": "agent-memory",
+  "version": "0.1.0",
+  "description": "Agent memory system with connector SDK, sync engine, and entity resolution",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5",
+    "ulid": "^2.3.0",
+    "zod": "^3.23.8",
+    "types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

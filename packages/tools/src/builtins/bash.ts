@@ -37,8 +37,8 @@ export async function executeBash(
     ...context?.envOverrides,
   };
 
-  // Security check
-  if (isDangerousCommand(command)) {
+  // Security check (bypassed in dangerous mode)
+  if (!context?.dangerousMode && isDangerousCommand(command)) {
     return errorResult(
       'Bash',
       `Command blocked for safety: contains dangerous pattern`,

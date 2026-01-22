@@ -61,7 +61,8 @@ interface HarnessLike {
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
-  getPermissionChecker?(): PermissionChecker;
+  getPermissionChecker?(): PermissionChecker;  // DEPRECATED: Use getSessionPermissionChecker instead
+  getSessionPermissionChecker?(sessionKey: string): PermissionChecker | null;  // Per-session permission checker
 }
 
 interface RalphLoopInfo {
@@ -71,6 +72,8 @@ interface RalphLoopInfo {
 
 interface ConnectionState {
   sessionKey: string | null;
+  /** Tracks sessionKey even after session_close nulls it, for disconnect cleanup */
+  lastSessionKey: string | null;
   workingDir: string | null;
   activeRequestId: string | null;
   planMode: boolean;
@@ -83,15 +86,17 @@ export class BridgeGateway {
   private readonly workingDir: string;
   private readonly authService: AuthService | null;
   private readonly localProviders: LocalProviderManager | null;
+  private readonly daemon: any | null;  // HarnessDaemon for dynamic mode changes
   private skillsDir: string;
   private hooksDir: string;
   private connections = new Map<string, ConnectionState>();
 
-  constructor(bus: BusServer, harness: HarnessLike, workingDir: string, authService?: AuthService | null) {
+  constructor(bus: BusServer, harness: HarnessLike, workingDir: string, authService?: AuthService | null, daemon?: any | null) {
     this.bus = bus;
     this.harness = harness;
     this.workingDir = workingDir;
     this.authService = authService ?? null;
+    this.daemon = daemon ?? null;
 
     const config = harness.getConfig();
     this.skillsDir = config.skills.directory
@@ -111,13 +116,15 @@ export class BridgeGateway {
 
   handleDisconnect(connectionId: string): void {
     const state = this.connections.get(connectionId);
-    if (state?.sessionKey) {
+    // Use lastSessionKey as fallback - session_close may have nulled sessionKey but we still need cleanup
+    const sessionKeyToClose = state?.sessionKey ?? state?.lastSessionKey;
+    if (sessionKeyToClose) {
       // Mark session as inactive (recoverable) on disconnect
       const graphd = this.harness.getGraphD?.();
       if (graphd) {
-        graphd.sessionUpdateStatus(state.sessionKey, 'inactive');
+        graphd.sessionUpdateStatus(sessionKeyToClose, 'inactive');
       }
-      this.harness.closeSession?.(state.sessionKey);
+      this.harness.closeSession?.(sessionKeyToClose);
     }
     this.connections.delete(connectionId);
   }
@@ -268,6 +275,9 @@ export class BridgeGateway {
         case 'permission_response':
           this.handlePermissionResponse(connectionId, command.data);
           return;
+        case 'set_dangerous_mode':
+          this.handleSetDangerousMode(connectionId, command.data);
+          return;
         case 'shutdown':
           this.sendError(connectionId, 'Shutdown is not supported via bridge');
           return;
@@ -304,6 +314,7 @@ export class BridgeGateway {
     }
 
     state.sessionKey = sessionKey;
+    state.lastSessionKey = sessionKey;  // Track for disconnect cleanup
 
     // Store working directory from client (where TUI was launched)
     const requestedWorkingDir = data?.working_dir;
@@ -1509,10 +1520,12 @@ export class BridgeGateway {
         // Clear Ralph loop state
         state.ralphLoop = null;
 
-        // Emit completion response
-        this.sendEvent(connectionId, {
+        // Emit completion event to the run channel (same as onIteration) so TUI receives it
+        const channel = runChannel(requestId);
+        this.bus.publish(channel, {
           type: 'response',
           data: {
+            request_id: requestId,
             success: reason === 'promise_detected',
             content: '',
             metadata: {
@@ -1520,11 +1533,11 @@ export class BridgeGateway {
               payload: {
                 reason,
                 iterations: loopState.iteration,
-                lastResponse: loopState.lastResponse.slice(0, 500), // Truncate for summary
+                lastResponse: loopState.lastResponse.slice(0, 500),
               },
             },
           },
-        }, sessionChannel(sessionKey));
+        });
       },
     });
 
@@ -1581,6 +1594,14 @@ export class BridgeGateway {
     connectionId: string,
     data: Record<string, unknown> | undefined
   ): void {
+    const state = this.getOrCreateConnectionState(connectionId);
+    const sessionKey = state.sessionKey;
+
+    if (!sessionKey) {
+      this.sendError(connectionId, 'Session not initialized');
+      return;
+    }
+
     const requestId = typeof data?.request_id === 'string' ? data.request_id : '';
     const decision = typeof data?.decision === 'string' ? data.decision : '';
     const pattern = typeof data?.pattern === 'string' ? data.pattern : undefined;
@@ -1595,17 +1616,49 @@ export class BridgeGateway {
       return;
     }
 
-    const checker = this.harness.getPermissionChecker?.();
-    if (!checker) {
-      this.sendError(connectionId, 'Permission checker not available');
+    // Get the session's permission checker - not the global harness one
+    const sessionChecker = this.harness.getSessionPermissionChecker?.(sessionKey);
+    if (!sessionChecker) {
+      this.sendError(connectionId, 'Permission checker not available for session');
       return;
     }
 
     // Handle the response - this resolves the pending promise in harness
-    checker.handleResponse({
+    sessionChecker.handleResponse({
       requestId,
       decision: decision as 'allow' | 'always_allow' | 'deny',
       pattern,
+    });
+  }
+
+  private handleSetDangerousMode(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const state = this.getOrCreateConnectionState(connectionId);
+    const sessionKey = state.sessionKey;
+
+    if (!sessionKey) {
+      this.sendError(connectionId, 'Session not initialized');
+      return;
+    }
+
+    const enabled = data?.enabled === true;
+
+    // Get the session's permission checker - each session has its own dangerous mode
+    const sessionChecker = this.harness.getSessionPermissionChecker?.(sessionKey);
+    if (!sessionChecker) {
+      this.sendError(connectionId, 'Permission checker not available for session');
+      return;
+    }
+
+    // Set dangerous mode for this session only
+    sessionChecker.setDangerousMode(enabled);
+
+    this.sendAuthResponse(connectionId, 'set_dangerous_mode', {
+      success: true,
+      enabled,
+      sessionKey,
     });
   }
 
@@ -1640,7 +1693,7 @@ export class BridgeGateway {
   private getOrCreateConnectionState(connectionId: string): ConnectionState {
     const existing = this.connections.get(connectionId);
     if (existing) return existing;
-    const state: ConnectionState = { sessionKey: null, workingDir: null, activeRequestId: null, planMode: false, ralphLoop: null };
+    const state: ConnectionState = { sessionKey: null, lastSessionKey: null, workingDir: null, activeRequestId: null, planMode: false, ralphLoop: null };
     this.connections.set(connectionId, state);
     return state;
   }

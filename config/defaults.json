@@ -67,11 +67,11 @@
         "max_tool_calls": 225,
         "max_duration_ms": 1000000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "coding-agent", "explorer"],
-      "output_schema": "goal_driven"
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "coding", "explorer", "WebSearch"],
+  "output_schema": "goal_driven"
     },
 
-    "coding-agent": {
+    "coding": {
       "$comment": "Deep coding tasks with high reasoning effort.",
       "llm": {
         "role": "reasoning",
@@ -137,7 +137,7 @@
   },
 
   "tools": {
-    "bash_timeout_ms": 30000,
+    "bash_timeout_ms": 120000,
     "max_output_length": 10000
   },
 

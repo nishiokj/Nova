@@ -113,7 +113,7 @@ export class HarnessDaemon {
         onConnect: (connectionId) => this.handleConnect(connectionId),
         onDisconnect: (connectionId) => this.handleDisconnect(connectionId),
       });
-      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
+      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService, this);
     }
 
     return this.bus.start();
@@ -144,6 +144,20 @@ export class HarnessDaemon {
       return { host: this.host, port: this.port };
     }
     return this.bus.getAddress();
+  }
+
+  /**
+   * Set dangerous mode dynamically without restarting the daemon.
+   * This allows a new TUI connection to request dangerous mode without
+   * disconnecting existing TUIs.
+   */
+  setDangerousMode(enabled: boolean): void {
+    const permissionChecker = this.harness?.getPermissionChecker?.();
+    if (permissionChecker) {
+      permissionChecker.setDangerousMode(enabled);
+      const status = enabled ? 'enabled' : 'disabled';
+      console.log(`[harness-daemon] Dangerous mode ${status} (dynamic)`);
+    }
   }
 }
 

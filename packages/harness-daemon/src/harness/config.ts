@@ -306,7 +306,7 @@ export interface FullHarnessConfig {
 // ============================================
 
 export const DEFAULT_TOOLS_CONFIG: ToolsConfigSection = {
-  bash_timeout_ms: 30000,
+  bash_timeout_ms: 120000,
   max_output_length: 10000,
 };
 

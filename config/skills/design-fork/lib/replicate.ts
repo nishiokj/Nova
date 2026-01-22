@@ -10,7 +10,7 @@ const MAX_POLL_ATTEMPTS = 120; // 60 seconds max
 interface ReplicatePrediction {
   id: string;
   status: 'starting' | 'processing' | 'succeeded' | 'failed' | 'canceled';
-  output?: string[];
+  output?: string | string[];
   error?: string;
 }
 
@@ -35,23 +35,25 @@ export interface ImageGenResult {
 async function createPrediction(options: ImageGenOptions): Promise<ReplicatePrediction> {
   const { prompt, width = 1024, height = 768, seed, apiKey } = options;
 
+  const requestBody = {
+    version: 'prunaai/z-image-turbo',
+    input: {
+      prompt,
+      width,
+      height,
+      num_outputs: 1,
+      output_format: 'png',
+      ...(seed !== undefined && { seed }),
+    },
+  };
+
   const response = await fetch(`${REPLICATE_API_BASE}/predictions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      version: FLUX_MODEL,
-      input: {
-        prompt,
-        width,
-        height,
-        num_outputs: 1,
-        output_format: 'png',
-        ...(seed !== undefined && { seed }),
-      },
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -59,7 +61,9 @@ async function createPrediction(options: ImageGenOptions): Promise<ReplicatePred
     throw new Error(`Replicate API error: ${response.status} - ${error}`);
   }
 
-  return response.json();
+  const result = await response.json();
+  console.error(`[replicate] Created prediction: ${result.id}`);
+  return result;
 }
 
 /**
@@ -79,11 +83,18 @@ async function pollPrediction(predictionId: string, apiKey: string): Promise<Rep
 
     const prediction: ReplicatePrediction = await response.json();
 
+    if (i % 10 === 0) {
+      console.error(`[replicate] Polling ${predictionId}: status=${prediction.status}, attempt=${i+1}/${MAX_POLL_ATTEMPTS}`);
+    }
+
     if (prediction.status === 'succeeded') {
+      console.error(`[replicate] Prediction ${predictionId} succeeded`);
+      console.error(`[replicate] Output: ${JSON.stringify(prediction.output)}`);
       return prediction;
     }
 
     if (prediction.status === 'failed' || prediction.status === 'canceled') {
+      console.error(`[replicate] Prediction ${predictionId} ${prediction.status}: ${prediction.error}`);
       throw new Error(prediction.error ?? 'Prediction failed');
     }
 
@@ -101,13 +112,24 @@ export async function generateImage(options: ImageGenOptions): Promise<ImageGenR
     const prediction = await createPrediction(options);
     const result = await pollPrediction(prediction.id, options.apiKey);
 
-    if (!result.output || result.output.length === 0) {
+    if (!result.output) {
       return { success: false, error: 'No output from image generation' };
+    }
+
+    // Handle both string and array output formats
+    let url: string;
+    if (Array.isArray(result.output)) {
+      if (result.output.length === 0) {
+        return { success: false, error: 'No output from image generation' };
+      }
+      url = result.output[0];
+    } else {
+      url = result.output;
     }
 
     return {
       success: true,
-      url: result.output[0],
+      url,
       predictionId: prediction.id,
     };
   } catch (error) {
@@ -122,6 +144,10 @@ export async function generateImage(options: ImageGenOptions): Promise<ImageGenR
  * Download an image from URL to a local buffer.
  */
 export async function downloadImage(url: string): Promise<Buffer> {
+  if (!url || typeof url !== 'string') {
+    throw new Error('Invalid image URL: URL is missing or not a string');
+  }
+
   const response = await fetch(url);
 
   if (!response.ok) {

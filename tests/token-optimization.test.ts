@@ -170,11 +170,11 @@ describe('Artifact Batching (Fix #2)', () => {
       context.addArtifact(createArtifact('/src/b.ts', 'functionB'));
       context.addArtifact(createArtifact('/src/c.ts', 'functionC'));
 
-      const items = context.getItemsForAnthropic();
+      const { messages } = context.getItemsForAnthropic();
 
-      expect(items.length).toBe(1);
-      expect(items[0].role).toBe('user');
-      expect((items[0].content as string)).toContain('[DISCOVERED ARTIFACTS: 3]');
+      expect(messages.length).toBe(1);
+      expect(messages[0].role).toBe('user');
+      expect((messages[0].content as string)).toContain('[DISCOVERED ARTIFACTS: 3]');
     });
 
     it('places artifacts after all other items', () => {
@@ -183,11 +183,29 @@ describe('Artifact Batching (Fix #2)', () => {
       context.addFunctionCallOutput('call-1', 'file content');
       context.addArtifact(createArtifact('/src/a.ts', 'fn'));
 
-      const items = context.getItemsForAnthropic();
+      const { messages } = context.getItemsForAnthropic();
 
       // Last item should be artifacts
-      const lastItem = items[items.length - 1];
+      const lastItem = messages[messages.length - 1];
       expect((lastItem.content as string)).toContain('[DISCOVERED ARTIFACTS: 1]');
+    });
+
+    it('separates system messages from conversation messages', () => {
+      context.addMessage('system', 'You are a helpful assistant');
+      context.addMessage('developer', 'Follow these rules');
+      context.addMessage('user', 'Hello');
+      context.addMessage('assistant', 'Hi there');
+
+      const { system, messages } = context.getItemsForAnthropic();
+
+      // System/developer messages should be in system string
+      expect(system).toContain('You are a helpful assistant');
+      expect(system).toContain('Follow these rules');
+
+      // Only user/assistant messages should be in messages array
+      expect(messages.length).toBe(2);
+      expect(messages[0].role).toBe('user');
+      expect(messages[1].role).toBe('assistant');
     });
   });
 

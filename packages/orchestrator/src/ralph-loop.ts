@@ -304,11 +304,21 @@ const CONTINUABLE_TERMINATIONS = new Set([
   'user_input_required', // Handled specially with async mode message
   'no_action', // LLM didn't output proper action field - common formatting issue
   'invalid_action', // Invalid action value - try again
+  'stagnation:tool_repeat', // Agent is repeating tool calls - nudge it to try something else
 ]);
 
 /** Termination reasons that can continue IF there's substantial response content */
 const CONDITIONAL_CONTINUABLE = new Set([
   'agent_error', // Agent errors might be recoverable if LLM produced output
+  'exception', // Caught exceptions - recoverable if we have partial output
+]);
+
+/** Termination reasons that MUST terminate the loop - no recovery */
+const TERMINAL_TERMINATIONS = new Set([
+  'refusal', // Model refused - no point retrying
+  'circuit_open', // Circuit breaker tripped - must stop
+  'rate_limit', // Rate limited - must stop
+  'user_stopped', // User explicitly stopped
 ]);
 
 /** Minimum response length to consider an error recoverable */
@@ -325,14 +335,29 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
   return (context: StopHookContext): StopHookResult => {
     state.lastResponse = context.response;
 
+    // TERMINAL TERMINATIONS: These MUST end the loop immediately - no recovery possible
+    if (TERMINAL_TERMINATIONS.has(context.terminationReason)) {
+      console.log(`[RalphLoop] Terminal termination: ${context.terminationReason} at iteration ${state.iteration}`);
+      config.onComplete?.(state, 'error');
+      return { decision: 'allow' };
+    }
+
     // Check if this termination reason allows continuation
     const isAlwaysContinuable = CONTINUABLE_TERMINATIONS.has(context.terminationReason);
     const isConditionalContinuable = CONDITIONAL_CONTINUABLE.has(context.terminationReason);
     const hasSubstantialResponse = (context.response?.length ?? 0) >= MIN_RESPONSE_FOR_RECOVERY;
 
-    // For non-continuable terminations (refusals, circuit_open, rate_limit), end the loop
-    // agent_error can continue ONLY if there's substantial response (indicates LLM did work)
-    if (!isAlwaysContinuable && !(isConditionalContinuable && hasSubstantialResponse)) {
+    // For unknown termination reasons, log and terminate to be safe
+    // This prevents silent failures on new/unhandled termination types
+    if (!isAlwaysContinuable && !isConditionalContinuable) {
+      console.warn(`[RalphLoop] Unknown termination reason: ${context.terminationReason} - terminating loop at iteration ${state.iteration}`);
+      config.onComplete?.(state, 'error');
+      return { decision: 'allow' };
+    }
+
+    // Conditional continuable (agent_error, exception) - only continue if we have substantial output
+    if (isConditionalContinuable && !hasSubstantialResponse) {
+      console.log(`[RalphLoop] Conditional termination (${context.terminationReason}) without substantial response at iteration ${state.iteration}`);
       config.onComplete?.(state, 'error');
       return { decision: 'allow' };
     }
@@ -345,6 +370,7 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
     if (elapsed < DEATH_SPIRAL_THRESHOLD_MS) {
       rapidFireCount++;
       if (rapidFireCount >= DEATH_SPIRAL_COUNT) {
+        console.warn(`[RalphLoop] Death spiral detected (${rapidFireCount} rapid iterations) at iteration ${state.iteration}`);
         config.onComplete?.(state, 'error');
         return { decision: 'allow' };
       }
@@ -355,6 +381,8 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
     // Handle user_input_required specially - tell agent it's in async mode
     // Don't increment iteration count for this, it's not real progress
     if (context.terminationReason === 'user_input_required') {
+      // Still emit iteration event so TUI knows loop is continuing
+      config.onIteration?.(state);
       return {
         decision: 'block',
         reason: ASYNC_MODE_MESSAGE,
@@ -363,24 +391,34 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
     }
 
     // Handle error conditions that we're retrying - add context about the issue
-    const isErrorRetry = context.terminationReason === 'agent_error' ||
-                         context.terminationReason === 'no_action' ||
-                         context.terminationReason === 'invalid_action';
-    const errorHint = isErrorRetry
-      ? `\n\nPrevious iteration ended with ${context.terminationReason}. Make sure to use proper structured output with action field.`
-      : '';
+    const isFormatError = context.terminationReason === 'no_action' ||
+                          context.terminationReason === 'invalid_action';
+    const isRecoverableError = context.terminationReason === 'agent_error' ||
+                               context.terminationReason === 'exception';
+    const isStagnation = context.terminationReason === 'stagnation:tool_repeat';
+
+    let errorHint = '';
+    if (isFormatError) {
+      errorHint = `\n\nPrevious iteration ended with ${context.terminationReason}. Make sure to use proper structured output with action field.`;
+    } else if (isRecoverableError) {
+      errorHint = `\n\nPrevious iteration encountered an error (${context.terminationReason}). Continue working on the task.`;
+    } else if (isStagnation) {
+      errorHint = `\n\nPrevious iteration detected tool repetition. Try a different approach or tool to make progress.`;
+    }
 
     // Increment iteration count for actual progress
     state.iteration++;
 
     // Check for completion promise
     if (config.completionPromise && checkCompletionPromise(context.response, config.completionPromise)) {
+      console.log(`[RalphLoop] Completion promise detected at iteration ${state.iteration}`);
       config.onComplete?.(state, 'promise_detected');
       return { decision: 'allow' };
     }
 
     // Check for max iterations
     if (config.maxIterations > 0 && state.iteration >= config.maxIterations) {
+      console.log(`[RalphLoop] Max iterations (${config.maxIterations}) reached`);
       config.onComplete?.(state, 'max_iterations');
       return { decision: 'allow' };
     }
@@ -396,6 +434,8 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
     if (config.completionPromise) {
       parts.push(`| To complete: output <promise>${config.completionPromise}</promise>`);
     }
+
+    console.log(`[RalphLoop] Continuing to iteration ${state.iteration + 1} (reason: ${context.terminationReason})`);
 
     // Block termination and re-inject the same prompt
     return {

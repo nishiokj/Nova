@@ -184,7 +184,8 @@ export type QuestionType =
   | "fill_in_blank"
   | "yes_no"
   | "free_text"
-  | "plan_mode_exit";
+  | "plan_mode_exit"
+  | "spec_review";
 
 export interface QuestionOption {
   id: string;
@@ -239,6 +240,24 @@ export interface ResponseContent {
 export interface ResponseLine {
   text: string;
   type: "header" | "added" | "removed" | "context" | "text" | "separator";
+}
+
+/** A styled text segment for rendering within a HistoryLine */
+export interface TextSegment {
+  /** The text content of this segment */
+  text: string;
+  /** Optional bold modifier */
+  bold?: boolean;
+  /** Optional italic modifier */
+  italic?: boolean;
+  /** Optional underline modifier */
+  underline?: boolean;
+  /** Optional dim modifier */
+  dim?: boolean;
+  /** Optional color name (for theme mapping) */
+  color?: "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "gray" | "text" | "muted";
+  /** Optional background color */
+  bgColor?: "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "gray" | "userBg" | "diffContextBg";
 }
 
 /** Model entry from the harness */

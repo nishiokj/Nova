@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason, PermissionRequestData } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason, PermissionRequestData, TextSegment } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 
@@ -53,6 +53,8 @@ export interface AutocompleteState {
 export interface HistoryLine {
   id: string;
   text: string;
+  /** Optional styled segments (overrides text for rendering if present) */
+  segments?: TextSegment[];
   role?: Role;
   requestId?: string;
   isBlockStart?: boolean;  // First line of a message block
@@ -954,13 +956,15 @@ export class Store {
       width,
     );
 
+    const normalizedLines = normalizeHistoryLines(lines, width);
+
     this.historyCache = {
       width,
       version: this.historyVersion,
-      lines,
+      lines: normalizedLines,
     };
 
-    return lines;
+    return normalizedLines;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1030,7 +1034,8 @@ export class Store {
     if (
       this.activeQuestion.type === "multiple_choice" ||
       this.activeQuestion.type === "yes_no" ||
-      this.activeQuestion.type === "plan_mode_exit"
+      this.activeQuestion.type === "plan_mode_exit" ||
+      this.activeQuestion.type === "spec_review"
     ) {
       // Single selection - replace
       this.questionSelection = [this.questionCursor];
@@ -1086,6 +1091,7 @@ export class Store {
       case "multiple_choice":
       case "yes_no":
       case "plan_mode_exit":
+      case "spec_review":
         if (this.questionSelection.length === 0) return null;
         return this.activeQuestion.options?.[this.questionSelection[0]]?.id;
       case "multi_select":
@@ -1917,6 +1923,282 @@ function isWhitespace(ch: string): boolean {
   return ch === " " || ch === "\n" || ch === "\t" || ch === "\r";
 }
 
+/**
+ * Parse markdown text and convert to TextSegment[].
+ * This handles bold, italic, code, and other inline markdown without rendering.
+ * IMPORTANT: This does NOT handle block elements like headers, lists, code blocks.
+ * Block elements must be split into separate HistoryLines before calling this.
+ */
+function parseMarkdownToSegments(text: string): TextSegment[] {
+  const segments: TextSegment[] = [];
+  let remaining = text;
+
+  // Define patterns for inline markdown (in order of priority)
+  const patterns = [
+    // Inline code `text`
+    {
+      regex: /`([^`]+)`/g,
+      process: (match: string) => ({ text: match, color: "yellow" as const }),
+    },
+    // Bold **text**
+    {
+      regex: /\*\*([^*]+)\*\*/g,
+      process: (match: string) => ({ text: match, bold: true }),
+    },
+    // Bold __text__
+    {
+      regex: /__([^_]+)__/g,
+      process: (match: string) => ({ text: match, bold: true }),
+    },
+    // Italic *text*
+    {
+      regex: /\*([^*]+)\*/g,
+      process: (match: string) => ({ text: match, italic: true }),
+    },
+    // Italic _text_
+    {
+      regex: /_([^_]+)_/g,
+      process: (match: string) => ({ text: match, italic: true }),
+    },
+    // Strikethrough ~~text~~
+    {
+      regex: /~~([^~]+)~~/g,
+      process: (match: string) => ({ text: match, dim: true }),
+    },
+    // Links [text](url) - show only text with blue underline
+    {
+      regex: /\[([^\]]+)\]\([^)]+\)/g,
+      process: (match: string) => ({ text: match, color: "blue" as const, underline: true }),
+    },
+  ];
+
+  let lastIndex = 0;
+
+  // For each pattern type, find all matches and build segments
+  for (const { regex, process } of patterns) {
+    let match;
+    regex.lastIndex = 0; // Reset regex state
+
+    while ((match = regex.exec(remaining)) !== null) {
+      // Add any text before the match as a plain segment
+      if (match.index > lastIndex) {
+        const plainText = remaining.slice(lastIndex, match.index);
+        if (plainText) {
+          segments.push({ text: plainText });
+        }
+      }
+
+      // Add the matched text with styling
+      const styled = process(match[1]);
+      segments.push(styled);
+
+      lastIndex = match.index + match[0].length;
+    }
+
+    // If we found matches, replace remaining with the text after the last match
+    // and continue with remaining patterns (already matched portions won't be re-matched)
+    if (lastIndex > 0) {
+      const prefix = remaining.slice(0, lastIndex);
+      remaining = remaining.slice(lastIndex);
+      // Continue processing remaining text with next patterns
+      lastIndex = 0;
+    } else {
+      // No matches found for this pattern, continue with next pattern
+    }
+  }
+
+  // Add any remaining text as a plain segment
+  if (remaining) {
+    segments.push({ text: remaining });
+  }
+
+  // Filter out empty segments
+  return segments.filter(s => s.text.length > 0);
+}
+
+/**
+ * Parse inline markdown in a HistoryLine and return text without markdown markers.
+ * This creates TextSegment[] for styled rendering.
+ *
+ * @param line - The HistoryLine to parse
+ * @returns A HistoryLine with parsed text and optional segments
+ */
+function parseInlineMarkdown(line: HistoryLine): HistoryLine {
+  let text = line.text;
+
+  // Check if text contains markdown-like patterns
+  const hasMarkdown = /\*\*|__|\*|_|`|~~|\[|\]/.test(text);
+
+  if (hasMarkdown) {
+    const segments = parseMarkdownToSegments(text);
+    const segmentTexts = segments.map(s => s.text);
+    text = segmentTexts.join(""); // Reconstruct text without markdown markers
+
+    // Attach segments to the line for rendering with styles
+    return { ...line, text, segments };
+  }
+
+  return line;
+}
+
+/**
+ * Render a single HistoryLine to the specified width.
+ * This handles width normalization (padding/truncation) but does NOT parse markdown.
+ * Markdown parsing should happen BEFORE wrapping via parseInlineMarkdown.
+ *
+ * Order of operations:
+ * 1. Sanitize: strip \r, expand \t to spaces
+ * 2. Handle empty strings: "" becomes " "
+ * 3. Width normalization: pad/truncate to exact width
+ *
+ * @param line - The HistoryLine to render (may already have segments from parseInlineMarkdown)
+ * @param width - Target width in terminal columns
+ * @returns A HistoryLine with normalized text and optional segments
+ */
+function renderLineToWidth(line: HistoryLine, width: number): HistoryLine {
+  const safeWidth = Math.max(10, width);
+  let text = line.text;
+
+  // Step 1: Sanitize - strip carriage returns
+  text = text.replace(/\r/g, "");
+
+  // Expand tabs to spaces (8-space intervals for consistency)
+  text = text.replace(/\t/g, "        ");
+
+  // Step 2: Handle empty strings - replace with single space
+  // This ensures empty content renders as a visible blank row
+  if (text === "") {
+    text = " ";
+  }
+
+  // Step 3: Truncate to width if necessary
+  if (text.length > safeWidth) {
+    text = text.slice(0, safeWidth);
+
+    // If we have segments, we also need to truncate them
+    if (line.segments) {
+      const truncatedSegments = truncateSegmentsToWidth(line.segments, safeWidth);
+      line.segments = truncatedSegments;
+    }
+  }
+
+  // Step 4: Pad to exact width with spaces
+  if (text.length < safeWidth) {
+    const paddingNeeded = safeWidth - text.length;
+    text += " ".repeat(paddingNeeded);
+
+    // If we have segments, add a filler segment for the padding
+    if (line.segments) {
+      line.segments.push({ text: " ".repeat(paddingNeeded) });
+    }
+  }
+
+  // Return the rendered line with updated text
+  return { ...line, text };
+}
+
+/**
+ * Truncate an array of TextSegment to fit within a maximum width.
+ * Preserves styles on the kept prefix segments.
+ *
+ * @param segments - The segments to truncate
+ * @param maxWidth - Maximum total width in columns
+ * @returns Truncated segments array
+ */
+function truncateSegmentsToWidth(segments: TextSegment[], maxWidth: number): TextSegment[] {
+  const result: TextSegment[] = [];
+  let currentWidth = 0;
+
+  for (const segment of segments) {
+    const segmentWidth = segment.text.length;
+
+    if (currentWidth + segmentWidth <= maxWidth) {
+      // Entire segment fits, add it
+      result.push(segment);
+      currentWidth += segmentWidth;
+    } else if (currentWidth < maxWidth) {
+      // Partial segment fits, truncate it
+      const remainingWidth = maxWidth - currentWidth;
+      result.push({
+        ...segment,
+        text: segment.text.slice(0, remainingWidth),
+      });
+      currentWidth = maxWidth;
+      break; // We've filled the width
+    } else {
+      // Segment doesn't fit, stop
+      break;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Split markdown text into separate HistoryLines for block elements.
+ * This handles headers, code blocks, lists, blockquotes that should be
+ * separate rows in the terminal.
+ *
+ * This function strips block-level markdown markers (###, - for lists, etc.)
+ * but keeps the text content. Inline markdown (bold, italic, code) is preserved
+ * for later processing by parseMarkdownToSegments.
+ *
+ * @param text - The markdown text to split
+ * @param role - The role to assign to each line
+ * @param requestId - Optional request ID
+ * @param baseId - Base ID for the lines
+ * @returns Array of HistoryLine objects
+ */
+function splitMarkdownIntoLines(
+  text: string,
+  role?: Role,
+  requestId?: string,
+  baseId?: string,
+): HistoryLine[] {
+  const lines: HistoryLine[] = [];
+
+  // First, normalize line endings and convert to array
+  let normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const rawLines = normalized.split("\n");
+
+  let lineIndex = 0;
+  for (let rawLine of rawLines) {
+    // Strip block-level markdown markers
+    // Headers: "### Header" -> "Header"
+    rawLine = rawLine.replace(/^#{1,6}\s+/, "");
+
+    // Lists: "- item" or "* item" or "1. item" -> "item"
+    rawLine = rawLine.replace(/^[-*+]\s+/, "");
+    rawLine = rawLine.replace(/^\d+\.\s+/, "");
+
+    // Blockquotes: "> quote" -> "quote"
+    rawLine = rawLine.replace(/^>\s+/, "");
+
+    // Code block fences: Remove ``` lines
+    if (rawLine.trim() === "```" || rawLine.trim().startsWith("```")) {
+      continue; // Skip fence lines entirely
+    }
+
+    // Horizontal rules: ---, ***, ___ - skip
+    if (/^[-*_]{3,}\s*$/.test(rawLine)) {
+      continue;
+    }
+
+    const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
+
+    lines.push({
+      id: lineId,
+      text: rawLine,
+      role,
+      requestId,
+    });
+
+    lineIndex++;
+  }
+
+  return lines;
+}
+
 function buildHistoryLines(
   history: MessageEntry[],
   streamingText: string,
@@ -1927,33 +2209,68 @@ function buildHistoryLines(
   const safeWidth = Math.max(20, width);
 
   for (const entry of history) {
-    const wrapped = wrapText(entry.text || "", safeWidth);
     const entryLinePrefix = entry.id;
-    let lineIndex = 0;
     const blockStartIndex = lines.length;
 
-    wrapped.forEach((line, index) => {
-      lines.push({
-        id: `${entryLinePrefix}:${lineIndex}`,
-        text: line,
-        role: entry.role,
-        requestId: entry.requestId,
-        isBlockStart: index === 0,
-      });
-      lineIndex += 1;
-    });
+    // Split markdown into separate lines for block elements
+    const markdownLines = splitMarkdownIntoLines(
+      entry.text || "",
+      entry.role,
+      entry.requestId,
+      entryLinePrefix,
+    );
 
-    if (entry.meta) {
-      const metaLines = wrapText(entry.meta, safeWidth);
-      metaLines.forEach((line) => {
-        lines.push({
+    // Process each line:
+    // 1. Parse inline markdown (removes **, *, etc.) - BEFORE wrapping
+    // 2. Wrap text to width
+    // 3. Render to exact width (padding/truncation)
+    let lineIndex = 0;
+    for (const mdLine of markdownLines) {
+      // Step 1: Parse inline markdown
+      const parsedLine = parseInlineMarkdown(mdLine);
+
+      // Step 2: Wrap the parsed text (without markdown markers)
+      const wrapped = wrapText(parsedLine.text, safeWidth);
+      wrapped.forEach((wrappedLine, index) => {
+        const line: HistoryLine = {
           id: `${entryLinePrefix}:${lineIndex}`,
-          text: line,
+          text: wrappedLine,
           role: entry.role,
           requestId: entry.requestId,
-        });
+          segments: index === 0 ? parsedLine.segments : undefined, // Only keep segments on first wrapped line
+          isBlockStart: lineIndex === 0 && index === 0,
+        };
+        // Step 3: Final width normalization (padding to exact width)
+        const finalLine = renderLineToWidth(line, safeWidth);
+        lines.push(finalLine);
         lineIndex += 1;
       });
+    }
+
+    if (entry.meta) {
+      const metaLines = splitMarkdownIntoLines(
+        entry.meta,
+        entry.role,
+        entry.requestId,
+        `${entryLinePrefix}:meta`,
+      );
+
+      for (const metaLine of metaLines) {
+        const parsedLine = parseInlineMarkdown(metaLine);
+        const wrapped = wrapText(parsedLine.text, safeWidth);
+        wrapped.forEach((wrappedLine) => {
+          const line: HistoryLine = {
+            id: `${entryLinePrefix}:${lineIndex}`,
+            text: wrappedLine,
+            role: entry.role,
+            requestId: entry.requestId,
+            segments: parsedLine.segments,
+          };
+          const finalLine = renderLineToWidth(line, safeWidth);
+          lines.push(finalLine);
+          lineIndex += 1;
+        });
+      }
     }
 
     // Mark the last content line as block end
@@ -1965,59 +2282,155 @@ function buildHistoryLines(
     // Use space characters so Ink renders them with actual height
     const separatorCount = 1;
     for (let i = 0; i < separatorCount; i++) {
-      lines.push({
-        id: `${entryLinePrefix}:${lineIndex + i}`,
+      const separatorLine: HistoryLine = {
+        id: `${entryLinePrefix}:sep:${i}`,
         text: " ",
         role: undefined,
         requestId: entry.requestId,
-      });
+      };
+      const rendered = renderLineToWidth(separatorLine, safeWidth);
+      lines.push(rendered);
     }
   }
 
   // Display reasoning content before the main response (dimmed in TUI)
   if (reasoningText) {
     // Add a thinking indicator prefix
-    lines.push({
+    const headerLine: HistoryLine = {
       id: "reasoning:header",
       text: "💭 Thinking...",
       role: "reasoning",
       isBlockStart: true,
-    });
-    const wrapped = wrapText(reasoningText, safeWidth);
-    wrapped.forEach((line, index) => {
-      lines.push({
-        id: `reasoning:${index}`,
-        text: line,
-        role: "reasoning",
+    };
+    lines.push(renderLineToWidth(headerLine, safeWidth));
+
+    const reasonLines = splitMarkdownIntoLines(
+      reasoningText,
+      "reasoning",
+      undefined,
+      "reasoning",
+    );
+
+    let reasonIndex = 0;
+    for (const reasonLine of reasonLines) {
+      const parsedLine = parseInlineMarkdown(reasonLine);
+      const wrapped = wrapText(parsedLine.text, safeWidth);
+      wrapped.forEach((wrappedLine) => {
+        const line: HistoryLine = {
+          id: `reasoning:${reasonIndex}`,
+          text: wrappedLine,
+          role: "reasoning",
+          segments: parsedLine.segments,
+        };
+        const finalLine = renderLineToWidth(line, safeWidth);
+        lines.push(finalLine);
+        reasonIndex += 1;
       });
-    });
+    }
+
     if (lines.length > 0 && lines[lines.length - 1].role === "reasoning") {
       lines[lines.length - 1].isBlockEnd = true;
     }
+
     // Add separator after reasoning
-    lines.push({
+    const sepLine: HistoryLine = {
       id: "reasoning:sep",
       text: " ",
       role: undefined,
-    });
+    };
+    lines.push(renderLineToWidth(sepLine, safeWidth));
   }
 
   if (streamingText) {
-    const wrapped = wrapText(streamingText, safeWidth);
-    wrapped.forEach((line, index) => {
-      lines.push({
-        id: `stream:${index}`,
-        text: line,
-        role: "agent",
-        isBlockStart: index === 0,
+    const streamLines = splitMarkdownIntoLines(
+      streamingText,
+      "agent",
+      undefined,
+      "stream",
+    );
+
+    let streamIndex = 0;
+    for (const streamLine of streamLines) {
+      const parsedLine = parseInlineMarkdown(streamLine);
+      const wrapped = wrapText(parsedLine.text, safeWidth);
+      wrapped.forEach((wrappedLine, index) => {
+        const line: HistoryLine = {
+          id: `stream:${streamIndex}`,
+          text: wrappedLine,
+          role: "agent",
+          segments: index === 0 ? parsedLine.segments : undefined,
+          isBlockStart: streamIndex === 0 && index === 0,
+        };
+        const finalLine = renderLineToWidth(line, safeWidth);
+        lines.push(finalLine);
+        streamIndex += 1;
       });
-    });
+    }
+
     if (lines.length > 0 && lines[lines.length - 1].role === "agent") {
       lines[lines.length - 1].isBlockEnd = true;
     }
   }
 
   return lines;
+}
+
+/**
+ * Normalize HistoryLine array to enforce viewport invariants.
+ *
+ * This is now a final safety net since most normalization happens in renderLineToWidth.
+ * It verifies that all lines are width-stable and handles any edge cases.
+ *
+ * @param lines - HistoryLine array from buildHistoryLines (already rendered)
+ * @param width - Target width in terminal columns
+ * @returns Normalized HistoryLine array
+ */
+function normalizeHistoryLines(lines: HistoryLine[], width: number): HistoryLine[] {
+  const normalized: HistoryLine[] = [];
+  const safeWidth = Math.max(10, width);
+
+  for (const line of lines) {
+    // If the line has embedded newlines, split it (should be rare after renderLineToWidth)
+    let textParts = line.text.split("\n");
+
+    for (let partIndex = 0; partIndex < textParts.length; partIndex++) {
+      let text = textParts[partIndex];
+
+      // Final safety: handle empty strings
+      if (text === "") {
+        text = " ";
+      }
+
+      // Final safety: truncate if somehow too long
+      if (text.length > safeWidth) {
+        text = text.slice(0, safeWidth);
+      }
+
+      // Final safety: pad to exact width
+      while (text.length < safeWidth) {
+        text += " ";
+      }
+
+      // Create the normalized line
+      const normalizedLine: HistoryLine = {
+        id: partIndex === 0 ? line.id : `${line.id}:${partIndex}`,
+        text,
+        role: line.role,
+        requestId: line.requestId,
+        segments: line.segments, // Preserve segments if present
+      };
+
+      // Preserve block markers on the original line only
+      if (partIndex === 0) {
+        normalizedLine.isBlockStart = line.isBlockStart;
+        normalizedLine.isBlockEnd = line.isBlockEnd;
+      }
+
+      normalized.push(normalizedLine);
+    }
+  }
+
+  return normalized;
 }
 
 /**

@@ -78,6 +78,11 @@ import {
   REQUEST_ID_SLICE_START,
   REQUEST_ID_SLICE_END,
   ISO_DATE_SLICE,
+  MIN_PROMPT_WIDTH,
+  MIN_PROMPT_HEIGHT,
+  MIN_PERMISSION_WIDTH,
+  MIN_PERMISSION_HEIGHT,
+  PROMPT_MAX_CONTENT_HEIGHT,
 } from "./constants.js";
 
 // ==================== Ralph Loop Argument Parsing ====================
@@ -649,6 +654,14 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           type: "init",
           data: initData,
         });
+
+        // Set dangerous mode for this session if requested
+        // Each session has its own dangerous mode state - does not affect other TUIs
+        if (options.dangerousMode) {
+          void client.setDangerousMode(true).catch((err) => {
+            console.error('[tui] Failed to set dangerous mode:', err);
+          });
+        }
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -1342,6 +1355,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       questionType?: string
     ): QuestionType => {
       if (questionType === "plan_mode_exit") return "plan_mode_exit";
+      if (questionType === "spec_review") return "spec_review";
       if (!opts || opts.length === 0) return "free_text";
       if (multiSelect) return "multi_select";
       const labels = opts.map((opt) =>
@@ -1842,7 +1856,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
         // Enter selects for single-select or submits for multi-select
         if (key.return) {
-          if (questionType === "multiple_choice" || questionType === "yes_no" || questionType === "plan_mode_exit") {
+          if (questionType === "multiple_choice" || questionType === "yes_no" || questionType === "plan_mode_exit" || questionType === "spec_review") {
             store.toggleQuestionSelection();
           }
 
@@ -1853,6 +1867,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
               store.batch(() => {
                 store.setPlanMode(false);
                 store.addMessage("system", "Plan mode disabled. Full tool access restored.");
+              });
+            }
+          }
+
+          // Handle spec_review: if user selected first option ("Yes, execute"), disable plan mode
+          if (questionType === "spec_review") {
+            if (snapshot.questionCursor === 0) {
+              store.batch(() => {
+                store.setPlanMode(false);
+                store.addMessage("system", "Plan mode disabled. Executing implementation.");
               });
             }
           }
@@ -3118,7 +3142,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const sessionsHeight = historyHeight + inputBoxHeight;
 
   // Full-screen modes that replace both history and input
-  const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode;
+  const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode || isQuestionMode || isPermissionMode;
 
   return (
     <Box flexDirection="column" width={width} height={height} paddingX={HORIZONTAL_PADDING} paddingTop={TOP_PADDING} paddingBottom={BOTTOM_PADDING}>
@@ -3129,12 +3153,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <Box flexDirection="column" height={historyHeight}>
           {visibleHistoryLines.map((line, index) => {
             const isUserLine = line.role === "user";
+            const isReasoning = line.role === "reasoning";
             const bgColor = isUserLine ? colors.userBg : undefined;
-            // Minimal padding (1 char each side) instead of full width
-            const paddedText = isUserLine ? ` ${line.text} ` : line.text;
+            // User messages: 4 chars padding (2 left + 2 right)
+            // Agent messages: 2 chars padding (1 left + 1 right)
+            const paddedText = isUserLine ? `  ${line.text}  ` : ` ${line.text} `;
+            const remainingWidth = contentWidth - paddedText.length;
+            const paddingText = remainingWidth > 0 ? " ".repeat(remainingWidth) : "";
             return (
               <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
-                <StyledLine text={paddedText} baseColor={roleColor(line.role)} />
+                <StyledLine text={paddedText + paddingText} baseColor={roleColor(line.role)} italic={isReasoning} />
               </Text>
             );
           })}
@@ -3184,20 +3212,26 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           onClose={() => store.exitUsageMode()}
         />
       ) : isQuestionMode ? (
-        <QuestionPrompt
-          question={snapshot.activeQuestion!}
-          cursor={snapshot.questionCursor}
-          selection={snapshot.questionSelection}
-          inputText={snapshot.questionInput}
-          width={contentWidth}
-          queueInfo={store.getQuestionQueueInfo()}
-        />
+        <Box flexDirection="column" justifyContent="center" alignItems="center" flexGrow={1}>
+          <QuestionPrompt
+            question={snapshot.activeQuestion!}
+            cursor={snapshot.questionCursor}
+            selection={snapshot.questionSelection}
+            inputText={snapshot.questionInput}
+            width={contentWidth}
+            height={PROMPT_MAX_CONTENT_HEIGHT}
+            queueInfo={store.getQuestionQueueInfo()}
+          />
+        </Box>
       ) : isPermissionMode ? (
-        <PermissionPrompt
-          request={snapshot.activePermissionRequest!}
-          cursor={snapshot.permissionCursor}
-          width={contentWidth}
-        />
+        <Box flexDirection="column" justifyContent="center" alignItems="center" flexGrow={1}>
+          <PermissionPrompt
+            request={snapshot.activePermissionRequest!}
+            cursor={snapshot.permissionCursor}
+            width={contentWidth}
+            height={PROMPT_MAX_CONTENT_HEIGHT}
+          />
+        </Box>
       ) : (
         <>
           {/* Top separator line - runs edge to edge */}
@@ -3297,6 +3331,18 @@ function levelColor(level?: string | null): string | undefined {
 /** Syntax highlight patterns - use color keys, resolved at runtime */
 type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg" | "diffContextBg";
 
+type SyntaxPattern = {
+  pattern: RegExp;
+  colorKey?: ColorKey;
+  bgKey?: ColorKey;
+  hardcodedColor?: string;
+  hardcodedBg?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  transform?: (s: string) => string;
+};
+
 // Hardcoded diff colors for add/remove - bright and consistent for visibility
 const DIFF_ADD_FG = "#ffffff";    // White text for visibility
 const DIFF_ADD_BG = "#166534";    // Solid green background
@@ -3304,7 +3350,7 @@ const DIFF_REMOVE_FG = "#ffffff"; // White text for visibility
 const DIFF_REMOVE_BG = "#991b1b"; // Solid red background
 // Context uses theme's diffContextBg (same as userBg) - resolved at runtime
 
-const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: ColorKey; hardcodedColor?: string; hardcodedBg?: string; bold?: boolean; italic?: boolean; transform?: (s: string) => string }> = [
+const syntaxPatterns: SyntaxPattern[] = [
   // Diff/Edit tool header - format: "✓ Edit /path/to/file.ts  +3 / -2 (123ms)"
   { pattern: /^[✓✗] Edit .+$/gm, colorKey: "diffHeader", bgKey: "diffHeaderBg", bold: true },
   // Diff lines with line numbers - format: "  42 + content" or "  42 - content" or "  42   content"
@@ -3323,8 +3369,8 @@ const syntaxPatterns: Array<{ pattern: RegExp; colorKey?: ColorKey; bgKey?: Colo
   // Markdown table rows (| cell | cell |) - style the pipes
   { pattern: /^\|.+\|\s*$/gm, colorKey: "text", transform: (s) => s.replace(/\|/g, "│") },
 
-  // Markdown headers (### Header text) - strip the hashes and bold
-  { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
+  // Markdown headers (### Header text) - strip the hashes and make them stand out
+  { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, underline: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
 
   // Blockquotes (> text) - preserve the > marker styled
   { pattern: /^>\s+.+$/gm, colorKey: "blockquote", italic: true, transform: (s) => "│ " + s.slice(2) },
@@ -3391,6 +3437,7 @@ interface TextSegment {
   backgroundColor?: string;
   bold?: boolean;
   italic?: boolean;
+  underline?: boolean;
 }
 
 const MAX_PARSE_TEXT_LENGTH = 20000;
@@ -3413,9 +3460,9 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
   const segments: TextSegment[] = [];
 
   // Find all matches with positions
-  const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean }> = [];
+  const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean; underline?: boolean }> = [];
 
-  for (const { pattern, colorKey, bgKey, hardcodedColor, hardcodedBg, bold, italic, transform } of syntaxPatterns) {
+  for (const { pattern, colorKey, bgKey, hardcodedColor, hardcodedBg, bold, italic, underline, transform } of syntaxPatterns) {
     const regex = new RegExp(pattern.source, pattern.flags);
     let m;
     while ((m = regex.exec(text)) !== null) {
@@ -3430,6 +3477,7 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
         backgroundColor: hardcodedBg ?? (bgKey ? colors[bgKey] : undefined),
         bold,
         italic,
+        underline,
       });
     }
   }
@@ -3451,7 +3499,7 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
     if (m.start > pos) {
       segments.push({ text: text.slice(pos, m.start), color: baseColor });
     }
-    segments.push({ text: m.displayText, color: m.color, backgroundColor: m.backgroundColor, bold: m.bold, italic: m.italic });
+    segments.push({ text: m.displayText, color: m.color, backgroundColor: m.backgroundColor, bold: m.bold, italic: m.italic, underline: m.underline });
     pos = m.end;
   }
   if (pos < text.length) {
@@ -3470,13 +3518,13 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
 }
 
 /** Render text with syntax highlighting */
-function StyledLine({ text, baseColor }: { text: string; baseColor?: string }): JSX.Element {
+function StyledLine({ text, baseColor, italic: lineItalic }: { text: string; baseColor?: string; italic?: boolean }): JSX.Element {
   const segments = parseTextSegments(text, baseColor);
 
   return (
     <>
       {segments.map((seg, i) => (
-        <Text key={i} color={seg.color} backgroundColor={seg.backgroundColor} bold={seg.bold} italic={seg.italic}>
+        <Text key={i} color={seg.color} backgroundColor={seg.backgroundColor} bold={seg.bold} italic={lineItalic || seg.italic} underline={seg.underline}>
           {seg.text}
         </Text>
       ))}
@@ -3552,6 +3600,7 @@ export function parseArgs(argv: string[]): AppOptions {
   let redactLogs = false;
   let logTranscripts = true;
   let sessionKey: string | null = null;
+  let dangerousMode = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -3563,6 +3612,10 @@ export function parseArgs(argv: string[]): AppOptions {
     if (arg === "--session" && argv[i + 1]) {
       sessionKey = argv[i + 1];
       i += 1;
+      continue;
+    }
+    if (arg === "--dangerous") {
+      dangerousMode = true;
       continue;
     }
     if (arg === "--no-voice") {
@@ -3587,7 +3640,7 @@ export function parseArgs(argv: string[]): AppOptions {
     logTranscripts = false;
   }
 
-  return { uiLogPath, enableVoice, redactLogs, logTranscripts, sessionKey };
+  return { uiLogPath, enableVoice, redactLogs, logTranscripts, sessionKey, dangerousMode };
 }
 
 const options = parseArgs(process.argv.slice(2));

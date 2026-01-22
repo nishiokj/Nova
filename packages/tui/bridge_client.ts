@@ -60,7 +60,7 @@ export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'rec
 const DEFAULT_RECONNECT_DELAY = 1000; // Base delay in ms
 const MAX_RECONNECT_DELAY = 30000; // Maximum delay in ms
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
-const DEFAULT_REQUEST_TIMEOUT = 30000; // 30 seconds
+const DEFAULT_REQUEST_TIMEOUT = 120000; // 120 seconds
 
 function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -372,6 +372,20 @@ export class BridgeClient extends EventEmitter {
     error?: string;
   }> {
     return this.sendAuthCommand('list_sessions', options);
+  }
+
+  /**
+   * Set dangerous mode for the current session.
+   * When enabled, this session bypasses all permission checks.
+   * Does NOT affect other sessions.
+   */
+  async setDangerousMode(enabled: boolean): Promise<{
+    success: boolean;
+    enabled?: boolean;
+    sessionKey?: string;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('set_dangerous_mode', { enabled });
   }
 
   private sendAuthCommand<T extends Record<string, unknown>>(

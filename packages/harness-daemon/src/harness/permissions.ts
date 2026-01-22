@@ -52,6 +52,14 @@ export class PermissionChecker {
   }
 
   /**
+   * Set dangerous mode dynamically.
+   * WARNING: This bypasses all permission checks when enabled.
+   */
+  setDangerousMode(enabled: boolean): void {
+    this.state.dangerousMode = enabled;
+  }
+
+  /**
    * Register a pending request (called by harness when awaiting user response).
    */
   registerPendingRequest(
@@ -276,11 +284,12 @@ export class PermissionChecker {
       // Also add to session grants so it takes effect immediately
       this.state.sessionGrants.push({ tool: request.tool, pattern });
     } else if (response.decision === 'allow') {
-      // Add to session grants only
-      this.state.sessionGrants.push({ tool: request.tool, pattern: request.target });
+      // Add to session grants using suggested pattern (e.g., "cd *" not "cd /specific/path")
+      // This allows similar commands for the rest of the session
+      this.state.sessionGrants.push({ tool: request.tool, pattern });
     } else if (response.decision === 'deny') {
-      // Add to session denials
-      this.state.sessionDenials.push({ tool: request.tool, pattern: request.target });
+      // Add to session denials using suggested pattern for consistency
+      this.state.sessionDenials.push({ tool: request.tool, pattern });
     }
 
     pending.resolve(response);

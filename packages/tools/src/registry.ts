@@ -33,6 +33,8 @@ export interface ToolExecuteOptions {
   timeout?: number;
   /** Allowed tools restriction (for skill-based filtering) */
   allowedTools?: Set<string>;
+  /** Environment variables to inject (e.g., provider API keys) */
+  envOverrides?: Record<string, string>;
 }
 
 /**
@@ -49,6 +51,7 @@ export class ToolRegistry {
   private cacheConfig: CacheConfig;
   private cache = new Map<string, CachedToolResult>();
   private defaultWorkingDir: string;
+  private dangerousMode: boolean;
 
   constructor(
     config: Partial<ToolRegistryConfig> = {},
@@ -60,6 +63,7 @@ export class ToolRegistry {
       ...config.cache,
     };
     this.defaultWorkingDir = defaultWorkingDir ?? process.cwd();
+    this.dangerousMode = config.dangerousMode ?? false;
   }
 
   // ============================================
@@ -241,6 +245,8 @@ export class ToolRegistry {
     const execContext: ToolExecutionContext = {
       workdirOverride: resolvedCwd,
       allowedTools: options?.allowedTools,
+      envOverrides: options?.envOverrides,
+      dangerousMode: this.dangerousMode,
     };
 
     // Execute with timeout

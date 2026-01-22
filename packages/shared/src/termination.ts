@@ -27,6 +27,7 @@ export type AgentTerminationReason =
   // Transient errors (retryable by caller)
   | 'rate_limit'
   | 'circuit_open'
+  | 'timeout'
 
   // Semantic errors (agent misbehavior)
   | 'invalid_action'
@@ -51,6 +52,7 @@ export type OrchestratorTerminationReason =
   | 'max_duration_exceeded'
   | 'rate_limit'
   | 'circuit_open'
+  | 'timeout'
   | 'refusal'
   | 'agent_error'
   // Semantic errors (continuable by Ralph Loop)

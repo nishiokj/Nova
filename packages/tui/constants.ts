@@ -27,6 +27,25 @@ export const MIN_TERMINAL_WIDTH = 40;
 /** Minimum terminal height (lines) */
 export const MIN_TERMINAL_HEIGHT = 10;
 
+// ============================================
+// PROMPT MODAL SIZING
+// ============================================
+
+/** Minimum width required for QuestionPrompt to render properly */
+export const MIN_PROMPT_WIDTH = 60;
+
+/** Minimum height required for QuestionPrompt to render properly */
+export const MIN_PROMPT_HEIGHT = 15;
+
+/** Minimum width required for PermissionPrompt to render properly */
+export const MIN_PERMISSION_WIDTH = 60;
+
+/** Minimum height required for PermissionPrompt to render properly */
+export const MIN_PERMISSION_HEIGHT = 12;
+
+/** Maximum height for prompt content before scrolling is needed */
+export const PROMPT_MAX_CONTENT_HEIGHT = 20;
+
 /** Default terminal width fallback */
 export const DEFAULT_TERMINAL_WIDTH = 80;
 
@@ -58,8 +77,8 @@ export const NETWORK_TIMEOUT = 10000;
 /** File cache refresh interval (ms) - 5 seconds */
 export const FILE_CACHE_REFRESH_INTERVAL = 5000;
 
-/** Session cleanup delay before disconnect (ms) */
-export const CLEANUP_DELAY = 50;
+/** Session cleanup delay before disconnect (ms) - must be long enough for round-trip */
+export const CLEANUP_DELAY = 300;
 
 /** Delay for graceful shutdown on signal (ms) */
 export const GRACEFUL_SHUTDOWN_DELAY = 500;

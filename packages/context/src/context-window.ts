@@ -154,6 +154,30 @@ const LEDGER_MAX_ENTRY_CHARS = 220;
 const LEDGER_MAX_ENTRIES_PER_SECTION = 8;
 const LEDGER_MAX_ITEM_PREVIEW = 600;
 
+/** Timeout for compaction LLM calls - 30 seconds is plenty for summarization */
+const COMPACTION_LLM_TIMEOUT_MS = 30_000;
+
+/**
+ * Wrap a promise with a timeout. Rejects with Error if timeout is exceeded.
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
 function truncateText(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max).trimEnd() + '...';
@@ -314,33 +338,50 @@ function formatLedgerMessage(ledger: LedgerPayload): string {
 // =========================================================================
 
 /**
- * Build the system message for a work item.
+ * Static system prompt content - MUST NOT contain dynamic values.
+ * This content is cached by the LLM provider; any changes invalidate the cache.
  */
-export function buildSystemMessage(
-  goal: string,
-  objective: string,
-  behavioralRules: string = '',
-  workspaceRoot: string = ''
-): string {
-  const workspaceInfo = workspaceRoot
-    ? `\nWORKSPACE ROOT: ${workspaceRoot}\nAll file paths are relative to this workspace unless specified as absolute.\n`
-    : '';
-
-  // Only show GOAL if it differs meaningfully from OBJECTIVE
-  const goalSection = goal !== objective && goal.length > 0
-    ? `GOAL: ${goal}\n\n`
-    : '';
-
-  return `OBJECTIVE: ${objective}
-${goalSection}${workspaceInfo}
-${behavioralRules}
-RESPONSE ACTIONS:
+const STATIC_SYSTEM_SUFFIX = `RESPONSE ACTIONS:
 - action: "done" + goalStateReached: true → objective complete
 - action: "continue" → progress made, more work needed
 - action: "handoff" → transition to execution mode (planning agents only)
 - Use PromptUser tool when you need user input
 
 Do not repeat identical tool calls.`;
+
+/**
+ * Build system prompt components, separating static (cacheable) from dynamic content.
+ *
+ * For optimal caching, API calls should be structured as:
+ *   system (static) → tools (static) → messages (dynamic)
+ *
+ * @returns Object with:
+ *   - system: Static behavioral rules only (for system parameter)
+ *   - taskContext: Dynamic goal/objective/workspace (inject as first user message)
+ */
+export function buildSystemMessage(
+  goal: string,
+  objective: string,
+  behavioralRules: string = '',
+  workspaceRoot: string = ''
+): { system: string; taskContext: string } {
+  // Static system prompt - only behavioral rules, no per-task content
+  const system = behavioralRules
+    ? `${behavioralRules}\n\n${STATIC_SYSTEM_SUFFIX}`
+    : STATIC_SYSTEM_SUFFIX;
+
+  // Dynamic task context - changes per work item, goes in messages
+  const workspaceInfo = workspaceRoot
+    ? `WORKSPACE: ${workspaceRoot}\n`
+    : '';
+
+  const goalSection = goal !== objective && goal.length > 0
+    ? `GOAL: ${goal}\n`
+    : '';
+
+  const taskContext = `${workspaceInfo}${goalSection}OBJECTIVE: ${objective}`;
+
+  return { system, taskContext };
 }
 
 // =========================================================================
@@ -821,18 +862,24 @@ export class ContextWindow {
 
     let ledgerPayload: LedgerPayload | null = null;
     try {
-      const response = await llm.respond({
-        llm: {
-          ...llmConfig,
-          temperature: 0,
-          maxTokens: Math.min(llmConfig.maxTokens ?? 800, 800),
-        },
-        messages: [{ role: 'user', content: userPrompt } satisfies Message],
-        system: systemPrompt,
-        responseSchema: LEDGER_RESPONSE_SCHEMA,
-      });
+      // Wrap LLM call with timeout to prevent hanging
+      const response = await withTimeout(
+        llm.respond({
+          llm: {
+            ...llmConfig,
+            temperature: 0,
+            maxTokens: Math.min(llmConfig.maxTokens ?? 800, 800),
+          },
+          messages: [{ role: 'user', content: userPrompt } satisfies Message],
+          system: systemPrompt,
+          responseSchema: LEDGER_RESPONSE_SCHEMA,
+        }),
+        COMPACTION_LLM_TIMEOUT_MS,
+        'Compaction LLM call'
+      );
       ledgerPayload = parseLedgerResponse(response.content, validIds);
     } catch {
+      // Timeout or LLM error - fall back to mechanical compaction
       ledgerPayload = null;
     }
 
@@ -1053,11 +1100,17 @@ export class ContextWindow {
 
   /**
    * Convert items to Anthropic Messages API format.
-   * Anthropic uses tool_use/tool_result content blocks instead of function_call items.
+   *
+   * Returns system content separately to enable proper cache prefixing:
+   * API call order is: system → tools → messages
+   * System content must NOT be in messages array or it breaks the cache prefix.
+   *
+   * Anthropic only accepts 'user' and 'assistant' roles in messages.
    * Batches artifacts into a single message to reduce token overhead.
    */
-  getItemsForAnthropic(): Array<Record<string, unknown>> {
-    const result: Array<Record<string, unknown>> = [];
+  getItemsForAnthropic(): { system: string; messages: Array<Record<string, unknown>> } {
+    const systemParts: string[] = [];
+    const messages: Array<Record<string, unknown>> = [];
     const artifactItems: ArtifactItem[] = [];
     let pendingToolCalls: Array<{
       type: 'tool_use';
@@ -1069,18 +1122,26 @@ export class ContextWindow {
     for (const item of this._items) {
       switch (item.type) {
         case 'message':
-          // Flush pending tool calls before user message
-          if (item.role === 'user' && pendingToolCalls.length > 0) {
-            result.push({
-              role: 'assistant',
-              content: pendingToolCalls,
+          if (item.role === 'system' || item.role === 'developer') {
+            // System/developer content goes in system parameter, not messages
+            const content = typeof item.content === 'string'
+              ? item.content
+              : flattenContentBlocks(item.content);
+            systemParts.push(content);
+          } else {
+            // Flush pending tool calls before user message
+            if (item.role === 'user' && pendingToolCalls.length > 0) {
+              messages.push({
+                role: 'assistant',
+                content: pendingToolCalls,
+              });
+              pendingToolCalls = [];
+            }
+            messages.push({
+              role: item.role,
+              content: item.content,
             });
-            pendingToolCalls = [];
           }
-          result.push({
-            role: item.role,
-            content: item.content,
-          });
           break;
 
         case 'function_call':
@@ -1095,13 +1156,13 @@ export class ContextWindow {
         case 'function_call_output':
           // Flush pending tool calls first
           if (pendingToolCalls.length > 0) {
-            result.push({
+            messages.push({
               role: 'assistant',
               content: pendingToolCalls,
             });
             pendingToolCalls = [];
           }
-          result.push({
+          messages.push({
             role: 'user',
             content: [{
               type: 'tool_result',
@@ -1115,14 +1176,14 @@ export class ContextWindow {
         case 'reasoning':
           // Anthropic doesn't have a separate reasoning type
           // Include as assistant message
-          result.push({
+          messages.push({
             role: 'assistant',
             content: `[Reasoning]\n${item.content}`,
           });
           break;
 
         case 'file_content':
-          result.push({
+          messages.push({
             role: 'user',
             content: `[File: ${item.path}]\n\`\`\`${item.language ?? ''}\n${item.content}\n\`\`\``,
           });
@@ -1137,7 +1198,7 @@ export class ContextWindow {
 
     // Flush any remaining tool calls
     if (pendingToolCalls.length > 0) {
-      result.push({
+      messages.push({
         role: 'assistant',
         content: pendingToolCalls,
       });
@@ -1145,13 +1206,16 @@ export class ContextWindow {
 
     // Batch all artifacts into single message at the end
     if (artifactItems.length > 0) {
-      result.push({
+      messages.push({
         role: 'user',
         content: `[DISCOVERED ARTIFACTS: ${artifactItems.length}]\n${artifactItems.map(formatArtifactForLLM).join('\n---\n')}`,
       });
     }
 
-    return result;
+    return {
+      system: systemParts.join('\n\n'),
+      messages,
+    };
   }
 
   // =========================================================================

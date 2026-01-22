@@ -32,6 +32,8 @@ export {
   CircuitOpenError,
   RetriesExhaustedError,
   RateLimitError,
+  TimeoutError,
+  withTimeout,
   type ResilientCallOptions,
   resilientCall,
 } from './retry.js';

@@ -11,6 +11,7 @@ import {
   RateLimitError,
   CircuitOpenError,
   RetriesExhaustedError,
+  TimeoutError,
   DEFAULT_RESILIENCE_CONFIG,
 } from 'llm';
 import type { ToolRegistry } from 'tools';
@@ -40,6 +41,12 @@ import {
   getCircuitStatus,
 } from './circuit-breaker-registry.js';
 import { TOOL_LIMITS, getMaxOutputLength, isRefusal } from './constants.js';
+
+/**
+ * Default timeout for LLM streaming calls in milliseconds.
+ * Set to 4 minutes - long enough for complex responses but prevents infinite hangs.
+ */
+const LLM_STREAM_TIMEOUT_MS = 240_000;
 
 // Re-export circuit breaker functions for backwards compatibility
 export { resetProviderCircuit, getCircuitStatus };
@@ -207,7 +214,7 @@ export class Agent {
     const circuitState = getProviderCircuitState(provider);
     const circuitKey = `${provider}:${this.llmConfig.model ?? 'unknown'}`;
 
-    // Wrap the streaming operation in resilientCall
+    // Wrap the streaming operation in resilientCall with timeout
     // Note: We wrap the entire stream consumption, not just the initial call
     return resilientCall(
       async () => {
@@ -249,14 +256,14 @@ export class Agent {
       {
         circuitState,
         circuitKey,
+        timeoutMs: LLM_STREAM_TIMEOUT_MS,
+        operationName: `LLM stream (${this.config.type})`,
         config: {
           ...DEFAULT_RESILIENCE_CONFIG,
           maxRetries: 2, // Retry up to 2 times for transient errors
         },
         onRetry: (attempt, error, delayMs) => {
           console.error(`[AGENT] Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
-          // Note: Not emitting an event here since llm_retry isn't a standard event type
-          // The retry is logged to stderr for debugging
         },
       }
     );
@@ -329,11 +336,22 @@ export class Agent {
         result.terminationReason = 'circuit_open';
         result.error = message;
         console.error(`[AGENT] Circuit breaker open: ${message}`);
+      } else if (error instanceof TimeoutError) {
+        result.terminationReason = 'timeout';
+        result.error = `LLM call timed out after ${error.timeoutMs}ms`;
+        console.error(`[AGENT] LLM timeout for ${this.config.type}: ${error.timeoutMs}ms`);
       } else if (error instanceof RetriesExhaustedError) {
-        // For now, treat retries_exhausted as exception. Phase 3 will unwrap the underlying error.
-        result.terminationReason = 'exception';
-        result.error = `Retries exhausted after ${error.attempts} attempts: ${message}`;
-        console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
+        // Check if underlying cause was a timeout
+        const cause = error.cause;
+        if (cause instanceof TimeoutError) {
+          result.terminationReason = 'timeout';
+          result.error = `LLM call timed out after ${cause.timeoutMs}ms (retries exhausted)`;
+          console.error(`[AGENT] LLM timeout after ${error.attempts} retries: ${cause.timeoutMs}ms`);
+        } else {
+          result.terminationReason = 'exception';
+          result.error = `Retries exhausted after ${error.attempts} attempts: ${message}`;
+          console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
+        }
       } else {
         result.terminationReason = 'exception';
         // Include stack trace in error message for debugging (truncated to first 5 lines)
@@ -357,6 +375,39 @@ export class Agent {
 
     // Bundle artifacts explicitly in result for clear contract
     result.artifacts = localContext.getArtifacts();
+
+    // HARD VALIDATION: Explorer agents MUST produce artifacts when reading files
+    // Reading files without extracting artifacts is unacceptable - it wastes context
+    // and provides zero value to downstream agents.
+    if (this.config.type === 'explorer' && result.filesRead.length > 0 && result.artifacts!.length === 0) {
+      result.success = false;
+      result.terminationReason = 'invalid_action';
+      result.error = `Explorer read ${result.filesRead.length} files but extracted 0 artifacts. ` +
+        `This is a hard failure. Every file read MUST produce artifacts. ` +
+        `Files read: ${result.filesRead.slice(0, 5).join(', ')}${result.filesRead.length > 5 ? '...' : ''}`;
+      console.error(`[AGENT:explorer] VALIDATION FAILURE: ${result.filesRead.length} files read, 0 artifacts produced`);
+    }
+
+    // HARD VALIDATION: Detect and reject planning-speak responses
+    // Responses that are just "I'll...", "Let me...", "Now I will..." are not actual work
+    if (result.success && result.response) {
+      const planningPatterns = [
+        /^I('ll| will) (analyze|explore|investigate|look|start|begin|check|examine)/i,
+        /^Let me (start|begin|first|analyze|explore|look|check)/i,
+        /^Now (let me|I('ll| will))/i,
+        /^First,? (I('ll| will)|let me)/i,
+      ];
+      const responseStart = result.response.trim().slice(0, 200);
+      const isPlanningSpeak = planningPatterns.some(p => p.test(responseStart));
+
+      // If the entire response is planning speak with no substantive content, fail
+      if (isPlanningSpeak && result.response.length < 500 && !result.response.includes('```')) {
+        result.success = false;
+        result.terminationReason = 'no_action';
+        result.error = `Response is planning text, not actual work: "${responseStart.slice(0, 100)}..."`;
+        console.error(`[AGENT:${this.config.type}] VALIDATION FAILURE: Response is planning-speak, not actual output`);
+      }
+    }
 
     if (result.invalidatedPaths.length > 0) {
       this.internalHookQueue.enqueue({
@@ -476,7 +527,7 @@ export class Agent {
         break;
       }
 
-      const systemMessage = this.buildSystemMessage(workItem, cwd);
+      const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
 
       const allTools = [
         ...this.toolRegistry.getDefinitions(),
@@ -484,11 +535,15 @@ export class Agent {
       ];
       const allowedTools = this.filterAllowedTools(allTools);
 
-      const messages = this.buildMessages(systemMessage, workItem, globalContext, localContext);
-
-      // On the last iteration, withhold tools to force the LLM to synthesize a response
+      // On the last iteration, withhold tools and inject instruction to synthesize
       // This ensures the agent produces a meaningful final response before hitting iteration limit
       const isLastIteration = iteration === maxIterations - 1;
+      const lastIterationInstruction = isLastIteration
+        ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
+        : '';
+
+      const messages = this.buildMessages(system, taskContext + lastIterationInstruction, workItem, globalContext, localContext);
+
       const toolsForThisCall = allowedTools.length > 0 ? allowedTools : undefined;
       const toolChoiceForThisCall = isLastIteration && toolsForThisCall ? 'none' as const : undefined;
 
@@ -834,15 +889,18 @@ export class Agent {
     result.filesRead = Array.from(localReadFiles);
   }
 
-  private buildSystemMessage(workItem: WorkItem, cwd: string): string {
-    const base = this.config.systemPrompt ? `${this.config.systemPrompt}\n\n` : '';
-    const contextInfo = buildSystemMessage(
+  /**
+   * Build system prompt components for caching optimization.
+   * Static content goes in system prompt (cached), dynamic content goes in messages.
+   */
+  private buildSystemPromptComponents(workItem: WorkItem, cwd: string): { system: string; taskContext: string } {
+    const { system, taskContext } = buildSystemMessage(
       workItem.goal,
       workItem.objective,
-      undefined,
+      this.config.systemPrompt,
       cwd
     );
-    return `${base}${contextInfo}`.trim();
+    return { system, taskContext };
   }
 
   private filterAllowedTools(allTools: ToolDefinition[]): ToolDefinition[] {
@@ -854,15 +912,20 @@ export class Agent {
   /**
    * Build messages array for LLM call.
    * Merges global context (historical) with local context (this turn's work).
+   *
+   * For cache optimization:
+   * - systemPrompt: Static behavioral rules (goes in system parameter, cached)
+   * - taskContext: Dynamic goal/objective/workspace (first user message, not cached)
    */
   private buildMessages(
-    systemMessage: string,
+    systemPrompt: string,
+    taskContext: string,
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow
   ): Array<Record<string, unknown>> {
     const messages: Array<Record<string, unknown>> = [
-      { role: 'system', content: systemMessage },
+      { role: 'system', content: systemPrompt },
     ];
 
     // Merge global (historical) + local (this turn) items
@@ -889,19 +952,22 @@ export class Agent {
       (item) => item.type === 'message' && (item as any).role === 'user'
     );
 
+    // Task context (goal/objective/workspace) goes in first user message - NOT in system prompt
+    // This enables caching of the static system prompt across different tasks
     if (!hasUserInput) {
-      const objectiveWithContext = combinedSummary
-        ? `${combinedSummary}\n\n${workItem.objective}`
-        : workItem.objective;
+      const contextParts = [taskContext];
+      if (combinedSummary) contextParts.push(combinedSummary);
       messages.push({
         role: 'user',
-        content: objectiveWithContext,
+        content: contextParts.join('\n\n'),
       });
-    } else if (combinedSummary) {
-      // Inject context summary even if there's user input
+    } else {
+      // Inject task context + summary even if there's user input
+      const contextParts = [taskContext];
+      if (combinedSummary) contextParts.push(combinedSummary);
       messages.push({
         role: 'user',
-        content: combinedSummary,
+        content: contextParts.join('\n\n'),
       });
     }
 
@@ -1127,22 +1193,6 @@ export class Agent {
 
       // Normalize tool name to canonical form for case-insensitive lookup
       const canonicalName = canonicalNames.get(nameLower) ?? call.name;
-
-      // Intercept Read calls for files already in context
-      if (nameLower === 'read') {
-        const readPath = call.arguments.path ?? call.arguments.file_path;
-        if (typeof readPath === 'string' && localContext.hasReadFile(readPath)) {
-          const msg = `File "${readPath}" is already in your context. Look above for its contents instead of re-reading.`;
-          localContext.appendItem({
-            type: 'function_call_output',
-            callId: call.id,
-            output: msg,
-            isError: false,
-            timestamp: Date.now(),
-          });
-          continue;
-        }
-      }
 
       // Intercept PromptUser tool - signal pause for user input
       if (nameLower === 'promptuser') {
@@ -1595,18 +1645,20 @@ export class Agent {
     // Extract artifacts from structured output and add to parent's local context
     // Wrapped in try-catch to preserve sub-agent results even if merging fails
     const artifacts = subResult.structuredOutput?.artifacts;
+    // Declare outside try-catch for validation access
+    let extractedArtifacts: Array<{
+      sourcePath: string;
+      line?: number | null;
+      kind: string;
+      name: string;
+      signature?: string | null;
+      modifies?: string[] | null;
+      calls?: string[] | null;
+      insight?: string | null;
+      reduces?: string | null;
+    }> = [];
+
     try {
-      let extractedArtifacts: Array<{
-        sourcePath: string;
-        line?: number | null;
-        kind: string;
-        name: string;
-        signature?: string | null;
-        modifies?: string[] | null;
-        calls?: string[] | null;
-        insight?: string | null;
-        reduces?: string | null;
-      }> = [];
 
       // Try to extract artifacts from structured output first
       if (Array.isArray(artifacts) && artifacts.length > 0) {
@@ -1677,19 +1729,33 @@ export class Agent {
     // CRITICAL: Include actual artifact content, not just count. The calling agent
     // needs to see the rich semantic extractions (signatures, side effects, call graphs)
     // to act without re-reading files.
+    // HARD VALIDATION: Explorer must produce artifacts when reading files
+    // This catches cases where the validation in run() didn't fire (e.g., structured output issues)
+    const filesReadCount = (subResult.filesRead ?? []).length;
+    const artifactCount = extractedArtifacts.length;
+    let explorerValidationFailed = false;
+    let explorerValidationError = '';
+
+    if (agentConfig.type === 'explorer' && filesReadCount > 0 && artifactCount === 0) {
+      explorerValidationFailed = true;
+      explorerValidationError = `Explorer read ${filesReadCount} files but extracted 0 artifacts. ` +
+        `This is unacceptable - every file read MUST produce artifacts.`;
+      console.error(`[AGENT:explorer] SUB-AGENT VALIDATION FAILURE: ${filesReadCount} files, 0 artifacts`);
+    }
+
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
-      success: subResult.success,
+      success: explorerValidationFailed ? false : subResult.success,
       response: enhancedResponse,
       filesRead: subResult.filesRead ?? [], // Explicit list - do not re-read these
       artifacts: Array.isArray(artifacts) ? artifacts : [], // Full artifact content for downstream use
-      error: subResult.error,
+      error: explorerValidationFailed ? explorerValidationError : subResult.error,
       postProcessingError, // Non-null if artifact merging failed
       metrics: subResult.metrics,
     };
 
-    if (subResult.success || subResult.needsUserInput) {
+    if ((subResult.success && !explorerValidationFailed) || subResult.needsUserInput) {
       // Even on success, include any post-processing errors in the result
       if (postProcessingError) {
         (payload as Record<string, unknown>).warning = postProcessingError;
@@ -1750,8 +1816,6 @@ export class Agent {
     }
 
     for (const targetPath of targetPaths) {
-      if (localReadFiles.has(targetPath)) continue;
-
       try {
         metrics.toolCallsMade++;
         const result = await this.toolRegistry.execute('Read', { path: targetPath }, { cwd });
@@ -1782,12 +1846,8 @@ export class Agent {
    */
   private parseStructuredOutput(content: string): Record<string, unknown> | null {
     const parsed = coerceStructuredOutput(content);
-    if (!this.config.outputSchema) {
-      if (parsed && typeof parsed.action === 'string') {
-        return parsed;
-      }
-      return null;
-    }
+    // Return whatever was parsed - let callers decide what fields they need
+    // (artifacts, action, response, etc.)
     return parsed;
   }
 

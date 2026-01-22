@@ -501,12 +501,15 @@ export class Orchestrator {
       // BOUND CHECK: Iterations
       if (iteration > this.config.maxIterations) {
         this.log('warning', 'Max iterations exceeded', { iteration, completedWork: this.completedWork.size });
+        const stopResult = await this.callStopHook(context, 'max_iterations_exceeded', '', iteration, agentType);
+        if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+          continue; // Stop hook blocked - keep going
+        }
         emitGoalNotAchieved('max_iterations_exceeded');
-        await this.notifyStopHook(context, 'max_iterations_exceeded', '', iteration, agentType);
         const harvestedResponse = this.harvestCompletedWork(inProgress, 'max_iterations_exceeded');
         const hasContent = this.completedWork.size > 0;
         return this.createResult({
-          success: hasContent, // Partial success if we have any completed work
+          success: hasContent,
           response: harvestedResponse,
           terminationReason: 'max_iterations_exceeded',
           metrics: { iterations: iteration - 1, totalLlmCalls, totalToolCalls, durationMs: elapsed },
@@ -655,13 +658,20 @@ export class Orchestrator {
               startTime = Date.now(); // Reset duration timer on interruption
               continue;
             }
-            this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question });
+            this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question, questionType: result.userPrompt.questionType });
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'user_input_required', result.response ?? '', iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue; // Stop hook blocked (e.g., Ralph async mode) - keep going
+            }
+
             terminalResult = this.createResult({
               success: false,
               response: result.response ?? '',
               paused: true,
               userPrompt: result.userPrompt,
+              handoffSpec: result.handoffSpec, // Include handoffSpec if agent provided it
               terminationReason: 'user_input_required',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
@@ -669,8 +679,9 @@ export class Orchestrator {
           }
 
           // TERMINAL: Handoff requested
+          // Agent has already presented the spec to the user and received approval
           if (result.needsHandoff && result.handoffSpec) {
-            // Check for interruption - user message takes precedence over handoff approval
+            // Check for interruption - user message takes precedence over handoff
             if (this.config.checkInterruption?.()) {
               this.log('info', 'Interruption preempts handoff request', { iteration, workId });
               context.addAgentResultContext(result);
@@ -685,29 +696,23 @@ export class Orchestrator {
               startTime = Date.now(); // Reset duration timer on interruption
               continue;
             }
-            this.log('info', 'Handoff requested', { workId, specLength: result.handoffSpec.length });
+            this.log('info', 'Handoff requested - executing with spec', { workId, specLength: result.handoffSpec.length });
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'handoff_requested', result.response ?? '', iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue; // Stop hook blocked - keep going
+            }
 
-            // Create user prompt for handoff approval - the orchestrator-level gate
-            const specPreview = result.handoffSpec.length > 500
-              ? result.handoffSpec.slice(0, 500) + '... [truncated]'
-              : result.handoffSpec;
-
+            // Agent has already gotten user approval via PromptUser
+            // Create a terminal result with spec but WITHOUT another approval prompt
+            // The spec was already presented and approved by the user
             terminalResult = this.createResult({
               success: true,
-              response: '',
+              response: result.response ?? 'Planning complete. Ready to execute.',
               paused: true,
               handoffSpec: result.handoffSpec,
-              userPrompt: {
-                question: 'The agent has completed planning and is ready to handoff to execution mode. Proceed with implementation?',
-                options: [
-                  'Yes, handoff now',
-                  'No, continue planning',
-                ],
-                context: `## Handoff Spec Preview\n\n\`\`\`\n${specPreview}\n\`\`\`\n\n**Spec length:** ${result.handoffSpec.length} chars`,
-                multiSelect: false,
-                questionType: 'handoff_approval',
-              },
+              // No userPrompt - the agent already presented the spec and got approval
               terminationReason: 'handoff_requested',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
@@ -717,9 +722,13 @@ export class Orchestrator {
           // TERMINAL: Refusal
           if (result.isRefusal) {
             this.log('warning', 'Agent refused', { workId, response: result.response });
-            emitGoalNotAchieved('refusal', 1);
-            await this.notifyStopHook(context, 'refusal', result.response, iteration, agentType);
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'refusal', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved('refusal', 1);
             terminalResult = this.createResult({
               success: false,
               response: result.response,
@@ -734,6 +743,11 @@ export class Orchestrator {
           if (result.terminationReason === 'user_stopped') {
             this.log('info', 'User stopped execution', { workId });
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'user_stopped', result.response || '', iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
             terminalResult = this.createResult({
               success: false,
               response: result.response || 'Execution stopped by user.',
@@ -743,62 +757,148 @@ export class Orchestrator {
             continue;
           }
 
-          // CONTINUABLE ERRORS: no_action, invalid_action - pass to stop hook with actual reason
-          // These are recoverable formatting issues where Ralph Loop can retry
-          if (result.terminationReason === 'no_action' || result.terminationReason === 'invalid_action') {
-            this.log('warning', `Agent ${result.terminationReason}`, { workId, error: result.error });
+          // CONTINUABLE ERRORS: no_action, invalid_action, stagnation - pass to stop hook with actual reason
+          // These are recoverable issues where Ralph Loop can retry with hints
+          const isContinuableError = result.terminationReason === 'no_action' ||
+                                     result.terminationReason === 'invalid_action' ||
+                                     result.terminationReason === 'stagnation:tool_repeat';
+          if (isContinuableError) {
+            const reason = result.terminationReason!; // Safe: just checked above
+            this.log('warning', `Agent ${reason}`, { workId, error: result.error });
             context.addAgentResultContext(result);
 
             // Check stop hook - Ralph Loop can continue on these
             const stopContext = {
               workId,
               response: result.response,
-              terminationReason: result.terminationReason,
+              terminationReason: reason,
               iteration,
               agentType,
               sessionKey: context.sessionKey,
             };
 
             if (this.config.stopHook) {
-              const stopResult = await this.config.stopHook(stopContext);
-              if (stopResult.decision === 'block' && stopResult.reason) {
-                // Re-inject prompt and continue the loop
-                this.log('info', 'Stop hook blocked termination on no_action, re-injecting prompt', {
-                  iteration,
-                  promptPreview: stopResult.reason.slice(0, 100),
-                });
+              try {
+                const stopResult = await this.config.stopHook(stopContext);
+                if (stopResult.decision === 'block' && stopResult.reason) {
+                  // Re-inject prompt and continue the loop
+                  this.log('info', `Stop hook blocked termination on ${reason}, re-injecting prompt`, {
+                    iteration,
+                    promptPreview: stopResult.reason.slice(0, 100),
+                  });
 
-                if (stopResult.systemMessage) {
-                  context.addMessage('system', stopResult.systemMessage);
+                  // Emit progress event so TUI knows loop is continuing
+                  this.emit(createEvent('agent_progress', {
+                    kind: 'work',
+                    message: stopResult.systemMessage || `Stop hook continuing on ${reason} (iteration ${iteration})`,
+                    requestId: this.requestId,
+                  }));
+
+                  if (stopResult.systemMessage) {
+                    context.addMessage('system', stopResult.systemMessage);
+                  }
+
+                  const newItem = this.createWorkItem(stopResult.reason, agentType);
+                  this.enqueue(newItem);
+                  this.completedWork.delete(this.initialWorkId);
+                  this.initialWorkId = newItem.workId;
+                  inProgress.delete(workId);
+                  continue;
                 }
-
-                const newItem = this.createWorkItem(stopResult.reason, agentType);
-                this.enqueue(newItem);
-                this.completedWork.delete(this.initialWorkId);
-                this.initialWorkId = newItem.workId;
-                inProgress.delete(workId);
-                continue;
+              } catch (err) {
+                // Stop hook error - log and fall through to termination
+                this.log('error', `Stop hook threw error on ${reason}`, {
+                  error: err instanceof Error ? err.message : String(err),
+                  iteration,
+                });
               }
             }
 
-            // No stop hook or hook allowed termination
-            emitGoalNotAchieved(result.error || result.terminationReason, 1);
+            // No stop hook or hook allowed termination - map to appropriate orchestrator reason
+            const orchReason = reason === 'stagnation:tool_repeat' ? 'agent_error' : reason;
+            emitGoalNotAchieved(result.error || reason, 1);
             terminalResult = this.createResult({
               success: false,
               response: result.response,
-              error: result.error,
+              error: result.error || reason,
+              terminationReason: orchReason as TerminationReason,
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // AGENT BOUNDS EXCEEDED: Map agent-level bounds to orchestrator-level reasons
+          if (result.terminationReason === 'iterations_exhausted' ||
+              result.terminationReason === 'bounds:tool_calls' ||
+              result.terminationReason === 'bounds:duration') {
+            const orchReason = result.terminationReason === 'iterations_exhausted' ? 'max_iterations_exceeded'
+              : result.terminationReason === 'bounds:tool_calls' ? 'max_tool_calls_exceeded'
+              : 'max_duration_exceeded';
+            this.log('warning', `Agent bounds exceeded: ${result.terminationReason}`, { workId });
+            context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, orchReason, result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            terminalResult = this.createResult({
+              success: !!result.response,
+              response: result.response || `Agent terminated: ${result.terminationReason}`,
+              terminationReason: orchReason,
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // TERMINAL: rate_limit, circuit_open - transient errors that must stop
+          if (result.terminationReason === 'rate_limit' || result.terminationReason === 'circuit_open') {
+            this.log('warning', `Agent ${result.terminationReason}`, { workId });
+            context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, result.terminationReason, result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response || `Execution stopped: ${result.terminationReason}`,
+              error: result.terminationReason,
               terminationReason: result.terminationReason,
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
             });
             continue;
           }
 
-          // TERMINAL: Hard error
-          if (result.error && !result.success && !actionIsContinue) {
-            this.log('error', 'Agent error', { workId, error: result.error });
-            emitGoalNotAchieved(result.error, 1);
-            await this.notifyStopHook(context, 'agent_error', result.response, iteration, agentType);
+          // TERMINAL: exception - agent caught an unexpected error
+          if (result.terminationReason === 'exception') {
+            this.log('error', 'Agent exception', { workId, error: result.error });
             context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'agent_error', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved(result.error || 'exception', 1);
+            terminalResult = this.createResult({
+              success: false,
+              response: result.response,
+              error: result.error || 'Agent encountered an unexpected exception',
+              terminationReason: 'agent_error',
+              metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+            });
+            continue;
+          }
+
+          // TERMINAL: Hard error (catch-all for error + !success cases)
+          if (result.error && !result.success && !actionIsContinue) {
+            this.log('error', 'Agent error', { workId, error: result.error, terminationReason: result.terminationReason });
+            context.addAgentResultContext(result);
+            const stopResult = await this.callStopHook(context, 'agent_error', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved(result.error, 1);
             terminalResult = this.createResult({
               success: false,
               response: result.response,
@@ -812,14 +912,17 @@ export class Orchestrator {
           // BOUND CHECK: Total tool calls
           if (totalToolCalls >= this.config.maxToolCalls) {
             this.log('warning', 'Max tool calls exceeded', { totalToolCalls, completedWork: this.completedWork.size });
-            emitGoalNotAchieved('max_tool_calls_exceeded');
-            await this.notifyStopHook(context, 'max_tool_calls_exceeded', result.response, iteration, agentType);
             context.addAgentResultContext(result);
-            // Use result.response if available, otherwise harvest completed work
+            const stopResult = await this.callStopHook(context, 'max_tool_calls_exceeded', result.response, iteration, agentType);
+            if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
+              inProgress.delete(workId);
+              continue;
+            }
+            emitGoalNotAchieved('max_tool_calls_exceeded');
             const response = result.response || this.harvestCompletedWork(inProgress, 'max_tool_calls_exceeded');
             const hasContent = !!result.response || this.completedWork.size > 0;
             terminalResult = this.createResult({
-              success: hasContent, // Partial success if we have any content
+              success: hasContent,
               response,
               terminationReason: 'max_tool_calls_exceeded',
               metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
@@ -875,38 +978,53 @@ export class Orchestrator {
           const stopContext = {
             workId: this.initialWorkId,
             response: initialWorkResponse,
-            terminationReason: 'goal_state_reached',
+            terminationReason: 'goal_state_reached' as TerminationReason,
             iteration,
             agentType,
             sessionKey: context.sessionKey,
           };
 
-          const stopResult = await this.config.stopHook(stopContext);
+          try {
+            const stopResult = await this.config.stopHook(stopContext);
 
-          if (stopResult.decision === 'block' && stopResult.reason) {
-            // Re-inject prompt and continue the loop
-            this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
-              iteration,
-              promptPreview: stopResult.reason.slice(0, 100),
-            });
+            if (stopResult.decision === 'block' && stopResult.reason) {
+              // Re-inject prompt and continue the loop
+              this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
+                iteration,
+                promptPreview: stopResult.reason.slice(0, 100),
+              });
 
-            // Add system message if provided
-            if (stopResult.systemMessage) {
-              context.addMessage('system', stopResult.systemMessage);
+              // Emit progress event so TUI knows loop is continuing
+              this.emit(createEvent('agent_progress', {
+                kind: 'work',
+                message: stopResult.systemMessage || `Stop hook continuing (iteration ${iteration})`,
+                requestId: this.requestId,
+              }));
+
+              // Add system message if provided
+              if (stopResult.systemMessage) {
+                context.addMessage('system', stopResult.systemMessage);
+              }
+
+              // Create new work item with the injected prompt
+              const newItem = this.createWorkItem(stopResult.reason, agentType);
+              this.enqueue(newItem);
+
+              // Reset completion tracking
+              initialWorkCompleted = false;
+              initialWorkResponse = '';
+              this.completedWork.delete(this.initialWorkId);
+              this.initialWorkId = newItem.workId;
+
+              // Continue the loop
+              continue;
             }
-
-            // Create new work item with the injected prompt
-            const newItem = this.createWorkItem(stopResult.reason, agentType);
-            this.enqueue(newItem);
-
-            // Reset completion tracking
-            initialWorkCompleted = false;
-            initialWorkResponse = '';
-            this.completedWork.delete(this.initialWorkId);
-            this.initialWorkId = newItem.workId;
-
-            // Continue the loop
-            continue;
+          } catch (err) {
+            // Stop hook error should NOT crash the orchestrator - log and continue to termination
+            this.log('error', 'Stop hook threw error on goal_state_reached', {
+              error: err instanceof Error ? err.message : String(err),
+              iteration,
+            });
           }
         }
 
@@ -1101,20 +1219,20 @@ export class Orchestrator {
   }
 
   /**
-   * Notify stop hook of termination (for non-goal cases).
-   * Fire-and-forget - result is ignored for error terminations.
+   * Call stop hook and return its decision.
+   * Returns null if no stop hook configured or if hook throws.
    */
-  private async notifyStopHook(
+  private async callStopHook(
     context: ContextWindow,
     terminationReason: TerminationReason,
     response: string,
     iteration: number,
     agentType: string
-  ): Promise<void> {
-    if (!this.config.stopHook) return;
+  ): Promise<import('agent').StopHookResult | null> {
+    if (!this.config.stopHook) return null;
 
     try {
-      await this.config.stopHook({
+      return await this.config.stopHook({
         workId: this.initialWorkId,
         response,
         terminationReason,
@@ -1123,8 +1241,40 @@ export class Orchestrator {
         sessionKey: context.sessionKey,
       });
     } catch (err) {
-      this.log('warning', 'Stop hook error (non-blocking)', { error: String(err) });
+      this.log('warning', 'Stop hook error', { error: String(err) });
+      return null;
     }
+  }
+
+  /**
+   * Handle stop hook "block" decision by re-injecting prompt and continuing.
+   * Returns true if loop should continue, false if termination should proceed.
+   */
+  private handleStopHookBlock(
+    stopResult: import('agent').StopHookResult | null,
+    context: ContextWindow,
+    agentType: string,
+    iteration: number
+  ): boolean {
+    if (!stopResult || stopResult.decision !== 'block' || !stopResult.reason) {
+      return false;
+    }
+
+    this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
+      iteration,
+      promptPreview: stopResult.reason.slice(0, 100),
+    });
+
+    if (stopResult.systemMessage) {
+      context.addMessage('system', stopResult.systemMessage);
+    }
+
+    const newItem = this.createWorkItem(stopResult.reason, agentType);
+    this.enqueue(newItem);
+    this.completedWork.delete(this.initialWorkId);
+    this.initialWorkId = newItem.workId;
+
+    return true;
   }
 
   /**

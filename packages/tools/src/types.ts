@@ -20,6 +20,8 @@ export interface ToolExecutionContext {
   workdirOverride?: string;
   /** Tool policy restrictions */
   allowedTools?: Set<string>;
+  /** Dangerous mode - bypasses safety checks */
+  dangerousMode?: boolean;
 }
 
 /**
@@ -159,6 +161,8 @@ export interface ToolRegistryConfig {
   maxOutputLength: number;
   /** Cache configuration */
   cache?: Partial<CacheConfig>;
+  /** Dangerous mode - bypasses all safety checks */
+  dangerousMode?: boolean;
 }
 
 /**

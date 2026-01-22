@@ -143,16 +143,27 @@ async function isDaemonRunning(): Promise<boolean> {
 }
 
 /**
+ * Build daemon args from launcher argv.
+ * Note: --dangerous is no longer forwarded to daemon - it's now per-session.
+ */
+function buildDaemonArgs(): string[] {
+  const daemonArgs: string[] = [];
+  // --dangerous is now handled per-session by the TUI, not the daemon
+  return daemonArgs;
+}
+
+/**
  * Start the daemon in background
  */
 async function startDaemon(): Promise<Subprocess> {
   const daemonPath = getDaemonPath();
   const configPath = resolveConfigPath();
+  const daemonArgs = buildDaemonArgs();
 
   console.log('[rex] Starting daemon...');
 
   const daemon = spawn({
-    cmd: ['bun', 'run', daemonPath],
+    cmd: ['bun', 'run', daemonPath, ...daemonArgs],
     env: {
       ...process.env,
       ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
@@ -241,10 +252,11 @@ async function main(): Promise<void> {
   if (process.argv.includes('--daemon-only')) {
     const daemonPath = getDaemonPath();
     const configPath = resolveConfigPath();
+    const daemonArgs = buildDaemonArgs();
 
     // Run daemon in foreground
     const daemon = spawn({
-      cmd: ['bun', 'run', daemonPath],
+      cmd: ['bun', 'run', daemonPath, ...daemonArgs],
       env: {
         ...process.env,
         ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
@@ -261,7 +273,14 @@ async function main(): Promise<void> {
   }
 
   // Check if daemon is already running
-  const running = await isDaemonRunning();
+  let running = await isDaemonRunning();
+
+  // Note: --dangerous is now per-session, NOT global.
+  // Starting a TUI with --dangerous enables dangerous mode for that session only.
+  // It does NOT require restarting the daemon or affect other sessions.
+  if (process.argv.includes('--dangerous')) {
+    console.log('[rex] --dangerous mode: Will enable for this session only');
+  }
 
   if (!running) {
     try {

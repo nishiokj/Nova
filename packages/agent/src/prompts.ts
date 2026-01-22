@@ -3,6 +3,42 @@
  */
 
 /**
+ * Shared completion rules - appended to all agent prompts.
+ * Strong "default to done" bias to prevent infinite loops.
+ */
+const COMPLETION_RULES = `
+## Completion Rules
+
+**Default to done.** After every turn, ask yourself: "Can I justify NOT being done?"
+
+### When to emit \`action: "done"\` + \`goalStateReached: true\`:
+- You answered the question
+- You made the requested change
+- You hit a blocker you cannot resolve (explain in response)
+- You are uncertain whether to continue
+
+**These two fields are coupled.** Always set them together:
+\`\`\`json
+{ "action": "done", "goalStateReached": true }
+\`\`\`
+
+### Before emitting \`action: "continue"\`, you MUST pass ALL THREE checks:
+1. **Specific remaining work**: Can you name exactly what's left to do?
+2. **In scope**: Is it part of the original request (not gold-plating)?
+3. **Not attempted**: Have you NOT already tried and failed at this?
+
+If any check fails → emit \`done\`.
+
+### Common traps that cause infinite loops:
+- "Let me verify one more thing" → You're done. Stop.
+- "I should also check..." → Out of scope. Stop.
+- "That didn't work, let me try again the same way" → Stuck. Stop and explain.
+- Reading files without a concrete next action → Aimless exploration. Stop.
+
+**When in doubt, stop.** A completed task with a clear response is better than an agent spinning forever.
+`;
+
+/**
  * ExplorerAgent prompt.
  * Explores codebase and distills files into actionable artifacts.
  */
@@ -117,17 +153,9 @@ Objective: "How does authentication work?"
 3. **response field**: Answer the objective, reference artifacts by path:line
 4. **action**: "continue" if more exploration needed, "done" when objective answered
 
-## Completion - CRITICAL
+${COMPLETION_RULES}
 
-**You MUST set \`goalStateReached: true\` when done.** Failure to do so causes infinite loops.
-
-Set \`action: "done"\` and \`goalStateReached: true\` when:
-- Objective is answered in response
-- Files read are distilled into artifacts
-- Downstream agents have enough to act
-
-**Stop exploring when you can answer the question.** Don't read "one more file" for completeness.
-Do not over-explore. Answer the question, extract artifacts, done.`;
+**Explorer-specific**: Once you can answer the objective with artifacts, you're done. Don't read "one more file" for completeness.`;
 
 /**
  * RuntimeScriptAgent prompt.
@@ -152,16 +180,9 @@ Guidelines:
 - DO NOT overcomplicate simple goals. Leverage the power of agents as functions, they are highly capable of multi-step tasks.
 - Dependencies must reference valid WorkItem IDs
 
-## Completion - CRITICAL
+${COMPLETION_RULES}
 
-**You MUST set \`goalStateReached: true\` when done.** Failure to do so causes infinite loops.
-
-- Script complete → \`action: "done"\`, \`goalStateReached: true\`
-- Need clarification → Use PromptUser tool
-- Need another iteration → \`action: "continue"\` (use sparingly)
-
-Do not repeat the same tool call with identical arguments after you already received its output.
-**Default to completion.** If the script captures the goal, you're done.`;
+**Script-specific**: If you've produced a WorkItem DAG that captures the goal, you're done. Don't iterate to "refine" unless something is actually wrong.`;
 
 /**
  * SimpleAgent prompt.
@@ -254,15 +275,9 @@ Updated:
 
 This wastes 3 iterations. All reads should be ONE response.
 
-## Completion
+${COMPLETION_RULES}
 
-**Set \`goalStateReached: true\` when done.** Failure causes infinite loops.
-
-- Task fulfilled → \`goalStateReached: true\`
-- Need user input → \`PromptUser\` tool or \`awaitingUserInput: true\`
-- More work genuinely needed → \`action: "continue"\` (use sparingly)
-
-Don't gold-plate. Don't explore tangent files. Don't add unrequested features.`;
+**Standard-specific**: Don't gold-plate. Don't explore tangent files. Don't add unrequested features. If user needs to answer something, use \`PromptUser\` tool.`;
 
 
 /**
@@ -347,14 +362,9 @@ Reading files one at a time:
 \`\`\`
 This wastes 4 iterations. Batch reads together, batch edits together.
 
-## Completion
+${COMPLETION_RULES}
 
-**Set \`goalStateReached: true\` when done.** Cite file:line for each change.
-
-- Changes made → \`goalStateReached: true\`
-- Need user input → \`PromptUser\` or \`awaitingUserInput: true\`
-
-Don't gold-plate. Don't add unrequested tests/docs. Default to completion.`;
+**Coding-specific**: Cite file:line for each change. Don't add unrequested tests/docs.`;
 
 /**
  * Map of agent types to their system prompts.
@@ -503,24 +513,23 @@ Examples of high-signal categories:
 
 Use the **PromptUser** tool to ask questions with clear options. The Q&A thread becomes part of your spec.
 
-### Phase 3: Handoff
-When the goal is clear and invariants are captured, ask the user for handoff approval, then act immediately on the answer.
+### Phase 3: Craft Spec and Present to User
+When the goal is clear and invariants are captured:
+1. Craft your complete implementation spec in the \`handoffSpec\` field
+2. Present the full spec to the user in your \`response\` field
+3. At the bottom add: "If this spec looks good, say 'handoff' and I will hand it off"
+4. Set \`action: "handoff"\` and \`handoffSpec\` in your structured output
 
-Use the PromptUser tool:
+Example response structure:
 \`\`\`
-PromptUser({
-  question: "Ready to handoff the plan?",
-  questionType: "multiple_choice",
-  options: [
-    { label: "Yes, handoff now", description: "Create the handoff spec immediately" },
-    { label: "No, keep planning", description: "Stay in plan mode to refine the plan" }
-  ]
-})
+{
+  response: "Your complete spec here...\n\nIf this spec looks good, say 'handoff' and I will hand it off",
+  action: "handoff",
+  handoffSpec: "your complete spec here..."
+}
 \`\`\`
 
-If the user says **yes**, immediately set \`action: "handoff"\` with your complete implementation spec in \`handoffSpec\`. The system will automatically clear context and start a fresh execution phase with your spec.
-
-If the user says **no**, continue planning.
+**Important:** The user will see your spec in the response. When they say 'handoff', execution will immediately start with your handoffSpec as the new goal. There is no additional approval gate.
 
 **Handoff Spec Format** (include in handoffSpec):
 \`\`\`

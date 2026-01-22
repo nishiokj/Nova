@@ -254,6 +254,13 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
         description: 'Z.AI coding model with interleaved thinking',
         reasoning: ['on', 'off'],
       },
+      {  
+        id: 'glm-4.7-flashx',
+        name: 'GLM-4.7-FlashX',
+        context_window: 128_000,
+        description: 'Fast Z.AI coding model with interleaved thinking',
+        reasoning: ['on', 'off'],
+      },
     ],
     envVar: 'ZAI_CODER_API_KEY',
     testEndpoint: 'https://api.z.ai/api/coding/paas/v4/models',

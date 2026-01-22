@@ -246,6 +246,8 @@ class HarnessProviderKeyService implements ProviderKeyService {
       try {
         this.localProviders = new LocalProviderManager(graphdDbPath);
         this.logger.info('HarnessProviderKeyService initialized with GraphD', { dbPath: graphdDbPath });
+        // Export stored provider keys to process.env so child processes (skill scripts) can access them
+        this.localProviders.exportToEnv();
       } catch (err) {
         this.logger.warning('Failed to initialize LocalProviderManager', { error: String(err) });
       }
@@ -352,6 +354,7 @@ export class AgentHarness {
       {
         bashTimeoutMs: config.tools.bashTimeoutMs,
         maxOutputLength: config.tools.maxOutputLength,
+        dangerousMode: config.dangerousMode,
       },
       workingDir
     );
@@ -570,7 +573,7 @@ export class AgentHarness {
   /**
    * Get or create a SessionStore for the session.
    */
-  private getOrCreateSessionStore(sessionKey: string): SessionStore {
+  private getOrCreateSessionStore(sessionKey: string, dangerousMode = false, workingDir?: string): SessionStore {
     const existing = this.sessionStores.get(sessionKey);
     const now = Date.now();
     if (existing) {
@@ -584,6 +587,8 @@ export class AgentHarness {
       graphd: this.graphd,
       isGraphDReady: () => this.isGraphDReady(),
       logger: this.logger,
+      dangerousMode,
+      workingDir: workingDir ?? this.config.tools.workingDir,
     });
     this.sessionStores.set(sessionKey, { store, lastAccessMs: now });
     return store;
@@ -717,6 +722,7 @@ export class AgentHarness {
     if (isResume) {
       // This is a resume - inputText is the answer to a pending question
       const normalizedAnswer = inputText.trim().toLowerCase();
+      const isSpecReview = paused.userPromptType === 'spec_review';
       const isHandoffApproval = paused.userPromptType === 'handoff_approval';
       const isPlanModeExit = paused.userPromptType === 'plan_mode_exit';
 
@@ -727,7 +733,25 @@ export class AgentHarness {
         normalizedAnswer === 'true'
       );
 
-      if (isHandoffApproval && paused.handoffSpec && userApproved) {
+      const userHandoff = normalizedAnswer === 'handoff';
+
+      // Handle handoff from plan mode - user says "handoff" to approve spec
+      if (paused.handoffSpec && userHandoff) {
+        // User approved spec - clear context and execute with handoffSpec
+        this.logger.info('User approved spec review, executing with spec', {
+          sessionKey,
+          specLength: paused.handoffSpec.length,
+        });
+        contextWindow = store.clearContext();
+        store.clearPausedState();
+        goal = paused.handoffSpec;
+        effectiveAgentType = 'standard';
+        effectivePlanMode = false;
+        effectiveWorkingDir = workingDir ?? paused.workingDir;
+        clearContextForHandoff = true;
+      }
+      // Handle legacy handoff_approval (orchestrator-level approval)
+      else if (isHandoffApproval && paused.handoffSpec && userApproved) {
         // User approved handoff - clear context and execute with handoffSpec
         this.logger.info('User approved handoff, executing with spec', {
           sessionKey,
@@ -744,10 +768,10 @@ export class AgentHarness {
         // Normal resume or rejection - add answer to context and continue
         contextWindow.addMessage('user', inputText);
 
-        if (isHandoffApproval && !userApproved) {
+        if ((isSpecReview || isHandoffApproval) && !userApproved) {
           contextWindow.addMessage(
             'system',
-            'User rejected the handoff and wants you to continue planning. Revise your plan based on their feedback and ask for approval again when ready.'
+            'User rejected the plan. Revise based on their feedback and ask for approval again when ready.'
           );
         } else if (isPlanModeExit) {
           if (userApproved) {
@@ -1154,8 +1178,11 @@ export class AgentHarness {
   private createAgentHooks(sessionKey: string, requestId: string, emit?: (event: AgentEvent) => void): AgentHooks {
     const executor = this.hookExecutor;
     const workingDir = this.config.tools.workingDir;
-    const permissionChecker = this.permissionChecker;
     const logger = this.logger;
+
+    // Get the session store to use its per-session permission checker
+    const sessionStore = this.getOrCreateSessionStore(sessionKey);
+    const permissionChecker = sessionStore.getPermissionChecker();
 
     return {
       preToolUse: async (toolName: string, args: Record<string, unknown>): Promise<ToolHookResult> => {
@@ -1262,7 +1289,20 @@ export class AgentHarness {
   }
 
   /**
-   * Get the permission checker for external access (e.g., bridge gateway).
+   * Get the permission checker for a specific session.
+   * Each session has its own permission state including dangerous mode.
+   */
+  getSessionPermissionChecker(sessionKey: string): PermissionChecker | null {
+    const entry = this.sessionStores.get(sessionKey);
+    if (entry) {
+      return entry.store.getPermissionChecker();
+    }
+    return null;
+  }
+
+  /**
+   * @deprecated Use getSessionPermissionChecker(sessionKey) instead.
+   * Returns the global permission checker (legacy behavior).
    */
   getPermissionChecker(): PermissionChecker {
     return this.permissionChecker;
@@ -1351,7 +1391,7 @@ export class AgentHarness {
     profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls, paused: result.paused });
 
     // Handle handoff: store handoffSpec for approval in paused state
-    if (result.handoffSpec && store && result.userPrompt?.questionType === 'handoff_approval') {
+    if (result.handoffSpec && store) {
       this.logger.info('Handoff requested, pausing for user approval', {
         sessionKey: context.sessionKey,
         specLength: result.handoffSpec.length,
