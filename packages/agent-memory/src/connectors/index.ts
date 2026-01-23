@@ -44,3 +44,36 @@ export {
   getGitHubMapper,
   getGitHubEntityTypes,
 } from './github/index.js'
+
+// Gmail Connector
+export {
+  // Connector
+  GmailConnector,
+  createGmailConnector,
+  type GmailConnectorConfig,
+  // Schemas
+  GmailMessageSchema,
+  GmailMessageHeaderSchema,
+  GmailMessagePartSchema,
+  GmailMessageListSchema,
+  GmailThreadSchema,
+  GmailHistoryRecordSchema,
+  GmailHistoryResponseSchema,
+  GmailProfileSchema,
+  GmailNotificationSchema,
+  PubSubPushEnvelopeSchema,
+  type GmailMessage,
+  type GmailMessageHeader,
+  type GmailMessagePart,
+  type GmailMessageList,
+  type GmailThread,
+  type GmailHistoryRecord,
+  type GmailHistoryResponse,
+  type GmailProfile,
+  type GmailNotification,
+  type PubSubPushEnvelope,
+  // Mappers
+  gmailMappers,
+  getGmailMapper,
+  getGmailEntityTypes,
+} from './gmail/index.js'

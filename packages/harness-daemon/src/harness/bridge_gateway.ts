@@ -421,10 +421,16 @@ export class BridgeGateway {
       return;
     }
     // Check 'standard' agent type selection - this is the main/default that must be set
-    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
+    let activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
     if (!activeSelection?.model || !activeSelection?.provider) {
-      this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
-      return;
+      // Session may have been evicted after timeout - try to hydrate from DB before erroring
+      this.hydrateSessionModelSelections(sessionKey);
+      // Re-check after hydration attempt
+      activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
+      if (!activeSelection?.model || !activeSelection?.provider) {
+        this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
+        return;
+      }
     }
     if (!this.harness.hasApiKey(activeSelection.provider)) {
       this.sendEvent(connectionId, {

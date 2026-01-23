@@ -5,11 +5,11 @@
 import { describe, it, expect } from 'bun:test';
 import { Agent } from './agent.js';
 import type { AgentConfig } from './types.js';
-import { ContextWindow } from '../context/index.js';
-import { createWorkItem } from '../work/work-item.js';
-import type { LLMAdapter, LLMResponse } from '../llm/index.js';
-import type { ToolRegistry } from '../tools/registry.js';
-import { successResult } from '../types/tools.js';
+import { ContextWindow } from 'context';
+import { createWorkItem } from 'work';
+import type { LLMAdapter, LLMResponse } from 'llm';
+import type { ToolRegistry } from 'tools';
+import { successResult } from 'types';
 
 function createMockLLM(response: LLMResponse): LLMAdapter {
   return {

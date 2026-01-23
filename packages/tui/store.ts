@@ -141,6 +141,10 @@ export interface StoreSnapshot {
   // Permission prompt state
   activePermissionRequest: PermissionRequestData | null;
   permissionCursor: number;
+  // Context window state
+  contextInputTokens: number | null;
+  contextTotalWindowSize: number | null;
+  cachedInput: string | null;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -260,6 +264,11 @@ export class Store {
   private activePermissionRequest: PermissionRequestData | null = null;
   private permissionCursor = 0; // 0=Allow, 1=Always Allow, 2=Deny
 
+  // ─── Context Window ───
+  private contextInputTokens: number | null = null;
+  private contextTotalWindowSize: number | null = null;
+  private cachedInput: string | null = null;
+
   // ═══════════════════════════════════════════════════════════════════════════
   // CONSTRUCTOR
   // ═══════════════════════════════════════════════════════════════════════════
@@ -354,6 +363,10 @@ export class Store {
       // Permission prompt state
       activePermissionRequest: this.activePermissionRequest,
       permissionCursor: this.permissionCursor,
+      // Context window state
+      contextInputTokens: this.contextInputTokens,
+      contextTotalWindowSize: this.contextTotalWindowSize,
+      cachedInput: this.cachedInput,
     };
   }
 
@@ -954,6 +967,7 @@ export class Store {
       this.streamingText ? `${this.streamingText}${streamCursor}` : "",
       this.reasoningText, // Pass reasoning text for distinct display
       width,
+      this.streamingRequestId, // Pass streaming request ID for proper ordering
     );
 
     const normalizedLines = normalizeHistoryLines(lines, width);
@@ -1783,6 +1797,40 @@ export class Store {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // CONTEXT WINDOW METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Sets the context window size information.
+   * @param inputTokens - Number of input tokens in the current request
+   * @param totalWindowSize - Total context window size for the model
+   */
+  setContextWindowSize(inputTokens: number | null, totalWindowSize: number | null): void {
+    this.contextInputTokens = inputTokens;
+    this.contextTotalWindowSize = totalWindowSize;
+    this.emit();
+  }
+
+  /**
+   * Sets the cached input value.
+   * @param input - The cached input string, or null to clear
+   */
+  setCachedInput(input: string | null): void {
+    this.cachedInput = input;
+    this.emit();
+  }
+
+  /**
+   * Clears all context window state.
+   */
+  clearContextWindowState(): void {
+    this.contextInputTokens = null;
+    this.contextTotalWindowSize = null;
+    this.cachedInput = null;
+    this.emit();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // RESPONSE PANE METHODS
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2204,6 +2252,7 @@ function buildHistoryLines(
   streamingText: string,
   reasoningText: string,
   width: number,
+  streamingRequestId?: string | null,
 ): HistoryLine[] {
   const lines: HistoryLine[] = [];
   const safeWidth = Math.max(20, width);
@@ -2212,9 +2261,15 @@ function buildHistoryLines(
     const entryLinePrefix = entry.id;
     const blockStartIndex = lines.length;
 
+    // If this entry is the currently streaming message, use streamingText instead
+    // This ensures tool results appear AFTER the agent's response text
+    const entryText = (streamingRequestId && entry.requestId === streamingRequestId)
+      ? streamingText
+      : (entry.text || "");
+
     // Split markdown into separate lines for block elements
     const markdownLines = splitMarkdownIntoLines(
-      entry.text || "",
+      entryText,
       entry.role,
       entry.requestId,
       entryLinePrefix,
@@ -2341,7 +2396,10 @@ function buildHistoryLines(
     lines.push(renderLineToWidth(sepLine, safeWidth));
   }
 
-  if (streamingText) {
+  // Only render streaming as a separate section if there's no matching history entry
+  // (backwards compatibility fallback - normally streaming should be rendered via history)
+  const hasStreamingInHistory = streamingRequestId && history.some(e => e.requestId === streamingRequestId);
+  if (streamingText && !hasStreamingInHistory) {
     const streamLines = splitMarkdownIntoLines(
       streamingText,
       "agent",

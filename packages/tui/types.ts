@@ -52,7 +52,8 @@ export type BridgeEventType =
   | "error"
   | "provider_key_required"
   | "model_changed"
-  | "permission_request";
+  | "permission_request"
+  | "llm_call";
 
 export interface BridgeCommand {
   type: BridgeCommandType;
@@ -117,6 +118,16 @@ export interface StreamData {
   is_final?: boolean;
   /** True if this is reasoning/thinking content from the model */
   is_reasoning?: boolean;
+}
+
+export interface LlmCallData {
+  agentType?: string;
+  provider?: string;
+  model?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
 }
 
 export interface ResponseData {

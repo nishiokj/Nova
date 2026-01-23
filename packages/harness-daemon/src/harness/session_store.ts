@@ -1,6 +1,6 @@
 import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
-import type { ContextWindowSnapshot } from 'types';
+import type { ContextWindowSnapshot, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
 import { PermissionChecker } from './permissions.js';
 
@@ -92,6 +92,10 @@ export class SessionStore {
       return this.context;
     }
 
+    // First, recover paused state from GraphD metadata if it exists
+    this.recoverPausedState();
+
+    // Then, hydrate context from GraphD
     if (this.isGraphDReady() && this.graphd) {
       try {
         const result = this.graphd.contextGet(this.sessionKey) as {
@@ -118,6 +122,41 @@ export class SessionStore {
     this.context = new ContextWindow(this.sessionKey, this.maxTokens);
     this.logger.debug('Created new context', { sessionKey: this.sessionKey, maxTokens: this.maxTokens });
     return this.context;
+  }
+
+  /**
+   * Recover paused state from GraphD session metadata.
+   * Called during context hydration to restore session pause state.
+   */
+  private recoverPausedState(): void {
+    if (!this.isGraphDReady() || !this.graphd) {
+      return;
+    }
+
+    try {
+      const session = this.graphd.sessionGet(this.sessionKey);
+      const metadata = session?.metadata as Record<string, unknown> | undefined;
+      const pausedStateMetadata = metadata?.paused_state as Omit<PausedState, 'pausedAt'> | undefined;
+
+      if (pausedStateMetadata) {
+        this.pausedState = { ...pausedStateMetadata, pausedAt: Date.now() };
+        this.logger.debug('Recovered paused state from GraphD', {
+          sessionKey: this.sessionKey,
+          goal: this.pausedState.goal,
+          agentType: this.pausedState.agentType,
+        });
+      }
+
+      // Hydrate session state (model selections, permissions) from metadata
+      if (metadata) {
+        this.hydrateSessionState(metadata);
+      }
+    } catch (error) {
+      this.logger.warning('Failed to recover paused state from GraphD', {
+        sessionKey: this.sessionKey,
+        error: String(error),
+      });
+    }
   }
 
   getCachedContextSnapshot(): ContextWindowSnapshot | null {
@@ -158,6 +197,60 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Persist session state (model selections, permissions) to GraphD.
+   */
+  private persistSessionState(): void {
+    if (!this.isGraphDReady() || !this.graphd) return;
+
+    try {
+      const metadata: Record<string, unknown> = {
+        model_selections: Object.fromEntries(this.modelSelections),
+        permission_state: this.permissionChecker.getState(),
+      };
+      this.graphd.sessionUpdateMetadata(this.sessionKey, metadata);
+      this.logger.debug('Persisted session state to GraphD', {
+        sessionKey: this.sessionKey,
+        modelSelectionsCount: this.modelSelections.size,
+        permissionGrants: this.permissionChecker.getState().sessionGrants.length,
+        permissionDenials: this.permissionChecker.getState().sessionDenials.length,
+        dangerousMode: this.permissionChecker.getState().dangerousMode,
+      });
+    } catch (error) {
+      this.logger.warning('Failed to persist session state to GraphD', {
+        sessionKey: this.sessionKey,
+        error: String(error),
+      });
+    }
+  }
+
+  /**
+   * Hydrate session state from GraphD metadata.
+   */
+  private hydrateSessionState(metadata: Record<string, unknown>): void {
+    // Hydrate model selections
+    const modelSelections = metadata.model_selections as Record<string, ModelSelection> | undefined;
+    if (modelSelections) {
+      for (const [agentType, selection] of Object.entries(modelSelections)) {
+        if (selection?.provider && selection?.model) {
+          this.modelSelections.set(agentType, selection);
+        }
+      }
+    }
+
+    // Hydrate permission state
+    const permissionState = metadata.permission_state as SessionPermissionState | undefined;
+    if (permissionState) {
+      this.permissionChecker.hydrateState(permissionState);
+      this.logger.debug('Hydrated permission state from GraphD', {
+        sessionKey: this.sessionKey,
+        grants: permissionState.sessionGrants.length,
+        denials: permissionState.sessionDenials.length,
+        dangerousMode: permissionState.dangerousMode,
+      });
+    }
+  }
+
   touch(workingDir: string): void {
     if (!this.isGraphDReady() || !this.graphd) return;
     this.graphd.sessionTouch(this.sessionKey, workingDir);
@@ -165,6 +258,22 @@ export class SessionStore {
 
   setPausedState(state: Omit<PausedState, 'pausedAt'>): void {
     this.pausedState = { ...state, pausedAt: Date.now() };
+    // Persist paused state to GraphD session metadata for recovery
+    if (this.isGraphDReady() && this.graphd) {
+      try {
+        this.graphd.sessionUpdateMetadata(this.sessionKey, { paused_state: state });
+        this.logger.debug('Persisted paused state to GraphD', {
+          sessionKey: this.sessionKey,
+          goal: state.goal,
+          agentType: state.agentType,
+        });
+      } catch (error) {
+        this.logger.warning('Failed to persist paused state to GraphD', {
+          sessionKey: this.sessionKey,
+          error: String(error),
+        });
+      }
+    }
   }
 
   getPausedState(): PausedState | null {
@@ -177,6 +286,18 @@ export class SessionStore {
 
   clearPausedState(): void {
     this.pausedState = null;
+    // Clear paused state from GraphD session metadata
+    if (this.isGraphDReady() && this.graphd) {
+      try {
+        this.graphd.sessionUpdateMetadata(this.sessionKey, { paused_state: null });
+        this.logger.debug('Cleared paused state from GraphD', { sessionKey: this.sessionKey });
+      } catch (error) {
+        this.logger.warning('Failed to clear paused state from GraphD', {
+          sessionKey: this.sessionKey,
+          error: String(error),
+        });
+      }
+    }
   }
 
   close(): void {
@@ -191,6 +312,7 @@ export class SessionStore {
    */
   setModelSelection(agentType: string, selection: ModelSelection): void {
     this.modelSelections.set(agentType, selection);
+    this.persistSessionState();
   }
 
   /**

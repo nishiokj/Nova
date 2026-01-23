@@ -25,6 +25,7 @@ const VALID_EVENT_TYPES = new Set<BridgeEventType>([
   'provider_key_required',
   'model_changed',
   'permission_request',
+  'llm_call',
 ]);
 
 /**
