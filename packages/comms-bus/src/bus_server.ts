@@ -1,10 +1,14 @@
 /**
  * JSONL-over-TCP bus server for bridge communication.
+ *
+ * Supports direct EventBus subscription for run channels, eliminating
+ * the need for intermediate event forwarding layers.
  */
 
 import net, { type Socket, type Server } from 'net';
 import { profiler } from 'shared';
 import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
+import type { EventBusProtocol } from './event_bus.js';
 
 export type BusPublishHandler = (
   connectionId: string,
@@ -12,12 +16,23 @@ export type BusPublishHandler = (
   payload: unknown
 ) => void | Promise<void>;
 
+/**
+ * Event translator function type.
+ * Translates internal events to wire format. Returns null to filter out events.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type EventTranslator = (event: any) => unknown | null;
+
 export interface BusServerOptions {
   host: string;
   port: number;
   onPublish: BusPublishHandler;
   onConnect?: (connectionId: string) => void;
   onDisconnect?: (connectionId: string) => void;
+  /** Optional EventBus for direct subscription to run events */
+  eventBus?: EventBusProtocol;
+  /** Optional translator for EventBus events before sending over TCP */
+  eventTranslator?: EventTranslator;
 }
 
 interface ConnectionState {
@@ -36,6 +51,10 @@ export class BusServer {
   private readonly onPublish: BusPublishHandler;
   private readonly onConnect?: (connectionId: string) => void;
   private readonly onDisconnect?: (connectionId: string) => void;
+  private readonly eventBus: EventBusProtocol | null;
+  private readonly eventTranslator: EventTranslator | null;
+  /** Maps runId → unsubscribe function for EventBus subscriptions */
+  private runSubscriptions = new Map<string, () => void>();
 
   constructor(options: BusServerOptions) {
     this.host = options.host;
@@ -43,6 +62,49 @@ export class BusServer {
     this.onPublish = options.onPublish;
     this.onConnect = options.onConnect;
     this.onDisconnect = options.onDisconnect;
+    this.eventBus = options.eventBus ?? null;
+    this.eventTranslator = options.eventTranslator ?? null;
+  }
+
+  /**
+   * Subscribe to a run's events from EventBus and forward to TCP channel.
+   * Called when a client subscribes to a run:* channel.
+   */
+  private subscribeToRun(runId: string, channel: string): void {
+    if (!this.eventBus || this.runSubscriptions.has(runId)) return;
+
+    const unsubscribe = this.eventBus.subscribeRun(runId, (event) => {
+      // Translate event if translator provided, otherwise pass through
+      const wireEvent = this.eventTranslator ? this.eventTranslator(event) : event;
+      if (wireEvent !== null) {
+        this.publish(channel, wireEvent);
+      }
+    });
+
+    this.runSubscriptions.set(runId, unsubscribe);
+  }
+
+  /**
+   * Unsubscribe from a run's events.
+   */
+  private unsubscribeFromRun(runId: string): void {
+    const unsubscribe = this.runSubscriptions.get(runId);
+    if (unsubscribe) {
+      unsubscribe();
+      this.runSubscriptions.delete(runId);
+    }
+  }
+
+  /**
+   * Check if any connection is still subscribed to a channel.
+   */
+  private hasSubscribers(channel: string): boolean {
+    for (const connection of this.connections.values()) {
+      if (connection.subscriptions.has(channel)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async start(): Promise<{ host: string; port: number }> {
@@ -62,6 +124,12 @@ export class BusServer {
 
   async stop(): Promise<void> {
     if (!this.server) return;
+
+    // Clean up all EventBus subscriptions
+    for (const unsubscribe of this.runSubscriptions.values()) {
+      unsubscribe();
+    }
+    this.runSubscriptions.clear();
 
     for (const connection of this.connections.values()) {
       connection.socket.destroy();
@@ -131,6 +199,14 @@ export class BusServer {
   }
 
   private handleClose(connection: ConnectionState): void {
+    // Clean up run subscriptions that this connection was the last subscriber for
+    for (const channel of connection.subscriptions) {
+      const runMatch = channel.match(/^run:(.+)$/);
+      if (runMatch && !this.hasSubscribers(channel)) {
+        this.unsubscribeFromRun(runMatch[1]);
+      }
+    }
+
     this.connections.delete(connection.id);
     if (this.onDisconnect) {
       this.onDisconnect(connection.id);
@@ -172,14 +248,28 @@ export class BusServer {
 
     profiler.begin(`bus.server.dispatch:${message.type}`, 'bus');
     switch (message.type) {
-      case 'subscribe':
+      case 'subscribe': {
         connection.subscriptions.add(message.channel);
+
+        // If subscribing to a run channel, subscribe to EventBus for direct forwarding
+        const runMatch = message.channel.match(/^run:(.+)$/);
+        if (runMatch && this.eventBus) {
+          this.subscribeToRun(runMatch[1], message.channel);
+        }
         profiler.end(`bus.server.dispatch:${message.type}`, 'bus');
         return;
-      case 'unsubscribe':
+      }
+      case 'unsubscribe': {
         connection.subscriptions.delete(message.channel);
+
+        // If unsubscribing from a run channel and no other clients need it, unsubscribe from EventBus
+        const runMatch = message.channel.match(/^run:(.+)$/);
+        if (runMatch && !this.hasSubscribers(message.channel)) {
+          this.unsubscribeFromRun(runMatch[1]);
+        }
         profiler.end(`bus.server.dispatch:${message.type}`, 'bus');
         return;
+      }
       case 'publish':
         try {
           const result = this.onPublish(connection.id, message.channel, message.payload);

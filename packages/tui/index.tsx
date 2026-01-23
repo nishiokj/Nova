@@ -3155,15 +3155,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const isUserLine = line.role === "user";
             const isReasoning = line.role === "reasoning";
             const bgColor = isUserLine ? colors.userBg : undefined;
-            // User messages: 4 chars padding (2 left + 2 right)
+            // User messages: 2 chars padding (1 left + 1 right)
             // Agent messages: 2 chars padding (1 left + 1 right)
             const paddedText = isUserLine ? `  ${line.text}  ` : ` ${line.text} `;
             const remainingWidth = contentWidth - paddedText.length;
             const paddingText = remainingWidth > 0 ? " ".repeat(remainingWidth) : "";
             return (
-              <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
-                <StyledLine text={paddedText + paddingText} baseColor={roleColor(line.role)} italic={isReasoning} />
-              </Text>
+              <Box key={line.id ?? `hist-${index}`} marginLeft={isUserLine ? -HORIZONTAL_PADDING : 0} marginRight={isUserLine ? -HORIZONTAL_PADDING : 0}>
+                <Text width={isUserLine ? width : undefined} backgroundColor={bgColor}>
+                  <StyledLine text={paddedText + paddingText} baseColor={roleColor(line.role)} italic={isReasoning} />
+                </Text>
+              </Box>
             );
           })}
         </Box>

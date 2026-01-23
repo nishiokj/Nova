@@ -38,7 +38,6 @@ import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscribe
 import path from 'path';
 import fs from 'fs';
 import {
-  translateAgentEvent,
   createStatusEvent,
   createResponseEvent,
   createErrorEvent,
@@ -817,12 +816,9 @@ export class AgentHarness {
     const userMessagePersisted = clearContextForHandoff ? false : this.persistUserMessage(sessionKey, requestId, inputText);
     const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
-    const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
-      const bridgeEvent = translateAgentEvent(event);
-      if (bridgeEvent) {
-        eventQueue.push(bridgeEvent);
-      }
-    });
+    // NOTE: Agent events (agent_message, tool_call, etc.) are now forwarded directly
+    // from EventBus to BusServer via BusServer's direct subscription. The eventQueue
+    // is only used for harness-level events (status, response, error, user_prompt).
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
@@ -1111,7 +1107,6 @@ export class AgentHarness {
 
         queueMicrotask(() => {
           try {
-            unsubscribe();
             store.persistContext();
 
             // Flush subscriber events to make them visible to dashboard immediately

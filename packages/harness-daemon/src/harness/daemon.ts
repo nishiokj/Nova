@@ -7,6 +7,7 @@ import { createHarnessFromEnv, type AgentHarness } from './harness.js';
 import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
+import { translateAgentEvent } from './event_translator.js';
 
 export interface HarnessDaemonOptions {
   host?: string;
@@ -112,6 +113,9 @@ export class HarnessDaemon {
           this.gateway?.handlePublish(connectionId, channel, payload),
         onConnect: (connectionId) => this.handleConnect(connectionId),
         onDisconnect: (connectionId) => this.handleDisconnect(connectionId),
+        // Direct EventBus subscription for run events - eliminates intermediate forwarding layers
+        eventBus: this.harness.getEventBus(),
+        eventTranslator: translateAgentEvent,
       });
       this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService, this);
     }
