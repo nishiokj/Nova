@@ -1,8 +1,9 @@
 # agent.ts Refactor Implementation
 
-## Status: Phase 1 Complete ✅
+## Status: Phase 2 Complete ✅
 
-Completed: 2026-01-23
+- Phase 1 Completed: 2026-01-23
+- Phase 2 Completed: 2026-01-23
 
 ---
 
@@ -261,12 +262,132 @@ bun test packages/agent/src/agent.test.ts
 
 ---
 
-## Remaining Work (Phase 2+)
+---
 
-### Phase 2: Further Loop Restructuring (Optional)
-- Extract artifact extraction into helper
-- Extract response parsing into helper
-- Extract TUI emission logic into helper
+## Phase 2: Response Processing Extraction
+
+### 2.1 `extractArtifactsFromOutput()` (lines 343-389)
+
+Extracts and validates artifacts from structured output.
+
+```typescript
+private extractArtifactsFromOutput(
+  structuredOutput: Record<string, unknown> | null,
+  localContext: ContextWindow
+): number
+```
+
+**Responsibilities:**
+- Validates artifact array from structured output
+- Type-guards each artifact for required fields (sourcePath, kind, name)
+- Adds valid artifacts to localContext
+- Returns count of artifacts added
+
+**Before:** 39 lines of inline type guards and iteration
+**After:** Single function call
+
+---
+
+### 2.2 `parseIterationResponse()` (lines 394-413)
+
+Parses LLM response content into structured components.
+
+```typescript
+private parseIterationResponse(
+  content: string,
+  result: AgentResult
+): {
+  structuredOutput: Record<string, unknown> | null;
+  action: AgentAction | null;
+  responseText: string | undefined;
+}
+```
+
+**Responsibilities:**
+- Calls `parseStructuredOutput()` and sets `result.structuredOutput`
+- Extracts action via `extractStructuredAction()`
+- Extracts response text via `extractStructuredResponse()`
+- Combines pre-JSON text with parsed response via `combineResponseText()`
+- Returns all components for downstream use
+
+**Before:** 10 lines of sequential parsing calls
+**After:** Single function call with destructured result
+
+---
+
+### 2.3 `emitResponseForTUI()` (lines 418-437)
+
+Emits response content for TUI display.
+
+```typescript
+private emitResponseForTUI(
+  hasStructuredOutput: boolean,
+  responseText: string | undefined,
+  structuredOutput: Record<string, unknown> | null,
+  content: string,
+  workItemId: string
+): void
+```
+
+**Responsibilities:**
+- Skips emission for non-structured-output agents (they stream directly)
+- Emits clean parsed response if JSON parsing succeeded
+- Falls back to raw content if no JSON was parsed but text exists
+
+**Before:** 18 lines of conditional emission logic
+**After:** Single function call
+
+---
+
+## Updated Metrics (After Phase 2)
+
+| Metric | Original | Phase 1 | Phase 2 | Total Change |
+|--------|----------|---------|---------|--------------|
+| `executeLoop` lines | 454 | 329 | 261 | -193 (42%) |
+| Total `agent.ts` lines | 2027 | 2051 | 2084 | +57 |
+| Helper methods | 0 | 5 | 8 | +8 |
+
+**Note:** Total lines increased because helpers improve clarity and testability. The key win is `executeLoop` is now 42% smaller and highly readable.
+
+---
+
+## New executeLoop Structure (After Phase 2)
+
+```typescript
+for (let iteration = 0; iteration < maxIterations; iteration++) {
+  profiler.instant(...);
+
+  // 1. Pre-checks
+  if (this.hooks?.shouldStop?.()) { ... }
+  const boundHit = this.checkBounds(...);
+  if (boundHit) { ... }
+
+  // 2. Context management
+  await this.compactIfNeeded(...);
+
+  // 3. Build + execute LLM call
+  const { messages, tools, toolChoice } = this.buildIterationRequest(...);
+  const { response } = await this.streamWithResilience(...);
+  // ... metrics and reasoning handling
+
+  // 4. Parse response (NEW - Phase 2)
+  const { structuredOutput, action, responseText } = this.parseIterationResponse(content, result);
+  this.extractArtifactsFromOutput(structuredOutput, localContext);
+  this.addAssistantMessage(localContext, content, toolCalls);
+  this.emitResponseForTUI(hasStructuredOutput, responseText, structuredOutput, content, workItem.workId);
+
+  // 5. Process tools
+  if (toolCalls.length > 0) { ... }
+
+  // 6. Resolve action
+  const resolved = this.resolveAction(...);
+  switch (resolved) { ... }
+}
+```
+
+---
+
+## Remaining Work (Phase 3)
 
 ### Phase 3: Sub-agent Callbacks (Separate PR)
 - Add `SubAgentCallbacks` interface
@@ -279,4 +400,4 @@ bun test packages/agent/src/agent.test.ts
 
 - `packages/agent/src/agent.ts` - Main refactoring
 - `packages/agent/src/REFACTOR_SPEC.md` - Updated with actual results
-- `packages/agent/src/REFACTOR_IMPLEMENTATION.md` - This file (created)
+- `packages/agent/src/REFACTOR_IMPLEMENTATION.md` - This file

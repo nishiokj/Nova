@@ -15,7 +15,6 @@ import type {
   FetchChangesOptions,
   FetchPageResult,
   SourceItem,
-  EntityMapper,
 } from '../../sync/types.js'
 import type {
   Connector,
@@ -127,14 +126,13 @@ export interface BaseConnectorOptions {
  * - HTTP client with resilience patterns
  * - OAuth2 flow implementation
  * - Webhook signature verification
- * - Entity mapper registry
  * - Error logging
  *
  * Subclasses must implement:
  * - type, displayName, capabilities, authConfig properties
  * - listAccounts() for account discovery
  * - fetchPage() for data fetching
- * - Entity mappers and schemas
+ * - Source schemas (optional) for validation
  */
 export abstract class BaseConnector implements Connector {
   // ============ Required Properties ============
@@ -152,8 +150,6 @@ export abstract class BaseConnector implements Connector {
 
   /** HTTP client for API requests */
   protected readonly http: ResilientHttpClient
-  /** Entity mappers by source entity type */
-  protected readonly mappers: Map<string, EntityMapper> = new Map()
   /** Source schemas by entity type */
   protected readonly sourceSchemas: Map<string, z.ZodSchema> = new Map()
   /** Logger for errors and events */
@@ -465,20 +461,6 @@ export abstract class BaseConnector implements Connector {
    */
   getSourceSchema(entityType: string): z.ZodSchema | undefined {
     return this.sourceSchemas.get(entityType)
-  }
-
-  /**
-   * Get mapper for transforming source data to canonical entities.
-   */
-  getMapper(entityType: string): EntityMapper | undefined {
-    return this.mappers.get(entityType)
-  }
-
-  /**
-   * Register an entity mapper.
-   */
-  protected registerMapper(mapper: EntityMapper): void {
-    this.mappers.set(mapper.sourceEntityType, mapper)
   }
 
   /**

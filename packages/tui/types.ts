@@ -128,6 +128,7 @@ export interface LlmCallData {
   completionTokens?: number;
   totalTokens?: number;
   cachedTokens?: number;
+  maxWindowSize?: number;
 }
 
 export interface ResponseData {

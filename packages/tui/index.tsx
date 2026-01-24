@@ -1065,10 +1065,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     // Calculate input tokens (prompt + cached for context)
     const inputTokens = promptTokens + cachedTokens;
-    const totalWindowSize = totalTokens > 0 ? totalTokens : null;
+    const maxWindowSize = data.maxWindowSize ?? null;
 
     // Update store with context window info
-    store.setContextWindowSize(inputTokens, totalWindowSize);
+    store.setContextWindowSize(inputTokens, maxWindowSize);
   };
 
   const handleResponse = (data?: ResponseData) => {
@@ -2879,7 +2879,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const inputLayout = computeInputLayout(snapshot.inputText.split(""), snapshot.cursor, contentWidth, prompt);
   const inputVisibleLines = Math.min(DEFAULT_MAX_INPUT_LINES, inputLayout.lines.length);
   // inputBoxHeight = top line (1) + input lines + bottom line (1) + model indicator row (1) + context info row (0 or 1)
-  const hasContextInfo = snapshot.contextInputTokens !== null || snapshot.contextTotalWindowSize !== null || snapshot.cachedInput !== null;
+  const hasContextInfo = snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null;
   const inputBoxHeight = 1 + inputVisibleLines + 1 + 1 + (hasContextInfo ? 1 : 0);
   const autocompleteHeight = snapshot.autocomplete.active
     ? snapshot.autocomplete.suggestions.length + 1
@@ -3301,20 +3301,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           </Text>
 
           {/* Context window info row: tokens / total size, and cached input */}
-          {(snapshot.contextInputTokens !== null || snapshot.contextTotalWindowSize !== null || snapshot.cachedInput !== null) && (
+          {(snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null) && (
             <Text>
               {(() => {
                 const padding = 2;
                 let parts: string[] = [];
 
-                // Context window size: input / total
-                if (snapshot.contextInputTokens !== null && snapshot.contextTotalWindowSize !== null) {
-                  const percentage = Math.round((snapshot.contextInputTokens / snapshot.contextTotalWindowSize) * 100);
-                  parts.push(`Ctx: ${snapshot.contextInputTokens}/${snapshot.contextTotalWindowSize} (${percentage}%)`);
+                // Context window size: input / maxWindowSize
+                if (snapshot.contextInputTokens !== null && snapshot.contextMaxWindowSize !== null) {
+                  const percentage = Math.round((snapshot.contextInputTokens / snapshot.contextMaxWindowSize) * 100);
+                  parts.push(`Ctx: ${snapshot.contextInputTokens}/${snapshot.contextMaxWindowSize} (${percentage}%)`);
                 } else if (snapshot.contextInputTokens !== null) {
                   parts.push(`Ctx: ${snapshot.contextInputTokens} tokens`);
-                } else if (snapshot.contextTotalWindowSize !== null) {
-                  parts.push(`Ctx: /${snapshot.contextTotalWindowSize}`);
+                } else if (snapshot.contextMaxWindowSize !== null) {
+                  parts.push(`Ctx: /${snapshot.contextMaxWindowSize}`);
                 }
 
                 // Cached input (truncated to fit)

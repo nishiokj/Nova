@@ -20,11 +20,12 @@ import { MicroQueue, type Job, type JobResult } from './queue.js'
 import { Collector, type CollectorConfig } from './collector.js'
 import { Processor, type ProcessorConfig } from './processor.js'
 import type {
-  ConnectorAdapter,
   SyncEvent,
   SyncStats,
   BatchProcessResult,
 } from './types.js'
+import type { AuthProvider } from '../auth/provider.js'
+import type { Connector } from '../connector/sdk/types.js'
 
 // ============ Job Types ============
 
@@ -50,6 +51,8 @@ export interface SyncEngineConfig {
   collector?: CollectorConfig
   /** Configuration for the processor */
   processor?: ProcessorConfig
+  /** Auth provider for connector authentication */
+  authProvider?: AuthProvider
   /** Whether to automatically process after collecting (default: true) */
   autoProcess?: boolean
   /** Poll interval for the queue in ms (default: 100) */
@@ -58,9 +61,10 @@ export interface SyncEngineConfig {
   maxJobRuntime?: number
 }
 
-const DEFAULT_CONFIG: Required<SyncEngineConfig> = {
-  collector: {},
-  processor: {},
+const DEFAULT_CONFIG = {
+  collector: {} as CollectorConfig,
+  processor: {} as ProcessorConfig,
+  authProvider: undefined as AuthProvider | undefined,
   autoProcess: true,
   pollInterval: 100,
   maxJobRuntime: 300000,
@@ -91,12 +95,12 @@ const DEFAULT_CONFIG: Required<SyncEngineConfig> = {
  */
 export class SyncEngine {
   private sql: Sql
-  private config: Required<SyncEngineConfig>
+  private config: typeof DEFAULT_CONFIG
   private queue: MicroQueue
   private collector: Collector
   private processor: Processor
   private syncJobRepo: SyncJobRepository
-  private connectors: Map<ConnectorType, ConnectorAdapter> = new Map()
+  private connectors: Map<ConnectorType, Connector> = new Map()
   private eventHandlers: Array<(event: SyncEvent) => void> = []
   private isRunning = false
 
@@ -110,7 +114,11 @@ export class SyncEngine {
       maxJobRuntime: this.config.maxJobRuntime,
     })
 
-    this.collector = new Collector(sql, this.config.collector)
+    // Pass authProvider to collector config
+    this.collector = new Collector(sql, {
+      ...this.config.collector,
+      authProvider: this.config.authProvider,
+    })
     this.processor = new Processor(sql, this.config.processor)
     this.syncJobRepo = createSyncJobRepository({ sql })
 
@@ -125,10 +133,10 @@ export class SyncEngine {
   // ============ Connector Registration ============
 
   /**
-   * Register a connector adapter.
+   * Register a connector.
    * Must be called before starting the engine.
    */
-  registerConnector(connector: ConnectorAdapter): this {
+  registerConnector(connector: Connector): this {
     this.connectors.set(connector.type, connector)
     this.collector.registerConnector(connector)
     this.processor.registerConnector(connector)
@@ -145,7 +153,7 @@ export class SyncEngine {
   /**
    * Get a registered connector.
    */
-  getConnector(type: ConnectorType): ConnectorAdapter | undefined {
+  getConnector(type: ConnectorType): Connector | undefined {
     return this.connectors.get(type)
   }
 

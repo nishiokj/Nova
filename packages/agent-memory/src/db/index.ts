@@ -65,4 +65,11 @@ export {
   type QueueJob,
   type JobStatus,
   type EnqueueOptions,
+  // Sync Task
+  createSyncTaskRepository,
+  type SyncTaskRepository,
+  type SyncTask,
+  type SyncTaskInput,
+  type SyncType,
+  type TaskMode,
 } from './repositories/index.js'

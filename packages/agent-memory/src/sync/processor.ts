@@ -31,8 +31,8 @@ import type {
   ProcessResult,
   BatchProcessResult,
   SyncEvent,
-  ConnectorAdapter,
 } from './types.js'
+import type { Connector } from '../connector/sdk/types.js'
 import { ProcessError, ValidationError } from './types.js'
 
 // ============ Configuration ============
@@ -65,7 +65,7 @@ export class Processor {
   private entityRepo: CanonicalEntityRepository
   private mappingRepo: EntitySourceMappingRepository
   private syncJobRepo: SyncJobRepository
-  private connectors: Map<ConnectorType, ConnectorAdapter> = new Map()
+  private connectors: Map<ConnectorType, Connector> = new Map()
   private eventHandler?: (event: SyncEvent) => void
 
   constructor(sql: Sql, config: ProcessorConfig = {}) {
@@ -78,9 +78,9 @@ export class Processor {
   }
 
   /**
-   * Register a connector adapter for entity mapping.
+   * Register a connector for entity mapping.
    */
-  registerConnector(connector: ConnectorAdapter): this {
+  registerConnector(connector: Connector): this {
     this.connectors.set(connector.type, connector)
     return this
   }

@@ -190,6 +190,7 @@ export class BusServer {
       this.onConnect(connectionId);
     }
 
+    socket.setNoDelay(true);  // Disable Nagle algorithm for low-latency streaming
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => this.handleData(connection, chunk));
     socket.on('close', () => this.handleClose(connection));

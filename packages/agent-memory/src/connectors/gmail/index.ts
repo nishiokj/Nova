@@ -42,7 +42,6 @@ import {
   type GmailNotification,
   type PubSubPushEnvelope,
 } from './schemas.js'
-import { gmailMappers, getGmailMapper, getGmailEntityTypes } from './mappers.js'
 
 // ============ Constants ============
 
@@ -86,7 +85,7 @@ export class GmailConnector extends BaseConnector {
     supportsIncrementalSync: true,
     supportsWebhook: true,
     supportsWrite: false, // MVP is read-only
-    supportedEntityTypes: getGmailEntityTypes(),
+    supportedEntityTypes: ['message', 'thread', 'history'],
   }
 
   readonly authConfig: OAuth2Config
@@ -117,11 +116,6 @@ export class GmailConnector extends BaseConnector {
       ],
       clientId: config.clientId,
       clientSecret: config.clientSecret,
-    }
-
-    // Register mappers
-    for (const [entityType, mapper] of Object.entries(gmailMappers)) {
-      this.registerMapper(mapper)
     }
 
     // Register schemas
@@ -339,7 +333,7 @@ export class GmailConnector extends BaseConnector {
 
       // Extract base64-decoded message data
       const decodedData = Buffer.from(push.message.data, 'base64').toString('utf-8')
-      const webhookPayload = GmailWebhookPayloadSchema.parse(JSON.parse(decodedData))
+      const webhookPayload = GmailNotificationSchema.parse(JSON.parse(decodedData))
 
       // In production, you would fetch the actual changes via History API here
       // using the stored credentials for webhookPayload.emailAddress
@@ -357,6 +351,74 @@ export class GmailConnector extends BaseConnector {
       // Silently fail on webhook parse errors
       return items
     }
+  }
+
+  /**
+   * Subscribe to Gmail Pub/Sub push notifications.
+   */
+  async subscribe(
+    ctx: ConnectorContext,
+    callbackUrl: string,
+    options?: { entityTypes?: string[]; options?: Record<string, unknown> }
+  ): Promise<{ subscriptionId: string; expiresAt?: Date; resourceUri?: string }> {
+    const topicName = options?.options?.topicName
+    if (!topicName || typeof topicName !== 'string') {
+      throw new Error('Gmail subscribe requires options.topicName (Pub/Sub topic name)')
+    }
+
+    const labelIds = Array.isArray(options?.options?.labelIds)
+      ? options?.options?.labelIds
+      : this.labels
+
+    const response = await this.authenticatedRequest<{ historyId: string; expiration?: string }>(
+      ctx,
+      `${this.apiBaseUrl}/users/me/watch`,
+      {
+        method: 'POST',
+        body: {
+          topicName,
+          labelIds: labelIds.length > 0 ? labelIds : undefined,
+          labelFilterAction: labelIds.length > 0 ? 'include' : undefined,
+        },
+      }
+    )
+
+    if (!response.ok) {
+      throw new Error(`Failed to subscribe to Gmail watch: ${response.status}`)
+    }
+
+    const expirationMs = response.data?.expiration ? Number(response.data.expiration) : undefined
+
+    return {
+      subscriptionId: response.data?.historyId ?? 'unknown',
+      expiresAt: expirationMs ? new Date(expirationMs) : undefined,
+      resourceUri: callbackUrl,
+    }
+  }
+
+  /**
+   * Unsubscribe from Gmail Pub/Sub notifications.
+   */
+  async unsubscribe(ctx: ConnectorContext, subscriptionId: string): Promise<void> {
+    const response = await this.authenticatedRequest<Record<string, unknown>>(
+      ctx,
+      `${this.apiBaseUrl}/users/me/stop`,
+      { method: 'POST' }
+    )
+
+    if (!response.ok) {
+      throw new Error(`Failed to unsubscribe from Gmail watch: ${response.status}`)
+    }
+  }
+
+  /**
+   * Renew Gmail Pub/Sub subscription by re-registering watch.
+   */
+  async renewSubscription(
+    ctx: ConnectorContext,
+    subscriptionId: string
+  ): Promise<{ subscriptionId: string; expiresAt?: Date; resourceUri?: string }> {
+    return this.subscribe(ctx, '', { options: { topicName: subscriptionId } })
   }
 
   // ============ Private Fetch Methods ============

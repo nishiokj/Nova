@@ -313,6 +313,29 @@ export class AuthenticationError extends AgentMemoryError {
 }
 
 /**
+ * Auth error - simplified alias for AuthenticationError.
+ * Used by the auth provider for consistency.
+ */
+export class AuthError extends AuthenticationError {
+  constructor(
+    message: string,
+    options: {
+      code?: ErrorCode
+      retryable?: boolean
+      context?: ErrorContext
+      cause?: Error
+    } = {}
+  ) {
+    super(message, options.code ?? ErrorCode.AUTH_INVALID, {
+      retryable: options.retryable,
+      context: options.context,
+      cause: options.cause,
+    })
+    this.name = 'AuthError'
+  }
+}
+
+/**
  * Token expired error - special case of auth error.
  */
 export class TokenExpiredError extends AuthenticationError {

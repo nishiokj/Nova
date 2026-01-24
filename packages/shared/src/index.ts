@@ -45,3 +45,9 @@ export {
   traced,
   tracedAsync,
 } from './profiler.js';
+
+// Streaming JSON extractor for structured output streaming
+export {
+  StreamingJsonExtractor,
+  createStreamingJsonExtractor,
+} from './streaming_json.js';

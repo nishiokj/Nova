@@ -36,6 +36,7 @@ export class BusClient extends EventEmitter {
     });
 
     this.connected = true;
+    this.socket.setNoDelay(true);  // Disable Nagle algorithm for low-latency streaming
     this.socket.setEncoding('utf8');
     this.socket.on('data', (chunk: string) => this.handleData(chunk));
     this.socket.on('close', () => this.handleClose());

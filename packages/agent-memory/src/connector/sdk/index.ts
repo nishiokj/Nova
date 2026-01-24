@@ -48,6 +48,8 @@ export {
   ApiKeyConfigSchema,
   type LocalAuthConfig,
   LocalAuthConfigSchema,
+  type CredentialReferenceConfig,
+  CredentialReferenceConfigSchema,
   type AuthConfig,
   AuthConfigSchema,
   // Auth Tokens
@@ -60,6 +62,8 @@ export {
   type WebhookEvent,
   WebhookEventSchema,
   type WebhookVerificationResult,
+  type WebhookSubscribeOptions,
+  type WebhookSubscription,
   // Context
   type ConnectorContext,
   // Interface

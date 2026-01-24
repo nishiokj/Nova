@@ -1,5 +1,9 @@
 /**
  * Harness daemon entrypoint for JSONL/TCP bridge.
+ *
+ * Supports:
+ * - TCP/JSONL bus for TUI connections
+ * - HTTP webhooks for external integrations (Telegram, etc.)
  */
 
 import { pathToFileURL } from 'url';
@@ -8,6 +12,7 @@ import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
 import { translateAgentEvent } from './event_translator.js';
+import { WebhookServer, TelegramConnector, registerTelegramWebhook } from '../connectors/index.js';
 
 export interface HarnessDaemonOptions {
   host?: string;
@@ -18,6 +23,10 @@ export interface HarnessDaemonOptions {
   idleTimeoutMs?: number;
   /** Dangerous mode - bypasses all permission checks. Use with extreme caution. */
   dangerousMode?: boolean;
+  /** Webhook server port (default: busPort + 1) */
+  webhookPort?: number;
+  /** Webhook server host (default: same as bus host) */
+  webhookHost?: string;
 }
 
 // Default idle timeout: 5 seconds
@@ -26,6 +35,8 @@ const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
 export class HarnessDaemon {
   private readonly host: string;
   private readonly port: number;
+  private readonly webhookPort: number;
+  private readonly webhookHost: string;
   private readonly workingDir: string;
   private readonly configPath?: string;
   private readonly idleTimeoutMs: number;
@@ -38,10 +49,16 @@ export class HarnessDaemon {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownRequested = false;
 
+  // Webhook infrastructure
+  private webhookServer: WebhookServer | null = null;
+  private telegramConnectors: Map<string, TelegramConnector> = new Map();
+
   constructor(options: HarnessDaemonOptions = {}) {
     this.host = options.host ?? '127.0.0.1';
     const rawPort = options.port ?? 9555;
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
+    this.webhookPort = options.webhookPort ?? this.port + 1;
+    this.webhookHost = options.webhookHost ?? this.host;
     this.workingDir = options.workingDir ?? process.cwd();
     this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -127,6 +144,15 @@ export class HarnessDaemon {
     this.cancelIdleTimer();
     this.shutdownRequested = true;
 
+    // Stop webhook server first
+    if (this.webhookServer) {
+      await this.webhookServer.stop();
+      this.webhookServer = null;
+    }
+
+    // Clear telegram connectors
+    this.telegramConnectors.clear();
+
     if (this.bus) {
       await this.bus.stop();
       this.bus = null;
@@ -163,14 +189,158 @@ export class HarnessDaemon {
       console.log(`[harness-daemon] Dangerous mode ${status} (dynamic)`);
     }
   }
+
+  // =========================================================================
+  // Webhook Server Methods
+  // =========================================================================
+
+  /**
+   * Start the webhook HTTP server for external integrations.
+   * Call this after start() if you want to enable webhooks.
+   */
+  async startWebhookServer(): Promise<{ host: string; port: number }> {
+    if (this.webhookServer) {
+      return { host: this.webhookHost, port: this.webhookPort };
+    }
+
+    this.webhookServer = new WebhookServer({
+      port: this.webhookPort,
+      host: this.webhookHost,
+    });
+
+    // Register any existing Telegram connectors
+    for (const connector of this.telegramConnectors.values()) {
+      registerTelegramWebhook(this.webhookServer, connector);
+    }
+
+    const address = await this.webhookServer.start();
+    console.log(`[harness-daemon] Webhook server listening on ${address.host}:${address.port}`);
+    return address;
+  }
+
+  /**
+   * Stop the webhook server.
+   */
+  async stopWebhookServer(): Promise<void> {
+    if (this.webhookServer) {
+      await this.webhookServer.stop();
+      this.webhookServer = null;
+      console.log('[harness-daemon] Webhook server stopped');
+    }
+  }
+
+  /**
+   * Get the webhook server address.
+   */
+  getWebhookAddress(): { host: string; port: number } | null {
+    if (!this.webhookServer) {
+      return null;
+    }
+    return { host: this.webhookHost, port: this.webhookPort };
+  }
+
+  // =========================================================================
+  // Telegram Integration Methods
+  // =========================================================================
+
+  /**
+   * Register a Telegram bot for webhook processing.
+   *
+   * @param botToken - The bot token from @BotFather
+   * @param options - Optional configuration
+   * @returns The registered connector
+   *
+   * @example
+   * ```ts
+   * const daemon = new HarnessDaemon();
+   * await daemon.start();
+   * await daemon.startWebhookServer();
+   *
+   * const connector = await daemon.registerTelegramBot(process.env.TELEGRAM_BOT_TOKEN!);
+   *
+   * // Set webhook URL with Telegram
+   * await connector.setWebhook('https://your-domain.com/webhook/telegram/' + connector.getBotId());
+   * ```
+   */
+  registerTelegramBot(
+    botToken: string,
+    options?: { secretToken?: string }
+  ): TelegramConnector {
+    if (!this.harness) {
+      throw new Error('Daemon not started. Call start() first.');
+    }
+
+    const connector = new TelegramConnector({
+      botToken,
+      workingDir: this.workingDir,
+    });
+
+    // Connect to harness
+    connector.setHarness(this.harness);
+
+    // Store by bot ID
+    const botId = connector.getBotId();
+    this.telegramConnectors.set(botId, connector);
+
+    // Register webhook route if server is running
+    if (this.webhookServer) {
+      registerTelegramWebhook(this.webhookServer, connector, options);
+    }
+
+    console.log(`[harness-daemon] Registered Telegram bot: ${botId}`);
+    return connector;
+  }
+
+  /**
+   * Unregister a Telegram bot.
+   */
+  unregisterTelegramBot(botIdOrToken: string): boolean {
+    // Extract bot ID if full token provided
+    const botId = botIdOrToken.includes(':') ? botIdOrToken.split(':')[0] : botIdOrToken;
+
+    const connector = this.telegramConnectors.get(botId);
+    if (!connector) {
+      return false;
+    }
+
+    this.telegramConnectors.delete(botId);
+    console.log(`[harness-daemon] Unregistered Telegram bot: ${botId}`);
+    return true;
+  }
+
+  /**
+   * Get a registered Telegram connector by bot ID.
+   */
+  getTelegramConnector(botId: string): TelegramConnector | undefined {
+    return this.telegramConnectors.get(botId);
+  }
+
+  /**
+   * List all registered Telegram bot IDs.
+   */
+  listTelegramBots(): string[] {
+    return Array.from(this.telegramConnectors.keys());
+  }
+
+  /**
+   * Get the harness instance (for advanced integrations).
+   */
+  getHarness(): AgentHarness | null {
+    return this.harness;
+  }
 }
 
 /**
  * Parse CLI arguments for daemon options.
  */
-function parseDaemonArgs(): HarnessDaemonOptions {
+interface ParsedDaemonArgs extends HarnessDaemonOptions {
+  telegramBotToken?: string;
+  enableWebhooks?: boolean;
+}
+
+function parseDaemonArgs(): ParsedDaemonArgs {
   const args = process.argv.slice(2);
-  const options: HarnessDaemonOptions = {};
+  const options: ParsedDaemonArgs = {};
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -187,7 +357,20 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       options.workingDir = args[++i];
     } else if (arg === '--idle-timeout' && i + 1 < args.length) {
       options.idleTimeoutMs = parseInt(args[++i], 10);
+    } else if (arg === '--webhook-port' && i + 1 < args.length) {
+      options.webhookPort = parseInt(args[++i], 10);
+    } else if (arg === '--telegram-bot' && i + 1 < args.length) {
+      options.telegramBotToken = args[++i];
+      options.enableWebhooks = true;
+    } else if (arg === '--enable-webhooks') {
+      options.enableWebhooks = true;
     }
+  }
+
+  // Also check environment variables
+  if (!options.telegramBotToken && process.env.TELEGRAM_BOT_TOKEN) {
+    options.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+    options.enableWebhooks = true;
   }
 
   return options;
@@ -198,6 +381,19 @@ export async function runHarnessDaemon(): Promise<void> {
   const daemon = new HarnessDaemon(options);
   const address = await daemon.start();
   console.log(`[harness-daemon] bus listening on ${address.host}:${address.port}`);
+
+  // Start webhook server if enabled or if Telegram bot is configured
+  if (options.enableWebhooks) {
+    const webhookAddress = await daemon.startWebhookServer();
+    console.log(`[harness-daemon] webhook server listening on ${webhookAddress.host}:${webhookAddress.port}`);
+
+    // Register Telegram bot if token provided
+    if (options.telegramBotToken) {
+      const connector = daemon.registerTelegramBot(options.telegramBotToken);
+      console.log(`[harness-daemon] Telegram bot registered: ${connector.getBotId()}`);
+      console.log(`[harness-daemon] Webhook URL: http://${webhookAddress.host}:${webhookAddress.port}/webhook/telegram/${connector.getBotId()}`);
+    }
+  }
 
   const shutdown = async (signal: string) => {
     console.log(`[harness-daemon] received ${signal}, shutting down`);

@@ -22,6 +22,7 @@ export {
   AgentMemoryError,
   // Specialized error classes
   AuthenticationError,
+  AuthError,
   TokenExpiredError,
   NetworkError,
   TimeoutError,

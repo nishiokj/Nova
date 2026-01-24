@@ -564,6 +564,15 @@ export class ContextWindow {
   }
 
   /**
+   * Filter items in-place using a predicate.
+   * Items for which the predicate returns false are removed.
+   */
+  filterItems(predicate: (item: ContextItem) => boolean): void {
+    this._items = this._items.filter(predicate);
+    this._version++;
+  }
+
+  /**
    * Get read files as array (for Agent tracking).
    */
   getReadFilesArray(): string[] {

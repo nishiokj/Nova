@@ -215,20 +215,6 @@ export const GmailProfileSchema = z.object({
 export type GmailProfile = z.infer<typeof GmailProfileSchema>
 
 /**
- * Gmail message list response (internal use).
- */
-export const GmailMessageListSchema = z.object({
-  messages: z.array(z.object({
-    id: z.string(),
-    threadId: z.string(),
-  })),
-  nextPageToken: z.string().optional(),
-  resultSizeEstimate: z.number(),
-})
-
-export type GmailMessageList = z.infer<typeof GmailMessageListSchema>
-
-/**
  * Gmail thread list response (internal use).
  */
 export const GmailThreadListSchema = z.object({

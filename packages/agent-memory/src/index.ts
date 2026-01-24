@@ -150,7 +150,35 @@ export {
   type QueueJob,
   type JobStatus,
   type EnqueueOptions,
+  // Sync Task Repository
+  createSyncTaskRepository,
+  type SyncTaskRepository,
+  type SyncTask,
+  type SyncTaskInput,
+  type SyncType,
+  type TaskMode,
 } from './db/index.js'
+
+// Auth Layer
+export {
+  // Auth Provider
+  DatabaseAuthProvider,
+  type AuthProvider,
+  type AuthProviderConfig,
+  type EncryptionResult,
+  createAuthProvider,
+  createAuthProviderFromEnv,
+  // Key Derivation
+  deriveKey,
+  generateSalt,
+  // Auth Registration
+  AuthRegistrationService,
+  type ConnectorRegistrationOptions,
+  type ConnectorRegistrationResult,
+  type OAuthCallbackResult,
+  type RegistrationServiceConfig,
+  createRegistrationService,
+} from './auth/index.js'
 
 // Sync & Queue
 export {
@@ -179,7 +207,6 @@ export {
   type SyncRun,
   type FetchPageOptions,
   type FetchChangesOptions,
-  type ConnectorAdapter,
   type EntityMapper,
   type MapperContext,
   type MappedEntity,
@@ -193,7 +220,10 @@ export {
   ProcessError,
   ValidationError,
   RateLimitError,
-  AuthError,
+  // Scheduler
+  Scheduler,
+  type SchedulerConfig,
+  type SchedulerEvent,
 } from './sync/index.js'
 
 // Connector SDK
@@ -246,6 +276,8 @@ export {
   type WebhookEvent,
   WebhookEventSchema,
   type WebhookVerificationResult,
+  type WebhookSubscribeOptions,
+  type WebhookSubscription,
   // Connector Context
   type ConnectorContext,
   // Connector Interface
@@ -628,3 +660,14 @@ export {
   getConfigSummary,
   type LoadConfigOptions,
 } from './config/index.js'
+
+// Sync Daemon
+export {
+  SyncDaemon,
+  HttpServer,
+  type DaemonConfig,
+  type ServerConfig,
+  type ParsedRequest,
+  type RouteHandler,
+  type RouteResponse,
+} from './daemon/index.js'

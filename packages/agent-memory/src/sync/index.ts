@@ -25,10 +25,9 @@ export {
   type RateLimitInfo,
   // Sync Run
   type SyncRun,
-  // Connector Interface
+  // Fetch Options
   type FetchPageOptions,
   type FetchChangesOptions,
-  type ConnectorAdapter,
   // Entity Mapping
   type EntityMapper,
   type MapperContext,
@@ -45,8 +44,14 @@ export {
   ProcessError,
   ValidationError,
   RateLimitError,
-  AuthError,
 } from './types.js'
+
+// Re-export Connector and related types from SDK
+export type {
+  Connector,
+  ConnectorCapabilities,
+  ConnectorContext,
+} from '../connector/sdk/types.js'
 
 // Collector
 export {
@@ -66,3 +71,10 @@ export {
   SyncEngine,
   type SyncEngineConfig,
 } from './engine.js'
+
+// Scheduler
+export {
+  Scheduler,
+  type SchedulerConfig,
+  type SchedulerEvent,
+} from './scheduler.js'

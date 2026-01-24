@@ -11,7 +11,6 @@ import type { ConnectorType, SourceRef } from '../ids.js'
 import type { RawEnvelope, CollectionMethod, EntitySourceMappingInput } from '../models/raw.js'
 import type { CanonicalEntity, EntityType } from '../models/canonical.js'
 import type { SyncJob, SyncJobType } from '../db/repositories/sync-job.js'
-
 // ============ Source Item ============
 
 /**
@@ -78,7 +77,7 @@ export interface SyncRun {
   startCursor?: string
 }
 
-// ============ Connector Interface ============
+// ============ Fetch Options ============
 
 /**
  * Options for fetching a page of data.
@@ -98,41 +97,6 @@ export interface FetchPageOptions {
 export interface FetchChangesOptions extends FetchPageOptions {
   /** Cursor from the last sync (e.g., timestamp, ID, historyId) */
   since?: string
-}
-
-/**
- * Interface that connectors must implement for data collection.
- * This is the contract between the sync engine and external connectors.
- */
-export interface ConnectorAdapter {
-  /** Connector type identifier */
-  readonly type: ConnectorType
-  /** Human-readable display name */
-  readonly displayName: string
-  /** Entity types this connector can fetch */
-  readonly supportedEntityTypes: string[]
-
-  /**
-   * Fetch a page of data for backfill operations.
-   */
-  fetchPage(
-    accountId: string,
-    options: FetchPageOptions
-  ): Promise<FetchPageResult>
-
-  /**
-   * Fetch changes since the last sync.
-   * Used for incremental syncs.
-   */
-  fetchChanges?(
-    accountId: string,
-    options: FetchChangesOptions
-  ): Promise<FetchPageResult>
-
-  /**
-   * Get the mapper for a specific entity type.
-   */
-  getMapper(entityType: string): EntityMapper | undefined
 }
 
 // ============ Entity Mapping ============
@@ -314,15 +278,5 @@ export class RateLimitError extends SyncError {
   ) {
     super(message, 'RATE_LIMIT_ERROR', true, { ...metadata, retryAfter })
     this.name = 'RateLimitError'
-  }
-}
-
-/**
- * Authentication/authorization error.
- */
-export class AuthError extends SyncError {
-  constructor(message: string, metadata: Record<string, unknown> = {}) {
-    super(message, 'AUTH_ERROR', false, metadata)
-    this.name = 'AuthError'
   }
 }

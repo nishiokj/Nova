@@ -187,6 +187,7 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
         completionTokens?: number;
         totalTokens?: number;
         cachedTokens?: number;
+        maxWindowSize?: number;
       };
       // Forward llm_call event to TUI for context window tracking
       return {
@@ -199,6 +200,7 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
           completionTokens: llmData.completionTokens ?? 0,
           totalTokens: llmData.totalTokens ?? 0,
           cachedTokens: llmData.cachedTokens,
+          maxWindowSize: llmData.maxWindowSize,
         },
       };
     }

@@ -68,3 +68,13 @@ export {
   type PendingReviewRow,
   type PendingReviewInput,
 } from './pending-review.js'
+
+export {
+  createSyncTaskRepository,
+  type SyncTaskRepository,
+  type SyncTask,
+  type SyncTaskInput,
+  type SyncTaskRow,
+  type SyncType,
+  type TaskMode,
+} from './sync-task.js'

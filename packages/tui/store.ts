@@ -143,7 +143,7 @@ export interface StoreSnapshot {
   permissionCursor: number;
   // Context window state
   contextInputTokens: number | null;
-  contextTotalWindowSize: number | null;
+  contextMaxWindowSize: number | null;
   cachedInput: string | null;
 }
 
@@ -266,7 +266,7 @@ export class Store {
 
   // ─── Context Window ───
   private contextInputTokens: number | null = null;
-  private contextTotalWindowSize: number | null = null;
+  private contextMaxWindowSize: number | null = null;
   private cachedInput: string | null = null;
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -365,7 +365,7 @@ export class Store {
       permissionCursor: this.permissionCursor,
       // Context window state
       contextInputTokens: this.contextInputTokens,
-      contextTotalWindowSize: this.contextTotalWindowSize,
+      contextMaxWindowSize: this.contextMaxWindowSize,
       cachedInput: this.cachedInput,
     };
   }
@@ -1803,11 +1803,11 @@ export class Store {
   /**
    * Sets the context window size information.
    * @param inputTokens - Number of input tokens in the current request
-   * @param totalWindowSize - Total context window size for the model
+   * @param maxWindowSize - Maximum context window size for the model
    */
-  setContextWindowSize(inputTokens: number | null, totalWindowSize: number | null): void {
+  setContextWindowSize(inputTokens: number | null, maxWindowSize: number | null): void {
     this.contextInputTokens = inputTokens;
-    this.contextTotalWindowSize = totalWindowSize;
+    this.contextMaxWindowSize = maxWindowSize;
     this.emit();
   }
 
@@ -1825,7 +1825,7 @@ export class Store {
    */
   clearContextWindowState(): void {
     this.contextInputTokens = null;
-    this.contextTotalWindowSize = null;
+    this.contextMaxWindowSize = null;
     this.cachedInput = null;
     this.emit();
   }

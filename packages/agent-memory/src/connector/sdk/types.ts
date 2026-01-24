@@ -14,7 +14,6 @@ import type {
   FetchChangesOptions,
   FetchPageResult,
   SourceItem,
-  EntityMapper,
 } from '../../sync/types.js'
 
 // ============ Connector Capabilities ============
@@ -120,14 +119,33 @@ export const LocalAuthConfigSchema = z.object({
 })
 
 /**
+ * Reference to existing credentials (for credential reuse).
+ * Used when you want to reuse OAuth credentials across multiple connector instances.
+ */
+export interface CredentialReferenceConfig {
+  type: 'credential_reference'
+  /** Account ID that holds the credentials to reuse */
+  accountId: string
+  /** Optional: Additional scopes beyond what the original account has */
+  additionalScopes?: string[]
+}
+
+export const CredentialReferenceConfigSchema = z.object({
+  type: z.literal('credential_reference'),
+  accountId: z.string().min(1),
+  additionalScopes: z.array(z.string()).optional(),
+})
+
+/**
  * Union of all auth configuration types.
  */
-export type AuthConfig = OAuth2Config | ApiKeyConfig | LocalAuthConfig
+export type AuthConfig = OAuth2Config | ApiKeyConfig | LocalAuthConfig | CredentialReferenceConfig
 
 export const AuthConfigSchema = z.discriminatedUnion('type', [
   OAuth2ConfigSchema,
   ApiKeyConfigSchema,
   LocalAuthConfigSchema,
+  CredentialReferenceConfigSchema,
 ])
 
 // ============ Auth Tokens ============
@@ -233,6 +251,30 @@ export interface WebhookVerificationResult {
   computedSignature?: string
 }
 
+// ============ Webhook Subscription Types ============
+
+/**
+ * Options for subscribing to webhooks.
+ */
+export interface WebhookSubscribeOptions {
+  /** Entity types to receive updates for */
+  entityTypes?: string[]
+  /** Additional service-specific options */
+  options?: Record<string, unknown>
+}
+
+/**
+ * Result of a webhook subscription.
+ */
+export interface WebhookSubscription {
+  /** Subscription ID (from external service) */
+  subscriptionId: string
+  /** When the subscription expires (if applicable) */
+  expiresAt?: Date
+  /** Resource URI being watched (service-specific) */
+  resourceUri?: string
+}
+
 // ============ Connector Context ============
 
 /**
@@ -330,6 +372,40 @@ export interface Connector {
    */
   parseWebhookPayload?(event: WebhookEvent): Promise<SourceItem[]>
 
+  /**
+   * Subscribe to webhooks for real-time updates.
+   * Returns a subscription ID that can be used to unsubscribe.
+   *
+   * @param ctx - Connector context with credentials
+   * @param callbackUrl - URL where webhooks should be sent
+   * @param options - Subscription options (event types, etc.)
+   */
+  subscribe?(
+    ctx: ConnectorContext,
+    callbackUrl: string,
+    options?: WebhookSubscribeOptions
+  ): Promise<WebhookSubscription>
+
+  /**
+   * Unsubscribe from webhooks.
+   *
+   * @param ctx - Connector context with credentials
+   * @param subscriptionId - ID returned from subscribe()
+   */
+  unsubscribe?(ctx: ConnectorContext, subscriptionId: string): Promise<void>
+
+  /**
+   * Renew a webhook subscription (if required by the service).
+   * Some services require periodic renewal (e.g., Google Push).
+   *
+   * @param ctx - Connector context with credentials
+   * @param subscriptionId - ID of subscription to renew
+   */
+  renewSubscription?(
+    ctx: ConnectorContext,
+    subscriptionId: string
+  ): Promise<WebhookSubscription>
+
   // ============ Schema Methods ============
 
   /**
@@ -337,12 +413,6 @@ export interface Connector {
    * @param entityType - Entity type (e.g., 'issue', 'message')
    */
   getSourceSchema(entityType: string): z.ZodSchema | undefined
-
-  /**
-   * Get mapper for transforming source data to canonical entities.
-   * @param entityType - Entity type (e.g., 'issue', 'message')
-   */
-  getMapper(entityType: string): EntityMapper | undefined
 }
 
 // ============ Connector Registration ============

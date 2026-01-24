@@ -77,3 +77,52 @@ export {
   getGmailMapper,
   getGmailEntityTypes,
 } from './gmail/index.js'
+
+// Coding Agent Session Connectors
+export {
+  // Base
+  CodingAgentSessionConnector,
+  type CodingAgentSessionConfig,
+  type SessionFile,
+  // Shared schemas
+  TextBlockSchema,
+  ThinkingBlockSchema,
+  ToolUseBlockSchema,
+  ToolResultBlockSchema,
+  ContentBlockSchema,
+  MessageContentSchema,
+  UsageInfoSchema,
+  ToolUseResultSchema,
+  ThinkingMetadataSchema,
+  type ContentBlock,
+  type MessageContent,
+  type UsageInfo,
+  type ToolUseResult,
+  type ThinkingMetadata,
+  // Claude Connector
+  ClaudeSessionConnector,
+  createClaudeSessionConnector,
+  type ClaudeSessionConnectorConfig,
+  ClaudeUserMessageSchema,
+  ClaudeAssistantMessageSchema,
+  ClaudeSummaryMessageSchema,
+  ClaudeFileHistorySnapshotSchema,
+  ClaudeSessionMessageSchema,
+  type ClaudeUserMessage,
+  type ClaudeAssistantMessage,
+  type ClaudeSummaryMessage,
+  type ClaudeFileHistorySnapshot,
+  type ClaudeSessionMessage,
+  // Rex Connector
+  RexSessionConnector,
+  createRexSessionConnector,
+  type RexSessionConnectorConfig,
+  RexUserMessageSchema,
+  RexAssistantMessageSchema,
+  RexSummaryMessageSchema,
+  RexSessionMessageSchema,
+  type RexUserMessage,
+  type RexAssistantMessage,
+  type RexSummaryMessage,
+  type RexSessionMessage,
+} from './coding-sessions/index.js'

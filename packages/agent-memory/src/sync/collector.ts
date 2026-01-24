@@ -20,12 +20,13 @@ import type { SyncJobRepository, SyncJob } from '../db/repositories/sync-job.js'
 import { createRawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import { createSyncJobRepository } from '../db/repositories/sync-job.js'
 import type {
-  ConnectorAdapter,
   SourceItem,
   FetchPageResult,
   SyncEvent,
 } from './types.js'
 import { CollectError, RateLimitError } from './types.js'
+import type { AuthProvider } from '../auth/provider.js'
+import type { Connector, ConnectorContext } from '../connector/sdk/types.js'
 
 // ============ Configuration ============
 
@@ -40,14 +41,17 @@ export interface CollectorConfig {
   maxRetries?: number
   /** Base delay for retry backoff in ms (default: 1000) */
   baseRetryDelay?: number
+  /** Auth provider for connector authentication */
+  authProvider?: AuthProvider
 }
 
-const DEFAULT_CONFIG: Required<CollectorConfig> = {
+const DEFAULT_CONFIG = {
   pageSize: 100,
   maxPages: 100,
   pageDelay: 100,
   maxRetries: 3,
   baseRetryDelay: 1000,
+  authProvider: undefined as AuthProvider | undefined,
 }
 
 // ============ Collector ============
@@ -57,22 +61,24 @@ const DEFAULT_CONFIG: Required<CollectorConfig> = {
  * Fetches data from connectors and stores it as RawEnvelopes.
  */
 export class Collector {
-  private config: Required<CollectorConfig>
+  private config: typeof DEFAULT_CONFIG
   private envelopeRepo: RawEnvelopeRepository
   private syncJobRepo: SyncJobRepository
-  private connectors: Map<ConnectorType, ConnectorAdapter> = new Map()
+  private connectors: Map<ConnectorType, Connector> = new Map()
   private eventHandler?: (event: SyncEvent) => void
+  private sql: Sql
 
   constructor(sql: Sql, config: CollectorConfig = {}) {
+    this.sql = sql
     this.config = { ...DEFAULT_CONFIG, ...config }
     this.envelopeRepo = createRawEnvelopeRepository({ sql })
     this.syncJobRepo = createSyncJobRepository({ sql })
   }
 
   /**
-   * Register a connector adapter.
+   * Register a connector.
    */
-  registerConnector(connector: ConnectorAdapter): this {
+  registerConnector(connector: Connector): this {
     this.connectors.set(connector.type, connector)
     return this
   }
@@ -299,24 +305,41 @@ export class Collector {
   }
 
   private async fetchPageWithRetry(
-    adapter: ConnectorAdapter,
+    adapter: Connector,
     accountId: string,
     collectionMethod: CollectionMethod,
     cursor?: string,
     entityTypes?: string[]
   ): Promise<FetchPageResult> {
+    // Get auth context if auth provider is available
+    let ctx: ConnectorContext | undefined
+    if (this.config.authProvider) {
+      try {
+        ctx = await this.config.authProvider.getContext(accountId)
+      } catch (error) {
+        throw new CollectError(
+          `Failed to get auth context: ${error instanceof Error ? error.message : String(error)}`,
+          true,
+          { accountId }
+        )
+      }
+    } else {
+      // Fallback: create minimal context with accountId
+      ctx = { accountId }
+    }
+
     let lastError: Error | undefined
 
     for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {
       try {
         if (collectionMethod === 'incremental' && adapter.fetchChanges) {
-          return await adapter.fetchChanges(accountId, {
+          return await adapter.fetchChanges(ctx!, {
             since: cursor,
             limit: this.config.pageSize,
             entityTypes,
           })
         } else {
-          return await adapter.fetchPage(accountId, {
+          return await adapter.fetchPage(ctx!, {
             cursor,
             limit: this.config.pageSize,
             entityTypes,
