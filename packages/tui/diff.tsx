@@ -121,8 +121,8 @@ interface DiffBlockProps {
 
 /** Colors for diff rendering */
 const DIFF_COLORS = {
-  added: { bg: "#1a4d1a", fg: "#4ade80" },      // Dark green bg, light green text
-  removed: { bg: "#4d1a1a", fg: "#f87171" },    // Dark red bg, light red text
+  added: { bg: "#1e5a1e", fg: "#4ade80" },      // Dark green bg (higher opacity), light green text
+  removed: { bg: "#5a1e1e", fg: "#f87171" },    // Dark red bg (higher opacity), light red text
   context: { bg: undefined, fg: "#9ca3af" },    // No bg, gray text
   lineNum: "#6b7280",                           // Gray for line numbers
   header: "#60a5fa",                            // Blue for file path

@@ -20,7 +20,7 @@ const ulid = monotonicFactory()
 
 // ============ Connector Types ============
 
-export const ConnectorTypeSchema = z.enum(['github', 'gmail', 'xcom', 'imessage'])
+export const ConnectorTypeSchema = z.enum(['github', 'gmail', 'xcom', 'imessage', 'claude_sessions', 'rex_sessions'])
 export type ConnectorType = z.infer<typeof ConnectorTypeSchema>
 
 // ============ ID Types ============

@@ -38,7 +38,6 @@ import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscribe
 import path from 'path';
 import fs from 'fs';
 import {
-  translateAgentEvent,
   createStatusEvent,
   createResponseEvent,
   createErrorEvent,
@@ -533,10 +532,23 @@ export class AgentHarness {
 
   /**
    * Close and evict in-memory state for a session.
+   * Persists context and marks session inactive before closing.
    */
   closeSession(sessionKey: string): void {
     const entry = this.sessionStores.get(sessionKey);
     if (entry) {
+      // Persist context before closing
+      entry.store.persistContext();
+
+      // Mark session as inactive in GraphD
+      if (this.isGraphDReady()) {
+        try {
+          this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
+        } catch (error) {
+          this.logger.warning('Failed to mark session inactive', { sessionKey, error: String(error) });
+        }
+      }
+
       entry.store.close();
       this.sessionStores.delete(sessionKey);
     }
@@ -817,12 +829,9 @@ export class AgentHarness {
     const userMessagePersisted = clearContextForHandoff ? false : this.persistUserMessage(sessionKey, requestId, inputText);
     const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
-    const unsubscribe = this.eventBus.subscribeRun(runId, (event: AgentEvent): void => {
-      const bridgeEvent = translateAgentEvent(event);
-      if (bridgeEvent) {
-        eventQueue.push(bridgeEvent);
-      }
-    });
+    // NOTE: Agent events (agent_message, tool_call, etc.) are now forwarded directly
+    // from EventBus to BusServer via BusServer's direct subscription. The eventQueue
+    // is only used for harness-level events (status, response, error, user_prompt).
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
@@ -1111,7 +1120,6 @@ export class AgentHarness {
 
         queueMicrotask(() => {
           try {
-            unsubscribe();
             store.persistContext();
 
             // Flush subscriber events to make them visible to dashboard immediately
@@ -1540,17 +1548,6 @@ export class AgentHarness {
       }
     }
 
-    if (this.isGraphDReady()) {
-      for (const sessionKey of this.sessionStores.keys()) {
-        try {
-          this.graphd!.sessionClose(sessionKey);
-          this.logger.debug('Closed GraphD session', { sessionKey });
-        } catch (error) {
-          this.logger.warning('GraphD session close failed', { sessionKey, error: String(error) });
-        }
-      }
-    }
-
     if (this.logSubscriber) {
       try {
         this.logSubscriber.close();
@@ -1562,6 +1559,20 @@ export class AgentHarness {
 
     this.eventBus.shutdown();
 
+    // Persist and mark all sessions inactive BEFORE stopping GraphD
+    for (const [sessionKey, entry] of this.sessionStores.entries()) {
+      try {
+        entry.store.persistContext();
+        if (this.isGraphDReady()) {
+          this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
+        }
+      } catch (error) {
+        this.logger.warning('Session persist failed during shutdown', { sessionKey, error: String(error) });
+      }
+      entry.store.close();
+    }
+    this.sessionStores.clear();
+
     if (this.isGraphDReady()) {
       try {
         await this.graphd!.stop();
@@ -1570,11 +1581,6 @@ export class AgentHarness {
         this.logger.warning('GraphD stop failed', { error: String(error) });
       }
     }
-
-    for (const entry of this.sessionStores.values()) {
-      entry.store.close();
-    }
-    this.sessionStores.clear();
     this.toolRegistry.clearCache();
 
     // Close provider key service (releases LocalProviderManager resources)

@@ -60,6 +60,27 @@ export class PermissionChecker {
   }
 
   /**
+   * Get session permission state for persistence.
+   */
+  getState(): SessionPermissionState {
+    return {
+      persistent: this.state.persistent,
+      sessionGrants: [...this.state.sessionGrants],
+      sessionDenials: [...this.state.sessionDenials],
+      dangerousMode: this.state.dangerousMode,
+    };
+  }
+
+  /**
+   * Hydrate session permission state from persistence.
+   */
+  hydrateState(state: SessionPermissionState): void {
+    this.state.sessionGrants = [...state.sessionGrants];
+    this.state.sessionDenials = [...state.sessionDenials];
+    this.state.dangerousMode = state.dangerousMode;
+  }
+
+  /**
    * Register a pending request (called by harness when awaiting user response).
    */
   registerPendingRequest(

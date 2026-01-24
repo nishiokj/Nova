@@ -143,6 +143,23 @@ export const MessageSchema = BaseEntitySchema.extend({
 export type Message = z.infer<typeof MessageSchema>
 
 /**
+ * Conversation: Threaded conversation across messages
+ */
+export const ConversationSchema = BaseEntitySchema.extend({
+  entity_type: z.literal('conversation'),
+  platform: PlatformSchema,
+  messageIds: z.array(z.string()),
+  messageCount: z.number(),
+  participants: z.array(CanonicalSourceRefSchema),
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+  topic: z.string().optional(),
+  metadata: z.record(z.unknown()).optional(),
+})
+
+export type Conversation = z.infer<typeof ConversationSchema>
+
+/**
  * Event: Calendar event, meeting, scheduled item
  */
 export const EventSchema = BaseEntitySchema.extend({
@@ -213,6 +230,52 @@ export const ObservationSchema = BaseEntitySchema.extend({
 
 export type Observation = z.infer<typeof ObservationSchema>
 
+/**
+ * Preference: Learned user preference or behavioral pattern from sessions
+ */
+export const PreferenceSchema = BaseEntitySchema.extend({
+  entity_type: z.literal('preference'),
+  /** Category of preference (e.g., 'coding_style', 'tool_usage', 'communication') */
+  category: z.string().min(1),
+  /** The preference key/name */
+  key: z.string().min(1),
+  /** The preference value or description */
+  value: z.string().min(1),
+  /** Confidence score for inferred preferences */
+  confidence: z.number().min(0).max(1).optional(),
+  /** Number of times this preference was observed */
+  occurrence_count: z.number().int().nonnegative().default(1),
+  /** Session IDs where this preference was observed */
+  session_ids: z.array(z.string()).default([]),
+  /** Whether this was explicitly stated vs inferred */
+  is_explicit: z.boolean().default(false),
+  /** Last time this preference was observed */
+  last_observed_at: z.string().datetime().optional(),
+})
+
+export type Preference = z.infer<typeof PreferenceSchema>
+
+/**
+ * Conversation: A thread of messages between participants
+ *
+ * Represents a conversation (e.g., email thread, chat session, DM chain)
+ * that spans multiple messages. The conversation aggregates metadata about the
+ * exchange and maintains an ordered list of message IDs.
+ */
+export const ConversationSchema = BaseEntitySchema.extend({
+  entity_type: z.literal('conversation'),
+  platform: PlatformSchema,
+  message_ids: z.array(UlidSchema).default([]),
+  message_count: z.number().int().nonnegative().default(0),
+  participants: z.array(CanonicalSourceRefSchema).default([]),
+  started_at: z.string().datetime(),
+  ended_at: z.string().datetime().optional(),
+  topic: z.string().optional(),
+  is_archived: z.boolean().default(false),
+})
+
+export type Conversation = z.infer<typeof ConversationSchema>
+
 // ============ Relationship Entity ============
 
 /**
@@ -253,7 +316,9 @@ export type Attachment = z.infer<typeof AttachmentSchema>
 
 export const EntityTypeSchema = z.enum([
   'person', 'identity', 'org', 'account',
-  'message', 'event', 'task', 'notification', 'observation', 'link', 'attachment',
+  'message', 'event', 'task', 'notification', 'observation', 'preference',
+  'conversation',
+  'link', 'attachment',
 ])
 
 export type EntityType = z.infer<typeof EntityTypeSchema>
@@ -274,6 +339,8 @@ export type CanonicalEntity =
   | Task
   | Notification
   | Observation
+  | Preference
+  | Conversation
   | Link
   | Attachment
 
@@ -292,6 +359,8 @@ export const EntitySchemas = {
   task: TaskSchema,
   notification: NotificationSchema,
   observation: ObservationSchema,
+  preference: PreferenceSchema,
+  conversation: ConversationSchema,
   link: LinkSchema,
   attachment: AttachmentSchema,
 } as const

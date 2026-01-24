@@ -17,7 +17,7 @@ import {
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -135,64 +135,304 @@ export class Agent {
   }
 
   /**
-   * Handle awaitingUserInput from structured output.
-   * This is a fallback for conversational questions when PromptUser isn't used.
-   * Returns true if we should pause for user input, false otherwise.
+   * Check if agent has hit tool call or duration bounds.
+   * Emits agent_bounds_hit event if a bound is hit.
+   * @returns termination reason if bound hit, null otherwise
    */
-  private handleAwaitingUserInput(
-    result: AgentResult,
-    structuredOutput: Record<string, unknown> | null,
-    responseText: string | undefined,
-    content: string
-  ): boolean {
-    // Skip if PromptUser already set needsUserInput (it takes precedence)
-    if (result.needsUserInput) return false;
+  private checkBounds(
+    metrics: AgentMetrics,
+    workItem: WorkItem,
+    elapsedMs: number
+  ): 'bounds:tool_calls' | 'bounds:duration' | null {
+    if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
+      this.emit(createEvent('agent_bounds_hit', {
+        agentType: this.config.type,
+        boundType: 'tool_calls',
+        current: metrics.toolCallsMade,
+        max: workItem.bounds.maxToolCalls,
+      }, workItem.workId));
+      return 'bounds:tool_calls';
+    }
 
-    // Check if agent explicitly declared it's waiting for input
-    if (structuredOutput?.awaitingUserInput !== true) return false;
+    if (elapsedMs >= workItem.bounds.maxDurationMs) {
+      this.emit(createEvent('agent_bounds_hit', {
+        agentType: this.config.type,
+        boundType: 'duration',
+        current: elapsedMs,
+        max: workItem.bounds.maxDurationMs,
+      }, workItem.workId));
+      return 'bounds:duration';
+    }
 
-    result.needsUserInput = true;
-    result.userPrompt = {
-      question: responseText || content || 'Waiting for your response...',
-    };
-    result.terminationReason = 'user_input_required';
-    return true;
+    return null;
   }
 
   /**
-   * Handle the 'done' action logic: goal state validation, refusal check, success/failure setup.
-   * Returns true if the action was handled and should return/break, false otherwise.
+   * Compact context if near full and rebuild localReadFiles tracking.
+   * Handles both LLM-assisted compaction and fallback basic compaction.
    */
-  private handleCompletionAction(
-    result: AgentResult,
+  private async compactIfNeeded(
+    localContext: ContextWindow,
+    localReadFiles: Set<string>,
+    workItem: WorkItem
+  ): Promise<void> {
+    if (!localContext.isNearFull()) return;
+
+    try {
+      await localContext.compactWithLedger({
+        llm: this.llm,
+        llmConfig: this.llmConfig,
+        targetReductionRatio: 0.66,
+        preserveRecentItems: 12,
+        deduplicateByPath: true,
+        truncateOutputsTo: 4000,
+      });
+    } catch {
+      localContext.compact({
+        deduplicateByPath: true,
+        truncateOutputsTo: 4000,
+      });
+    }
+
+    // Rebuild localReadFiles from compacted context
+    localReadFiles.clear();
+    for (const path of localContext.getReadFilesArray()) {
+      localReadFiles.add(path);
+    }
+
+    this.internalHookQueue.enqueue({
+      type: 'context_threshold',
+      usagePercent: localContext.metrics.percentageUsed,
+      tokenCount: localContext.metrics.inputTokens + localContext.metrics.outputTokens,
+      itemCount: localContext.items.length,
+    }, this.buildHookContext(workItem));
+  }
+
+  /**
+   * Build the LLM request parameters for an iteration.
+   * Consolidates system prompt, tools, messages, and last-iteration handling.
+   */
+  private buildIterationRequest(
+    workItem: WorkItem,
+    globalContext: ContextWindow,
+    localContext: ContextWindow,
+    cwd: string,
+    iteration: number,
+    maxIterations: number
+  ): {
+    messages: Array<Record<string, unknown>>;
+    tools: ToolDefinition[] | undefined;
+    toolChoice: 'none' | 'auto' | undefined;
+  } {
+    const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
+
+    const allTools = [
+      ...this.toolRegistry.getDefinitions(),
+      ...(this.agentRegistry?.listToolDefinitions() ?? []),
+    ];
+    const allowedTools = this.filterAllowedTools(allTools);
+
+    const isLastIteration = iteration === maxIterations - 1;
+    const lastIterationInstruction = isLastIteration
+      ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
+      : '';
+
+    const messages = this.buildMessages(
+      system,
+      taskContext + lastIterationInstruction,
+      workItem,
+      globalContext,
+      localContext
+    );
+
+    const tools = allowedTools.length > 0 ? allowedTools : undefined;
+    const toolChoice = isLastIteration && tools ? 'none' as const : undefined;
+
+    return { messages, tools, toolChoice };
+  }
+
+  /**
+   * Handle handoff action from structured output.
+   * @returns 'return' if should exit loop, 'continue' if should continue to next iteration, null if not a handoff
+   */
+  private handleHandoff(
+    structuredOutput: Record<string, unknown> | null,
+    result: AgentResult
+  ): 'return' | 'continue' | null {
+    const handoffSpec = typeof structuredOutput?.handoffSpec === 'string'
+      ? structuredOutput.handoffSpec
+      : null;
+
+    if (handoffSpec) {
+      result.needsHandoff = true;
+      result.handoffSpec = handoffSpec;
+      result.terminationReason = 'handoff_requested';
+      return 'return';
+    }
+
+    // No valid handoffSpec provided, continue execution
+    return 'continue';
+  }
+
+  /**
+   * Resolve the action from structured output into a loop control directive.
+   * Sets result fields as side effects (terminationReason, success, response, etc.)
+   * @returns loop control: 'done' | 'handoff' | 'user_input' | 'continue' | 'no_action'
+   */
+  private resolveAction(
+    action: AgentAction | null,
+    structuredOutput: Record<string, unknown> | null,
     responseText: string | undefined,
     content: string,
-    action: string | null,
-    structuredOutput: any
-  ): boolean {
-    if (action !== 'done') {
-      return false;
+    result: AgentResult
+  ): 'done' | 'handoff' | 'user_input' | 'continue' | 'no_action' {
+    // Check awaitingUserInput first (fallback for conversational questions)
+    if (!result.needsUserInput && structuredOutput?.awaitingUserInput === true) {
+      result.needsUserInput = true;
+      result.userPrompt = {
+        question: responseText || content || 'Waiting for your response...',
+      };
+      result.terminationReason = 'user_input_required';
+      return 'user_input';
     }
 
-    const goalReached = structuredOutput?.goalStateReached === true;
-    if (!goalReached) {
-      result.terminationReason = 'invalid_action';
-      result.error = 'Action "done" requires goalStateReached: true.';
-      return true; // Should break after this
+    // If PromptUser already set needsUserInput, honor it
+    if (result.needsUserInput) {
+      return 'user_input';
     }
 
-    const finalText = responseText ?? content;
-    if (isRefusal(finalText)) {
-      result.isRefusal = true;
-      result.error = 'LLM refused to complete the task';
-      result.terminationReason = 'refusal';
-    } else {
-      result.success = true;
-      result.response = finalText;
-      result.terminationReason = 'goal_state_reached';
+    // Handle done action
+    if (action === 'done') {
+      const goalReached = structuredOutput?.goalStateReached === true;
+      if (!goalReached) {
+        result.terminationReason = 'invalid_action';
+        result.error = 'Action "done" requires goalStateReached: true.';
+        return 'done';
+      }
+
+      const finalText = responseText ?? content;
+      if (isRefusal(finalText)) {
+        result.isRefusal = true;
+        result.error = 'LLM refused to complete the task';
+        result.terminationReason = 'refusal';
+      } else {
+        result.success = true;
+        result.response = finalText;
+        result.terminationReason = 'goal_state_reached';
+      }
+      return 'done';
     }
 
-    return true;
+    // Handle handoff action
+    if (action === 'handoff') {
+      return 'handoff';
+    }
+
+    // Handle continue action
+    if (action === 'continue') {
+      if (responseText?.trim()) {
+        result.response = responseText;
+      }
+      return 'continue';
+    }
+
+    // No recognized action
+    return 'no_action';
+  }
+
+  /**
+   * Extract and validate artifacts from structured output, adding them to context.
+   * Returns the number of artifacts added.
+   */
+  private extractArtifactsFromOutput(
+    structuredOutput: Record<string, unknown> | null,
+    localContext: ContextWindow
+  ): number {
+    if (!structuredOutput?.artifacts || !Array.isArray(structuredOutput.artifacts)) {
+      return 0;
+    }
+
+    const validArtifacts = (structuredOutput.artifacts as unknown[]).filter((a): a is {
+      sourcePath: string;
+      line?: number | null;
+      kind: string;
+      name: string;
+      signature?: string | null;
+      modifies?: string[] | null;
+      calls?: string[] | null;
+      insight?: string | null;
+      reduces?: string | null;
+    } => (
+      typeof a === 'object' &&
+      a !== null &&
+      typeof (a as Record<string, unknown>).sourcePath === 'string' &&
+      typeof (a as Record<string, unknown>).kind === 'string' &&
+      typeof (a as Record<string, unknown>).name === 'string'
+    ));
+
+    for (const a of validArtifacts) {
+      localContext.addArtifact({
+        sourcePath: a.sourcePath,
+        line: typeof a.line === 'number' ? a.line : undefined,
+        kind: a.kind as ArtifactKind,
+        name: a.name,
+        signature: typeof a.signature === 'string' ? a.signature : undefined,
+        modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
+        calls: Array.isArray(a.calls) ? a.calls : undefined,
+        insight: typeof a.insight === 'string' ? a.insight : undefined,
+        reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
+        relevance: 1.0,
+        discoveredBy: this.config.type,
+      });
+    }
+
+    return validArtifacts.length;
+  }
+
+  /**
+   * Parse LLM response content into structured components.
+   * Returns action, response text, and structured output for downstream handling.
+   */
+  private parseIterationResponse(
+    content: string,
+    result: AgentResult
+  ): {
+    structuredOutput: Record<string, unknown> | null;
+    action: AgentAction | null;
+    responseText: string | undefined;
+  } {
+    const structuredOutput = this.parseStructuredOutput(content);
+    if (structuredOutput) {
+      result.structuredOutput = structuredOutput;
+    }
+
+    const action = this.extractStructuredAction(structuredOutput);
+    const parsedResponseText = this.extractStructuredResponse(structuredOutput);
+    const preJsonText = extractPreJsonText(content);
+    const responseText = this.combineResponseText(preJsonText, parsedResponseText);
+
+    return { structuredOutput, action, responseText };
+  }
+
+  /**
+   * Emit fallback response for TUI when streaming didn't capture content.
+   * Only used when structured output was expected but JSON parsing failed.
+   */
+  private emitFallbackResponse(
+    content: string,
+    streamedContent: string,
+    workItemId: string
+  ): void {
+    // If we already streamed the response field, don't re-emit
+    if (streamedContent.length > 0) return;
+
+    // Fallback: LLM output plain text instead of JSON, emit it
+    if (content && content.trim().length > 0) {
+      this.emit(createEvent('agent_message', {
+        agentType: this.config.type,
+        message: content,
+      }, workItemId));
+    }
   }
 
   /**
@@ -473,85 +713,34 @@ export class Agent {
         break;
       }
 
+      // 1. Pre-checks: bounds and context management
       const elapsedMs = Date.now() - startTime;
-
-      // Auto-compact if context is near full
-      if (localContext.isNearFull()) {
-        let compactResult = { itemsRemoved: 0, outputsTruncated: 0, bytesRecovered: 0, fileContentRemoved: 0 };
-        try {
-          compactResult = await localContext.compactWithLedger({
-            llm: this.llm,
-            llmConfig: this.llmConfig,
-            targetReductionRatio: 0.66,
-            preserveRecentItems: 12,
-            deduplicateByPath: true,
-            truncateOutputsTo: 4000,
-          });
-        } catch {
-          compactResult = localContext.compact({
-            deduplicateByPath: true,
-            truncateOutputsTo: 4000,
-          });
-        }
-        localReadFiles.clear();
-        for (const path of localContext.getReadFilesArray()) {
-          localReadFiles.add(path);
-        }
-        this.internalHookQueue.enqueue({
-          type: 'context_threshold',
-          usagePercent: localContext.metrics.percentageUsed,
-          tokenCount: localContext.metrics.inputTokens + localContext.metrics.outputTokens,
-          itemCount: localContext.items.length,
-        }, this.buildHookContext(workItem));
-      }
-
-      if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
-        result.terminationReason = 'bounds:tool_calls';
-        this.emit(createEvent('agent_bounds_hit', {
-          agentType: this.config.type,
-          boundType: 'tool_calls',
-          current: metrics.toolCallsMade,
-          max: workItem.bounds.maxToolCalls,
-        }, workItem.workId));
+      const boundHit = this.checkBounds(metrics, workItem, elapsedMs);
+      if (boundHit) {
+        result.terminationReason = boundHit;
         break;
       }
 
-      if (elapsedMs >= workItem.bounds.maxDurationMs) {
-        result.terminationReason = 'bounds:duration';
-        this.emit(createEvent('agent_bounds_hit', {
-          agentType: this.config.type,
-          boundType: 'duration',
-          current: elapsedMs,
-          max: workItem.bounds.maxDurationMs,
-        }, workItem.workId));
-        break;
-      }
+      await this.compactIfNeeded(localContext, localReadFiles, workItem);
 
-      const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
-
-      const allTools = [
-        ...this.toolRegistry.getDefinitions(),
-        ...(this.agentRegistry?.listToolDefinitions() ?? []),
-      ];
-      const allowedTools = this.filterAllowedTools(allTools);
-
-      // On the last iteration, withhold tools and inject instruction to synthesize
-      // This ensures the agent produces a meaningful final response before hitting iteration limit
-      const isLastIteration = iteration === maxIterations - 1;
-      const lastIterationInstruction = isLastIteration
-        ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
-        : '';
-
-      const messages = this.buildMessages(system, taskContext + lastIterationInstruction, workItem, globalContext, localContext);
-
-      const toolsForThisCall = allowedTools.length > 0 ? allowedTools : undefined;
-      const toolChoiceForThisCall = isLastIteration && toolsForThisCall ? 'none' as const : undefined;
+      // 2. Build LLM request
+      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = this.buildIterationRequest(
+        workItem,
+        globalContext,
+        localContext,
+        cwd,
+        iteration,
+        maxIterations
+      );
 
 
       const llmStartTime = Date.now();
-      // Don't stream raw chunks when using structured output (they're JSON garbage)
-      // The extracted response field will be emitted after parsing
       const hasStructuredOutput = !!this.config.outputSchema;
+
+      // For structured output, use extractor to stream the response field in real-time
+      const jsonExtractor = hasStructuredOutput ? new StreamingJsonExtractor() : null;
+      // Track what content was streamed to TUI (to avoid re-emitting in result.response)
+      let streamedResponseContent = '';
 
       // Use resilient streaming with retry + circuit breaker
       const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
@@ -562,18 +751,25 @@ export class Agent {
           toolChoice: toolChoiceForThisCall,
           responseSchema: this.config.outputSchema,
           onChunk: (chunk) => {
-            if (hasStructuredOutput) return; // Skip raw JSON streaming
-            this.emit(createEvent('agent_message', {
-              agentType: this.config.type,
-              message: chunk,
-            }, workItem.workId));
+            if (jsonExtractor) {
+              // Extract and stream the response field from structured JSON
+              const newContent = jsonExtractor.addChunk(chunk);
+              if (newContent) {
+                streamedResponseContent += newContent;
+                this.emit(createEvent('agent_message', {
+                  agentType: this.config.type,
+                  message: newContent,
+                }, workItem.workId));
+              }
+            } else {
+              // Non-structured output: stream directly
+              this.emit(createEvent('agent_message', {
+                agentType: this.config.type,
+                message: chunk,
+              }, workItem.workId));
+            }
           },
-          onReasoningChunk: (chunk) => {
-            this.emit(createEvent('agent_reasoning', {
-              agentType: this.config.type,
-              content: chunk,
-            }, workItem.workId));
-          },
+
         },
         workItem.workId
       );
@@ -586,7 +782,7 @@ export class Agent {
       });
       metrics.llmCallsMade++;
 
-      this.emitLlmCall(response, messages, llmDurationMs, allowedTools, workItem.workId);
+      this.emitLlmCall(response, messages, llmDurationMs, toolsForThisCall ?? [], workItem.workId);
 
       // Update local context metrics with actual token usage from LLM
       if (response.usage) {
@@ -600,97 +796,29 @@ export class Agent {
       const content = (response.content ?? '') as string;
       const toolCalls = response.toolCalls ?? [];
 
-      // Add reasoning content to context for multi-turn salience (GLM-4.7)
-      // This preserves the thinking trace across turns so the model can reference it
+      // Add reasoning content to context for multi-turn salience
       if (response.reasoningContent) {
         localContext.addReasoning(response.reasoningContent);
       }
 
-      const structuredOutput = this.parseStructuredOutput(content);
-      if (structuredOutput) {
-        result.structuredOutput = structuredOutput;
-      }
-
-      // Extract artifacts from structured output each iteration (explorer emits these)
-      // This allows incremental artifact accumulation rather than only at final response
-      if (structuredOutput?.artifacts && Array.isArray(structuredOutput.artifacts)) {
-        const validArtifacts = (structuredOutput.artifacts as unknown[]).filter((a): a is {
-          sourcePath: string;
-          line?: number | null;
-          kind: string;
-          name: string;
-          signature?: string | null;
-          modifies?: string[] | null;
-          calls?: string[] | null;
-          insight?: string | null;
-          reduces?: string | null;
-        } => (
-          typeof a === 'object' &&
-          a !== null &&
-          typeof (a as Record<string, unknown>).sourcePath === 'string' &&
-          typeof (a as Record<string, unknown>).kind === 'string' &&
-          typeof (a as Record<string, unknown>).name === 'string'
-        ));
-
-        if (validArtifacts.length > 0) {
-          for (const a of validArtifacts) {
-            localContext.addArtifact({
-              sourcePath: a.sourcePath,
-              line: typeof a.line === 'number' ? a.line : undefined,
-              kind: a.kind as ArtifactKind,
-              name: a.name,
-              signature: typeof a.signature === 'string' ? a.signature : undefined,
-              modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
-              calls: Array.isArray(a.calls) ? a.calls : undefined,
-              insight: typeof a.insight === 'string' ? a.insight : undefined,
-              reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
-              relevance: 1.0,
-              discoveredBy: this.config.type,
-            });
-          }
-        }
-      }
-
+      // 3. Parse response content
+      const { structuredOutput, action, responseText: rawResponseText } = this.parseIterationResponse(content, result);
+      this.extractArtifactsFromOutput(structuredOutput, localContext);
       this.addAssistantMessage(localContext, content, toolCalls);
 
-      const action = this.extractStructuredAction(structuredOutput);
-      const parsedResponseText = this.extractStructuredResponse(structuredOutput);
-
-      // For LLMs that output prose before JSON (e.g., GLM), extract that text
-      // and combine with the parsed response field for complete display
+      // If we streamed the response field, don't include it again in result.response
+      // Only use pre-JSON text (if any) to avoid duplicate TUI output
       const preJsonText = extractPreJsonText(content);
-      const responseText = this.combineResponseText(preJsonText, parsedResponseText);
+      const responseText = streamedResponseContent.length > 0
+        ? (preJsonText?.trim() || undefined)  // Only pre-JSON text, response was already streamed
+        : rawResponseText;  // Nothing streamed, use full combined text
 
-      const emitTurnCompleted = (hasResponse: boolean): void => {
-        this.internalHookQueue.enqueue({
-          type: 'turn_completed',
-          iteration,
-          toolCallsMade: metrics.toolCallsMade,
-          llmCallsMade: metrics.llmCallsMade,
-          hasResponse,
-          terminationReason: result.terminationReason || undefined,
-        }, this.buildHookContext(workItem));
-      };
-
-      // Emit content for TUI display
-      // For structured output agents, we skip raw JSON chunk streaming (it's garbage to users).
-      // Instead, emit the clean parsed response OR raw content if JSON parsing failed.
+      // Fallback: if structured output was expected but streaming didn't capture anything
       if (hasStructuredOutput) {
-        if (responseText && responseText.trim().length > 0) {
-          // JSON parsed successfully - emit the clean response field
-          this.emit(createEvent('agent_message', {
-            agentType: this.config.type,
-            message: responseText,
-          }, workItem.workId));
-        } else if (!structuredOutput && content && content.trim().length > 0) {
-          // No JSON parsed but there's text content - emit it (LLM output plain text)
-          this.emit(createEvent('agent_message', {
-            agentType: this.config.type,
-            message: content,
-          }, workItem.workId));
-        }
+        this.emitFallbackResponse(content, jsonExtractor?.getContent() ?? '', workItem.workId);
       }
 
+      // 4. Process tools (if any)
       if (toolCalls.length > 0) {
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
         const toolCallsFailedBefore = metrics.toolCallsFailed;
@@ -708,125 +836,76 @@ export class Agent {
           toolRepeatState
         );
 
-        if (toolCalls.length > 0) {
-          const successCount = metrics.toolCallsSucceeded - toolCallsSucceededBefore;
-          const failCount = metrics.toolCallsFailed - toolCallsFailedBefore;
-          this.internalHookQueue.enqueue({
-            type: 'tool_batch_completed',
-            toolNames: toolCalls.map(tc => tc.name),
-            successCount,
-            failCount,
-          }, this.buildHookContext(workItem));
-        }
+        const successCount = metrics.toolCallsSucceeded - toolCallsSucceededBefore;
+        const failCount = metrics.toolCallsFailed - toolCallsFailedBefore;
+        this.internalHookQueue.enqueue({
+          type: 'tool_batch_completed',
+          toolNames: toolCalls.map(tc => tc.name),
+          successCount,
+          failCount,
+        }, this.buildHookContext(workItem));
 
-        if (result.needsUserInput || result.terminationReason) {
+        // Early exit if tool processing set a termination reason
+        if (result.terminationReason) {
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
         }
+      }
 
-        // Check awaitingUserInput from structured output (fallback for conversational questions)
-        if (this.handleAwaitingUserInput(result, structuredOutput, responseText, content as string)) {
+      // 4. Resolve action (single code path)
+      const resolved = this.resolveAction(action, structuredOutput, responseText, content, result);
+
+      switch (resolved) {
+        case 'done':
+        case 'user_input':
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
-        }
-
-        // Handle completion after tool calls
-        if (this.handleCompletionAction(result, responseText, content as string, action, structuredOutput)) {
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
-        }
-
-        // Handle handoff request after tool calls
-        if (action === 'handoff') {
-          const handoffSpec = typeof structuredOutput?.handoffSpec === 'string'
-            ? structuredOutput.handoffSpec
-            : null;
-          if (handoffSpec) {
-            result.needsHandoff = true;
-            result.handoffSpec = handoffSpec;
-            result.terminationReason = 'handoff_requested';
-            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-            return;
+          if (result.terminationReason === 'invalid_action') {
+            return; // Break out of loop via return (terminationReason already set)
           }
-          // No valid handoffSpec provided, continue execution
+          return;
+
+        case 'handoff': {
+          const handoffResult = this.handleHandoff(structuredOutput, result);
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+          if (handoffResult === 'return') return;
           continue;
         }
 
-        // Capture partial response even when continuing (in case we hit bounds later)
-        if (responseText && responseText.trim().length > 0) {
-          result.response = responseText;
-        }
+        case 'continue':
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+          continue;
 
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-        continue;
-      }
+        case 'no_action': {
+          // Handle missing action field
+          const responseCandidate = responseText ?? content;
+          if (responseCandidate.trim().length > 0) {
+            result.response = responseCandidate;
+          }
 
-      // Check awaitingUserInput from structured output (fallback for conversational questions)
-      if (this.handleAwaitingUserInput(result, structuredOutput, responseText, content as string)) {
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-        return;
-      }
+          // Tool calls made = progress, allow implicit continue
+          if (toolCalls.length > 0) {
+            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
+            continue;
+          }
 
-      // Handle completion action (done)
-      if (this.handleCompletionAction(result, responseText, content as string, action, structuredOutput)) {
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-        if (result.terminationReason === 'invalid_action') {
+          // No tool calls AND no action = inject schema reminder for structured output agents
+          if (this.config.outputSchema) {
+            const schemaReminder = `[SCHEMA REMINDER] You must set "action" every turn. Valid values: "done" (with goalStateReached: true) or "continue" (with specific next steps). If you need user input, use PromptUser tool then action: "done".`;
+            localContext.addMessage('user', schemaReminder);
+            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
+            continue;
+          }
+
+          // Non-structured agent with no action and no tools - terminate
+          result.terminationReason = 'no_action';
+          const preview = responseCandidate.trim().slice(0, 1000);
+          result.error = preview
+            ? `LLM response has no tools and no action directive. Response preview: ${preview}`
+            : 'LLM response has no tools and no action directive';
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           break;
         }
-        return;
       }
-
-      // Handle handoff request
-      if (action === 'handoff') {
-        const handoffSpec = typeof structuredOutput?.handoffSpec === 'string'
-          ? structuredOutput.handoffSpec
-          : null;
-        if (handoffSpec) {
-          result.needsHandoff = true;
-          result.handoffSpec = handoffSpec;
-          result.terminationReason = 'handoff_requested';
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
-        }
-        // No valid handoffSpec provided, continue execution
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-        continue;
-      }
-
-      // Handle continue action
-      if (action === 'continue') {
-        // Capture partial response even when continuing (in case we hit bounds later)
-        if (responseText && responseText.trim().length > 0) {
-          result.response = responseText;
-        }
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-        continue;
-      }
-
-      // Handle missing action - this happens when models using json_object format
-      // (like GLM-4.7) output plain text instead of structured JSON after tool calls.
-      // Rather than terminating, treat substantive text as implicit "continue".
-      const responseCandidate = responseText ?? content;
-      if (responseCandidate.trim().length > 0) {
-        result.response = responseCandidate;
-
-        // If we have an output schema configured but no valid action was extracted,
-        // the model likely output conversational text instead of JSON.
-        // Treat this as implicit "continue" to allow the agent to keep working.
-        if (this.config.outputSchema && !action) {
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
-          continue;
-        }
-      }
-
-      result.terminationReason = 'no_action';
-      const preview = responseCandidate.trim().slice(0, 1000);
-      result.error = preview
-        ? `LLM response has no tools and no action directive. Response preview: ${preview}`
-        : 'LLM response has no tools and no action directive';
-      this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-      break;
     }
 
     // Always capture all assistant responses even without a terminal action.
@@ -1375,6 +1454,14 @@ export class Agent {
     // Clone global context to avoid mutation
     const merged = ContextWindow.deserialize(globalContext.serialize());
 
+    // Filter out tool call history from globalContext clone - sub-agents should not
+    // see parent's tool calls (they could mimic tool signatures not in their allowed list)
+    if (!options.includeToolHistory) {
+      merged.filterItems((item) =>
+        item.type !== 'function_call' && item.type !== 'function_call_output'
+      );
+    }
+
     // Transfer artifacts from parent
     if (options.includeArtifacts) {
       for (const artifact of parentLocalContext.getArtifacts()) {
@@ -1743,11 +1830,16 @@ export class Agent {
       console.error(`[AGENT:explorer] SUB-AGENT VALIDATION FAILURE: ${filesReadCount} files, 0 artifacts`);
     }
 
+    // Sub-agents with structured output stream their response field directly to TUI
+    // Mark this so parent knows not to repeat the content
+    const responseStreamedToUser = !!agentConfig.outputSchema && !!enhancedResponse;
+
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
       success: explorerValidationFailed ? false : subResult.success,
       response: enhancedResponse,
+      responseStreamedToUser, // True if response was already shown to user via streaming
       filesRead: subResult.filesRead ?? [], // Explicit list - do not re-read these
       artifacts: Array.isArray(artifacts) ? artifacts : [], // Full artifact content for downstream use
       error: explorerValidationFailed ? explorerValidationError : subResult.error,

@@ -178,8 +178,32 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
       };
     }
 
-    case 'llm_call':
-      return null;
+    case 'llm_call': {
+      const llmData = data as {
+        agentType?: string;
+        provider?: string;
+        model?: string;
+        promptTokens?: number;
+        completionTokens?: number;
+        totalTokens?: number;
+        cachedTokens?: number;
+        maxWindowSize?: number;
+      };
+      // Forward llm_call event to TUI for context window tracking
+      return {
+        type: 'llm_call',
+        data: {
+          agentType: llmData.agentType,
+          provider: llmData.provider ?? 'unknown',
+          model: llmData.model ?? 'unknown',
+          promptTokens: llmData.promptTokens ?? 0,
+          completionTokens: llmData.completionTokens ?? 0,
+          totalTokens: llmData.totalTokens ?? 0,
+          cachedTokens: llmData.cachedTokens,
+          maxWindowSize: llmData.maxWindowSize,
+        },
+      };
+    }
 
     case 'agent_message': {
       const msgData = data as { agentType?: string; message?: string };

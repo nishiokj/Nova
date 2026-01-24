@@ -48,6 +48,14 @@ export class EventBus implements EventBusProtocol {
   publish(event: AnyEvent): void {
     if (this.shutdownFlag) return;
 
+    // Streaming events dispatch immediately - no batching delay
+    // These are high-frequency, latency-sensitive events
+    const isStreamingEvent = event.type === 'agent_message' || event.type === 'agent_reasoning';
+    if (isStreamingEvent) {
+      this.dispatchEvent(event);
+      return;
+    }
+
     this.pendingEvents.push(event);
     this.scheduleFlush();
   }

@@ -17,6 +17,7 @@ export {
   BusServer,
   type BusServerOptions,
   type BusPublishHandler,
+  type EventTranslator,
 } from './bus_server.js';
 
 export {

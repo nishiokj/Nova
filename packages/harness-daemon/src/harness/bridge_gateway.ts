@@ -119,11 +119,7 @@ export class BridgeGateway {
     // Use lastSessionKey as fallback - session_close may have nulled sessionKey but we still need cleanup
     const sessionKeyToClose = state?.sessionKey ?? state?.lastSessionKey;
     if (sessionKeyToClose) {
-      // Mark session as inactive (recoverable) on disconnect
-      const graphd = this.harness.getGraphD?.();
-      if (graphd) {
-        graphd.sessionUpdateStatus(sessionKeyToClose, 'inactive');
-      }
+      // closeSession handles persist + marking inactive
       this.harness.closeSession?.(sessionKeyToClose);
     }
     this.connections.delete(connectionId);
@@ -421,10 +417,16 @@ export class BridgeGateway {
       return;
     }
     // Check 'standard' agent type selection - this is the main/default that must be set
-    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
+    let activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
     if (!activeSelection?.model || !activeSelection?.provider) {
-      this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
-      return;
+      // Session may have been evicted after timeout - try to hydrate from DB before erroring
+      this.hydrateSessionModelSelections(sessionKey);
+      // Re-check after hydration attempt
+      activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
+      if (!activeSelection?.model || !activeSelection?.provider) {
+        this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
+        return;
+      }
     }
     if (!this.harness.hasApiKey(activeSelection.provider)) {
       this.sendEvent(connectionId, {
@@ -1153,11 +1155,7 @@ export class BridgeGateway {
       return;
     }
 
-    const graphd = this.harness.getGraphD?.();
-    if (graphd) {
-      graphd.sessionUpdateStatus(sessionKey, 'inactive');
-    }
-
+    // closeSession handles persist + marking inactive
     this.harness.closeSession?.(sessionKey);
 
     // Clear the connection's session reference
@@ -1166,7 +1164,7 @@ export class BridgeGateway {
     this.sendAuthResponse(connectionId, 'session_close', {
       success: true,
       sessionKey,
-      message: 'Session marked inactive',
+      message: 'Session closed and persisted',
     });
   }
 
@@ -1189,8 +1187,8 @@ export class BridgeGateway {
       return;
     }
 
-    // Use provided workingDir or fall back to connection's workingDir
-    const workingDir = typeof data?.workingDir === 'string' ? data.workingDir : state.workingDir;
+    // Only filter by workingDir if explicitly provided - otherwise show ALL sessions
+    const workingDir = typeof data?.workingDir === 'string' ? data.workingDir : undefined;
 
     // Default to recoverable sessions (active + inactive)
     const defaultStatuses = ['active', 'inactive'];

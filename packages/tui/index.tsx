@@ -11,6 +11,7 @@ import { Store, type HistoryLine } from "./store.js";
 import { HELP_LINES, parseSlashCommand } from "./commands.js";
 import {
   type ErrorData,
+  type LlmCallData,
   type ProgressData,
   type ReadyData,
   type ResponseData,
@@ -761,6 +762,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         case "response":
           handleResponse(event.data as ResponseData | undefined);
           break;
+        case "llm_call":
+          handleLlmCall(event.data as LlmCallData | undefined);
+          break;
         case "transcription":
           handleTranscription(event.data as TranscriptionData | undefined);
           break;
@@ -969,6 +973,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.finalizeReasoning();
         // Update snapshot after finalizing reasoning
       }
+      // Add message to history immediately so tool results appear AFTER it
+      // The message text will be substituted with streamingText during rendering
+      store.addMessage("agent", data.chunk, undefined, data.request_id);
       store.setStreaming(data.request_id, data.chunk);
       profiler.instant('tui.stream.firstChunk', 'tui', 'p', { requestId: data.request_id });
     } else {
@@ -982,7 +989,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       profiler.begin('tui.stream.finalize', 'tui');
       const finalText = store.getSnapshot().streamingText;
       store.batch(() => {
-        if (!messageExists(store.getSnapshot().history, data.request_id)) {
+        // Update the message text with the complete streamed content
+        // The message was added to history when streaming started
+        if (messageExists(store.getSnapshot().history, data.request_id)) {
+          store.updateMessageText(data.request_id, finalText);
+        } else {
+          // Fallback: add message if it somehow doesn't exist
           store.addMessage("agent", finalText, undefined, data.request_id);
         }
         store.finalizeStreaming();
@@ -1038,6 +1050,25 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (content) {
       store.addMessage("system", content);
     }
+  };
+
+  const handleLlmCall = (data?: LlmCallData) => {
+    if (!data) {
+      return;
+    }
+
+    // Extract token usage from llm_call event (fields are camelCase from agent)
+    const promptTokens = data.promptTokens ?? 0;
+    const completionTokens = data.completionTokens ?? 0;
+    const totalTokens = data.totalTokens ?? 0;
+    const cachedTokens = data.cachedTokens ?? 0;
+
+    // Calculate input tokens (prompt + cached for context)
+    const inputTokens = promptTokens + cachedTokens;
+    const maxWindowSize = data.maxWindowSize ?? null;
+
+    // Update store with context window info
+    store.setContextWindowSize(inputTokens, maxWindowSize);
   };
 
   const handleResponse = (data?: ResponseData) => {
@@ -1259,17 +1290,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         ? streamedContent
         : content;
 
-      console.error(`[TUI DEBUG] handleResponse: streamedContent=${streamedContent?.length ?? 0} chars, content=${content?.length ?? 0} chars, finalContent=${finalContent?.length ?? 0} chars, requestId=${requestId}`);
-      console.error(`[TUI DEBUG] handleResponse: messageExists=${requestId ? messageExists(store.getSnapshot().history, requestId) : 'no requestId'}`);
-
       if (finalContent && requestId && messageExists(store.getSnapshot().history, requestId)) {
-        console.error(`[TUI DEBUG] handleResponse: updating existing message`);
         store.updateMessageText(requestId, finalContent, meta);
       } else if (finalContent && (!requestId || !messageExists(store.getSnapshot().history, requestId))) {
-        console.error(`[TUI DEBUG] handleResponse: adding new agent message`);
         store.addMessage("agent", finalContent, meta, requestId);
-      } else {
-        console.error(`[TUI DEBUG] handleResponse: NOT adding message - finalContent empty or other condition`);
       }
 
       store.finalizeStreaming();
@@ -2854,8 +2878,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   const inputLayout = computeInputLayout(snapshot.inputText.split(""), snapshot.cursor, contentWidth, prompt);
   const inputVisibleLines = Math.min(DEFAULT_MAX_INPUT_LINES, inputLayout.lines.length);
-  // inputBoxHeight = top line (1) + input lines + bottom line (1) + model indicator row (1)
-  const inputBoxHeight = 1 + inputVisibleLines + 1 + 1;
+  // inputBoxHeight = top line (1) + input lines + bottom line (1) + model indicator row (1) + context info row (0 or 1)
+  const hasContextInfo = snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null;
+  const inputBoxHeight = 1 + inputVisibleLines + 1 + 1 + (hasContextInfo ? 1 : 0);
   const autocompleteHeight = snapshot.autocomplete.active
     ? snapshot.autocomplete.suggestions.length + 1
     : 0;
@@ -3155,15 +3180,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const isUserLine = line.role === "user";
             const isReasoning = line.role === "reasoning";
             const bgColor = isUserLine ? colors.userBg : undefined;
-            // User messages: 4 chars padding (2 left + 2 right)
+            // User messages: 2 chars padding (1 left + 1 right)
             // Agent messages: 2 chars padding (1 left + 1 right)
             const paddedText = isUserLine ? `  ${line.text}  ` : ` ${line.text} `;
             const remainingWidth = contentWidth - paddedText.length;
             const paddingText = remainingWidth > 0 ? " ".repeat(remainingWidth) : "";
             return (
-              <Text key={line.id ?? `hist-${index}`} backgroundColor={bgColor}>
-                <StyledLine text={paddedText + paddingText} baseColor={roleColor(line.role)} italic={isReasoning} />
-              </Text>
+              <Box key={line.id ?? `hist-${index}`} marginLeft={isUserLine ? -HORIZONTAL_PADDING : 0} marginRight={isUserLine ? -HORIZONTAL_PADDING : 0}>
+                <Text width={isUserLine ? width : undefined} backgroundColor={bgColor}>
+                  <StyledLine text={paddedText + paddingText} baseColor={roleColor(line.role)} italic={isReasoning} />
+                </Text>
+              </Box>
             );
           })}
         </Box>
@@ -3272,6 +3299,48 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
               );
             })()}
           </Text>
+
+          {/* Context window info row: tokens / total size, and cached input */}
+          {(snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null) && (
+            <Text>
+              {(() => {
+                const padding = 2;
+                let parts: string[] = [];
+
+                // Context window size: input / maxWindowSize
+                if (snapshot.contextInputTokens !== null && snapshot.contextMaxWindowSize !== null) {
+                  const percentage = Math.round((snapshot.contextInputTokens / snapshot.contextMaxWindowSize) * 100);
+                  parts.push(`Ctx: ${snapshot.contextInputTokens}/${snapshot.contextMaxWindowSize} (${percentage}%)`);
+                } else if (snapshot.contextInputTokens !== null) {
+                  parts.push(`Ctx: ${snapshot.contextInputTokens} tokens`);
+                } else if (snapshot.contextMaxWindowSize !== null) {
+                  parts.push(`Ctx: /${snapshot.contextMaxWindowSize}`);
+                }
+
+                // Cached input (truncated to fit)
+                if (snapshot.cachedInput !== null && snapshot.cachedInput.length > 0) {
+                  const maxCachedLength = Math.floor((contentWidth - padding * 2 - (parts.length > 0 ? parts.join(" | ").length + 3 : 0)) / 2);
+                  const truncated = snapshot.cachedInput.length > maxCachedLength
+                    ? snapshot.cachedInput.slice(0, maxCachedLength - 3) + "..."
+                    : snapshot.cachedInput;
+                  parts.push(`Cache: ${truncated}`);
+                }
+
+                if (parts.length === 0) return null;
+
+                const content = parts.join(" | ");
+                const gap = contentWidth - content.length - (padding * 2);
+                return (
+                  <>
+                    <Text>{" ".repeat(padding)}</Text>
+                    <Text>{" ".repeat(Math.max(0, gap))}</Text>
+                    <Text color={colors.muted} dimColor>{content}</Text>
+                    <Text>{" ".repeat(padding)}</Text>
+                  </>
+                );
+              })()}
+            </Text>
+          )}
 
           {/* Autocomplete dropdown */}
           {snapshot.autocomplete.active ? (

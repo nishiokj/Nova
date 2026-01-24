@@ -52,7 +52,8 @@ export type BridgeEventType =
   | "response"
   | "transcription"
   | "user_prompt"
-  | "error";
+  | "error"
+  | "llm_call";
 
 export interface BridgeCommand {
   type: BridgeCommandType;

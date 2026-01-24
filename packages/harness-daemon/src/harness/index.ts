@@ -4,7 +4,7 @@
 
 export { AgentHarness, createHarnessFromEnv } from './harness.js';
 export { BridgeGateway } from './bridge_gateway.js';
-export { HarnessDaemon, runHarnessDaemon } from './daemon.js';
+export { HarnessDaemon, runHarnessDaemon, type HarnessDaemonOptions } from './daemon.js';
 export {
   translateAgentEvent,
   createStreamEvent,
@@ -77,3 +77,21 @@ export type {
   SkillDefinitionStub,
   HookDefinitionStub,
 } from './skills_loader.js';
+
+// Connectors and webhooks
+export {
+  TelegramConnector,
+  WebhookServer,
+  registerTelegramWebhook,
+  createTelegramWebhookHandler,
+} from '../connectors/index.js';
+export type {
+  TelegramConnectorConfig,
+  TelegramUpdate,
+  TelegramMessage,
+  TelegramUser,
+  TelegramChat,
+  TelegramSendMessageOptions,
+  WebhookServerConfig,
+  WebhookRoute,
+} from '../connectors/index.js';

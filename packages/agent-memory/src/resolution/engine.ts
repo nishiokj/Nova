@@ -250,44 +250,154 @@ export class EntityResolutionEngine {
 
   /**
    * Resolve all unresolved identities.
+   * @param options.limit - Maximum identities to process (default: 1000)
+   * @param options.batchSize - Process in batches of this size (default: 50)
    */
-  async resolveAllUnresolved(): Promise<{ resolved: number; queued: number; failed: number }> {
-    const stats = { resolved: 0, queued: 0, failed: 0 }
+  async resolveAllUnresolved(options: {
+    limit?: number
+    batchSize?: number
+  } = {}): Promise<{ resolved: number; queued: number; failed: number; total: number }> {
+    const { limit = 1000, batchSize = 50 } = options
+    const stats = { resolved: 0, queued: 0, failed: 0, total: 0 }
 
     // Find identities without person_id
-    const result = await this.entityRepo.findByType('identity', { limit: 1000 })
+    const result = await this.entityRepo.findByType('identity', { limit })
     const unresolvedIdentities = result.items.filter((e) => {
       const identity = e.data as Identity
       return !identity.person_id
     })
 
-    for (const stored of unresolvedIdentities) {
-      try {
-        const identity = stored.data as Identity
-        await this.resolveIdentity(stored.id)
+    stats.total = unresolvedIdentities.length
 
-        // Check if resolved or queued
-        const updated = await this.entityRepo.findById(stored.id)
+    // Process in batches
+    for (let i = 0; i < unresolvedIdentities.length; i += batchSize) {
+      const batch = unresolvedIdentities.slice(i, i + batchSize)
+      const batchStats = await this.resolveIdentityBatch(batch.map((e) => e.id))
+      stats.resolved += batchStats.resolved
+      stats.queued += batchStats.queued
+      stats.failed += batchStats.failed
+    }
+
+    return stats
+  }
+
+  /**
+   * Resolve a batch of identities by ID.
+   * More efficient than calling resolveIdentity() in a loop.
+   */
+  async resolveIdentityBatch(identityIds: string[]): Promise<{
+    resolved: number
+    queued: number
+    failed: number
+    results: Array<{ id: string; status: 'resolved' | 'queued' | 'failed'; personId?: string; error?: string }>
+  }> {
+    const stats = { resolved: 0, queued: 0, failed: 0 }
+    const results: Array<{ id: string; status: 'resolved' | 'queued' | 'failed'; personId?: string; error?: string }> = []
+
+    for (const identityId of identityIds) {
+      try {
+        await this.resolveIdentity(identityId)
+
+        // Check outcome
+        const updated = await this.entityRepo.findById(identityId)
         const updatedIdentity = updated?.data as Identity
+
         if (updatedIdentity?.person_id) {
           stats.resolved++
+          results.push({ id: identityId, status: 'resolved', personId: updatedIdentity.person_id })
         } else {
-          const pending = await this.reviewRepo.findByIdentity(stored.id)
+          const pending = await this.reviewRepo.findByIdentity(identityId)
           if (pending.length > 0) {
             stats.queued++
+            results.push({ id: identityId, status: 'queued' })
+          } else {
+            stats.failed++
+            results.push({ id: identityId, status: 'failed', error: 'Unknown outcome' })
           }
         }
       } catch (error) {
         stats.failed++
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        results.push({ id: identityId, status: 'failed', error: errorMsg })
         this.emit({
           type: 'error',
-          identityId: stored.id,
-          error: error instanceof Error ? error.message : String(error),
+          identityId,
+          error: errorMsg,
         })
       }
     }
 
+    return { ...stats, results }
+  }
+
+  /**
+   * Resolve identities created by a specific sync job.
+   * Useful for processing identities right after a sync completes.
+   */
+  async resolveFromSyncJob(syncJobId: string): Promise<{
+    resolved: number
+    queued: number
+    failed: number
+    total: number
+  }> {
+    const stats = { resolved: 0, queued: 0, failed: 0, total: 0 }
+
+    // Find identity IDs linked to this sync job via entity_source_mappings
+    const rows = await this.sql<{ canonical_entity_id: string }[]>`
+      SELECT DISTINCT esm.canonical_entity_id
+      FROM entity_source_mappings esm
+      JOIN raw_envelopes re ON esm.raw_envelope_id = re.id
+      JOIN canonical_entities ce ON esm.canonical_entity_id = ce.id
+      WHERE re.sync_job_id = ${syncJobId}
+        AND ce.entity_type = 'identity'
+        AND ce.deleted_at IS NULL
+        AND (ce.data->>'person_id') IS NULL
+    `
+
+    const identityIds = rows.map((r) => r.canonical_entity_id)
+    stats.total = identityIds.length
+
+    if (identityIds.length === 0) {
+      return stats
+    }
+
+    // Resolve in batches
+    const batchSize = 50
+    for (let i = 0; i < identityIds.length; i += batchSize) {
+      const batch = identityIds.slice(i, i + batchSize)
+      const batchStats = await this.resolveIdentityBatch(batch)
+      stats.resolved += batchStats.resolved
+      stats.queued += batchStats.queued
+      stats.failed += batchStats.failed
+    }
+
     return stats
+  }
+
+  /**
+   * Get unresolved identity count for monitoring.
+   */
+  async getUnresolvedCount(): Promise<number> {
+    const [row] = await this.sql<{ count: number }[]>`
+      SELECT COUNT(*) as count
+      FROM canonical_entities
+      WHERE entity_type = 'identity'
+        AND deleted_at IS NULL
+        AND (data->>'person_id') IS NULL
+    `
+    return Number(row.count)
+  }
+
+  /**
+   * Get pending review count for monitoring.
+   */
+  async getPendingReviewCount(): Promise<number> {
+    const [row] = await this.sql<{ count: number }[]>`
+      SELECT COUNT(*) as count
+      FROM pending_reviews
+      WHERE reviewed_at IS NULL
+    `
+    return Number(row.count)
   }
 
   /**

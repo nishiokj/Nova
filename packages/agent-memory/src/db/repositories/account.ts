@@ -11,6 +11,22 @@ import type { RepositoryContext } from './types.js'
 
 export type AuthType = 'oauth2' | 'api_key' | 'basic' | 'token'
 
+/**
+ * Account credentials (encrypted).
+ */
+export interface AccountCredentials {
+  /** Encrypted access token */
+  credentials_encrypted: Buffer
+  /** Initialization vector for encryption */
+  credentials_iv: Buffer
+  /** Encrypted refresh token (if available) */
+  refresh_token_encrypted?: Buffer
+  /** Token expiration time */
+  token_expires_at?: Date | null
+  /** Connector type these credentials are for */
+  connector_type?: ConnectorType
+}
+
 export interface Account {
   id: string
   connector: ConnectorType
@@ -67,13 +83,6 @@ export interface AccountInput {
   display_name?: string
   email?: string
   auth_type: AuthType
-}
-
-export interface AccountCredentials {
-  credentials_encrypted: Buffer
-  credentials_iv: Buffer
-  refresh_token_encrypted?: Buffer
-  token_expires_at?: Date
 }
 
 export interface AccountRepository {
@@ -238,10 +247,10 @@ export function createAccountRepository(ctx: RepositoryContext): AccountReposito
       const [row] = await sql<
         Pick<
           AccountRow,
-          'credentials_encrypted' | 'credentials_iv' | 'refresh_token_encrypted' | 'token_expires_at'
+          'credentials_encrypted' | 'credentials_iv' | 'refresh_token_encrypted' | 'token_expires_at' | 'connector'
         >[]
       >`
-        SELECT credentials_encrypted, credentials_iv, refresh_token_encrypted, token_expires_at
+        SELECT credentials_encrypted, credentials_iv, refresh_token_encrypted, token_expires_at, connector
         FROM accounts
         WHERE id = ${id}
       `
@@ -255,6 +264,7 @@ export function createAccountRepository(ctx: RepositoryContext): AccountReposito
         credentials_iv: row.credentials_iv,
         refresh_token_encrypted: row.refresh_token_encrypted ?? undefined,
         token_expires_at: row.token_expires_at ?? undefined,
+        connector_type: row.connector as ConnectorType,
       }
     },
   }

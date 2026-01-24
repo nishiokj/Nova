@@ -28,6 +28,8 @@ export {
   // Activity Entities
   MessageSchema,
   type Message,
+  ConversationSchema,
+  type Conversation,
   EventSchema,
   type Event,
   TaskSchema,
