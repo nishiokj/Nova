@@ -14,13 +14,20 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "daemon": "bun run scripts/sync-daemon.ts",
+    "kill": "lsof -ti:3001 | xargs kill 2>/dev/null || true",
+    "db:migrate": "bun run scripts/migrate.ts"
   },
   "dependencies": {
-    "postgres": "^3.4.5",
+    "harness-client": "workspace:*",
+    "ngrok": "^5.0.0-beta.2",
+    "open": "^10.1.0",
+    "pgvector": "^0.2.1",
+    "postgres": "^3.4.8",
+    "types": "workspace:*",
     "ulid": "^2.3.0",
-    "zod": "^3.23.8",
-    "types": "workspace:*"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

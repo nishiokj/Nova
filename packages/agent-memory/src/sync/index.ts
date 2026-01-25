@@ -62,7 +62,6 @@ export {
 // Processor
 export {
   Processor,
-  MapperRegistry,
   type ProcessorConfig,
 } from './processor.js'
 

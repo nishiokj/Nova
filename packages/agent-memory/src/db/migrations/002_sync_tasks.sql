@@ -34,7 +34,8 @@ CREATE INDEX idx_sync_tasks_scheduler
 CREATE INDEX idx_sync_tasks_account
   ON sync_tasks (account_id);
 
--- Prevent duplicate active tasks for same account/connector/entityTypes/syncType
+-- Prevent duplicate active tasks for same account/connector/syncType
+-- Note: entity_types uniqueness enforced at application level
 CREATE UNIQUE INDEX idx_sync_tasks_unique
-  ON sync_tasks (account_id, connector, sync_type, COALESCE(entity_types::text, ''))
+  ON sync_tasks (account_id, connector, sync_type)
   WHERE enabled = true;

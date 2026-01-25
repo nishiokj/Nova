@@ -143,23 +143,6 @@ export const MessageSchema = BaseEntitySchema.extend({
 export type Message = z.infer<typeof MessageSchema>
 
 /**
- * Conversation: Threaded conversation across messages
- */
-export const ConversationSchema = BaseEntitySchema.extend({
-  entity_type: z.literal('conversation'),
-  platform: PlatformSchema,
-  messageIds: z.array(z.string()),
-  messageCount: z.number(),
-  participants: z.array(CanonicalSourceRefSchema),
-  startedAt: z.string(),
-  endedAt: z.string().optional(),
-  topic: z.string().optional(),
-  metadata: z.record(z.unknown()).optional(),
-})
-
-export type Conversation = z.infer<typeof ConversationSchema>
-
-/**
  * Event: Calendar event, meeting, scheduled item
  */
 export const EventSchema = BaseEntitySchema.extend({

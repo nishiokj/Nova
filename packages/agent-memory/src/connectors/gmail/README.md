@@ -40,12 +40,11 @@ Connector for Gmail API v1. Enables syncing email messages into the agent-memory
 
 ### 3. Configure Environment Variables
 
-Add the following to your environment:
+Add the following to your environment. These are **centralized Google OAuth credentials** used by all Google connectors (Gmail, Calendar, Drive, etc.):
 
 ```bash
-GMAIL_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GMAIL_CLIENT_SECRET=your-client-secret
-GMAIL_WEBHOOK_SECRET=your-webhook-secret  # Optional for Pub/Sub
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
 ```
 
 ### 4. (Optional) Set Up Pub/Sub Push
@@ -80,9 +79,9 @@ For real-time webhook notifications:
 ```typescript
 import { createGmailConnector } from '@agent-memory/connectors'
 
+// OAuth credentials are managed centrally via OAuthProviderRegistry
+// (loaded from GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env vars)
 const connector = createGmailConnector({
-  clientId: process.env.GMAIL_CLIENT_ID!,
-  clientSecret: process.env.GMAIL_CLIENT_SECRET!,
   rateLimit: 10,  // Requests per second
   labels: ['INBOX', 'IMPORTANT'],  // Labels to sync
   excludeLabels: ['SPAM', 'TRASH'],  // Labels to exclude
@@ -218,11 +217,11 @@ app.post('/webhooks/gmail', async (req, res) => {
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `clientId` | `string` | Required | OAuth2 client ID from GCP Console |
-| `clientSecret` | `string` | Required | OAuth2 client secret from GCP Console |
 | `rateLimit` | `number` | `10` | Max API requests per second (Gmail limit: 100/100s) |
 | `labels` | `string[]` | `[]` | Specific labels to sync (empty = all labels) |
 | `excludeLabels` | `string[]` | `['SPAM', 'TRASH']` | Labels to exclude from sync |
+
+> **Note**: OAuth credentials (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) are managed centrally by the `OAuthProviderRegistry`, not passed to individual connectors.
 
 ## Supported Entity Types
 
@@ -317,8 +316,8 @@ pnpm test -- packages/agent-memory/src/connectors/gmail/index.test.ts
 ## Troubleshooting
 
 ### "Invalid client" error
-- Verify `clientId` and `clientSecret` are correct
-- Check OAuth consent screen is configured
+- Verify `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` env vars are set correctly
+- Check OAuth consent screen is configured in GCP Console
 
 ### "Insufficient Permission" error
 - Verify API scopes are enabled in GCP Console

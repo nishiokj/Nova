@@ -325,14 +325,13 @@ describe('Configuration Loader', () => {
       const config = loadFromEnv({
         GITHUB_CLIENT_ID: 'gh-client',
         GITHUB_CLIENT_SECRET: 'gh-secret',
-        GMAIL_CLIENT_ID: 'gmail-client',
         TWITTER_BEARER_TOKEN: 'bearer-token',
       })
 
       expect(config.connectors?.github?.clientId).toBe('gh-client')
       expect(config.connectors?.github?.clientSecret).toBe('gh-secret')
-      expect(config.connectors?.gmail?.clientId).toBe('gmail-client')
       expect(config.connectors?.xcom?.bearerToken).toBe('bearer-token')
+      // Note: OAuth credentials (GOOGLE_CLIENT_ID, etc.) are loaded by OAuthProviderRegistry, not config loader
     })
 
     test('loads observability config', () => {

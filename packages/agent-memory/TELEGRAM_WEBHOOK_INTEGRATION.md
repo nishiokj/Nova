@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide explains how to integrate Telegram with the Harness system using a **dumb webhook** approach. The webhook handler simply extracts incoming messages and calls `harness.run()` with a session key. The harness's existing `SessionStore` provides automatic stateful conversation management through GraphD persistence.
+This guide explains how to integrate Telegram with the Harness system using the built-in `TelegramConnector`. The webhook handler integrates directly with `HarnessDaemon` and uses the harness's existing `SessionStore` for automatic stateful conversation management.
 
 ---
 
@@ -10,175 +10,97 @@ This guide explains how to integrate Telegram with the Harness system using a **
 
 ### The Key Insight: `sessionKey` = Conversation ID
 
-The harness's `run()` method already supports session-based state management:
+The harness's `run()` method supports session-based state management:
 
 ```typescript
-// harness.ts:367 - run() accepts sessionKey
+// harness.ts - run() accepts sessionKey
 run(params: {
   requestId: string;
   inputText: string;
-  tier?: 'simple' | 'standard' | 'complex';
-  sessionKey: string;  // ← This is the magic!
+  sessionKey: string;  // ← Telegram chat ID becomes this!
   workingDir: string;
-  planMode?: boolean;
-  stopHook?: StopHookHandler;
+  // ...
 }): AgentRunHandle
-
-// harness.ts:422 - Loads or creates SessionStore for this sessionKey
-const store = this.getOrCreateSessionStore(sessionKey);
 ```
 
 ### Flow Diagram
 
 ```
-Telegram Webhook → Your Handler
-                   │
-                   ├─ sessionKey = `telegram:${chatId}`
-                   │
-                   └─ harness.run({ sessionKey, inputText })
-                            │
-                            ▼
-                   harness.ts:getOrCreateSessionStore()
-                   │
-                   ├─ If NEW session → creates ContextWindow (empty)
-                   └─ If EXISTS session → loads ContextWindow from GraphD
-                            │
-                            ▼
-                   ContextWindow has FULL conversation history
-                   - All previous messages
-                   - All tool calls
-                   - All file content
-                            │
-                            ▼
-                   Orchestrator.execute() with full context
-                            │
-                            ▼
-                   Agent response
-                            │
-                            ▼
-                   SessionStore.persistContext() → GraphD
+Telegram Webhook → WebhookServer → TelegramConnector
+                                   │
+                                   ├─ sessionKey = `telegram:${chatId}`
+                                   │
+                                   └─ harness.run({ sessionKey, inputText })
+                                            │
+                                            ▼
+                                   SessionStore loads/creates context
+                                   │
+                                   ├─ If NEW session → creates ContextWindow
+                                   └─ If EXISTS → loads from GraphD
+                                            │
+                                            ▼
+                                   Agent processes with full history
+                                            │
+                                            ▼
+                                   TelegramConnector.sendMessage()
 ```
 
 ---
 
-## Implementation
+## Quick Start
 
-### Telegram Webhook Handler
+### Option 1: CLI with Environment Variable
 
-```typescript
-// telegram-webhook.ts
-import { AgentHarness } from 'harness';
-import { v4 as uuidv4 } from 'uuid';
+```bash
+# Set your bot token
+export TELEGRAM_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 
-interface TelegramUpdate {
-  update_id: number;
-  message: {
-    from: { id: number; username?: string; first_name: string };
-    chat: { id: number; type: 'private' | 'group' };
-    text: string;
-  };
-}
+# Start daemon with webhook server enabled
+bun run packages/harness-daemon/src/harness/daemon.ts --enable-webhooks
 
-export class TelegramWebhookHandler {
-  constructor(
-    private harness: AgentHarness,
-    private botToken: string
-  ) {}
-
-  async handleUpdate(update: TelegramUpdate) {
-    const { message } = update;
-    if (!message?.text) return;
-
-    // KEY: Use Telegram chat_id as sessionKey!
-    const sessionKey = `telegram:${message.chat.id}`;
-    const requestId = uuidv4();
-
-    console.log(`[${message.from.username || message.from.first_name}]: ${message.text}`);
-
-    // Call harness - it loads full history automatically
-    const handle = this.harness.run({
-      requestId,
-      inputText: message.text,
-      sessionKey,  // ← This loads previous context!
-      workingDir: process.cwd(),
-    });
-
-    // Stream events and send responses to Telegram
-    for await (const event of handle.events) {
-      if (event.type === 'response') {
-        await this.sendTelegramMessage(
-          message.chat.id,
-          event.data.content
-        );
-      }
-      if (event.type === 'error' && event.data.fatal) {
-        await this.sendTelegramMessage(
-          message.chat.id,
-          `⚠️ ${event.data.message}`
-        );
-      }
-    }
-  }
-
-  private async sendTelegramMessage(chatId: number, text: string) {
-    await fetch(
-      `https://api.telegram.org/bot${this.botToken}/sendMessage`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          chat_id: chatId, 
-          text: text.slice(0, 4096) // Telegram limit
-        }),
-      }
-    );
-  }
-}
+# Output:
+# [harness-daemon] bus listening on 127.0.0.1:9555
+# [harness-daemon] webhook server listening on 127.0.0.1:9556
+# [harness-daemon] Registered Telegram bot: 123456789
+# [harness-daemon] Webhook URL: http://127.0.0.1:9556/webhook/telegram/123456789
 ```
 
-### Webhook Server
+### Option 2: CLI with Explicit Arguments
+
+```bash
+bun run packages/harness-daemon/src/harness/daemon.ts \
+  --telegram-bot "123456789:ABCdefGHIjklMNOpqrsTUVwxyz" \
+  --webhook-port 3001
+```
+
+### Option 3: Programmatic Setup
 
 ```typescript
-// webhook-server.ts
-import express from 'express';
 import { HarnessDaemon } from 'harness-daemon';
-import { TelegramWebhookHandler } from './telegram-webhook.js';
 
 async function main() {
-  // Start harness (same as TUI!)
-  const daemon = new HarnessDaemon();
+  const daemon = new HarnessDaemon({
+    port: 9555,
+    webhookPort: 3001,
+    workingDir: process.cwd(),
+  });
+
+  // Start the bus server (for TUI connections)
   await daemon.start();
-  const harness = daemon.getHarness();
 
-  // Start webhook handler
-  const telegramWebhook = new TelegramWebhookHandler(
-    harness,
-    process.env.TELEGRAM_BOT_TOKEN!
-  );
+  // Start the webhook HTTP server
+  await daemon.startWebhookServer();
 
-  // Set up Express/HTTP server
-  const app = express();
-  app.use(express.json());
-  
-  app.post('/webhook/telegram', async (req, res) => {
-    await telegramWebhook.handleUpdate(req.body);
-    res.send('OK');
+  // Register Telegram bot with a default model
+  const connector = daemon.registerTelegramBot(process.env.TELEGRAM_BOT_TOKEN!, {
+    defaultModel: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
   });
 
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, async () => {
-    console.log(`🚀 Webhook server listening on port ${PORT}`);
+  // Set webhook URL with Telegram
+  const publicUrl = process.env.PUBLIC_URL ?? 'https://your-domain.com';
+  await connector.setWebhook(`${publicUrl}/webhook/telegram/${connector.getBotId()}`);
 
-    // Set Telegram webhook
-    const webhookUrl = `${process.env.PUBLIC_URL}/webhook/telegram`;
-    console.log(`📡 Setting Telegram webhook to: ${webhookUrl}`);
-    
-    await fetch(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}`
-    );
-    
-    console.log('✅ Telegram webhook configured!');
-  });
+  console.log(`Telegram bot ready: ${connector.getBotId()}`);
 }
 
 main().catch(console.error);
@@ -186,79 +108,194 @@ main().catch(console.error);
 
 ---
 
-## Stateful Conversations Explained
+## Configuration Options
 
-### Session Management Features
+### HarnessDaemon Options
 
-| Feature | How It Works |
-|---------|---------------|
-| **Conversation History** | Each `sessionKey` = one conversation. `ContextWindow` stores all messages |
-| **Auto-Persistence** | `SessionStore.persistContext()` saves to GraphD after each message |
-| **Auto-Loading** | `getOrCreateSessionStore()` loads from GraphD on first access |
-| **Model Selection** | `setSessionSelectedModel(sessionKey, agentType, selection)` per session |
-| **Context Compaction** | `ContextWindow` auto-compacts at 80% capacity with LLM-ledger |
-| **Interruption** | `checkInterruption()` detects new messages during execution |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `port` | number | 9555 | TCP bus server port |
+| `webhookPort` | number | port + 1 | HTTP webhook server port |
+| `webhookHost` | string | same as host | Webhook server bind address |
 
-### Conversation Flow Example
+### TelegramConnector Options
 
-#### First Message (Alice, chat_id: 12345)
+| Option | Type | Description |
+|--------|------|-------------|
+| `defaultModel` | `{ provider: string; model: string }` | Default model for new sessions |
+| `secretToken` | string | Telegram webhook secret for verification |
+| `skipModelValidation` | boolean | Skip model/API key checks (testing only) |
 
-```typescript
-// Session doesn't exist yet
-const sessionKey = 'telegram:12345';
-const store = getOrCreateSessionStore(sessionKey);
-// ContextWindow = [] (empty)
+---
 
-// Harness runs agent
-// Agent: "Hello! I'm your assistant."
+## Stateful Conversations
 
-// Persist
-store.persistContext() → GraphD saves session
-```
-
-#### Second Message (Alice, same chat)
+Each Telegram chat gets its own session with full conversation history:
 
 ```typescript
-// Session EXISTS now!
-const sessionKey = 'telegram:12345';
-const store = getOrCreateSessionStore(sessionKey);
+// Session key format
+const sessionKey = `telegram:${chatId}`;
+
+// First message (Alice, chat_id: 12345)
+// Session: telegram:12345 (NEW)
+// ContextWindow = []
+// Agent responds...
+// SessionStore persists to GraphD
+
+// Second message (same chat)
+// Session: telegram:12345 (EXISTS)
 // ContextWindow = [
 //   { role: 'user', content: 'Hello!' },
 //   { role: 'assistant', content: "Hello! I'm your assistant." }
 // ]
-
-// Harness runs agent WITH FULL HISTORY
-// Agent: "You just said hello to me. How can I help?"
+// Agent has FULL history
 ```
+
+### Session Features
+
+| Feature | Description |
+|---------|-------------|
+| **Conversation History** | All messages stored in `ContextWindow` |
+| **Auto-Persistence** | Saved to GraphD after each message |
+| **Auto-Loading** | Loaded from GraphD on session resume |
+| **Context Compaction** | Auto-compacts at 80% capacity |
+
+---
+
+## Webhook Security
+
+### Secret Token Verification
+
+```typescript
+const connector = daemon.registerTelegramBot(botToken, {
+  secretToken: 'your-secret-token',
+});
+
+// Set webhook with secret
+await connector.setWebhook(webhookUrl, {
+  secret_token: 'your-secret-token',
+});
+```
+
+The webhook server validates the `X-Telegram-Bot-Api-Secret-Token` header.
 
 ---
 
 ## Multi-Platform Support
 
-The same dumb webhook pattern works for ANY messaging platform:
+The same session pattern works for any messaging platform:
 
 | Platform | sessionKey Format |
 |----------|------------------|
 | Telegram | `telegram:${chatId}` |
-| Slack | `slack:${userId}` |
+| Slack | `slack:${channelId}` |
 | Discord | `discord:${channelId}` |
 | WhatsApp | `whatsapp:${phoneNumber}` |
-| Email | `email:${threadId}` |
-| SMS | `sms:${phoneNumber}` |
 
 ---
 
-## Environment Variables
+## Local Development
+
+### Option A: Polling Mode (No Public URL Needed)
+
+The simplest option for local development - the connector polls Telegram for updates:
 
 ```bash
-# Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
+export TELEGRAM_BOT_TOKEN="your-token"
+bun run packages/harness-daemon/src/harness/daemon.ts --telegram-polling
 
-# Public URL (use ngrok/tunnelmole for local development)
-PUBLIC_URL="https://your-domain.com"
+# Output:
+# [harness-daemon] bus listening on 127.0.0.1:9555
+# [harness-daemon] Telegram bot registered: 123456789
+# [harness-daemon] Telegram polling mode active (no public URL required)
+```
 
-# Server Port
-PORT=3000
+Or programmatically:
+
+```typescript
+const connector = daemon.registerTelegramBot(token);
+await connector.deleteWebhook();  // Disable any existing webhook
+connector.startPolling();          // Start polling loop
+```
+
+### Option B: ngrok (For Webhook Testing)
+
+If you need to test webhook mode specifically:
+
+```bash
+# Terminal 1: Start daemon with webhooks
+export TELEGRAM_BOT_TOKEN="your-token"
+bun run packages/harness-daemon/src/harness/daemon.ts --enable-webhooks
+
+# Terminal 2: Start ngrok
+ngrok http 9556
+
+# Copy the HTTPS URL and set webhook
+curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=https://abc123.ngrok-free.app/webhook/telegram/YOUR_BOT_ID"
+```
+
+### Auto-Detection
+
+If `TELEGRAM_BOT_TOKEN` is set but `PUBLIC_URL` is not, the daemon automatically uses polling mode.
+
+---
+
+## API Reference
+
+### TelegramConnector Methods
+
+```typescript
+class TelegramConnector {
+  // Handle incoming webhook update
+  async handleUpdate(update: TelegramUpdate): Promise<boolean>;
+
+  // Send a message to a chat
+  async sendMessage(options: TelegramSendMessageOptions): Promise<boolean>;
+
+  // Send typing indicator
+  async sendChatAction(chatId: number, action: 'typing'): Promise<boolean>;
+
+  // Configure webhook URL with Telegram
+  async setWebhook(url: string, options?: { secret_token?: string }): Promise<{ success: boolean }>;
+
+  // Remove webhook
+  async deleteWebhook(): Promise<{ success: boolean }>;
+
+  // Polling mode (for local dev without public URL)
+  startPolling(intervalMs?: number): void;
+  stopPolling(): void;
+  isPolling(): boolean;
+
+  // Get bot ID (first part of token)
+  getBotId(): string;
+}
+```
+
+### HarnessDaemon Methods
+
+```typescript
+class HarnessDaemon {
+  // Start webhook HTTP server
+  async startWebhookServer(): Promise<{ host: string; port: number }>;
+
+  // Register a Telegram bot
+  registerTelegramBot(
+    botToken: string,
+    options?: {
+      secretToken?: string;
+      defaultModel?: { provider: string; model: string };
+    }
+  ): TelegramConnector;
+
+  // List registered bot IDs
+  listTelegramBots(): string[];
+
+  // Get connector by bot ID
+  getTelegramConnector(botId: string): TelegramConnector | undefined;
+
+  // Get harness instance (for advanced use)
+  getHarness(): AgentHarness | null;
+}
 ```
 
 ---
@@ -268,75 +305,62 @@ PORT=3000
 1. **Create a Telegram Bot**:
    - Open Telegram and search for **@BotFather**
    - Send `/newbot` to create a new bot
-   - Follow the prompts to name your bot and choose a username
+   - Follow the prompts to name your bot
    - **Save the API token** (e.g., `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
 
-2. **Get Your Bot's Username**:
-   - Send `/mybots` to BotFather
-   - Select your bot to see its `@username`
+2. **Configure Environment**:
+   ```bash
+   export TELEGRAM_BOT_TOKEN="your-token"
+   export PUBLIC_URL="https://your-domain.com"  # or ngrok URL
+   ```
 
-3. **Test Your Bot**:
-   - Search for your bot's username in Telegram
-   - Send it a message
-   - It should show "is typing" and respond (once webhook is running)
+3. **Start Daemon with Webhooks**:
+   ```bash
+   bun run packages/harness-daemon/src/harness/daemon.ts --enable-webhooks
+   ```
+
+4. **Set Webhook URL** (automatic if using env var, or manual):
+   ```bash
+   curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${PUBLIC_URL}/webhook/telegram/BOT_ID"
+   ```
+
+5. **Test**: Send a message to your bot in Telegram!
 
 ---
 
-## Local Development with ngrok
+## Troubleshooting
 
-For local development, use ngrok to expose your localhost:
+### "No model selected for this session"
 
-```bash
-# Install ngrok
-npm install -g ngrok
+Set a default model when registering the bot:
 
-# Start ngrok (in a separate terminal)
-ngrok http 3000
-
-# Copy the HTTPS URL from ngrok output
-# Example: https://abc123.ngrok-free.app
-
-# Set environment variable
-export PUBLIC_URL=https://abc123.ngrok-free.app
-
-# Start your webhook server
-npm run webhook
+```typescript
+daemon.registerTelegramBot(token, {
+  defaultModel: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
+});
 ```
 
----
+Or configure a model via TUI first (the session will persist).
 
-## Comparison: Agent Memory vs. Dumb Webhook
+### "No API key configured"
 
-| Aspect | Agent Memory Approach | Dumb Webhook Approach |
-|--------|----------------------|----------------------|
-| **State Management** | Custom in `raw_envelopes` | Built-in `SessionStore` |
-| **Persistence** | PostgreSQL only | GraphD |
-| **Message Storage** | Append-only RawEnvelopes | ContextWindow (auto-compacting) |
-| **Conversation History** | Query `canonical_entities` | Automatic via `sessionKey` |
-| **Transformations** | Required (Layer 1→2→3) | Not needed |
-| **Code Changes** | Requires new connector | Simple webhook handler |
-| **Chatbot Use Case** | Over-engineered | Perfect fit |
-| **Data Sync** | Good for email, issues, etc. | Not needed for chat |
+Ensure you have the provider API key configured in the harness:
+1. Start the TUI: `bun run packages/tui`
+2. Run `/providers` to configure API keys
+3. Keys are stored in GraphD and persist across sessions
 
----
+### Webhook Not Receiving Updates
 
-## Summary
-
-| Question | Answer |
-|----------|--------|
-| Can webhooks be dumb? | **Yes** - just extract message and call `harness.run()` |
-| No harness changes needed? | **No** - `run(sessionKey)` already exists |
-| Stateful conversations? | **Yes** - `sessionKey` = conversation ID, `SessionStore` loads history |
-| Context management? | **Yes** - `ContextWindow` + `SessionStore.persistContext()` handle it automatically |
-| Persistent across restarts? | **Yes** - `SessionStore` loads from GraphD |
-
-You've built perfect architecture for this - just use the same API that TUI uses! The webhook handler is basically TUI's `bridge_gateway.ts:handleSendText()` but adapted for Telegram instead of terminal input.
+1. Check ngrok is running and forwarding to correct port
+2. Verify webhook URL: `curl "https://api.telegram.org/bot${TOKEN}/getWebhookInfo"`
+3. Check daemon logs for incoming requests
 
 ---
 
 ## References
 
-- **Harness Daemon**: `packages/harness-daemon/src/harness/harness.ts`
-- **Bridge Gateway**: `packages/harness-daemon/src/harness/bridge_gateway.ts`
-- **Session Store**: `packages/context/src/context-window.ts`
+- **Harness Daemon**: `packages/harness-daemon/src/harness/daemon.ts`
+- **Telegram Connector**: `packages/harness-daemon/src/connectors/telegram.ts`
+- **Webhook Server**: `packages/harness-daemon/src/connectors/webhook_server.ts`
+- **Session Store**: `packages/harness-daemon/src/harness/session_store.ts`
 - **Telegram Bot API**: https://core.telegram.org/bots/api

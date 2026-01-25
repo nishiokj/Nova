@@ -196,7 +196,6 @@ export {
   SyncEngine,
   Collector,
   Processor,
-  MapperRegistry,
   type SyncEngineConfig,
   type CollectorConfig,
   type ProcessorConfig,
@@ -330,10 +329,13 @@ export {
   type GitHubIssueEvent,
   type GitHubPullRequestEvent,
   type GitHubIssueCommentEvent,
-  // GitHub Mappers
-  githubMappers,
-  getGitHubMapper,
-  getGitHubEntityTypes,
+  // GitHub Transformations
+  githubTransforms,
+  userTransform,
+  issueTransform,
+  pullRequestTransform,
+  commentTransform,
+  notificationTransform,
 } from './connectors/index.js'
 
 // Entity Resolution
@@ -671,3 +673,30 @@ export {
   type RouteHandler,
   type RouteResponse,
 } from './daemon/index.js'
+
+// Client SDK
+export {
+  SyncClient,
+  type SyncClientConfig,
+  // Response Types (prefixed with Client to avoid conflicts)
+  type Account as ClientAccount,
+  type SyncTask as ClientSyncTask,
+  type SyncJob as ClientSyncJob,
+  type SyncType as ClientSyncType,
+  type TaskMode as ClientTaskMode,
+  type SyncJobStatus as ClientSyncJobStatus,
+  type SyncJobType as ClientSyncJobType,
+  type HealthResponse,
+  type AuthUrlResponse,
+  type AuthStatusResponse,
+  type TaskResponse,
+  type JobResponse,
+  type BackfillResponse,
+  type QueueStats,
+  SyncClientError,
+  // OAuth helpers
+  captureOAuthCallback,
+  getCallbackUri,
+  type OAuthResult,
+  type OAuthCallbackOptions,
+} from './client/index.js'

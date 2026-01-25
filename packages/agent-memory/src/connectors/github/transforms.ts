@@ -1,14 +1,16 @@
 /**
- * GitHub Entity Mappers
+ * GitHub Transformations
  *
- * Transforms GitHub API responses into canonical entities.
+ * Transforms GitHub API responses into canonical entities using the new
+ * Transformation interface (connect, collect, transform pattern).
  *
- * @module connectors/github/mappers
+ * @module connectors/github/transforms
  */
 
 import { generateCanonicalId, sourceRefToKey } from '../../ids.js'
-import type { EntityMapper, MapperContext, MappedEntity } from '../../sync/types.js'
-import type { Identity, Task, Message, Notification, EntityType } from '../../models/canonical.js'
+import type { Identity, Task, Message, Notification } from '../../models/canonical.js'
+import type { Transformation, TransformResult, TransformOutput, TransformContext } from '../../transform/types.js'
+import type { RawEnvelope } from '../../models/raw.js'
 import {
   GitHubUserSchema,
   GitHubIssueSchema,
@@ -56,58 +58,80 @@ function createBaseEntity(id: string, sourceRef: Identity['source_refs'][0]) {
   }
 }
 
-// ============ User Mapper ============
+// ============ Helper: Build User Identity ============
 
 /**
- * Maps GitHub User to canonical Identity.
+ * Helper to build an Identity from a GitHub user.
  */
-export const userMapper: EntityMapper<GitHubUser> = {
-  sourceEntityType: 'user',
-  targetEntityType: 'identity',
-  sourceSchema: GitHubUserSchema,
+function buildIdentity(
+  accountId: string,
+  user: GitHubUser
+): { entity: Identity; output: TransformOutput } {
+  const sourceRef = createSourceRef(accountId, 'user', String(user.id), user.updated_at)
 
-  map(source: GitHubUser, context: MapperContext): MappedEntity {
-    const sourceRef = createSourceRef(
-      context.accountId,
-      'user',
-      String(source.id),
-      source.updated_at
-    )
+  const identity: Identity = {
+    ...createBaseEntity(generateCanonicalId(), sourceRef),
+    entity_type: 'identity',
+    platform: 'github',
+    platform_user_id: String(user.id),
+    username: user.login,
+    display_name: user.name ?? user.login,
+    email: user.email ?? undefined,
+    avatar_url: user.avatar_url,
+    profile_url: user.html_url,
+  }
 
-    const identity: Identity = {
-      ...createBaseEntity(generateCanonicalId(), sourceRef),
-      entity_type: 'identity',
-      platform: 'github',
-      platform_user_id: String(source.id),
-      username: source.login,
-      display_name: source.name ?? source.login,
-      email: source.email ?? undefined,
-      avatar_url: source.avatar_url,
-      profile_url: source.html_url,
-    }
-
-    return {
+  return {
+    entity: identity,
+    output: {
       entityType: 'identity',
       data: identity,
-      displayText: `${identity.display_name} (@${source.login})`,
+      displayText: `${identity.display_name} (@${user.login})`,
       sourceRefKey: sourceRefToKey(sourceRef),
-    }
-  },
+    },
+  }
 }
 
-// ============ Issue Mapper ============
+// ============ User Transformation ============
 
 /**
- * Maps GitHub Issue to canonical Task.
+ * Transforms GitHub User to canonical Identity.
  */
-export const issueMapper: EntityMapper<GitHubIssue> = {
-  sourceEntityType: 'issue',
-  targetEntityType: 'task',
-  sourceSchema: GitHubIssueSchema,
+export const userTransform: Transformation<GitHubUser> = {
+  id: 'github:user:v1',
+  name: 'GitHub User → Identity',
+  source: {
+    connector: 'github',
+    entityType: 'user',
+  },
+  inputSchema: GitHubUserSchema,
+  outputType: 'identity',
+  transform(source: GitHubUser, ctx: TransformContext): TransformResult {
+    const { entity, output } = buildIdentity(ctx.accountId, source)
+    return { primary: output }
+  },
+  onError: 'skip',
+  enabled: true,
+  version: 1,
+}
 
-  map(source: GitHubIssue, context: MapperContext): MappedEntity | MappedEntity[] {
+// ============ Issue Transformation ============
+
+/**
+ * Transforms GitHub Issue to canonical Task.
+ */
+export const issueTransform: Transformation<GitHubIssue> = {
+  id: 'github:issue:v1',
+  name: 'GitHub Issue → Task',
+  source: {
+    connector: 'github',
+    entityType: 'issue',
+  },
+  inputSchema: GitHubIssueSchema,
+  outputType: 'task',
+  transform(source: GitHubIssue, ctx: TransformContext): TransformResult {
     const sourceRef = createSourceRef(
-      context.accountId,
+      ctx.accountId,
       'issue',
       String(source.id),
       source.updated_at
@@ -138,72 +162,54 @@ export const issueMapper: EntityMapper<GitHubIssue> = {
       },
     }
 
-    const result: MappedEntity = {
+    const primary: TransformOutput = {
       entityType: 'task',
       data: task,
       displayText: `#${source.number}: ${source.title}`,
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    // Also map the issue creator as a related entity
-    const relatedEntities: MappedEntity[] = []
+    const related: TransformOutput[] = []
 
+    // Map the issue creator as a related entity
     if (source.user) {
-      const creatorContext: MapperContext = {
-        ...context,
-        sourceRef: {
-          connector: 'github',
-          account_id: context.accountId,
-          entity_type: 'user',
-          source_id: String(source.user.id),
-        },
-        envelope: context.envelope,
-      }
-
-      relatedEntities.push(
-        userMapper.map(source.user as GitHubUser, creatorContext) as MappedEntity
-      )
+      const creator = buildIdentity(ctx.accountId, source.user)
+      related.push(creator.output)
     }
 
     // Map assignees
     for (const assignee of source.assignees ?? []) {
-      const assigneeContext: MapperContext = {
-        ...context,
-        sourceRef: {
-          connector: 'github',
-          account_id: context.accountId,
-          entity_type: 'user',
-          source_id: String(assignee.id),
-        },
-        envelope: context.envelope,
-      }
-
-      relatedEntities.push(
-        userMapper.map(assignee as GitHubUser, assigneeContext) as MappedEntity
-      )
+      const assigneeIdentity = buildIdentity(ctx.accountId, assignee as GitHubUser)
+      related.push(assigneeIdentity.output)
     }
 
-    if (relatedEntities.length > 0) {
-      result.relatedEntities = relatedEntities
+    return {
+      primary,
+      related: related.length > 0 ? related : undefined,
     }
-
-    return result
   },
+  onError: 'skip',
+  enabled: true,
+  version: 1,
 }
 
-// ============ Pull Request Mapper ============
+// ============ Pull Request Transformation ============
 
 /**
- * Maps GitHub Pull Request to canonical Task.
+ * Transforms GitHub Pull Request to canonical Task.
  */
-export const pullRequestMapper: EntityMapper<GitHubPullRequest> = {
-  sourceEntityType: 'pull_request',
-  targetEntityType: 'task',
-  sourceSchema: GitHubPullRequestSchema,
-
-  map(source: GitHubPullRequest, context: MapperContext): MappedEntity | MappedEntity[] {
+export const pullRequestTransform: Transformation<GitHubPullRequest> = {
+  id: 'github:pull_request:v1',
+  name: 'GitHub Pull Request → Task',
+  source: {
+    connector: 'github',
+    entityType: 'pull_request',
+  },
+  inputSchema: GitHubPullRequestSchema,
+  outputType: 'task',
+  transform(source: GitHubPullRequest, ctx: TransformContext): TransformResult {
     const sourceRef = createSourceRef(
-      context.accountId,
+      ctx.accountId,
       'pull_request',
       String(source.id),
       source.updated_at
@@ -242,71 +248,54 @@ export const pullRequestMapper: EntityMapper<GitHubPullRequest> = {
       },
     }
 
-    const result: MappedEntity = {
+    const primary: TransformOutput = {
       entityType: 'task',
       data: task,
       displayText: `PR #${source.number}: ${source.title}`,
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    // Map creator and assignees as related entities
-    const relatedEntities: MappedEntity[] = []
+    const related: TransformOutput[] = []
 
+    // Map creator
     if (source.user) {
-      const creatorContext: MapperContext = {
-        ...context,
-        sourceRef: {
-          connector: 'github',
-          account_id: context.accountId,
-          entity_type: 'user',
-          source_id: String(source.user.id),
-        },
-        envelope: context.envelope,
-      }
-
-      relatedEntities.push(
-        userMapper.map(source.user as GitHubUser, creatorContext) as MappedEntity
-      )
+      const creator = buildIdentity(ctx.accountId, source.user)
+      related.push(creator.output)
     }
 
+    // Map assignees
     for (const assignee of source.assignees ?? []) {
-      const assigneeContext: MapperContext = {
-        ...context,
-        sourceRef: {
-          connector: 'github',
-          account_id: context.accountId,
-          entity_type: 'user',
-          source_id: String(assignee.id),
-        },
-        envelope: context.envelope,
-      }
-
-      relatedEntities.push(
-        userMapper.map(assignee as GitHubUser, assigneeContext) as MappedEntity
-      )
+      const assigneeIdentity = buildIdentity(ctx.accountId, assignee as GitHubUser)
+      related.push(assigneeIdentity.output)
     }
 
-    if (relatedEntities.length > 0) {
-      result.relatedEntities = relatedEntities
+    return {
+      primary,
+      related: related.length > 0 ? related : undefined,
     }
-
-    return result
   },
+  onError: 'skip',
+  enabled: true,
+  version: 1,
 }
 
-// ============ Comment Mapper ============
+// ============ Comment Transformation ============
 
 /**
- * Maps GitHub Comment to canonical Message.
+ * Transforms GitHub Comment to canonical Message.
  */
-export const commentMapper: EntityMapper<GitHubComment> = {
-  sourceEntityType: 'comment',
-  targetEntityType: 'message',
-  sourceSchema: GitHubCommentSchema,
-
-  map(source: GitHubComment, context: MapperContext): MappedEntity | MappedEntity[] {
+export const commentTransform: Transformation<GitHubComment> = {
+  id: 'github:comment:v1',
+  name: 'GitHub Comment → Message',
+  source: {
+    connector: 'github',
+    entityType: 'comment',
+  },
+  inputSchema: GitHubCommentSchema,
+  outputType: 'message',
+  transform(source: GitHubComment, ctx: TransformContext): TransformResult {
     const sourceRef = createSourceRef(
-      context.accountId,
+      ctx.accountId,
       'comment',
       String(source.id),
       source.updated_at
@@ -329,48 +318,48 @@ export const commentMapper: EntityMapper<GitHubComment> = {
       },
     }
 
-    const result: MappedEntity = {
+    const primary: TransformOutput = {
       entityType: 'message',
       data: message,
       displayText: source.body.length > 100 ? source.body.substring(0, 100) + '...' : source.body,
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    // Map comment author as related entity
-    if (source.user) {
-      const authorContext: MapperContext = {
-        ...context,
-        sourceRef: {
-          connector: 'github',
-          account_id: context.accountId,
-          entity_type: 'user',
-          source_id: String(source.user.id),
-        },
-        envelope: context.envelope,
-      }
+    const related: TransformOutput[] = []
 
-      result.relatedEntities = [
-        userMapper.map(source.user as GitHubUser, authorContext) as MappedEntity,
-      ]
+    // Map comment author
+    if (source.user) {
+      const author = buildIdentity(ctx.accountId, source.user)
+      related.push(author.output)
     }
 
-    return result
+    return {
+      primary,
+      related: related.length > 0 ? related : undefined,
+    }
   },
+  onError: 'skip',
+  enabled: true,
+  version: 1,
 }
 
-// ============ Notification Mapper ============
+// ============ Notification Transformation ============
 
 /**
- * Maps GitHub Notification to canonical Notification.
+ * Transforms GitHub Notification to canonical Notification.
  */
-export const notificationMapper: EntityMapper<GitHubNotification> = {
-  sourceEntityType: 'notification',
-  targetEntityType: 'notification',
-  sourceSchema: GitHubNotificationSchema,
-
-  map(source: GitHubNotification, context: MapperContext): MappedEntity {
+export const notificationTransform: Transformation<GitHubNotification> = {
+  id: 'github:notification:v1',
+  name: 'GitHub Notification → Notification',
+  source: {
+    connector: 'github',
+    entityType: 'notification',
+  },
+  inputSchema: GitHubNotificationSchema,
+  outputType: 'notification',
+  transform(source: GitHubNotification, ctx: TransformContext): TransformResult {
     const sourceRef = createSourceRef(
-      context.accountId,
+      ctx.accountId,
       'notification',
       source.id,
       source.updated_at
@@ -409,38 +398,29 @@ export const notificationMapper: EntityMapper<GitHubNotification> = {
       },
     }
 
-    return {
+    const primary: TransformOutput = {
       entityType: 'notification',
       data: notification,
       displayText: `[${source.repository.full_name}] ${source.subject.title}`,
       sourceRefKey: sourceRefToKey(sourceRef),
     }
+
+    return { primary }
   },
+  onError: 'skip',
+  enabled: true,
+  version: 1,
 }
 
-// ============ Mapper Registry ============
+// ============ Export All Transformations ============
 
 /**
- * All GitHub entity mappers.
+ * All GitHub transformations.
  */
-export const githubMappers = {
-  user: userMapper,
-  issue: issueMapper,
-  pull_request: pullRequestMapper,
-  comment: commentMapper,
-  notification: notificationMapper,
-} as const
-
-/**
- * Get a mapper by entity type.
- */
-export function getGitHubMapper(entityType: string): EntityMapper | undefined {
-  return githubMappers[entityType as keyof typeof githubMappers]
-}
-
-/**
- * Get all supported entity types.
- */
-export function getGitHubEntityTypes(): string[] {
-  return Object.keys(githubMappers)
-}
+export const githubTransforms = [
+  userTransform,
+  issueTransform,
+  pullRequestTransform,
+  commentTransform,
+  notificationTransform,
+] as const

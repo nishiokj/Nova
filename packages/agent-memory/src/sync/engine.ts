@@ -26,6 +26,8 @@ import type {
 } from './types.js'
 import type { AuthProvider } from '../auth/provider.js'
 import type { Connector } from '../connector/sdk/types.js'
+import { TransformationRegistry } from '../transform/registry.js'
+import type { Transformation } from '../transform/types.js'
 
 // ============ Job Types ============
 
@@ -101,12 +103,16 @@ export class SyncEngine {
   private processor: Processor
   private syncJobRepo: SyncJobRepository
   private connectors: Map<ConnectorType, Connector> = new Map()
+  private transformRegistry: TransformationRegistry
   private eventHandlers: Array<(event: SyncEvent) => void> = []
   private isRunning = false
 
   constructor(sql: Sql, config: SyncEngineConfig = {}) {
     this.sql = sql
     this.config = { ...DEFAULT_CONFIG, ...config }
+
+    // Shared transformation registry
+    this.transformRegistry = new TransformationRegistry()
 
     // Initialize components
     this.queue = new MicroQueue(sql, {
@@ -119,7 +125,10 @@ export class SyncEngine {
       ...this.config.collector,
       authProvider: this.config.authProvider,
     })
-    this.processor = new Processor(sql, this.config.processor)
+    this.processor = new Processor(sql, {
+      ...this.config.processor,
+      transformRegistry: this.transformRegistry,
+    })
     this.syncJobRepo = createSyncJobRepository({ sql })
 
     // Wire up event handlers
@@ -139,7 +148,20 @@ export class SyncEngine {
   registerConnector(connector: Connector): this {
     this.connectors.set(connector.type, connector)
     this.collector.registerConnector(connector)
-    this.processor.registerConnector(connector)
+
+    // Register connector's transforms if it has any
+    if ('registerTransforms' in connector && typeof connector.registerTransforms === 'function') {
+      (connector as any).registerTransforms(this.transformRegistry)
+    }
+
+    return this
+  }
+
+  /**
+   * Manually register a transformation.
+   */
+  registerTransform<T>(transform: Transformation<T>): this {
+    this.transformRegistry.register(transform)
     return this
   }
 

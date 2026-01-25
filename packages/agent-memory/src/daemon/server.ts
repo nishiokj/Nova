@@ -40,7 +40,9 @@ export interface RouteResponse {
   /** HTTP status code (default: 200) */
   status?: number
   /** Response body (will be JSON serialized) */
-  body: unknown
+  body?: unknown
+  /** Raw body string (bypasses JSON serialization, e.g., for HTML) */
+  rawBody?: string
   /** Additional headers */
   headers?: Record<string, string>
 }
@@ -128,6 +130,14 @@ export class HttpServer {
     return this.addRoute('PATCH', path, handler)
   }
 
+  /**
+   * Register a route at an absolute path (bypasses basePath).
+   * Use for webhooks and other non-API endpoints.
+   */
+  raw(method: string, path: string, handler: RouteHandler): this {
+    return this.addRouteRaw(method.toUpperCase(), path, handler)
+  }
+
   // ============ Lifecycle ============
 
   /**
@@ -200,10 +210,13 @@ export class HttpServer {
   private addRoute(method: string, path: string, handler: RouteHandler): this {
     // Build full path with base path
     const fullPath = this.config.basePath + path
+    return this.addRouteRaw(method, fullPath, handler)
+  }
 
+  private addRouteRaw(method: string, path: string, handler: RouteHandler): this {
     // Extract parameter names and build regex pattern
     const paramNames: string[] = []
-    const pattern = fullPath
+    const pattern = path
       .replace(/:[a-zA-Z_][a-zA-Z0-9_]*/g, (match) => {
         paramNames.push(match.slice(1))
         return '([^/]+)'
@@ -280,7 +293,13 @@ export class HttpServer {
       const response = await matchedRoute.handler(parsed)
 
       // Send response
-      this.sendJson(res, response.status || 200, response.body, response.headers)
+      if (response.rawBody !== undefined) {
+        // Send raw body (e.g., HTML)
+        this.sendRaw(res, response.status || 200, response.rawBody, response.headers)
+      } else {
+        // Send JSON
+        this.sendJson(res, response.status || 200, response.body, response.headers)
+      }
     } catch (error) {
       console.error('[HttpServer] Request error:', error)
 
@@ -353,7 +372,7 @@ export class HttpServer {
     body: unknown,
     headers?: Record<string, string>
   ): void {
-    const json = JSON.stringify(body)
+    const json = JSON.stringify(body ?? null)
 
     res.writeHead(status, {
       'Content-Type': 'application/json',
@@ -361,6 +380,20 @@ export class HttpServer {
       ...headers,
     })
     res.end(json)
+  }
+
+  private sendRaw(
+    res: ServerResponse,
+    status: number,
+    body: string,
+    headers?: Record<string, string>
+  ): void {
+    res.writeHead(status, {
+      'Content-Type': 'text/html',
+      'Content-Length': Buffer.byteLength(body),
+      ...headers,
+    })
+    res.end(body)
   }
 }
 

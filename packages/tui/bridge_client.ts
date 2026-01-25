@@ -1,16 +1,13 @@
 /**
- * BridgeClient - TCP JSONL client for the harness bridge bus.
+ * BridgeClient - TUI-specific wrapper around HarnessClient.
+ *
+ * Adds TUI-specific profiling and validation, delegates bus communication to HarnessClient.
  */
 
-import { EventEmitter } from "events";
-import {
-  BusClient,
-  BRIDGE_COMMAND_CHANNEL,
-  runChannel,
-  sessionChannel,
-} from "comms-bus";
-import { profiler } from "shared";
-import type { BridgeCommand, BridgeCommandType, BridgeEvent, BridgeEventType, ReadyData, ResponseData } from "./types.js";
+import { EventEmitter } from 'events';
+import { HarnessClient, type ConnectionState } from 'harness-client';
+import { profiler } from 'shared';
+import type { BridgeCommand, BridgeEvent, BridgeEventType, ReadyData, ResponseData } from './types.js';
 
 // Valid bridge event types for runtime validation (Set for O(1) lookups)
 const VALID_EVENT_TYPES = new Set<BridgeEventType>([
@@ -54,425 +51,112 @@ export interface BridgeClientOptions {
   port: number;
 }
 
-// Connection state machine - explicit states instead of boolean
-export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
-
-// Constants for connection management
-const DEFAULT_RECONNECT_DELAY = 1000; // Base delay in ms
-const MAX_RECONNECT_DELAY = 30000; // Maximum delay in ms
-const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
-const DEFAULT_REQUEST_TIMEOUT = 120000; // 120 seconds
-
-function generateRequestId(): string {
-  return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
+export type { ConnectionState };
 
 export class BridgeClient extends EventEmitter {
-  private readonly bus: BusClient;
-  private sessionKey: string | null = null;
-  private activeRuns = new Set<string>();
-  private connectionState: ConnectionState = 'disconnected';
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts: number;
-  private reconnectDelay: number;
-  private requestTimeout: number;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (reason?: any) => void }>();
+  private readonly client: HarnessClient;
 
-  // Getter for backwards compatibility
   get connected(): boolean {
-    return this.connectionState === 'connected';
+    return this.client.connected;
   }
 
   constructor(options: BridgeClientOptions) {
     super();
-    this.bus = new BusClient(options);
-    this.maxReconnectAttempts = DEFAULT_MAX_RECONNECT_ATTEMPTS;
-    this.reconnectDelay = DEFAULT_RECONNECT_DELAY;
-    this.requestTimeout = DEFAULT_REQUEST_TIMEOUT;
+    this.client = new HarnessClient(options);
 
-    this.bus.on("event", (payload, _channel) => {
-      this.handleBusEvent(payload);
+    this.client.on('event', (event: BridgeEvent) => {
+      profiler.begin(`bridge.client.validate:${event.type}`, 'tui');
+      const validated = validateBridgeEvent(event);
+      if (!validated) {
+        profiler.end(`bridge.client.validate:${event.type}`, 'tui');
+        this.emit('error', { message: 'Malformed event from bridge' });
+        return;
+      }
+      profiler.end(`bridge.client.validate:${event.type}`, 'tui');
+
+      profiler.instant(`bridge.client.emit:${event.type}`, 'tui', 'p');
+      this.emit('event', validated);
     });
-    this.bus.on("error", (payload) => {
-      this.emit("error", payload);
+
+    this.client.on('error', (payload) => {
+      this.emit('error', payload);
     });
-    this.bus.on("close", () => {
-      this.handleDisconnect();
+
+    this.client.on('close', () => {
+      this.emit('close');
+    });
+
+    this.client.on('connection_state', (state: ConnectionState) => {
+      this.emit('connection_state', state);
     });
   }
 
   async connect(): Promise<void> {
-    // Already connected or in progress
-    if (this.connectionState === 'connecting' || this.connectionState === 'reconnecting') {
-      return;
-    }
-    if (this.connectionState === 'connected') {
-      return;
-    }
-
-    this.connectionState = 'connecting';
-    this.emit('connection_state', this.connectionState);
-
-    try {
-      await this.bus.connect();
-      this.connectionState = 'connected';
-      this.reconnectAttempts = 0;
-      this.reconnectDelay = DEFAULT_RECONNECT_DELAY;
-      this.emit('connection_state', this.connectionState);
-    } catch (err) {
-      this.connectionState = 'disconnected';
-      this.emit('connection_state', this.connectionState);
-      throw err;
-    }
+    return this.client.connect();
   }
 
   send(command: BridgeCommand): boolean {
     profiler.instant(`tui:send:${command.type}`, 'tui', 'p');
-    if (this.connectionState !== 'connected') {
-      this.emit("error", { message: "Not connected to bridge" });
-      return false;
-    }
-
-    if (command.type === "send_text") {
-      const data = { ...(command.data ?? {}) } as Record<string, unknown>;
-      const requestId =
-        typeof data.client_request_id === "string" && data.client_request_id.length > 0
-          ? data.client_request_id
-          : generateRequestId();
-      data.client_request_id = requestId;
-      this.activeRuns.add(requestId);
-      this.bus.subscribe(runChannel(requestId));
-      command = { ...command, data };
-    }
-
-    if (command.type === "user_prompt_response") {
-      const data = command.data ?? {};
-      const requestId = typeof data.request_id === "string" ? data.request_id : "";
-      if (requestId && !this.activeRuns.has(requestId)) {
-        this.activeRuns.add(requestId);
-        this.bus.subscribe(runChannel(requestId));
-      }
-    }
-
-    if (command.type === "permission_response") {
-      const data = command.data ?? {};
-      const requestId = typeof data.request_id === "string" ? data.request_id : "";
-      if (requestId && !this.activeRuns.has(requestId)) {
-        this.activeRuns.add(requestId);
-        this.bus.subscribe(runChannel(requestId));
-      }
-    }
-
-    this.bus.publish(BRIDGE_COMMAND_CHANNEL, command);
-    return true;
+    return this.client.send(command);
   }
 
   close(): void {
-    // Cancel any pending reconnection
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    // Reject all pending requests
-    this.rejectPendingRequests(new Error('Connection closed'));
-    this.connectionState = 'disconnected';
-    this.sessionKey = null;
-    this.activeRuns.clear();
-    this.bus.close();
-    this.emit('connection_state', this.connectionState);
+    this.client.close();
   }
 
-  private handleDisconnect(): void {
-    // Already disconnected or intentionally closing
-    if (this.connectionState === 'disconnected') return;
-
-    this.sessionKey = null;
-    this.activeRuns.clear();
-    // Reject pending requests on disconnect
-    this.rejectPendingRequests(new Error('Connection lost'));
-    this.connectionState = 'reconnecting';
-    this.emit('connection_state', this.connectionState);
-    this.emit('close');
-    this.scheduleReconnect();
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      this.connectionState = 'disconnected';
-      this.emit('connection_state', this.connectionState);
-      this.emit('error', { message: 'Connection lost. Max reconnect attempts reached.' });
-      return;
-    }
-
-    const delay = Math.min(this.reconnectDelay, MAX_RECONNECT_DELAY);
-    this.reconnectAttempts++;
-    this.reconnectDelay *= 2;
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect().catch(() => {
-        // Connect failed, try again
-        this.connectionState = 'reconnecting';
-        this.emit('connection_state', this.connectionState);
-        this.scheduleReconnect();
-      });
-    }, delay);
-  }
-
-  /** Get current connection state */
   getConnectionState(): ConnectionState {
-    return this.connectionState;
+    return this.client.getConnectionState();
   }
 
   // =========================================================================
-  // Auth Commands
+  // Auth Commands (delegated to HarnessClient)
   // =========================================================================
 
-  /**
-   * Start OAuth flow. Returns auth URL and state token.
-   */
-  async authStart(deviceName?: string): Promise<{
-    success: boolean;
-    authUrl?: string;
-    stateToken?: string;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('auth_start', { device: deviceName });
+  async authStart(deviceName?: string) {
+    return this.client.authStart(deviceName);
   }
 
-  /**
-   * Poll for completed OAuth session.
-   */
-  async authPoll(stateToken: string): Promise<{
-    success: boolean;
-    pending?: boolean;
-    sessionToken?: string;
-    userId?: string;
-    email?: string;
-    name?: string | null;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('auth_poll', { stateToken });
+  async authPoll(stateToken: string) {
+    return this.client.authPoll(stateToken);
   }
 
-  /**
-   * Verify a session token.
-   */
-  async authVerify(sessionToken: string): Promise<{
-    success: boolean;
-    valid?: boolean;
-    user?: { id: string; email: string; name: string | null };
-    error?: string;
-  }> {
-    return this.sendAuthCommand('auth_verify', { sessionToken });
+  async authVerify(sessionToken: string) {
+    return this.client.authVerify(sessionToken);
   }
 
-  /**
-   * Logout (revoke session).
-   */
-  async authLogout(sessionToken: string): Promise<{ success: boolean }> {
-    return this.sendAuthCommand('auth_logout', { sessionToken });
+  async authLogout(sessionToken: string) {
+    return this.client.authLogout(sessionToken);
   }
 
-  /**
-   * List configured providers.
-   * @param sessionToken Optional for local providers (no auth required)
-   */
-  async providersList(sessionToken?: string): Promise<{
-    success: boolean;
-    providers?: Array<{ provider: string; configured: boolean; updatedAt?: number }>;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('providers_list', sessionToken ? { sessionToken } : {});
+  async providersList(sessionToken?: string) {
+    return this.client.providersList(sessionToken);
   }
 
-  /**
-   * Save a provider API key.
-   * @param sessionToken Optional for local providers (no auth required)
-   */
-  async providersSave(provider: string, apiKey: string, sessionToken?: string): Promise<{
-    success: boolean;
-    error?: string;
-  }> {
-    const data: Record<string, string> = { provider, apiKey };
-    if (sessionToken) data.sessionToken = sessionToken;
-    return this.sendAuthCommand('providers_save', data);
+  async providersSave(provider: string, apiKey: string, sessionToken?: string) {
+    return this.client.providersSave(provider, apiKey, sessionToken);
   }
 
-  /**
-   * Delete a provider API key.
-   * @param sessionToken Optional for local providers (no auth required)
-   */
-  async providersDelete(provider: string, sessionToken?: string): Promise<{
-    success: boolean;
-    error?: string;
-  }> {
-    const data: Record<string, string> = { provider };
-    if (sessionToken) data.sessionToken = sessionToken;
-    return this.sendAuthCommand('providers_delete', data);
+  async providersDelete(provider: string, sessionToken?: string) {
+    return this.client.providersDelete(provider, sessionToken);
   }
 
-  /**
-   * Test a provider API key.
-   * @param sessionToken Optional for local providers (no auth required)
-   */
-  async providersTest(provider: string, sessionToken?: string): Promise<{
-    success: boolean;
-    valid?: boolean;
-    error?: string;
-  }> {
-    const data: Record<string, string> = { provider };
-    if (sessionToken) data.sessionToken = sessionToken;
-    return this.sendAuthCommand('providers_test', data);
+  async providersTest(provider: string, sessionToken?: string) {
+    return this.client.providersTest(provider, sessionToken);
   }
 
-  /**
-   * Fork the current session.
-   */
-  async sessionFork(): Promise<{
-    success: boolean;
-    newSessionKey?: string;
-    sourceSessionKey?: string;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('session_fork', {});
+  async sessionFork() {
+    return this.client.sessionFork();
   }
 
-  /**
-   * Close (deactivate) the current session gracefully.
-   * Call this before closing the connection to ensure session is marked inactive.
-   */
-  async sessionClose(): Promise<{
-    success: boolean;
-    sessionKey?: string;
-    message?: string;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('session_close', {});
+  async sessionClose() {
+    return this.client.sessionClose();
   }
 
-  /**
-   * List recoverable sessions, optionally filtered by workingDir.
-   */
-  async listSessions(options: {
-    workingDir?: string;
-    status?: string | string[];
-    limit?: number;
-  } = {}): Promise<{
-    success: boolean;
-    sessions: Array<{
-      sessionKey: string;
-      clientType: string;
-      createdAt: number;
-      lastAccessedAt: number;
-      workingDir: string | null;
-      status: string;
-      lastUserMessagePreview?: string | null;
-    }>;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('list_sessions', options);
+  async listSessions(options: { workingDir?: string; status?: string | string[]; limit?: number } = {}) {
+    return this.client.listSessions(options);
   }
 
-  /**
-   * Set dangerous mode for the current session.
-   * When enabled, this session bypasses all permission checks.
-   * Does NOT affect other sessions.
-   */
-  async setDangerousMode(enabled: boolean): Promise<{
-    success: boolean;
-    enabled?: boolean;
-    sessionKey?: string;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('set_dangerous_mode', { enabled });
-  }
-
-  private sendAuthCommand<T extends Record<string, unknown>>(
-    type: BridgeCommandType,
-    data: Record<string, unknown>
-  ): Promise<T> {
-    return new Promise((resolve, reject) => {
-      // Validate connection before sending
-      if (this.connectionState !== 'connected') {
-        reject(new Error('Not connected to bridge'));
-        return;
-      }
-
-      const requestId = generateRequestId();
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-      const handler = (event: BridgeEvent) => {
-        if (event.type === 'response') {
-          const responseData = event.data as ResponseData;
-          const metadata = responseData?.metadata as { kind?: string; payload?: unknown } | undefined;
-          if (metadata?.kind === type) {
-            if (timeoutId) clearTimeout(timeoutId);
-            this.off('event', handler);
-            this.pendingRequests.delete(requestId);
-            resolve((metadata.payload ?? { success: false }) as T);
-          }
-        }
-      };
-
-      this.pendingRequests.set(requestId, { resolve, reject });
-      this.on('event', handler);
-
-      timeoutId = setTimeout(() => {
-        this.off('event', handler);
-        this.pendingRequests.delete(requestId);
-        reject(new Error('Request timeout'));
-      }, this.requestTimeout);
-
-      this.send({ type, data });
-    });
-  }
-
-  private handleBusEvent(payload: unknown): void {
-    profiler.begin('bridge.client.validate', 'tui');
-    const event = validateBridgeEvent(payload);
-    if (!event) {
-      profiler.end('bridge.client.validate', 'tui');
-      this.emit('error', { message: 'Malformed event from bridge' });
-      return;
-    }
-    profiler.end('bridge.client.validate', 'tui');
-
-    profiler.begin(`bridge.client.process:${event.type}`, 'tui');
-    if (event.type === "ready") {
-      const data = (event.data ?? {}) as ReadyData;
-      if (data.session_key && data.session_key !== this.sessionKey) {
-        if (this.sessionKey) {
-          this.bus.unsubscribe(sessionChannel(this.sessionKey));
-        }
-        this.sessionKey = data.session_key;
-        this.bus.subscribe(sessionChannel(data.session_key));
-      }
-    }
-
-    if (event.type === "response") {
-      const data = (event.data ?? {}) as ResponseData;
-      const requestId = typeof data.request_id === "string" ? data.request_id : "";
-      if (requestId && this.activeRuns.has(requestId)) {
-        this.activeRuns.delete(requestId);
-        this.bus.unsubscribe(runChannel(requestId));
-      }
-    }
-    profiler.end(`bridge.client.process:${event.type}`, 'tui');
-
-    profiler.instant(`bridge.client.emit:${event.type}`, 'tui', 'p');
-    this.emit("event", event);
-  }
-
-  /**
-   * Reject all pending requests with the given error.
-   * Called on disconnect or close to prevent hanging promises.
-   */
-  private rejectPendingRequests(error: Error): void {
-    this.pendingRequests.forEach(({ reject }) => {
-      reject(error);
-    });
-    this.pendingRequests.clear();
+  async setDangerousMode(enabled: boolean) {
+    return this.client.setDangerousMode(enabled);
   }
 }

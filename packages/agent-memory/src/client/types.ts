@@ -1,0 +1,186 @@
+/**
+ * Sync Client Response Types
+ *
+ * Types matching the daemon API responses.
+ */
+
+import type { ConnectorType } from '../ids.js'
+
+// ============ Health ============
+
+export interface HealthResponse {
+  status: string
+  timestamp: string
+}
+
+// ============ Accounts ============
+
+export interface Account {
+  id: string
+  connector: ConnectorType
+  external_account_id: string
+  display_name?: string
+  email?: string
+  auth_type: 'oauth2' | 'api_key' | 'basic' | 'token'
+  token_expires_at?: string
+  is_active: boolean
+  last_synced_at?: string
+  sync_cursor?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface AccountListResponse {
+  accounts: Account[]
+}
+
+export interface AccountResponse {
+  account: Account
+}
+
+// ============ Auth ============
+
+export interface OAuthProvider {
+  id: string
+  name: string
+  configured: boolean
+}
+
+export interface ProvidersResponse {
+  providers: string[]
+}
+
+export interface AuthUrlResponse {
+  url: string
+  state: string
+  provider?: string
+}
+
+export interface AuthStatusResponse {
+  accountId: string
+  hasCredentials: boolean
+}
+
+// ============ Tasks ============
+
+export type SyncType = 'backfill' | 'incremental'
+export type TaskMode = 'once' | 'recurring' | 'webhook'
+
+export interface SyncTask {
+  id: string
+  connector: ConnectorType
+  account_id: string
+  entity_types: string[] | null
+  sync_type: SyncType
+  mode: TaskMode
+  interval_ms: number | null
+  enabled: boolean
+  last_job_id: string | null
+  next_run_at: string | null
+  webhook_subscription_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskListResponse {
+  tasks: SyncTask[]
+}
+
+export interface TaskResponse {
+  task: SyncTask
+  recentJobs?: SyncJob[]
+}
+
+export interface BackfillResponse {
+  task: SyncTask
+  job: SyncJob
+}
+
+// ============ Jobs ============
+
+export type SyncJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type SyncJobType = 'backfill' | 'incremental' | 'webhook'
+
+export interface SyncJob {
+  id: string
+  connector: ConnectorType
+  account_id: string
+  job_type: SyncJobType
+  status: SyncJobStatus
+  priority: number
+  cursor_state?: Record<string, unknown>
+  items_fetched: number
+  items_processed: number
+  items_failed: number
+  created_at: string
+  started_at?: string
+  completed_at?: string
+  last_error?: string
+  retry_count: number
+  next_retry_at?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface QueueStats {
+  pending: number
+  running: number
+  completed: number
+  failed: number
+  avgProcessTime?: number
+}
+
+export interface JobListResponse {
+  jobs: SyncJob[]
+}
+
+export interface JobResponse {
+  job: SyncJob
+  queueStats?: QueueStats
+}
+
+export interface RetryResponse {
+  job: SyncJob
+  originalJob: SyncJob
+}
+
+// ============ Data ============
+
+export interface Entity {
+  id: string
+  entity_type: string
+  data: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface EntityListResponse {
+  entities: Entity[]
+  total: number
+  hasMore: boolean
+  nextCursor?: string
+}
+
+export interface EntityResponse {
+  entity: Entity
+  sources?: unknown[]
+  mappings?: unknown[]
+}
+
+// ============ Error ============
+
+export interface ApiError {
+  error: string
+  code?: string
+  message?: string
+}
+
+export class SyncClientError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string
+  ) {
+    super(message)
+    this.name = 'SyncClientError'
+  }
+}

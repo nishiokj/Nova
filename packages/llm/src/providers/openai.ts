@@ -110,9 +110,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
       body.prompt_cache_retention = params.promptCacheRetention;
     }
 
-    if (params.previousResponseId) {
-      body.previous_response_id = params.previousResponseId;
-    }
+    // NOTE: previous_response_id intentionally not set - we manage context server-side
+    // and this breaks on model/provider switches
 
     if (supportsSamplingParams(resolved.model)) {
       if (params.temperature ?? resolved.temperature) {
@@ -406,9 +405,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
       body.prompt_cache_retention = params.promptCacheRetention;
     }
 
-    if (params.previousResponseId) {
-      body.previous_response_id = params.previousResponseId;
-    }
+    // NOTE: previous_response_id intentionally not set - we manage context server-side
+    // and this breaks on model/provider switches
 
     if (supportsSamplingParams(resolved.model)) {
       if (params.temperature ?? resolved.temperature) {

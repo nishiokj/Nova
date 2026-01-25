@@ -53,7 +53,26 @@ export type ConnectorAuthType = 'oauth2' | 'api_key' | 'local'
 export const ConnectorAuthTypeSchema = z.enum(['oauth2', 'api_key', 'local'])
 
 /**
+ * OAuth2 configuration that references a centralized provider.
+ * Client credentials are looked up from OAuthProviderRegistry.
+ */
+export interface OAuthProviderRefConfig {
+  type: 'oauth2_provider'
+  /** Provider ID (e.g., 'google', 'github') */
+  provider: 'google' | 'github' | 'microsoft' | 'slack' | 'twitter'
+  /** Required OAuth scopes for this connector */
+  scopes: string[]
+}
+
+export const OAuthProviderRefConfigSchema = z.object({
+  type: z.literal('oauth2_provider'),
+  provider: z.enum(['google', 'github', 'microsoft', 'slack', 'twitter']),
+  scopes: z.array(z.string()),
+})
+
+/**
  * OAuth2 configuration for connectors that use OAuth.
+ * @deprecated Use OAuthProviderRefConfig instead for centralized credentials
  */
 export interface OAuth2Config {
   type: 'oauth2'
@@ -139,9 +158,10 @@ export const CredentialReferenceConfigSchema = z.object({
 /**
  * Union of all auth configuration types.
  */
-export type AuthConfig = OAuth2Config | ApiKeyConfig | LocalAuthConfig | CredentialReferenceConfig
+export type AuthConfig = OAuthProviderRefConfig | OAuth2Config | ApiKeyConfig | LocalAuthConfig | CredentialReferenceConfig
 
 export const AuthConfigSchema = z.discriminatedUnion('type', [
+  OAuthProviderRefConfigSchema,
   OAuth2ConfigSchema,
   ApiKeyConfigSchema,
   LocalAuthConfigSchema,

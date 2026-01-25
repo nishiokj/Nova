@@ -22,15 +22,13 @@ export function registerDataRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     // Get all supported entity types and their schemas
-    const schemas: Record<string, { source: any; canonical: string }> = {}
+    const schemas: Record<string, { source: any }> = {}
 
     for (const entityType of connectorInstance.capabilities.supportedEntityTypes) {
       const sourceSchema = connectorInstance.getSourceSchema(entityType)
-      const mapper = connectorInstance.getMapper(entityType)
 
       schemas[entityType] = {
         source: sourceSchema ? (sourceSchema as any).description || 'Schema available' : null,
-        canonical: mapper?.targetEntityType || 'unknown',
       }
     }
 
