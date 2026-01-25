@@ -12,7 +12,7 @@ import {
   BaseConnector,
   type BaseConnectorOptions,
   type ConnectorCapabilities,
-  type OAuth2Config,
+  type OAuthProviderRefConfig,
   type AccountInfo,
   type WebhookEvent,
   type ConnectorContext,
@@ -42,6 +42,8 @@ import {
   type GmailNotification,
   type PubSubPushEnvelope,
 } from './schemas.js'
+import { gmailTransforms } from './transforms.js'
+import type { TransformationRegistry } from '../../transform/registry.js'
 
 // ============ Constants ============
 
@@ -52,10 +54,6 @@ const GMAIL_OAUTH_BASE = 'https://oauth2.googleapis.com'
  * Configuration for Gmail connector.
  */
 export interface GmailConnectorConfig {
-  /** OAuth client ID from GCP Console */
-  clientId: string
-  /** OAuth client secret from GCP Console */
-  clientSecret: string
   /** Rate limit for API requests (per second) */
   rateLimit?: number
   /** Specific labels to sync (empty = all) */
@@ -88,35 +86,25 @@ export class GmailConnector extends BaseConnector {
     supportedEntityTypes: ['message', 'thread', 'history'],
   }
 
-  readonly authConfig: OAuth2Config
+  readonly authConfig: OAuthProviderRefConfig = {
+    type: 'oauth2_provider',
+    provider: 'google',
+    scopes: [
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.metadata',
+    ],
+  }
 
   private readonly apiBaseUrl: string
-  private readonly oauthBaseUrl: string
   private readonly labels: string[]
   private readonly excludeLabels: string[]
 
-  constructor(config: GmailConnectorConfig, options?: BaseConnectorOptions) {
+  constructor(config: GmailConnectorConfig = {}, options?: BaseConnectorOptions) {
     super(options)
 
     this.apiBaseUrl = GMAIL_API_BASE
-    this.oauthBaseUrl = GMAIL_OAUTH_BASE
     this.labels = config.labels ?? []
     this.excludeLabels = config.excludeLabels ?? ['SPAM', 'TRASH']
-
-    // Configure rate limiting (Gmail limit: 100 queries per 100 seconds)
-    // Rate limit is handled by the TokenBucket in the HTTP client constructor
-
-    this.authConfig = {
-      type: 'oauth2',
-      authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
-      tokenUrl: 'https://oauth2.googleapis.com/token',
-      scopes: [
-        'https://www.googleapis.com/auth/gmail.readonly',
-        'https://www.googleapis.com/auth/gmail.metadata',
-      ],
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-    }
 
     // Register schemas
     this.registerSchema('message', GmailMessageSchema)
@@ -684,6 +672,18 @@ export class GmailConnector extends BaseConnector {
     }
   }
 
+  // ============ Transform Registration ============
+
+  /**
+   * Register Gmail transformations with a registry.
+   * Call this during daemon setup to enable processing.
+   */
+  registerTransforms(registry: TransformationRegistry): void {
+    for (const transform of gmailTransforms) {
+      registry.register(transform as any)
+    }
+  }
+
   // ============ Utility Methods ============
 
   private parseRateLimitHeaders(headers: Headers): RateLimitInfo | undefined {
@@ -738,6 +738,6 @@ export function createGmailConnector(
   return new GmailConnector(config, options)
 }
 
-// Re-export schemas and mappers
+// Re-export schemas and transforms
 export * from './schemas.js'
-export { gmailMappers, getGmailMapper, getGmailEntityTypes } from './mappers.js'
+export { gmailTransforms, gmailMessageTransform, gmailThreadTransform } from './transforms.js'

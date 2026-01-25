@@ -38,6 +38,7 @@ export type BridgeCommandType =
   | "compact_context"
   | "set_model"
   | "get_model"
+  | "set_dangerous_mode"
   | "ralph_loop_start"
   | "ralph_loop_cancel";
 

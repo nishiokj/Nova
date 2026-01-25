@@ -39,10 +39,13 @@ export {
   type GitHubIssueEvent,
   type GitHubPullRequestEvent,
   type GitHubIssueCommentEvent,
-  // Mappers
-  githubMappers,
-  getGitHubMapper,
-  getGitHubEntityTypes,
+  // Transformations
+  githubTransforms,
+  userTransform,
+  issueTransform,
+  pullRequestTransform,
+  commentTransform,
+  notificationTransform,
 } from './github/index.js'
 
 // Gmail Connector
@@ -72,11 +75,24 @@ export {
   type GmailProfile,
   type GmailNotification,
   type PubSubPushEnvelope,
-  // Mappers
-  gmailMappers,
-  getGmailMapper,
-  getGmailEntityTypes,
+  // Transformations
+  gmailTransforms,
+  gmailMessageTransform,
+  gmailThreadTransform,
 } from './gmail/index.js'
+
+// Telegram Connector (real-time harness bridge)
+export {
+  TelegramConnector,
+  createTelegramConnector,
+  type TelegramConnectorConfig,
+  type TelegramUpdate,
+  type TelegramMessage,
+  type TelegramUser,
+  type TelegramChat,
+  type PendingRequest,
+  type ChatSession,
+} from './telegram/index.js'
 
 // Coding Agent Session Connectors
 export {
@@ -125,4 +141,8 @@ export {
   type RexAssistantMessage,
   type RexSummaryMessage,
   type RexSessionMessage,
+  // Transformations
+  claudeSessionTransform,
+  claudeMessageTransform,
+  codingSessionTransforms,
 } from './coding-sessions/index.js'

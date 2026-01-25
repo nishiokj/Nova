@@ -85,9 +85,8 @@ const ENV_MAPPING: Record<string, string> = {
   GITHUB_CLIENT_SECRET: 'connectors.github.clientSecret',
   [`${ENV_PREFIX}GITHUB_RATE_LIMIT`]: 'connectors.github.rateLimit',
 
-  // Connectors - Gmail
-  GMAIL_CLIENT_ID: 'connectors.gmail.clientId',
-  GMAIL_CLIENT_SECRET: 'connectors.gmail.clientSecret',
+  // OAuth Providers (centralized - loaded by OAuthProviderRegistry)
+  // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, etc. are handled by OAuthProviderRegistry
 
   // Connectors - X.com
   TWITTER_BEARER_TOKEN: 'connectors.xcom.bearerToken',

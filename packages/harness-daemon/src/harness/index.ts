@@ -78,20 +78,3 @@ export type {
   HookDefinitionStub,
 } from './skills_loader.js';
 
-// Connectors and webhooks
-export {
-  TelegramConnector,
-  WebhookServer,
-  registerTelegramWebhook,
-  createTelegramWebhookHandler,
-} from '../connectors/index.js';
-export type {
-  TelegramConnectorConfig,
-  TelegramUpdate,
-  TelegramMessage,
-  TelegramUser,
-  TelegramChat,
-  TelegramSendMessageOptions,
-  WebhookServerConfig,
-  WebhookRoute,
-} from '../connectors/index.js';

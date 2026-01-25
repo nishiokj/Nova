@@ -5,8 +5,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { z } from 'zod'
 import { generateCanonicalId } from '../../ids.js'
-import type { MapperContext, SourceItem, EntityMapper } from '../../sync/types.js'
-import type { RawEnvelope } from '../../models/raw.js'
+import type { SourceItem } from '../../sync/types.js'
 import {
   // Schemas
   GitHubUserSchema,
@@ -26,16 +25,6 @@ import {
   type GitHubComment,
   type GitHubNotification,
 } from './schemas.js'
-import {
-  userMapper,
-  issueMapper,
-  pullRequestMapper,
-  commentMapper,
-  notificationMapper,
-  githubMappers,
-  getGitHubMapper,
-  getGitHubEntityTypes,
-} from './mappers.js'
 import {
   GitHubConnector,
   createGitHubConnector,
@@ -220,32 +209,6 @@ const mockNotification: GitHubNotification = {
   subscription_url: 'https://api.github.com/notifications/threads/22222/subscription',
 }
 
-function createMapperContext(entityType: string, sourceId: string): MapperContext {
-  const envelope: RawEnvelope = {
-    id: generateCanonicalId(),
-    connector: 'github',
-    account_id: 'test-account',
-    entity_type: entityType,
-    source_id: sourceId,
-    raw_data: {},
-    raw_data_hash: 'test-hash',
-    collected_at: new Date().toISOString(),
-    collection_method: 'backfill',
-  }
-
-  return {
-    sourceRef: {
-      connector: 'github',
-      account_id: 'test-account',
-      entity_type: entityType,
-      source_id: sourceId,
-    },
-    envelope,
-    accountId: 'test-account',
-    connector: 'github',
-  }
-}
-
 // ============ Schema Tests ============
 
 describe('GitHub Schemas', () => {
@@ -420,230 +383,6 @@ describe('GitHub Schemas', () => {
   })
 })
 
-// ============ Mapper Tests ============
-
-describe('GitHub Mappers', () => {
-  describe('userMapper', () => {
-    it('should map GitHub user to Identity', () => {
-      const context = createMapperContext('user', String(mockUser.id))
-      const result = userMapper.map(mockUser, context)
-
-      expect(result.entityType).toBe('identity')
-      expect(result.data.entity_type).toBe('identity')
-      expect((result.data as any).platform).toBe('github')
-      expect((result.data as any).platform_user_id).toBe(String(mockUser.id))
-      expect((result.data as any).username).toBe(mockUser.login)
-      expect((result.data as any).display_name).toBe(mockUser.name)
-      expect((result.data as any).email).toBe(mockUser.email)
-      expect((result.data as any).avatar_url).toBe(mockUser.avatar_url)
-    })
-
-    it('should use login as display_name if name is null', () => {
-      const userNoName = { ...mockUser, name: null }
-      const context = createMapperContext('user', String(userNoName.id))
-      const result = userMapper.map(userNoName, context)
-
-      expect((result.data as any).display_name).toBe(mockUser.login)
-    })
-  })
-
-  describe('issueMapper', () => {
-    it('should map GitHub issue to Task', () => {
-      const context = createMapperContext('issue', String(mockIssue.id))
-      const result = issueMapper.map(mockIssue, context)
-
-      // Result could be single or array
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect(mapped.entityType).toBe('task')
-      expect(mapped.data.entity_type).toBe('task')
-      expect((mapped.data as any).title).toBe(mockIssue.title)
-      expect((mapped.data as any).description).toBe(mockIssue.body)
-      expect((mapped.data as any).status).toBe('open')
-      expect((mapped.data as any).labels).toEqual(['bug'])
-      expect((mapped.data as any).platform_url).toBe(mockIssue.html_url)
-    })
-
-    it('should map closed issue with completed status', () => {
-      const context = createMapperContext('issue', String(mockClosedIssue.id))
-      const result = issueMapper.map(mockClosedIssue, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect((mapped.data as any).status).toBe('closed')
-      expect((mapped.data as any).completed_at).toBe(mockClosedIssue.closed_at)
-    })
-
-    it('should map issue with not_planned state_reason as cancelled', () => {
-      const cancelledIssue = {
-        ...mockClosedIssue,
-        state_reason: 'not_planned' as const,
-      }
-      const context = createMapperContext('issue', String(cancelledIssue.id))
-      const result = issueMapper.map(cancelledIssue, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect((mapped.data as any).status).toBe('cancelled')
-    })
-
-    it('should include creator as related entity', () => {
-      const context = createMapperContext('issue', String(mockIssue.id))
-      const result = issueMapper.map(mockIssue, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect(mapped.relatedEntities).toBeDefined()
-      expect(mapped.relatedEntities!.length).toBeGreaterThan(0)
-      expect(mapped.relatedEntities![0].entityType).toBe('identity')
-    })
-  })
-
-  describe('pullRequestMapper', () => {
-    it('should map GitHub PR to Task', () => {
-      const context = createMapperContext('pull_request', String(mockPullRequest.id))
-      const result = pullRequestMapper.map(mockPullRequest, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect(mapped.entityType).toBe('task')
-      expect((mapped.data as any).title).toBe(mockPullRequest.title)
-      expect((mapped.data as any).metadata?.github_pr).toBe(true)
-      expect((mapped.data as any).metadata?.github_head_ref).toBe('feature-branch')
-      expect((mapped.data as any).metadata?.github_base_ref).toBe('main')
-    })
-
-    it('should mark draft PR as in_progress', () => {
-      const draftPr = { ...mockPullRequest, draft: true }
-      const context = createMapperContext('pull_request', String(draftPr.id))
-      const result = pullRequestMapper.map(draftPr, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect((mapped.data as any).status).toBe('in_progress')
-    })
-
-    it('should mark merged PR as closed', () => {
-      const mergedPr = {
-        ...mockPullRequest,
-        merged: true,
-        merged_at: '2024-01-15T12:00:00Z',
-      }
-      const context = createMapperContext('pull_request', String(mergedPr.id))
-      const result = pullRequestMapper.map(mergedPr, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect((mapped.data as any).status).toBe('closed')
-      expect((mapped.data as any).completed_at).toBe(mergedPr.merged_at)
-    })
-
-    it('should mark closed unmerged PR as cancelled', () => {
-      const closedPr = {
-        ...mockPullRequest,
-        state: 'closed' as const,
-        merged: false,
-      }
-      const context = createMapperContext('pull_request', String(closedPr.id))
-      const result = pullRequestMapper.map(closedPr, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect((mapped.data as any).status).toBe('cancelled')
-    })
-  })
-
-  describe('commentMapper', () => {
-    it('should map GitHub comment to Message', () => {
-      const context = createMapperContext('comment', String(mockComment.id))
-      const result = commentMapper.map(mockComment, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect(mapped.entityType).toBe('message')
-      expect((mapped.data as any).body_text).toBe(mockComment.body)
-      expect((mapped.data as any).sent_at).toBe(mockComment.created_at)
-    })
-
-    it('should include comment author as related entity', () => {
-      const context = createMapperContext('comment', String(mockComment.id))
-      const result = commentMapper.map(mockComment, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect(mapped.relatedEntities).toBeDefined()
-      expect(mapped.relatedEntities![0].entityType).toBe('identity')
-    })
-
-    it('should truncate long display text', () => {
-      const longComment = {
-        ...mockComment,
-        body: 'A'.repeat(200),
-      }
-      const context = createMapperContext('comment', String(longComment.id))
-      const result = commentMapper.map(longComment, context)
-      const mapped = Array.isArray(result) ? result[0] : result
-
-      expect(mapped.displayText!.length).toBeLessThanOrEqual(103) // 100 + '...'
-    })
-  })
-
-  describe('notificationMapper', () => {
-    it('should map GitHub notification to Notification', () => {
-      const context = createMapperContext('notification', mockNotification.id)
-      const result = notificationMapper.map(mockNotification, context)
-
-      expect(result.entityType).toBe('notification')
-      expect((result.data as any).title).toBe(mockNotification.subject.title)
-      expect((result.data as any).notification_type).toBe('mention')
-      expect((result.data as any).is_read).toBe(false)
-    })
-
-    it('should map read notification correctly', () => {
-      const readNotification = {
-        ...mockNotification,
-        unread: false,
-        last_read_at: '2024-01-15T10:00:00Z',
-      }
-      const context = createMapperContext('notification', readNotification.id)
-      const result = notificationMapper.map(readNotification, context)
-
-      expect((result.data as any).is_read).toBe(true)
-      expect((result.data as any).read_at).toBe(readNotification.last_read_at)
-    })
-
-    it('should map different notification reasons', () => {
-      const reasonMappings: Record<string, string> = {
-        assign: 'assignment',
-        comment: 'comment',
-        review_requested: 'review_request',
-      }
-
-      for (const [githubReason, expectedType] of Object.entries(reasonMappings)) {
-        const notification = { ...mockNotification, reason: githubReason as any }
-        const context = createMapperContext('notification', notification.id)
-        const result = notificationMapper.map(notification, context)
-
-        expect((result.data as any).notification_type).toBe(expectedType)
-      }
-    })
-  })
-
-  describe('Mapper Registry', () => {
-    it('should return all supported entity types', () => {
-      const types = getGitHubEntityTypes()
-      expect(types).toContain('user')
-      expect(types).toContain('issue')
-      expect(types).toContain('pull_request')
-      expect(types).toContain('comment')
-      expect(types).toContain('notification')
-    })
-
-    it('should get mapper by entity type', () => {
-      expect(getGitHubMapper('user')).toBe(userMapper)
-      expect(getGitHubMapper('issue')).toBe(issueMapper)
-      expect(getGitHubMapper('pull_request')).toBe(pullRequestMapper)
-      expect(getGitHubMapper('comment')).toBe(commentMapper)
-      expect(getGitHubMapper('notification')).toBe(notificationMapper)
-    })
-
-    it('should return undefined for unknown entity type', () => {
-      expect(getGitHubMapper('unknown')).toBeUndefined()
-    })
-  })
-})
-
 // ============ Connector Tests ============
 
 describe('GitHubConnector', () => {
@@ -723,18 +462,6 @@ describe('GitHubConnector', () => {
 
     it('should return undefined for unknown entity type', () => {
       expect(connector.getSourceSchema('unknown')).toBeUndefined()
-    })
-  })
-
-  describe('getMapper', () => {
-    it('should return mapper for known entity types', () => {
-      expect(connector.getMapper('user')).toBeDefined()
-      expect(connector.getMapper('issue')).toBeDefined()
-      expect(connector.getMapper('pull_request')).toBeDefined()
-    })
-
-    it('should return undefined for unknown entity type', () => {
-      expect(connector.getMapper('unknown')).toBeUndefined()
     })
   })
 

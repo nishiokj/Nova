@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "comms-bus": "workspace:*",
+    "harness-client": "workspace:*",
     "diff": "^8.0.3",
     "ink": "^4.4.1",
     "marked": "^17.0.1",

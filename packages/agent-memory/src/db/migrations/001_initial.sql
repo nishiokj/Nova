@@ -3,7 +3,7 @@
 -- Version: 1
 
 -- Extensions
-CREATE EXTENSION IF NOT EXISTS "pgvector";
+CREATE EXTENSION IF NOT EXISTS "vector";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
 -- Schema versioning

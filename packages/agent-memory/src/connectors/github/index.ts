@@ -24,9 +24,9 @@ import type {
   FetchChangesOptions,
   FetchPageResult,
   SourceItem,
-  EntityMapper,
   RateLimitInfo,
 } from '../../sync/types.js'
+import type { Transformation } from '../../transform/types.js'
 import {
   GitHubUserSchema,
   GitHubIssueSchema,
@@ -44,10 +44,13 @@ import {
   type GitHubAuthenticatedUser,
 } from './schemas.js'
 import {
-  githubMappers,
-  getGitHubMapper,
-  getGitHubEntityTypes,
-} from './mappers.js'
+  githubTransforms,
+  issueTransform,
+  pullRequestTransform,
+  commentTransform,
+  notificationTransform,
+  userTransform,
+} from './transforms.js'
 
 // ============ Constants ============
 
@@ -87,7 +90,7 @@ export class GitHubConnector extends BaseConnector {
     supportsIncrementalSync: true,
     supportsWebhook: true,
     supportsWrite: true, // Could support creating issues, comments, etc.
-    supportedEntityTypes: getGitHubEntityTypes(),
+    supportedEntityTypes: ['user', 'issue', 'pull_request', 'comment', 'notification'],
   }
 
   readonly authConfig: OAuth2Config
@@ -108,10 +111,8 @@ export class GitHubConnector extends BaseConnector {
       clientSecret: config.clientSecret,
     }
 
-    // Register mappers
-    for (const [entityType, mapper] of Object.entries(githubMappers)) {
-      this.registerMapper(mapper)
-    }
+    // Transformations are handled via TransformationRegistry
+    // Use registerTransforms() to register GitHub transforms
 
     // Register schemas
     this.registerSchema('user', GitHubUserSchema)
@@ -618,6 +619,18 @@ export class GitHubConnector extends BaseConnector {
     // GitHub expects sha256= prefix
     return 'sha256=' + super.computeWebhookSignature(payload, secret)
   }
+
+  // ============ Transform Registration ============
+
+  /**
+   * Register GitHub transformations with a registry.
+   * Call this during daemon setup to enable processing.
+   */
+  registerTransforms(registry: { register<T>(t: Transformation<T>): void }): void {
+    for (const transform of githubTransforms) {
+      registry.register(transform)
+    }
+  }
 }
 
 // ============ Types ============
@@ -649,6 +662,13 @@ export function createGitHubConnector(
   return new GitHubConnector(config, options)
 }
 
-// Re-export schemas and mappers
+// Re-export schemas and transforms
 export * from './schemas.js'
-export { githubMappers, getGitHubMapper, getGitHubEntityTypes } from './mappers.js'
+export {
+  githubTransforms,
+  userTransform,
+  issueTransform,
+  pullRequestTransform,
+  commentTransform,
+  notificationTransform,
+} from './transforms.js'

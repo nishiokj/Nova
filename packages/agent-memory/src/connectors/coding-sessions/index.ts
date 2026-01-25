@@ -1,20 +1,22 @@
 /**
  * Coding Agent Session Connectors
  *
- * Connectors for ingesting session data from various coding agents.
+ * Connectors for ingesting session data from coding agents (Claude Code, Rex).
  *
  * @module connectors/coding-sessions
  */
 
-// Base
-export { CodingAgentSessionConnector } from './base.js'
+// ============ Base ============
 
-// Types
 export {
+  CodingAgentSessionConnector,
   type CodingAgentSessionConfig,
   type SessionFile,
-  type BackfillCursor,
-  type IncrementalCursor,
+} from './base.js'
+
+// ============ Schemas ============
+
+export {
   // Shared schemas
   TextBlockSchema,
   ThinkingBlockSchema,
@@ -30,14 +32,7 @@ export {
   type UsageInfo,
   type ToolUseResult,
   type ThinkingMetadata,
-} from './types.js'
-
-// Claude Connector
-export {
-  ClaudeSessionConnector,
-  createClaudeSessionConnector,
-  type ClaudeSessionConnectorConfig,
-  // Schemas
+  // Claude schemas
   ClaudeUserMessageSchema,
   ClaudeAssistantMessageSchema,
   ClaudeSummaryMessageSchema,
@@ -48,14 +43,7 @@ export {
   type ClaudeSummaryMessage,
   type ClaudeFileHistorySnapshot,
   type ClaudeSessionMessage,
-} from './claude.js'
-
-// Rex Connector
-export {
-  RexSessionConnector,
-  createRexSessionConnector,
-  type RexSessionConnectorConfig,
-  // Schemas
+  // Rex schemas
   RexUserMessageSchema,
   RexAssistantMessageSchema,
   RexSummaryMessageSchema,
@@ -64,4 +52,28 @@ export {
   type RexAssistantMessage,
   type RexSummaryMessage,
   type RexSessionMessage,
+} from './schemas.js'
+
+// ============ Claude Connector ============
+
+export {
+  ClaudeSessionConnector,
+  createClaudeSessionConnector,
+  type ClaudeSessionConnectorConfig,
+} from './claude.js'
+
+// ============ Rex Connector ============
+
+export {
+  RexSessionConnector,
+  createRexSessionConnector,
+  type RexSessionConnectorConfig,
 } from './rex.js'
+
+// ============ Transformations ============
+
+export {
+  claudeSessionTransform,
+  claudeMessageTransform,
+  transforms as codingSessionTransforms,
+} from './transforms.js'

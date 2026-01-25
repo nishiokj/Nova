@@ -42,6 +42,8 @@ export {
   // Auth Types
   type ConnectorAuthType,
   ConnectorAuthTypeSchema,
+  type OAuthProviderRefConfig,
+  OAuthProviderRefConfigSchema,
   type OAuth2Config,
   OAuth2ConfigSchema,
   type ApiKeyConfig,

@@ -25,6 +25,7 @@ import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
 import { DatabaseAuthProvider, type AuthProviderConfig } from '../auth/provider.js'
+import { OAuthProviderRegistry, oauthProviders } from '../auth/oauth-providers.js'
 import { HttpServer, type ServerConfig } from './server.js'
 import { registerRoutes } from './routes/index.js'
 
@@ -82,6 +83,7 @@ export class SyncDaemon {
   readonly scheduler: Scheduler
   readonly authProvider: AuthProvider
   readonly collector: Collector
+  readonly oauthProviders: OAuthProviderRegistry
 
   // Repositories (exposed for route handlers)
   readonly accountRepo: AccountRepository
@@ -91,7 +93,7 @@ export class SyncDaemon {
   readonly entityRepo: CanonicalEntityRepository
   readonly mappingRepo: EntitySourceMappingRepository
 
-  private server: HttpServer
+  readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
   private config: DaemonConfig
   private isRunning = false
@@ -103,6 +105,7 @@ export class SyncDaemon {
     scheduler: Scheduler,
     authProvider: AuthProvider,
     collector: Collector,
+    oauthProviderRegistry: OAuthProviderRegistry,
     accountRepo: AccountRepository,
     syncJobRepo: SyncJobRepository,
     taskRepo: SyncTaskRepository,
@@ -116,6 +119,7 @@ export class SyncDaemon {
     this.scheduler = scheduler
     this.authProvider = authProvider
     this.collector = collector
+    this.oauthProviders = oauthProviderRegistry
     this.accountRepo = accountRepo
     this.syncJobRepo = syncJobRepo
     this.taskRepo = taskRepo
@@ -130,6 +134,12 @@ export class SyncDaemon {
    */
   static async create(config: DaemonConfig): Promise<SyncDaemon> {
     const { sql, encryptionKey, port, host, basePath, webhookBaseUrl } = config
+
+    // Initialize OAuth providers from environment
+    const loadedProviders = oauthProviders.loadAllFromEnv()
+    if (loadedProviders.length > 0) {
+      console.log(`[daemon] Loaded OAuth providers: ${loadedProviders.join(', ')}`)
+    }
 
     // Create repositories
     const ctx = { sql }
@@ -174,8 +184,8 @@ export class SyncDaemon {
     // Create HTTP server
     const server = new HttpServer({
       port,
-      host,
-      basePath,
+      ...(host && { host }),
+      ...(basePath && { basePath }),
     })
 
     const daemon = new SyncDaemon(
@@ -185,6 +195,7 @@ export class SyncDaemon {
       scheduler,
       authProvider,
       collector,
+      oauthProviders,
       accountRepo,
       syncJobRepo,
       taskRepo,
@@ -462,6 +473,70 @@ export class SyncDaemon {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
       expiresAt: tokens.expiresAt,
+    })
+
+    // Activate the account
+    await this.accountRepo.activate(account.id)
+
+    return (await this.accountRepo.findById(account.id))!
+  }
+
+  /**
+   * Create account with pre-exchanged tokens.
+   * Used when tokens are obtained via centralized OAuth provider registry.
+   */
+  async createAccountWithTokens(
+    connector: ConnectorType,
+    tokens: {
+      accessToken: string
+      refreshToken?: string
+      expiresIn?: number
+      scope?: string
+    },
+    scopes: string[]
+  ): Promise<Account> {
+    const connectorInstance = this.connectors.get(connector)
+    if (!connectorInstance) {
+      throw new Error(`Connector not registered: ${connector}`)
+    }
+
+    // Get account info using the access token
+    const ctx = {
+      accountId: 'temp', // Temporary until we create the account
+      accessToken: tokens.accessToken,
+    }
+
+    const accounts = await connectorInstance.listAccounts(ctx)
+    const primaryAccount = accounts.find((a) => a.isPrimary) || accounts[0]
+
+    if (!primaryAccount) {
+      throw new Error('No account found after OAuth')
+    }
+
+    // Check if account already exists
+    let account = await this.accountRepo.findByConnector(connector, primaryAccount.externalId)
+
+    if (!account) {
+      // Create new account
+      account = await this.accountRepo.create({
+        connector,
+        external_account_id: primaryAccount.externalId,
+        display_name: primaryAccount.displayName,
+        email: primaryAccount.email,
+        auth_type: 'oauth2',
+      })
+    }
+
+    // Calculate expiration time
+    const expiresAt = tokens.expiresIn
+      ? new Date(Date.now() + tokens.expiresIn * 1000)
+      : undefined
+
+    // Store credentials
+    await this.authProvider.storeCredentials(account.id, {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt,
     })
 
     // Activate the account

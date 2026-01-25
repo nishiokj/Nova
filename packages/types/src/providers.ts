@@ -28,7 +28,9 @@ export type SupportedProvider =
   | 'gemini'
   | 'z.ai-coder'
   | 'lmstudio'
-  | 'replicate';
+  | 'replicate'
+  | 'claude'
+  | 'jimmy';
 
 /**
  * Provider definition containing all metadata about a provider.
@@ -143,6 +145,17 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
   'z.ai-coder': {
     fast: 'glm-4.7',
     standard: 'glm-4.7',
+  },
+  claude: {
+    fast: 'claude-haiku-4',
+    standard: 'claude-sonnet-4',
+    powerful: 'claude-opus-4',
+    reasoning: 'claude-opus-4',
+  },
+  jimmy: {
+    fast: 'jimmy-fast',
+    standard: 'jimmy-standard',
+    powerful: 'jimmy-powerful',
   },
 };
 
@@ -291,6 +304,58 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     envVar: 'REPLICATE_API_TOKEN',
     testEndpoint: 'https://api.replicate.com/v1/models',
     dashboardUrl: 'https://replicate.com/account/api-tokens',
+  },
+  claude: {
+    id: 'claude',
+    displayName: 'Claude',
+    canonicalProvider: 'anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    models: [
+      { id: 'claude-haiku-4', name: 'Claude Haiku 4', context_window: 200_000 },
+      { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', context_window: 200_000, reasoning: ['on', 'off'] },
+      { id: 'claude-opus-4', name: 'Claude Opus 4', context_window: 200_000, reasoning: ['on', 'off'] },
+    ],
+    envVar: 'ANTHROPIC_API_KEY',
+    testEndpoint: 'https://api.anthropic.com/v1/messages',
+    testMethod: 'POST',
+    testHeaders: { 'anthropic-version': '2023-06-01' },
+    testBody: {
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'hi' }],
+    },
+    dashboardUrl: 'https://console.anthropic.com/settings/billing',
+  },
+  jimmy: {
+    id: 'jimmy',
+    displayName: 'Jimmy',
+    canonicalProvider: 'openai-compat',
+    baseUrl: 'https://api.jimmy.ai/v1',
+    models: [
+      {
+        id: 'jimmy-fast',
+        name: 'Jimmy Fast',
+        context_window: 128_000,
+        description: 'Fast Jimmy model for quick tasks',
+      },
+      {
+        id: 'jimmy-standard',
+        name: 'Jimmy Standard',
+        context_window: 200_000,
+        description: 'Balanced Jimmy model for general use',
+        reasoning: ['on', 'off'],
+      },
+      {
+        id: 'jimmy-powerful',
+        name: 'Jimmy Powerful',
+        context_window: 256_000,
+        description: 'High-performance Jimmy model for complex tasks',
+        reasoning: ['on', 'off'],
+      },
+    ],
+    envVar: 'JIMMY_API_KEY',
+    testEndpoint: 'https://api.jimmy.ai/v1/models',
+    dashboardUrl: 'https://jimmy.ai/dashboard',
   },
 };
 
