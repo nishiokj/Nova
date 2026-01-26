@@ -283,6 +283,12 @@ export class TelegramConnector {
   // ===========================================================================
 
   private handleEvent(event: BridgeEvent, channel: string): void {
+    // Handle direct channel events (errors, provider_key_required, etc.)
+    if (channel === 'direct') {
+      this.handleDirectEvent(event)
+      return
+    }
+
     // Extract requestId from channel (run:requestId)
     const requestId = channel.startsWith('run:') ? channel.slice(4) : null
     if (!requestId) return
@@ -312,6 +318,45 @@ export class TelegramConnector {
         // Keep typing indicator active
         void this.sendChatAction(pending.chatId, 'typing')
         break
+    }
+  }
+
+  private handleDirectEvent(event: BridgeEvent): void {
+    const data = event.data as Record<string, unknown> | undefined
+
+    switch (event.type) {
+      case 'error': {
+        const message = typeof data?.message === 'string' ? data.message : 'Unknown error'
+        console.error('[TelegramConnector] Direct error:', message)
+        // Send to all active sessions - we don't know which chat triggered this
+        for (const [chatId] of this.sessions) {
+          void this.sendMessage(chatId, `⚠️ ${message}`)
+        }
+        break
+      }
+
+      case 'provider_key_required': {
+        const provider = typeof data?.provider === 'string' ? data.provider : 'unknown'
+        const model = typeof data?.model === 'string' ? data.model : 'unknown'
+        console.warn(`[TelegramConnector] Provider key required: ${provider} for ${model}`)
+        for (const [chatId] of this.sessions) {
+          void this.sendMessage(chatId, `⚠️ API key required for ${provider} (${model})`)
+        }
+        break
+      }
+
+      case 'model_changed': {
+        const model = typeof data?.model === 'string' ? data.model : null
+        const provider = typeof data?.provider === 'string' ? data.provider : null
+        if (model && provider) {
+          console.log(`[TelegramConnector] Model changed: ${provider}/${model}`)
+        }
+        break
+      }
+
+      default:
+        // Log but don't crash on unknown direct events
+        console.log(`[TelegramConnector] Direct event: ${event.type}`)
     }
   }
 
@@ -511,6 +556,145 @@ export class TelegramConnector {
 
   getBotId(): string {
     return this.botToken.split(':')[0]
+  }
+
+  // ===========================================================================
+  // Long Polling (alternative to webhooks)
+  // ===========================================================================
+
+  private pollingActive = false
+  private lastUpdateId = 0
+  private pollingConflictCount = 0
+
+  /**
+   * Start long polling for updates.
+   * Use this instead of webhooks when you don't want to expose a public endpoint.
+   */
+  async startPolling(intervalMs = 1000): Promise<void> {
+    if (this.pollingActive) return
+    this.pollingActive = true
+
+    // Delete any existing webhook first (required before using getUpdates)
+    console.log('[TelegramConnector] Deleting webhook before starting polling...')
+    try {
+      const deleteResponse = await fetch(
+        `${this.apiBaseUrl}/bot${this.botToken}/deleteWebhook?drop_pending_updates=true`
+      )
+      const deleteResult = await deleteResponse.json() as { ok: boolean; description?: string }
+      if (deleteResult.ok) {
+        console.log('[TelegramConnector] Webhook deleted successfully')
+      } else {
+        console.error('[TelegramConnector] Failed to delete webhook:', deleteResult.description)
+        this.pollingActive = false
+        throw new Error(`Failed to delete webhook: ${deleteResult.description}`)
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('Failed to delete webhook')) {
+        throw err
+      }
+      console.error('[TelegramConnector] Error deleting webhook:', err)
+      this.pollingActive = false
+      throw err
+    }
+
+    // Wait a moment for Telegram to process the webhook deletion
+    await new Promise(r => setTimeout(r, 1000))
+
+    // Verify webhook is deleted by checking getWebhookInfo
+    try {
+      const infoResponse = await fetch(
+        `${this.apiBaseUrl}/bot${this.botToken}/getWebhookInfo`
+      )
+      const info = await infoResponse.json() as { ok: boolean; result: { url: string } }
+      if (info.ok && info.result.url) {
+        console.error('[TelegramConnector] Webhook still set to:', info.result.url)
+        this.pollingActive = false
+        throw new Error('Webhook deletion did not take effect')
+      }
+      console.log('[TelegramConnector] Verified: no webhook set')
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Webhook deletion did not take effect') {
+        throw err
+      }
+      console.warn('[TelegramConnector] Could not verify webhook status:', err)
+    }
+
+    console.log('[TelegramConnector] Starting long polling...')
+
+    // Flush any stale long-poll requests from previous runs with timeout=0
+    // This immediately returns and "claims" the polling slot
+    try {
+      const flushResponse = await fetch(
+        `${this.apiBaseUrl}/bot${this.botToken}/getUpdates?offset=-1&timeout=0`
+      )
+      if (flushResponse.ok) {
+        const flushData = await flushResponse.json() as { ok: boolean; result: TelegramUpdate[] }
+        if (flushData.result?.length) {
+          this.lastUpdateId = Math.max(...flushData.result.map(u => u.update_id))
+        }
+        console.log('[TelegramConnector] Flushed stale requests, ready for polling')
+      }
+    } catch (err) {
+      console.warn('[TelegramConnector] Flush failed (will retry):', err)
+    }
+
+    while (this.pollingActive) {
+      try {
+        const response = await fetch(
+          `${this.apiBaseUrl}/bot${this.botToken}/getUpdates?offset=${this.lastUpdateId + 1}&timeout=30`,
+          { signal: AbortSignal.timeout(35000) }
+        )
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          if (response.status === 409) {
+            this.pollingConflictCount += 1
+            if (this.pollingConflictCount === 1) {
+              console.warn('[TelegramConnector] getUpdates conflict:', errorText)
+              console.warn('[TelegramConnector] Ensure only one bot instance is polling and no webhook is set.')
+            }
+            const backoffMs = Math.min(30000, Math.max(intervalMs, 1000) * this.pollingConflictCount)
+            await new Promise(r => setTimeout(r, backoffMs))
+            continue
+          }
+
+          console.error('[TelegramConnector] getUpdates failed:', errorText)
+          await new Promise(r => setTimeout(r, intervalMs))
+          continue
+        }
+
+        const data = await response.json() as { ok: boolean; result: TelegramUpdate[] }
+        this.pollingConflictCount = 0
+
+        for (const update of data.result || []) {
+          this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id)
+          this.handleUpdate(update).catch(err => {
+            console.error('[TelegramConnector] Error processing update:', err)
+          })
+        }
+      } catch (err) {
+        if (this.pollingActive) {
+          console.error('[TelegramConnector] Polling error:', err)
+          await new Promise(r => setTimeout(r, intervalMs))
+        }
+      }
+    }
+
+    console.log('[TelegramConnector] Polling stopped')
+  }
+
+  /**
+   * Stop the polling loop.
+   */
+  stopPolling(): void {
+    this.pollingActive = false
+  }
+
+  /**
+   * Check if polling is active.
+   */
+  isPolling(): boolean {
+    return this.pollingActive
   }
 }
 

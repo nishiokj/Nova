@@ -1,0 +1,9 @@
+{
+  "id": "01KFVZ9KXF6VNW2M89TE5631E0",
+  "type": "sync:collect",
+  "payload": "{\"syncJobId\":\"01KFVZ9KX7PW4KHT77Z9Z6D5TV\",\"connector\":\"gmail\",\"accountId\":\"01KFVEPH6EH74PWYYQ1Z935F0X\",\"jobType\":\"incremental\",\"entityTypes\":[\"message\"]}",
+  "error": "UNDEFINED_VALUE: Undefined values are not allowed",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T01:39:34.959Z",
+  "diedAt": "2026-01-26T01:39:38.674Z"
+}

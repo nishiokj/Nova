@@ -75,5 +75,6 @@ export {
 export {
   claudeSessionTransform,
   claudeMessageTransform,
+  claudeSummaryTransform,
   transforms as codingSessionTransforms,
 } from './transforms.js'

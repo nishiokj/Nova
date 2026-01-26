@@ -6,6 +6,18 @@
  * @module connectors
  */
 
+// Connector Factory Registry (static lookup)
+export {
+  CONNECTOR_FACTORIES,
+  getFactory,
+  listFactoryTypes,
+  hasFactory,
+  createConnector,
+  type ConnectorFactory,
+  type ConnectorFactoryEntry,
+  type LoadConnectorsResult,
+} from './registry.js'
+
 // GitHub Connector
 export {
   // Connector
@@ -146,3 +158,36 @@ export {
   claudeMessageTransform,
   codingSessionTransforms,
 } from './coding-sessions/index.js'
+
+// iMessage Connector (macOS local)
+export {
+  // Connector
+  IMessageConnector,
+  createIMessageConnector,
+  type IMessageConnectorConfig,
+  // Schemas
+  HandleRowSchema,
+  ChatRowSchema,
+  MessageRowSchema,
+  AttachmentRowSchema,
+  EnrichedMessageSchema,
+  EnrichedChatSchema,
+  IMessageSourceSchema,
+  IChatSourceSchema,
+  type HandleRow,
+  type ChatRow,
+  type MessageRow,
+  type AttachmentRow,
+  type EnrichedMessage,
+  type EnrichedChat,
+  type IMessageSource,
+  type IChatSource,
+  // Utilities
+  macosTimestampToDate,
+  macosTimestampToISOString,
+  MACOS_EPOCH_OFFSET,
+  // Transformations
+  imessageMessageTransform,
+  imessageChatTransform,
+  imessageTransforms,
+} from './imessage/index.js'

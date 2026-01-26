@@ -306,9 +306,11 @@ export class HttpServer {
       if (error instanceof HttpError) {
         this.sendJson(res, error.status, { error: error.message, code: error.code })
       } else {
+        // Surface the actual error message to the client
+        const message = error instanceof Error ? error.message : 'Unknown error'
         this.sendJson(res, 500, {
-          error: 'Internal Server Error',
-          message: error instanceof Error ? error.message : 'Unknown error',
+          error: message,
+          code: 'INTERNAL_ERROR',
         })
       }
     }

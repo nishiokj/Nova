@@ -426,6 +426,23 @@ export interface Connector {
     subscriptionId: string
   ): Promise<WebhookSubscription>
 
+  // ============ Estimate Methods ============
+
+  /**
+   * Estimate the scope of a sync operation.
+   * Returns approximate item counts per entity type.
+   * Used by the CLI to show users what they're about to sync.
+   *
+   * @param ctx - Connector context with credentials
+   * @param syncType - Type of sync (backfill or incremental)
+   * @param entityTypes - Entity types to estimate (defaults to all supported)
+   */
+  estimateScope?(
+    ctx: ConnectorContext,
+    syncType: 'backfill' | 'incremental',
+    entityTypes?: string[]
+  ): Promise<SyncEstimate>
+
   // ============ Schema Methods ============
 
   /**
@@ -433,6 +450,31 @@ export interface Connector {
    * @param entityType - Entity type (e.g., 'issue', 'message')
    */
   getSourceSchema(entityType: string): z.ZodSchema | undefined
+}
+
+// ============ Sync Estimates ============
+
+/**
+ * Estimate of items per entity type for a sync operation.
+ */
+export interface SyncEstimateEntry {
+  /** Entity type (e.g., 'message', 'thread') */
+  type: string
+  /** Approximate item count (undefined if unknown) */
+  count?: number
+  /** Human-readable description (e.g., "~12,500 messages") */
+  description: string
+}
+
+/**
+ * Estimate of the scope of a sync operation.
+ * Returned by `Connector.estimateScope()`.
+ */
+export interface SyncEstimate {
+  /** Per-entity-type estimates */
+  entities: SyncEstimateEntry[]
+  /** Overall human-readable summary */
+  summary?: string
 }
 
 // ============ Connector Registration ============

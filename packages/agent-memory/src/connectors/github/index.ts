@@ -12,7 +12,7 @@ import {
   BaseConnector,
   type BaseConnectorOptions,
   type ConnectorCapabilities,
-  type OAuth2Config,
+  type OAuthProviderRefConfig,
   type AuthTokens,
   type AccountInfo,
   type WebhookEvent,
@@ -57,14 +57,10 @@ import {
 const GITHUB_API_BASE = 'https://api.github.com'
 
 /**
- * Default OAuth2 configuration for GitHub.
- * Client ID/Secret should be provided via environment variables.
+ * GitHub connector configuration.
+ * OAuth credentials are provided via the OAuth provider registry.
  */
 export interface GitHubConnectorConfig {
-  /** GitHub OAuth client ID */
-  clientId: string
-  /** GitHub OAuth client secret */
-  clientSecret: string
   /** Custom API base URL (for GitHub Enterprise) */
   apiBaseUrl?: string
 }
@@ -75,7 +71,7 @@ export interface GitHubConnectorConfig {
  * GitHub connector implementation.
  *
  * Supports:
- * - OAuth2 authentication
+ * - OAuth2 authentication (via provider registry)
  * - Backfill of issues, pull requests, comments, notifications
  * - Incremental sync via updated_at filtering
  * - Webhook verification and parsing
@@ -93,22 +89,19 @@ export class GitHubConnector extends BaseConnector {
     supportedEntityTypes: ['user', 'issue', 'pull_request', 'comment', 'notification'],
   }
 
-  readonly authConfig: OAuth2Config
+  readonly authConfig: OAuthProviderRefConfig
 
   private readonly apiBaseUrl: string
 
-  constructor(config: GitHubConnectorConfig, options?: BaseConnectorOptions) {
+  constructor(config: GitHubConnectorConfig = {}, options?: BaseConnectorOptions) {
     super(options)
 
     this.apiBaseUrl = config.apiBaseUrl ?? GITHUB_API_BASE
 
     this.authConfig = {
-      type: 'oauth2',
-      authorizationUrl: 'https://github.com/login/oauth/authorize',
-      tokenUrl: 'https://github.com/login/oauth/access_token',
+      type: 'oauth2_provider',
+      provider: 'github',
       scopes: ['repo', 'read:user', 'read:org', 'notifications'],
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
     }
 
     // Transformations are handled via TransformationRegistry
@@ -656,7 +649,7 @@ interface PageFetchResult {
  * Create a GitHub connector instance.
  */
 export function createGitHubConnector(
-  config: GitHubConnectorConfig,
+  config: GitHubConnectorConfig = {},
   options?: BaseConnectorOptions
 ): GitHubConnector {
   return new GitHubConnector(config, options)

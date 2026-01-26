@@ -78,3 +78,11 @@ export {
   type SyncType,
   type TaskMode,
 } from './sync-task.js'
+
+export {
+  createRegisteredConnectorRepository,
+  type RegisteredConnectorRepository,
+  type RegisteredConnector,
+  type RegisteredConnectorInput,
+  type RegisteredConnectorRow,
+} from './registered-connector.js'

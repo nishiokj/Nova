@@ -382,7 +382,11 @@ export function createErrorEvent(message: string, fatal = false): BridgeEvent {
 /**
  * Create a ready event for initialization.
  */
-export function createReadyEvent(sessionKey: string, configSummary?: string): BridgeEvent {
+export function createReadyEvent(
+  sessionKey: string,
+  history?: Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>,
+  configSummary?: string
+): BridgeEvent {
   return {
     type: 'ready',
     data: {
@@ -392,6 +396,7 @@ export function createReadyEvent(sessionKey: string, configSummary?: string): Br
         streaming_supported: true,
       },
       config_summary: configSummary,
+      history,
     },
   };
 }

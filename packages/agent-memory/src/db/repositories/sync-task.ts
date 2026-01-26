@@ -75,6 +75,7 @@ export interface SyncTaskRepository {
   // CRUD
   create(input: SyncTaskInput): Promise<SyncTask>
   findById(id: string): Promise<SyncTask | null>
+  findAll(limit?: number): Promise<SyncTask[]>
   findByAccount(accountId: string): Promise<SyncTask[]>
   findByConnector(connector: ConnectorType, accountId?: string): Promise<SyncTask[]>
   update(id: string, updates: Partial<Pick<SyncTask, 'entity_types' | 'interval_ms' | 'enabled'>>): Promise<SyncTask | null>
@@ -133,6 +134,15 @@ export function createSyncTaskRepository(ctx: RepositoryContext): SyncTaskReposi
         SELECT * FROM sync_tasks WHERE id = ${id}
       `
       return row ? rowToSyncTask(row) : null
+    },
+
+    async findAll(limit = 100) {
+      const rows = await sql<SyncTaskRow[]>`
+        SELECT * FROM sync_tasks
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `
+      return rows.map(rowToSyncTask)
     },
 
     async findByAccount(accountId) {

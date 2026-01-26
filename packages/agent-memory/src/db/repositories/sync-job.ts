@@ -85,6 +85,7 @@ export interface SyncJobInput {
 
 export interface SyncJobRepository {
   findById(id: string): Promise<SyncJob | null>
+  findRecent(options?: PaginationOptions): Promise<PaginatedResult<SyncJob>>
   findPending(options?: PaginationOptions): Promise<PaginatedResult<SyncJob>>
   findByConnector(connector: ConnectorType, accountId: string): Promise<SyncJob[]>
   findRunning(): Promise<SyncJob[]>
@@ -110,6 +111,28 @@ export function createSyncJobRepository(ctx: RepositoryContext): SyncJobReposito
         SELECT * FROM sync_jobs WHERE id = ${id}
       `
       return row ? rowToSyncJob(row) : null
+    },
+
+    async findRecent(options = {}) {
+      const { limit = 100, offset = 0 } = options
+
+      const [countResult] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM sync_jobs
+      `
+      const total = parseInt(countResult.count, 10)
+
+      const rows = await sql<SyncJobRow[]>`
+        SELECT * FROM sync_jobs
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+        OFFSET ${offset}
+      `
+
+      return {
+        items: rows.map(rowToSyncJob),
+        total,
+        hasMore: offset + rows.length < total,
+      }
     },
 
     async findPending(options = {}) {

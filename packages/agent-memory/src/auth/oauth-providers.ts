@@ -37,6 +37,8 @@ export interface OAuthProviderConfig {
   authorizationUrl: string
   /** Token endpoint */
   tokenUrl: string
+  /** Device authorization endpoint (for CLI/headless flows) */
+  deviceAuthUrl?: string
   /** Client ID (from environment) */
   clientId: string
   /** Client secret (from environment) */
@@ -57,6 +59,7 @@ export const OAUTH_PROVIDERS: Record<OAuthProviderId, Omit<OAuthProviderConfig, 
     displayName: 'Google',
     authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: 'https://oauth2.googleapis.com/token',
+    deviceAuthUrl: 'https://oauth2.googleapis.com/device/code',
     authParams: {
       access_type: 'offline',
       prompt: 'consent',
@@ -248,9 +251,11 @@ export class OAuthProviderRegistry {
 
     if (!response.ok) {
       const error = await response.text()
+      console.error('[OAuthProvider] Token exchange failed:', response.status, error)
       throw new Error(`Token exchange failed: ${error}`)
     }
 
+    console.log('[OAuthProvider] Token exchange successful')
     const data = await response.json() as {
       access_token: string
       refresh_token?: string
@@ -310,6 +315,144 @@ export class OAuthProviderRegistry {
       accessToken: data.access_token,
       refreshToken: data.refresh_token,
       expiresIn: data.expires_in,
+    }
+  }
+
+  /**
+   * Check if provider supports device authorization flow.
+   */
+  supportsDeviceAuth(providerId: OAuthProviderId): boolean {
+    const provider = this.providers.get(providerId)
+    return !!provider?.deviceAuthUrl
+  }
+
+  /**
+   * Initiate device authorization flow.
+   * Returns codes for user to enter at verification URL.
+   * Uses separate device client credentials if available (PROVIDER_DEVICE_CLIENT_ID).
+   */
+  async initiateDeviceAuth(
+    providerId: OAuthProviderId,
+    scopes: string[]
+  ): Promise<{
+    deviceCode: string
+    userCode: string
+    verificationUri: string
+    verificationUriComplete?: string
+    expiresIn: number
+    interval: number
+  }> {
+    const provider = this.getOrThrow(providerId)
+
+    if (!provider.deviceAuthUrl) {
+      throw new Error(`Provider '${providerId}' does not support device authorization flow`)
+    }
+
+    // Use device-specific credentials if available
+    const envPrefix = providerId.toUpperCase()
+    const deviceClientId = process.env[`${envPrefix}_DEVICE_CLIENT_ID`] || provider.clientId
+
+    const body = new URLSearchParams({
+      client_id: deviceClientId,
+      scope: scopes.join(' '),
+    })
+
+    const response = await fetch(provider.deviceAuthUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+      },
+      body: body.toString(),
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Device auth initiation failed: ${error}`)
+    }
+
+    const data = await response.json() as {
+      device_code: string
+      user_code: string
+      verification_uri: string
+      verification_uri_complete?: string
+      expires_in: number
+      interval: number
+    }
+
+    return {
+      deviceCode: data.device_code,
+      userCode: data.user_code,
+      verificationUri: data.verification_uri,
+      verificationUriComplete: data.verification_uri_complete,
+      expiresIn: data.expires_in,
+      interval: data.interval,
+    }
+  }
+
+  /**
+   * Poll for device authorization completion.
+   * Call this repeatedly until it returns tokens or throws.
+   * Uses separate device client credentials if available (PROVIDER_DEVICE_CLIENT_ID).
+   */
+  async pollDeviceAuth(
+    providerId: OAuthProviderId,
+    deviceCode: string
+  ): Promise<{
+    accessToken: string
+    refreshToken?: string
+    expiresIn?: number
+    scope?: string
+  } | { pending: true }> {
+    const provider = this.getOrThrow(providerId)
+
+    // Use device-specific credentials if available
+    const envPrefix = providerId.toUpperCase()
+    const deviceClientId = process.env[`${envPrefix}_DEVICE_CLIENT_ID`] || provider.clientId
+    const deviceClientSecret = process.env[`${envPrefix}_DEVICE_CLIENT_SECRET`] || provider.clientSecret
+
+    const body = new URLSearchParams({
+      client_id: deviceClientId,
+      client_secret: deviceClientSecret,
+      device_code: deviceCode,
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+    })
+
+    const response = await fetch(provider.tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+      },
+      body: body.toString(),
+    })
+
+    const data = await response.json() as {
+      access_token?: string
+      refresh_token?: string
+      expires_in?: number
+      scope?: string
+      error?: string
+      error_description?: string
+    }
+
+    if (data.error === 'authorization_pending' || data.error === 'slow_down') {
+      return { pending: true }
+    }
+
+    if (data.error) {
+      throw new Error(`Device auth failed: ${data.error_description || data.error}`)
+    }
+
+    if (!data.access_token) {
+      throw new Error('Device auth response missing access_token')
+    }
+
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in,
+      scope: data.scope,
     }
   }
 }

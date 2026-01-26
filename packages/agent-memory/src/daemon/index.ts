@@ -5,9 +5,11 @@
  * Provides HTTP API, scheduled syncing, and webhook handling.
  */
 
+import { createHmac, timingSafeEqual } from 'crypto'
 import type { Sql } from 'postgres'
-import type { ConnectorType } from '../ids.js'
-import type { Connector } from '../connector/sdk/types.js'
+import { computeIdempotencyKeys, computeRawDataHash, generateCanonicalId, type ConnectorType } from '../ids.js'
+import type { OAuthProviderId } from '../auth/oauth-providers.js'
+import type { Connector, ConnectorContext, SyncEstimate } from '../connector/sdk/types.js'
 import type { AuthProvider } from '../auth/provider.js'
 import type { Account, AccountRepository } from '../db/repositories/account.js'
 import type { SyncJob, SyncJobRepository } from '../db/repositories/sync-job.js'
@@ -15,12 +17,16 @@ import type { SyncTask, SyncTaskRepository } from '../db/repositories/sync-task.
 import type { RawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import type { CanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import type { EntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
+import type { RegisteredConnectorRepository, RegisteredConnector } from '../db/repositories/registered-connector.js'
+import type { RawEnvelope } from '../models/raw.js'
+import { validateEntity, type EntityType } from '../models/canonical.js'
 import { createAccountRepository } from '../db/repositories/account.js'
 import { createSyncJobRepository } from '../db/repositories/sync-job.js'
 import { createSyncTaskRepository } from '../db/repositories/sync-task.js'
 import { createRawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import { createCanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import { createEntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
+import { createRegisteredConnectorRepository } from '../db/repositories/registered-connector.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
@@ -28,6 +34,8 @@ import { DatabaseAuthProvider, type AuthProviderConfig } from '../auth/provider.
 import { OAuthProviderRegistry, oauthProviders } from '../auth/oauth-providers.js'
 import { HttpServer, type ServerConfig } from './server.js'
 import { registerRoutes } from './routes/index.js'
+import { createConnector, listFactoryTypes, hasFactory, type LoadConnectorsResult } from '../connectors/registry.js'
+import { TransformationRegistry } from '../transform/registry.js'
 
 // ============ Configuration ============
 
@@ -48,6 +56,13 @@ export interface DaemonConfig {
   scheduler?: SchedulerConfig
   /** Engine config */
   engine?: SyncEngineConfig
+}
+
+interface AuthStatePayload {
+  connector: string
+  redirectUri: string
+  issuedAt: number
+  nonce: string
 }
 
 // ============ Sync Daemon ============
@@ -92,6 +107,7 @@ export class SyncDaemon {
   readonly envelopeRepo: RawEnvelopeRepository
   readonly entityRepo: CanonicalEntityRepository
   readonly mappingRepo: EntitySourceMappingRepository
+  readonly connectorRepo: RegisteredConnectorRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
@@ -111,7 +127,8 @@ export class SyncDaemon {
     taskRepo: SyncTaskRepository,
     envelopeRepo: RawEnvelopeRepository,
     entityRepo: CanonicalEntityRepository,
-    mappingRepo: EntitySourceMappingRepository
+    mappingRepo: EntitySourceMappingRepository,
+    connectorRepo: RegisteredConnectorRepository
   ) {
     this.config = config
     this.server = server
@@ -126,6 +143,7 @@ export class SyncDaemon {
     this.envelopeRepo = envelopeRepo
     this.entityRepo = entityRepo
     this.mappingRepo = mappingRepo
+    this.connectorRepo = connectorRepo
   }
 
   /**
@@ -149,6 +167,7 @@ export class SyncDaemon {
     const envelopeRepo = createRawEnvelopeRepository(ctx)
     const entityRepo = createCanonicalEntityRepository(ctx)
     const mappingRepo = createEntitySourceMappingRepository(ctx)
+    const connectorRepo = createRegisteredConnectorRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -156,17 +175,23 @@ export class SyncDaemon {
       encryptionKey,
       accountRepo,
       getConnector: (type) => connectors.get(type),
+      oauthProviders,
     })
 
     // Create engine
     const engine = new SyncEngine(sql, {
       ...config.engine,
       authProvider,
+      collector: {
+        ...config.engine?.collector,
+        accountRepo,
+      },
     })
 
     // Create collector (for direct webhook ingestion)
     const collector = new Collector(sql, {
       authProvider,
+      accountRepo,
     })
 
     // Create scheduler
@@ -178,7 +203,8 @@ export class SyncDaemon {
       {
         ...config.scheduler,
         webhookBaseUrl,
-      }
+      },
+      accountRepo
     )
 
     // Create HTTP server
@@ -201,7 +227,8 @@ export class SyncDaemon {
       taskRepo,
       envelopeRepo,
       entityRepo,
-      mappingRepo
+      mappingRepo,
+      connectorRepo
     )
 
     // Store connectors map reference in daemon for registration
@@ -237,6 +264,116 @@ export class SyncDaemon {
    */
   hasConnector(type: ConnectorType): boolean {
     return this.connectors.has(type)
+  }
+
+  /**
+   * Unload a connector (remove from memory).
+   * Does not affect the database registration.
+   */
+  unloadConnector(type: ConnectorType): boolean {
+    if (!this.connectors.has(type)) {
+      return false
+    }
+    this.connectors.delete(type)
+    ;(this as any)._connectors?.delete(type)
+    return true
+  }
+
+  /**
+   * List available connector factories that are not yet registered.
+   */
+  listAvailableFactories(): ConnectorType[] {
+    const allFactories = listFactoryTypes()
+    const registered = Array.from(this.connectors.keys())
+    return allFactories.filter((f) => !registered.includes(f))
+  }
+
+  /**
+   * Load connectors from the database.
+   * Called at daemon startup to restore registered connectors.
+   */
+  async loadRegisteredConnectors(): Promise<LoadConnectorsResult> {
+    const result: LoadConnectorsResult = {
+      loaded: [],
+      errors: [],
+      skipped: [],
+    }
+
+    const registered = await this.connectorRepo.findEnabled()
+
+    for (const reg of registered) {
+      if (!hasFactory(reg.type)) {
+        result.skipped.push(reg.type)
+        continue
+      }
+
+      try {
+        const connector = await createConnector(reg.type, reg.config)
+        this.registerConnector(connector)
+        result.loaded.push(reg.type)
+      } catch (error) {
+        result.errors.push({
+          type: reg.type,
+          error: error instanceof Error ? error : new Error(String(error)),
+        })
+      }
+    }
+
+    return result
+  }
+
+  /**
+   * Register a connector dynamically (persists to database).
+   * Creates the connector from its factory and registers it.
+   */
+  async registerConnectorDynamic(
+    type: ConnectorType,
+    config?: Record<string, unknown>
+  ): Promise<RegisteredConnector> {
+    if (!hasFactory(type)) {
+      throw new Error(`No factory registered for connector type: ${type}`)
+    }
+
+    // Create and register the connector instance
+    const connector = await createConnector(type, config ?? {})
+    this.registerConnector(connector)
+
+    // Persist to database
+    const registered = await this.connectorRepo.register({
+      type,
+      enabled: true,
+      config: config ?? {},
+    })
+
+    return registered
+  }
+
+  /**
+   * Reload a connector (unload and re-create from database config).
+   */
+  async reloadConnector(type: ConnectorType): Promise<boolean> {
+    const registration = await this.connectorRepo.findByType(type)
+    if (!registration) {
+      return false
+    }
+
+    if (!hasFactory(type)) {
+      throw new Error(`No factory registered for connector type: ${type}`)
+    }
+
+    // Unload existing
+    this.unloadConnector(type)
+
+    // Skip if disabled
+    if (!registration.enabled) {
+      return true
+    }
+
+    // Re-create and register
+    const connector = await createConnector(type, registration.config)
+    this.registerConnector(connector)
+
+    return true
   }
 
   /**
@@ -404,6 +541,40 @@ export class SyncDaemon {
   }
 
   /**
+   * Find existing credentials for an OAuth provider.
+   * Searches all active accounts that use the same provider.
+   */
+  async findExistingProviderCredentials(
+    provider: OAuthProviderId,
+    requiredScopes: string[]
+  ): Promise<{ accountId: string; hasAllScopes: boolean } | null> {
+    const accounts = await this.accountRepo.findActive()
+
+    for (const account of accounts) {
+      const connector = this.connectors.get(account.connector as ConnectorType)
+      if (!connector) continue
+
+      // Check if this connector uses the same OAuth provider
+      const authConfig = connector.authConfig
+      if (authConfig?.type !== 'oauth2_provider') continue
+      if (authConfig.provider !== provider) continue
+
+      // Check if we have valid credentials
+      const creds = await this.authProvider.getCredentials(account.id)
+      if (!creds) continue
+
+      // For now, assume existing scopes are sufficient
+      // TODO: Parse token scopes and check coverage
+      return {
+        accountId: account.id,
+        hasAllScopes: true,
+      }
+    }
+
+    return null
+  }
+
+  /**
    * Get OAuth URL for a connector.
    */
   getAuthUrl(connector: ConnectorType, redirectUri: string, state?: string): string {
@@ -418,6 +589,50 @@ export class SyncDaemon {
 
     const authState = state || Math.random().toString(36).substring(2)
     return connectorInstance.getAuthorizationUrl(authState, redirectUri)
+  }
+
+  /**
+   * Sign OAuth state payload for stateless validation.
+   */
+  signAuthState(payload: AuthStatePayload): string {
+    const payloadJson = JSON.stringify(payload)
+    const payloadB64 = Buffer.from(payloadJson).toString('base64url')
+    const signature = createHmac('sha256', this.config.encryptionKey)
+      .update(payloadB64)
+      .digest('base64url')
+    return `${payloadB64}.${signature}`
+  }
+
+  /**
+   * Verify and decode a signed OAuth state payload.
+   */
+  verifyAuthState(state: string, maxAgeMs: number): AuthStatePayload | null {
+    const [payloadB64, signature] = state.split('.')
+    if (!payloadB64 || !signature) return null
+
+    const expected = createHmac('sha256', this.config.encryptionKey)
+      .update(payloadB64)
+      .digest('base64url')
+
+    if (signature.length !== expected.length) return null
+
+    try {
+      if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+        return null
+      }
+    } catch {
+      return null
+    }
+
+    try {
+      const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as AuthStatePayload
+      if (typeof payload.connector !== 'string' || typeof payload.redirectUri !== 'string') return null
+      if (typeof payload.issuedAt !== 'number') return null
+      if (Date.now() - payload.issuedAt > maxAgeMs) return null
+      return payload
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -539,13 +754,594 @@ export class SyncDaemon {
       expiresAt,
     })
 
+    // Store initial sync cursor from profile metadata (e.g., Gmail historyId)
+    if (primaryAccount.metadata?.history_id) {
+      await this.accountRepo.updateSyncState(account.id, String(primaryAccount.metadata.history_id))
+    }
+
     // Activate the account
     await this.accountRepo.activate(account.id)
 
     return (await this.accountRepo.findById(account.id))!
   }
+
+  /**
+   * Create an account for a connector by copying credentials from an existing account.
+   * Used when multiple connectors share the same OAuth provider (e.g., Gmail and Calendar both use Google).
+   */
+  async createAccountFromExisting(
+    connector: ConnectorType,
+    sourceAccountId: string
+  ): Promise<Account> {
+    const connectorInstance = this.connectors.get(connector)
+    if (!connectorInstance) {
+      throw new Error(`Connector not registered: ${connector}`)
+    }
+
+    // Get source account's credentials
+    const creds = await this.authProvider.getCredentials(sourceAccountId)
+    if (!creds) {
+      throw new Error('Source account has no credentials')
+    }
+
+    // Get account info using the access token
+    const ctx = {
+      accountId: 'temp',
+      accessToken: creds.accessToken,
+    }
+
+    const accounts = await connectorInstance.listAccounts(ctx)
+    const primaryAccount = accounts.find((a) => a.isPrimary) || accounts[0]
+
+    if (!primaryAccount) {
+      throw new Error('No account found with provided credentials')
+    }
+
+    // Check if account already exists for this connector
+    let account = await this.accountRepo.findByConnector(connector, primaryAccount.externalId)
+
+    if (!account) {
+      // Create new account
+      account = await this.accountRepo.create({
+        connector,
+        external_account_id: primaryAccount.externalId,
+        display_name: primaryAccount.displayName,
+        email: primaryAccount.email,
+        auth_type: 'oauth2',
+      })
+    }
+
+    // Copy credentials to the new account
+    await this.authProvider.storeCredentials(account.id, {
+      accessToken: creds.accessToken,
+      refreshToken: creds.refreshToken,
+      expiresAt: creds.expiresAt,
+    })
+
+    // Activate the account
+    await this.accountRepo.activate(account.id)
+
+    return (await this.accountRepo.findById(account.id))!
+  }
+
+  // ============ Sanity Checks ============
+
+  /**
+   * Run sanity checks for connector registration/config.
+   */
+  async checkConnectorSanity(options: ConnectorSanityOptions): Promise<SanityCheckResult> {
+    const checks: SanityCheck[] = []
+    const addCheck = (id: string, status: SanityCheckStatus, message: string, details?: Record<string, unknown>) => {
+      checks.push({ id, status, message, ...(details ? { details } : {}) })
+    }
+
+    let connector: Connector | undefined
+    let registry: TransformationRegistry | undefined
+
+    if (options.config) {
+      if (!hasFactory(options.type)) {
+        addCheck('connector', 'error', `No factory registered for connector type: ${options.type}`)
+        return this.buildSanityResult(checks)
+      }
+
+      try {
+        connector = await createConnector(options.type, options.config)
+      } catch (error) {
+        addCheck('connector', 'error', 'Failed to construct connector', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return this.buildSanityResult(checks)
+      }
+
+      registry = new TransformationRegistry()
+      if ('registerTransforms' in connector && typeof (connector as { registerTransforms?: unknown }).registerTransforms === 'function') {
+        ;(connector as { registerTransforms: (registry: TransformationRegistry) => void }).registerTransforms(registry)
+      } else {
+        addCheck('transforms', 'warning', 'Connector does not expose registerTransforms()')
+      }
+    } else {
+      connector = this.getConnector(options.type)
+      if (!connector) {
+        addCheck('connector', 'error', `Connector not registered: ${options.type}`)
+        return this.buildSanityResult(checks)
+      }
+    }
+
+    const entityTypes = connector.capabilities.supportedEntityTypes
+    if (entityTypes.length === 0) {
+      addCheck('capabilities', 'warning', 'Connector has no supported entity types')
+      return this.buildSanityResult(checks)
+    }
+
+    for (const entityType of entityTypes) {
+      const transforms = registry
+        ? registry.findBySource(connector.type, entityType)
+        : this.engine.findTransformations(connector.type, entityType)
+
+      if (transforms.length === 0) {
+        addCheck(`transform:${entityType}`, 'warning', `No transformation registered for ${entityType}`)
+      } else {
+        addCheck(`transform:${entityType}`, 'ok', `Found ${transforms.length} transformation(s)`)
+      }
+    }
+
+    return this.buildSanityResult(checks)
+  }
+
+  /**
+   * Run sanity checks for task creation or backfill.
+   */
+  async checkTaskSanity(options: TaskSanityOptions): Promise<SanityCheckResult> {
+    const checks: SanityCheck[] = []
+    const addCheck = (id: string, status: SanityCheckStatus, message: string, details?: Record<string, unknown>) => {
+      checks.push({ id, status, message, ...(details ? { details } : {}) })
+    }
+
+    const connector = this.getConnector(options.connector)
+    if (!connector) {
+      addCheck('connector', 'error', `Connector not registered: ${options.connector}`)
+      return this.buildSanityResult(checks)
+    }
+
+    const account = await this.accountRepo.findById(options.accountId)
+    if (!account) {
+      addCheck('account', 'error', `Account not found: ${options.accountId}`)
+      return this.buildSanityResult(checks)
+    }
+    if (account.connector !== options.connector) {
+      addCheck('account', 'error', `Account ${options.accountId} is not a ${options.connector} account`)
+      return this.buildSanityResult(checks)
+    }
+
+    const entityTypes = options.entityTypes?.length
+      ? options.entityTypes
+      : connector.capabilities.supportedEntityTypes
+
+    if (entityTypes.length === 0) {
+      addCheck('entity-types', 'error', 'No entity types specified or supported')
+      return this.buildSanityResult(checks)
+    }
+
+    const unsupported = entityTypes.filter((entityType) =>
+      !connector.capabilities.supportedEntityTypes.includes(entityType)
+    )
+    if (unsupported.length > 0) {
+      addCheck('entity-types', 'error', 'Unsupported entity types requested', {
+        unsupported,
+      })
+    }
+
+    if (options.syncType === 'backfill' && !connector.capabilities.supportsBackfill) {
+      addCheck('capabilities', 'error', 'Connector does not support backfill')
+    }
+    if (options.syncType === 'incremental' && !connector.capabilities.supportsIncrementalSync) {
+      addCheck('capabilities', 'error', 'Connector does not support incremental sync')
+    }
+    if (options.mode === 'webhook' && !connector.capabilities.supportsWebhook) {
+      addCheck('capabilities', 'error', 'Connector does not support webhooks')
+    }
+    if (options.mode === 'webhook' && !connector.subscribe) {
+      addCheck('capabilities', 'error', 'Connector does not implement webhook subscribe()')
+    }
+    if (options.syncType === 'incremental' && !connector.fetchChanges) {
+      addCheck('capabilities', 'error', 'Connector does not implement fetchChanges()')
+    }
+
+    for (const entityType of entityTypes) {
+      const transforms = this.engine.findTransformations(connector.type, entityType)
+      if (transforms.length === 0) {
+        addCheck(`transform:${entityType}`, 'error', `No transformation registered for ${entityType}`)
+      } else {
+        addCheck(`transform:${entityType}`, 'ok', `Found ${transforms.length} transformation(s)`)
+      }
+    }
+
+    if (checks.some((check) => check.status === 'error')) {
+      return this.buildSanityResult(checks)
+    }
+
+    let ctx: ConnectorContext = { accountId: options.accountId }
+    // Local auth connectors don't need OAuth credentials - just use minimal context
+    if (connector.authConfig.type === 'local') {
+      addCheck('auth', 'ok', 'Local auth connector (no credentials needed)')
+    } else if (this.authProvider) {
+      try {
+        ctx = await this.authProvider.getContext(options.accountId)
+        addCheck('auth', 'ok', 'Auth context resolved')
+      } catch (error) {
+        addCheck('auth', 'error', 'Failed to get auth context', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return this.buildSanityResult(checks)
+      }
+    } else {
+      addCheck('auth', 'warning', 'No auth provider configured; using minimal context')
+    }
+
+    try {
+      const accounts = await connector.listAccounts(ctx)
+      addCheck('accounts', 'ok', `Listed ${accounts.length} account(s)`)
+    } catch (error) {
+      addCheck('accounts', 'error', 'Failed to list accounts', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return this.buildSanityResult(checks)
+    }
+
+    if (options.mode === 'webhook') {
+      return this.buildSanityResult(checks)
+    }
+
+    for (const entityType of entityTypes) {
+      const fetchLabel = `fetch:${entityType}`
+      const fetchResult = await this.fetchSanitySample(
+        connector,
+        ctx,
+        options.syncType,
+        entityType,
+        account.sync_cursor ?? undefined
+      )
+
+      if (!fetchResult.ok) {
+        addCheck(fetchLabel, 'error', 'Sample fetch failed', { error: fetchResult.error })
+        continue
+      }
+
+      if (fetchResult.items.length === 0) {
+        addCheck(fetchLabel, 'warning', 'Sample fetch returned no items')
+        continue
+      }
+
+      addCheck(fetchLabel, 'ok', `Fetched ${fetchResult.items.length} sample item(s)`)
+
+      const sampleItem = fetchResult.items.find((item) => item.entity_type === entityType) ?? fetchResult.items[0]
+      const transform = this.engine.findTransformations(connector.type, sampleItem.entity_type)[0]
+
+      if (!transform) {
+        addCheck(`transform:${entityType}:run`, 'error', `No transformation registered for ${sampleItem.entity_type}`)
+        continue
+      }
+
+      const envelope = this.buildSanityEnvelope(options, sampleItem)
+      const transformCtx = this.buildTransformContext(envelope, options.accountId)
+
+      const parseResult = transform.inputSchema.safeParse(sampleItem.raw_data)
+      if (!parseResult.success) {
+        addCheck(`transform:${entityType}:input`, 'error', 'Transform input validation failed', {
+          error: parseResult.error.message,
+        })
+        continue
+      }
+
+      let results
+      try {
+        results = transform.transform(parseResult.data, transformCtx)
+      } catch (error) {
+        addCheck(`transform:${entityType}:run`, 'error', 'Transform threw an error', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        continue
+      }
+
+      const resultList = Array.isArray(results) ? results : [results]
+      if (resultList.length === 0) {
+        addCheck(`transform:${entityType}:run`, 'warning', 'Transform returned no results')
+        continue
+      }
+
+      for (const result of resultList) {
+        const outputs = [result.primary, ...(result.related ?? [])]
+        for (const output of outputs) {
+          if (!output.sourceRefKey) {
+            addCheck(`transform:${entityType}:output`, 'error', 'Transform output missing sourceRefKey')
+            continue
+          }
+
+          const validation = validateEntity(output.entityType, output.data)
+          if (!validation.success) {
+            addCheck(`transform:${entityType}:output`, 'error', 'Canonical validation failed', {
+              error: validation.error.message,
+              entityType: output.entityType,
+            })
+            continue
+          }
+
+          addCheck(`transform:${entityType}:output`, 'ok', `Validated ${output.entityType} output`)
+        }
+      }
+    }
+
+    // Collect scope estimates if the connector supports it
+    let estimate: SyncEstimate | undefined
+    if (connector.estimateScope) {
+      try {
+        estimate = await connector.estimateScope(ctx, options.syncType, entityTypes)
+
+        // Enrich with account sync state
+        if (account.sync_cursor) {
+          estimate.summary = estimate.summary
+            ? `${estimate.summary} (cursor: ${account.sync_cursor.slice(0, 40)}${account.sync_cursor.length > 40 ? '...' : ''})`
+            : `Sync cursor: ${account.sync_cursor.slice(0, 40)}`
+        }
+        if (account.last_synced_at) {
+          estimate.summary = estimate.summary
+            ? `${estimate.summary} | last synced: ${new Date(account.last_synced_at).toLocaleString()}`
+            : `Last synced: ${new Date(account.last_synced_at).toLocaleString()}`
+        }
+      } catch {
+        // Non-fatal - estimates are best-effort
+      }
+    }
+
+    return this.buildSanityResult(checks, estimate)
+  }
+
+  // ============ Connector Discovery ============
+
+  /**
+   * List all registered connectors with their capabilities.
+   */
+  listConnectors(): ConnectorInfo[] {
+    const result: ConnectorInfo[] = []
+    for (const [type, connector] of this.connectors) {
+      result.push({
+        type,
+        displayName: connector.displayName,
+        entityTypes: connector.capabilities.supportedEntityTypes,
+        capabilities: {
+          backfill: connector.capabilities.supportsBackfill,
+          incremental: connector.capabilities.supportsIncrementalSync,
+          webhook: connector.capabilities.supportsWebhook,
+          write: connector.capabilities.supportsWrite,
+        },
+        authType: connector.authConfig.type === 'oauth2_provider'
+          ? 'oauth2'
+          : connector.authConfig.type === 'oauth2'
+            ? 'oauth2'
+            : connector.authConfig.type,
+      })
+    }
+    return result
+  }
+
+  /**
+   * Get info about a specific connector.
+   */
+  getConnectorInfo(type: ConnectorType): ConnectorInfo | undefined {
+    const connector = this.connectors.get(type)
+    if (!connector) return undefined
+
+    return {
+      type,
+      displayName: connector.displayName,
+      entityTypes: connector.capabilities.supportedEntityTypes,
+      capabilities: {
+        backfill: connector.capabilities.supportsBackfill,
+        incremental: connector.capabilities.supportsIncrementalSync,
+        webhook: connector.capabilities.supportsWebhook,
+        write: connector.capabilities.supportsWrite,
+      },
+      authType: connector.authConfig.type === 'oauth2_provider'
+        ? 'oauth2'
+        : connector.authConfig.type === 'oauth2'
+          ? 'oauth2'
+          : connector.authConfig.type,
+    }
+  }
+
+  /**
+   * Resolve connector to a single account.
+   * Returns the account if exactly one exists, throws if none or multiple.
+   * For local auth connectors, auto-creates an account if none exists.
+   */
+  async resolveAccount(
+    connector: ConnectorType,
+    accountId?: string
+  ): Promise<Account> {
+    // If accountId provided, validate it
+    if (accountId) {
+      const account = await this.accountRepo.findById(accountId)
+      if (!account) {
+        throw new Error(`Account not found: ${accountId}`)
+      }
+      if (account.connector !== connector) {
+        throw new Error(`Account ${accountId} is not a ${connector} account`)
+      }
+      return account
+    }
+
+    // Find accounts for this connector
+    const accounts = await this.accountRepo.findAllByConnector(connector)
+    const active = accounts.filter((a) => a.is_active)
+
+    if (active.length === 0) {
+      // Check if connector uses local auth - if so, auto-create account
+      const connectorInstance = this.connectors.get(connector)
+      if (connectorInstance?.authConfig.type === 'local') {
+        const accountInfo = await connectorInstance.listAccounts({ accountId: 'temp' })
+        const primaryAccount = accountInfo.find((a) => a.isPrimary) || accountInfo[0]
+
+        if (primaryAccount) {
+          const account = await this.accountRepo.create({
+            connector,
+            external_account_id: primaryAccount.externalId,
+            display_name: primaryAccount.displayName,
+            email: primaryAccount.email,
+            auth_type: 'local',
+          })
+          await this.accountRepo.activate(account.id)
+          return (await this.accountRepo.findById(account.id))!
+        }
+      }
+
+      throw new Error(`No ${connector} accounts found. Run: auth login ${connector}`)
+    }
+
+    if (active.length > 1) {
+      const ids = active.map((a) => `  - ${a.id} (${a.email || a.display_name})`).join('\n')
+      throw new Error(
+        `Multiple ${connector} accounts found. Specify one:\n${ids}`
+      )
+    }
+
+    return active[0]
+  }
+
+  private buildSanityResult(checks: SanityCheck[], estimate?: SyncEstimate): SanityCheckResult {
+    return {
+      ok: !checks.some((check) => check.status === 'error'),
+      checks,
+      ...(estimate ? { estimate } : {}),
+    }
+  }
+
+  private async fetchSanitySample(
+    connector: Connector,
+    ctx: ConnectorContext,
+    syncType: TaskSanityOptions['syncType'],
+    entityType: string,
+    cursor?: string
+  ): Promise<{ ok: boolean; items: Array<{ entity_type: string; raw_data: unknown; source_id: string; source_timestamp?: string; source_version?: string }>; error?: string }> {
+    try {
+      if (syncType === 'incremental' && connector.fetchChanges) {
+        const result = await connector.fetchChanges(ctx, {
+          since: cursor,
+          limit: 1,
+          entityTypes: [entityType],
+        })
+        return { ok: true, items: result.items }
+      }
+
+      const result = await connector.fetchPage(ctx, {
+        limit: 1,
+        entityTypes: [entityType],
+      })
+      return { ok: true, items: result.items }
+    } catch (error) {
+      return {
+        ok: false,
+        items: [],
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  private buildSanityEnvelope(
+    options: TaskSanityOptions,
+    item: { entity_type: string; raw_data: unknown; source_id: string; source_timestamp?: string; source_version?: string }
+  ): RawEnvelope {
+    const rawHash = computeRawDataHash(item.raw_data)
+    const idempotency = computeIdempotencyKeys(
+      options.connector,
+      options.accountId,
+      item.entity_type,
+      item.source_id,
+      item.raw_data
+    )
+
+    return {
+      id: generateCanonicalId(),
+      idempotency_key: idempotency.raw_key,
+      connector: options.connector,
+      account_id: options.accountId,
+      entity_type: item.entity_type,
+      source_id: item.source_id,
+      source_version: item.source_version,
+      raw_data: item.raw_data,
+      raw_data_hash: rawHash,
+      source_timestamp: item.source_timestamp,
+      received_at: new Date().toISOString(),
+      sync_job_id: generateCanonicalId(),
+      collection_method: options.syncType,
+    }
+  }
+
+  private buildTransformContext(envelope: RawEnvelope, accountId: string) {
+    return {
+      envelope,
+      accountId,
+      connector: envelope.connector,
+      lookupEntity: async (sourceRefKey: string) => {
+        const mapping = await this.mappingRepo.findBySourceRefKey(sourceRefKey)
+        if (!mapping) return null
+        return this.entityRepo.findById(mapping.canonical_entity_id)
+      },
+      lookupEntitiesByType: async (type: EntityType, limit?: number) => {
+        const result = await this.entityRepo.findByType(type, { limit })
+        return result.items
+      },
+    }
+  }
+}
+
+/**
+ * Info about a registered connector.
+ */
+export interface ConnectorInfo {
+  type: ConnectorType
+  displayName: string
+  entityTypes: string[]
+  capabilities: {
+    backfill: boolean
+    incremental: boolean
+    webhook: boolean
+    write: boolean
+  }
+  authType: string
+}
+
+export type SanityCheckStatus = 'ok' | 'warning' | 'error'
+
+export interface SanityCheck {
+  id: string
+  status: SanityCheckStatus
+  message: string
+  details?: Record<string, unknown>
+}
+
+export interface SanityCheckResult {
+  ok: boolean
+  checks: SanityCheck[]
+  estimate?: SyncEstimate
+}
+
+export { type SyncEstimate, type SyncEstimateEntry } from '../connector/sdk/types.js'
+
+export interface ConnectorSanityOptions {
+  type: ConnectorType
+  config?: Record<string, unknown>
+}
+
+export interface TaskSanityOptions {
+  connector: ConnectorType
+  accountId: string
+  entityTypes?: string[]
+  syncType: 'backfill' | 'incremental'
+  mode?: 'once' | 'recurring' | 'webhook'
 }
 
 // Re-export server and scheduler types
 export { HttpServer, type ServerConfig, type ParsedRequest, type RouteHandler, type RouteResponse } from './server.js'
 export { Scheduler, type SchedulerConfig, type SchedulerEvent } from '../sync/scheduler.js'
+export { type LoadConnectorsResult } from '../connectors/registry.js'
+export { type RegisteredConnector, type RegisteredConnectorRepository } from '../db/repositories/registered-connector.js'

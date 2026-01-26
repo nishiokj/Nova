@@ -8,14 +8,44 @@
  */
 
 import type { Transformation, TransformContext, TransformResult } from '../../transform/types.js'
+import { generateCanonicalId, sourceRefToKey } from '../../ids.js'
+import type { Identity } from '../../models/canonical.js'
 import {
   ClaudeSessionMessageSchema,
+  ClaudeSummaryMessageSchema,
   type ClaudeSessionMessage,
   type ClaudeUserMessage,
   type ClaudeAssistantMessage,
+  type ClaudeSummaryMessage,
 } from './schemas.js'
 
 // ============ Helper Functions ============
+
+function createSourceRef(
+  accountId: string,
+  entityType: string,
+  sourceId: string,
+  sourceVersion?: string
+): Identity['source_refs'][0] {
+  return {
+    connector: 'claude_sessions',
+    account_id: accountId,
+    entity_type: entityType,
+    source_id: sourceId,
+    source_version: sourceVersion,
+    last_synced_at: new Date().toISOString(),
+  }
+}
+
+function createBaseEntity(id: string, sourceRef: Identity['source_refs'][0]) {
+  const now = new Date().toISOString()
+  return {
+    id,
+    created_at: now,
+    updated_at: now,
+    source_refs: [sourceRef],
+  }
+}
 
 /**
  * Extract text content from message content (handles string or content blocks)
@@ -204,11 +234,14 @@ export const claudeMessageTransform: Transformation<ClaudeSessionMessage> = {
       ? extractToolUsage(msg.message.content)
       : []
 
+    const sourceRef = createSourceRef(ctx.accountId, 'message', msg.uuid)
+
     return {
       primary: {
         entityType: 'message',
-        sourceRefKey: `claude_sessions:${ctx.accountId}:message:${msg.uuid}`,
+        sourceRefKey: sourceRefToKey(sourceRef),
         data: {
+          ...createBaseEntity(generateCanonicalId(), sourceRef),
           entity_type: 'message',
           thread_id: msg.sessionId,
           body_text: textContent,
@@ -237,9 +270,59 @@ export const claudeMessageTransform: Transformation<ClaudeSessionMessage> = {
   description: 'Transforms individual Claude session messages into Message canonical entities',
 }
 
+/**
+ * Transform Claude session summary to an Observation entity.
+ * Summaries are AI-generated synopses of session conversations.
+ */
+export const claudeSummaryTransform: Transformation<ClaudeSummaryMessage> = {
+  id: 'claude_sessions:summary_to_observation',
+  name: 'Claude Summary → Observation',
+
+  source: {
+    connector: 'claude_sessions',
+    entityType: 'session_summary',
+  },
+
+  inputSchema: ClaudeSummaryMessageSchema,
+
+  outputType: 'observation',
+
+  transform: (msg: ClaudeSummaryMessage, ctx: TransformContext): TransformResult => {
+    const meta = (msg as { _meta?: { sessionId?: string; project?: string } })._meta ?? {}
+    const sourceRef = createSourceRef(ctx.accountId, 'summary', msg.leafUuid)
+
+    return {
+      primary: {
+        entityType: 'observation',
+        sourceRefKey: sourceRefToKey(sourceRef),
+        data: {
+          ...createBaseEntity(generateCanonicalId(), sourceRef),
+          entity_type: 'observation',
+          content: msg.summary,
+          observation_type: 'summary',
+          related_entity_ids: [],
+          metadata: {
+            agent: 'claude',
+            session_id: meta.sessionId,
+            project: meta.project,
+            leaf_uuid: msg.leafUuid,
+          },
+        },
+        displayText: msg.summary.slice(0, 200),
+      },
+    }
+  },
+
+  onError: 'skip',
+  enabled: true,
+  version: 1,
+  description: 'Transforms Claude session summaries into Observation canonical entities',
+}
+
 // ============ Exports ============
 
 export const transforms = [
   claudeSessionTransform,
   claudeMessageTransform,
+  claudeSummaryTransform,
 ]

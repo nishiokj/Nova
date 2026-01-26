@@ -319,7 +319,7 @@ export const DEFAULT_GRAPHD_CONFIG: GraphDConfigSection = {
 
 export const DEFAULT_CONTEXT_CONFIG: ContextConfigSection = {
   max_tokens: 200_000,
-  session_ttl_ms: 1_800_000,
+  session_ttl_ms: 7_200_000,
   pause_timeout_ms: 1_200_000, // 20 minutes
 };
 

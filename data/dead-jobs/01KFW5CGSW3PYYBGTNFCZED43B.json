@@ -1,0 +1,9 @@
+{
+  "id": "01KFW5CGSW3PYYBGTNFCZED43B",
+  "type": "sync:collect",
+  "payload": "{\"syncJobId\":\"01KFW5CGSSJBB7C8VMYFP9AMJT\",\"connector\":\"gmail\",\"accountId\":\"01KFW5C14DNR71Y99G38ND9DK8\",\"jobType\":\"backfill\"}",
+  "error": "UNDEFINED_VALUE: Undefined values are not allowed",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T03:26:01.531Z",
+  "diedAt": "2026-01-26T03:26:05.264Z"
+}

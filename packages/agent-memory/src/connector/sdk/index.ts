@@ -72,6 +72,9 @@ export {
   type Connector,
   type ConnectorFactory,
   type ConnectorRegistration,
+  // Estimates
+  type SyncEstimate,
+  type SyncEstimateEntry,
 } from './types.js'
 
 // Base Connector

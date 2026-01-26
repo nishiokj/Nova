@@ -9,6 +9,7 @@ import type { ConnectorType } from '../ids.js'
 import type { AuthProvider } from '../auth/provider.js'
 import type { Connector, WebhookSubscription } from '../connector/sdk/types.js'
 import type { SyncTask, SyncTaskRepository } from '../db/repositories/sync-task.js'
+import type { AccountRepository } from '../db/repositories/account.js'
 import type { SyncEngine } from './engine.js'
 import type { SyncJob } from '../db/repositories/sync-job.js'
 
@@ -76,7 +77,8 @@ export class Scheduler {
     private taskRepo: SyncTaskRepository,
     private authProvider: AuthProvider,
     private connectors: Map<ConnectorType, Connector>,
-    config: SchedulerConfig = {}
+    config: SchedulerConfig = {},
+    private accountRepo?: AccountRepository
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config }
   }
@@ -318,7 +320,11 @@ export class Scheduler {
         entityTypes: task.entity_types ?? undefined,
       })
     } else {
-      job = await this.engine.scheduleIncremental(task.connector, task.account_id, undefined, {
+      // Look up account's sync_cursor for incremental syncs
+      const cursor = this.accountRepo
+        ? (await this.accountRepo.findById(task.account_id))?.sync_cursor
+        : undefined
+      job = await this.engine.scheduleIncremental(task.connector, task.account_id, cursor, {
         entityTypes: task.entity_types ?? undefined,
       })
     }

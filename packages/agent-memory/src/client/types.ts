@@ -54,11 +54,116 @@ export interface AuthUrlResponse {
   url: string
   state: string
   provider?: string
+  /** Set when existing credentials were found for the same OAuth provider */
+  existingCredentials?: boolean
+  /** Account ID with existing credentials that can be reused */
+  existingAccountId?: string
+  /** Whether the existing credentials have all required scopes */
+  hasAllScopes?: boolean
 }
 
 export interface AuthStatusResponse {
   accountId: string
   hasCredentials: boolean
+}
+
+export interface DeviceAuthResponse {
+  deviceCode: string
+  userCode: string
+  verificationUri: string
+  verificationUriComplete?: string
+  expiresIn: number
+  interval: number
+  connector: string
+  provider: string
+}
+
+export interface DeviceAuthPollResponse {
+  status: 'pending' | 'complete'
+  account?: Account
+}
+
+// ============ Connectors ============
+
+export interface ConnectorInfo {
+  type: string
+  displayName: string
+  entityTypes: string[]
+  capabilities: {
+    backfill: boolean
+    incremental: boolean
+    webhook: boolean
+    write: boolean
+  }
+  authType: string
+}
+
+export interface ConnectorListResponse {
+  connectors: ConnectorInfo[]
+}
+
+export interface ConnectorResponse {
+  connector: ConnectorInfo
+  registration?: RegisteredConnector
+  factoryAvailable?: boolean
+}
+
+export interface AvailableConnectorsResponse {
+  available: string[]
+}
+
+export interface RegisteredConnector {
+  type: string
+  enabled: boolean
+  config: Record<string, unknown>
+  registered_at: string
+  updated_at: string
+}
+
+export interface ConnectorRegistrationResponse {
+  connector: ConnectorInfo | null
+  registration: RegisteredConnector
+}
+
+export interface ConnectorUnregisterResponse {
+  success: boolean
+  message: string
+}
+
+// ============ Sanity ============
+
+export type SanityCheckStatus = 'ok' | 'warning' | 'error'
+
+export interface SanityCheck {
+  id: string
+  status: SanityCheckStatus
+  message: string
+  details?: Record<string, unknown>
+}
+
+export interface SyncEstimateEntry {
+  type: string
+  count?: number
+  description: string
+}
+
+export interface SyncEstimate {
+  entities: SyncEstimateEntry[]
+  summary?: string
+}
+
+export interface SanityCheckResult {
+  ok: boolean
+  checks: SanityCheck[]
+  estimate?: SyncEstimate
+}
+
+export interface ConnectorSanityResponse {
+  sanity: SanityCheckResult
+}
+
+export interface TaskSanityResponse {
+  sanity: SanityCheckResult
 }
 
 // ============ Tasks ============

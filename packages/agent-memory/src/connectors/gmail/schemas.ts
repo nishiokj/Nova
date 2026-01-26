@@ -206,10 +206,10 @@ export type GmailHistoryResponse = z.infer<typeof GmailHistoryResponseSchema>
  * Gmail user profile info.
  */
 export const GmailProfileSchema = z.object({
-  emailAddress: z.string().email(),
-  messagesTotal: z.number(),
-  threadsTotal: z.number(),
-  historyId: z.string(),
+  emailAddress: z.string(),
+  messagesTotal: z.number().optional(),
+  threadsTotal: z.number().optional(),
+  historyId: z.string().optional(),
 })
 
 export type GmailProfile = z.infer<typeof GmailProfileSchema>

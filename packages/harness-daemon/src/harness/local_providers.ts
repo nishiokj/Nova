@@ -228,28 +228,6 @@ export class LocalProviderManager {
   }
 
   /**
-   * Export all stored provider keys to process.env.
-   * This makes them available to child processes (e.g., skill scripts via Bash tool).
-   * Uses each provider's standard env var name from PROVIDER_REGISTRY.
-   */
-  exportToEnv(): void {
-    let exportCount = 0;
-    for (const provider of SUPPORTED_PROVIDER_IDS) {
-      const key = this.getProviderKey(provider);
-      if (key) {
-        const definition = getProviderDefinition(provider);
-        if (definition?.envVar) {
-          process.env[definition.envVar] = key;
-          exportCount++;
-        }
-      }
-    }
-    if (exportCount > 0) {
-      console.log(`[local-providers] Exported ${exportCount} provider keys to process.env`);
-    }
-  }
-
-  /**
    * Test an API key for a provider.
    */
   async testProviderKey(provider: string): Promise<ProviderTestResult> {

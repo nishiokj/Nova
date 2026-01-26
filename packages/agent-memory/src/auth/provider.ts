@@ -16,6 +16,7 @@ import type {
   AccountCredentials,
 } from '../db/repositories/account.js'
 import { AuthError } from '../errors/types.js'
+import type { OAuthProviderRegistry } from './oauth-providers.js'
 
 // ============ Types ============
 
@@ -41,7 +42,15 @@ export interface AuthProviderConfig {
       refreshToken?: string
       expiresAt?: Date
     }>
+    authConfig?: {
+      type: 'oauth2' | 'oauth2_provider' | 'api_key' | 'local' | 'credential_reference'
+      provider?: 'google' | 'github' | 'microsoft' | 'slack' | 'twitter'
+    }
   } | undefined
+  /**
+   * OAuth provider registry for provider-based token refresh.
+   */
+  oauthProviders?: OAuthProviderRegistry
 }
 
 /**
@@ -91,6 +100,17 @@ export interface AuthProvider {
       expiresAt?: Date
     }
   ): Promise<void>
+
+  /**
+   * Get decrypted credentials for an account.
+   * Used for credential sharing between connectors using the same OAuth provider.
+   * @param accountId - Account ID to get credentials for
+   */
+  getCredentials(accountId: string): Promise<{
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: Date
+  } | null>
 }
 
 /**
@@ -190,7 +210,7 @@ export class DatabaseAuthProvider implements AuthProvider {
     this.credentialCache.set(accountId, {
       accessToken,
       refreshToken: creds.refresh_token_encrypted
-        ? this.decrypt(creds.refresh_token_encrypted!, creds.credentials_iv)
+        ? this.decryptRefreshToken(creds.refresh_token_encrypted!)
         : undefined,
       expiresAt: creds.token_expires_at ?? undefined,
       grantedScopes: [],
@@ -242,12 +262,32 @@ export class DatabaseAuthProvider implements AuthProvider {
     }
 
     const connector = this.config.getConnector(creds.connector_type)
-    if (!connector?.refreshTokens) {
-      throw new AuthError(`Connector ${creds.connector_type} does not support token refresh`)
+    if (!connector) {
+      throw new AuthError(`Connector ${creds.connector_type} not registered`)
     }
 
-    // Perform refresh
-    const refreshed = await connector.refreshTokens(cached.refreshToken)
+    let refreshed: { accessToken: string; refreshToken?: string; expiresAt?: Date }
+    if (connector.authConfig?.type === 'oauth2_provider') {
+      const provider = connector.authConfig.provider
+      if (!provider) {
+        throw new AuthError(`Connector ${creds.connector_type} missing OAuth provider`)
+      }
+      if (!this.config.oauthProviders) {
+        throw new AuthError('OAuth provider registry is not configured')
+      }
+      const result = await this.config.oauthProviders.refreshToken(provider, cached.refreshToken)
+      refreshed = {
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        expiresAt: result.expiresIn
+          ? new Date(Date.now() + result.expiresIn * 1000)
+          : undefined,
+      }
+    } else if (connector.refreshTokens) {
+      refreshed = await connector.refreshTokens(cached.refreshToken)
+    } else {
+      throw new AuthError(`Connector ${creds.connector_type} does not support token refresh`)
+    }
 
     // Update stored credentials
     await this.storeCredentials(accountId, {
@@ -313,7 +353,8 @@ export class DatabaseAuthProvider implements AuthProvider {
 
     if (credentials.refreshToken) {
       const encryptedRefresh = this.encrypt(credentials.refreshToken)
-      update.refresh_token_encrypted = encryptedRefresh.encrypted
+      // Prepend IV so refresh token blob is self-contained: [IV (16)][ciphertext][authTag (16)]
+      update.refresh_token_encrypted = Buffer.concat([encryptedRefresh.iv, encryptedRefresh.encrypted])
     }
 
     if (credentials.expiresAt) {
@@ -324,6 +365,33 @@ export class DatabaseAuthProvider implements AuthProvider {
 
     // Clear cache
     this.credentialCache.delete(accountId)
+  }
+
+  /**
+   * Get decrypted credentials for an account.
+   * Used for credential sharing between connectors using the same OAuth provider.
+   * @param accountId - Account ID to get credentials for
+   */
+  async getCredentials(accountId: string): Promise<{
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: Date
+  } | null> {
+    const creds = await this.fetchCredentials(accountId)
+    if (!creds) {
+      return null
+    }
+
+    const accessToken = this.decrypt(creds.credentials_encrypted, creds.credentials_iv)
+    const refreshToken = creds.refresh_token_encrypted
+      ? this.decryptRefreshToken(creds.refresh_token_encrypted)
+      : undefined
+
+    return {
+      accessToken,
+      refreshToken,
+      expiresAt: creds.token_expires_at ?? undefined,
+    }
   }
 
   /**
@@ -358,6 +426,7 @@ export class DatabaseAuthProvider implements AuthProvider {
 
   /**
    * Encrypt plaintext using AES-256-GCM.
+   * Auth tag is appended to the encrypted buffer.
    */
   private encrypt(plaintext: string): EncryptionResult {
     const iv = randomBytes(IV_LENGTH)
@@ -367,19 +436,37 @@ export class DatabaseAuthProvider implements AuthProvider {
     encrypted = Buffer.concat([encrypted, cipher.final()])
     const authTag = cipher.getAuthTag()
 
-    return { encrypted, iv, authTag }
+    // Append auth tag to encrypted data for storage
+    const encryptedWithTag = Buffer.concat([encrypted, authTag])
+
+    return { encrypted: encryptedWithTag, iv, authTag }
   }
 
   /**
    * Decrypt ciphertext using AES-256-GCM.
+   * Expects auth tag appended to the encrypted buffer.
    */
   private decrypt(encrypted: Buffer, iv: Buffer): string {
-    const decipher = createDecipheriv(ALGORITHM, this.config.encryptionKey, iv)
+    // Extract auth tag from end of encrypted buffer
+    const authTag = encrypted.subarray(encrypted.length - AUTH_TAG_LENGTH)
+    const ciphertext = encrypted.subarray(0, encrypted.length - AUTH_TAG_LENGTH)
 
-    let decrypted = decipher.update(encrypted)
+    const decipher = createDecipheriv(ALGORITHM, this.config.encryptionKey, iv)
+    decipher.setAuthTag(authTag)
+
+    let decrypted = decipher.update(ciphertext)
     decrypted = Buffer.concat([decrypted, decipher.final()])
 
     return decrypted.toString('utf8')
+  }
+
+  /**
+   * Decrypt refresh token blob which has IV prepended: [IV (16)][ciphertext][authTag (16)]
+   */
+  private decryptRefreshToken(blob: Buffer): string {
+    const iv = blob.subarray(0, IV_LENGTH)
+    const encrypted = blob.subarray(IV_LENGTH)
+    return this.decrypt(encrypted, iv)
   }
 }
 

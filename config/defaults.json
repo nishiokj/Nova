@@ -149,7 +149,8 @@
   },
 
   "context": {
-    "max_tokens": 200000
+    "max_tokens": 200000,
+    "session_ttl_ms": 7200000
   },
 
   "skills": {

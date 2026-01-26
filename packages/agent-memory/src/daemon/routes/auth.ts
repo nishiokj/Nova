@@ -11,28 +11,7 @@ import type { SyncDaemon } from '../index.js'
 import { badRequest, notFound } from '../server.js'
 import type { OAuthProviderId } from '../../auth/oauth-providers.js'
 
-// In-memory state storage (in production, use Redis or database)
-const pendingStates = new Map<string, {
-  connector: string
-  provider: OAuthProviderId
-  scopes: string[]
-  redirectUri: string
-  createdAt: Date
-}>()
-
-// Clean up old states periodically (15 minute expiry)
 const STATE_EXPIRY_MS = 15 * 60 * 1000
-
-function cleanupStates(): void {
-  const now = Date.now()
-  for (const [state, data] of pendingStates) {
-    if (now - data.createdAt.getTime() > STATE_EXPIRY_MS) {
-      pendingStates.delete(state)
-    }
-  }
-}
-
-setInterval(cleanupStates, 60000) // Clean up every minute
 
 export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void {
   // List available OAuth providers
@@ -44,7 +23,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
   // Get OAuth authorization URL
   server.get('/auth/:connector/url', async (req) => {
     const { connector } = req.params
-    const { redirectUri } = req.query
+    const { redirectUri, forceNew } = req.query
 
     if (!redirectUri) {
       throw badRequest('Missing required query parameter: redirectUri')
@@ -61,8 +40,13 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
       throw badRequest(`Connector ${connector} does not support OAuth`)
     }
 
-    // Generate state for CSRF protection
-    const state = randomBytes(32).toString('hex')
+    // Generate stateless signed state for CSRF protection
+    const state = daemon.signAuthState({
+      connector,
+      redirectUri,
+      issuedAt: Date.now(),
+      nonce: randomBytes(16).toString('hex'),
+    })
 
     let url: string
     let provider: OAuthProviderId
@@ -80,6 +64,24 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
         )
       }
 
+      // Check for existing credentials unless forceNew is set
+      if (forceNew !== 'true') {
+        const existing = await daemon.findExistingProviderCredentials(provider, scopes)
+        if (existing) {
+          // Return with existing credentials info
+          return {
+            body: {
+              existingCredentials: true,
+              existingAccountId: existing.accountId,
+              hasAllScopes: existing.hasAllScopes,
+              url: daemon.oauthProviders.getAuthorizationUrl(provider, scopes, state, redirectUri),
+              state,
+              provider,
+            }
+          }
+        }
+      }
+
       url = daemon.oauthProviders.getAuthorizationUrl(provider, scopes, state, redirectUri)
     } else {
       // Legacy: connector has its own credentials
@@ -91,16 +93,29 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
       scopes = authConfig.scopes
     }
 
-    // Store state for validation
-    pendingStates.set(state, {
-      connector,
-      provider,
-      scopes,
-      redirectUri,
-      createdAt: new Date(),
-    })
-
     return { body: { url, state, provider } }
+  })
+
+  // Create account using existing credentials from another connector
+  server.post('/auth/:connector/from-existing', async (req) => {
+    const { connector } = req.params
+    const body = req.body as { sourceAccountId?: string }
+
+    if (!body.sourceAccountId) {
+      throw badRequest('Missing required field: sourceAccountId')
+    }
+
+    const connectorInstance = daemon.getConnector(connector as any)
+    if (!connectorInstance) {
+      throw notFound(`Connector not found: ${connector}`)
+    }
+
+    const account = await daemon.createAccountFromExisting(
+      connector as any,
+      body.sourceAccountId
+    )
+
+    return { body: { account } }
   })
 
   // Handle OAuth callback (POST - for CLI/programmatic use)
@@ -117,7 +132,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     // Validate state
-    const pending = pendingStates.get(body.state)
+    const pending = daemon.verifyAuthState(body.state, STATE_EXPIRY_MS)
     if (!pending) {
       throw badRequest('Invalid or expired state parameter')
     }
@@ -129,9 +144,6 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     if (pending.redirectUri !== body.redirectUri) {
       throw badRequest('Redirect URI does not match')
     }
-
-    // Clean up state
-    pendingStates.delete(body.state)
 
     const connectorInstance = daemon.getConnector(connector as any)
     if (!connectorInstance) {
@@ -145,7 +157,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     if (authConfig?.type === 'oauth2_provider') {
       // Use centralized provider for token exchange
       tokens = await daemon.oauthProviders.exchangeCode(
-        pending.provider,
+        authConfig.provider,
         body.code,
         body.redirectUri
       )
@@ -163,7 +175,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     const account = await daemon.createAccountWithTokens(
       connector as any,
       tokens,
-      pending.scopes
+      authConfig.scopes
     )
 
     return { body: { account } }
@@ -204,7 +216,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     // Validate state
-    const pending = pendingStates.get(state)
+    const pending = daemon.verifyAuthState(state, STATE_EXPIRY_MS)
     if (!pending) {
       return {
         status: 400,
@@ -217,9 +229,6 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
 </body></html>`,
       }
     }
-
-    // Clean up state
-    pendingStates.delete(state)
 
     const connectorInstance = daemon.getConnector(pending.connector as any)
     if (!connectorInstance) {
@@ -242,14 +251,14 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
 
       if (authConfig?.type === 'oauth2_provider') {
         const tokens = await daemon.oauthProviders.exchangeCode(
-          pending.provider,
+          authConfig.provider,
           code,
           pending.redirectUri
         )
         account = await daemon.createAccountWithTokens(
           pending.connector as any,
           tokens,
-          pending.scopes
+          authConfig.scopes
         )
       } else {
         account = await daemon.handleAuthCallback(
@@ -285,6 +294,78 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
 </body></html>`,
       }
     }
+  })
+
+  // ========== Device Authorization Flow (headless/CLI) ==========
+
+  // Initiate device auth - returns codes for user to enter
+  server.post('/auth/:connector/device', async (req) => {
+    const { connector } = req.params
+
+    const connectorInstance = daemon.getConnector(connector as any)
+    if (!connectorInstance) {
+      throw notFound(`Connector not found: ${connector}`)
+    }
+
+    const authConfig = connectorInstance.authConfig
+    if (!authConfig || authConfig.type !== 'oauth2_provider') {
+      throw badRequest(`Connector ${connector} does not support OAuth`)
+    }
+
+    const provider = authConfig.provider
+    if (!daemon.oauthProviders.supportsDeviceAuth(provider)) {
+      throw badRequest(`Provider '${provider}' does not support device authorization flow`)
+    }
+
+    const result = await daemon.oauthProviders.initiateDeviceAuth(provider, authConfig.scopes)
+
+    return {
+      body: {
+        deviceCode: result.deviceCode,
+        userCode: result.userCode,
+        verificationUri: result.verificationUri,
+        verificationUriComplete: result.verificationUriComplete,
+        expiresIn: result.expiresIn,
+        interval: result.interval,
+        connector,
+        provider,
+      },
+    }
+  })
+
+  // Poll device auth - check if user has completed authorization
+  server.post('/auth/:connector/device/poll', async (req) => {
+    const { connector } = req.params
+    const body = req.body as { deviceCode?: string }
+
+    if (!body.deviceCode) {
+      throw badRequest('Missing required field: deviceCode')
+    }
+
+    const connectorInstance = daemon.getConnector(connector as any)
+    if (!connectorInstance) {
+      throw notFound(`Connector not found: ${connector}`)
+    }
+
+    const authConfig = connectorInstance.authConfig
+    if (!authConfig || authConfig.type !== 'oauth2_provider') {
+      throw badRequest(`Connector ${connector} does not support OAuth`)
+    }
+
+    const result = await daemon.oauthProviders.pollDeviceAuth(authConfig.provider, body.deviceCode)
+
+    if ('pending' in result) {
+      return { body: { status: 'pending' } }
+    }
+
+    // Got tokens - create account
+    const account = await daemon.createAccountWithTokens(
+      connector as any,
+      result,
+      authConfig.scopes
+    )
+
+    return { body: { status: 'complete', account } }
   })
 
   // Refresh token for an account

@@ -149,6 +149,13 @@ export async function migrate(
       await db.sql.begin(async (tx: TransactionSql) => {
         // Execute the migration SQL
         await tx.unsafe(migration.sql)
+
+        // Record the migration as applied
+        await tx`
+          INSERT INTO schema_migrations (version, description)
+          VALUES (${migration.version}, ${migration.description})
+          ON CONFLICT (version) DO NOTHING
+        `
       })
     }
 

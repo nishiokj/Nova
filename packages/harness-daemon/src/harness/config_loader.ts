@@ -44,47 +44,6 @@ const USER_CONFIG_PATH = '~/.rex/config.json';
 const OUTPUT_SCHEMAS_PATH = 'config/output_schemas.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
 
-// ============================================
-// DEEP MERGE UTILITY
-// ============================================
-
-/**
- * Check if a value is a plain object (not array, null, Date, etc.)
- */
-function isPlainObject(obj: unknown): obj is Record<string, unknown> {
-  return typeof obj === 'object' && obj !== null && !Array.isArray(obj) && !(obj instanceof Date);
-}
-
-/**
- * Deep merge two objects. Source values override target values.
- * - Objects are recursively merged
- * - Arrays replace entirely (no array merging)
- * - Primitives replace entirely
- * - Source values override target values
- */
-function deepMerge<T extends Record<string, unknown>>(target: T, source: Partial<T>): T {
-  const result = { ...target };
-
-  for (const key in source) {
-    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
-
-    const sourceValue = source[key];
-    const targetValue = result[key];
-
-    // Skip undefined source values (explicit overrides only)
-    if (sourceValue === undefined) continue;
-
-    // If both are plain objects, merge recursively
-    if (isPlainObject(targetValue) && isPlainObject(sourceValue)) {
-      result[key] = deepMerge(targetValue as Record<string, unknown>, sourceValue as Record<string, unknown>) as T[typeof key];
-    } else {
-      // Otherwise, source replaces target
-      result[key] = sourceValue as T[typeof key];
-    }
-  }
-
-  return result;
-}
 
 /**
  * Get the package root directory from this module's location.
@@ -559,85 +518,6 @@ function resolvePathRelativeTo(basePath: string, relativePath: string): string {
   return resolve(basePath, expanded);
 }
 
-// ============================================
-// LAYERED CONFIG LOADING
-// ============================================
-
-/**
- * Load user config overrides from ~/.rex/config.json.
- * This is a PARTIAL config - it doesn't need to pass full schema validation.
- * Only the final merged config needs to be valid.
- */
-function loadUserConfigOverrides(): { config: Partial<HarnessConfigFile>; path: string } | null {
-  const userPath = expandHome(USER_CONFIG_PATH);
-
-  if (!existsSync(userPath)) {
-    console.log(`[config] No user config at ${userPath}`);
-    return null;
-  }
-
-  try {
-    const content = readFileSync(userPath, 'utf-8');
-    const json = JSON.parse(content);
-    // User config is partial - don't validate against full schema
-    // Just ensure it's a valid object we can merge
-    if (typeof json === 'object' && json !== null && !Array.isArray(json)) {
-      console.log(`[config] Loaded user config overrides from ${userPath}`);
-      return { config: json as Partial<HarnessConfigFile>, path: userPath };
-    }
-    console.warn(`[config] User config at ${userPath} is not an object`);
-  } catch (e) {
-    console.warn(`[config] Failed to parse user config ${userPath}:`, e);
-  }
-
-  return null;
-}
-
-/**
- * Load layered config: base defaults + user overrides.
- *
- * Strategy:
- * 1. Load base config (config/defaults.json) - MUST be complete and valid
- * 2. Load user config overrides (~/.rex/config.json) - PARTIAL, merged on top
- * 3. Explicit configPath overrides all (if provided)
- *
- * This allows users to have minimal configs with just their preferences,
- * while the base defaults provide all required fields.
- */
-function loadLayeredConfig(configPath?: string): LoadedConfigFile | null {
-  // If explicit config path provided, use it as the sole source (no layering)
-  if (configPath) {
-    const explicit = loadConfigFile(configPath);
-    if (explicit) {
-      return explicit;
-    }
-    console.warn(`[config] Explicit config path not found: ${configPath}`);
-    // Fall through to layered loading
-  }
-
-  // Load base config (defaults.json) - this must be complete and valid
-  const baseConfig = loadConfigFile();
-  if (!baseConfig) {
-    console.error('[config] CRITICAL: No base config (defaults.json) could be loaded.');
-    return null;
-  }
-
-  // Load user config overrides (partial - doesn't need full validation)
-  const userOverrides = loadUserConfigOverrides();
-
-  // Merge: base <- user overrides
-  let merged = baseConfig.config;
-  if (userOverrides) {
-    merged = deepMerge(merged, userOverrides.config as Partial<HarnessConfigFile>) as HarnessConfigFile;
-    console.log(`[config] Merged user overrides from ${userOverrides.path}`);
-  }
-
-  return {
-    config: merged,
-    configDir: baseConfig.configDir,
-    configPath: baseConfig.configPath,
-  };
-}
 
 // ============================================
 // CONFIG CREATION
@@ -757,29 +637,28 @@ export function createConfigFromFile(
 // ============================================
 
 /**
- * Load full config using layered approach: user + project.
+ * Load config from first available location (no merging).
  *
- * Config priority (highest to lowest):
- * 1. Project harness_config.json (repo-specific settings)
- * 2. User config ~/.rex/config.json (user API keys, preferences)
+ * Search order:
+ * 1. Explicit configPath (if provided)
+ * 2. cwd/config/defaults.json (project config)
+ * 3. ~/.rex/config.json (user fallback)
+ * 4. Package bundled config
  *
- * Path resolution is BULLETPROOF:
- * - All relative paths in config are resolved relative to where the config file was found
- * - This works correctly regardless of process.cwd() or where the harness is started from
- * - workingDir only affects tool execution context, not path resolution
+ * Each config must be complete and valid. No partial configs or merging.
+ * User preferences (model selection, etc.) are handled at runtime via SessionStore/GraphD.
  */
 export function loadConfig(
   configPath?: string,
   workingDir?: string
 ): FullHarnessConfig {
-  // Use layered config loading (user + project)
-  const loaded = loadLayeredConfig(configPath);
+  const loaded = loadConfigFile(configPath);
 
   if (!loaded) {
     throw new Error(
       'No configuration file found. Please create one of the following:\n' +
+      '  - <project>/config/defaults.json (project config)\n' +
       '  - ~/.rex/config.json (user config)\n' +
-      '  - <project>/config/harness_config.json (project config)\n' +
       'Or specify an explicit config path via the --config option.'
     );
   }

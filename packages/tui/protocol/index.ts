@@ -77,6 +77,13 @@ export interface ReadyData {
     streaming_supported?: boolean;
   };
   config_summary?: string;
+  /** Message history for session rehydration */
+  history?: Array<{
+    role: "user" | "agent" | "system";
+    content: string;
+    timestamp: number;
+    request_id?: string;
+  }>;
 }
 
 export interface StatusData {

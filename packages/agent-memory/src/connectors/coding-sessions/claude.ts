@@ -12,11 +12,13 @@ import { homedir } from 'os'
 import { z } from 'zod'
 import type { ConnectorType } from '../../ids.js'
 import type { SourceItem } from '../../sync/types.js'
+import type { TransformationRegistry } from '../../transform/registry.js'
 import { CodingAgentSessionConnector } from './base.js'
 import {
   ClaudeSessionMessageSchema,
   type ClaudeSessionMessage,
 } from './schemas.js'
+import { transforms } from './transforms.js'
 
 // ============ Configuration ============
 
@@ -96,6 +98,15 @@ export class ClaudeSessionConnector extends CodingAgentSessionConnector {
         },
       },
       source_timestamp: sourceTimestamp,
+    }
+  }
+
+  /**
+   * Register Claude session transformations with a registry.
+   */
+  registerTransforms(registry: TransformationRegistry): void {
+    for (const transform of transforms) {
+      registry.register(transform as any)
     }
   }
 }
