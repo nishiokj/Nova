@@ -6,6 +6,7 @@
 
 import type { HttpServer } from '../server.js'
 import type { SyncDaemon } from '../index.js'
+import type { ConnectorType } from '../../ids.js'
 import { badRequest, notFound } from '../server.js'
 
 export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void {
@@ -21,8 +22,8 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
     } else if (connector) {
       tasks = await taskRepo.findByConnector(connector as any)
     } else {
-      // Get all tasks (limited to due tasks for now)
-      tasks = await taskRepo.findDueForExecution(1000)
+      // Get all tasks
+      tasks = await taskRepo.findAll(100)
     }
 
     // Filter by enabled if specified
@@ -32,6 +33,49 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     return { body: { tasks } }
+  })
+
+  // Run task sanity checks
+  server.post('/tasks/sanity', async (req) => {
+    const body = req.body as {
+      accountId?: string
+      connector?: string
+      syncType?: 'backfill' | 'incremental'
+      entityTypes?: string[]
+      mode?: 'once' | 'recurring' | 'webhook'
+    }
+
+    let accountId: string
+    let connector: ConnectorType
+
+    if (body.accountId) {
+      const account = await daemon.accountRepo.findById(body.accountId)
+      if (!account) {
+        throw notFound(`Account not found: ${body.accountId}`)
+      }
+      accountId = account.id
+      connector = account.connector
+    } else if (body.connector) {
+      const account = await daemon.resolveAccount(body.connector as any)
+      accountId = account.id
+      connector = account.connector
+    } else {
+      throw badRequest('Missing required field: accountId or connector')
+    }
+
+    if (!body.syncType) {
+      throw badRequest('Missing required field: syncType')
+    }
+
+    const sanity = await daemon.checkTaskSanity({
+      connector,
+      accountId,
+      entityTypes: body.entityTypes,
+      syncType: body.syncType,
+      mode: body.mode,
+    })
+
+    return { body: { sanity } }
   })
 
   // Get task by ID
@@ -184,7 +228,10 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
         entityTypes: task.entity_types ?? undefined,
       })
     } else {
-      job = await daemon.engine.scheduleIncremental(task.connector, task.account_id, undefined, {
+      // Look up account's sync_cursor for incremental syncs
+      const account = await daemon.accountRepo.findById(task.account_id)
+      const cursor = account?.sync_cursor
+      job = await daemon.engine.scheduleIncremental(task.connector, task.account_id, cursor, {
         entityTypes: task.entity_types ?? undefined,
       })
     }

@@ -69,6 +69,14 @@ export function registerConnectorRoutes(server: HttpServer, daemon: SyncDaemon):
     return { body: { accounts: accounts.filter((a) => a.is_active) } }
   })
 
+  // Run connector sanity checks
+  server.post('/connectors/:type/sanity', async (req) => {
+    const type = req.params.type as ConnectorType
+    const { config } = req.body as { config?: Record<string, unknown> }
+    const sanity = await daemon.checkConnectorSanity({ type, config })
+    return { body: { sanity } }
+  })
+
   // ============ Dynamic Registration ============
 
   // Register a new connector

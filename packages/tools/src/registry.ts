@@ -276,10 +276,25 @@ export class ToolRegistry {
       }
 
       // Invalidate caches for write operations
-      if (result.isSuccess && (name === 'Write' || name === 'Edit')) {
-        const path = (argsWithCwd as Record<string, unknown>).path as string;
-        if (path) {
-          this.invalidateCacheForPath(path);
+      if (result.isSuccess && (name === 'Write' || name === 'Edit' || name === 'BatchEdit')) {
+        const argsRecord = argsWithCwd as Record<string, unknown>;
+        const invalidate = (pathValue: unknown) => {
+          if (typeof pathValue === 'string' && pathValue.length > 0) {
+            this.invalidateCacheForPath(pathValue);
+          }
+        };
+
+        if (name === 'BatchEdit') {
+          const edits = argsRecord.edits;
+          if (Array.isArray(edits)) {
+            for (const edit of edits) {
+              if (!edit || typeof edit !== 'object') continue;
+              const editArgs = edit as Record<string, unknown>;
+              invalidate(editArgs.path ?? editArgs.file_path);
+            }
+          }
+        } else {
+          invalidate(argsRecord.path ?? argsRecord.file_path);
         }
       }
 
@@ -391,7 +406,7 @@ export class ToolRegistry {
 
     for (const key of this.cache.keys()) {
       const [toolName] = key.split('|');
-      if (toolName === 'Read' && key.includes(`path=${path}`)) {
+      if (toolName === 'Read' && (key.includes(`path=${path}`) || key.includes(`file_path=${path}`))) {
         keysToRemove.push(key);
       } else if (toolName === 'Glob' || toolName === 'Grep') {
         keysToRemove.push(key);

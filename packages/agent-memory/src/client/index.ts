@@ -17,6 +17,7 @@ import type {
   ConnectorListResponse,
   ConnectorRegistrationResponse,
   ConnectorResponse,
+  ConnectorSanityResponse,
   ConnectorUnregisterResponse,
   DeviceAuthPollResponse,
   DeviceAuthResponse,
@@ -26,9 +27,12 @@ import type {
   ProvidersResponse,
   RegisteredConnector,
   RetryResponse,
+  SanityCheckResult,
   SyncJob,
   SyncTask,
   SyncType,
+  TaskMode,
+  TaskSanityResponse,
   TaskListResponse,
   TaskResponse,
 } from './types.js'
@@ -277,6 +281,14 @@ export class SyncClient {
     },
 
     /**
+     * Run connector sanity checks (optionally with config).
+     */
+    sanity: async (type: string, config?: Record<string, unknown>): Promise<SanityCheckResult> => {
+      const response = await this.post<ConnectorSanityResponse>(`/connectors/${type}/sanity`, { config })
+      return response.sanity
+    },
+
+    /**
      * Register a new connector (persists to database).
      * @param type - Connector type (must have a registered factory)
      * @param config - Optional configuration for the connector
@@ -452,6 +464,20 @@ export class SyncClient {
       const query = params.toString()
       const response = await this.get<TaskListResponse>(`/tasks${query ? `?${query}` : ''}`)
       return response.tasks
+    },
+
+    /**
+     * Run task sanity checks before creating a task.
+     */
+    sanity: async (opts: {
+      accountId?: string
+      connector?: string
+      syncType: SyncType
+      entityTypes?: string[]
+      mode?: TaskMode
+    }): Promise<SanityCheckResult> => {
+      const response = await this.post<TaskSanityResponse>('/tasks/sanity', opts)
+      return response.sanity
     },
 
     /**

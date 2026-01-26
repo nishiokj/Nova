@@ -20,6 +20,8 @@ import {
   captureOAuthCallback,
   getCallbackUri,
   type Account,
+  type SanityCheckResult,
+  type SyncEstimate,
   type SyncJob,
   type SyncTask,
 } from '../packages/agent-memory/src/client/index.js'
@@ -40,15 +42,20 @@ let lastTasksList: SyncTask[] = []
 /**
  * Resolve a short ID (#1, #2) or prefix to a full ULID.
  * Supports:
- *   - #N: Index from last list (1-based)
+ *   - #N: Index from last list (1-based) - fetches list if cache empty
  *   - Prefix: First 4+ chars of ULID (e.g., "01JD" matches "01JDXXXXXXXXXXXXXXXXXX")
  *   - Full ULID: Passed through as-is
  */
-function resolveJobId(input: string): string {
+async function resolveJobId(input: string): Promise<string> {
+  // Populate cache if empty and we need it
+  if (lastJobsList.length === 0 && (input.startsWith('#') || (input.length >= 4 && input.length < 26))) {
+    lastJobsList = await client.jobs.list({ limit: 50 })
+  }
+
   if (input.startsWith('#')) {
     const idx = parseInt(input.slice(1), 10) - 1
     if (isNaN(idx) || idx < 0 || idx >= lastJobsList.length) {
-      throw new Error(`Invalid index ${input}. Run "jobs list" first. Valid: #1-#${lastJobsList.length || 0}`)
+      throw new Error(`Invalid index ${input}. Valid: #1-#${lastJobsList.length || 0}`)
     }
     return lastJobsList[idx].id
   }
@@ -58,15 +65,21 @@ function resolveJobId(input: string): string {
     if (matches.length > 1) {
       throw new Error(`Ambiguous prefix "${input}" matches ${matches.length} jobs. Be more specific.`)
     }
+    // No match in cache - pass through and let API handle it
   }
   return input
 }
 
-function resolveTaskId(input: string): string {
+async function resolveTaskId(input: string): Promise<string> {
+  // Populate cache if empty and we need it
+  if (lastTasksList.length === 0 && (input.startsWith('#') || (input.length >= 4 && input.length < 26))) {
+    lastTasksList = await client.tasks.list()
+  }
+
   if (input.startsWith('#')) {
     const idx = parseInt(input.slice(1), 10) - 1
     if (isNaN(idx) || idx < 0 || idx >= lastTasksList.length) {
-      throw new Error(`Invalid index ${input}. Run "tasks list" first. Valid: #1-#${lastTasksList.length || 0}`)
+      throw new Error(`Invalid index ${input}. Valid: #1-#${lastTasksList.length || 0}`)
     }
     return lastTasksList[idx].id
   }
@@ -76,6 +89,7 @@ function resolveTaskId(input: string): string {
     if (matches.length > 1) {
       throw new Error(`Ambiguous prefix "${input}" matches ${matches.length} tasks. Be more specific.`)
     }
+    // No match in cache - pass through and let API handle it
   }
   return input
 }
@@ -92,6 +106,77 @@ function printSuccess(message: string): void {
 
 function printError(message: string): void {
   console.error(`\x1b[31m✗\x1b[0m ${message}`)
+}
+
+function formatSanityDetails(details?: Record<string, unknown>): string {
+  if (!details) return ''
+  if (typeof details.error === 'string') {
+    return ` (${details.error})`
+  }
+  return ` (${JSON.stringify(details)})`
+}
+
+function printEstimate(estimate: SyncEstimate): void {
+  console.log('\n\x1b[1mScope estimate:\x1b[0m')
+
+  for (const entity of estimate.entities) {
+    if (entity.count != null) {
+      const formatted = entity.count.toLocaleString()
+      console.log(`  \x1b[36m${formatted.padStart(10)}\x1b[0m  ${entity.type}`)
+    } else {
+      console.log(`          \x1b[90m?\x1b[0m  ${entity.type} \x1b[90m(${entity.description})\x1b[0m`)
+    }
+  }
+
+  if (estimate.summary) {
+    console.log(`\n  \x1b[90m${estimate.summary}\x1b[0m`)
+  }
+}
+
+function printSanityResult(result: SanityCheckResult): void {
+  // Show estimate first - this is the most useful info
+  if (result.estimate) {
+    printEstimate(result.estimate)
+  }
+
+  console.log('\nSanity checks:')
+
+  if (result.checks.length === 0) {
+    console.log('  (no checks)')
+    return
+  }
+
+  for (const check of result.checks) {
+    let icon = '\x1b[32m✓\x1b[0m'
+    if (check.status === 'warning') {
+      icon = '\x1b[33m!\x1b[0m'
+    } else if (check.status === 'error') {
+      icon = '\x1b[31m✗\x1b[0m'
+    }
+    const details = formatSanityDetails(check.details)
+    console.log(`  ${icon} ${check.id}: ${check.message}${details}`)
+  }
+}
+
+async function requireConnectorSanity(type: string, config?: Record<string, unknown>): Promise<void> {
+  const sanity = await client.connectors.sanity(type, config ?? {})
+  printSanityResult(sanity)
+  if (!sanity.ok) {
+    throw new Error('Sanity checks failed')
+  }
+}
+
+async function requireTaskSanity(opts: {
+  connector: string
+  syncType: 'backfill' | 'incremental'
+  entityTypes?: string[]
+  mode?: 'once' | 'recurring' | 'webhook'
+}): Promise<void> {
+  const sanity = await client.tasks.sanity(opts)
+  printSanityResult(sanity)
+  if (!sanity.ok) {
+    throw new Error('Sanity checks failed')
+  }
 }
 
 function printHeader(message: string): void {
@@ -617,6 +702,8 @@ async function cmdConnectorRegister(type: string, configJson?: string): Promise<
     }
   }
 
+  await requireConnectorSanity(type, config)
+
   const result = await client.connectors.register(type, config)
   printSuccess(`Connector ${type} registered`)
 
@@ -739,7 +826,7 @@ async function cmdTasksList(connector?: string): Promise<void> {
 }
 
 async function cmdTasksGet(id: string): Promise<void> {
-  const resolvedId = resolveTaskId(id)
+  const resolvedId = await resolveTaskId(id)
   printHeader('Task Details')
   const { task, recentJobs } = await client.tasks.get(resolvedId)
   printTask(task)
@@ -940,6 +1027,14 @@ async function cmdTasksCreate(connector: string): Promise<void> {
     return
   }
 
+  const sanityEntityTypes = entityTypes.length === info.entityTypes.length ? undefined : entityTypes
+  await requireTaskSanity({
+    connector,
+    syncType: syncType as 'backfill' | 'incremental',
+    entityTypes: sanityEntityTypes,
+    mode: mode as 'once' | 'recurring' | 'webhook',
+  })
+
   // 7. Create the task
   console.log('\nCreating task...')
 
@@ -947,7 +1042,7 @@ async function cmdTasksCreate(connector: string): Promise<void> {
     // Use backfill endpoint (creates task + job)
     const { task, job } = await client.tasks.backfill({
       connector,
-      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+      entityTypes: sanityEntityTypes,
     })
     printSuccess('Backfill task created and job scheduled')
     printTask(task)
@@ -957,7 +1052,7 @@ async function cmdTasksCreate(connector: string): Promise<void> {
     // Use webhook endpoint
     const task = await client.tasks.webhook({
       connector,
-      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+      entityTypes: sanityEntityTypes,
     })
     printSuccess('Webhook task created')
     printTask(task)
@@ -968,26 +1063,25 @@ async function cmdTasksCreate(connector: string): Promise<void> {
       connector,
       syncType: syncType as 'backfill' | 'incremental',
       intervalMs: intervalMs!,
-      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+      entityTypes: sanityEntityTypes,
     })
     printSuccess('Recurring task created')
     printTask(task)
   } else {
-    // One-shot incremental - use subscribe with mode once
-    // The API doesn't have a direct endpoint for this, so we create a recurring task
-    // and immediately disable it after the first run completes
+    // One-shot incremental - create recurring task, trigger immediately, then disable
     const task = await client.tasks.subscribe({
       connector,
       syncType: syncType as 'backfill' | 'incremental',
       intervalMs: 24 * 60 * 60 * 1000, // placeholder, task will be triggered manually
-      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+      entityTypes: sanityEntityTypes,
     })
-    // Disable to prevent recurring runs
-    await client.tasks.disable(task.id)
-    // Trigger once
+    // Trigger first while still enabled
     const job = await client.tasks.trigger(task.id)
+    // Then disable to prevent recurring runs
+    await client.tasks.disable(task.id)
     printSuccess('One-shot incremental task created and triggered')
-    printTask(task)
+    const updatedTask = await client.tasks.get(task.id)
+    printTask(updatedTask.task)
     console.log(`\n  Job ID: ${job.id.slice(0, 8)}`)
     console.log(`  Monitor: jobs get ${job.id.slice(0, 8)}`)
   }
@@ -1000,6 +1094,12 @@ async function cmdTasksCreate(connector: string): Promise<void> {
  */
 async function cmdTasksBackfill(connector: string, entityTypes?: string[]): Promise<void> {
   printHeader(`Backfill: ${connector}`)
+  await requireTaskSanity({
+    connector,
+    syncType: 'backfill',
+    entityTypes: entityTypes?.length ? entityTypes : undefined,
+    mode: 'once',
+  })
   const { task, job } = await client.tasks.backfill({
     connector,
     entityTypes: entityTypes?.length ? entityTypes : undefined,
@@ -1026,6 +1126,12 @@ async function cmdTasksSubscribe(connector: string, intervalMin: string, entityT
   if (isNaN(intervalMs) || intervalMs < 60000) {
     throw new Error('Interval must be at least 1 minute')
   }
+  await requireTaskSanity({
+    connector,
+    syncType: 'incremental',
+    entityTypes: entityTypes?.length ? entityTypes : undefined,
+    mode: 'recurring',
+  })
   const task = await client.tasks.subscribe({
     connector,
     syncType: 'incremental',
@@ -1044,6 +1150,12 @@ async function cmdTasksSubscribe(connector: string, intervalMin: string, entityT
  */
 async function cmdTasksWebhook(connector: string, entityTypes?: string[]): Promise<void> {
   printHeader(`Webhook: ${connector}`)
+  await requireTaskSanity({
+    connector,
+    syncType: 'incremental',
+    entityTypes: entityTypes?.length ? entityTypes : undefined,
+    mode: 'webhook',
+  })
   const task = await client.tasks.webhook({
     connector,
     entityTypes: entityTypes?.length ? entityTypes : undefined,
@@ -1055,7 +1167,7 @@ async function cmdTasksWebhook(connector: string, entityTypes?: string[]): Promi
 }
 
 async function cmdTasksTrigger(id: string): Promise<void> {
-  const resolvedId = resolveTaskId(id)
+  const resolvedId = await resolveTaskId(id)
   printHeader('Trigger Task')
   const job = await client.tasks.trigger(resolvedId)
   printSuccess('Task triggered')
@@ -1064,21 +1176,21 @@ async function cmdTasksTrigger(id: string): Promise<void> {
 }
 
 async function cmdTasksEnable(id: string): Promise<void> {
-  const resolvedId = resolveTaskId(id)
+  const resolvedId = await resolveTaskId(id)
   printHeader('Enable Task')
   await client.tasks.enable(resolvedId)
   printSuccess(`Task ${resolvedId.slice(0, 8)} enabled`)
 }
 
 async function cmdTasksDisable(id: string): Promise<void> {
-  const resolvedId = resolveTaskId(id)
+  const resolvedId = await resolveTaskId(id)
   printHeader('Disable Task')
   await client.tasks.disable(resolvedId)
   printSuccess(`Task ${resolvedId.slice(0, 8)} disabled`)
 }
 
 async function cmdTasksDelete(id: string): Promise<void> {
-  const resolvedId = resolveTaskId(id)
+  const resolvedId = await resolveTaskId(id)
   printHeader('Delete Task')
   await client.tasks.delete(resolvedId)
   printSuccess(`Task ${resolvedId.slice(0, 8)} deleted`)
@@ -1099,7 +1211,7 @@ async function cmdJobsList(): Promise<void> {
 }
 
 async function cmdJobsGet(id: string): Promise<void> {
-  const resolvedId = resolveJobId(id)
+  const resolvedId = await resolveJobId(id)
   printHeader('Job Details')
   const { job, queueStats } = await client.jobs.get(resolvedId)
   printJob(job)
@@ -1120,7 +1232,7 @@ async function cmdJobsGet(id: string): Promise<void> {
 }
 
 async function cmdJobsCancel(id: string): Promise<void> {
-  const resolvedId = resolveJobId(id)
+  const resolvedId = await resolveJobId(id)
   printHeader('Cancel Job')
   const job = await client.jobs.cancel(resolvedId)
   printSuccess(`Job ${resolvedId.slice(0, 8)} cancelled`)
@@ -1128,7 +1240,7 @@ async function cmdJobsCancel(id: string): Promise<void> {
 }
 
 async function cmdJobsRetry(id: string): Promise<void> {
-  const resolvedId = resolveJobId(id)
+  const resolvedId = await resolveJobId(id)
   printHeader('Retry Job')
   const { job } = await client.jobs.retry(resolvedId)
   printSuccess('New job scheduled')

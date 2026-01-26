@@ -227,6 +227,7 @@ export interface LLMCallData {
   promptTokens: number;
   completionTokens: number;
   cachedTokens?: number;
+  maxWindowSize?: number;
   durationMs: number;
   model: string;
   toolCallsCount: number;

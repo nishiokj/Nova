@@ -610,6 +610,26 @@ export class ContextWindow {
   }
 
   /**
+   * Eject all artifact items for a given source path.
+   */
+  private ejectArtifactsByPath(sourcePath: string): number {
+    let removed = 0;
+    this._items = this._items.filter((item) => {
+      if (item.type === 'artifact' && item.sourcePath === sourcePath) {
+        removed++;
+        return false;
+      }
+      return true;
+    });
+
+    if (removed > 0) {
+      this._version++;
+    }
+
+    return removed;
+  }
+
+  /**
    * Eject a specific file_content item by ID.
    */
   ejectFileContentById(id: string): EjectResult {
@@ -643,11 +663,15 @@ export class ContextWindow {
   }
 
   /**
-   * Invalidate file content after a file modification.
-   * Convenience alias for ejectFileContentByPath.
+   * Invalidate file content and artifacts after a file modification.
    */
   invalidateFileContent(path: string): EjectResult {
-    return this.ejectFileContentByPath(path);
+    const result = this.ejectFileContentByPath(path);
+    this.ejectArtifactsByPath(path);
+    if (this._readFiles.delete(path)) {
+      this._version++;
+    }
+    return result;
   }
 
   /**
@@ -1260,6 +1284,47 @@ export class ContextWindow {
   }
 
   /**
+   * Extract message history for TUI rehydration.
+   * Returns only message-type items with role, content, timestamp, and optional requestId.
+   */
+  getMessageHistory(): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
+    return this._items
+      .filter((item): item is MessageItem => item.type === 'message')
+      .map((item) => {
+        // Convert content to string
+        let content = '';
+        if (typeof item.content === 'string') {
+          content = item.content;
+        } else if (Array.isArray(item.content)) {
+          // For array content, stringify appropriately
+          content = item.content
+            .map((block) => {
+              if (typeof block === 'string') return block;
+              if (block.type === 'text') return block.text;
+              return '';
+            })
+            .join('\n');
+        }
+
+        // Map internal role to TUI role
+        // ContextWindow uses 'assistant' | 'developer', TUI uses 'agent'
+        let role: 'user' | 'agent' | 'system';
+        if (item.role === 'user' || item.role === 'system') {
+          role = item.role;
+        } else {
+          role = 'agent'; // assistant -> agent
+        }
+
+        return {
+          role,
+          content,
+          timestamp: item.timestamp,
+          requestId: (item as any).requestId, // requestId may be stored as metadata on item
+        };
+      });
+  }
+
+  /**
    * Merge agent execution result into this context.
    * Ejects stale file content, merges filesRead, merges tool calls, adds response.
    */
@@ -1269,9 +1334,9 @@ export class ContextWindow {
     invalidatedPaths: string[];
     localContext?: ContextWindow;
   }): void {
-    // Eject stale file content from writes/edits
+    // Invalidate stale file content and artifacts from writes/edits
     for (const path of result.invalidatedPaths) {
-      this.ejectFileContentByPath(path);
+      this.invalidateFileContent(path);
     }
     // Merge filesRead into global _readFiles
     for (const path of result.filesRead) {

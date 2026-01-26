@@ -130,6 +130,42 @@ export interface ConnectorUnregisterResponse {
   message: string
 }
 
+// ============ Sanity ============
+
+export type SanityCheckStatus = 'ok' | 'warning' | 'error'
+
+export interface SanityCheck {
+  id: string
+  status: SanityCheckStatus
+  message: string
+  details?: Record<string, unknown>
+}
+
+export interface SyncEstimateEntry {
+  type: string
+  count?: number
+  description: string
+}
+
+export interface SyncEstimate {
+  entities: SyncEstimateEntry[]
+  summary?: string
+}
+
+export interface SanityCheckResult {
+  ok: boolean
+  checks: SanityCheck[]
+  estimate?: SyncEstimate
+}
+
+export interface ConnectorSanityResponse {
+  sanity: SanityCheckResult
+}
+
+export interface TaskSanityResponse {
+  sanity: SanityCheckResult
+}
+
 // ============ Tasks ============
 
 export type SyncType = 'backfill' | 'incremental'

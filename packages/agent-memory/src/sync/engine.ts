@@ -179,6 +179,23 @@ export class SyncEngine {
     return this.connectors.get(type)
   }
 
+  /**
+   * List transformations (optionally filtered by connector).
+   */
+  listTransformations(connector?: ConnectorType): Transformation[] {
+    if (!connector) {
+      return this.transformRegistry.list()
+    }
+    return this.transformRegistry.findByConnector(connector)
+  }
+
+  /**
+   * Find transformations for a specific connector + entity type.
+   */
+  findTransformations(connector: ConnectorType, entityType: string): Transformation[] {
+    return this.transformRegistry.findBySource(connector, entityType)
+  }
+
   // ============ Event Handling ============
 
   /**
@@ -377,10 +394,13 @@ export class SyncEngine {
 
     this.isRunning = true
 
-    // Start the queue in background
-    this.queue.start().catch((error) => {
-      console.error('[SyncEngine] Queue error:', error)
-    })
+    // Start the queue - this blocks until queue is processing
+    try {
+      await this.queue.start()
+    } catch (error) {
+      console.error('[SyncEngine] Failed to start queue:', error)
+      throw error
+    }
   }
 
   /**

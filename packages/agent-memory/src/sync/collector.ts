@@ -26,6 +26,7 @@ import type {
 } from './types.js'
 import { CollectError, RateLimitError } from './types.js'
 import type { AuthProvider } from '../auth/provider.js'
+import type { AccountRepository } from '../db/repositories/account.js'
 import type { Connector, ConnectorContext } from '../connector/sdk/types.js'
 
 // ============ Configuration ============
@@ -43,6 +44,8 @@ export interface CollectorConfig {
   baseRetryDelay?: number
   /** Auth provider for connector authentication */
   authProvider?: AuthProvider
+  /** Account repository for updating sync cursor after sync completes */
+  accountRepo?: AccountRepository
 }
 
 const DEFAULT_CONFIG = {
@@ -52,6 +55,7 @@ const DEFAULT_CONFIG = {
   maxRetries: 3,
   baseRetryDelay: 1000,
   authProvider: undefined as AuthProvider | undefined,
+  accountRepo: undefined as AccountRepository | undefined,
 }
 
 // ============ Collector ============
@@ -263,19 +267,26 @@ export class Collector {
         // Update progress
         await this.syncJobRepo.updateProgress(job.id, { fetched: result.items.length })
 
-        // Check if we're done
-        if (!result.hasMore || !result.nextCursor) {
-          break
+        // Capture final cursor even when done (e.g., Gmail's updated historyId)
+        if (result.nextCursor) {
+          cursor = result.nextCursor
+          await this.syncJobRepo.updateCursor(job.id, { cursor })
         }
 
-        // Update cursor for resumability
-        cursor = result.nextCursor
-        await this.syncJobRepo.updateCursor(job.id, { cursor })
+        // Check if we're done
+        if (!result.hasMore) {
+          break
+        }
 
         // Page delay to avoid hammering the API
         if (this.config.pageDelay > 0) {
           await sleep(this.config.pageDelay)
         }
+      }
+
+      // Update account sync_cursor with the final cursor value
+      if (cursor && this.config.accountRepo) {
+        await this.config.accountRepo.updateSyncState(job.account_id, cursor)
       }
 
       // Complete the job

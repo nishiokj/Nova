@@ -672,6 +672,11 @@ export {
   type ParsedRequest,
   type RouteHandler,
   type RouteResponse,
+  type SanityCheck,
+  type SanityCheckResult,
+  type SanityCheckStatus,
+  type ConnectorSanityOptions,
+  type TaskSanityOptions,
 } from './daemon/index.js'
 
 // Client SDK

@@ -1,170 +1,126 @@
 /**
- * Connector Registry
+ * Connector Factory Registry
  *
- * Maps connector types to factory functions for config-driven loading.
- * This is the bridge between implementing a connector and the daemon recognizing it.
+ * Static lookup table mapping connector types to their factory functions.
+ * This defines which connectors CAN exist (code). The database defines
+ * which connectors ARE active (state).
  *
  * To add a new connector:
- * 1. Implement the Connector interface
- * 2. Add factory function here
- * 3. Add config schema in config/schema.ts
- * 4. Enable in config
+ * 1. Implement the Connector interface in src/connectors/{name}/
+ * 2. Add the factory to CONNECTOR_FACTORIES below
+ * 3. Add ConnectorType to src/ids.ts
  *
  * @module connectors/registry
  */
 
 import type { Connector } from '../connector/sdk/types.js'
 import type { ConnectorType } from '../ids.js'
-import { createGmailConnector, type GmailConnectorConfig } from './gmail/index.js'
-import { createGitHubConnector, type GitHubConnectorConfig } from './github/index.js'
-import { createClaudeSessionConnector, type ClaudeSessionConnectorConfig } from './coding-sessions/claude.js'
-import { createRexSessionConnector, type RexSessionConnectorConfig } from './coding-sessions/rex.js'
+import { createGmailConnector } from './gmail/index.js'
+import { createGitHubConnector } from './github/index.js'
+import { createClaudeSessionConnector } from './coding-sessions/claude.js'
+import { createRexSessionConnector } from './coding-sessions/rex.js'
+import { createIMessageConnector } from './imessage/index.js'
 
 // ============ Types ============
 
 /**
  * Factory function that creates a connector from config.
- * May be async for connectors that need initialization.
  */
-export type ConnectorFactory<C = unknown> = (config: C) => Connector | Promise<Connector>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ConnectorFactory = (config: any) => Connector | Promise<Connector>
 
 /**
  * Registry entry for a connector factory.
  */
-export interface ConnectorFactoryEntry<C = unknown> {
-  factory: ConnectorFactory<C>
+export interface ConnectorFactoryEntry {
+  factory: ConnectorFactory
+  /** Human-readable display name */
+  displayName: string
   /** Whether the connector requires async initialization */
   async?: boolean
 }
 
-// ============ Registry ============
-
 /**
- * Map of connector types to their factory functions.
+ * Result of loading connectors.
  */
-const factories = new Map<ConnectorType, ConnectorFactoryEntry>()
-
-/**
- * Register a connector factory.
- */
-export function registerFactory<C>(
-  type: ConnectorType,
-  factory: ConnectorFactory<C>,
-  options?: { async?: boolean }
-): void {
-  factories.set(type, { factory: factory as ConnectorFactory, async: options?.async })
+export interface LoadConnectorsResult {
+  loaded: ConnectorType[]
+  errors: Array<{ type: ConnectorType; error: Error }>
+  skipped: ConnectorType[]
 }
+
+// ============ Static Factory Registry ============
+
+/**
+ * All available connector factories.
+ * Add new connectors here.
+ */
+export const CONNECTOR_FACTORIES: Record<ConnectorType, ConnectorFactoryEntry> = {
+  gmail: {
+    factory: createGmailConnector,
+    displayName: 'Gmail',
+  },
+  github: {
+    factory: createGitHubConnector,
+    displayName: 'GitHub',
+  },
+  claude_sessions: {
+    factory: createClaudeSessionConnector,
+    displayName: 'Claude Code Sessions',
+  },
+  rex_sessions: {
+    factory: createRexSessionConnector,
+    displayName: 'Rex Sessions',
+  },
+  imessage: {
+    factory: createIMessageConnector,
+    displayName: 'iMessage',
+  },
+  // Telegram is handled separately - it's a real-time harness bridge, not a sync connector
+  telegram: {
+    factory: () => { throw new Error('Telegram connector is initialized separately via TelegramConnector') },
+    displayName: 'Telegram',
+  },
+  // X.com placeholder
+  xcom: {
+    factory: () => { throw new Error('X.com connector not yet implemented') },
+    displayName: 'X (Twitter)',
+  },
+}
+
+// ============ Factory Lookup Functions ============
 
 /**
  * Get a connector factory by type.
  */
 export function getFactory(type: ConnectorType): ConnectorFactoryEntry | undefined {
-  return factories.get(type)
+  return CONNECTOR_FACTORIES[type]
 }
 
 /**
- * List all registered connector types.
+ * List all available connector types.
  */
 export function listFactoryTypes(): ConnectorType[] {
-  return Array.from(factories.keys())
+  return Object.keys(CONNECTOR_FACTORIES) as ConnectorType[]
 }
 
 /**
  * Check if a factory exists for a connector type.
  */
 export function hasFactory(type: ConnectorType): boolean {
-  return factories.has(type)
-}
-
-// ============ Built-in Factories ============
-
-// Gmail (uses oauth2_provider for centralized OAuth)
-registerFactory<GmailConnectorConfig>('gmail', (config) => {
-  return createGmailConnector(config)
-})
-
-// GitHub (uses direct oauth2)
-registerFactory<GitHubConnectorConfig>('github', (config) => {
-  return createGitHubConnector(config)
-})
-
-// Claude Code Sessions (local filesystem)
-registerFactory<ClaudeSessionConnectorConfig>('claude_sessions', (config) => {
-  return createClaudeSessionConnector(config)
-})
-
-// Rex Sessions (local filesystem)
-registerFactory<RexSessionConnectorConfig>('rex_sessions', (config) => {
-  return createRexSessionConnector(config)
-})
-
-// Note: Telegram is handled separately in the daemon startup
-// because it's a real-time harness bridge, not a sync connector
-
-// ============ Loader ============
-
-/**
- * Result of loading connectors.
- */
-export interface LoadConnectorsResult {
-  /** Successfully loaded connectors */
-  loaded: ConnectorType[]
-  /** Connectors that failed to load */
-  errors: Array<{ type: ConnectorType; error: Error }>
-  /** Connectors that were skipped (disabled or missing config) */
-  skipped: ConnectorType[]
+  return type in CONNECTOR_FACTORIES
 }
 
 /**
- * Connector config with enabled flag.
+ * Create a connector instance from a factory.
  */
-export interface EnabledConnectorConfig {
-  enabled?: boolean
-  [key: string]: unknown
-}
-
-/**
- * Load connectors from config.
- *
- * @param config - Connector configuration (from AppConfig.connectors)
- * @param register - Function to register each loaded connector
- * @returns Load results
- */
-export async function loadConnectors(
-  config: Record<string, EnabledConnectorConfig>,
-  register: (connector: Connector) => void
-): Promise<LoadConnectorsResult> {
-  const result: LoadConnectorsResult = {
-    loaded: [],
-    errors: [],
-    skipped: [],
+export async function createConnector(
+  type: ConnectorType,
+  config: Record<string, unknown> = {}
+): Promise<Connector> {
+  const entry = CONNECTOR_FACTORIES[type]
+  if (!entry) {
+    throw new Error(`Unknown connector type: ${type}`)
   }
-
-  for (const [type, connectorConfig] of Object.entries(config)) {
-    // Skip if not a registered connector type
-    if (!hasFactory(type as ConnectorType)) {
-      continue
-    }
-
-    // Skip if disabled
-    if (!connectorConfig.enabled) {
-      result.skipped.push(type as ConnectorType)
-      continue
-    }
-
-    const entry = getFactory(type as ConnectorType)!
-
-    try {
-      const connector = await entry.factory(connectorConfig)
-      register(connector)
-      result.loaded.push(type as ConnectorType)
-    } catch (error) {
-      result.errors.push({
-        type: type as ConnectorType,
-        error: error instanceof Error ? error : new Error(String(error)),
-      })
-    }
-  }
-
-  return result
+  return entry.factory(config)
 }

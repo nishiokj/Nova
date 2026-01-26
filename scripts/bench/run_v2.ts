@@ -1,5 +1,9 @@
-import { BridgeClient } from '../../packages/tui/bridge_client.ts';
-import { GraphStore } from '../../packages/graphd/src/store.ts';
+import { Orchestrator, DEFAULT_ORCHESTRATOR_CONFIG, OrchestratorResult } from 'orchestrator';
+import { ContextWindow } from 'context';
+import { Agent, AgentRegistry, buildAgentConfig, type OrchestratorLogger } from 'agent';
+import { ToolRegistry, builtinToolOptions } from 'tools';
+import { createAdapter } from 'llm';
+import { isOpenAICompatProvider, createEvent } from 'types';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -22,6 +26,7 @@ type RunConfig = {
   working_dir?: string;
   branch_name?: string;
   metadata?: Record<string, unknown>;
+  agent_type?: string;  // 'standard', 'explorer', 'coding', etc.
 };
 
 type RunsFile = {
@@ -30,7 +35,37 @@ type RunsFile = {
   runs: RunConfig[];
 };
 
-function parseArgs(argv: string[]) {
+type BenchmarkResult = {
+  experiment_id?: string;
+  run_id: string;
+  question_set_id: string;
+  provider?: string;
+  model?: string;
+  agent_type: string;
+  prompt_variant_id?: string;
+  context_strategy_id?: string;
+  sys_prompt_id?: string;
+  context_window_id?: string;
+  temperature?: number;
+  questions_count: number;
+  working_dir: string;
+  branch_name: string;
+  total_llm_calls: number;
+  total_tool_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+  tool_names: string[];
+  success: boolean;
+  error?: string;
+  git_sha?: string;
+  git_branch?: string;
+  git_dirty?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+export function parseArgs(argv: string[]) {
   const args: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -47,17 +82,7 @@ function parseArgs(argv: string[]) {
   return args;
 }
 
-function resolveDbPath(rawPath: string, rootDir: string) {
-  if (rawPath.startsWith('~/')) {
-    return path.join(os.homedir(), rawPath.slice(2));
-  }
-  if (path.isAbsolute(rawPath)) {
-    return rawPath;
-  }
-  return path.resolve(rootDir, rawPath);
-}
-
-function getGitInfo() {
+export function getGitInfo() {
   try {
     const sha = execSync('git rev-parse HEAD', { encoding: 'utf-8' }).trim();
     const branch = execSync('git branch --show-current', { encoding: 'utf-8' }).trim();
@@ -92,7 +117,7 @@ function runGitCommand(command: string, cwd: string) {
   return execSync(command, { encoding: 'utf-8', cwd }).trim();
 }
 
-function sanitizeBranchSegment(segment: string) {
+export function sanitizeBranchSegment(segment: string) {
   const trimmed = segment.trim();
   if (!trimmed) return 'default';
   return trimmed
@@ -102,7 +127,7 @@ function sanitizeBranchSegment(segment: string) {
     .replace(/^[-.]+|[-.]+$/g, '') || 'default';
 }
 
-function buildBranchName(runIndex: number, run: RunConfig, defaultModelLabel: string) {
+export function buildBranchName(runIndex: number, run: RunConfig, defaultModelLabel: string) {
   const sysPrompt = sanitizeBranchSegment(run.sys_prompt_id ?? 'default');
   const contextWindow = sanitizeBranchSegment(run.context_window_id ?? 'default');
   const modelLabel = sanitizeBranchSegment(defaultModelLabel);
@@ -136,150 +161,90 @@ function ensureBranchForRun(
   runGitCommand(`git checkout -B ${branchName} ${baseRef}`, cwd);
 }
 
-async function waitForReady(client: BridgeClient, sessionKey: string, timeoutMs = 10000) {
-  return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      client.off('event', handler);
-      reject(new Error('Timed out waiting for ready event'));
-    }, timeoutMs);
-
-    const handler = (event: { type: string; data?: Record<string, unknown> }) => {
-      if (event.type !== 'ready') return;
-      const data = event.data ?? {};
-      if (data.session_key === sessionKey) {
-        clearTimeout(timer);
-        client.off('event', handler);
-        resolve();
-      }
-    };
-
-    client.on('event', handler);
-  });
+// Simple logger for benchmarks (no output)
+export class BenchmarkLogger implements OrchestratorLogger {
+  info(msg: string, meta?: Record<string, unknown>): void {}
+  debug(msg: string, meta?: Record<string, unknown>): void {}
+  warning(msg: string, meta?: Record<string, unknown>): void {}
+  error(msg: string, meta?: Record<string, unknown>): void {}
 }
 
-async function waitForCompletion(client: BridgeClient, requestId: string, timeoutMs = 300000) {
-  return new Promise<{ success: boolean; durationMs: number }>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      client.off('event', handler);
-      reject(new Error('Timed out waiting for run completion'));
-    }, timeoutMs);
+// Simple in-memory provider key service for benchmarks
+export class BenchmarkProviderKeyService {
+  private keys: Map<string, string> = new Map();
 
-    const handler = (event: { type: string; data?: Record<string, unknown> }) => {
-      if (event.type === 'response') {
-        const data = event.data ?? {};
-        if (data.request_id === requestId) {
-          clearTimeout(timer);
-          client.off('event', handler);
-          resolve({ success: Boolean(data.success), durationMs: Number(data.duration_ms ?? 0) });
-        }
-      }
-
-      if (event.type === 'error') {
-        clearTimeout(timer);
-        client.off('event', handler);
-        resolve({ success: false, durationMs: 0 });
-      }
-
-      if (event.type === 'user_prompt') {
-        clearTimeout(timer);
-        client.off('event', handler);
-        resolve({ success: false, durationMs: 0 });
-      }
-    };
-
-    client.on('event', handler);
-  });
-}
-
-async function sendAuthCommand<T extends Record<string, unknown>>(
-  client: BridgeClient,
-  kind: string,
-  data: Record<string, unknown>
-): Promise<T> {
-  return new Promise((resolve) => {
-    const handler = (event: { type: string; data?: Record<string, unknown> }) => {
-      if (event.type === 'response') {
-        const responseData = event.data ?? {};
-        const metadata = responseData.metadata as { kind?: string; payload?: unknown } | undefined;
-        if (metadata?.kind === kind) {
-          client.off('event', handler);
-          resolve((metadata.payload ?? { success: false }) as T);
-        }
-      }
-    };
-
-    client.on('event', handler);
-
-    setTimeout(() => {
-      client.off('event', handler);
-      resolve({ success: false, error: 'Request timeout' } as T);
-    }, 30000);
-
-    client.send({ type: kind, data });
-  });
-}
-
-function aggregateMetrics(events: Array<{ type: string; data?: Record<string, unknown> }>) {
-  const llmEvents = events.filter((event) => event.type === 'llm_call');
-  const toolNames = new Set<string>();
-  let promptTokens = 0;
-  let completionTokens = 0;
-  let totalTokens = 0;
-  let totalToolCalls = 0;
-
-  for (const event of llmEvents) {
-    const data = event.data ?? {};
-    promptTokens += Number(data.prompt_tokens ?? 0);
-    completionTokens += Number(data.completion_tokens ?? 0);
-    totalTokens += Number(data.total_tokens ?? 0);
-    totalToolCalls += Number(data.tool_calls_count ?? 0);
-
-    const tools = Array.isArray(data.tool_names) ? data.tool_names : [];
-    for (const tool of tools) {
-      if (typeof tool === 'string') toolNames.add(tool);
+  constructor(keys: Record<string, string>) {
+    for (const [provider, key] of Object.entries(keys)) {
+      this.keys.set(provider, key);
     }
   }
 
+  async getApiKey(provider: string): Promise<string | null> {
+    return this.keys.get(provider) ?? null;
+  }
+
+  hasApiKey(provider: string): boolean {
+    return this.keys.has(provider);
+  }
+}
+
+function loadConfig(): Record<string, unknown> {
+  // Try defaults.json in config directory
+  const configPath = path.resolve(process.cwd(), 'config/defaults.json');
+  if (fs.existsSync(configPath)) {
+    return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  }
+  throw new Error(`Missing config file: ${configPath}`);
+}
+
+/**
+ * Collect metrics from all orchestrator executions for a benchmark run
+ */
+export function aggregateMetrics(allResults: OrchestratorResult[], allEvents: Array<{ type: string; data?: Record<string, unknown> }>): {
+  total_llm_calls: number;
+  total_tool_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+  tool_names: Set<string>;
+} {
+  const toolNames = new Set<string>();
+  let totalLlmCalls = 0;
+  let totalToolCalls = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  let durationMs = 0;
+
+  // Collect tool names from events
+  for (const event of allEvents) {
+    if (event.type === 'tool_call') {
+      const data = event.data ?? {};
+      const toolName = typeof data.tool === 'string' ? data.tool : undefined;
+      if (toolName) {
+        toolNames.add(toolName);
+      }
+    }
+  }
+
+  for (const result of allResults) {
+    totalLlmCalls += result.metrics.totalLlmCalls;
+    totalToolCalls += result.metrics.totalToolCalls;
+    // Token counts aren't currently in OrchestratorMetrics, but we'll keep the fields
+    // for backward compatibility - they'll be 0 unless we hook into LLM events
+    durationMs += result.metrics.durationMs;
+  }
+
   return {
-    total_llm_calls: llmEvents.length,
+    total_llm_calls: totalLlmCalls,
     total_tool_calls: totalToolCalls,
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: totalTokens,
-    tool_names: Array.from(toolNames),
+    duration_ms: durationMs,
+    tool_names: toolNames,
   };
-}
-
-async function loadSessionEvents(dbPath: string, sessionKey: string, requestIds: string[]) {
-  const store = new GraphStore(dbPath);
-  try {
-    const session = store.getSession(sessionKey);
-    if (!session || !session.metadata) return { session: null, events: [] as Array<{ type: string; data?: Record<string, unknown> }> };
-    const events = Array.isArray(session.metadata.agent_events)
-      ? session.metadata.agent_events
-      : [];
-    const requestIdSet = new Set(requestIds);
-    const requestEvents = events.filter((event) => requestIdSet.has(event.request_id));
-    return { session, events: requestEvents };
-  } finally {
-    store.close();
-  }
-}
-
-async function pollForEvents(dbPath: string, sessionKey: string, requestIds: string[]) {
-  const maxAttempts = 20;
-  const delayMs = 500;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const { session, events } = await loadSessionEvents(dbPath, sessionKey, requestIds);
-    const hasAllRequests = requestIds.every((requestId) =>
-      events.some((event) => event.request_id === requestId)
-    );
-    if (session && events.length > 0 && hasAllRequests) {
-      return { session, events };
-    }
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-  return { session: null, events: [] };
 }
 
 function ensureUniqueWorkingDirs(runs: RunConfig[], fallbackWorkingDir: string) {
@@ -290,129 +255,181 @@ function ensureUniqueWorkingDirs(runs: RunConfig[], fallbackWorkingDir: string) 
   }
 }
 
-async function runSession(params: {
+async function runSingleBenchmark(params: {
   run: RunConfig;
   runId: string;
   runIndex: number;
-  sessionKey: string;
   questions: string[];
   questionSetId: string;
   baseWorkingDir: string;
-  host: string;
-  port: number;
-  dbPath: string;
   experimentId?: string;
   baseRef: string;
   forceBranch: boolean;
   defaultModelLabel: string;
-}) {
+  config: Record<string, unknown>;
+  apiKeys: Record<string, string>;
+}): Promise<BenchmarkResult> {
   const {
     run,
     runId,
     runIndex,
-    sessionKey,
     questions,
     questionSetId,
     baseWorkingDir,
-    host,
-    port,
-    dbPath,
     experimentId,
     baseRef,
     forceBranch,
     defaultModelLabel,
+    config,
+    apiKeys,
   } = params;
+
   const workingDir = run.working_dir ?? baseWorkingDir;
   const branchName = run.branch_name ?? buildBranchName(runIndex, run, defaultModelLabel);
-  ensureBranchForRun(workingDir, branchName, baseRef, forceBranch);
-  const client = new BridgeClient({ host, port });
-  await client.connect();
+  const agentType = run.agent_type ?? 'standard';
 
-  client.send({
-    type: 'init',
-    data: {
-      session_key: sessionKey,
-      working_dir: workingDir,
-    },
+  // Set up git branch
+  ensureBranchForRun(workingDir, branchName, baseRef, forceBranch);
+
+  // Load agent config from defaults.json
+  const agents = config.agents as Record<string, unknown> ?? {};
+  if (!agents[agentType]) {
+    throw new Error(`Agent type '${agentType}' not found in config. Available: ${Object.keys(agents).join(', ')}`);
+  }
+
+  const agentConfig = agents[agentType] as Record<string, unknown>;
+
+  // Set up orchestrator config
+  const orchestratorConfig = {
+    ...DEFAULT_ORCHESTRATOR_CONFIG,
+    maxIterations: (agentConfig.budget as Record<string, unknown>)?.max_iterations ?? 50,
+    maxToolCalls: (agentConfig.budget as Record<string, unknown>)?.max_tool_calls ?? 225,
+    maxDurationMs: (agentConfig.budget as Record<string, unknown>)?.max_duration_ms ?? 1000000,
+  };
+
+  // Create a simple event emit callback that captures events for metrics
+  const capturedEvents: Array<{ type: string; data?: Record<string, unknown> }> = [];
+  const emit = (event: { type: string; data?: Record<string, unknown> }) => {
+    capturedEvents.push(event);
+  };
+
+  const orchestrator = new Orchestrator(
+    orchestratorConfig,
+    toolRegistry,
+    llmAdapter,
+    emit,
+    `bench_${runId}_${Date.now()}`,
+    new BenchmarkLogger(),
+    undefined, // agentRegistry - will register below
+    undefined, // hooks
+    undefined, // planModeOptions
+    undefined, // eventBus
+    undefined  // getModelSelection
+  );
+
+  // Set up provider key service
+  const providerKeyService = new BenchmarkProviderKeyService(apiKeys);
+
+  // Create tool registry with working dir
+  const toolRegistry = new ToolRegistry({
+    ...builtinToolOptions,
+    workingDir,
+    repoRoot: workingDir,
   });
 
-  await waitForReady(client, sessionKey);
+  // Get model configuration
+  const llmConfig = agentConfig.llm as Record<string, unknown>;
+  const provider = run.model?.provider ?? (llmConfig.provider as string) ?? 'openai';
+  const model = run.model?.model ?? (llmConfig.model as string);
+  const reasoning = run.model?.reasoning ?? (llmConfig.reasoning as string);
 
-  let modelOverride: ModelOverride | null = null;
-  let modelOverrideError: string | undefined;
-  if (run.model?.provider) {
-    const result = await sendAuthCommand<{
-      success: boolean;
-      model_override?: ModelOverride | null;
-      error?: string;
-    }>(client, 'set_model', {
-      provider: run.model.provider,
-      model: run.model.model,
-      reasoning: run.model.reasoning,
-    });
-    if (!result.success) {
-      modelOverrideError = result.error ?? 'Failed to set model';
-    } else {
-      modelOverride = result.model_override ?? null;
-    }
+  if (!model) {
+    throw new Error(`No model specified. Either provide --model or have a default in config for agent '${agentType}'`);
   }
 
-  const requestIds: string[] = [];
-  let durationMs = 0;
-  let success = modelOverrideError ? false : true;
+  // Map provider to canonical form for adapter
+  const canonicalProvider = isOpenAICompatProvider(provider) ? 'openai-compat' : provider as any;
 
-  if (!modelOverrideError) {
-    for (let i = 0; i < questions.length; i += 1) {
-      const requestId = `req_${runId}_${i}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      requestIds.push(requestId);
-      client.send({
-        type: 'send_text',
-        data: {
-          text: questions[i],
-          client_request_id: requestId,
-          working_dir: workingDir,
+  // Create LLM adapter
+  const llmAdapter = createAdapter({
+    provider: canonicalProvider,
+    model,
+    temperature: run.temperature ?? (llmConfig.temperature as number) ?? 0.7,
+    maxTokens: (llmConfig.max_tokens as number) ?? 128000,
+    reasoning: typeof reasoning === 'string' ? reasoning : (typeof reasoning === 'object' ? (reasoning as any).effort : undefined),
+    providerKeyService,
+  });
+
+  // Create agent
+  const agent = new Agent({
+    llm: llmAdapter,
+    tools: toolRegistry,
+    config: buildAgentConfig(agentType as any, agentConfig),
+    workingDir,
+  });
+
+  // Register agent with agent type
+  AgentRegistry.register(agentType, {
+    create: () => agent,
+    config: agentConfig,
+  });
+
+  // Run each question
+  const allResults: OrchestratorResult[] = [];
+  let success = true;
+  let error: string | undefined;
+
+  for (const question of questions) {
+    // Create a fresh context for each question
+    const context = new ContextWindow({
+      maxTokens: (config.context as Record<string, unknown>)?.max_tokens as number ?? 200000,
+    });
+
+    try {
+      const result = await orchestrator.execute(context, question, agentType, workingDir);
+      allResults.push(result);
+
+      if (!result.success) {
+        success = false;
+        error = result.error ?? 'Unknown error';
+      }
+    } catch (err) {
+      success = false;
+      error = err instanceof Error ? err.message : String(err);
+      allResults.push({
+        success: false,
+        response: '',
+        error,
+        paused: false,
+        userPrompt: undefined,
+        handoffSpec: undefined,
+        terminationReason: 'error',
+        metrics: {
+          iterations: 0,
+          totalLlmCalls: 0,
+          totalToolCalls: 0,
+          durationMs: 0,
         },
       });
-      const completion = await waitForCompletion(client, requestId);
-      durationMs += completion.durationMs;
-      if (!completion.success) success = false;
     }
   }
 
-  client.close();
-
-  const { session, events } =
-    requestIds.length > 0
-      ? await pollForEvents(dbPath, sessionKey, requestIds)
-      : { session: null, events: [] };
-  const metrics = aggregateMetrics(events);
+  // Aggregate metrics
+  const metrics = aggregateMetrics(allResults, capturedEvents);
   const gitInfo = getGitInfo();
-  const sessionMetadata = session?.metadata ?? {};
-  const modelOverrideMeta = sessionMetadata.model_override as ModelOverride | null | undefined;
 
   return {
     experiment_id: experimentId,
     run_id: runId,
-    session_key: sessionKey,
-    request_ids: requestIds,
-    provider:
-      typeof modelOverrideMeta?.provider === 'string'
-        ? modelOverrideMeta.provider
-        : typeof sessionMetadata.provider === 'string'
-          ? sessionMetadata.provider
-          : undefined,
-    model:
-      typeof modelOverrideMeta?.model === 'string'
-        ? modelOverrideMeta.model
-        : typeof sessionMetadata.model === 'string'
-          ? sessionMetadata.model
-          : undefined,
+    question_set_id: questionSetId,
+    provider,
+    model,
+    agent_type: agentType,
     prompt_variant_id: run.prompt_variant_id,
     context_strategy_id: run.context_strategy_id,
     sys_prompt_id: run.sys_prompt_id,
     context_window_id: run.context_window_id,
     temperature: run.temperature,
-    question_set_id: questionSetId,
     questions_count: questions.length,
     working_dir: workingDir,
     branch_name: branchName,
@@ -421,10 +438,10 @@ async function runSession(params: {
     prompt_tokens: metrics.prompt_tokens,
     completion_tokens: metrics.completion_tokens,
     total_tokens: metrics.total_tokens,
-    duration_ms: durationMs,
-    tool_names: metrics.tool_names,
+    duration_ms: metrics.duration_ms,
+    tool_names: Array.from(metrics.tool_names),
     success,
-    error: modelOverrideError,
+    error,
     git_sha: gitInfo.sha,
     git_branch: gitInfo.branch,
     git_dirty: gitInfo.dirty,
@@ -436,7 +453,6 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const outPath = args.out ?? 'bench/results.jsonl';
   const baseWorkingDir = args.working_dir ?? process.cwd();
-  const seedPrompt = args.seed_prompt;
   const questionSetId = args.question_set_id ?? 'v2_default';
   const parallel = args.parallel === 'true';
   const baseRef = args.base_ref ?? 'HEAD';
@@ -446,6 +462,7 @@ async function main() {
   const defaultModelName = args.model;
   const defaultModelReasoning = args.model_reasoning;
   const defaultModelLabel = defaultModelName ?? defaultModelProvider ?? 'default';
+  const defaultAgentType = args.agent_type ?? 'standard';
 
   const runsPath = args.runs;
   const questionsPath = args.questions;
@@ -460,6 +477,7 @@ async function main() {
     throw new Error('No runs provided. Provide a runs file with at least one run.');
   }
 
+  // Apply default model and agent type to runs
   for (const run of runs) {
     if (!run.model && defaultModelProvider) {
       run.model = {
@@ -467,6 +485,9 @@ async function main() {
         model: defaultModelName,
         reasoning: defaultModelReasoning,
       };
+    }
+    if (!run.agent_type && defaultAgentType) {
+      run.agent_type = defaultAgentType;
     }
   }
 
@@ -479,84 +500,60 @@ async function main() {
     ensureUniqueWorkingDirs(runs, baseWorkingDir);
   }
 
-  const host = process.env.EVENT_BUS_HOST ?? '127.0.0.1';
-  const port = Number(process.env.EVENT_BUS_PORT ?? '9555');
+  // Load config
+  const config = loadConfig();
 
-  const configPath = path.resolve(process.cwd(), 'config/harness_config.json');
-  if (!fs.existsSync(configPath)) {
-    throw new Error(`Missing config file: ${configPath}`);
-  }
-
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  if (!config.graphd?.enabled || !config.graphd.db_path) {
-    throw new Error('GraphD is not enabled in config; cannot validate run in DB');
-  }
-
-  const dbPath = resolveDbPath(config.graphd.db_path, process.cwd());
-
-  const baseClient = new BridgeClient({ host, port });
-  await baseClient.connect();
-
-  const baseSessionKey = args.base_session_key ?? `bench_base_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  baseClient.send({
-    type: 'init',
-    data: {
-      session_key: baseSessionKey,
-      working_dir: baseWorkingDir,
-    },
-  });
-
-  await waitForReady(baseClient, baseSessionKey);
-
-  if (seedPrompt) {
-    const seedRequestId = `seed_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    baseClient.send({
-      type: 'send_text',
-      data: {
-        text: seedPrompt,
-        client_request_id: seedRequestId,
-        working_dir: baseWorkingDir,
-      },
-    });
-    await waitForCompletion(baseClient, seedRequestId);
-  }
-
-  const forks = [];
-  for (const run of runs) {
-    const fork = await baseClient.sessionFork();
-    if (!fork.success || !fork.newSessionKey) {
-      throw new Error(`Failed to fork session: ${fork.error ?? 'unknown error'}`);
+  // Get API keys from environment variables
+  const apiKeys: Record<string, string> = {};
+  
+  // Common provider names
+  const providerNames = ['openai', 'anthropic', 'openai-compat', 'cerebras', 'deepseek', 'xai', 'ollama', 'groq', 'openrouter'];
+  
+  for (const provider of providerNames) {
+    const envVar = `${provider.toUpperCase()}_API_KEY`;
+    if (process.env[envVar]) {
+      apiKeys[provider] = process.env[envVar]!;
     }
-    forks.push({
-      run,
-      sessionKey: fork.newSessionKey,
-    });
   }
 
-  baseClient.close();
+  // Check if required API keys are available
+  const missingProviders = new Set<string>();
+  for (const run of runs) {
+    const provider = run.model?.provider;
+    if (provider && !apiKeys[provider]) {
+      missingProviders.add(provider);
+    }
+  }
+
+  if (missingProviders.size > 0) {
+    console.error(`Missing API keys for providers: ${Array.from(missingProviders).join(', ')}`);
+    console.error('Set environment variables like OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.');
+    process.exit(1);
+  }
 
   const experimentId = runsConfig.experiment_id ?? args.experiment_id;
-  const runTasks = forks.map(({ run, sessionKey }, index) => {
+
+  // Create run tasks
+  const runTasks = runs.map((run, index) => {
     const runId = run.id ?? `run_${index + 1}`;
     return () =>
-      runSession({
+      runSingleBenchmark({
         run,
         runId,
         runIndex: index + 1,
-        sessionKey,
         questions,
         questionSetId: runsConfig.question_set_id ?? questionSetId,
         baseWorkingDir,
-        host,
-        port,
-        dbPath,
         experimentId,
         baseRef,
         forceBranch,
         defaultModelLabel: run.model?.model ?? run.model?.provider ?? defaultModelLabel,
+        config,
+        apiKeys,
       });
   });
 
+  // Execute runs (parallel or sequential)
   const results = parallel ? await Promise.all(runTasks.map((task) => task())) : [];
   if (!parallel) {
     for (const task of runTasks) {
@@ -564,11 +561,12 @@ async function main() {
     }
   }
 
+  // Write results
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   for (const result of results) {
     fs.appendFileSync(outPath, `${JSON.stringify(result)}\n`);
     if (result.total_llm_calls === 0) {
-      console.warn(`Warning: no llm_call events found in GraphD for run ${result.run_id}.`);
+      console.warn(`Warning: no LLM calls for run ${result.run_id}.`);
     }
   }
 

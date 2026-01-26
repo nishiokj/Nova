@@ -61,7 +61,9 @@ src/connectors/myconnector/
 import { z } from 'zod'
 import { BaseConnector, type ConnectorCapabilities } from '../../connector/sdk/index.js'
 import type { FetchPageOptions, FetchPageResult } from '../../sync/types.js'
+import type { Transformation } from '../../transform/types.js'
 import { MyEntitySchema } from './schemas.js'
+import { myTransforms } from './transforms.js'
 
 export interface MyConnectorConfig {
   apiKey?: string
@@ -101,6 +103,13 @@ export class MyConnector extends BaseConnector {
       default: return undefined
     }
   }
+
+  // Register transformations with the sync engine/daemon
+  registerTransforms(registry: { register<T>(t: Transformation<T>): void }): void {
+    for (const transform of myTransforms) {
+      registry.register(transform)
+    }
+  }
 }
 
 export function createMyConnector(config: MyConnectorConfig): MyConnector {
@@ -123,19 +132,80 @@ export const MyEntitySchema = z.object({
 export type MyEntity = z.infer<typeof MyEntitySchema>
 ```
 
+### transforms.ts
+
+Transforms convert raw source data into canonical entities (Identity, Message, Conversation, etc.).
+
+```typescript
+import type { Transformation, TransformResult } from '../../transform/types.js'
+import { generateCanonicalId, sourceRefToKey } from '../../ids.js'
+import { MyEntitySchema, type MyEntity } from './schemas.js'
+
+export const myEntityTransform: Transformation<MyEntity> = {
+  id: 'myconnector:entity_a:v1',
+  name: 'My Entity → Canonical Message',
+  source: {
+    connector: 'myconnector',
+    entityType: 'entity_a',
+  },
+  inputSchema: MyEntitySchema,
+  outputType: 'message',  // or 'identity', 'conversation', etc.
+
+  transform(source, ctx): TransformResult {
+    const sourceRef = {
+      connector: 'myconnector',
+      account_id: ctx.accountId,
+      entity_type: 'entity_a',
+      source_id: source.id,
+      last_synced_at: new Date().toISOString(),
+    }
+
+    const entity = {
+      id: generateCanonicalId(),
+      entity_type: 'message' as const,
+      // ... map source fields to canonical fields
+      source_refs: [sourceRef],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+
+    return {
+      primary: {
+        entityType: 'message',
+        data: entity,
+        displayText: source.name,
+        sourceRefKey: sourceRefToKey(sourceRef),
+      },
+    }
+  },
+
+  onError: 'quarantine',
+  enabled: true,
+  version: 1,
+}
+
+export const myTransforms = [myEntityTransform]
+```
+
+**Important:** The `registerTransforms` method in your connector class is called by the sync engine and daemon during initialization. Without it, your transforms won't be registered and items won't be processed.
+
 ---
 
 ## Step 2: Register Factory
 
-Add one line to `src/connectors/registry.ts`:
+Add to `CONNECTOR_FACTORIES` in `src/connectors/registry.ts`:
 
 ```typescript
-import { createMyConnector, type MyConnectorConfig } from './myconnector/index.js'
+import { createMyConnector } from './myconnector/index.js'
 
-// In the built-in factories section:
-registerFactory<MyConnectorConfig>('myconnector', (config) => {
-  return createMyConnector(config)
-})
+// In CONNECTOR_FACTORIES:
+export const CONNECTOR_FACTORIES: Record<ConnectorType, ConnectorFactoryEntry> = {
+  // ... existing connectors
+  myconnector: {
+    factory: createMyConnector,
+    displayName: 'My Connector',
+  },
+}
 ```
 
 ---
@@ -162,22 +232,21 @@ export const ConnectorConfigSchema = z.object({
 
 ---
 
-## Step 4: Enable in Config
+## Step 4: Register via CLI
 
-Set environment variables or modify config:
+Connectors are enabled at runtime via the CLI (stored in database):
 
 ```bash
-# Environment variables
-MYCONNECTOR_ENABLED=true
-MYCONNECTOR_API_KEY=xxx
+# Register a connector
+bun run scripts/sync-api-cli.ts connectors register myconnector
 
-# Or in sync-daemon.ts connector config:
-const connectorConfig = {
-  myconnector: {
-    enabled: true,
-    apiKey: process.env.MYCONNECTOR_API_KEY,
-  },
-}
+# Register with config
+bun run scripts/sync-api-cli.ts connectors register myconnector --config '{"apiKey":"xxx"}'
+
+# Or via API
+curl -X POST http://localhost:3001/api/connectors/register \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"myconnector","config":{"apiKey":"xxx"}}'
 ```
 
 ---
@@ -215,10 +284,17 @@ export type ConnectorType =
 
 ## Verification
 
-Once registered, verify via CLI:
+Once implemented, verify via CLI:
 
 ```bash
-# List connectors
+# List available factories (not yet registered)
+bun run scripts/sync-api-cli.ts connectors available
+# Should show: myconnector
+
+# Register it
+bun run scripts/sync-api-cli.ts connectors register myconnector
+
+# List active connectors
 bun run scripts/sync-api-cli.ts connectors list
 # Should show: myconnector - My Connector
 #              Entity types: entity_a, entity_b
@@ -238,7 +314,9 @@ bun run scripts/sync-api-cli.ts tasks myconnector backfill entity_a
 |------|---------|
 | `src/connectors/{name}/index.ts` | Connector implementation |
 | `src/connectors/{name}/schemas.ts` | Zod schemas for external API |
-| `src/connectors/registry.ts` | Factory registration |
+| `src/connectors/{name}/transforms.ts` | Transformations to canonical entities |
+| `src/connectors/registry.ts` | Static factory lookup (code) |
+| `registered_connectors` table | Active connectors + config (state) |
 | `src/config/schema.ts` | Config schema with `enabled` flag |
 | `src/ids.ts` | ConnectorType union |
 
@@ -302,7 +380,7 @@ readonly authConfig: LocalAuthConfig = {
 | Type | Display Name | Entity Types | Auth |
 |------|--------------|--------------|------|
 | `gmail` | Gmail | message, thread, history | oauth2_provider (google) |
-| `github` | GitHub | user, issue, pull_request, comment, notification | oauth2 |
+| `github` | GitHub | user, issue, pull_request, comment, notification | oauth2_provider (github) |
 | `telegram` | Telegram | (real-time bridge) | bot token |
 | `claude_sessions` | Claude Code Sessions | session_message, session_summary, file_history | local |
 | `rex_sessions` | Rex Sessions | session_message, session_summary | local |
@@ -314,6 +392,8 @@ readonly authConfig: LocalAuthConfig = {
 - [ ] Create `src/connectors/{name}/` directory
 - [ ] Implement `Connector` interface in `index.ts`
 - [ ] Define source schemas in `schemas.ts`
+- [ ] Define transformations in `transforms.ts`
+- [ ] Implement `registerTransforms()` method in connector class
 - [ ] Add factory to `registry.ts`
 - [ ] Add config schema to `config/schema.ts`
 - [ ] Add to `ConnectorType` in `ids.ts`

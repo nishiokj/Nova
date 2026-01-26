@@ -797,6 +797,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const handleReady = async (data?: ReadyData) => {
+    // Set session key and clear previous state
+    const previousSessionKey = store.getSnapshot().sessionKey;
+    const isNewSession = previousSessionKey !== (data?.session_key ?? null);
+
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
     }
@@ -806,6 +810,21 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       store.setModelSelection('explorer', null);
       store.setModelSelection('coding', null);
     });
+
+    // Hydrate message history if provided (session rehydration)
+    if (data?.history && data.history.length > 0) {
+      store.batch(() => {
+        // Clear existing history only for session switches
+        if (isNewSession) {
+          store.clearHistory();
+        }
+        // Add each historical message
+        for (const msg of data.history) {
+          store.addMessage(msg.role, msg.content, undefined, msg.requestId);
+        }
+      });
+    }
+
     if (data?.capabilities) {
       // Convert snake_case from bridge to camelCase for store
       store.setCapabilities({

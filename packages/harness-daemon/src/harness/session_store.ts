@@ -178,6 +178,15 @@ export class SessionStore {
     this.context = ContextWindow.deserialize(snapshot);
   }
 
+  /**
+   * Get message history for TUI rehydration.
+   * This returns the conversation history that should be displayed in the TUI.
+   */
+  getMessageHistory(): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
+    const context = this.getContext();
+    return context.getMessageHistory();
+  }
+
   persistContext(): void {
     if (!this.context || !this.isGraphDReady() || !this.graphd) return;
 

@@ -16,6 +16,7 @@ import {
   type AccountInfo,
   type WebhookEvent,
   type ConnectorContext,
+  type SyncEstimate,
 } from '../../connector/sdk/index.js'
 import type {
   FetchPageOptions,
@@ -83,7 +84,8 @@ export class GmailConnector extends BaseConnector {
     supportsIncrementalSync: true,
     supportsWebhook: true,
     supportsWrite: false, // MVP is read-only
-    supportedEntityTypes: ['message', 'thread', 'history'],
+    // Note: 'history' is used internally for incremental sync but is not a transformable entity type
+    supportedEntityTypes: ['message', 'thread'],
   }
 
   readonly authConfig: OAuthProviderRefConfig = {
@@ -150,6 +152,80 @@ export class GmailConnector extends BaseConnector {
         history_id: user.historyId,
       },
     }]
+  }
+
+  // ============ Estimate Methods ============
+
+  /**
+   * Estimate the scope of a sync operation using Gmail profile data.
+   * For backfill: returns total message/thread counts from the profile.
+   * For incremental: indicates cursor-based sync with no count available.
+   */
+  async estimateScope(
+    ctx: ConnectorContext,
+    syncType: 'backfill' | 'incremental',
+    entityTypes?: string[]
+  ): Promise<SyncEstimate> {
+    const types = entityTypes ?? this.capabilities.supportedEntityTypes
+
+    const response = await this.authenticatedRequest<GmailProfile>(
+      ctx,
+      `${this.apiBaseUrl}/users/me/profile`
+    )
+
+    if (!response.ok) {
+      return {
+        entities: types.map((type) => ({ type, description: 'Unable to estimate (profile fetch failed)' })),
+      }
+    }
+
+    const parsed = GmailProfileSchema.safeParse(response.data)
+    if (!parsed.success) {
+      return {
+        entities: types.map((type) => ({ type, description: 'Unable to estimate (profile parse failed)' })),
+      }
+    }
+
+    const profile = parsed.data
+
+    if (syncType === 'backfill') {
+      const entities = types.map((type) => {
+        if (type === 'message' && profile.messagesTotal != null) {
+          return {
+            type,
+            count: profile.messagesTotal,
+            description: `~${profile.messagesTotal.toLocaleString()} messages`,
+          }
+        }
+        if (type === 'thread' && profile.threadsTotal != null) {
+          return {
+            type,
+            count: profile.threadsTotal,
+            description: `~${profile.threadsTotal.toLocaleString()} threads`,
+          }
+        }
+        return { type, description: `${type} (count unavailable)` }
+      })
+
+      const parts = entities.filter((e) => e.count != null).map((e) => e.description)
+      return {
+        entities,
+        summary: parts.length > 0
+          ? `Full backfill: ${parts.join(', ')}`
+          : 'Full backfill (counts unavailable)',
+      }
+    }
+
+    // Incremental - count not available from history API without fetching
+    return {
+      entities: types.map((type) => ({
+        type,
+        description: `${type} changes since last sync`,
+      })),
+      summary: profile.historyId
+        ? `Incremental sync from historyId ${profile.historyId}`
+        : 'Incremental sync (will capture current position)',
+    }
   }
 
   // ============ Sync Methods ============
@@ -243,9 +319,9 @@ export class GmailConnector extends BaseConnector {
     const entityTypes = options.entityTypes ?? ['message']
     const items: SourceItem[] = []
 
-    // Parse cursor
+    // Parse cursor - since may be a plain historyId or a JSON cursor from a previous sync
     let cursorState: HistoryCursorState = {
-      historyId: options.since ?? '1', // Default to start from beginning
+      historyId: '',
       entityTypeIndex: 0,
     }
     if (options.cursor) {
@@ -254,6 +330,33 @@ export class GmailConnector extends BaseConnector {
       } catch {
         // Invalid cursor, use defaults
       }
+    } else if (options.since) {
+      // Try parsing as JSON cursor (stored sync_cursor from previous sync)
+      try {
+        const parsed = JSON.parse(options.since) as HistoryCursorState
+        if (parsed.historyId) {
+          cursorState = parsed
+        }
+      } catch {
+        // Plain historyId string
+        cursorState.historyId = options.since
+      }
+    }
+
+    // If no historyId available, fetch current one from profile
+    if (!cursorState.historyId) {
+      const profile = await this.authenticatedRequest<GmailProfile>(
+        ctx,
+        `${this.apiBaseUrl}/users/me/profile`
+      )
+      if (!profile.ok) {
+        throw new Error(`Failed to fetch Gmail profile for history cursor: ${profile.status}`)
+      }
+      const parsed = GmailProfileSchema.safeParse(profile.data)
+      if (!parsed.success) {
+        throw new Error('Failed to parse Gmail profile for history cursor')
+      }
+      cursorState.historyId = parsed.data.historyId
     }
 
     const currentEntityType = entityTypes[cursorState.entityTypeIndex]
@@ -275,6 +378,9 @@ export class GmailConnector extends BaseConnector {
 
     items.push(...result.items)
 
+    // Track the latest historyId from the response
+    const latestHistoryId = result.nextHistoryId ?? cursorState.historyId
+
     // Determine next cursor
     let hasMore = false
     let nextCursor: string | undefined
@@ -282,14 +388,20 @@ export class GmailConnector extends BaseConnector {
     if (result.hasMore) {
       hasMore = true
       nextCursor = JSON.stringify({
-        historyId: result.nextHistoryId ?? cursorState.historyId,
+        historyId: latestHistoryId,
         entityTypeIndex: cursorState.entityTypeIndex,
       })
     } else if (cursorState.entityTypeIndex < entityTypes.length - 1) {
       hasMore = true
       nextCursor = JSON.stringify({
-        historyId: cursorState.historyId,
+        historyId: latestHistoryId,
         entityTypeIndex: cursorState.entityTypeIndex + 1,
+      })
+    } else {
+      // Sync complete - still emit cursor so the account sync_cursor gets updated
+      nextCursor = JSON.stringify({
+        historyId: latestHistoryId,
+        entityTypeIndex: cursorState.entityTypeIndex,
       })
     }
 
@@ -584,16 +696,19 @@ export class GmailConnector extends BaseConnector {
     const params: Record<string, string | number> = {
       userId: 'me',
       startHistoryId,
-      historyTypes: 'messageAdded,messageDeleted',
+      // historyTypes passed via URL to support repeated query params
     }
 
     if (limit) {
       params.maxResults = limit
     }
 
+    // Gmail API requires historyTypes as repeated query params, not comma-separated
+    const url = `${this.apiBaseUrl}/users/me/history?historyTypes=messageAdded&historyTypes=messageDeleted`
+
     const response = await this.authenticatedRequest<GmailHistoryResponse>(
       ctx,
-      `${this.apiBaseUrl}/users/me/history`,
+      url,
       { params }
     )
 

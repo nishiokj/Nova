@@ -57,6 +57,7 @@ interface HarnessLike {
   setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('agent').ModelSelection | null): void;
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
+  getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };

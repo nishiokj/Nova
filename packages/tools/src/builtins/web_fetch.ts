@@ -1,8 +1,8 @@
 /**
  * WebFetch tool - Fetch and process web page content.
  *
- * Retrieves content from a URL, converts HTML to markdown, and optionally
- * processes it with a prompt using a lightweight extraction model.
+ * Retrieves content from a URL, converts HTML to markdown, and extracts
+ * prompt-relevant sections using lightweight heuristics.
  */
 
 import type { ToolResult } from 'types';
@@ -23,7 +23,75 @@ export interface WebFetchArgs {
 
 const MAX_CONTENT_LENGTH = 100000; // 100KB limit for content
 const FETCH_TIMEOUT_MS = 30000;
-const USER_AGENT = 'Mozilla/5.0 (compatible; AgentBot/1.0; +https://github.com/example/agent)';
+const MAX_EXTRACTED_BLOCKS = 8;
+const MIN_KEYWORD_LENGTH = 3;
+const USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const STOPWORDS = new Set([
+  'a',
+  'an',
+  'the',
+  'and',
+  'or',
+  'but',
+  'if',
+  'then',
+  'than',
+  'this',
+  'that',
+  'these',
+  'those',
+  'it',
+  'its',
+  'are',
+  'was',
+  'were',
+  'be',
+  'to',
+  'of',
+  'in',
+  'on',
+  'for',
+  'with',
+  'as',
+  'at',
+  'by',
+  'from',
+  'about',
+  'into',
+  'over',
+  'after',
+  'before',
+  'between',
+  'within',
+  'without',
+  'via',
+  'what',
+  'when',
+  'where',
+  'why',
+  'how',
+  'which',
+  'who',
+  'whom',
+  'please',
+  'show',
+  'find',
+  'list',
+  'give',
+  'tell',
+  'summarize',
+  'summary',
+  'extract',
+  'information',
+  'info',
+  'details',
+  'data',
+  'page',
+  'website',
+  'site',
+  'content',
+]);
 
 // ============================================
 // EXECUTOR
@@ -92,32 +160,30 @@ export async function executeWebFetch(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-    const response = await fetch(parsedUrl.href, {
-      method: 'GET',
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-      },
-      redirect: 'follow',
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(parsedUrl.href, {
+        method: 'GET',
+        headers: {
+          'User-Agent': USER_AGENT,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
-    clearTimeout(timeoutId);
-
-    // Check for redirects to different hosts
     const responseUrl = new URL(response.url);
-    if (responseUrl.host !== parsedUrl.host) {
+    if (responseUrl.protocol !== 'https:') {
       return {
         toolName: 'WebFetch',
-        status: 'success',
-        output: `Redirect detected to different host. Please fetch the redirect URL directly: ${response.url}`,
-        isSuccess: true,
+        status: 'error',
+        output: `Invalid redirect protocol: ${responseUrl.protocol}. Only HTTPS is supported.`,
+        isSuccess: false,
         durationMs: Date.now() - startTime,
-        metadata: {
-          redirectUrl: response.url,
-          originalUrl: url,
-        },
       };
     }
 
@@ -131,53 +197,68 @@ export async function executeWebFetch(
       };
     }
 
-    // Get content type
-    const contentType = response.headers.get('content-type') ?? '';
-    const isHtml = contentType.includes('text/html') || contentType.includes('application/xhtml');
-    const isText = contentType.includes('text/') || contentType.includes('application/json');
+    const contentTypeHeader = response.headers.get('content-type') ?? '';
+    const { mimeType, charset } = parseContentType(contentTypeHeader);
+    const rawContent = await readResponseText(response, charset);
+    const rawLength = rawContent.length;
+    const contentFlags = detectContentFlags(mimeType, rawContent);
 
-    if (!isHtml && !isText) {
+    if (!contentFlags.isText) {
       return {
         toolName: 'WebFetch',
         status: 'error',
-        output: `Unsupported content type: ${contentType}. WebFetch only supports HTML and text content.`,
+        output: `Unsupported content type: ${contentTypeHeader}. WebFetch only supports HTML, JSON, and text content.`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
     }
 
-    // Read content with size limit
-    let content = await response.text();
-    const originalLength = content.length;
-
-    if (content.length > MAX_CONTENT_LENGTH) {
-      content = content.slice(0, MAX_CONTENT_LENGTH);
+    let content = rawContent;
+    let htmlSource: string | undefined;
+    if (contentFlags.isHtml) {
+      const title = extractTitle(rawContent);
+      const extracted = extractPrimaryHtml(rawContent);
+      content = htmlToMarkdown(extracted.html, title);
+      htmlSource = extracted.source;
+    } else if (contentFlags.isJson) {
+      content = formatJson(rawContent);
     }
 
-    // Convert HTML to markdown-like text
-    if (isHtml) {
-      content = htmlToMarkdown(content);
+    const extraction = extractRelevantContent(content, prompt);
+    let finalContent = extraction.content;
+    const extractedLength = finalContent.length;
+
+    if (finalContent.length > MAX_CONTENT_LENGTH) {
+      finalContent = finalContent.slice(0, MAX_CONTENT_LENGTH) + '\n\n[Content truncated...]';
     }
 
-    // Truncate again after conversion if needed
-    if (content.length > MAX_CONTENT_LENGTH) {
-      content = content.slice(0, MAX_CONTENT_LENGTH) + '\n\n[Content truncated...]';
-    }
-
-    // Build response with context about what was fetched
-    const output = [
-      `## Fetched: ${parsedUrl.href}`,
+    const outputLines = [
+      `## Fetched: ${responseUrl.href}`,
       '',
       `**Prompt:** ${prompt}`,
-      '',
-      '---',
-      '',
-      content,
-      '',
-      '---',
-      '',
-      `*Content length: ${content.length} chars${originalLength > MAX_CONTENT_LENGTH ? ` (truncated from ${originalLength})` : ''}*`,
-    ].join('\n');
+    ];
+    if (responseUrl.href !== parsedUrl.href) {
+      outputLines.push(`**Redirected from:** ${parsedUrl.href}`);
+    }
+    if (extraction.mode === 'extracted') {
+      outputLines.push(
+        `**Extraction:** matched ${extraction.matchedBlocks} of ${extraction.totalBlocks} blocks`
+      );
+    } else {
+      outputLines.push('**Extraction:** full content');
+    }
+    if (extraction.keywords.length > 0) {
+      outputLines.push(`**Keywords:** ${extraction.keywords.join(', ')}`);
+    }
+    if (htmlSource) {
+      outputLines.push(`**HTML source:** ${htmlSource}`);
+    }
+    outputLines.push('', '---', '', finalContent, '', '---', '');
+    outputLines.push(
+      `*Content length: ${finalContent.length} chars${extractedLength > MAX_CONTENT_LENGTH ? ` (truncated from ${extractedLength})` : ''}*`
+    );
+
+    const output = outputLines.join('\n');
 
     return {
       toolName: 'WebFetch',
@@ -186,10 +267,17 @@ export async function executeWebFetch(
       isSuccess: true,
       durationMs: Date.now() - startTime,
       metadata: {
-        url: parsedUrl.href,
-        contentType,
-        contentLength: content.length,
-        truncated: originalLength > MAX_CONTENT_LENGTH,
+        url: responseUrl.href,
+        originalUrl: parsedUrl.href,
+        redirected: responseUrl.href !== parsedUrl.href,
+        contentType: contentTypeHeader,
+        contentLength: finalContent.length,
+        rawLength,
+        extractedLength,
+        truncated: extractedLength > MAX_CONTENT_LENGTH,
+        extractionMode: extraction.mode,
+        extractionKeywords: extraction.keywords,
+        htmlSource,
       },
     };
   } catch (error) {
@@ -215,6 +303,239 @@ export async function executeWebFetch(
 }
 
 // ============================================
+// CONTENT PROCESSING
+// ============================================
+
+interface ContentFlags {
+  isHtml: boolean;
+  isJson: boolean;
+  isText: boolean;
+}
+
+function parseContentType(value: string): { mimeType: string; charset?: string } {
+  if (!value) {
+    return { mimeType: '' };
+  }
+
+  const [typePart, ...params] = value.split(';');
+  let charset: string | undefined;
+
+  for (const param of params) {
+    const [key, val] = param.trim().split('=');
+    if (key?.toLowerCase() === 'charset' && val) {
+      charset = val.replace(/["']/g, '').trim();
+    }
+  }
+
+  return { mimeType: typePart.trim().toLowerCase(), charset };
+}
+
+async function readResponseText(response: Response, charset?: string): Promise<string> {
+  try {
+    const buffer = await response.arrayBuffer();
+    return decodeBuffer(buffer, charset);
+  } catch {
+    return response.text();
+  }
+}
+
+function decodeBuffer(buffer: ArrayBuffer, charset?: string): string {
+  if (charset) {
+    try {
+      return new TextDecoder(charset).decode(buffer);
+    } catch {
+      // Fall back to UTF-8 below.
+    }
+  }
+  return new TextDecoder('utf-8').decode(buffer);
+}
+
+function detectContentFlags(mimeType: string, content: string): ContentFlags {
+  const normalized = mimeType.toLowerCase();
+  if (normalized && normalized !== 'application/octet-stream') {
+    const isHtml = normalized.includes('html') || normalized.includes('xhtml');
+    const isJson = normalized.includes('json');
+    const isText =
+      normalized.startsWith('text/') ||
+      normalized.includes('json') ||
+      normalized.includes('xml') ||
+      normalized.includes('xhtml');
+    return { isHtml, isJson, isText };
+  }
+
+  const sample = content.slice(0, 1000);
+  if (sample.includes('\u0000')) {
+    return { isHtml: false, isJson: false, isText: false };
+  }
+
+  const normalizedSample = sample.trim().toLowerCase();
+  const isHtml =
+    normalizedSample.startsWith('<!doctype') ||
+    normalizedSample.includes('<html') ||
+    normalizedSample.includes('<body');
+  const isJson = normalizedSample.startsWith('{') || normalizedSample.startsWith('[');
+
+  return { isHtml, isJson, isText: true };
+}
+
+function extractPrimaryHtml(html: string): { html: string; source: string } {
+  const candidates: Array<{ source: string; regex: RegExp; group: number }> = [
+    { source: 'article', regex: /<article[^>]*>([\s\S]*?)<\/article>/i, group: 1 },
+    { source: 'main', regex: /<main[^>]*>([\s\S]*?)<\/main>/i, group: 1 },
+    {
+      source: 'content',
+      regex:
+        /<(div|section)[^>]*(id|class)=["'][^"']*(content|article|post|entry|main)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/i,
+      group: 4,
+    },
+    { source: 'body', regex: /<body[^>]*>([\s\S]*?)<\/body>/i, group: 1 },
+  ];
+
+  for (const candidate of candidates) {
+    const match = candidate.regex.exec(html);
+    if (!match) {
+      continue;
+    }
+    const extracted = match[candidate.group]?.trim();
+    if (extracted) {
+      return { html: extracted, source: candidate.source };
+    }
+  }
+
+  return { html, source: 'document' };
+}
+
+function extractTitle(html: string): string | undefined {
+  const match = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  if (!match) {
+    return undefined;
+  }
+  const title = decodeHtmlEntities(stripHtmlTags(match[1])).trim();
+  return title || undefined;
+}
+
+function formatJson(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+function extractRelevantContent(
+  text: string,
+  prompt: string
+): {
+  content: string;
+  mode: 'full' | 'extracted';
+  matchedBlocks: number;
+  totalBlocks: number;
+  keywords: string[];
+} {
+  const keywords = extractKeywords(prompt);
+  const blocks = text
+    .split(/\n{2,}/g)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  if (blocks.length === 0) {
+    return {
+      content: text,
+      mode: 'full',
+      matchedBlocks: 0,
+      totalBlocks: 0,
+      keywords,
+    };
+  }
+
+  if (keywords.length === 0) {
+    return {
+      content: text,
+      mode: 'full',
+      matchedBlocks: 0,
+      totalBlocks: blocks.length,
+      keywords,
+    };
+  }
+
+  const scored = blocks.map((block, index) => {
+    const lower = block.toLowerCase();
+    let score = 0;
+    for (const keyword of keywords) {
+      let pos = lower.indexOf(keyword);
+      while (pos !== -1) {
+        score += 1;
+        pos = lower.indexOf(keyword, pos + keyword.length);
+      }
+    }
+    if (block.startsWith('#')) {
+      score += 1;
+    }
+    return { block, index, score };
+  });
+
+  const matches = scored.filter((item) => item.score > 0);
+  if (matches.length === 0) {
+    return {
+      content: text,
+      mode: 'full',
+      matchedBlocks: 0,
+      totalBlocks: blocks.length,
+      keywords,
+    };
+  }
+
+  matches.sort((a, b) => b.score - a.score);
+  const selected = matches
+    .slice(0, MAX_EXTRACTED_BLOCKS)
+    .sort((a, b) => a.index - b.index);
+
+  return {
+    content: selected.map((item) => item.block).join('\n\n'),
+    mode: 'extracted',
+    matchedBlocks: selected.length,
+    totalBlocks: blocks.length,
+    keywords,
+  };
+}
+
+function extractKeywords(prompt: string): string[] {
+  const tokens = prompt
+    .toLowerCase()
+    .replace(/['"]/g, ' ')
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean);
+
+  const keywords = new Set<string>();
+  for (const token of tokens) {
+    if (token.length < MIN_KEYWORD_LENGTH) {
+      continue;
+    }
+    if (STOPWORDS.has(token)) {
+      continue;
+    }
+    keywords.add(token);
+  }
+
+  return Array.from(keywords);
+}
+
+function stripHtmlTags(text: string): string {
+  return text.replace(/<[^>]+>/g, '');
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+// ============================================
 // HTML TO MARKDOWN CONVERSION
 // ============================================
 
@@ -222,13 +543,15 @@ export async function executeWebFetch(
  * Convert HTML to a readable markdown-like format.
  * This is a lightweight extraction - not a full HTML parser.
  */
-function htmlToMarkdown(html: string): string {
+function htmlToMarkdown(html: string, title?: string): string {
   let text = html;
 
   // Remove script and style blocks
   text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
   text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
   text = text.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+  text = text.replace(/<head[\s\S]*?<\/head>/gi, '');
+  text = text.replace(/<(nav|footer|aside|form|svg|canvas|iframe|template|menu)[\s\S]*?<\/\1>/gi, '');
 
   // Remove HTML comments
   text = text.replace(/<!--[\s\S]*?-->/g, '');
@@ -252,6 +575,10 @@ function htmlToMarkdown(html: string): string {
   text = text.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n');
   text = text.replace(/<div[^>]*>([\s\S]*?)<\/div>/gi, '\n$1\n');
 
+  // Convert images
+  text = text.replace(/<img[^>]*alt=["']([^"']+)["'][^>]*>/gi, '![$1]');
+  text = text.replace(/<img[^>]*>/gi, '');
+
   // Convert line breaks
   text = text.replace(/<br\s*\/?>/gi, '\n');
 
@@ -267,22 +594,21 @@ function htmlToMarkdown(html: string): string {
   text = text.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, '\n> $1\n');
 
   // Remove remaining HTML tags
-  text = text.replace(/<[^>]+>/g, '');
+  text = stripHtmlTags(text);
 
   // Decode common HTML entities
-  text = text.replace(/&nbsp;/g, ' ');
-  text = text.replace(/&amp;/g, '&');
-  text = text.replace(/&lt;/g, '<');
-  text = text.replace(/&gt;/g, '>');
-  text = text.replace(/&quot;/g, '"');
-  text = text.replace(/&#39;/g, "'");
-  text = text.replace(/&apos;/g, "'");
+  text = decodeHtmlEntities(text);
 
   // Clean up whitespace
   text = text.replace(/\n{3,}/g, '\n\n');
   text = text.replace(/[ \t]+/g, ' ');
   text = text.split('\n').map((line) => line.trim()).join('\n');
   text = text.trim();
+
+  const normalizedTitle = title ? decodeHtmlEntities(stripHtmlTags(title)).trim() : '';
+  if (normalizedTitle) {
+    return `# ${normalizedTitle}\n\n${text}`;
+  }
 
   return text;
 }
@@ -302,9 +628,10 @@ Usage:
 - Provide a prompt describing what information to extract
 - HTTP URLs are automatically upgraded to HTTPS
 - HTML content is converted to markdown for easier reading
+- Prompt keywords are used to extract the most relevant sections (full content if no matches)
 - Large content is truncated to prevent context overflow
 
-When redirects occur to a different host, you will receive the redirect URL and should make a new request.`,
+Redirects are followed automatically; the output notes when a redirect occurred.`,
   parameters: {
     type: 'object',
     properties: {

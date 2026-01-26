@@ -826,7 +826,7 @@ export class Agent {
       });
       metrics.llmCallsMade++;
 
-      this.emitLlmCall(response, messages, llmDurationMs, toolsForThisCall ?? [], workItem.workId);
+      this.emitLlmCall(response, messages, llmDurationMs, toolsForThisCall ?? [], localContext.maxTokens, workItem.workId);
 
       // Update local context metrics with actual token usage from LLM
       if (response.usage) {
@@ -1176,6 +1176,15 @@ export class Agent {
       promise: Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
     }> = [];
 
+    const invalidatePath = (pathValue: unknown): void => {
+      if (typeof pathValue !== 'string' || pathValue.length === 0) {
+        return;
+      }
+      result.invalidatedPaths.push(pathValue);
+      localReadFiles.delete(pathValue);
+      localContext.invalidateFileContent(pathValue);
+    };
+
     const handleToolResult = (
       call: { id: string; name: string; arguments: Record<string, unknown> },
       toolResult: ToolResult,
@@ -1201,9 +1210,17 @@ export class Agent {
           }
         }
 
-        if ((nameLower === 'write' || nameLower === 'edit') && call.arguments.path) {
-          result.invalidatedPaths.push(String(call.arguments.path));
-          localReadFiles.delete(String(call.arguments.path));
+        if (nameLower === 'write' || nameLower === 'edit') {
+          invalidatePath(call.arguments.path ?? call.arguments.file_path);
+        } else if (nameLower === 'batchedit') {
+          const edits = call.arguments.edits;
+          if (Array.isArray(edits)) {
+            for (const edit of edits) {
+              if (!edit || typeof edit !== 'object') continue;
+              const editArgs = edit as Record<string, unknown>;
+              invalidatePath(editArgs.path ?? editArgs.file_path);
+            }
+          }
         }
       } else {
         metrics.toolCallsFailed++;
@@ -2049,6 +2066,7 @@ export class Agent {
     messages: Array<Record<string, unknown>>,
     durationMs: number,
     tools: ToolDefinition[],
+    maxWindowSize: number,
     workItemId?: string
   ): void {
     const content = response.content ?? '';
@@ -2063,6 +2081,7 @@ export class Agent {
       promptTokens: response.usage?.promptTokens ?? 0,
       completionTokens: response.usage?.completionTokens ?? 0,
       cachedTokens: response.usage?.cachedTokens,
+      maxWindowSize,
       durationMs,
       model: response.model ?? 'unknown',
       toolCallsCount: toolCalls.length,

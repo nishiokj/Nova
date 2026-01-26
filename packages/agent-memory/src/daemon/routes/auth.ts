@@ -11,28 +11,7 @@ import type { SyncDaemon } from '../index.js'
 import { badRequest, notFound } from '../server.js'
 import type { OAuthProviderId } from '../../auth/oauth-providers.js'
 
-// In-memory state storage (in production, use Redis or database)
-const pendingStates = new Map<string, {
-  connector: string
-  provider: OAuthProviderId
-  scopes: string[]
-  redirectUri: string
-  createdAt: Date
-}>()
-
-// Clean up old states periodically (15 minute expiry)
 const STATE_EXPIRY_MS = 15 * 60 * 1000
-
-function cleanupStates(): void {
-  const now = Date.now()
-  for (const [state, data] of pendingStates) {
-    if (now - data.createdAt.getTime() > STATE_EXPIRY_MS) {
-      pendingStates.delete(state)
-    }
-  }
-}
-
-setInterval(cleanupStates, 60000) // Clean up every minute
 
 export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void {
   // List available OAuth providers
@@ -61,8 +40,13 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
       throw badRequest(`Connector ${connector} does not support OAuth`)
     }
 
-    // Generate state for CSRF protection
-    const state = randomBytes(32).toString('hex')
+    // Generate stateless signed state for CSRF protection
+    const state = daemon.signAuthState({
+      connector,
+      redirectUri,
+      issuedAt: Date.now(),
+      nonce: randomBytes(16).toString('hex'),
+    })
 
     let url: string
     let provider: OAuthProviderId
@@ -84,15 +68,6 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
       if (forceNew !== 'true') {
         const existing = await daemon.findExistingProviderCredentials(provider, scopes)
         if (existing) {
-          // Store state anyway in case user wants to re-auth
-          pendingStates.set(state, {
-            connector,
-            provider,
-            scopes,
-            redirectUri,
-            createdAt: new Date(),
-          })
-
           // Return with existing credentials info
           return {
             body: {
@@ -117,15 +92,6 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
       provider = 'google' as OAuthProviderId // fallback, won't be used
       scopes = authConfig.scopes
     }
-
-    // Store state for validation
-    pendingStates.set(state, {
-      connector,
-      provider,
-      scopes,
-      redirectUri,
-      createdAt: new Date(),
-    })
 
     return { body: { url, state, provider } }
   })
@@ -166,7 +132,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     // Validate state
-    const pending = pendingStates.get(body.state)
+    const pending = daemon.verifyAuthState(body.state, STATE_EXPIRY_MS)
     if (!pending) {
       throw badRequest('Invalid or expired state parameter')
     }
@@ -178,9 +144,6 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     if (pending.redirectUri !== body.redirectUri) {
       throw badRequest('Redirect URI does not match')
     }
-
-    // Clean up state
-    pendingStates.delete(body.state)
 
     const connectorInstance = daemon.getConnector(connector as any)
     if (!connectorInstance) {
@@ -194,7 +157,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     if (authConfig?.type === 'oauth2_provider') {
       // Use centralized provider for token exchange
       tokens = await daemon.oauthProviders.exchangeCode(
-        pending.provider,
+        authConfig.provider,
         body.code,
         body.redirectUri
       )
@@ -212,7 +175,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     const account = await daemon.createAccountWithTokens(
       connector as any,
       tokens,
-      pending.scopes
+      authConfig.scopes
     )
 
     return { body: { account } }
@@ -253,7 +216,7 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     // Validate state
-    const pending = pendingStates.get(state)
+    const pending = daemon.verifyAuthState(state, STATE_EXPIRY_MS)
     if (!pending) {
       return {
         status: 400,
@@ -266,9 +229,6 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
 </body></html>`,
       }
     }
-
-    // Clean up state
-    pendingStates.delete(state)
 
     const connectorInstance = daemon.getConnector(pending.connector as any)
     if (!connectorInstance) {
@@ -291,14 +251,14 @@ export function registerAuthRoutes(server: HttpServer, daemon: SyncDaemon): void
 
       if (authConfig?.type === 'oauth2_provider') {
         const tokens = await daemon.oauthProviders.exchangeCode(
-          pending.provider,
+          authConfig.provider,
           code,
           pending.redirectUri
         )
         account = await daemon.createAccountWithTokens(
           pending.connector as any,
           tokens,
-          pending.scopes
+          authConfig.scopes
         )
       } else {
         account = await daemon.handleAuthCallback(

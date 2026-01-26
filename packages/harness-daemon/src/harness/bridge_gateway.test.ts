@@ -96,7 +96,7 @@ class FakeHarness {
   }
 
   createReadyEvent(sessionKey: string): BridgeEvent {
-    return createReadyEvent(sessionKey);
+    return createReadyEvent(sessionKey, []);
   }
 
   getConfig(): FullHarnessConfig {

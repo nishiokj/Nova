@@ -24,8 +24,8 @@ export function registerJobRoutes(server: HttpServer, daemon: SyncDaemon): void 
     } else if (status === 'running') {
       jobs = await syncJobRepo.findRunning()
     } else {
-      // Default to pending jobs
-      const result = await syncJobRepo.findPending({ limit: parseInt(limit, 10) })
+      // Default to recent jobs (all statuses)
+      const result = await syncJobRepo.findRecent({ limit: parseInt(limit, 10) })
       jobs = result.items
     }
 

@@ -346,7 +346,7 @@ sync-api-cli connectors available
 
 # Register a connector
 sync-api-cli connectors register gmail
-sync-api-cli connectors register github --config clientId=xxx clientSecret=yyy
+sync-api-cli connectors register github
 
 # Update config
 sync-api-cli connectors config github --set rateLimit=10

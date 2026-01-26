@@ -386,15 +386,10 @@ describe('GitHub Schemas', () => {
 // ============ Connector Tests ============
 
 describe('GitHubConnector', () => {
-  const testConfig: GitHubConnectorConfig = {
-    clientId: 'test-client-id',
-    clientSecret: 'test-client-secret',
-  }
-
   let connector: GitHubConnector
 
   beforeEach(() => {
-    connector = createGitHubConnector(testConfig, { logger: noopLogger })
+    connector = createGitHubConnector({}, { logger: noopLogger })
   })
 
   describe('constructor', () => {
@@ -418,36 +413,29 @@ describe('GitHubConnector', () => {
       expect(connector.capabilities.supportedEntityTypes).toContain('notification')
     })
 
-    it('should have OAuth2 auth config', () => {
-      expect(connector.authConfig.type).toBe('oauth2')
-      expect((connector.authConfig as any).clientId).toBe(testConfig.clientId)
+    it('should use OAuth provider auth config', () => {
+      expect(connector.authConfig.type).toBe('oauth2_provider')
+      expect((connector.authConfig as any).provider).toBe('github')
     })
 
     it('should accept custom API base URL', () => {
       const enterpriseConfig: GitHubConnectorConfig = {
-        ...testConfig,
         apiBaseUrl: 'https://github.mycompany.com/api/v3',
       }
       const enterpriseConnector = createGitHubConnector(enterpriseConfig, { logger: noopLogger })
       expect(enterpriseConnector).toBeDefined()
     })
+
   })
 
   describe('getAuthorizationUrl', () => {
-    it('should generate correct authorization URL', () => {
+    it('should throw because OAuth URLs are handled by the provider registry', () => {
       const state = 'random-state-123'
       const redirectUri = 'https://myapp.com/callback'
 
-      const url = connector.getAuthorizationUrl(state, redirectUri)
-      const parsed = new URL(url)
-
-      expect(parsed.origin).toBe('https://github.com')
-      expect(parsed.pathname).toBe('/login/oauth/authorize')
-      expect(parsed.searchParams.get('client_id')).toBe(testConfig.clientId)
-      expect(parsed.searchParams.get('redirect_uri')).toBe(redirectUri)
-      expect(parsed.searchParams.get('state')).toBe(state)
-      expect(parsed.searchParams.get('response_type')).toBe('code')
-      expect(parsed.searchParams.get('scope')).toContain('repo')
+      expect(() => connector.getAuthorizationUrl(state, redirectUri)).toThrow(
+        'github connector does not support OAuth2'
+      )
     })
   })
 
@@ -630,10 +618,7 @@ describe('GitHubConnector', () => {
 
 describe('createGitHubConnector', () => {
   it('should create a GitHubConnector instance', () => {
-    const connector = createGitHubConnector({
-      clientId: 'id',
-      clientSecret: 'secret',
-    }, { logger: noopLogger })
+    const connector = createGitHubConnector({}, { logger: noopLogger })
 
     expect(connector).toBeInstanceOf(GitHubConnector)
     expect(connector.type).toBe('github')
