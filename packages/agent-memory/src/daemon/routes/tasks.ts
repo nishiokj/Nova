@@ -52,17 +52,27 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
   })
 
   // Create one-shot backfill task
+  // Accepts either accountId directly, or connector (which auto-resolves to account)
   server.post('/tasks/backfill', async (req) => {
     const body = req.body as {
       accountId?: string
+      connector?: string
       entityTypes?: string[]
     }
 
-    if (!body.accountId) {
-      throw badRequest('Missing required field: accountId')
+    let accountId: string
+
+    if (body.accountId) {
+      accountId = body.accountId
+    } else if (body.connector) {
+      // Resolve connector to account
+      const account = await daemon.resolveAccount(body.connector as any)
+      accountId = account.id
+    } else {
+      throw badRequest('Missing required field: accountId or connector')
     }
 
-    const { task, job } = await daemon.backfill(body.accountId, {
+    const { task, job } = await daemon.backfill(accountId, {
       entityTypes: body.entityTypes,
     })
 
@@ -70,16 +80,25 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
   })
 
   // Create recurring sync task
+  // Accepts either accountId directly, or connector (which auto-resolves to account)
   server.post('/tasks/subscribe', async (req) => {
     const body = req.body as {
       accountId?: string
+      connector?: string
       syncType?: 'backfill' | 'incremental'
       entityTypes?: string[]
       intervalMs?: number
     }
 
-    if (!body.accountId) {
-      throw badRequest('Missing required field: accountId')
+    let accountId: string
+
+    if (body.accountId) {
+      accountId = body.accountId
+    } else if (body.connector) {
+      const account = await daemon.resolveAccount(body.connector as any)
+      accountId = account.id
+    } else {
+      throw badRequest('Missing required field: accountId or connector')
     }
 
     if (!body.syncType) {
@@ -90,7 +109,7 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
       throw badRequest('intervalMs must be at least 1000ms')
     }
 
-    const task = await daemon.subscribe(body.accountId, {
+    const task = await daemon.subscribe(accountId, {
       syncType: body.syncType,
       entityTypes: body.entityTypes,
       intervalMs: body.intervalMs,
@@ -100,17 +119,26 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
   })
 
   // Create webhook-driven sync task
+  // Accepts either accountId directly, or connector (which auto-resolves to account)
   server.post('/tasks/webhook', async (req) => {
     const body = req.body as {
       accountId?: string
+      connector?: string
       entityTypes?: string[]
     }
 
-    if (!body.accountId) {
-      throw badRequest('Missing required field: accountId')
+    let accountId: string
+
+    if (body.accountId) {
+      accountId = body.accountId
+    } else if (body.connector) {
+      const account = await daemon.resolveAccount(body.connector as any)
+      accountId = account.id
+    } else {
+      throw badRequest('Missing required field: accountId or connector')
     }
 
-    const task = await daemon.subscribeWebhook(body.accountId, {
+    const task = await daemon.subscribeWebhook(accountId, {
       entityTypes: body.entityTypes,
     })
 

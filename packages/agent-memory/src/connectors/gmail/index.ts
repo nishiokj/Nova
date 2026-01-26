@@ -125,11 +125,13 @@ export class GmailConnector extends BaseConnector {
     )
 
     if (!response.ok) {
+      console.error('[GmailConnector] Profile request failed:', response.status, response.data)
       throw new Error(`Failed to get user profile: ${response.status}`)
     }
 
     const parsed = GmailProfileSchema.safeParse(response.data)
     if (!parsed.success) {
+      console.error('[GmailConnector] Profile parse failed:', response.data, parsed.error.format())
       throw new Error(`Invalid user profile response: ${parsed.error.message}`)
     }
 

@@ -11,11 +11,20 @@ import type {
   AccountResponse,
   AuthStatusResponse,
   AuthUrlResponse,
+  AvailableConnectorsResponse,
   BackfillResponse,
+  ConnectorInfo,
+  ConnectorListResponse,
+  ConnectorRegistrationResponse,
+  ConnectorResponse,
+  ConnectorUnregisterResponse,
+  DeviceAuthPollResponse,
+  DeviceAuthResponse,
   HealthResponse,
   JobListResponse,
   JobResponse,
   ProvidersResponse,
+  RegisteredConnector,
   RetryResponse,
   SyncJob,
   SyncTask,
@@ -98,17 +107,15 @@ export class SyncClient {
 
       if (!response.ok) {
         const errorBody = await response.text()
-        let errorData: { error?: string; code?: string } = {}
+        let errorData: { error?: string; message?: string; code?: string } = {}
         try {
           errorData = JSON.parse(errorBody)
         } catch {
           errorData = { error: errorBody }
         }
-        throw new SyncClientError(
-          errorData.error || `HTTP ${response.status}`,
-          response.status,
-          errorData.code
-        )
+        // Prefer message field for detailed errors, fall back to error field
+        const errorMessage = errorData.message || errorData.error || `HTTP ${response.status}`
+        throw new SyncClientError(errorMessage, response.status, errorData.code)
       }
 
       const contentType = response.headers.get('content-type')
@@ -231,6 +238,81 @@ export class SyncClient {
     },
   }
 
+  // ============ Connectors ============
+
+  /**
+   * Connector discovery and management methods.
+   */
+  connectors = {
+    /**
+     * List all registered (loaded) connectors.
+     */
+    list: async (): Promise<ConnectorInfo[]> => {
+      const response = await this.get<ConnectorListResponse>('/connectors')
+      return response.connectors
+    },
+
+    /**
+     * List available connector factories (not yet registered).
+     */
+    available: async (): Promise<string[]> => {
+      const response = await this.get<AvailableConnectorsResponse>('/connectors/available')
+      return response.available
+    },
+
+    /**
+     * Get info about a specific connector.
+     * Returns connector info if loaded, or factory availability if not.
+     */
+    get: async (type: string): Promise<ConnectorResponse> => {
+      return this.get<ConnectorResponse>(`/connectors/${type}`)
+    },
+
+    /**
+     * List accounts for a connector.
+     */
+    accounts: async (type: string): Promise<Account[]> => {
+      const response = await this.get<AccountListResponse>(`/connectors/${type}/accounts`)
+      return response.accounts
+    },
+
+    /**
+     * Register a new connector (persists to database).
+     * @param type - Connector type (must have a registered factory)
+     * @param config - Optional configuration for the connector
+     */
+    register: async (type: string, config?: Record<string, unknown>): Promise<ConnectorRegistrationResponse> => {
+      return this.post<ConnectorRegistrationResponse>('/connectors/register', { type, config })
+    },
+
+    /**
+     * Update connector configuration.
+     * Reloads the connector with the new config.
+     * @param type - Connector type
+     * @param config - New configuration
+     */
+    updateConfig: async (type: string, config: Record<string, unknown>): Promise<ConnectorRegistrationResponse> => {
+      return this.patch<ConnectorRegistrationResponse>(`/connectors/${type}/config`, { config })
+    },
+
+    /**
+     * Enable or disable a connector.
+     * @param type - Connector type
+     * @param enabled - Whether to enable or disable
+     */
+    setEnabled: async (type: string, enabled: boolean): Promise<ConnectorRegistrationResponse> => {
+      return this.patch<ConnectorRegistrationResponse>(`/connectors/${type}`, { enabled })
+    },
+
+    /**
+     * Unregister a connector (removes from database and unloads).
+     * @param type - Connector type
+     */
+    unregister: async (type: string): Promise<ConnectorUnregisterResponse> => {
+      return this.delete<ConnectorUnregisterResponse>(`/connectors/${type}`)
+    },
+  }
+
   // ============ Auth ============
 
   /**
@@ -275,6 +357,19 @@ export class SyncClient {
     },
 
     /**
+     * Create account using credentials from an existing account.
+     * Used when multiple connectors share the same OAuth provider.
+     * @param connector - Connector type for the new account
+     * @param sourceAccountId - Account ID with existing credentials to copy
+     */
+    fromExisting: async (connector: string, sourceAccountId: string): Promise<Account> => {
+      const response = await this.post<AccountResponse>(`/auth/${connector}/from-existing`, {
+        sourceAccountId,
+      })
+      return response.account
+    },
+
+    /**
      * Force token refresh for an account.
      */
     refresh: async (accountId: string): Promise<void> => {
@@ -286,6 +381,50 @@ export class SyncClient {
      */
     status: async (accountId: string): Promise<AuthStatusResponse> => {
       return this.get<AuthStatusResponse>(`/auth/status/${accountId}`)
+    },
+
+    /**
+     * Initiate device authorization flow (headless/CLI).
+     * Returns codes for user to enter at verification URL.
+     */
+    deviceAuth: async (connector: string): Promise<DeviceAuthResponse> => {
+      return this.post<DeviceAuthResponse>(`/auth/${connector}/device`)
+    },
+
+    /**
+     * Poll device auth status.
+     * Returns { status: 'pending' } or { status: 'complete', account }.
+     */
+    pollDeviceAuth: async (
+      connector: string,
+      deviceCode: string
+    ): Promise<DeviceAuthPollResponse> => {
+      return this.post<DeviceAuthPollResponse>(`/auth/${connector}/device/poll`, { deviceCode })
+    },
+
+    /**
+     * Complete device auth with polling loop.
+     * Blocks until user authorizes or timeout.
+     */
+    waitForDeviceAuth: async (
+      connector: string,
+      deviceCode: string,
+      opts?: { interval?: number; timeout?: number; onPoll?: () => void }
+    ): Promise<Account> => {
+      const interval = opts?.interval ?? 5000
+      const timeout = opts?.timeout ?? 300000 // 5 minutes
+      const startTime = Date.now()
+
+      while (Date.now() - startTime < timeout) {
+        opts?.onPoll?.()
+        const result = await this.auth.pollDeviceAuth(connector, deviceCode)
+        if (result.status === 'complete') {
+          return result.account!
+        }
+        await new Promise((resolve) => setTimeout(resolve, interval))
+      }
+
+      throw new SyncClientError('Device authorization timed out', 408, 'DEVICE_AUTH_TIMEOUT')
     },
   }
 
@@ -324,43 +463,41 @@ export class SyncClient {
 
     /**
      * Create a one-shot backfill task and schedule immediately.
+     * @param opts - Options with either accountId or connector (auto-resolved)
      */
-    backfill: async (
-      accountId: string,
+    backfill: async (opts: {
+      accountId?: string
+      connector?: string
       entityTypes?: string[]
-    ): Promise<BackfillResponse> => {
-      return this.post<BackfillResponse>('/tasks/backfill', { accountId, entityTypes })
+    }): Promise<BackfillResponse> => {
+      return this.post<BackfillResponse>('/tasks/backfill', opts)
     },
 
     /**
      * Create a recurring sync subscription.
+     * @param opts - Options with either accountId or connector (auto-resolved)
      */
-    subscribe: async (
-      accountId: string,
-      opts: {
-        syncType: SyncType
-        intervalMs: number
-        entityTypes?: string[]
-      }
-    ): Promise<SyncTask> => {
-      const response = await this.post<{ task: SyncTask }>('/tasks/subscribe', {
-        accountId,
-        ...opts,
-      })
+    subscribe: async (opts: {
+      accountId?: string
+      connector?: string
+      syncType: SyncType
+      intervalMs: number
+      entityTypes?: string[]
+    }): Promise<SyncTask> => {
+      const response = await this.post<{ task: SyncTask }>('/tasks/subscribe', opts)
       return response.task
     },
 
     /**
      * Create a webhook-driven sync task.
+     * @param opts - Options with either accountId or connector (auto-resolved)
      */
-    webhook: async (
-      accountId: string,
+    webhook: async (opts: {
+      accountId?: string
+      connector?: string
       entityTypes?: string[]
-    ): Promise<SyncTask> => {
-      const response = await this.post<{ task: SyncTask }>('/tasks/webhook', {
-        accountId,
-        entityTypes,
-      })
+    }): Promise<SyncTask> => {
+      const response = await this.post<{ task: SyncTask }>('/tasks/webhook', opts)
       return response.task
     },
 

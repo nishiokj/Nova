@@ -7,6 +7,7 @@
 
 import type { Sql } from 'postgres'
 import type { ConnectorType } from '../ids.js'
+import type { OAuthProviderId } from '../auth/oauth-providers.js'
 import type { Connector } from '../connector/sdk/types.js'
 import type { AuthProvider } from '../auth/provider.js'
 import type { Account, AccountRepository } from '../db/repositories/account.js'
@@ -15,12 +16,14 @@ import type { SyncTask, SyncTaskRepository } from '../db/repositories/sync-task.
 import type { RawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import type { CanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import type { EntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
+import type { RegisteredConnectorRepository, RegisteredConnector } from '../db/repositories/registered-connector.js'
 import { createAccountRepository } from '../db/repositories/account.js'
 import { createSyncJobRepository } from '../db/repositories/sync-job.js'
 import { createSyncTaskRepository } from '../db/repositories/sync-task.js'
 import { createRawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import { createCanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import { createEntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
+import { createRegisteredConnectorRepository } from '../db/repositories/registered-connector.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
@@ -28,6 +31,7 @@ import { DatabaseAuthProvider, type AuthProviderConfig } from '../auth/provider.
 import { OAuthProviderRegistry, oauthProviders } from '../auth/oauth-providers.js'
 import { HttpServer, type ServerConfig } from './server.js'
 import { registerRoutes } from './routes/index.js'
+import { getFactory, listFactoryTypes, hasFactory, type LoadConnectorsResult } from '../connectors/registry.js'
 
 // ============ Configuration ============
 
@@ -92,6 +96,7 @@ export class SyncDaemon {
   readonly envelopeRepo: RawEnvelopeRepository
   readonly entityRepo: CanonicalEntityRepository
   readonly mappingRepo: EntitySourceMappingRepository
+  readonly connectorRepo: RegisteredConnectorRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
@@ -111,7 +116,8 @@ export class SyncDaemon {
     taskRepo: SyncTaskRepository,
     envelopeRepo: RawEnvelopeRepository,
     entityRepo: CanonicalEntityRepository,
-    mappingRepo: EntitySourceMappingRepository
+    mappingRepo: EntitySourceMappingRepository,
+    connectorRepo: RegisteredConnectorRepository
   ) {
     this.config = config
     this.server = server
@@ -126,6 +132,7 @@ export class SyncDaemon {
     this.envelopeRepo = envelopeRepo
     this.entityRepo = entityRepo
     this.mappingRepo = mappingRepo
+    this.connectorRepo = connectorRepo
   }
 
   /**
@@ -149,6 +156,7 @@ export class SyncDaemon {
     const envelopeRepo = createRawEnvelopeRepository(ctx)
     const entityRepo = createCanonicalEntityRepository(ctx)
     const mappingRepo = createEntitySourceMappingRepository(ctx)
+    const connectorRepo = createRegisteredConnectorRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -201,7 +209,8 @@ export class SyncDaemon {
       taskRepo,
       envelopeRepo,
       entityRepo,
-      mappingRepo
+      mappingRepo,
+      connectorRepo
     )
 
     // Store connectors map reference in daemon for registration
@@ -237,6 +246,120 @@ export class SyncDaemon {
    */
   hasConnector(type: ConnectorType): boolean {
     return this.connectors.has(type)
+  }
+
+  /**
+   * Unload a connector (remove from memory).
+   * Does not affect the database registration.
+   */
+  unloadConnector(type: ConnectorType): boolean {
+    if (!this.connectors.has(type)) {
+      return false
+    }
+    this.connectors.delete(type)
+    ;(this as any)._connectors?.delete(type)
+    return true
+  }
+
+  /**
+   * List available connector factories that are not yet registered.
+   */
+  listAvailableFactories(): ConnectorType[] {
+    const allFactories = listFactoryTypes()
+    const registered = Array.from(this.connectors.keys())
+    return allFactories.filter((f) => !registered.includes(f))
+  }
+
+  /**
+   * Load connectors from the database.
+   * Called at daemon startup to restore registered connectors.
+   */
+  async loadRegisteredConnectors(): Promise<LoadConnectorsResult> {
+    const result: LoadConnectorsResult = {
+      loaded: [],
+      errors: [],
+      skipped: [],
+    }
+
+    const registered = await this.connectorRepo.findEnabled()
+
+    for (const reg of registered) {
+      if (!hasFactory(reg.type)) {
+        result.skipped.push(reg.type)
+        continue
+      }
+
+      const entry = getFactory(reg.type)!
+
+      try {
+        const connector = await entry.factory(reg.config)
+        this.registerConnector(connector)
+        result.loaded.push(reg.type)
+      } catch (error) {
+        result.errors.push({
+          type: reg.type,
+          error: error instanceof Error ? error : new Error(String(error)),
+        })
+      }
+    }
+
+    return result
+  }
+
+  /**
+   * Register a connector dynamically (persists to database).
+   * Creates the connector from its factory and registers it.
+   */
+  async registerConnectorDynamic(
+    type: ConnectorType,
+    config?: Record<string, unknown>
+  ): Promise<RegisteredConnector> {
+    if (!hasFactory(type)) {
+      throw new Error(`No factory registered for connector type: ${type}`)
+    }
+
+    // Create and register the connector instance
+    const entry = getFactory(type)!
+    const connector = await entry.factory(config ?? {})
+    this.registerConnector(connector)
+
+    // Persist to database
+    const registered = await this.connectorRepo.register({
+      type,
+      enabled: true,
+      config: config ?? {},
+    })
+
+    return registered
+  }
+
+  /**
+   * Reload a connector (unload and re-create from database config).
+   */
+  async reloadConnector(type: ConnectorType): Promise<boolean> {
+    const registration = await this.connectorRepo.findByType(type)
+    if (!registration) {
+      return false
+    }
+
+    if (!hasFactory(type)) {
+      throw new Error(`No factory registered for connector type: ${type}`)
+    }
+
+    // Unload existing
+    this.unloadConnector(type)
+
+    // Skip if disabled
+    if (!registration.enabled) {
+      return true
+    }
+
+    // Re-create and register
+    const entry = getFactory(type)!
+    const connector = await entry.factory(registration.config)
+    this.registerConnector(connector)
+
+    return true
   }
 
   /**
@@ -404,6 +527,40 @@ export class SyncDaemon {
   }
 
   /**
+   * Find existing credentials for an OAuth provider.
+   * Searches all active accounts that use the same provider.
+   */
+  async findExistingProviderCredentials(
+    provider: OAuthProviderId,
+    requiredScopes: string[]
+  ): Promise<{ accountId: string; hasAllScopes: boolean } | null> {
+    const accounts = await this.accountRepo.findActive()
+
+    for (const account of accounts) {
+      const connector = this.connectors.get(account.connector as ConnectorType)
+      if (!connector) continue
+
+      // Check if this connector uses the same OAuth provider
+      const authConfig = connector.authConfig
+      if (authConfig?.type !== 'oauth2_provider') continue
+      if (authConfig.provider !== provider) continue
+
+      // Check if we have valid credentials
+      const creds = await this.authProvider.getCredentials(account.id)
+      if (!creds) continue
+
+      // For now, assume existing scopes are sufficient
+      // TODO: Parse token scopes and check coverage
+      return {
+        accountId: account.id,
+        hasAllScopes: true,
+      }
+    }
+
+    return null
+  }
+
+  /**
    * Get OAuth URL for a connector.
    */
   getAuthUrl(connector: ConnectorType, redirectUri: string, state?: string): string {
@@ -544,8 +701,196 @@ export class SyncDaemon {
 
     return (await this.accountRepo.findById(account.id))!
   }
+
+  /**
+   * Create an account for a connector by copying credentials from an existing account.
+   * Used when multiple connectors share the same OAuth provider (e.g., Gmail and Calendar both use Google).
+   */
+  async createAccountFromExisting(
+    connector: ConnectorType,
+    sourceAccountId: string
+  ): Promise<Account> {
+    const connectorInstance = this.connectors.get(connector)
+    if (!connectorInstance) {
+      throw new Error(`Connector not registered: ${connector}`)
+    }
+
+    // Get source account's credentials
+    const creds = await this.authProvider.getCredentials(sourceAccountId)
+    if (!creds) {
+      throw new Error('Source account has no credentials')
+    }
+
+    // Get account info using the access token
+    const ctx = {
+      accountId: 'temp',
+      accessToken: creds.accessToken,
+    }
+
+    const accounts = await connectorInstance.listAccounts(ctx)
+    const primaryAccount = accounts.find((a) => a.isPrimary) || accounts[0]
+
+    if (!primaryAccount) {
+      throw new Error('No account found with provided credentials')
+    }
+
+    // Check if account already exists for this connector
+    let account = await this.accountRepo.findByConnector(connector, primaryAccount.externalId)
+
+    if (!account) {
+      // Create new account
+      account = await this.accountRepo.create({
+        connector,
+        external_account_id: primaryAccount.externalId,
+        display_name: primaryAccount.displayName,
+        email: primaryAccount.email,
+        auth_type: 'oauth2',
+      })
+    }
+
+    // Copy credentials to the new account
+    await this.authProvider.storeCredentials(account.id, {
+      accessToken: creds.accessToken,
+      refreshToken: creds.refreshToken,
+      expiresAt: creds.expiresAt,
+    })
+
+    // Activate the account
+    await this.accountRepo.activate(account.id)
+
+    return (await this.accountRepo.findById(account.id))!
+  }
+
+  // ============ Connector Discovery ============
+
+  /**
+   * List all registered connectors with their capabilities.
+   */
+  listConnectors(): ConnectorInfo[] {
+    const result: ConnectorInfo[] = []
+    for (const [type, connector] of this.connectors) {
+      result.push({
+        type,
+        displayName: connector.displayName,
+        entityTypes: connector.capabilities.supportedEntityTypes,
+        capabilities: {
+          backfill: connector.capabilities.supportsBackfill,
+          incremental: connector.capabilities.supportsIncrementalSync,
+          webhook: connector.capabilities.supportsWebhook,
+          write: connector.capabilities.supportsWrite,
+        },
+        authType: connector.authConfig.type === 'oauth2_provider'
+          ? 'oauth2'
+          : connector.authConfig.type === 'oauth2'
+            ? 'oauth2'
+            : connector.authConfig.type,
+      })
+    }
+    return result
+  }
+
+  /**
+   * Get info about a specific connector.
+   */
+  getConnectorInfo(type: ConnectorType): ConnectorInfo | undefined {
+    const connector = this.connectors.get(type)
+    if (!connector) return undefined
+
+    return {
+      type,
+      displayName: connector.displayName,
+      entityTypes: connector.capabilities.supportedEntityTypes,
+      capabilities: {
+        backfill: connector.capabilities.supportsBackfill,
+        incremental: connector.capabilities.supportsIncrementalSync,
+        webhook: connector.capabilities.supportsWebhook,
+        write: connector.capabilities.supportsWrite,
+      },
+      authType: connector.authConfig.type === 'oauth2_provider'
+        ? 'oauth2'
+        : connector.authConfig.type === 'oauth2'
+          ? 'oauth2'
+          : connector.authConfig.type,
+    }
+  }
+
+  /**
+   * Resolve connector to a single account.
+   * Returns the account if exactly one exists, throws if none or multiple.
+   * For local auth connectors, auto-creates an account if none exists.
+   */
+  async resolveAccount(
+    connector: ConnectorType,
+    accountId?: string
+  ): Promise<Account> {
+    // If accountId provided, validate it
+    if (accountId) {
+      const account = await this.accountRepo.findById(accountId)
+      if (!account) {
+        throw new Error(`Account not found: ${accountId}`)
+      }
+      if (account.connector !== connector) {
+        throw new Error(`Account ${accountId} is not a ${connector} account`)
+      }
+      return account
+    }
+
+    // Find accounts for this connector
+    const accounts = await this.accountRepo.findAllByConnector(connector)
+    const active = accounts.filter((a) => a.is_active)
+
+    if (active.length === 0) {
+      // Check if connector uses local auth - if so, auto-create account
+      const connectorInstance = this.connectors.get(connector)
+      if (connectorInstance?.authConfig.type === 'local') {
+        const accountInfo = await connectorInstance.listAccounts({ accountId: 'temp' })
+        const primaryAccount = accountInfo.find((a) => a.isPrimary) || accountInfo[0]
+
+        if (primaryAccount) {
+          const account = await this.accountRepo.create({
+            connector,
+            external_account_id: primaryAccount.externalId,
+            display_name: primaryAccount.displayName,
+            email: primaryAccount.email,
+            auth_type: 'local',
+          })
+          await this.accountRepo.activate(account.id)
+          return (await this.accountRepo.findById(account.id))!
+        }
+      }
+
+      throw new Error(`No ${connector} accounts found. Run: auth login ${connector}`)
+    }
+
+    if (active.length > 1) {
+      const ids = active.map((a) => `  - ${a.id} (${a.email || a.display_name})`).join('\n')
+      throw new Error(
+        `Multiple ${connector} accounts found. Specify one:\n${ids}`
+      )
+    }
+
+    return active[0]
+  }
+}
+
+/**
+ * Info about a registered connector.
+ */
+export interface ConnectorInfo {
+  type: ConnectorType
+  displayName: string
+  entityTypes: string[]
+  capabilities: {
+    backfill: boolean
+    incremental: boolean
+    webhook: boolean
+    write: boolean
+  }
+  authType: string
 }
 
 // Re-export server and scheduler types
 export { HttpServer, type ServerConfig, type ParsedRequest, type RouteHandler, type RouteResponse } from './server.js'
 export { Scheduler, type SchedulerConfig, type SchedulerEvent } from '../sync/scheduler.js'
+export { type LoadConnectorsResult } from '../connectors/registry.js'
+export { type RegisteredConnector, type RegisteredConnectorRepository } from '../db/repositories/registered-connector.js'

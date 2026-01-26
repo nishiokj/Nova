@@ -91,6 +91,17 @@ export interface AuthProvider {
       expiresAt?: Date
     }
   ): Promise<void>
+
+  /**
+   * Get decrypted credentials for an account.
+   * Used for credential sharing between connectors using the same OAuth provider.
+   * @param accountId - Account ID to get credentials for
+   */
+  getCredentials(accountId: string): Promise<{
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: Date
+  } | null>
 }
 
 /**
@@ -324,6 +335,33 @@ export class DatabaseAuthProvider implements AuthProvider {
 
     // Clear cache
     this.credentialCache.delete(accountId)
+  }
+
+  /**
+   * Get decrypted credentials for an account.
+   * Used for credential sharing between connectors using the same OAuth provider.
+   * @param accountId - Account ID to get credentials for
+   */
+  async getCredentials(accountId: string): Promise<{
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: Date
+  } | null> {
+    const creds = await this.fetchCredentials(accountId)
+    if (!creds) {
+      return null
+    }
+
+    const accessToken = this.decrypt(creds.credentials_encrypted, creds.credentials_iv)
+    const refreshToken = creds.refresh_token_encrypted
+      ? this.decrypt(creds.refresh_token_encrypted, creds.credentials_iv)
+      : undefined
+
+    return {
+      accessToken,
+      refreshToken,
+      expiresAt: creds.token_expires_at ?? undefined,
+    }
   }
 
   /**

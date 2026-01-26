@@ -91,8 +91,8 @@ export type HttpConfig = z.infer<typeof HttpConfigSchema>
 // ============ Sync Engine Configuration ============
 
 export const SyncConfigSchema = z.object({
-  /** Whether to automatically process after collecting (default: true) */
-  autoProcess: z.boolean().default(true),
+  /** Whether to automatically process after collecting (default: false) */
+  autoProcess: z.boolean().default(false),
   /** Poll interval for the queue in ms (default: 100) */
   pollInterval: z.number().int().positive().default(100),
   /** Maximum job runtime in ms (default: 300000 = 5 min) */
@@ -156,6 +156,8 @@ export type EmbeddingsConfig = z.infer<typeof EmbeddingsConfigSchema>
 export const ConnectorConfigSchema = z.object({
   /** GitHub connector settings */
   github: z.object({
+    /** Enable this connector */
+    enabled: z.boolean().default(false),
     clientId: z.string().optional(),
     clientSecret: z.string().optional(),
     /** Requests per second limit */
@@ -168,6 +170,8 @@ export const ConnectorConfigSchema = z.object({
 
   /** Gmail connector settings */
   gmail: z.object({
+    /** Enable this connector */
+    enabled: z.boolean().default(false),
     clientId: z.string().optional(),
     clientSecret: z.string().optional(),
     rateLimit: z.number().positive().default(10),
@@ -177,8 +181,28 @@ export const ConnectorConfigSchema = z.object({
     excludeLabels: z.array(z.string()).default(['SPAM', 'TRASH']),
   }).default({}),
 
+  /** Telegram connector settings */
+  telegram: z.object({
+    /** Enable this connector */
+    enabled: z.boolean().default(false),
+    /** Bot token from @BotFather */
+    botToken: z.string().optional(),
+    /** Harness daemon host */
+    harnessHost: z.string().default('127.0.0.1'),
+    /** Harness daemon port */
+    harnessPort: z.number().int().positive().default(9555),
+    /** Working directory for agent */
+    workingDir: z.string().optional(),
+    /** Allowed user IDs (empty = dangerous mode) */
+    allowedUserIds: z.array(z.number()).optional(),
+    /** Allow all users (dangerous) */
+    dangerousMode: z.boolean().default(false),
+  }).default({}),
+
   /** X.com (Twitter) connector settings */
   xcom: z.object({
+    /** Enable this connector */
+    enabled: z.boolean().default(false),
     bearerToken: z.string().optional(),
     clientId: z.string().optional(),
     clientSecret: z.string().optional(),
@@ -187,10 +211,38 @@ export const ConnectorConfigSchema = z.object({
 
   /** iMessage connector settings */
   imessage: z.object({
+    /** Enable this connector */
+    enabled: z.boolean().default(false),
     /** Path to chat.db (default: ~/Library/Messages/chat.db) */
     databasePath: z.string().optional(),
     /** Sync attachments */
     syncAttachments: z.boolean().default(true),
+  }).default({}),
+
+  /** Claude Code Sessions connector settings */
+  claude_sessions: z.object({
+    /** Enable this connector */
+    enabled: z.boolean().default(false),
+    /** Path to Claude projects (default: ~/.claude/projects) */
+    projectsPath: z.string().optional(),
+    /** Specific projects to sync (empty = all) */
+    projectFilter: z.array(z.string()).optional(),
+    /** Sessions per page (default: 10) */
+    pageSize: z.number().int().positive().default(10),
+    /** Include file history snapshots */
+    includeFileHistory: z.boolean().default(false),
+  }).default({}),
+
+  /** Rex Sessions connector settings */
+  rex_sessions: z.object({
+    /** Enable this connector */
+    enabled: z.boolean().default(false),
+    /** Path to Rex sessions directory (required) */
+    sessionsPath: z.string().optional(),
+    /** Specific projects to sync (empty = all) */
+    projectFilter: z.array(z.string()).optional(),
+    /** Sessions per page (default: 10) */
+    pageSize: z.number().int().positive().default(10),
   }).default({}),
 })
 

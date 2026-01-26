@@ -55,7 +55,7 @@ export interface SyncEngineConfig {
   processor?: ProcessorConfig
   /** Auth provider for connector authentication */
   authProvider?: AuthProvider
-  /** Whether to automatically process after collecting (default: true) */
+  /** Whether to automatically process after collecting (default: false) */
   autoProcess?: boolean
   /** Poll interval for the queue in ms (default: 100) */
   pollInterval?: number
@@ -67,7 +67,7 @@ const DEFAULT_CONFIG = {
   collector: {} as CollectorConfig,
   processor: {} as ProcessorConfig,
   authProvider: undefined as AuthProvider | undefined,
-  autoProcess: true,
+  autoProcess: false,
   pollInterval: 100,
   maxJobRuntime: 300000,
 }

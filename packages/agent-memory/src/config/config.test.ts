@@ -116,7 +116,7 @@ describe('Configuration Schema', () => {
   describe('SyncConfigSchema', () => {
     test('provides sensible defaults', () => {
       const config = SyncConfigSchema.parse({})
-      expect(config.autoProcess).toBe(true)
+      expect(config.autoProcess).toBe(false)
       expect(config.processBatchSize).toBe(100)
       expect(config.processConcurrency).toBe(5)
       expect(config.failFast).toBe(false)
@@ -243,7 +243,7 @@ describe('Configuration Schema', () => {
       expect(config.database.host).toBe('localhost')
       expect(config.queue.maxAttempts).toBe(3)
       expect(config.http.maxRetries).toBe(3)
-      expect(config.sync.autoProcess).toBe(true)
+      expect(config.sync.autoProcess).toBe(false)
       expect(config.entityResolution.mergeThreshold).toBe(80)
       expect(config.embeddings.dimension).toBe(1536)
       expect(config.observability.logLevel).toBe('info')

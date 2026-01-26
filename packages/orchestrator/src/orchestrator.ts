@@ -413,19 +413,7 @@ export class Orchestrator {
         const agent = this.createAgent(item.agent);
         if (!agent) {
           // Mark as failed with synthetic error
-          const errorResult: AgentResult = {
-            success: false,
-            response: '',
-            error: `Unknown agent type: ${item.agent}`,
-            metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
-            filesRead: [],
-            invalidatedPaths: [],
-            toolErrors: [],
-            terminationReason: 'exception', // Agent-level reason for orchestrator error
-            needsUserInput: false,
-            isRefusal: false,
-            localContext: context,
-          };
+          const errorResult = this.createErrorResult(`Unknown agent type: ${item.agent}`, context);
           this.completedWork.set(item.workId, errorResult);
 
           // If this was the initial item, return error immediately
@@ -469,6 +457,7 @@ export class Orchestrator {
         const compactAsyncId = profiler.asyncBegin('orch.compact', 'orchestrator');
         const llmConfig = this.resolveCompactionLlmConfig(agentType);
         let compactResult;
+        const compactionConfig = this.getCompactionConfig();
         if (llmConfig) {
           try {
             compactResult = await context.compactWithLedger({
@@ -476,23 +465,13 @@ export class Orchestrator {
               llmConfig,
               targetReductionRatio: 0.66,
               preserveRecentItems: 12,
-              deduplicateByPath: true,
-              maxFileContentCount: this.config.compactMaxFileCount,
-              truncateOutputsTo: this.config.compactTruncateTo,
+              ...compactionConfig,
             });
           } catch {
-            compactResult = context.compact({
-              deduplicateByPath: true,
-              maxFileContentCount: this.config.compactMaxFileCount,
-              truncateOutputsTo: this.config.compactTruncateTo,
-            });
+            compactResult = context.compact(compactionConfig);
           }
         } else {
-          compactResult = context.compact({
-            deduplicateByPath: true,
-            maxFileContentCount: this.config.compactMaxFileCount,
-            truncateOutputsTo: this.config.compactTruncateTo,
-          });
+          compactResult = context.compact(compactionConfig);
         }
         compactedRecently = true;
         profiler.asyncEnd('orch.compact', compactAsyncId, 'orchestrator', {
@@ -585,20 +564,8 @@ export class Orchestrator {
           return { workId, item, result };
         } catch (err) {
           // Construct synthetic failure result to preserve all results on Promise.all
-          const errorResult: AgentResult = {
-            success: false,
-            response: '',
-            error: err instanceof Error ? err.message : String(err),
-            metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
-            filesRead: [],
-            invalidatedPaths: [],
-            toolErrors: [],
-            terminationReason: 'exception', // Agent-level reason for orchestrator-caught exception
-            needsUserInput: false,
-            isRefusal: false,
-            localContext: context,
-          };
-          return { workId, item, result: errorResult };
+          const error = err instanceof Error ? err.message : String(err);
+          return { workId, item, result: this.createErrorResult(error, context) };
         }
       });
 
@@ -673,8 +640,7 @@ export class Orchestrator {
               // Reset completion tracking and duration timer for the new work
               initialWorkCompleted = false;
               initialWorkResponse = '';
-              this.completedWork.delete(this.initialWorkId);
-              this.initialWorkId = checkResult.newItem.workId;
+              this.resetWorkTracking(checkResult.newItem);
               startTime = Date.now();
             }
             inProgress.delete(workId);
@@ -717,8 +683,7 @@ export class Orchestrator {
           // Reset completion tracking and duration timer for the new work
           initialWorkCompleted = false;
           initialWorkResponse = '';
-          this.completedWork.delete(this.initialWorkId);
-          this.initialWorkId = newItem.workId;
+          this.resetWorkTracking(newItem);
           startTime = Date.now(); // Reset duration timer on interruption
 
           continue;
@@ -764,8 +729,7 @@ export class Orchestrator {
               // Reset completion tracking
               initialWorkCompleted = false;
               initialWorkResponse = '';
-              this.completedWork.delete(this.initialWorkId);
-              this.initialWorkId = newItem.workId;
+              this.resetWorkTracking(newItem);
 
               // Continue the loop
               continue;
@@ -976,6 +940,74 @@ export class Orchestrator {
     this.emit(createEvent('goal_not_achieved', { goal, reason, completed: 0, failed, skipped: 0 }));
   }
 
+  // --- Helper methods for code deduplication ---
+
+  /**
+   * Create a synthetic error result when agent fails to execute.
+   */
+  private createErrorResult(error: string, context: ContextWindow): AgentResult {
+    return {
+      success: false,
+      response: '',
+      error,
+      metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
+      filesRead: [],
+      invalidatedPaths: [],
+      toolErrors: [],
+      terminationReason: 'exception',
+      needsUserInput: false,
+      isRefusal: false,
+      localContext: context,
+    };
+  }
+
+  /**
+   * Reset work tracking for continuation after interruption or stop hook block.
+   */
+  private resetWorkTracking(newItem: WorkItem): void {
+    this.completedWork.delete(this.initialWorkId);
+    this.initialWorkId = newItem.workId;
+  }
+
+  /**
+   * Check for and handle user interruption. Returns true if interruption was handled.
+   */
+  private handleInterruption(
+    context: ContextWindow,
+    agentType: string,
+    iteration: number
+  ): WorkItem | null {
+    if (!this.config.checkInterruption?.()) {
+      return null;
+    }
+    const newItem = this.createWorkItem('Continue with user input', agentType);
+    this.enqueue(newItem);
+    this.resetWorkTracking(newItem);
+    return newItem;
+  }
+
+  /**
+   * Create TerminationCheckResult for interruption continuation.
+   */
+  private createInterruptionResult(agentType: string): TerminationCheckResult {
+    return {
+      terminal: null,
+      shouldContinue: true,
+      newItem: this.createWorkItem('Continue with user input', agentType),
+    };
+  }
+
+  /**
+   * Get base compaction configuration shared between ledger and simple compaction.
+   */
+  private getCompactionConfig() {
+    return {
+      deduplicateByPath: true,
+      maxFileContentCount: this.config.compactMaxFileCount,
+      truncateOutputsTo: this.config.compactTruncateTo,
+    };
+  }
+
   /**
    * Call stop hook and return its decision.
    * Returns null if no stop hook configured or if hook throws.
@@ -1121,11 +1153,7 @@ export class Orchestrator {
       if (this.config.checkInterruption?.()) {
         this.log('info', 'Interruption preempts user prompt request', { iteration, workId });
         context.addAgentResultContext(result);
-        return {
-          terminal: null,
-          shouldContinue: true,
-          newItem: this.createWorkItem('Continue with user input', agentType),
-        };
+        return this.createInterruptionResult(agentType);
       }
       this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question, questionType: result.userPrompt.questionType });
       context.addAgentResultContext(result);
@@ -1155,11 +1183,7 @@ export class Orchestrator {
       if (this.config.checkInterruption?.()) {
         this.log('info', 'Interruption preempts handoff request', { iteration, workId });
         context.addAgentResultContext(result);
-        return {
-          terminal: null,
-          shouldContinue: true,
-          newItem: this.createWorkItem('Continue with user input', agentType),
-        };
+        return this.createInterruptionResult(agentType);
       }
       this.log('info', 'Handoff requested - executing with spec', { workId, specLength: result.handoffSpec.length });
       context.addAgentResultContext(result);

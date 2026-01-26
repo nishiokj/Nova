@@ -2504,10 +2504,10 @@ function normalizeMarkdownSpacing(text: string): string {
 
   // Fix common LLM escape sequence issues:
   // - Literal \n strings that should be newlines
-  // - Malformed ''n patterns (corrupted \n)
+  // - Malformed ''n or ``n patterns (corrupted \n with quote/backtick loss)
   result = result.replace(/\\n/g, "\n");
   result = result.replace(/'+'n/g, "\n");
-  result = result.replace(/''n/g, "\n");
+  result = result.replace(/`+n/g, "\n");
 
   // Headers: ensure blank line before (unless at start) and after
   // Matches: # Header, ## Header, etc.

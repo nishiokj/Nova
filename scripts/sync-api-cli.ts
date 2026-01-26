@@ -2,37 +2,15 @@
 /**
  * Sync Engine API CLI
  *
- * CLI tool to interact with the sync daemon API using the typed client SDK.
+ * CLI tool to interact with the sync daemon API.
+ * Connectors are discovered dynamically from the registry.
  *
- * Usage:
- *   bun run scripts/sync-api-cli.ts <command> [subcommand] [options]
+ * Quick Start:
+ *   1. connectors list           - See available connectors
+ *   2. auth login <connector>    - Authenticate
+ *   3. tasks <connector> backfill - Sync data
  *
- * Commands:
- *   health                       - Check daemon health
- *
- *   accounts list                - List accounts
- *   accounts get <id>            - Get account details
- *   accounts delete <id>         - Deactivate account
- *
- *   auth providers               - List available OAuth providers
- *   auth login <connector>       - Start OAuth flow (opens browser)
- *   auth status <accountId>      - Check credential status
- *   auth refresh <accountId>     - Force token refresh
- *
- *   tasks list                   - List sync tasks
- *   tasks get <id>               - Get task with recent jobs
- *   tasks backfill <accountId>   - Create backfill task
- *   tasks subscribe <accountId>  - Create recurring sync
- *   tasks webhook <accountId>    - Create webhook subscription
- *   tasks trigger <id>           - Manually run a task
- *   tasks enable <id>            - Enable task
- *   tasks disable <id>           - Disable task
- *   tasks delete <id>            - Delete task
- *
- *   jobs list                    - List jobs
- *   jobs get <id>                - Get job details
- *   jobs cancel <id>             - Cancel running job
- *   jobs retry <id>              - Retry failed job
+ * See: packages/agent-memory/src/connectors/README.md for adding connectors.
  */
 
 import { parseArgs } from 'node:util'
@@ -53,6 +31,54 @@ const CALLBACK_PORT = parseInt(process.env.OAUTH_CALLBACK_PORT || '9876', 10)
 const OAUTH_REDIRECT_URI = process.env.OAUTH_REDIRECT_URI
 
 const client = new SyncClient(SYNC_DAEMON_URL)
+
+// ============ Short ID Index ============
+// Maps short indices (#1, #2) to full ULIDs for easy reference
+let lastJobsList: SyncJob[] = []
+let lastTasksList: SyncTask[] = []
+
+/**
+ * Resolve a short ID (#1, #2) or prefix to a full ULID.
+ * Supports:
+ *   - #N: Index from last list (1-based)
+ *   - Prefix: First 4+ chars of ULID (e.g., "01JD" matches "01JDXXXXXXXXXXXXXXXXXX")
+ *   - Full ULID: Passed through as-is
+ */
+function resolveJobId(input: string): string {
+  if (input.startsWith('#')) {
+    const idx = parseInt(input.slice(1), 10) - 1
+    if (isNaN(idx) || idx < 0 || idx >= lastJobsList.length) {
+      throw new Error(`Invalid index ${input}. Run "jobs list" first. Valid: #1-#${lastJobsList.length || 0}`)
+    }
+    return lastJobsList[idx].id
+  }
+  if (input.length >= 4 && input.length < 26) {
+    const matches = lastJobsList.filter((j) => j.id.toUpperCase().startsWith(input.toUpperCase()))
+    if (matches.length === 1) return matches[0].id
+    if (matches.length > 1) {
+      throw new Error(`Ambiguous prefix "${input}" matches ${matches.length} jobs. Be more specific.`)
+    }
+  }
+  return input
+}
+
+function resolveTaskId(input: string): string {
+  if (input.startsWith('#')) {
+    const idx = parseInt(input.slice(1), 10) - 1
+    if (isNaN(idx) || idx < 0 || idx >= lastTasksList.length) {
+      throw new Error(`Invalid index ${input}. Run "tasks list" first. Valid: #1-#${lastTasksList.length || 0}`)
+    }
+    return lastTasksList[idx].id
+  }
+  if (input.length >= 4 && input.length < 26) {
+    const matches = lastTasksList.filter((t) => t.id.toUpperCase().startsWith(input.toUpperCase()))
+    if (matches.length === 1) return matches[0].id
+    if (matches.length > 1) {
+      throw new Error(`Ambiguous prefix "${input}" matches ${matches.length} tasks. Be more specific.`)
+    }
+  }
+  return input
+}
 
 // ============ Output Helpers ============
 
@@ -83,21 +109,77 @@ function printAccount(account: Account): void {
   }
 }
 
-function printTask(task: SyncTask): void {
+function formatInterval(ms: number): string {
+  const minutes = Math.floor(ms / 60000)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  if (hours < 24) return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`
+  const days = Math.floor(hours / 24)
+  const remainingHours = hours % 24
+  return remainingHours ? `${days}d ${remainingHours}h` : `${days}d`
+}
+
+function formatRelativeTime(date: Date): string {
+  const now = new Date()
+  const diffMs = date.getTime() - now.getTime()
+  const absDiff = Math.abs(diffMs)
+  const isPast = diffMs < 0
+
+  if (absDiff < 60000) return isPast ? 'just now' : 'in <1m'
+  const minutes = Math.floor(absDiff / 60000)
+  if (minutes < 60) return isPast ? `${minutes}m ago` : `in ${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return isPast ? `${hours}h ago` : `in ${hours}h`
+  const days = Math.floor(hours / 24)
+  return isPast ? `${days}d ago` : `in ${days}d`
+}
+
+function printTask(task: SyncTask, index?: number): void {
   const status = task.enabled ? '\x1b[32menabled\x1b[0m' : '\x1b[33mdisabled\x1b[0m'
-  console.log(`  \x1b[36m${task.id}\x1b[0m`)
-  console.log(`    Account: ${task.account_id}`)
-  console.log(`    Type: ${task.sync_type} (${task.mode})`)
-  console.log(`    Status: ${status}`)
-  if (task.interval_ms) {
-    console.log(`    Interval: ${Math.floor(task.interval_ms / 1000 / 60)} minutes`)
+  const indexLabel = index !== undefined ? `\x1b[90m#${index + 1}\x1b[0m ` : ''
+  const shortId = task.id.slice(0, 8)
+
+  console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m \x1b[90m${task.connector}\x1b[0m`)
+  console.log(`    Mode: ${task.sync_type} / ${task.mode} ${status}`)
+
+  // Entity types
+  if (task.entity_types?.length) {
+    console.log(`    Types: ${task.entity_types.join(', ')}`)
   }
-  if (task.next_run_at) {
-    console.log(`    Next run: ${new Date(task.next_run_at).toLocaleString()}`)
+
+  // Scheduling info
+  if (task.mode === 'recurring' && task.interval_ms) {
+    const cadence = formatInterval(task.interval_ms)
+    if (task.next_run_at) {
+      const nextRun = new Date(task.next_run_at)
+      const relative = formatRelativeTime(nextRun)
+      console.log(`    Schedule: every ${cadence} (next: ${relative})`)
+    } else {
+      console.log(`    Schedule: every ${cadence}`)
+    }
+  } else if (task.mode === 'webhook') {
+    console.log(`    Schedule: real-time (webhook)`)
+  } else if (task.mode === 'once') {
+    if (task.last_job_id) {
+      console.log(`    Schedule: one-shot (completed)`)
+    } else {
+      console.log(`    Schedule: one-shot (pending)`)
+    }
+  }
+
+  // Last job reference
+  if (task.last_job_id) {
+    console.log(`    Last job: ${task.last_job_id.slice(0, 8)}`)
+  }
+
+  // Created timestamp
+  if (task.created_at) {
+    console.log(`    Created: ${formatRelativeTime(new Date(task.created_at))}`)
   }
 }
 
-function printJob(job: SyncJob): void {
+function printJob(job: SyncJob, index?: number): void {
   const statusColors: Record<string, string> = {
     pending: '\x1b[33m',
     running: '\x1b[34m',
@@ -106,19 +188,59 @@ function printJob(job: SyncJob): void {
     cancelled: '\x1b[90m',
   }
   const color = statusColors[job.status] || ''
-  console.log(`  \x1b[36m${job.id}\x1b[0m`)
-  console.log(`    Account: ${job.account_id}`)
+  const indexLabel = index !== undefined ? `\x1b[90m#${index + 1}\x1b[0m ` : ''
+  const shortId = job.id.slice(0, 8)
+
+  console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m \x1b[90m${job.connector}\x1b[0m ${color}${job.status}\x1b[0m`)
   console.log(`    Type: ${job.job_type}`)
-  console.log(`    Status: ${color}${job.status}\x1b[0m`)
-  console.log(`    Progress: ${job.items_processed}/${job.items_fetched} (${job.items_failed} failed)`)
+
+  // Entity types from metadata
+  const entityTypes = job.metadata?.entityTypes as string[] | undefined
+  if (entityTypes?.length) {
+    console.log(`    Entities: ${entityTypes.join(', ')}`)
+  }
+
+  // Progress
+  const progressPct = job.items_fetched > 0 ? Math.round((job.items_processed / job.items_fetched) * 100) : 0
+  if (job.items_fetched > 0 || job.items_processed > 0) {
+    let progressLine = `    Progress: ${job.items_processed}/${job.items_fetched}`
+    if (job.status === 'running' && progressPct > 0) {
+      progressLine += ` (${progressPct}%)`
+    }
+    if (job.items_failed > 0) {
+      progressLine += ` \x1b[31m${job.items_failed} failed\x1b[0m`
+    }
+    console.log(progressLine)
+  }
+
+  // Timing
   if (job.started_at) {
-    console.log(`    Started: ${new Date(job.started_at).toLocaleString()}`)
+    const started = new Date(job.started_at)
+    if (job.completed_at) {
+      const completed = new Date(job.completed_at)
+      const durationMs = completed.getTime() - started.getTime()
+      const durationSec = Math.round(durationMs / 1000)
+      console.log(`    Duration: ${durationSec}s (${formatRelativeTime(completed)})`)
+    } else if (job.status === 'running') {
+      console.log(`    Started: ${formatRelativeTime(started)}`)
+    }
+  } else if (job.status === 'pending') {
+    console.log(`    Queued: ${formatRelativeTime(new Date(job.created_at))}`)
   }
-  if (job.completed_at) {
-    console.log(`    Completed: ${new Date(job.completed_at).toLocaleString()}`)
+
+  // Retry info
+  if (job.retry_count > 0) {
+    let retryLine = `    Retries: ${job.retry_count}`
+    if (job.next_retry_at) {
+      retryLine += ` (next: ${formatRelativeTime(new Date(job.next_retry_at))})`
+    }
+    console.log(retryLine)
   }
+
+  // Error
   if (job.last_error) {
-    console.log(`    Error: ${job.last_error}`)
+    const truncatedError = job.last_error.length > 80 ? job.last_error.slice(0, 80) + '...' : job.last_error
+    console.log(`    \x1b[31mError: ${truncatedError}\x1b[0m`)
   }
 }
 
@@ -171,25 +293,96 @@ async function cmdAuthProviders(): Promise<void> {
   }
 }
 
-async function cmdAuthLogin(connector: string): Promise<void> {
+async function cmdAuthLogin(connector: string, headless = false): Promise<void> {
   printHeader(`OAuth Login: ${connector}`)
 
-  // Use external redirect URI if configured, otherwise localhost
+  // Headless mode: use device authorization flow
+  if (headless) {
+    console.log('Using device authorization flow (headless)...\n')
+
+    const device = await client.auth.deviceAuth(connector)
+
+    console.log('╭─────────────────────────────────────────────────╮')
+    console.log('│                                                 │')
+    console.log(`│   Go to: \x1b[36m${device.verificationUri.padEnd(30)}\x1b[0m │`)
+    console.log(`│   Enter code: \x1b[1m${device.userCode.padEnd(25)}\x1b[0m    │`)
+    console.log('│                                                 │')
+    console.log('╰─────────────────────────────────────────────────╯')
+
+    if (device.verificationUriComplete) {
+      console.log(`\nOr visit: ${device.verificationUriComplete}`)
+    }
+
+    console.log('\nWaiting for authorization...')
+
+    const account = await client.auth.waitForDeviceAuth(connector, device.deviceCode, {
+      interval: (device.interval || 5) * 1000,
+      timeout: device.expiresIn * 1000,
+      onPoll: () => process.stdout.write('.'),
+    })
+
+    console.log('\n')
+    printSuccess('Account created successfully!')
+    printAccount(account)
+    return
+  }
+
+  // Browser-based flow
   const redirectUri = OAUTH_REDIRECT_URI || getCallbackUri(CALLBACK_PORT)
   const useLocalCallback = !OAUTH_REDIRECT_URI
+  const daemonHandlesCallback = OAUTH_REDIRECT_URI?.includes('/api/auth/callback')
 
-  // Get authorization URL
-  const { url, state } = await client.auth.getUrl(connector, redirectUri)
+  const authResponse = await client.auth.getUrl(connector, redirectUri)
+  const { url, state, existingCredentials, existingAccountId } = authResponse
 
-  let code: string
+  // Check if we can reuse existing credentials
+  if (existingCredentials && existingAccountId) {
+    console.log(`\x1b[33mFound existing ${authResponse.provider || 'OAuth'} credentials from another connector.\x1b[0m\n`)
+    console.log('Options:')
+    console.log('  \x1b[1m1.\x1b[0m Use existing credentials (no browser needed)')
+    console.log('  \x1b[1m2.\x1b[0m Authenticate again with browser\n')
+
+    const readline = await import('readline')
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    const choice = await new Promise<string>((resolve) => {
+      rl.question('Choice [1]: ', (answer) => {
+        rl.close()
+        resolve(answer.trim() || '1')
+      })
+    })
+
+    if (choice !== '2') {
+      console.log('\nReusing existing credentials...')
+      const account = await client.auth.fromExisting(connector, existingAccountId)
+      printSuccess('Account created using existing credentials!')
+      printAccount(account)
+      return
+    }
+
+    console.log('\nProceeding with browser OAuth...')
+  }
+
+  if (daemonHandlesCallback) {
+    console.log('Opening browser for OAuth...')
+    const open = (await import('open')).default
+    await open(url)
+
+    console.log('\nThe daemon will handle the OAuth callback automatically.')
+    console.log('Check the browser for success/error message.')
+    console.log('\nAfter authorizing, run:')
+    console.log('  bun run scripts/sync-api-cli.ts accounts list')
+    return
+  }
 
   if (useLocalCallback) {
-    // Capture callback via local server (opens browser + captures code automatically)
     console.log('Opening browser for OAuth...')
     const result = await captureOAuthCallback(url, { port: CALLBACK_PORT })
-    code = result.code
+
+    console.log('\nExchanging authorization code...')
+    const account = await client.auth.callback(connector, result.code, result.state, redirectUri)
+    printSuccess('Account created successfully!')
+    printAccount(account)
   } else {
-    // External redirect - open browser, user pastes code
     console.log('Opening browser for OAuth...')
     const open = (await import('open')).default
     await open(url)
@@ -197,7 +390,7 @@ async function cmdAuthLogin(connector: string): Promise<void> {
     console.log('\nAfter authorizing, paste the "code" parameter from the callback URL:')
     const readline = await import('readline')
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    code = await new Promise<string>((resolve) => {
+    const code = await new Promise<string>((resolve) => {
       rl.question('\nCode: ', (answer) => {
         rl.close()
         resolve(answer.trim())
@@ -207,14 +400,12 @@ async function cmdAuthLogin(connector: string): Promise<void> {
     if (!code) {
       throw new Error('No authorization code provided')
     }
+
+    console.log('\nExchanging authorization code...')
+    const account = await client.auth.callback(connector, code, state, redirectUri)
+    printSuccess('Account created successfully!')
+    printAccount(account)
   }
-
-  // Exchange code for account
-  console.log('\nExchanging authorization code...')
-  const account = await client.auth.callback(connector, code, state, redirectUri)
-
-  printSuccess('Account created successfully!')
-  printAccount(account)
 }
 
 async function cmdAuthStatus(accountId: string): Promise<void> {
@@ -230,86 +421,667 @@ async function cmdAuthRefresh(accountId: string): Promise<void> {
   printSuccess(`Token refreshed for ${accountId}`)
 }
 
+// --- Connectors ---
+
+async function cmdConnectorsList(): Promise<void> {
+  printHeader('Registered Connectors')
+  const connectors = await client.connectors.list()
+  if (connectors.length === 0) {
+    console.log('  No connectors registered.')
+    console.log('  Use "connectors available" to see available factories.')
+  } else {
+    for (const c of connectors) {
+      console.log(`  \x1b[36m${c.type}\x1b[0m - ${c.displayName}`)
+      console.log(`    Entity types: ${c.entityTypes.join(', ')}`)
+      console.log(`    Auth: ${c.authType}`)
+    }
+  }
+}
+
+async function cmdConnectorsAvailable(): Promise<void> {
+  printHeader('Available Connector Factories')
+  const available = await client.connectors.available()
+  if (available.length === 0) {
+    console.log('  All factories are registered.')
+  } else {
+    console.log('  The following connector types can be registered:\n')
+    for (const type of available) {
+      console.log(`    \x1b[33m${type}\x1b[0m`)
+    }
+    console.log('\n  Register with: connectors register <type>')
+  }
+}
+
+// ============ Connector Config Fields ============
+// Defines prompts for connector-specific configuration
+
+interface ConfigField {
+  key: string
+  label: string
+  description: string
+  required?: boolean
+  secret?: boolean
+  envVar?: string
+  defaultValue?: string
+}
+
+const CONNECTOR_CONFIG_FIELDS: Record<string, ConfigField[]> = {
+  telegram: [
+    {
+      key: 'botToken',
+      label: 'Bot Token',
+      description: 'Token from @BotFather (starts with numbers:letters)',
+      required: true,
+      secret: true,
+      envVar: 'TELEGRAM_BOT_TOKEN',
+    },
+    {
+      key: 'dangerousMode',
+      label: 'Allow all users',
+      description: 'Skip user ID restrictions (true/false)',
+      defaultValue: 'false',
+    },
+  ],
+  github: [
+    {
+      key: 'clientId',
+      label: 'Client ID',
+      description: 'GitHub OAuth App client ID',
+      required: true,
+      envVar: 'GITHUB_CLIENT_ID',
+    },
+    {
+      key: 'clientSecret',
+      label: 'Client Secret',
+      description: 'GitHub OAuth App client secret',
+      required: true,
+      secret: true,
+      envVar: 'GITHUB_CLIENT_SECRET',
+    },
+  ],
+  gmail: [
+    {
+      key: 'clientId',
+      label: 'Client ID',
+      description: 'Google OAuth client ID',
+      required: true,
+      envVar: 'GOOGLE_CLIENT_ID',
+    },
+    {
+      key: 'clientSecret',
+      label: 'Client Secret',
+      description: 'Google OAuth client secret',
+      required: true,
+      secret: true,
+      envVar: 'GOOGLE_CLIENT_SECRET',
+    },
+  ],
+  xcom: [
+    {
+      key: 'bearerToken',
+      label: 'Bearer Token',
+      description: 'X.com API bearer token',
+      secret: true,
+      envVar: 'XCOM_BEARER_TOKEN',
+    },
+  ],
+  imessage: [
+    {
+      key: 'databasePath',
+      label: 'Database Path',
+      description: 'Path to chat.db (default: ~/Library/Messages/chat.db)',
+    },
+  ],
+  claude_sessions: [
+    {
+      key: 'projectsPath',
+      label: 'Projects Path',
+      description: 'Path to Claude projects (default: ~/.claude/projects)',
+    },
+  ],
+  rex_sessions: [
+    {
+      key: 'sessionsPath',
+      label: 'Sessions Path',
+      description: 'Path to Rex sessions directory',
+      required: true,
+    },
+  ],
+}
+
+async function cmdConnectorRegister(type: string, configJson?: string): Promise<void> {
+  printHeader(`Register Connector: ${type}`)
+
+  let config: Record<string, unknown> | undefined
+
+  if (configJson) {
+    // JSON provided directly
+    try {
+      config = JSON.parse(configJson)
+    } catch {
+      throw new Error('Invalid JSON config')
+    }
+  } else {
+    // Interactive mode - prompt for config fields
+    const fields = CONNECTOR_CONFIG_FIELDS[type]
+
+    if (fields && fields.length > 0) {
+      console.log(`  \x1b[90mConfiguring ${type}...\x1b[0m\n`)
+      config = {}
+
+      for (const field of fields) {
+        // Check for env var first
+        const envValue = field.envVar ? process.env[field.envVar] : undefined
+        if (envValue) {
+          config[field.key] = field.key.includes('Mode') ? envValue === 'true' : envValue
+          console.log(`  \x1b[32m✓\x1b[0m ${field.label}: \x1b[90m(from ${field.envVar})\x1b[0m`)
+          continue
+        }
+
+        // Build prompt
+        const reqLabel = field.required ? ' \x1b[31m*\x1b[0m' : ''
+        const hint = field.envVar ? ` \x1b[90m(or set ${field.envVar})\x1b[0m` : ''
+        console.log(`  ${field.label}${reqLabel}${hint}`)
+        console.log(`  \x1b[90m${field.description}\x1b[0m`)
+
+        const value = await prompt('  > ', field.defaultValue)
+
+        if (value) {
+          // Parse booleans
+          if (value === 'true' || value === 'false') {
+            config[field.key] = value === 'true'
+          } else {
+            config[field.key] = value
+          }
+        } else if (field.required) {
+          throw new Error(`${field.label} is required`)
+        }
+
+        console.log('')
+      }
+
+      // Confirm
+      console.log('  Config to register:')
+      for (const [k, v] of Object.entries(config)) {
+        const field = fields.find((f) => f.key === k)
+        const display = field?.secret ? '********' : String(v)
+        console.log(`    ${k}: ${display}`)
+      }
+      console.log('')
+
+      const confirmed = await promptConfirm('  Register with this config?')
+      if (!confirmed) {
+        console.log('  Cancelled.')
+        return
+      }
+    }
+  }
+
+  const result = await client.connectors.register(type, config)
+  printSuccess(`Connector ${type} registered`)
+
+  if (result.connector) {
+    console.log(`  Display name: ${result.connector.displayName}`)
+    console.log(`  Entity types: ${result.connector.entityTypes.join(', ')}`)
+    console.log(`  Auth type: ${result.connector.authType}`)
+  }
+
+  if (result.registration) {
+    console.log(`  Enabled: ${result.registration.enabled}`)
+    if (Object.keys(result.registration.config).length > 0) {
+      console.log(`  Config: ${JSON.stringify(result.registration.config)}`)
+    }
+  }
+}
+
+async function cmdConnectorConfig(type: string, configJson: string): Promise<void> {
+  printHeader(`Update Config: ${type}`)
+
+  let config: Record<string, unknown>
+  try {
+    config = JSON.parse(configJson)
+  } catch {
+    throw new Error('Invalid JSON config')
+  }
+
+  const result = await client.connectors.updateConfig(type, config)
+  printSuccess(`Config updated for ${type}`)
+  console.log(`  New config: ${JSON.stringify(result.registration?.config)}`)
+}
+
+async function cmdConnectorEnable(type: string): Promise<void> {
+  printHeader(`Enable Connector: ${type}`)
+  await client.connectors.setEnabled(type, true)
+  printSuccess(`Connector ${type} enabled`)
+}
+
+async function cmdConnectorDisable(type: string): Promise<void> {
+  printHeader(`Disable Connector: ${type}`)
+  await client.connectors.setEnabled(type, false)
+  printSuccess(`Connector ${type} disabled (unloaded from memory)`)
+}
+
+async function cmdConnectorUnregister(type: string): Promise<void> {
+  printHeader(`Unregister Connector: ${type}`)
+  await client.connectors.unregister(type)
+  printSuccess(`Connector ${type} unregistered`)
+}
+
+async function cmdConnectorInfo(type: string): Promise<void> {
+  printHeader(`Connector: ${type}`)
+  const response = await client.connectors.get(type)
+
+  if (!response.connector) {
+    if (response.factoryAvailable) {
+      console.log(`  Factory available but not registered.`)
+      console.log(`  Register with: connectors register ${type}`)
+    } else {
+      console.log(`  Connector not found: ${type}`)
+    }
+    if (response.registration) {
+      console.log(`\n  Registration:`)
+      console.log(`    Enabled: ${response.registration.enabled}`)
+      console.log(`    Config: ${JSON.stringify(response.registration.config)}`)
+    }
+    return
+  }
+
+  const connector = response.connector
+  console.log(`  Display name: ${connector.displayName}`)
+  console.log(`  Entity types: ${connector.entityTypes.join(', ')}`)
+  console.log(`  Auth type: ${connector.authType}`)
+  console.log(`  Capabilities:`)
+  console.log(`    - Backfill: ${connector.capabilities.backfill ? 'yes' : 'no'}`)
+  console.log(`    - Incremental: ${connector.capabilities.incremental ? 'yes' : 'no'}`)
+  console.log(`    - Webhook: ${connector.capabilities.webhook ? 'yes' : 'no'}`)
+  console.log(`    - Write: ${connector.capabilities.write ? 'yes' : 'no'}`)
+
+  if (response.registration) {
+    console.log(`\n  Registration:`)
+    console.log(`    Enabled: ${response.registration.enabled}`)
+    if (Object.keys(response.registration.config).length > 0) {
+      console.log(`    Config: ${JSON.stringify(response.registration.config)}`)
+    }
+  }
+
+  // Show accounts for this connector
+  try {
+    const accounts = await client.connectors.accounts(type)
+    if (accounts.length > 0) {
+      console.log(`\n  Accounts:`)
+      for (const a of accounts) {
+        console.log(`    - ${a.id} (${a.email || a.display_name || 'no name'})`)
+      }
+    } else if (connector.authType === 'local') {
+      // Local auth connectors auto-create accounts when needed
+      console.log(`\n  No accounts. Accounts are auto-created for local connectors.`)
+    } else {
+      console.log(`\n  No accounts. Run: auth login ${type}`)
+    }
+  } catch {
+    // Connector not loaded, can't get accounts
+  }
+}
+
 // --- Tasks ---
 
-async function cmdTasksList(): Promise<void> {
+async function cmdTasksList(connector?: string): Promise<void> {
   printHeader('Sync Tasks')
-  const tasks = await client.tasks.list()
+  const tasks = await client.tasks.list(connector ? { connector } : undefined)
+  lastTasksList = tasks // Cache for short ID resolution
   if (tasks.length === 0) {
     console.log('  No tasks found.')
-    console.log('  Use "tasks backfill <accountId>" to create a sync task.')
+    console.log('  Use "tasks <connector> backfill" to create a sync task.')
   } else {
-    tasks.forEach(printTask)
+    tasks.forEach((task, i) => printTask(task, i))
+    console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference tasks (e.g., "tasks get #1")\x1b[0m`)
   }
 }
 
 async function cmdTasksGet(id: string): Promise<void> {
+  const resolvedId = resolveTaskId(id)
   printHeader('Task Details')
-  const { task, recentJobs } = await client.tasks.get(id)
+  const { task, recentJobs } = await client.tasks.get(resolvedId)
   printTask(task)
+
+  // Show full ID for copying
+  console.log(`\n  Full ID: \x1b[36m${task.id}\x1b[0m`)
+
   if (recentJobs && recentJobs.length > 0) {
     console.log('\n  Recent jobs:')
     recentJobs.slice(0, 5).forEach((job) => {
-      const color = job.status === 'completed' ? '\x1b[32m' : job.status === 'failed' ? '\x1b[31m' : ''
-      console.log(`    - ${job.id} ${color}${job.status}\x1b[0m`)
+      const statusColors: Record<string, string> = {
+        pending: '\x1b[33m',
+        running: '\x1b[34m',
+        completed: '\x1b[32m',
+        failed: '\x1b[31m',
+        cancelled: '\x1b[90m',
+      }
+      const color = statusColors[job.status] || ''
+      const shortId = job.id.slice(0, 8)
+      console.log(`    ${shortId} ${color}${job.status}\x1b[0m ${job.items_processed}/${job.items_fetched}`)
     })
   }
 }
 
-async function cmdTasksBackfill(accountId: string): Promise<void> {
-  printHeader('Create Backfill Task')
-  const { task, job } = await client.tasks.backfill(accountId)
-  printSuccess('Backfill task created')
-  console.log(`  Task ID: ${task.id}`)
-  console.log(`  Job ID: ${job.id}`)
-  console.log('\nMonitor progress: bun run scripts/sync-api-cli.ts jobs get ' + job.id)
+// ============ Interactive Helpers ============
+
+async function prompt(question: string, defaultValue?: string): Promise<string> {
+  const readline = await import('readline')
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  const suffix = defaultValue ? ` [${defaultValue}]` : ''
+  return new Promise((resolve) => {
+    rl.question(`${question}${suffix}: `, (answer) => {
+      rl.close()
+      resolve(answer.trim() || defaultValue || '')
+    })
+  })
 }
 
-async function cmdTasksSubscribe(accountId: string, intervalMin: string): Promise<void> {
-  printHeader('Create Recurring Sync')
+async function promptSelect(question: string, options: string[], defaultIndex = 0): Promise<string> {
+  console.log(`\n${question}`)
+  options.forEach((opt, i) => {
+    const marker = i === defaultIndex ? '\x1b[36m→\x1b[0m' : ' '
+    console.log(`  ${marker} ${i + 1}. ${opt}`)
+  })
+  const answer = await prompt('Select', String(defaultIndex + 1))
+  const idx = parseInt(answer, 10) - 1
+  if (idx >= 0 && idx < options.length) {
+    return options[idx]
+  }
+  return options[defaultIndex]
+}
+
+async function promptMultiSelect(question: string, options: string[], defaults: string[] = []): Promise<string[]> {
+  console.log(`\n${question}`)
+  console.log('  \x1b[90m(Enter numbers separated by commas, or "all")\x1b[0m')
+  options.forEach((opt, i) => {
+    const isDefault = defaults.includes(opt)
+    const marker = isDefault ? '\x1b[32m✓\x1b[0m' : ' '
+    console.log(`  ${marker} ${i + 1}. ${opt}`)
+  })
+
+  const defaultStr = defaults.length === options.length ? 'all' : defaults.map((d) => options.indexOf(d) + 1).join(',')
+  const answer = await prompt('Select', defaultStr || 'all')
+
+  if (answer.toLowerCase() === 'all') {
+    return options
+  }
+
+  const indices = answer.split(',').map((s) => parseInt(s.trim(), 10) - 1)
+  const selected = indices.filter((i) => i >= 0 && i < options.length).map((i) => options[i])
+  return selected.length > 0 ? selected : options
+}
+
+async function promptConfirm(question: string, defaultValue = true): Promise<boolean> {
+  const hint = defaultValue ? '[Y/n]' : '[y/N]'
+  const answer = await prompt(`${question} ${hint}`)
+  if (!answer) return defaultValue
+  return answer.toLowerCase().startsWith('y')
+}
+
+/**
+ * Interactive task creation wizard.
+ * Walks through sync type, mode, entity types, and cadence.
+ */
+async function cmdTasksCreate(connector: string): Promise<void> {
+  printHeader(`Create Task: ${connector}`)
+
+  // 1. Fetch connector info
+  console.log('Fetching connector info...')
+  const response = await client.connectors.get(connector)
+
+  if (!response.connector) {
+    if (response.factoryAvailable) {
+      throw new Error(`Connector "${connector}" is not registered. Run: connectors register ${connector}`)
+    }
+    throw new Error(`Unknown connector: ${connector}`)
+  }
+
+  const info = response.connector
+  const caps = info.capabilities
+
+  console.log(`\n\x1b[1m${info.displayName}\x1b[0m`)
+  console.log(`  Entity types: ${info.entityTypes.join(', ')}`)
+  console.log(`  Capabilities: ${[caps.backfill && 'backfill', caps.incremental && 'incremental', caps.webhook && 'webhook'].filter(Boolean).join(', ')}`)
+
+  // 2. Select sync type
+  const syncTypeOptions: string[] = []
+  if (caps.backfill) syncTypeOptions.push('backfill')
+  if (caps.incremental) syncTypeOptions.push('incremental')
+
+  if (syncTypeOptions.length === 0) {
+    throw new Error('Connector has no sync capabilities')
+  }
+
+  const syncType = syncTypeOptions.length === 1
+    ? syncTypeOptions[0]
+    : await promptSelect('Sync type?', [
+        'backfill    - Full historical sync (fetches everything)',
+        'incremental - Changes only (requires prior backfill)',
+      ].filter((_, i) => syncTypeOptions.includes(['backfill', 'incremental'][i])))
+        .then((s) => s.split(' ')[0])
+
+  // 3. Select mode based on sync type
+  const modeOptions: { value: string; label: string }[] = []
+
+  if (syncType === 'backfill') {
+    // Backfill is always one-shot
+    modeOptions.push({ value: 'once', label: 'once - Run once and complete' })
+  } else {
+    // Incremental can be recurring or webhook
+    modeOptions.push({ value: 'recurring', label: 'recurring - Run on a schedule' })
+    if (caps.webhook) {
+      modeOptions.push({ value: 'webhook', label: 'webhook   - Real-time push notifications' })
+    }
+    modeOptions.push({ value: 'once', label: 'once      - Run once (manual trigger)' })
+  }
+
+  const mode = modeOptions.length === 1
+    ? modeOptions[0].value
+    : await promptSelect('Mode?', modeOptions.map((m) => m.label)).then((s) => s.split(' ')[0])
+
+  // 4. Select entity types
+  const entityTypes = await promptMultiSelect(
+    'Entity types to sync?',
+    info.entityTypes,
+    info.entityTypes // default to all
+  )
+
+  // 5. Interval for recurring mode
+  let intervalMs: number | undefined
+  if (mode === 'recurring') {
+    console.log('\n\x1b[90mCommon intervals: 5m, 15m, 30m, 1h, 6h, 24h\x1b[0m')
+    const intervalStr = await prompt('Sync interval', '1h')
+
+    // Parse interval string (e.g., "5m", "1h", "30")
+    const match = intervalStr.match(/^(\d+)\s*(m|min|h|hr|hour|d|day)?$/i)
+    if (!match) {
+      throw new Error(`Invalid interval format: ${intervalStr}. Use formats like: 5m, 1h, 30`)
+    }
+
+    const value = parseInt(match[1], 10)
+    const unit = (match[2] || 'm').toLowerCase()
+
+    switch (unit[0]) {
+      case 'm':
+        intervalMs = value * 60 * 1000
+        break
+      case 'h':
+        intervalMs = value * 60 * 60 * 1000
+        break
+      case 'd':
+        intervalMs = value * 24 * 60 * 60 * 1000
+        break
+      default:
+        intervalMs = value * 60 * 1000
+    }
+
+    if (intervalMs < 60000) {
+      throw new Error('Interval must be at least 1 minute')
+    }
+  }
+
+  // 6. Show summary and confirm
+  console.log('\n' + '─'.repeat(50))
+  console.log('\x1b[1mTask Summary\x1b[0m')
+  console.log(`  Connector:    ${connector}`)
+  console.log(`  Sync type:    ${syncType}`)
+  console.log(`  Mode:         ${mode}`)
+  console.log(`  Entity types: ${entityTypes.join(', ')}`)
+  if (intervalMs) {
+    console.log(`  Interval:     ${formatInterval(intervalMs)}`)
+  }
+  console.log('─'.repeat(50))
+
+  const confirmed = await promptConfirm('\nCreate this task?')
+  if (!confirmed) {
+    console.log('\nCancelled.')
+    return
+  }
+
+  // 7. Create the task
+  console.log('\nCreating task...')
+
+  if (syncType === 'backfill' && mode === 'once') {
+    // Use backfill endpoint (creates task + job)
+    const { task, job } = await client.tasks.backfill({
+      connector,
+      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+    })
+    printSuccess('Backfill task created and job scheduled')
+    printTask(task)
+    console.log(`\n  Job ID: ${job.id.slice(0, 8)}`)
+    console.log(`  Monitor: jobs get ${job.id.slice(0, 8)}`)
+  } else if (mode === 'webhook') {
+    // Use webhook endpoint
+    const task = await client.tasks.webhook({
+      connector,
+      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+    })
+    printSuccess('Webhook task created')
+    printTask(task)
+    console.log('\n  Note: Webhooks may require additional provider setup.')
+  } else if (mode === 'recurring') {
+    // Use subscribe endpoint
+    const task = await client.tasks.subscribe({
+      connector,
+      syncType: syncType as 'backfill' | 'incremental',
+      intervalMs: intervalMs!,
+      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+    })
+    printSuccess('Recurring task created')
+    printTask(task)
+  } else {
+    // One-shot incremental - use subscribe with mode once
+    // The API doesn't have a direct endpoint for this, so we create a recurring task
+    // and immediately disable it after the first run completes
+    const task = await client.tasks.subscribe({
+      connector,
+      syncType: syncType as 'backfill' | 'incremental',
+      intervalMs: 24 * 60 * 60 * 1000, // placeholder, task will be triggered manually
+      entityTypes: entityTypes.length === info.entityTypes.length ? undefined : entityTypes,
+    })
+    // Disable to prevent recurring runs
+    await client.tasks.disable(task.id)
+    // Trigger once
+    const job = await client.tasks.trigger(task.id)
+    printSuccess('One-shot incremental task created and triggered')
+    printTask(task)
+    console.log(`\n  Job ID: ${job.id.slice(0, 8)}`)
+    console.log(`  Monitor: jobs get ${job.id.slice(0, 8)}`)
+  }
+}
+
+/**
+ * Create backfill task for a connector.
+ * @param connector - Connector type (e.g., 'gmail', 'github')
+ * @param entityTypes - Optional entity types to backfill
+ */
+async function cmdTasksBackfill(connector: string, entityTypes?: string[]): Promise<void> {
+  printHeader(`Backfill: ${connector}`)
+  const { task, job } = await client.tasks.backfill({
+    connector,
+    entityTypes: entityTypes?.length ? entityTypes : undefined,
+  })
+  printSuccess('Backfill task created')
+  console.log(`  Connector: ${connector}`)
+  console.log(`  Task: ${task.id.slice(0, 8)}`)
+  console.log(`  Job: ${job.id.slice(0, 8)}`)
+  if (entityTypes?.length) {
+    console.log(`  Entity types: ${entityTypes.join(', ')}`)
+  }
+  console.log(`\n  Monitor: jobs get ${job.id.slice(0, 8)}`)
+}
+
+/**
+ * Create recurring sync for a connector.
+ * @param connector - Connector type
+ * @param intervalMin - Sync interval in minutes
+ * @param entityTypes - Optional entity types
+ */
+async function cmdTasksSubscribe(connector: string, intervalMin: string, entityTypes?: string[]): Promise<void> {
+  printHeader(`Subscribe: ${connector}`)
   const intervalMs = parseInt(intervalMin, 10) * 60 * 1000
   if (isNaN(intervalMs) || intervalMs < 60000) {
     throw new Error('Interval must be at least 1 minute')
   }
-  const task = await client.tasks.subscribe(accountId, {
+  const task = await client.tasks.subscribe({
+    connector,
     syncType: 'incremental',
     intervalMs,
+    entityTypes: entityTypes?.length ? entityTypes : undefined,
   })
   printSuccess('Subscription created')
   printTask(task)
+  console.log(`\n  Manage: tasks get ${task.id.slice(0, 8)}`)
 }
 
-async function cmdTasksWebhook(accountId: string): Promise<void> {
-  printHeader('Create Webhook Subscription')
-  const task = await client.tasks.webhook(accountId)
+/**
+ * Create webhook subscription for a connector.
+ * @param connector - Connector type
+ * @param entityTypes - Optional entity types
+ */
+async function cmdTasksWebhook(connector: string, entityTypes?: string[]): Promise<void> {
+  printHeader(`Webhook: ${connector}`)
+  const task = await client.tasks.webhook({
+    connector,
+    entityTypes: entityTypes?.length ? entityTypes : undefined,
+  })
   printSuccess('Webhook subscription created')
   printTask(task)
-  console.log('\nNote: Webhooks may require additional provider setup (e.g., Google Pub/Sub).')
+  console.log(`\n  Manage: tasks get ${task.id.slice(0, 8)}`)
+  console.log('  Note: Webhooks may require additional provider setup (e.g., Google Pub/Sub).')
 }
 
 async function cmdTasksTrigger(id: string): Promise<void> {
+  const resolvedId = resolveTaskId(id)
   printHeader('Trigger Task')
-  const job = await client.tasks.trigger(id)
+  const job = await client.tasks.trigger(resolvedId)
   printSuccess('Task triggered')
-  console.log(`  Job ID: ${job.id}`)
+  console.log(`  Job ID: ${job.id.slice(0, 8)}`)
+  console.log(`\n  Monitor: jobs get ${job.id.slice(0, 8)}`)
 }
 
 async function cmdTasksEnable(id: string): Promise<void> {
+  const resolvedId = resolveTaskId(id)
   printHeader('Enable Task')
-  await client.tasks.enable(id)
-  printSuccess(`Task ${id} enabled`)
+  await client.tasks.enable(resolvedId)
+  printSuccess(`Task ${resolvedId.slice(0, 8)} enabled`)
 }
 
 async function cmdTasksDisable(id: string): Promise<void> {
+  const resolvedId = resolveTaskId(id)
   printHeader('Disable Task')
-  await client.tasks.disable(id)
-  printSuccess(`Task ${id} disabled`)
+  await client.tasks.disable(resolvedId)
+  printSuccess(`Task ${resolvedId.slice(0, 8)} disabled`)
 }
 
 async function cmdTasksDelete(id: string): Promise<void> {
+  const resolvedId = resolveTaskId(id)
   printHeader('Delete Task')
-  await client.tasks.delete(id)
-  printSuccess(`Task ${id} deleted`)
+  await client.tasks.delete(resolvedId)
+  printSuccess(`Task ${resolvedId.slice(0, 8)} deleted`)
 }
 
 // --- Jobs ---
@@ -317,36 +1089,51 @@ async function cmdTasksDelete(id: string): Promise<void> {
 async function cmdJobsList(): Promise<void> {
   printHeader('Sync Jobs')
   const jobs = await client.jobs.list({ limit: 20 })
+  lastJobsList = jobs // Cache for short ID resolution
   if (jobs.length === 0) {
     console.log('  No jobs found.')
   } else {
-    jobs.forEach(printJob)
+    jobs.forEach((job, i) => printJob(job, i))
+    console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference jobs (e.g., "jobs get #1")\x1b[0m`)
   }
 }
 
 async function cmdJobsGet(id: string): Promise<void> {
+  const resolvedId = resolveJobId(id)
   printHeader('Job Details')
-  const { job, queueStats } = await client.jobs.get(id)
+  const { job, queueStats } = await client.jobs.get(resolvedId)
   printJob(job)
+
+  // Show full ID for copying
+  console.log(`\n  Full ID: \x1b[36m${job.id}\x1b[0m`)
+
   if (queueStats) {
     console.log('\n  Queue stats:')
     console.log(`    Pending: ${queueStats.pending}`)
     console.log(`    Running: ${queueStats.running}`)
+    console.log(`    Completed: ${queueStats.completed}`)
+    console.log(`    Failed: ${queueStats.failed}`)
+    if (queueStats.avgProcessTime) {
+      console.log(`    Avg time: ${Math.round(queueStats.avgProcessTime / 1000)}s`)
+    }
   }
 }
 
 async function cmdJobsCancel(id: string): Promise<void> {
+  const resolvedId = resolveJobId(id)
   printHeader('Cancel Job')
-  const job = await client.jobs.cancel(id)
-  printSuccess(`Job ${id} cancelled`)
+  const job = await client.jobs.cancel(resolvedId)
+  printSuccess(`Job ${resolvedId.slice(0, 8)} cancelled`)
   printJob(job)
 }
 
 async function cmdJobsRetry(id: string): Promise<void> {
+  const resolvedId = resolveJobId(id)
   printHeader('Retry Job')
-  const { job } = await client.jobs.retry(id)
+  const { job } = await client.jobs.retry(resolvedId)
   printSuccess('New job scheduled')
-  console.log(`  New job ID: ${job.id}`)
+  console.log(`  New job ID: ${job.id.slice(0, 8)}`)
+  console.log(`\n  Monitor: jobs get ${job.id.slice(0, 8)}`)
 }
 
 // ============ CLI Router ============
@@ -356,64 +1143,124 @@ function printHelp(): void {
 \x1b[1mSync Engine API CLI\x1b[0m
 
 \x1b[4mUsage:\x1b[0m
-  bun run scripts/sync-api-cli.ts <command> [subcommand] [args]
+  sync-api-cli <command> [subcommand] [args]
 
 \x1b[4mEnvironment:\x1b[0m
   SYNC_DAEMON_URL      API endpoint (default: http://localhost:3001)
   OAUTH_REDIRECT_URI   External OAuth redirect URI (e.g., Tailscale endpoint)
-  OAUTH_CALLBACK_PORT  Local callback port if no OAUTH_REDIRECT_URI (default: 9876)
+  OAUTH_CALLBACK_PORT  Local callback port (default: 9876)
 
 \x1b[4mCommands:\x1b[0m
 
-  \x1b[1mhealth\x1b[0m                         Check if daemon is running
+  \x1b[1mhealth\x1b[0m                           Check if daemon is running
 
-  \x1b[1maccounts\x1b[0m
-    list                         List all accounts
-    get <id>                     Get account details
-    delete <id>                  Deactivate account
+  \x1b[1mconnectors\x1b[0m                       Discover and manage connectors
+    list                           List all registered connectors
+    available                      List available factories (not yet registered)
+    <type>                         Show connector details and accounts
+    register <type>                Register a connector (interactive prompts)
+    register <type> <json>         Register with JSON config directly
+    config <type> <json>           Update connector config
+    enable <type>                  Enable a disabled connector
+    disable <type>                 Disable a connector (unload from memory)
+    unregister <type>              Unregister a connector completely
 
-  \x1b[1mauth\x1b[0m
-    providers                    List available OAuth providers
-    login <connector>            Start OAuth flow (opens browser)
-    status <accountId>           Check credential status
-    refresh <accountId>          Force token refresh
+  \x1b[1mauth\x1b[0m                             Authentication
+    providers                      List OAuth providers (Google, GitHub, etc.)
+    login <connector>              OAuth flow (opens browser)
+    login <connector> --headless   Device auth flow (no browser)
+    status <accountId>             Check credential status
+    refresh <accountId>            Force token refresh
 
-  \x1b[1mtasks\x1b[0m
-    list                         List all sync tasks
-    get <id>                     Get task with recent jobs
-    backfill <accountId>         Create one-time backfill task
-    subscribe <accountId> <min>  Create recurring sync (interval in minutes)
-    webhook <accountId>          Create webhook subscription
-    trigger <id>                 Manually run a task now
-    enable <id>                  Enable a task
-    disable <id>                 Disable a task
-    delete <id>                  Delete a task
+  \x1b[1maccounts\x1b[0m                         Manage authenticated accounts
+    list                           List all accounts
+    get <id>                       Get account details
+    delete <id>                    Deactivate account
 
-  \x1b[1mjobs\x1b[0m
-    list                         List recent jobs
-    get <id>                     Get job details
-    cancel <id>                  Cancel a running job
-    retry <id>                   Retry a failed job
+  \x1b[1mtasks\x1b[0m                            Sync task management
+    list                           List all tasks (shows #N indices)
+    get <id>                       Get task with recent jobs
+    trigger <id>                   Run a task now
+    enable <id>                    Enable a task
+    disable <id>                   Disable a task
+    delete <id>                    Delete a task
+
+    \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
+
+    \x1b[1m<connector>\x1b[0m create
+                                   Interactive task wizard (recommended)
+    \x1b[1m<connector>\x1b[0m backfill [types...]
+                                   Quick: one-shot historical sync
+    \x1b[1m<connector>\x1b[0m subscribe <min> [types...]
+                                   Quick: recurring sync (interval in minutes)
+    \x1b[1m<connector>\x1b[0m webhook [types...]
+                                   Quick: real-time webhook subscription
+    \x1b[1m<connector>\x1b[0m list
+                                   List tasks for this connector
+
+  \x1b[1mjobs\x1b[0m                             Monitor sync jobs
+    list                           List recent jobs (shows #N indices)
+    get <id>                       Get job details
+    cancel <id>                    Cancel running job
+    retry <id>                     Retry failed job
+
+    \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
+
+\x1b[4mWorkflow:\x1b[0m
+
+  \x1b[90m# 1. Discover available connectors\x1b[0m
+  sync-api-cli connectors list
+  \x1b[90m# → gmail - Gmail (message, thread, history)
+  #   github - GitHub (user, issue, pull_request, comment, notification)\x1b[0m
+
+  \x1b[90m# 2. Authenticate with a connector\x1b[0m
+  sync-api-cli auth login gmail
+  \x1b[90m# → Opens browser for OAuth, creates account\x1b[0m
+
+  \x1b[90m# 3. Create a sync task (interactive wizard - recommended)\x1b[0m
+  sync-api-cli tasks gmail create
+  \x1b[90m# → Walks through: sync type, mode, entity types, interval
+  #   Shows connector capabilities and validates combinations\x1b[0m
+
+  \x1b[90m# 3b. Or use quick commands if you know what you want\x1b[0m
+  sync-api-cli tasks gmail backfill           \x1b[90m# One-shot historical sync\x1b[0m
+  sync-api-cli tasks gmail subscribe 60       \x1b[90m# Hourly incremental sync\x1b[0m
+  sync-api-cli tasks gmail backfill message   \x1b[90m# Backfill specific types\x1b[0m
+
+  \x1b[90m# 4. Monitor progress\x1b[0m
+  sync-api-cli jobs list
+  sync-api-cli jobs get #1          \x1b[90m# Use index from list\x1b[0m
+  sync-api-cli jobs get 01JD        \x1b[90m# Or use ID prefix\x1b[0m
 
 \x1b[4mExamples:\x1b[0m
 
-  # Start daemon and check health
-  bun run scripts/sync-api-cli.ts health
+  \x1b[90m# Gmail: interactive task creation (recommended)\x1b[0m
+  sync-api-cli auth login gmail
+  sync-api-cli tasks gmail create
+  \x1b[90m# → Select sync type: backfill/incremental
+  # → Select mode: once/recurring/webhook
+  # → Select entity types: message, thread, history
+  # → Set interval (if recurring)\x1b[0m
 
-  # Add Gmail account (opens browser for OAuth)
-  bun run scripts/sync-api-cli.ts auth login gmail
+  \x1b[90m# Quick commands (for scripting or when you know what you want)\x1b[0m
+  sync-api-cli tasks gmail backfill              \x1b[90m# One-shot full sync\x1b[0m
+  sync-api-cli tasks gmail subscribe 60          \x1b[90m# Hourly incremental\x1b[0m
+  sync-api-cli tasks github backfill issue pr    \x1b[90m# Specific entity types\x1b[0m
 
-  # List accounts
-  bun run scripts/sync-api-cli.ts accounts list
+  \x1b[90m# Reuse OAuth credentials across connectors\x1b[0m
+  sync-api-cli auth login gmail     \x1b[90m# First Google connector\x1b[0m
+  sync-api-cli auth login calendar  \x1b[90m# Prompts: "Found existing Google credentials"\x1b[0m
 
-  # Start backfill sync
-  bun run scripts/sync-api-cli.ts tasks backfill <account-id>
+\x1b[4mAdding Connectors:\x1b[0m
 
-  # Create hourly sync
-  bun run scripts/sync-api-cli.ts tasks subscribe <account-id> 60
+  See: packages/agent-memory/src/connectors/README.md
 
-  # Monitor jobs
-  bun run scripts/sync-api-cli.ts jobs list
+  1. Implement Connector interface in src/connectors/<name>/
+  2. Register factory in src/connectors/registry.ts
+  3. Add config schema in src/config/schema.ts
+  4. Enable in daemon config
+
+  Once registered, connectors appear in \`connectors list\` automatically.
 `)
 }
 
@@ -421,6 +1268,7 @@ async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
     options: {
       help: { type: 'boolean', short: 'h', default: false },
+      headless: { type: 'boolean', default: false },
     },
     allowPositionals: true,
   })
@@ -436,6 +1284,42 @@ async function main(): Promise<void> {
     switch (command) {
       case 'health':
         await cmdHealth()
+        break
+
+      case 'connectors':
+        switch (subcommand) {
+          case 'list':
+          case undefined:
+            await cmdConnectorsList()
+            break
+          case 'available':
+            await cmdConnectorsAvailable()
+            break
+          case 'register':
+            if (!args[0]) throw new Error('Missing connector type')
+            await cmdConnectorRegister(args[0], args[1])
+            break
+          case 'config':
+            if (!args[0]) throw new Error('Missing connector type')
+            if (!args[1]) throw new Error('Missing config JSON')
+            await cmdConnectorConfig(args[0], args[1])
+            break
+          case 'enable':
+            if (!args[0]) throw new Error('Missing connector type')
+            await cmdConnectorEnable(args[0])
+            break
+          case 'disable':
+            if (!args[0]) throw new Error('Missing connector type')
+            await cmdConnectorDisable(args[0])
+            break
+          case 'unregister':
+            if (!args[0]) throw new Error('Missing connector type')
+            await cmdConnectorUnregister(args[0])
+            break
+          default:
+            // subcommand is connector type
+            await cmdConnectorInfo(subcommand)
+        }
         break
 
       case 'accounts':
@@ -467,7 +1351,7 @@ async function main(): Promise<void> {
             break
           case 'login':
             if (!args[0]) throw new Error('Missing connector (e.g., gmail, github)')
-            await cmdAuthLogin(args[0])
+            await cmdAuthLogin(args[0], values.headless)
             break
           case 'status':
             if (!args[0]) throw new Error('Missing account ID')
@@ -491,19 +1375,6 @@ async function main(): Promise<void> {
             if (!args[0]) throw new Error('Missing task ID')
             await cmdTasksGet(args[0])
             break
-          case 'backfill':
-            if (!args[0]) throw new Error('Missing account ID')
-            await cmdTasksBackfill(args[0])
-            break
-          case 'subscribe':
-            if (!args[0]) throw new Error('Missing account ID')
-            if (!args[1]) throw new Error('Missing interval (minutes)')
-            await cmdTasksSubscribe(args[0], args[1])
-            break
-          case 'webhook':
-            if (!args[0]) throw new Error('Missing account ID')
-            await cmdTasksWebhook(args[0])
-            break
           case 'trigger':
             if (!args[0]) throw new Error('Missing task ID')
             await cmdTasksTrigger(args[0])
@@ -524,7 +1395,38 @@ async function main(): Promise<void> {
             if (!subcommand) {
               await cmdTasksList()
             } else {
-              throw new Error(`Unknown subcommand: tasks ${subcommand}`)
+              // subcommand is the connector type
+              // args[0] is the action (backfill, subscribe, webhook)
+              // args[1...] are entity types or interval + entity types
+              const connector = subcommand
+              const action = args[0]
+              const restArgs = args.slice(1)
+
+              switch (action) {
+                case 'create':
+                  // tasks <connector> create - interactive wizard
+                  await cmdTasksCreate(connector)
+                  break
+                case 'backfill':
+                  // tasks <connector> backfill [types...]
+                  await cmdTasksBackfill(connector, restArgs.length > 0 ? restArgs : undefined)
+                  break
+                case 'subscribe':
+                  // tasks <connector> subscribe <interval> [types...]
+                  if (!restArgs[0]) throw new Error('Missing interval (minutes)')
+                  await cmdTasksSubscribe(connector, restArgs[0], restArgs.slice(1))
+                  break
+                case 'webhook':
+                  // tasks <connector> webhook [types...]
+                  await cmdTasksWebhook(connector, restArgs.length > 0 ? restArgs : undefined)
+                  break
+                case 'list':
+                  // tasks <connector> list - filter tasks by connector
+                  await cmdTasksList(connector)
+                  break
+                default:
+                  throw new Error(`Unknown action: tasks ${connector} ${action || '(none)'}. Use create, backfill, subscribe, webhook, or list.`)
+              }
             }
         }
         break

@@ -53,6 +53,35 @@ export { resetProviderCircuit, getCircuitStatus };
 
 type AgentAction = 'done' | 'continue' | 'handoff';
 
+const QUESTION_CLEANUP_REGEX = /```[\s\S]*?```|`[^`]*`/g;
+
+function inferUserPromptFromResponse(responseText?: string): UserPromptInfo | null {
+  if (!responseText) return null;
+
+  const cleaned = responseText.replace(QUESTION_CLEANUP_REGEX, '').trim();
+  if (!cleaned.includes('?')) return null;
+
+  const lastQuestionIndex = cleaned.lastIndexOf('?');
+  if (lastQuestionIndex === -1) return null;
+
+  const beforeQuestion = cleaned.slice(0, lastQuestionIndex);
+  const boundaryIndex = Math.max(
+    beforeQuestion.lastIndexOf('.'),
+    beforeQuestion.lastIndexOf('!'),
+    beforeQuestion.lastIndexOf('?'),
+    beforeQuestion.lastIndexOf('\n')
+  );
+
+  const question = cleaned.slice(boundaryIndex + 1, lastQuestionIndex + 1).trim();
+  if (question.length < 2 || !/[a-zA-Z]/.test(question)) return null;
+
+  const context = cleaned.slice(0, boundaryIndex + 1).trim();
+  return {
+    question,
+    context: context.length > 0 ? context : undefined,
+  };
+}
+
 /**
  * Model selection override for per-agent-type model configuration.
  */
@@ -299,6 +328,21 @@ export class Agent {
     // If PromptUser already set needsUserInput, honor it
     if (result.needsUserInput) {
       return 'user_input';
+    }
+
+    const shouldInferUserPrompt = action !== 'done' || structuredOutput?.goalStateReached !== true;
+    if (shouldInferUserPrompt) {
+      const responseCandidate = responseText ?? content;
+      const inferredPrompt = inferUserPromptFromResponse(responseCandidate);
+      if (inferredPrompt) {
+        result.needsUserInput = true;
+        result.userPrompt = inferredPrompt;
+        result.terminationReason = 'user_input_required';
+        if (responseCandidate.trim()) {
+          result.response = responseCandidate;
+        }
+        return 'user_input';
+      }
     }
 
     // Handle done action

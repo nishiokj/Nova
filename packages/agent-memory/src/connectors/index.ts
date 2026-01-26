@@ -6,6 +6,19 @@
  * @module connectors
  */
 
+// Connector Registry (for config-driven loading)
+export {
+  registerFactory,
+  getFactory,
+  listFactoryTypes,
+  hasFactory,
+  loadConnectors,
+  type ConnectorFactory,
+  type ConnectorFactoryEntry,
+  type LoadConnectorsResult,
+  type EnabledConnectorConfig,
+} from './registry.js'
+
 // GitHub Connector
 export {
   // Connector

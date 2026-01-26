@@ -245,8 +245,6 @@ class HarnessProviderKeyService implements ProviderKeyService {
       try {
         this.localProviders = new LocalProviderManager(graphdDbPath);
         this.logger.info('HarnessProviderKeyService initialized with GraphD', { dbPath: graphdDbPath });
-        // Export stored provider keys to process.env so child processes (skill scripts) can access them
-        this.localProviders.exportToEnv();
       } catch (err) {
         this.logger.warning('Failed to initialize LocalProviderManager', { error: String(err) });
       }
