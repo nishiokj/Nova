@@ -1,0 +1,9 @@
+{
+  "id": "01KFW7Z16KA6W0K7E6GMHZEMYC",
+  "type": "sync:collect",
+  "payload": "{\"syncJobId\":\"01KFW7Z16G5G0VSE0404DRHBHJ\",\"connector\":\"github\",\"accountId\":\"01KFW1ECTGK6GDJS2KX3XA8D2V\",\"jobType\":\"incremental\",\"entityTypes\":[\"pull_request\"]}",
+  "error": "UNDEFINED_VALUE: Undefined values are not allowed",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T04:11:05.299Z",
+  "diedAt": "2026-01-26T04:11:08.905Z"
+}

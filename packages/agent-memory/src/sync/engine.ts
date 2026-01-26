@@ -106,6 +106,7 @@ export class SyncEngine {
   private transformRegistry: TransformationRegistry
   private eventHandlers: Array<(event: SyncEvent) => void> = []
   private isRunning = false
+  private queueWorker: Promise<void> | null = null
 
   constructor(sql: Sql, config: SyncEngineConfig = {}) {
     this.sql = sql
@@ -385,7 +386,7 @@ export class SyncEngine {
 
   /**
    * Start the sync engine.
-   * Begins processing queued jobs.
+   * Begins processing queued jobs in the background.
    */
   async start(): Promise<void> {
     if (this.isRunning) {
@@ -394,13 +395,12 @@ export class SyncEngine {
 
     this.isRunning = true
 
-    // Start the queue - this blocks until queue is processing
-    try {
-      await this.queue.start()
-    } catch (error) {
-      console.error('[SyncEngine] Failed to start queue:', error)
-      throw error
-    }
+    // Start the queue worker without blocking scheduler startup.
+    this.queueWorker = this.queue.start()
+    this.queueWorker.catch((error) => {
+      console.error('[SyncEngine] Queue worker exited with error:', error)
+      this.isRunning = false
+    })
   }
 
   /**
@@ -412,6 +412,10 @@ export class SyncEngine {
 
     this.isRunning = false
     await this.queue.stop()
+    if (this.queueWorker) {
+      await this.queueWorker.catch(() => undefined)
+      this.queueWorker = null
+    }
   }
 
   /**
