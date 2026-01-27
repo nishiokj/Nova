@@ -8,7 +8,7 @@
  * Quick Start:
  *   1. connectors list           - See available connectors
  *   2. auth login <connector>    - Authenticate
- *   3. tasks <connector> backfill - Sync data
+ *   3. tasks <connector> create   - Create a sync task (interactive)
  *
  * See: packages/agent-memory/src/connectors/README.md for adding connectors.
  */
@@ -24,6 +24,8 @@ import {
   type SyncEstimate,
   type SyncJob,
   type SyncTask,
+  type DerivedTask,
+  type DerivedJob,
 } from '../packages/agent-memory/src/client/index.js'
 
 const SYNC_DAEMON_URL = process.env.SYNC_DAEMON_URL || 'http://localhost:3001'
@@ -38,6 +40,8 @@ const client = new SyncClient(SYNC_DAEMON_URL)
 // Maps short indices (#1, #2) to full ULIDs for easy reference
 let lastJobsList: SyncJob[] = []
 let lastTasksList: SyncTask[] = []
+let lastDerivedTasksList: DerivedTask[] = []
+let lastDerivedJobsList: DerivedJob[] = []
 
 /**
  * Resolve a short ID (#1, #2) or prefix to a full ULID.
@@ -90,6 +94,50 @@ async function resolveTaskId(input: string): Promise<string> {
       throw new Error(`Ambiguous prefix "${input}" matches ${matches.length} tasks. Be more specific.`)
     }
     // No match in cache - pass through and let API handle it
+  }
+  return input
+}
+
+async function resolveDerivedTaskId(input: string): Promise<string> {
+  if (lastDerivedTasksList.length === 0 && (input.startsWith('#') || (input.length >= 4 && input.length < 26))) {
+    lastDerivedTasksList = await client.derivedTasks.list()
+  }
+
+  if (input.startsWith('#')) {
+    const idx = parseInt(input.slice(1), 10) - 1
+    if (isNaN(idx) || idx < 0 || idx >= lastDerivedTasksList.length) {
+      throw new Error(`Invalid index ${input}. Valid: #1-#${lastDerivedTasksList.length || 0}`)
+    }
+    return lastDerivedTasksList[idx].id
+  }
+  if (input.length >= 4 && input.length < 26) {
+    const matches = lastDerivedTasksList.filter((t) => t.id.toUpperCase().startsWith(input.toUpperCase()))
+    if (matches.length === 1) return matches[0].id
+    if (matches.length > 1) {
+      throw new Error(`Ambiguous prefix "${input}" matches ${matches.length} derived tasks. Be more specific.`)
+    }
+  }
+  return input
+}
+
+async function resolveDerivedJobId(input: string): Promise<string> {
+  if (lastDerivedJobsList.length === 0 && (input.startsWith('#') || (input.length >= 4 && input.length < 26))) {
+    lastDerivedJobsList = await client.derivedJobs.list({ limit: 50 })
+  }
+
+  if (input.startsWith('#')) {
+    const idx = parseInt(input.slice(1), 10) - 1
+    if (isNaN(idx) || idx < 0 || idx >= lastDerivedJobsList.length) {
+      throw new Error(`Invalid index ${input}. Valid: #1-#${lastDerivedJobsList.length || 0}`)
+    }
+    return lastDerivedJobsList[idx].id
+  }
+  if (input.length >= 4 && input.length < 26) {
+    const matches = lastDerivedJobsList.filter((j) => j.id.toUpperCase().startsWith(input.toUpperCase()))
+    if (matches.length === 1) return matches[0].id
+    if (matches.length > 1) {
+      throw new Error(`Ambiguous prefix "${input}" matches ${matches.length} derived jobs. Be more specific.`)
+    }
   }
   return input
 }
@@ -155,6 +203,26 @@ function printSanityResult(result: SanityCheckResult): void {
     }
     const details = formatSanityDetails(check.details)
     console.log(`  ${icon} ${check.id}: ${check.message}${details}`)
+  }
+}
+
+function extractSanityResult(data: unknown): SanityCheckResult | undefined {
+  if (!data || typeof data !== 'object') return undefined
+  const sanity = (data as { sanity?: SanityCheckResult }).sanity
+  if (!sanity || typeof sanity !== 'object') return undefined
+  return sanity
+}
+
+function printErrorDetails(data: unknown): void {
+  const sanity = extractSanityResult(data)
+  if (sanity) {
+    printSanityResult(sanity)
+    return
+  }
+
+  if (data && typeof data === 'object') {
+    console.log('\nDetails:')
+    printJson(data)
   }
 }
 
@@ -326,6 +394,39 @@ function printJob(job: SyncJob, index?: number): void {
   if (job.last_error) {
     const truncatedError = job.last_error.length > 80 ? job.last_error.slice(0, 80) + '...' : job.last_error
     console.log(`    \x1b[31mError: ${truncatedError}\x1b[0m`)
+  }
+}
+
+function printDerivedTask(task: DerivedTask, index?: number): void {
+  const status = task.enabled ? '\x1b[32menabled\x1b[0m' : '\x1b[33mdisabled\x1b[0m'
+  const indexLabel = index !== undefined ? `\x1b[90m#${index + 1}\x1b[0m ` : ''
+  const shortId = task.id.slice(0, 8)
+
+  console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m \x1b[90m${task.name}\x1b[0m`)
+  console.log(`    Mode: ${task.mode} ${status}`)
+  console.log(`    Script: ${task.script_path}`)
+
+  if (task.mode === 'recurring' && task.interval_ms) {
+    const cadence = formatInterval(task.interval_ms)
+    if (task.next_run_at) {
+      const nextRun = new Date(task.next_run_at)
+      const relative = formatRelativeTime(nextRun)
+      console.log(`    Schedule: every ${cadence} (next: ${relative})`)
+    } else {
+      console.log(`    Schedule: every ${cadence}`)
+    }
+  } else if (task.mode === 'event') {
+    console.log('    Schedule: event-driven')
+  } else if (task.mode === 'once') {
+    console.log('    Schedule: one-shot')
+  }
+
+  if (task.last_job_id) {
+    console.log(`    Last job: ${task.last_job_id.slice(0, 8)}`)
+  }
+
+  if (task.created_at) {
+    console.log(`    Created: ${formatRelativeTime(new Date(task.created_at))}`)
   }
 }
 
@@ -818,7 +919,7 @@ async function cmdTasksList(connector?: string): Promise<void> {
   lastTasksList = tasks // Cache for short ID resolution
   if (tasks.length === 0) {
     console.log('  No tasks found.')
-    console.log('  Use "tasks <connector> backfill" to create a sync task.')
+    console.log('  Use "tasks <connector> create" to create a sync task.')
   } else {
     tasks.forEach((task, i) => printTask(task, i))
     console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference tasks (e.g., "tasks get #1")\x1b[0m`)
@@ -1087,85 +1188,6 @@ async function cmdTasksCreate(connector: string): Promise<void> {
   }
 }
 
-/**
- * Create backfill task for a connector.
- * @param connector - Connector type (e.g., 'gmail', 'github')
- * @param entityTypes - Optional entity types to backfill
- */
-async function cmdTasksBackfill(connector: string, entityTypes?: string[]): Promise<void> {
-  printHeader(`Backfill: ${connector}`)
-  await requireTaskSanity({
-    connector,
-    syncType: 'backfill',
-    entityTypes: entityTypes?.length ? entityTypes : undefined,
-    mode: 'once',
-  })
-  const { task, job } = await client.tasks.backfill({
-    connector,
-    entityTypes: entityTypes?.length ? entityTypes : undefined,
-  })
-  printSuccess('Backfill task created')
-  console.log(`  Connector: ${connector}`)
-  console.log(`  Task: ${task.id.slice(0, 8)}`)
-  console.log(`  Job: ${job.id.slice(0, 8)}`)
-  if (entityTypes?.length) {
-    console.log(`  Entity types: ${entityTypes.join(', ')}`)
-  }
-  console.log(`\n  Monitor: jobs get ${job.id.slice(0, 8)}`)
-}
-
-/**
- * Create recurring sync for a connector.
- * @param connector - Connector type
- * @param intervalMin - Sync interval in minutes
- * @param entityTypes - Optional entity types
- */
-async function cmdTasksSubscribe(connector: string, intervalMin: string, entityTypes?: string[]): Promise<void> {
-  printHeader(`Subscribe: ${connector}`)
-  const intervalMs = parseInt(intervalMin, 10) * 60 * 1000
-  if (isNaN(intervalMs) || intervalMs < 60000) {
-    throw new Error('Interval must be at least 1 minute')
-  }
-  await requireTaskSanity({
-    connector,
-    syncType: 'incremental',
-    entityTypes: entityTypes?.length ? entityTypes : undefined,
-    mode: 'recurring',
-  })
-  const task = await client.tasks.subscribe({
-    connector,
-    syncType: 'incremental',
-    intervalMs,
-    entityTypes: entityTypes?.length ? entityTypes : undefined,
-  })
-  printSuccess('Subscription created')
-  printTask(task)
-  console.log(`\n  Manage: tasks get ${task.id.slice(0, 8)}`)
-}
-
-/**
- * Create webhook subscription for a connector.
- * @param connector - Connector type
- * @param entityTypes - Optional entity types
- */
-async function cmdTasksWebhook(connector: string, entityTypes?: string[]): Promise<void> {
-  printHeader(`Webhook: ${connector}`)
-  await requireTaskSanity({
-    connector,
-    syncType: 'incremental',
-    entityTypes: entityTypes?.length ? entityTypes : undefined,
-    mode: 'webhook',
-  })
-  const task = await client.tasks.webhook({
-    connector,
-    entityTypes: entityTypes?.length ? entityTypes : undefined,
-  })
-  printSuccess('Webhook subscription created')
-  printTask(task)
-  console.log(`\n  Manage: tasks get ${task.id.slice(0, 8)}`)
-  console.log('  Note: Webhooks may require additional provider setup (e.g., Google Pub/Sub).')
-}
-
 async function cmdTasksTrigger(id: string): Promise<void> {
   const resolvedId = await resolveTaskId(id)
   printHeader('Trigger Task')
@@ -1194,6 +1216,103 @@ async function cmdTasksDelete(id: string): Promise<void> {
   printHeader('Delete Task')
   await client.tasks.delete(resolvedId)
   printSuccess(`Task ${resolvedId.slice(0, 8)} deleted`)
+}
+
+// --- Derived Tasks ---
+
+async function cmdDerivedTasksList(): Promise<void> {
+  printHeader('Derived Tasks')
+  const tasks = await client.derivedTasks.list()
+  lastDerivedTasksList = tasks
+  if (tasks.length === 0) {
+    console.log('  No derived tasks found.')
+    console.log('  Use "derived-tasks create" to create a derived task.')
+  } else {
+    tasks.forEach((task, i) => printDerivedTask(task, i))
+    console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference derived tasks (e.g., "derived-tasks run #1")\x1b[0m`)
+  }
+}
+
+async function cmdDerivedTasksCreate(): Promise<void> {
+  printHeader('Create Derived Task')
+
+  const name = await prompt('Task name')
+  if (!name) {
+    throw new Error('Task name is required')
+  }
+
+  const defaultScriptPath = 'packages/agent-memory/scripts/derived/'
+  const scriptPath = await prompt('Script path', defaultScriptPath)
+  if (!scriptPath) {
+    throw new Error('Script path is required')
+  }
+
+  const mode = await promptSelect('Mode?', [
+    'once      - Run once and complete',
+    'recurring - Run on a schedule',
+    'event     - Triggered by external events',
+  ]).then((s) => s.split(' ')[0] as 'once' | 'recurring' | 'event')
+
+  let intervalMs: number | undefined
+  if (mode === 'recurring') {
+    console.log('\n\x1b[90mCommon intervals: 5m, 15m, 30m, 1h, 6h, 24h\x1b[0m')
+    const intervalStr = await prompt('Run interval', '1h')
+    const match = intervalStr.match(/^(\d+)\s*(m|min|h|hr|hour|d|day)?$/i)
+    if (!match) {
+      throw new Error(`Invalid interval format: ${intervalStr}. Use formats like: 5m, 1h, 30`)
+    }
+
+    const value = parseInt(match[1], 10)
+    const unit = (match[2] || 'm').toLowerCase()
+
+    switch (unit[0]) {
+      case 'm':
+        intervalMs = value * 60 * 1000
+        break
+      case 'h':
+        intervalMs = value * 60 * 60 * 1000
+        break
+      case 'd':
+        intervalMs = value * 24 * 60 * 60 * 1000
+        break
+      default:
+        intervalMs = value * 60 * 1000
+    }
+
+    if (intervalMs < 60000) {
+      throw new Error('Interval must be at least 1 minute')
+    }
+  }
+
+  let metadata: Record<string, unknown> | undefined
+  const metadataStr = await prompt('Metadata (optional JSON)', '')
+  if (metadataStr) {
+    try {
+      metadata = JSON.parse(metadataStr)
+    } catch {
+      throw new Error('Metadata must be valid JSON')
+    }
+  }
+
+  const task = await client.derivedTasks.create({
+    name,
+    scriptPath,
+    mode,
+    intervalMs,
+    metadata,
+  })
+
+  printSuccess('Derived task created')
+  printDerivedTask(task)
+}
+
+async function cmdDerivedTasksRun(id: string): Promise<void> {
+  const resolvedId = await resolveDerivedTaskId(id)
+  printHeader('Run Derived Task')
+  const job = await client.derivedTasks.run(resolvedId)
+  printSuccess('Derived task triggered')
+  console.log(`  Job ID: ${job.id.slice(0, 8)}`)
+  console.log(`\n  Monitor: derived-jobs get ${job.id.slice(0, 8)}`)
 }
 
 // --- Jobs ---
@@ -1248,6 +1367,187 @@ async function cmdJobsRetry(id: string): Promise<void> {
   console.log(`\n  Monitor: jobs get ${job.id.slice(0, 8)}`)
 }
 
+// --- Derived Jobs ---
+
+async function cmdDerivedJobsList(): Promise<void> {
+  printHeader('Derived Jobs')
+  const jobs = await client.derivedJobs.list({ limit: 20 })
+  lastDerivedJobsList = jobs
+  if (jobs.length === 0) {
+    console.log('  No derived jobs found.')
+  } else {
+    jobs.forEach((job, i) => {
+      const status = job.status
+      const shortId = job.id.slice(0, 8)
+      const indexLabel = `\x1b[90m#${i + 1}\x1b[0m `
+      console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m ${status}`)
+      console.log(`    Task: ${job.task_id.slice(0, 8)}`)
+    })
+    console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference derived jobs (e.g., "derived-jobs get #1")\x1b[0m`)
+  }
+}
+
+async function cmdDerivedJobsGet(id: string): Promise<void> {
+  const resolvedId = await resolveDerivedJobId(id)
+  printHeader('Derived Job Details')
+  const { job, queueStats } = await client.derivedJobs.get(resolvedId)
+  console.log(`  \x1b[36m${job.id}\x1b[0m ${job.status}`)
+  console.log(`    Task: ${job.task_id}`)
+  if (job.output_ref) console.log(`    Output: ${job.output_ref}`)
+  if (job.last_error) console.log(`    \x1b[31mError: ${job.last_error}\x1b[0m`)
+  if (queueStats) {
+    console.log('\n  Queue stats:')
+    console.log(`    Pending: ${queueStats.pending}`)
+    console.log(`    Running: ${queueStats.running}`)
+    console.log(`    Completed: ${queueStats.completed}`)
+    console.log(`    Failed: ${queueStats.failed}`)
+    if (queueStats.avgProcessTime) {
+      console.log(`    Avg time: ${Math.round(queueStats.avgProcessTime / 1000)}s`)
+    }
+  }
+}
+
+async function cmdDerivedJobsCancel(id: string): Promise<void> {
+  const resolvedId = await resolveDerivedJobId(id)
+  printHeader('Cancel Derived Job')
+  const job = await client.derivedJobs.cancel(resolvedId)
+  printSuccess(`Derived job ${resolvedId.slice(0, 8)} cancelled`)
+  console.log(`  Status: ${job.status}`)
+}
+
+async function cmdDerivedJobsRetry(id: string): Promise<void> {
+  const resolvedId = await resolveDerivedJobId(id)
+  printHeader('Retry Derived Job')
+  const { job } = await client.derivedJobs.retry(resolvedId)
+  printSuccess('New derived job scheduled')
+  console.log(`  New job ID: ${job.id.slice(0, 8)}`)
+  console.log(`\n  Monitor: derived-jobs get ${job.id.slice(0, 8)}`)
+}
+
+// --- Processing ---
+
+async function cmdProcessJob(id: string): Promise<void> {
+  const resolvedId = await resolveJobId(id)
+  printHeader('Process Sync Job')
+  const { job } = await client.jobs.get(resolvedId)
+
+  const entityTypes = (job.metadata?.entityTypes as string[] | undefined) ?? []
+  const transforms = await client.transformations.list({
+    connector: job.connector,
+    entityTypes,
+  })
+
+  if (transforms.length === 0) {
+    console.log('  No registered transformations found for this job.')
+  } else {
+    console.log('\nAvailable transformations:')
+    transforms.forEach((t, i) => {
+      const label = `${t.id} - ${t.name} (${t.source.entityType})`
+      const indexLabel = `\x1b[90m#${i + 1}\x1b[0m `
+      console.log(`  ${indexLabel}${label}`)
+    })
+  }
+
+  let transformationIds: string[] | undefined
+  if (transforms.length > 0) {
+    const options = transforms.map((t) => `${t.id} - ${t.name} (${t.source.entityType})`)
+    const selected = await promptMultiSelect('Select transformations to run?', options, options)
+    transformationIds = selected.map((s) => s.split(' ')[0])
+  }
+
+  const { result } = await client.processing.processJob(resolvedId, { transformationIds })
+  printSuccess(`Processed job ${job.id.slice(0, 8)}`)
+  console.log(`  Result: ${result.succeeded} succeeded, ${result.failed} failed (total ${result.total})`)
+}
+
+async function cmdProcessAll(): Promise<void> {
+  printHeader('Process All Unprocessed Envelopes')
+  let transformationIds: string[] | undefined
+  const select = await promptConfirm('Select transformations to run?', true)
+  if (select) {
+    const transforms = await client.transformations.list()
+    if (transforms.length === 0) {
+      console.log('  No registered transformations found.')
+    } else {
+      const options = transforms.map((t) => `${t.id} - ${t.name} (${t.source.connector}:${t.source.entityType})`)
+      const selected = await promptMultiSelect('Select transformations', options, options)
+      transformationIds = selected.map((s) => s.split(' ')[0])
+    }
+  }
+
+  const { result } = await client.processing.processAll({ transformationIds })
+  printSuccess('Processing complete')
+  console.log(`  Result: ${result.succeeded} succeeded, ${result.failed} failed (total ${result.total})`)
+}
+
+async function cmdProcessErrored(): Promise<void> {
+  printHeader('Reprocess All Errored Envelopes')
+  let transformationIds: string[] | undefined
+  const select = await promptConfirm('Select transformations to run?', true)
+  if (select) {
+    const transforms = await client.transformations.list()
+    if (transforms.length === 0) {
+      console.log('  No registered transformations found.')
+    } else {
+      const options = transforms.map((t) => `${t.id} - ${t.name} (${t.source.connector}:${t.source.entityType})`)
+      const selected = await promptMultiSelect('Select transformations', options, options)
+      transformationIds = selected.map((s) => s.split(' ')[0])
+    }
+  }
+
+  const { result } = await client.processing.processErrored({ transformationIds })
+  printSuccess('Reprocessing complete')
+  console.log(`  Result: ${result.succeeded} succeeded, ${result.failed} failed (total ${result.total})`)
+}
+
+async function cmdProcessReprocess(): Promise<void> {
+  printHeader('Reprocess Envelopes (Scoped)')
+  const connectors = await client.connectors.list()
+  if (connectors.length === 0) {
+    console.log('  No connectors registered.')
+    return
+  }
+
+  const connectorOptions = connectors.map((c) => `${c.type} - ${c.displayName}`)
+  const selectedConnector = await promptSelect('Select connector', connectorOptions, 0)
+  const connector = selectedConnector.split(' ')[0]
+
+  const connectorInfo = connectors.find((c) => c.type === connector)
+  const entityTypes = connectorInfo?.entityTypes ?? []
+  let entityType: string | undefined
+  if (entityTypes.length > 0) {
+    const selectEntity = await promptConfirm('Scope to a single entity type?', false)
+    if (selectEntity) {
+      const selectedEntity = await promptSelect('Select entity type', entityTypes, 0)
+      entityType = selectedEntity
+    }
+  }
+
+  let transformationIds: string[] | undefined
+  const selectTransforms = await promptConfirm('Select transformations to run?', true)
+  if (selectTransforms) {
+    const transforms = await client.transformations.list({
+      connector,
+      entityTypes: entityType ? [entityType] : undefined,
+    })
+    if (transforms.length === 0) {
+      console.log('  No registered transformations found.')
+    } else {
+      const options = transforms.map((t) => `${t.id} - ${t.name} (${t.source.connector}:${t.source.entityType})`)
+      const selected = await promptMultiSelect('Select transformations', options, options)
+      transformationIds = selected.map((s) => s.split(' ')[0])
+    }
+  }
+
+  const { result } = await client.processing.reprocess({
+    connector,
+    entityType,
+    transformationIds,
+  })
+  printSuccess('Reprocessing complete')
+  console.log(`  Result: ${result.succeeded} succeeded, ${result.failed} failed (total ${result.total})`)
+}
+
 // ============ CLI Router ============
 
 function printHelp(): void {
@@ -1300,15 +1600,33 @@ function printHelp(): void {
     \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
 
     \x1b[1m<connector>\x1b[0m create
-                                   Interactive task wizard (recommended)
-    \x1b[1m<connector>\x1b[0m backfill [types...]
-                                   Quick: one-shot historical sync
-    \x1b[1m<connector>\x1b[0m subscribe <min> [types...]
-                                   Quick: recurring sync (interval in minutes)
-    \x1b[1m<connector>\x1b[0m webhook [types...]
-                                   Quick: real-time webhook subscription
+                                   Interactive task wizard
+                                   Walks through: sync type, mode, entity types, interval
     \x1b[1m<connector>\x1b[0m list
                                    List tasks for this connector
+
+  \x1b[1mderived-tasks\x1b[0m                     Derived task management
+    list                           List all derived tasks (shows #N indices)
+    create                         Create a derived task (interactive)
+    run <id>                       Run a derived task now
+
+    \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
+
+  \x1b[1mderived-jobs\x1b[0m                      Monitor derived jobs
+    list                           List recent derived jobs (shows #N indices)
+    get <id>                       Get derived job details
+    cancel <id>                    Cancel running derived job
+    retry <id>                     Retry failed derived job
+
+    \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
+
+  \x1b[1mprocess\x1b[0m                          Process raw envelopes
+    job <id>                       Process envelopes for a sync job
+    all                            Process all unprocessed envelopes
+    errored                        Reprocess all errored envelopes
+    reprocess                      Reprocess envelopes (scoped)
+
+    \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
 
   \x1b[1mjobs\x1b[0m                             Monitor sync jobs
     list                           List recent jobs (shows #N indices)
@@ -1329,15 +1647,10 @@ function printHelp(): void {
   sync-api-cli auth login gmail
   \x1b[90m# → Opens browser for OAuth, creates account\x1b[0m
 
-  \x1b[90m# 3. Create a sync task (interactive wizard - recommended)\x1b[0m
+  \x1b[90m# 3. Create a sync task (interactive wizard)\x1b[0m
   sync-api-cli tasks gmail create
   \x1b[90m# → Walks through: sync type, mode, entity types, interval
   #   Shows connector capabilities and validates combinations\x1b[0m
-
-  \x1b[90m# 3b. Or use quick commands if you know what you want\x1b[0m
-  sync-api-cli tasks gmail backfill           \x1b[90m# One-shot historical sync\x1b[0m
-  sync-api-cli tasks gmail subscribe 60       \x1b[90m# Hourly incremental sync\x1b[0m
-  sync-api-cli tasks gmail backfill message   \x1b[90m# Backfill specific types\x1b[0m
 
   \x1b[90m# 4. Monitor progress\x1b[0m
   sync-api-cli jobs list
@@ -1346,18 +1659,13 @@ function printHelp(): void {
 
 \x1b[4mExamples:\x1b[0m
 
-  \x1b[90m# Gmail: interactive task creation (recommended)\x1b[0m
+  \x1b[90m# Gmail: interactive task creation\x1b[0m
   sync-api-cli auth login gmail
   sync-api-cli tasks gmail create
   \x1b[90m# → Select sync type: backfill/incremental
   # → Select mode: once/recurring/webhook
   # → Select entity types: message, thread, history
   # → Set interval (if recurring)\x1b[0m
-
-  \x1b[90m# Quick commands (for scripting or when you know what you want)\x1b[0m
-  sync-api-cli tasks gmail backfill              \x1b[90m# One-shot full sync\x1b[0m
-  sync-api-cli tasks gmail subscribe 60          \x1b[90m# Hourly incremental\x1b[0m
-  sync-api-cli tasks github backfill issue pr    \x1b[90m# Specific entity types\x1b[0m
 
   \x1b[90m# Reuse OAuth credentials across connectors\x1b[0m
   sync-api-cli auth login gmail     \x1b[90m# First Google connector\x1b[0m
@@ -1508,8 +1816,7 @@ async function main(): Promise<void> {
               await cmdTasksList()
             } else {
               // subcommand is the connector type
-              // args[0] is the action (backfill, subscribe, webhook)
-              // args[1...] are entity types or interval + entity types
+              // args[0] is the action (create, list)
               const connector = subcommand
               const action = args[0]
               const restArgs = args.slice(1)
@@ -1519,27 +1826,75 @@ async function main(): Promise<void> {
                   // tasks <connector> create - interactive wizard
                   await cmdTasksCreate(connector)
                   break
-                case 'backfill':
-                  // tasks <connector> backfill [types...]
-                  await cmdTasksBackfill(connector, restArgs.length > 0 ? restArgs : undefined)
-                  break
-                case 'subscribe':
-                  // tasks <connector> subscribe <interval> [types...]
-                  if (!restArgs[0]) throw new Error('Missing interval (minutes)')
-                  await cmdTasksSubscribe(connector, restArgs[0], restArgs.slice(1))
-                  break
-                case 'webhook':
-                  // tasks <connector> webhook [types...]
-                  await cmdTasksWebhook(connector, restArgs.length > 0 ? restArgs : undefined)
-                  break
                 case 'list':
                   // tasks <connector> list - filter tasks by connector
                   await cmdTasksList(connector)
                   break
                 default:
-                  throw new Error(`Unknown action: tasks ${connector} ${action || '(none)'}. Use create, backfill, subscribe, webhook, or list.`)
+                  throw new Error(`Unknown action: tasks ${connector} ${action || '(none)'}. Use create or list.`)
               }
             }
+        }
+        break
+
+      case 'derived-tasks':
+        switch (subcommand) {
+          case 'list':
+          case undefined:
+            await cmdDerivedTasksList()
+            break
+          case 'create':
+            await cmdDerivedTasksCreate()
+            break
+          case 'run':
+            if (!args[0]) throw new Error('Missing derived task ID')
+            await cmdDerivedTasksRun(args[0])
+            break
+          default:
+            throw new Error(`Unknown subcommand: derived-tasks ${subcommand || '(none)'}`)
+        }
+        break
+
+      case 'derived-jobs':
+        switch (subcommand) {
+          case 'list':
+          case undefined:
+            await cmdDerivedJobsList()
+            break
+          case 'get':
+            if (!args[0]) throw new Error('Missing derived job ID')
+            await cmdDerivedJobsGet(args[0])
+            break
+          case 'cancel':
+            if (!args[0]) throw new Error('Missing derived job ID')
+            await cmdDerivedJobsCancel(args[0])
+            break
+          case 'retry':
+            if (!args[0]) throw new Error('Missing derived job ID')
+            await cmdDerivedJobsRetry(args[0])
+            break
+          default:
+            throw new Error(`Unknown subcommand: derived-jobs ${subcommand || '(none)'}`)
+        }
+        break
+
+      case 'process':
+        switch (subcommand) {
+          case 'job':
+            if (!args[0]) throw new Error('Missing job ID')
+            await cmdProcessJob(args[0])
+            break
+          case 'all':
+            await cmdProcessAll()
+            break
+          case 'errored':
+            await cmdProcessErrored()
+            break
+          case 'reprocess':
+            await cmdProcessReprocess()
+            break
+          default:
+            throw new Error(`Unknown subcommand: process ${subcommand || '(none)'}`)
         }
         break
 
@@ -1577,6 +1932,7 @@ async function main(): Promise<void> {
   } catch (error) {
     if (error instanceof SyncClientError) {
       printError(`${error.message}`)
+      printErrorDetails(error.data)
       if (error.code === 'CONNECTION_ERROR') {
         console.log('\nIs the daemon running? Try: bun run packages/agent-memory/scripts/sync-daemon.ts')
       }

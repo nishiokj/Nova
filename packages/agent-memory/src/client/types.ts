@@ -201,6 +201,100 @@ export interface BackfillResponse {
   job: SyncJob
 }
 
+// ============ Processing ============
+
+export interface ProcessResultItem {
+  success: boolean
+  envelopeId: string
+  entityIds: string[]
+  mappings: Array<Record<string, unknown>>
+  error?: string
+}
+
+export interface BatchProcessResult {
+  total: number
+  succeeded: number
+  failed: number
+  results: ProcessResultItem[]
+}
+
+export interface ProcessJobResponse {
+  job: SyncJob
+  result: BatchProcessResult
+}
+
+export interface ProcessAllResponse {
+  result: BatchProcessResult
+}
+
+export interface ProcessErroredResponse {
+  result: BatchProcessResult
+}
+
+export interface ReprocessFilteredRequest {
+  connector?: string
+  entityType?: string
+  transformationIds?: string[]
+}
+
+export interface ReprocessFilteredResponse {
+  result: BatchProcessResult
+}
+
+export interface ProcessErroredResponse {
+  result: BatchProcessResult
+}
+
+// ============ Transformations ============
+
+export interface TransformationSummary {
+  id: string
+  name: string
+  source: {
+    connector: ConnectorType
+    entityType: string
+  }
+  outputType: string | string[]
+  enabled: boolean
+  version: number
+  description?: string
+}
+
+export interface TransformationListResponse {
+  transformations: TransformationSummary[]
+}
+
+// ============ Derived Tasks ============
+
+export type DerivedTaskMode = 'once' | 'recurring' | 'event'
+
+export interface DerivedTask {
+  id: string
+  name: string
+  script_path: string
+  mode: DerivedTaskMode
+  interval_ms: number | null
+  enabled: boolean
+  last_job_id: string | null
+  next_run_at: string | null
+  metadata?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface DerivedTaskListResponse {
+  tasks: DerivedTask[]
+}
+
+export interface DerivedTaskResponse {
+  task: DerivedTask
+  recentJobs?: DerivedJob[]
+}
+
+export interface DerivedTaskCreateResponse {
+  task: DerivedTask
+}
+
 // ============ Jobs ============
 
 export type SyncJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -248,6 +342,39 @@ export interface RetryResponse {
   originalJob: SyncJob
 }
 
+// ============ Derived Jobs ============
+
+export type DerivedJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export interface DerivedJob {
+  id: string
+  task_id: string
+  status: DerivedJobStatus
+  priority: number
+  created_at: string
+  started_at?: string
+  completed_at?: string
+  last_error?: string
+  retry_count: number
+  next_retry_at?: string
+  metadata?: Record<string, unknown>
+  output_ref?: string
+}
+
+export interface DerivedJobListResponse {
+  jobs: DerivedJob[]
+}
+
+export interface DerivedJobResponse {
+  job: DerivedJob
+  queueStats?: QueueStats
+}
+
+export interface DerivedRetryResponse {
+  job: DerivedJob
+  originalJob: DerivedJob
+}
+
 // ============ Data ============
 
 export interface Entity {
@@ -283,7 +410,8 @@ export class SyncClientError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly code?: string
+    public readonly code?: string,
+    public readonly data?: unknown
   ) {
     super(message)
     this.name = 'SyncClientError'

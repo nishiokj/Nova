@@ -115,6 +115,10 @@ export interface MappedEntity {
   relatedEntities?: MappedEntity[]
   /** Source ref key for this entity */
   sourceRefKey: string
+  /** Transformation ID used to create this mapping */
+  transformationId?: string
+  /** Transformation version used to create this mapping */
+  transformationVersion?: number
 }
 
 /**

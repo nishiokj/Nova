@@ -10,7 +10,38 @@ import type { InternalHookEvent, InternalHookContext, StopHookResult } from 'age
 
 // --- Event Types ---
 
-export type HookEventType = InternalHookEvent['type'] | 'stop';
+export type HookEventType = InternalHookEvent['type'] | 'stop' | 'prompt_user';
+
+/**
+ * PromptUser hook event - fired when agent requests user input.
+ */
+export interface PromptUserHookEvent {
+  type: 'prompt_user';
+  workItemId: string;
+  prompt: {
+    question: string;
+    options?: Array<string | { label: string; description?: string }>;
+    context?: string;
+    multiSelect?: boolean;
+    questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';
+    questions?: Array<{
+      question: string;
+      options?: Array<string | { label: string; description?: string }>;
+      context?: string;
+      multiSelect?: boolean;
+      questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';
+    }>;
+  };
+  timestamp: number;
+}
+
+/**
+ * PromptUser hook result - determines what happens next.
+ */
+export type PromptUserHookResult =
+  | { action: 'answer'; answer: string | string[]; contextAddendum?: string }
+  | { action: 'escalate'; reason: string }
+  | { action: 'block'; reason: string };
 
 // --- Callback Types ---
 
@@ -20,13 +51,18 @@ export type HookCallback<T extends InternalHookEvent = InternalHookEvent> = (
   ctx: InternalHookContext
 ) => Promise<void>;
 
+/** TypeScript callback for prompt_user hooks */
+export type PromptUserHookHandler = (
+  event: PromptUserHookEvent
+) => Promise<PromptUserHookResult>;
+
 /** Shell command hook - spawns subprocess, pipes JSON to stdin */
 export interface ShellHook {
   command: string;
   timeout?: number; // ms, default 60000
 }
 
-export type HookEntry = HookCallback | ShellHook;
+export type HookEntry = HookCallback | ShellHook | PromptUserHookHandler;
 
 // --- Stop Hook Types (blocking, can re-inject prompts) ---
 
@@ -146,6 +182,10 @@ export async function executeHooks(
     try {
       if (isShellHook(hook)) {
         await executeShellHook(hook, payload, ctx);
+      } else if (event === 'prompt_user') {
+        // PromptUser hooks have different signature - they return PromptUserHookResult
+        const promptUserHook = hook as PromptUserHookHandler;
+        await promptUserHook(payload as unknown as PromptUserHookEvent);
       } else {
         await hook(payload, ctx);
       }

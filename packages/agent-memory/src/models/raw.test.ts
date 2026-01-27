@@ -33,7 +33,7 @@ function createEntitySourceMapping(overrides = {}) {
   return {
     id: generateCanonicalId(),
     canonical_entity_id: canonicalId,
-    canonical_entity_type: 'task',
+    canonical_entity_type: 'issue',
     raw_envelope_id: rawEnvelopeId,
     source_ref_key: sourceRefToKey({
       connector: 'github',

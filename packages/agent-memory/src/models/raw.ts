@@ -13,6 +13,7 @@
 
 import { z } from 'zod'
 import { UlidSchema, ConnectorTypeSchema } from '../ids.js'
+import { EntityTypeSchema } from './canonical.js'
 
 // ============ Collection Method ============
 
@@ -98,13 +99,19 @@ export const EntitySourceMappingSchema = z.object({
   canonical_entity_id: UlidSchema,
 
   /** Type of the canonical entity */
-  canonical_entity_type: z.string().min(1),
+  canonical_entity_type: EntityTypeSchema,
 
   /** The raw envelope this entity was derived from */
   raw_envelope_id: UlidSchema,
 
   /** Source reference key: connector:account_id:entity_type:source_id */
   source_ref_key: z.string().min(1),
+
+  /** Transformation ID used to create this mapping */
+  transformation_id: z.string().min(1).optional(),
+
+  /** Transformation version used to create this mapping */
+  transformation_version: z.number().int().positive().optional(),
 
   /** When this mapping was created */
   created_at: z.string().datetime(),

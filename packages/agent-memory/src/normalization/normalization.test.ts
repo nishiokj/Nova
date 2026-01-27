@@ -598,13 +598,13 @@ describe('NormalizationPipeline', () => {
       expect(result.fields.sent_at).toBeDefined()
     })
 
-    test('normalizes task entity', () => {
+    test('normalizes issue entity', () => {
       const data = {
         title: 'Fix bug',
         description: '<ul><li>Step 1</li><li>Step 2</li></ul>',
       }
 
-      const result = pipeline.normalizeEntity('task', data)
+      const result = pipeline.normalizeEntity('issue', data)
       expect(result.success).toBe(true)
     })
 
@@ -636,7 +636,7 @@ describe('NormalizationPipeline', () => {
         description: '<p>Test</p>',
       }
 
-      const result = pipeline.normalizeEntity('task', data)
+      const result = pipeline.normalizeEntity('issue', data)
       const applied = pipeline.applyNormalization(data, result)
 
       expect(applied.title).toBe('Hello World')

@@ -138,7 +138,10 @@
 
   "tools": {
     "bash_timeout_ms": 120000,
-    "max_output_length": 10000
+    "max_output_length": 10000,
+    "browser": {
+      "default_screenshot_dir": "~/Desktop"
+    }
   },
 
   "graphd": {

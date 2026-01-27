@@ -49,7 +49,6 @@ import {
   pullRequestTransform,
   commentTransform,
   notificationTransform,
-  userTransform,
 } from './transforms.js'
 
 // ============ Constants ============
@@ -659,7 +658,6 @@ export function createGitHubConnector(
 export * from './schemas.js'
 export {
   githubTransforms,
-  userTransform,
   issueTransform,
   pullRequestTransform,
   commentTransform,

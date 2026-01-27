@@ -1,0 +1,51 @@
+{
+  "name": "@jesus/decision-watcher",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Decision watcher for async agent orchestration - auto-answers PromptUser questions using a curated decision and preference database",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./db": {
+      "types": "./dist/db/index.d.ts",
+      "import": "./dist/db/index.js"
+    },
+    "./engine": {
+      "types": "./dist/engine/index.d.ts",
+      "import": "./dist/engine/index.js"
+    },
+    "./watcher": {
+      "types": "./dist/watcher/index.d.ts",
+      "import": "./dist/watcher/index.js"
+    },
+    "./integration": {
+      "types": "./dist/integration/index.d.ts",
+      "import": "./dist/integration/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "test": "bun test",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@jesus/agent": "workspace:*",
+    "@jesus/types": "workspace:*",
+    "@jesus/shared": "workspace:*",
+    "@jesus/agent-memory": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.2",
+    "typescript": "^5.8.2"
+  }
+}

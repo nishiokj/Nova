@@ -24,13 +24,11 @@ import {
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
-import { Orchestrator } from 'orchestrator';
 import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
+import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind } from 'types';
 import { ContextWindow } from 'context';
-import { createWorkItem } from 'work';
-import { coerceStructuredOutput, profiler } from 'shared';
+import { profiler } from 'shared';
 import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
@@ -58,6 +56,7 @@ import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './sk
 import { SessionStore } from './session_store.js';
 import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 import { PermissionChecker } from './permissions.js';
+import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
 import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
 
@@ -300,8 +299,9 @@ export class AgentHarness {
   private hookExecutor: HookExecutor | null = null;
   private providerKeyService: HarnessProviderKeyService;
   private permissionChecker: PermissionChecker;
+  private orchestratorRunner: OrchestratorRunner;
 
-  constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
+  constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
     this.sessionTtlMs = config.context.sessionTtlMs;
@@ -457,6 +457,8 @@ export class AgentHarness {
       this.logger.info('PermissionChecker initialized', { workingDir });
     }
 
+    this.orchestratorRunner = orchestratorRunner ?? new DefaultOrchestratorRunner();
+
     const defaultAgent = config.agents[config.defaultAgent];
     this.logger.info('AgentHarness initialized', {
       defaultAgent: config.defaultAgent,
@@ -604,6 +606,59 @@ export class AgentHarness {
     return store;
   }
 
+  /**
+   * Single entrypoint for session rehydration (context + model selections).
+   */
+  ensureSessionHydrated(
+    sessionKey: string,
+    options: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean } = {}
+  ): SessionStore {
+    const store = this.getOrCreateSessionStore(sessionKey, options.dangerousMode ?? false, options.workingDir);
+    // Hydrate context + session metadata (paused state, permissions, model selections).
+    store.getContext();
+
+    if (options.includeUserPreferences !== false) {
+      this.hydrateModelSelectionsFromPreferences(sessionKey, store);
+    }
+
+    return store;
+  }
+
+  private hydrateModelSelectionsFromPreferences(sessionKey: string, store: SessionStore): void {
+    if (!this.isGraphDReady() || !this.graphd) {
+      return;
+    }
+    if (store.getAllModelSelections().size > 0) {
+      return;
+    }
+
+    const hiddenModels = this.graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+    const modelSelectionsMap = this.graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>(
+      'user_prefs:model_selections'
+    );
+    if (!modelSelectionsMap) {
+      return;
+    }
+
+    let applied = 0;
+    for (const [agentType, selection] of Object.entries(modelSelectionsMap)) {
+      if (selection?.provider && selection?.model) {
+        const isHidden = hiddenModels.some(
+          (hidden) => hidden.trim().toLowerCase() === selection.model.trim().toLowerCase()
+        );
+        if (!isHidden) {
+          store.setModelSelection(agentType, selection);
+          applied += 1;
+        }
+      }
+    }
+
+    if (applied > 0) {
+      // Keep session metadata aligned with global preferences.
+      this.graphd.sessionUpdateMetadata(sessionKey, { model_selections: modelSelectionsMap });
+    }
+  }
+
   setSessionSelectedModel(sessionKey: string, agentType: string, selectedModel: ModelSelection | null): void {
     const store = this.getOrCreateSessionStore(sessionKey);
     if (selectedModel) {
@@ -680,7 +735,7 @@ export class AgentHarness {
     const eventQueue = new AsyncEventQueue();
 
     this.pruneSessionStores('run');
-    const store = this.getOrCreateSessionStore(sessionKey);
+    const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
     const paused = store.getPausedState();
 
     // Determine if this is a resume (paused state exists) or fresh run
@@ -882,30 +937,6 @@ export class AgentHarness {
         }
 
         const llmAdapter = this.llmAdapter;
-
-        // Hydrate model selections from GraphD if store is empty (session startup)
-        if (store.getAllModelSelections().size === 0 && this.isGraphDReady()) {
-          try {
-            const session = this.graphd!.sessionGet(sessionKey);
-            const metadata = session?.metadata as Record<string, unknown> | undefined;
-            // Load per-agent-type model selections from GraphD
-            const modelSelections = metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string }> | undefined;
-            if (modelSelections) {
-              for (const [agentType, selection] of Object.entries(modelSelections)) {
-                if (selection?.provider && selection?.model) {
-                  store.setModelSelection(agentType, {
-                    provider: selection.provider,
-                    model: selection.model,
-                    reasoning: selection.reasoning,
-                  });
-                }
-              }
-              this.logger.debug('Hydrated model selections from GraphD', { count: Object.keys(modelSelections).length });
-            }
-          } catch {
-            // Ignore errors getting selected model
-          }
-        }
 
         // All requests go through orchestrator (loop-until-goal architecture)
         // Orchestrator handles interruptions internally via checkInterruption() callback
@@ -1294,6 +1325,25 @@ export class AgentHarness {
     };
   }
 
+  private attachArtifactSubscriber(context: ContextWindow): () => void {
+    return this.eventBus.subscribe('artifact_discovered', (event: AgentEvent<ArtifactDiscoveredData>) => {
+      const data = event.data;
+      if (!data?.artifact) {
+        return;
+      }
+      context.addArtifact({
+        sourcePath: data.artifact.sourcePath,
+        line: data.artifact.line,
+        kind: data.artifact.kind as ArtifactKind,
+        name: data.artifact.name,
+        signature: data.artifact.signature,
+        insight: data.artifact.insight,
+        relevance: data.artifact.relevance,
+        discoveredBy: data.agentType,
+      });
+    });
+  }
+
   /**
    * Get the permission checker for a specific session.
    * Each session has its own permission state including dangerous mode.
@@ -1355,45 +1405,41 @@ export class AgentHarness {
         }
       : undefined;
 
-    // Build orchestrator config with optional hooks
-    const orchestratorConfig: {
-      stopHook?: typeof stopHook;
-      checkInterruption?: () => boolean;
-      checkStopRequest?: () => boolean;
-    } = {};
-    if (stopHook) {
-      orchestratorConfig.stopHook = stopHook;
-    }
-    // Pass interruption check callback so orchestrator can avoid premature termination
-    // when user messages arrived during execution.
-    // The callback drains the queue (clear on check) so subsequent checks return false.
-    if (store) {
-      orchestratorConfig.checkInterruption = () => {
+    // Build orchestrator runtime with optional hooks
+    const runtime = {
+      stopHook,
+      onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
+      // Pass interruption check callback so orchestrator can avoid premature termination
+      // when user messages arrived during execution.
+      // The callback drains the queue (clear on check) so subsequent checks return false.
+      checkInterruption: store ? () => {
         const pending = store.drainQueuedMessages();
         return pending.length > 0;
-      };
+      } : undefined,
       // Pass stop request check so agent can exit loop early on explicit "stop" from user
-      orchestratorConfig.checkStopRequest = () => store.hasPendingStopRequest();
-    }
-
-    const orchestrator = new Orchestrator(
-      orchestratorConfig,
-      this.toolRegistry,
-      llm,
-      emit,
-      requestId,
-      this.logger,
-      this.agentRegistry,
-      hooks,
-      planModeOptions,
-      this.eventBus,
-      getModelSelection
-    );
+      checkStopRequest: store ? () => store.hasPendingStopRequest() : undefined,
+    };
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
-    const result = await orchestrator.execute(context, goal, agentType, effectiveWorkingDir);
+    const result = await this.orchestratorRunner.execute({
+      config: {},
+      toolRegistry: this.toolRegistry,
+      llm,
+      emit,
+      requestId,
+      logger: this.logger,
+      agentRegistry: this.agentRegistry,
+      hooks,
+      planModeOptions,
+      getModelSelection,
+      context,
+      goal,
+      agentType,
+      cwd: effectiveWorkingDir,
+      runtime,
+    });
     profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls, paused: result.paused });
 
     // Handle handoff: store handoffSpec for approval in paused state
@@ -1445,11 +1491,8 @@ export class AgentHarness {
    * Returns conversation history that should be displayed in TUI.
    */
   getSessionHistory(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
-    const entry = this.sessionStores.get(sessionKey);
-    if (!entry) {
-      return [];
-    }
-    return entry.store.getMessageHistory();
+    const store = this.ensureSessionHydrated(sessionKey, { includeUserPreferences: false });
+    return store.getMessageHistory();
   }
 
   /**

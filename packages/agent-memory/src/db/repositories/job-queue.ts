@@ -46,11 +46,22 @@ export interface QueueJobRow {
   idempotency_key: string | null
 }
 
+function normalizePayload<T>(payload: unknown): T {
+  if (typeof payload === 'string') {
+    try {
+      return JSON.parse(payload) as T
+    } catch {
+      return payload as T
+    }
+  }
+  return payload as T
+}
+
 function rowToJob<T>(row: QueueJobRow): QueueJob<T> {
   return {
     id: row.id,
     job_type: row.job_type,
-    payload: row.payload as T,
+    payload: normalizePayload<T>(row.payload),
     status: row.status as JobStatus,
     priority: row.priority,
     visible_at: row.visible_at.toISOString(),

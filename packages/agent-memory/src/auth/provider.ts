@@ -246,15 +246,21 @@ export class DatabaseAuthProvider implements AuthProvider {
    * @param accountId - Account ID to refresh token for
    */
   async refresh(accountId: string): Promise<ConnectorContext> {
-    const cached = this.credentialCache.get(accountId)
-    if (!cached?.refreshToken) {
-      throw new AuthError(`No refresh token available for account: ${accountId}`)
-    }
-
-    // Get connector to perform refresh
+    // Get credentials from DB (needed for connector_type and as fallback for refresh token)
     const creds = await this.fetchCredentials(accountId)
     if (!creds) {
       throw new AuthError(`Account not found: ${accountId}`)
+    }
+
+    // Resolve refresh token: prefer cache, fall back to database
+    const cached = this.credentialCache.get(accountId)
+    const refreshTokenValue = cached?.refreshToken
+      ?? (creds.refresh_token_encrypted
+        ? this.decryptRefreshToken(creds.refresh_token_encrypted)
+        : undefined)
+
+    if (!refreshTokenValue) {
+      throw new AuthError(`No refresh token available for account: ${accountId}`)
     }
 
     if (!creds.connector_type) {
@@ -275,7 +281,7 @@ export class DatabaseAuthProvider implements AuthProvider {
       if (!this.config.oauthProviders) {
         throw new AuthError('OAuth provider registry is not configured')
       }
-      const result = await this.config.oauthProviders.refreshToken(provider, cached.refreshToken)
+      const result = await this.config.oauthProviders.refreshToken(provider, refreshTokenValue)
       refreshed = {
         accessToken: result.accessToken,
         refreshToken: result.refreshToken,
@@ -284,7 +290,7 @@ export class DatabaseAuthProvider implements AuthProvider {
           : undefined,
       }
     } else if (connector.refreshTokens) {
-      refreshed = await connector.refreshTokens(cached.refreshToken)
+      refreshed = await connector.refreshTokens(refreshTokenValue)
     } else {
       throw new AuthError(`Connector ${creds.connector_type} does not support token refresh`)
     }
@@ -292,7 +298,7 @@ export class DatabaseAuthProvider implements AuthProvider {
     // Update stored credentials
     await this.storeCredentials(accountId, {
       accessToken: refreshed.accessToken,
-      refreshToken: refreshed.refreshToken ?? cached.refreshToken,
+      refreshToken: refreshed.refreshToken ?? refreshTokenValue,
       expiresAt: refreshed.expiresAt,
     })
 

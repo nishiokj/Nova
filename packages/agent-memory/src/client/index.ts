@@ -19,6 +19,22 @@ import type {
   ConnectorResponse,
   ConnectorSanityResponse,
   ConnectorUnregisterResponse,
+  DerivedJob,
+  DerivedJobListResponse,
+  DerivedJobResponse,
+  DerivedRetryResponse,
+  DerivedTask,
+  DerivedTaskCreateResponse,
+  DerivedTaskListResponse,
+  DerivedTaskResponse,
+  DerivedTaskMode,
+  ProcessAllResponse,
+  ProcessErroredResponse,
+  ProcessJobResponse,
+  ReprocessFilteredRequest,
+  ReprocessFilteredResponse,
+  TransformationListResponse,
+  TransformationSummary,
   DeviceAuthPollResponse,
   DeviceAuthResponse,
   HealthResponse,
@@ -119,7 +135,7 @@ export class SyncClient {
         }
         // Prefer message field for detailed errors, fall back to error field
         const errorMessage = errorData.message || errorData.error || `HTTP ${response.status}`
-        throw new SyncClientError(errorMessage, response.status, errorData.code)
+        throw new SyncClientError(errorMessage, response.status, errorData.code, errorData)
       }
 
       const contentType = response.headers.get('content-type')
@@ -574,6 +590,56 @@ export class SyncClient {
     },
   }
 
+  // ============ Derived Tasks ============
+
+  /**
+   * Derived task management methods.
+   */
+  derivedTasks = {
+    /**
+     * List derived tasks.
+     * @param opts.enabled - Filter by enabled status
+     * @param opts.name - Filter by name
+     */
+    list: async (opts?: { enabled?: boolean; name?: string }): Promise<DerivedTask[]> => {
+      const params = new URLSearchParams()
+      if (opts?.enabled !== undefined) params.set('enabled', String(opts.enabled))
+      if (opts?.name) params.set('name', opts.name)
+      const query = params.toString()
+      const response = await this.get<DerivedTaskListResponse>(`/derived/tasks${query ? `?${query}` : ''}`)
+      return response.tasks
+    },
+
+    /**
+     * Get derived task by ID with recent jobs.
+     */
+    get: async (id: string): Promise<DerivedTaskResponse> => {
+      return this.get<DerivedTaskResponse>(`/derived/tasks/${id}`)
+    },
+
+    /**
+     * Create a derived task.
+     */
+    create: async (opts: {
+      name: string
+      scriptPath: string
+      mode: DerivedTaskMode
+      intervalMs?: number
+      metadata?: Record<string, unknown>
+    }): Promise<DerivedTask> => {
+      const response = await this.post<DerivedTaskCreateResponse>('/derived/tasks', opts)
+      return response.task
+    },
+
+    /**
+     * Run a derived task immediately.
+     */
+    run: async (id: string, opts?: { priority?: number; metadata?: Record<string, unknown> }): Promise<DerivedJob> => {
+      const response = await this.post<{ job: DerivedJob }>(`/derived/tasks/${id}/run`, opts)
+      return response.job
+    },
+  }
+
   // ============ Jobs ============
 
   /**
@@ -624,6 +690,112 @@ export class SyncClient {
      */
     retry: async (id: string): Promise<RetryResponse> => {
       return this.post<RetryResponse>(`/jobs/${id}/retry`)
+    },
+  }
+
+  // ============ Derived Jobs ============
+
+  /**
+   * Derived job management methods.
+   */
+  derivedJobs = {
+    /**
+     * List derived jobs.
+     * @param opts.status - Filter by status ('pending', 'running')
+     * @param opts.taskId - Filter by task
+     * @param opts.limit - Max number of jobs to return
+     */
+    list: async (opts?: {
+      status?: string
+      taskId?: string
+      limit?: number
+    }): Promise<DerivedJob[]> => {
+      const params = new URLSearchParams()
+      if (opts?.status) params.set('status', opts.status)
+      if (opts?.taskId) params.set('taskId', opts.taskId)
+      if (opts?.limit) params.set('limit', String(opts.limit))
+      const query = params.toString()
+      const response = await this.get<DerivedJobListResponse>(`/derived/jobs${query ? `?${query}` : ''}`)
+      return response.jobs
+    },
+
+    /**
+     * Get derived job by ID with queue stats.
+     */
+    get: async (id: string): Promise<DerivedJobResponse> => {
+      return this.get<DerivedJobResponse>(`/derived/jobs/${id}`)
+    },
+
+    /**
+     * Cancel a pending or running derived job.
+     */
+    cancel: async (id: string): Promise<DerivedJob> => {
+      const response = await this.post<{ job: DerivedJob }>(`/derived/jobs/${id}/cancel`)
+      return response.job
+    },
+
+    /**
+     * Retry a failed derived job.
+     */
+    retry: async (id: string): Promise<DerivedRetryResponse> => {
+      return this.post<DerivedRetryResponse>(`/derived/jobs/${id}/retry`)
+    },
+  }
+
+  // ============ Processing ============
+
+  /**
+   * Processing methods for raw envelopes.
+   */
+  processing = {
+    /**
+     * Process a specific sync job by ID.
+     */
+    processJob: async (id: string, opts?: { transformationIds?: string[] }): Promise<ProcessJobResponse> => {
+      return this.post<ProcessJobResponse>(`/process/jobs/${id}`, opts)
+    },
+
+    /**
+     * Process all unprocessed envelopes.
+     */
+    processAll: async (opts?: { transformationIds?: string[] }): Promise<ProcessAllResponse> => {
+      return this.post<ProcessAllResponse>('/process/all', opts)
+    },
+
+    /**
+     * Reprocess all errored envelopes.
+     */
+    processErrored: async (opts?: { transformationIds?: string[] }): Promise<ProcessErroredResponse> => {
+      return this.post<ProcessErroredResponse>('/process/errored', opts)
+    },
+
+    /**
+     * Reprocess all envelopes matching a scope filter.
+     */
+    reprocess: async (opts?: ReprocessFilteredRequest): Promise<ReprocessFilteredResponse> => {
+      return this.post<ReprocessFilteredResponse>('/process/reprocess', opts)
+    },
+  }
+
+  // ============ Transformations ============
+
+  /**
+   * Transformation listing methods.
+   */
+  transformations = {
+    /**
+     * List registered transformations.
+     */
+    list: async (opts?: {
+      connector?: string
+      entityTypes?: string[]
+    }): Promise<TransformationSummary[]> => {
+      const params = new URLSearchParams()
+      if (opts?.connector) params.set('connector', opts.connector)
+      if (opts?.entityTypes?.length) params.set('entityType', opts.entityTypes.join(','))
+      const query = params.toString()
+      const response = await this.get<TransformationListResponse>(`/transformations${query ? `?${query}` : ''}`)
+      return response.transformations
     },
   }
 }

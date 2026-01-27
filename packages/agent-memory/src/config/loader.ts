@@ -96,6 +96,7 @@ const ENV_MAPPING: Record<string, string> = {
 
   // Connectors - iMessage
   [`${ENV_PREFIX}IMESSAGE_DB_PATH`]: 'connectors.imessage.databasePath',
+  [`${ENV_PREFIX}IMESSAGE_MAX_TEXT_BYTES`]: 'connectors.imessage.maxTextBytes',
 
   // Observability
   LOG_LEVEL: 'observability.logLevel',
@@ -141,6 +142,7 @@ function coerceValue(path: string, value: string): unknown {
   const floatFields = [
     'http.maxRequestsPerSecond',
     'connectors.github.rateLimit', 'connectors.gmail.rateLimit', 'connectors.xcom.rateLimit',
+    'connectors.imessage.maxTextBytes',
     'observability.tracingSampleRate',
   ]
 

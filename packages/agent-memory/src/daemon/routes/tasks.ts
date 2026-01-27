@@ -105,15 +105,34 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     let accountId: string
+    let connector: ConnectorType
 
     if (body.accountId) {
-      accountId = body.accountId
+      const account = await daemon.accountRepo.findById(body.accountId)
+      if (!account) {
+        throw notFound(`Account not found: ${body.accountId}`)
+      }
+      accountId = account.id
+      connector = account.connector
     } else if (body.connector) {
       // Resolve connector to account
       const account = await daemon.resolveAccount(body.connector as any)
       accountId = account.id
+      connector = account.connector
     } else {
       throw badRequest('Missing required field: accountId or connector')
+    }
+
+    const sanity = await daemon.checkTaskSanity({
+      connector,
+      accountId,
+      entityTypes: body.entityTypes,
+      syncType: 'backfill',
+      mode: 'once',
+    })
+
+    if (!sanity.ok) {
+      return { status: 400, body: { error: 'Task sanity check failed', sanity } }
     }
 
     const { task, job } = await daemon.backfill(accountId, {
@@ -135,12 +154,19 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     let accountId: string
+    let connector: ConnectorType
 
     if (body.accountId) {
-      accountId = body.accountId
+      const account = await daemon.accountRepo.findById(body.accountId)
+      if (!account) {
+        throw notFound(`Account not found: ${body.accountId}`)
+      }
+      accountId = account.id
+      connector = account.connector
     } else if (body.connector) {
       const account = await daemon.resolveAccount(body.connector as any)
       accountId = account.id
+      connector = account.connector
     } else {
       throw badRequest('Missing required field: accountId or connector')
     }
@@ -151,6 +177,18 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
 
     if (!body.intervalMs || body.intervalMs < 1000) {
       throw badRequest('intervalMs must be at least 1000ms')
+    }
+
+    const sanity = await daemon.checkTaskSanity({
+      connector,
+      accountId,
+      entityTypes: body.entityTypes,
+      syncType: body.syncType,
+      mode: 'recurring',
+    })
+
+    if (!sanity.ok) {
+      return { status: 400, body: { error: 'Task sanity check failed', sanity } }
     }
 
     const task = await daemon.subscribe(accountId, {
@@ -172,14 +210,33 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
     }
 
     let accountId: string
+    let connector: ConnectorType
 
     if (body.accountId) {
-      accountId = body.accountId
+      const account = await daemon.accountRepo.findById(body.accountId)
+      if (!account) {
+        throw notFound(`Account not found: ${body.accountId}`)
+      }
+      accountId = account.id
+      connector = account.connector
     } else if (body.connector) {
       const account = await daemon.resolveAccount(body.connector as any)
       accountId = account.id
+      connector = account.connector
     } else {
       throw badRequest('Missing required field: accountId or connector')
+    }
+
+    const sanity = await daemon.checkTaskSanity({
+      connector,
+      accountId,
+      entityTypes: body.entityTypes,
+      syncType: 'incremental',
+      mode: 'webhook',
+    })
+
+    if (!sanity.ok) {
+      return { status: 400, body: { error: 'Task sanity check failed', sanity } }
     }
 
     const task = await daemon.subscribeWebhook(accountId, {
@@ -219,6 +276,18 @@ export function registerTaskRoutes(server: HttpServer, daemon: SyncDaemon): void
 
     if (!task.enabled) {
       throw badRequest('Cannot trigger disabled task')
+    }
+
+    const sanity = await daemon.checkTaskSanity({
+      connector: task.connector,
+      accountId: task.account_id,
+      entityTypes: task.entity_types ?? undefined,
+      syncType: task.sync_type,
+      mode: task.mode,
+    })
+
+    if (!sanity.ok) {
+      return { status: 400, body: { error: 'Task sanity check failed', sanity } }
     }
 
     // Schedule the job directly

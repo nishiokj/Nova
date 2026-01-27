@@ -3,7 +3,7 @@
  */
 
 import { generateCanonicalId, sourceRefToKey } from '../../ids.js'
-import type { Identity, Message, Conversation } from '../../models/canonical.js'
+import type { CanonicalSourceRef, Message, Conversation } from '../../models/canonical.js'
 import type { Transformation, TransformResult, TransformOutput } from '../../transform/types.js'
 import {
   GmailMessageSchema,
@@ -21,7 +21,7 @@ function createSourceRef(
   entityType: string,
   sourceId: string,
   sourceVersion?: string
-): Identity['source_refs'][0] {
+): CanonicalSourceRef {
   return {
     connector: 'gmail',
     account_id: accountId,
@@ -32,7 +32,7 @@ function createSourceRef(
   }
 }
 
-function createBaseEntity(id: string, sourceRef: Identity['source_refs'][0]) {
+function createBaseEntity(id: string, sourceRef: CanonicalSourceRef) {
   const now = new Date().toISOString()
   return {
     id,
@@ -101,37 +101,6 @@ function parseEmailAddresses(value: string | undefined): Array<{ email: string; 
   return addresses
 }
 
-function platformUserIdFromEmail(email: string): string {
-  return email.toLowerCase().replace(/[^a-z0-9@._-]/g, '')
-}
-
-function buildIdentity(
-  accountId: string,
-  email: string,
-  name?: string
-): { entity: Identity; output: TransformOutput } {
-  const sourceRef = createSourceRef(accountId, 'identity', platformUserIdFromEmail(email))
-
-  const identity: Identity = {
-    ...createBaseEntity(generateCanonicalId(), sourceRef),
-    entity_type: 'identity',
-    platform: 'gmail',
-    platform_user_id: platformUserIdFromEmail(email),
-    email,
-    display_name: name || email,
-  }
-
-  return {
-    entity: identity,
-    output: {
-      entityType: 'identity',
-      data: identity,
-      displayText: name ? `${name} <${email}>` : email,
-      sourceRefKey: sourceRefToKey(sourceRef),
-    },
-  }
-}
-
 // ============ Transformations ============
 
 export const gmailMessageTransform: Transformation<GmailMessage> = {
@@ -188,24 +157,8 @@ export const gmailMessageTransform: Transformation<GmailMessage> = {
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    const related: TransformOutput[] = []
-
-    if (fromAddresses.length > 0) {
-      const sender = fromAddresses[0]
-      const senderIdentity = buildIdentity(ctx.accountId, sender.email, sender.name)
-      related.push(senderIdentity.output)
-      message.sender_identity_id = senderIdentity.entity.id
-    }
-
-    for (const recipient of allRecipients) {
-      const recipientIdentity = buildIdentity(ctx.accountId, recipient.email, recipient.name)
-      related.push(recipientIdentity.output)
-      message.recipient_identity_ids.push(recipientIdentity.entity.id)
-    }
-
     return {
       primary,
-      related: related.length > 0 ? related : undefined,
     }
   },
   onError: 'quarantine',
@@ -225,7 +178,7 @@ export const gmailThreadTransform: Transformation<GmailThread> = {
   transform(source, ctx): TransformResult[] {
     const messageOutputs: TransformOutput[] = []
 
-    const participants: Identity['source_refs'][0][] = []
+    const participants: CanonicalSourceRef[] = []
     const messageIds: string[] = []
 
     for (const message of source.messages) {
@@ -234,21 +187,6 @@ export const gmailThreadTransform: Transformation<GmailThread> = {
 
       for (const result of results) {
         messageOutputs.push(result.primary)
-        if (result.related) {
-          messageOutputs.push(...result.related)
-          for (const related of result.related) {
-            if (related.entityType === 'identity') {
-              const refParts = related.sourceRefKey.split(':')
-              participants.push({
-                connector: 'gmail',
-                account_id: ctx.accountId,
-                entity_type: 'identity',
-                source_id: refParts[3] ?? related.sourceRefKey,
-                last_synced_at: new Date().toISOString(),
-              })
-            }
-          }
-        }
       }
 
       const messagePrimary = messageOutputs.find((output) =>

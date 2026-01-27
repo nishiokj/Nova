@@ -53,7 +53,6 @@ export {
   type GitHubIssueCommentEvent,
   // Transformations
   githubTransforms,
-  userTransform,
   issueTransform,
   pullRequestTransform,
   commentTransform,
@@ -191,3 +190,35 @@ export {
   imessageChatTransform,
   imessageTransforms,
 } from './imessage/index.js'
+
+// Google Calendar Connector
+export {
+  // Connector
+  GoogleCalendarConnector,
+  createGoogleCalendarConnector,
+  type GoogleCalendarConnectorConfig,
+  // Schemas
+  GoogleCalendarEventSchema,
+  GoogleCalendarEventListSchema,
+  GoogleCalendarListSchema,
+  GoogleCalendarEntrySchema,
+  GoogleCalendarAttendeeSchema,
+  GoogleCalendarOrganizerSchema,
+  GoogleCalendarDateTimeSchema,
+  GoogleCalendarReminderSchema,
+  GoogleCalendarNotificationSchema,
+  GoogleCalendarConferenceDataSchema,
+  type GoogleCalendarEvent,
+  type GoogleCalendarEventList,
+  type GoogleCalendarList,
+  type GoogleCalendarEntry,
+  type GoogleCalendarAttendee,
+  type GoogleCalendarOrganizer,
+  type GoogleCalendarDateTime,
+  type GoogleCalendarReminder,
+  type GoogleCalendarNotification,
+  type GoogleCalendarConferenceData,
+  // Transformations
+  googleCalendarTransforms,
+  googleCalendarEventTransform,
+} from './google-calendar/index.js'

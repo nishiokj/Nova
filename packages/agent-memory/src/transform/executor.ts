@@ -369,7 +369,10 @@ export class TransformExecutor {
     envelope: RawEnvelope,
     transformation: Transformation
   ): Promise<{ entityId: string; isNew: boolean }> {
-    const existingMapping = await this.mappingRepo.findBySourceRefKey(output.sourceRefKey)
+    const existingMapping = await this.mappingRepo.findBySourceRefKey(
+      output.sourceRefKey,
+      transformation.id
+    )
 
     if (existingMapping) {
       const updated = await this.entityRepo.update(

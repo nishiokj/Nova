@@ -1,8 +1,8 @@
 /**
  * Canonical Entity Repository
  *
- * CRUD operations for canonical_entities table.
- * Supports all entity types with type-safe operations.
+ * CRUD operations for per-type canonical tables.
+ * Supports message, conversation, issue, notification, and preference entities.
  */
 
 import type { EntityType, CanonicalEntity } from '../../models/canonical.js'
@@ -72,40 +72,69 @@ export interface CanonicalEntityRepository {
 
 export function createCanonicalEntityRepository(ctx: RepositoryContext): CanonicalEntityRepository {
   const { sql } = ctx
+  const tableByType: Partial<Record<EntityType, string>> = {
+    message: 'canonical_message',
+    conversation: 'canonical_conversation',
+    issue: 'canonical_issue',
+    notification: 'canonical_notification',
+    preference: 'canonical_preference',
+  }
+  const allTables = Object.values(tableByType).filter((t): t is string => !!t)
+
+  function tableForType(entityType: EntityType): string | null {
+    return tableByType[entityType] ?? null
+  }
+
+  async function findByIdInternal(id: string, includeDeleted: boolean): Promise<StoredEntity | null> {
+    for (const table of allTables) {
+      const [row] = await sql<CanonicalEntityRow[]>`
+        SELECT * FROM ${sql(table)}
+        WHERE id = ${id}
+          ${includeDeleted ? sql`` : sql`AND deleted_at IS NULL`}
+      `
+      if (row) return rowToStoredEntity(row)
+    }
+    return null
+  }
 
   return {
     async findById(id) {
-      const [row] = await sql<CanonicalEntityRow[]>`
-        SELECT * FROM canonical_entities
-        WHERE id = ${id} AND deleted_at IS NULL
-      `
-      return row ? rowToStoredEntity(row) : null
+      return findByIdInternal(id, false)
     },
 
     async findByIds(ids) {
       if (ids.length === 0) return []
 
-      const rows = await sql<CanonicalEntityRow[]>`
-        SELECT * FROM canonical_entities
-        WHERE id = ANY(${ids})
-          AND deleted_at IS NULL
-      `
-      return rows.map(rowToStoredEntity)
+      const results: StoredEntity[] = []
+      for (const table of allTables) {
+        const rows = await sql<CanonicalEntityRow[]>`
+          SELECT * FROM ${sql(table)}
+          WHERE id = ANY(${ids})
+            AND deleted_at IS NULL
+        `
+        results.push(...rows.map(rowToStoredEntity))
+      }
+      return results
     },
 
     async findByType(entityType, options = {}) {
       const { limit = 100, offset = 0, orderBy = 'updated_at', orderDirection = 'desc' } = options
 
+      const table = tableForType(entityType)
+      if (!table) {
+        throw new Error(`Unknown entity type: ${entityType}`)
+      }
+
       const [countResult] = await sql<{ count: string }[]>`
-        SELECT COUNT(*) as count FROM canonical_entities
-        WHERE entity_type = ${entityType} AND deleted_at IS NULL
+        SELECT COUNT(*) as count FROM ${sql(table)}
+        WHERE deleted_at IS NULL
       `
       const total = parseInt(countResult.count, 10)
 
       // Use safe column ordering
       const rows = await sql<CanonicalEntityRow[]>`
-        SELECT * FROM canonical_entities
-        WHERE entity_type = ${entityType} AND deleted_at IS NULL
+        SELECT * FROM ${sql(table)}
+        WHERE deleted_at IS NULL
         ORDER BY
           CASE WHEN ${orderBy} = 'updated_at' AND ${orderDirection} = 'desc' THEN updated_at END DESC,
           CASE WHEN ${orderBy} = 'updated_at' AND ${orderDirection} = 'asc' THEN updated_at END ASC,
@@ -125,28 +154,77 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
     async search(query, options = {}) {
       const { limit = 50, offset = 0, entity_type, includeDeleted = false } = options
 
-      const rows = await sql<CanonicalEntityRow[]>`
-        SELECT * FROM canonical_entities
-        WHERE search_vector @@ plainto_tsquery('english', ${query})
-          ${entity_type ? sql`AND entity_type = ${entity_type}` : sql``}
-          ${!includeDeleted ? sql`AND deleted_at IS NULL` : sql``}
-        ORDER BY ts_rank(search_vector, plainto_tsquery('english', ${query})) DESC
-        LIMIT ${limit}
-        OFFSET ${offset}
+      if (entity_type) {
+        const table = tableForType(entity_type)
+        if (!table) {
+          throw new Error(`Unknown entity type: ${entity_type}`)
+        }
+        const rows = await sql<CanonicalEntityRow[]>`
+          SELECT * FROM ${sql(table)}
+          WHERE search_vector @@ plainto_tsquery('english', ${query})
+            ${!includeDeleted ? sql`AND deleted_at IS NULL` : sql``}
+          ORDER BY ts_rank(search_vector, plainto_tsquery('english', ${query})) DESC
+          LIMIT ${limit}
+          OFFSET ${offset}
+        `
+        return rows.map(rowToStoredEntity)
+      }
+
+      const searchSql = `
+        SELECT *, ts_rank(search_vector, plainto_tsquery('english', $1)) as rank
+        FROM canonical_message
+        WHERE search_vector @@ plainto_tsquery('english', $1)
+        ${includeDeleted ? '' : 'AND deleted_at IS NULL'}
+        UNION ALL
+        SELECT *, ts_rank(search_vector, plainto_tsquery('english', $1)) as rank
+        FROM canonical_conversation
+        WHERE search_vector @@ plainto_tsquery('english', $1)
+        ${includeDeleted ? '' : 'AND deleted_at IS NULL'}
+        UNION ALL
+        SELECT *, ts_rank(search_vector, plainto_tsquery('english', $1)) as rank
+        FROM canonical_issue
+        WHERE search_vector @@ plainto_tsquery('english', $1)
+        ${includeDeleted ? '' : 'AND deleted_at IS NULL'}
+        UNION ALL
+        SELECT *, ts_rank(search_vector, plainto_tsquery('english', $1)) as rank
+        FROM canonical_notification
+        WHERE search_vector @@ plainto_tsquery('english', $1)
+        ${includeDeleted ? '' : 'AND deleted_at IS NULL'}
+        UNION ALL
+        SELECT *, ts_rank(search_vector, plainto_tsquery('english', $1)) as rank
+        FROM canonical_preference
+        WHERE search_vector @@ plainto_tsquery('english', $1)
+        ${includeDeleted ? '' : 'AND deleted_at IS NULL'}
+        ORDER BY rank DESC
+        LIMIT $2
+        OFFSET $3
       `
+
+      const rows = await sql.unsafe<(CanonicalEntityRow & { rank: number })[]>(searchSql, [
+        query,
+        limit,
+        offset,
+      ])
 
       return rows.map(rowToStoredEntity)
     },
 
     async similarByEmbedding(embedding, options = {}) {
       const { limit = 10, threshold = 0.7, entityType } = options
+      if (!entityType) {
+        throw new Error('similarByEmbedding requires entityType with per-type canonical tables')
+      }
+
+      const table = tableForType(entityType)
+      if (!table) {
+        throw new Error(`Unknown entity type: ${entityType}`)
+      }
 
       const rows = await sql<(CanonicalEntityRow & { similarity: number })[]>`
         SELECT *, 1 - (embedding <=> ${sql.array(embedding)}::vector) as similarity
-        FROM canonical_entities
+        FROM ${sql(table)}
         WHERE embedding IS NOT NULL
           AND deleted_at IS NULL
-          ${entityType ? sql`AND entity_type = ${entityType}` : sql``}
           AND 1 - (embedding <=> ${sql.array(embedding)}::vector) >= ${threshold}
         ORDER BY embedding <=> ${sql.array(embedding)}::vector
         LIMIT ${limit}
@@ -161,9 +239,13 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
     async create(entityType, data, displayText) {
       const id = generateCanonicalId()
       const now = new Date()
+      const table = tableForType(entityType)
+      if (!table) {
+        throw new Error(`Unknown entity type: ${entityType}`)
+      }
 
       const [row] = await sql<CanonicalEntityRow[]>`
-        INSERT INTO canonical_entities (
+        INSERT INTO ${sql(table)} (
           id, entity_type, data, created_at, updated_at, display_text
         ) VALUES (
           ${id},
@@ -181,10 +263,16 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
 
     async update(id, data, displayText) {
       const now = new Date()
+      const existing = await findByIdInternal(id, false)
+      if (!existing) return null
+      const table = tableForType(existing.entity_type)
+      if (!table) {
+        return null
+      }
 
       // Merge the data with existing data
       const [row] = await sql<CanonicalEntityRow[]>`
-        UPDATE canonical_entities
+        UPDATE ${sql(table)}
         SET data = data || ${JSON.stringify(data)}::jsonb,
             updated_at = ${now}
             ${displayText !== undefined ? sql`, display_text = ${displayText}` : sql``}
@@ -196,8 +284,14 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
     },
 
     async updateEmbedding(id, embedding) {
+      const existing = await findByIdInternal(id, true)
+      if (!existing) return false
+      const table = tableForType(existing.entity_type)
+      if (!table) {
+        return false
+      }
       const result = await sql`
-        UPDATE canonical_entities
+        UPDATE ${sql(table)}
         SET embedding = ${sql.array(embedding)}::vector
         WHERE id = ${id}
       `
@@ -206,8 +300,14 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
 
     async softDelete(id) {
       const now = new Date()
+      const existing = await findByIdInternal(id, false)
+      if (!existing) return false
+      const table = tableForType(existing.entity_type)
+      if (!table) {
+        return false
+      }
       const result = await sql`
-        UPDATE canonical_entities
+        UPDATE ${sql(table)}
         SET deleted_at = ${now}
         WHERE id = ${id} AND deleted_at IS NULL
       `
@@ -215,8 +315,14 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
     },
 
     async restore(id) {
+      const existing = await findByIdInternal(id, true)
+      if (!existing) return false
+      const table = tableForType(existing.entity_type)
+      if (!table) {
+        return false
+      }
       const result = await sql`
-        UPDATE canonical_entities
+        UPDATE ${sql(table)}
         SET deleted_at = NULL
         WHERE id = ${id} AND deleted_at IS NOT NULL
       `
@@ -224,8 +330,14 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
     },
 
     async hardDelete(id) {
+      const existing = await findByIdInternal(id, true)
+      if (!existing) return false
+      const table = tableForType(existing.entity_type)
+      if (!table) {
+        return false
+      }
       const result = await sql`
-        DELETE FROM canonical_entities WHERE id = ${id}
+        DELETE FROM ${sql(table)} WHERE id = ${id}
       `
       return result.count > 0
     },

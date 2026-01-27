@@ -20,6 +20,7 @@ import { createGitHubConnector } from './github/index.js'
 import { createClaudeSessionConnector } from './coding-sessions/claude.js'
 import { createRexSessionConnector } from './coding-sessions/rex.js'
 import { createIMessageConnector } from './imessage/index.js'
+import { createGoogleCalendarConnector } from './google-calendar/index.js'
 
 // ============ Types ============
 
@@ -75,6 +76,10 @@ export const CONNECTOR_FACTORIES: Record<ConnectorType, ConnectorFactoryEntry> =
   imessage: {
     factory: createIMessageConnector,
     displayName: 'iMessage',
+  },
+  'google-calendar': {
+    factory: createGoogleCalendarConnector,
+    displayName: 'Google Calendar',
   },
   // Telegram is handled separately - it's a real-time harness bridge, not a sync connector
   telegram: {

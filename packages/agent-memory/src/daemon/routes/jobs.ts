@@ -78,7 +78,9 @@ export function registerJobRoutes(server: HttpServer, daemon: SyncDaemon): void 
       newJob = await engine.scheduleIncremental(
         existingJob.connector,
         existingJob.account_id,
-        existingJob.cursor_state?.cursor as string | undefined,
+        typeof existingJob.cursor_state === 'string'
+          ? existingJob.cursor_state
+          : (existingJob.cursor_state as Record<string, unknown> | undefined)?.cursor as string | undefined,
         { entityTypes: (existingJob.metadata as any)?.entityTypes }
       )
     }

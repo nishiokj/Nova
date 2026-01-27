@@ -10,7 +10,7 @@ import {
   AccountSchema,
   MessageSchema,
   EventSchema,
-  TaskSchema,
+  IssueSchema,
   NotificationSchema,
   ObservationSchema,
   LinkSchema,
@@ -279,37 +279,37 @@ describe('Canonical Data Model', () => {
     })
   })
 
-  describe('TaskSchema', () => {
-    test('validates correct task', () => {
-      const task = {
+  describe('IssueSchema', () => {
+    test('validates correct issue', () => {
+      const issue = {
         ...createBaseFields(),
-        entity_type: 'task',
+        entity_type: 'issue',
         title: 'Fix bug',
         status: 'open',
         priority: 'high',
       }
-      const result = TaskSchema.safeParse(task)
+      const result = IssueSchema.safeParse(issue)
       expect(result.success).toBe(true)
     })
 
     test('applies default status', () => {
-      const task = {
+      const issue = {
         ...createBaseFields(),
-        entity_type: 'task',
+        entity_type: 'issue',
         title: 'Fix bug',
       }
-      const result = TaskSchema.parse(task)
+      const result = IssueSchema.parse(issue)
       expect(result.status).toBe('open')
     })
 
     test('validates priority enum', () => {
-      const task = {
+      const issue = {
         ...createBaseFields(),
-        entity_type: 'task',
+        entity_type: 'issue',
         title: 'Fix bug',
         priority: 'invalid',
       }
-      const result = TaskSchema.safeParse(task)
+      const result = IssueSchema.safeParse(issue)
       expect(result.success).toBe(false)
     })
   })
@@ -448,18 +448,11 @@ describe('Canonical Data Model', () => {
   describe('EntityTypeSchema', () => {
     test('includes all entity types', () => {
       const types = EntityTypeSchema.options
-      expect(types).toContain('person')
-      expect(types).toContain('identity')
-      expect(types).toContain('org')
-      expect(types).toContain('account')
       expect(types).toContain('message')
-      expect(types).toContain('event')
-      expect(types).toContain('task')
+      expect(types).toContain('conversation')
+      expect(types).toContain('issue')
       expect(types).toContain('notification')
-      expect(types).toContain('observation')
-      expect(types).toContain('link')
-      expect(types).toContain('attachment')
-      expect(types.length).toBe(11)
+      expect(types.length).toBe(4)
     })
   })
 
@@ -473,33 +466,23 @@ describe('Canonical Data Model', () => {
   })
 
   describe('validateEntity', () => {
-    test('validates person entity', () => {
-      const person = {
+    test('validates issue entity', () => {
+      const issue = {
         ...createBaseFields(),
-        entity_type: 'person',
-        display_name: 'Test User',
+        entity_type: 'issue',
+        title: 'Test Issue',
       }
-      const result = validateEntity('person', person)
+      const result = validateEntity('issue', issue)
       expect(result.success).toBe(true)
     })
 
     test('returns error for invalid entity', () => {
-      const person = {
-        entity_type: 'person',
+      const issue = {
+        entity_type: 'issue',
         // Missing required fields
       }
-      const result = validateEntity('person', person)
+      const result = validateEntity('issue', issue)
       expect(result.success).toBe(false)
-    })
-
-    test('validates task entity', () => {
-      const task = {
-        ...createBaseFields(),
-        entity_type: 'task',
-        title: 'Test Task',
-      }
-      const result = validateEntity('task', task)
-      expect(result.success).toBe(true)
     })
   })
 })

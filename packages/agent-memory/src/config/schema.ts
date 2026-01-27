@@ -217,6 +217,8 @@ export const ConnectorConfigSchema = z.object({
     databasePath: z.string().optional(),
     /** Sync attachments */
     syncAttachments: z.boolean().default(true),
+    /** Max message text bytes before truncation (0 = unlimited) */
+    maxTextBytes: z.number().int().nonnegative().default(1024 * 1024),
   }).default({}),
 
   /** Claude Code Sessions connector settings */

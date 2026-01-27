@@ -2010,14 +2010,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         // Regular text input
         if (input && !key.ctrl && !key.meta) {
           // Filter control chars and escape sequence fragments that leak through
+          // Preserve whitespace: tab (\x09), newline (\x0a), carriage return (\x0d)
+          // Remove other control characters: NUL through \x08, \x0b-\x0c, \x0e-\x1f, DEL (\x7f)
           const printable = input
-            .replace(/[\x00-\x1f\x7f]/g, "")  // Control characters
-            .replace(/\[200~/g, "")            // Bracketed paste start
-            .replace(/\[201~/g, "")            // Bracketed paste end
-            .replace(/\[[ABCD]/g, "")          // Arrow key fragments [A, [B, [C, [D
-            .replace(/O[ABCD]/g, "")           // Alt arrow key fragments OA, OB, OC, OD
-            .replace(/\[\d+~/g, "")            // Function/special keys [5~, [6~, etc.
-            .replace(/\[\d+;\d+[~ABCDHF]/g, "")// Modified keys with parameters
+            .replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, "")  // Control chars except tab/newline/cr
+            .replace(/\[200~/g, "")                        // Bracketed paste start
+            .replace(/\[201~/g, "")                        // Bracketed paste end
+            .replace(/\[[ABCD]/g, "")                      // Arrow key fragments [A, [B, [C, [D
+            .replace(/O[ABCD]/g, "")                       // Alt arrow key fragments OA, OB, OC, OD
+            .replace(/\[\d+~/g, "")                        // Function/special keys [5~, [6~, etc.
+            .replace(/\[\d+;\d+[~ABCDHF]/g, "")            // Modified keys with parameters
             .replace(/\[<\d+;\d+;\d+[Mm]/g, "")// Mouse sequences
             .replace(/\[?\[/g, "");            // Leftover brackets from sequences
           if (printable) {
@@ -2471,16 +2473,18 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Only insert printable characters (filter out control chars that weren't handled above)
     if (input && !key.ctrl && !key.meta) {
       // Filter control chars and escape sequence fragments that leak through
+      // Preserve whitespace: tab (\x09), newline (\x0a), carriage return (\x0d), form feed (\x0c)
+      // Remove other control characters: NUL through \x08 (includes \x07 BEL), \x0b-\x0c, \x0e-\x1f, DEL (\x7f)
       const printable = input
-        .replace(/[\x00-\x1f\x7f]/g, "")       // Control characters
-        .replace(/\[200~/g, "")                 // Bracketed paste start
-        .replace(/\[201~/g, "")                 // Bracketed paste end
-        .replace(/\[[ABCD]/g, "")               // Arrow key fragments [A, [B, [C, [D
-        .replace(/O[ABCD]/g, "")                // Alt arrow key fragments OA, OB, OC, OD
-        .replace(/\[\d+~/g, "")                 // Function/special keys [5~, [6~, etc.
-        .replace(/\[\d+;\d+[~ABCDHF]/g, "")     // Modified keys with parameters
-        .replace(/\[<\d+;\d+;\d+[Mm]/g, "")     // Mouse sequences
-        .replace(/\[?\[/g, "");                 // Leftover brackets from sequences
+        .replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, "")  // Control chars except tab/newline/cr
+        .replace(/\[200~/g, "")                        // Bracketed paste start
+        .replace(/\[201~/g, "")                        // Bracketed paste end
+        .replace(/\[[ABCD]/g, "")                      // Arrow key fragments [A, [B, [C, [D
+        .replace(/O[ABCD]/g, "")                       // Alt arrow key fragments OA, OB, OC, OD
+        .replace(/\[\d+~/g, "")                        // Function/special keys [5~, [6~, etc.
+        .replace(/\[\d+;\d+[~ABCDHF]/g, "")            // Modified keys with parameters
+        .replace(/\[<\d+;\d+;\d+[Mm]/g, "")            // Mouse sequences
+        .replace(/\[?\[/g, "");                        // Leftover brackets from sequences
       if (printable) {
         store.insertInput(printable);
         refreshAutocomplete();

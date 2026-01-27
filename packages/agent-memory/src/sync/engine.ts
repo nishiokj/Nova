@@ -16,6 +16,7 @@ import type { Sql } from 'postgres'
 import type { ConnectorType } from '../ids.js'
 import type { SyncJob, SyncJobType } from '../db/repositories/sync-job.js'
 import { createSyncJobRepository, type SyncJobRepository } from '../db/repositories/sync-job.js'
+import { createTransformationRepository, type TransformationRepository } from '../db/repositories/transformations.js'
 import { MicroQueue, type Job, type JobResult } from './queue.js'
 import { Collector, type CollectorConfig } from './collector.js'
 import { Processor, type ProcessorConfig } from './processor.js'
@@ -37,13 +38,17 @@ interface CollectJobPayload {
   connector: ConnectorType
   accountId: string
   jobType: SyncJobType
-  cursor?: string
   entityTypes?: string[]
 }
 
 /** Job payload for process phase */
 interface ProcessJobPayload {
   syncJobId: string
+}
+
+/** Job payload for derived task execution */
+interface DerivedJobPayload {
+  derivedJobId: string
 }
 
 // ============ Configuration ============
@@ -102,9 +107,11 @@ export class SyncEngine {
   private collector: Collector
   private processor: Processor
   private syncJobRepo: SyncJobRepository
+  private transformationRepo: TransformationRepository
   private connectors: Map<ConnectorType, Connector> = new Map()
   private transformRegistry: TransformationRegistry
   private eventHandlers: Array<(event: SyncEvent) => void> = []
+  private derivedJobHandlers: Map<string, (job: Job<DerivedJobPayload>) => Promise<JobResult>> = new Map()
   private isRunning = false
   private queueWorker: Promise<void> | null = null
 
@@ -131,6 +138,7 @@ export class SyncEngine {
       transformRegistry: this.transformRegistry,
     })
     this.syncJobRepo = createSyncJobRepository({ sql })
+    this.transformationRepo = createTransformationRepository({ sql })
 
     // Wire up event handlers
     this.collector.onEvent((event) => this.emit(event))
@@ -153,6 +161,7 @@ export class SyncEngine {
     // Register connector's transforms if it has any
     if ('registerTransforms' in connector && typeof connector.registerTransforms === 'function') {
       (connector as any).registerTransforms(this.transformRegistry)
+      void this.persistTransformations(connector.type)
     }
 
     return this
@@ -163,6 +172,7 @@ export class SyncEngine {
    */
   registerTransform<T>(transform: Transformation<T>): this {
     this.transformRegistry.register(transform)
+    void this.persistTransformation(transform)
     return this
   }
 
@@ -190,6 +200,24 @@ export class SyncEngine {
     return this.transformRegistry.findByConnector(connector)
   }
 
+  private async persistTransformations(connector: ConnectorType): Promise<void> {
+    const transforms = this.transformRegistry.findByConnector(connector)
+    await Promise.all(transforms.map((t) => this.persistTransformation(t)))
+  }
+
+  private async persistTransformation(transform: Transformation): Promise<void> {
+    await this.transformationRepo.upsert({
+      id: transform.id,
+      name: transform.name,
+      connector: transform.source.connector,
+      entity_type: transform.source.entityType,
+      output_type: transform.outputType,
+      enabled: transform.enabled,
+      version: transform.version,
+      description: transform.description,
+    })
+  }
+
   /**
    * Find transformations for a specific connector + entity type.
    */
@@ -205,6 +233,41 @@ export class SyncEngine {
   onEvent(handler: (event: SyncEvent) => void): this {
     this.eventHandlers.push(handler)
     return this
+  }
+
+  // ============ Derived Task Support ============
+
+  /**
+   * Register a handler for a derived job type.
+   * Allows the shared queue to process derived tasks.
+   */
+  registerDerivedJobHandler(
+    jobType: string,
+    handler: (job: Job<DerivedJobPayload>) => Promise<JobResult>
+  ): this {
+    this.derivedJobHandlers.set(jobType, handler)
+    this.queue.register<DerivedJobPayload>(jobType, handler)
+    return this
+  }
+
+  /**
+   * Schedule a derived job on the shared queue.
+   */
+  async scheduleDerivedJob(
+    jobType: string,
+    derivedJobId: string,
+    options: { priority?: number; idempotencyKey?: string } = {}
+  ): Promise<void> {
+    if (!this.derivedJobHandlers.has(jobType)) {
+      throw new Error(`No handler registered for derived job type: ${jobType}`)
+    }
+
+    await this.queue.enqueue<DerivedJobPayload>(jobType, {
+      derivedJobId,
+    }, {
+      priority: options.priority ?? 0,
+      idempotencyKey: options.idempotencyKey,
+    })
   }
 
   // ============ Sync Scheduling ============
@@ -259,7 +322,7 @@ export class SyncEngine {
       account_id: accountId,
       job_type: 'incremental',
       priority: options.priority ?? 5, // Higher default priority than backfill
-      cursor_state: cursor ? { cursor } : undefined,
+      cursor_state: cursor ? parseCursorForStorage(cursor) : undefined,
       metadata: { entityTypes: options.entityTypes },
     })
 
@@ -268,7 +331,6 @@ export class SyncEngine {
       connector,
       accountId,
       jobType: 'incremental',
-      cursor,
       entityTypes: options.entityTypes,
     }, {
       priority: options.priority ?? 5,
@@ -347,8 +409,35 @@ export class SyncEngine {
   /**
    * Process all unprocessed envelopes.
    */
-  async processAll(): Promise<BatchProcessResult> {
-    return this.processor.processAll()
+  async processAll(options: { transformationIds?: string[] } = {}): Promise<BatchProcessResult> {
+    return this.processor.processAll(options)
+  }
+
+  /**
+   * Reprocess all errored envelopes.
+   */
+  async processErrored(options: { transformationIds?: string[] } = {}): Promise<BatchProcessResult> {
+    return this.processor.processErrored(options)
+  }
+
+  /**
+   * Reprocess all envelopes that match a scope filter.
+   */
+  async reprocessFiltered(
+    filter: { connector?: string; entityType?: string },
+    options: { transformationIds?: string[] } = {}
+  ): Promise<BatchProcessResult> {
+    return this.processor.reprocessFiltered(filter, options)
+  }
+
+  /**
+   * Process envelopes for a specific sync job.
+   */
+  async processSyncJob(
+    syncJobId: string,
+    options: { transformationIds?: string[] } = {}
+  ): Promise<BatchProcessResult> {
+    return this.processor.processSyncJob(syncJobId, options)
   }
 
   // ============ Job Status ============
@@ -465,7 +554,14 @@ export class SyncEngine {
   }
 
   private async handleCollectJob(job: Job<CollectJobPayload>): Promise<JobResult> {
-    const { syncJobId, connector, accountId, jobType, cursor, entityTypes } = job.payload
+    const payload = typeof job.payload === 'string'
+      ? JSON.parse(job.payload) as CollectJobPayload
+      : job.payload
+    const { syncJobId } = payload
+
+    if (!syncJobId) {
+      return { success: false, error: new Error(`Missing syncJobId in collect job payload`), noRetry: true }
+    }
 
     try {
       // Resume or start the job
@@ -474,11 +570,10 @@ export class SyncEngine {
         return { success: false, error: new Error(`Sync job not found: ${syncJobId}`) }
       }
 
-      // Run collection based on job type
-      if (jobType === 'backfill') {
-        await this.collector.backfill(connector, accountId, { entityTypes })
-      } else {
-        await this.collector.incrementalSync(connector, accountId, cursor, { entityTypes })
+      // Run collection for the existing job instead of creating a new one.
+      const resumed = await this.collector.resumeJob(syncJobId)
+      if (!resumed) {
+        return { success: false, error: new Error(`Failed to resume job: ${syncJobId}`) }
       }
 
       // Schedule process phase if auto-process is enabled
@@ -496,7 +591,10 @@ export class SyncEngine {
   }
 
   private async handleProcessJob(job: Job<ProcessJobPayload>): Promise<JobResult> {
-    const { syncJobId } = job.payload
+    const payload = typeof job.payload === 'string'
+      ? JSON.parse(job.payload) as ProcessJobPayload
+      : job.payload
+    const { syncJobId } = payload
 
     try {
       const result = await this.processor.processSyncJob(syncJobId)
@@ -518,7 +616,10 @@ export class SyncEngine {
   }
 
   private async handleReprocessJob(job: Job<ProcessJobPayload>): Promise<JobResult> {
-    const { syncJobId } = job.payload
+    const payload = typeof job.payload === 'string'
+      ? JSON.parse(job.payload) as ProcessJobPayload
+      : job.payload
+    const { syncJobId } = payload
 
     try {
       const result = await this.processor.reprocessSyncJob(syncJobId)
@@ -554,4 +655,19 @@ export class SyncEngine {
       }
     }
   }
+}
+
+/**
+ * Parse a cursor string for JSONB storage.
+ * If the cursor is valid JSON that parses to an object, store the object directly.
+ * Otherwise, wrap it as { cursor: "..." } so it fits Record<string, unknown>.
+ */
+function parseCursorForStorage(cursor: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(cursor)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {}
+  return { cursor }
 }

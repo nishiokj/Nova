@@ -37,6 +37,15 @@ export {
 } from './sync-job.js'
 
 export {
+  createDerivedJobRepository,
+  type DerivedJobRepository,
+  type DerivedJob,
+  type DerivedJobInput,
+  type DerivedJobRow,
+  type DerivedJobStatus,
+} from './derived-job.js'
+
+export {
   createAccountRepository,
   type AccountRepository,
   type Account,
@@ -78,6 +87,23 @@ export {
   type SyncType,
   type TaskMode,
 } from './sync-task.js'
+
+export {
+  createDerivedTaskRepository,
+  type DerivedTaskRepository,
+  type DerivedTask,
+  type DerivedTaskInput,
+  type DerivedTaskRow,
+  type DerivedTaskMode,
+} from './derived-task.js'
+
+export {
+  createTransformationRepository,
+  type TransformationRepository,
+  type TransformationRecord,
+  type TransformationInput,
+  type TransformationRow,
+} from './transformations.js'
 
 export {
   createRegisteredConnectorRepository,

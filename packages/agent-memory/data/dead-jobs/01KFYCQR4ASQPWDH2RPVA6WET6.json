@@ -1,0 +1,11 @@
+{
+  "id": "01KFYCQR4ASQPWDH2RPVA6WET6",
+  "type": "derived:run",
+  "payload": {
+    "derivedJobId": "01KFYCQR47P4P4A2VR5BS6GR2V"
+  },
+  "error": "No handler registered for job type: derived:run",
+  "attemptCount": 2,
+  "createdAt": "2026-01-27T00:12:58.378Z",
+  "diedAt": "2026-01-27T00:12:59.787Z"
+}

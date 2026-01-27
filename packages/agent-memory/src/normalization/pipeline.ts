@@ -40,8 +40,8 @@ const ENTITY_SPECS: Record<string, EntityNormalizationSpec> = {
       { field: 'received_at', type: 'timestamp' },
     ],
   },
-  task: {
-    entityType: 'task',
+  issue: {
+    entityType: 'issue',
     fields: [
       { field: 'title', type: 'text', required: true },
       { field: 'description', type: 'html' },

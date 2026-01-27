@@ -268,7 +268,8 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
           return;
         }
         // Filter control characters and strip any paste markers that slipped through
-        const clean = stripPasteMarkers(input.replace(/[\x00-\x1f\x7f]/g, ""));
+        // Preserve whitespace: tab (\x09), newline (\x0a), carriage return (\x0d)
+        const clean = stripPasteMarkers(input.replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, ""));
         if (clean) {
           setViewMode({
             ...viewMode,

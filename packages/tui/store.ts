@@ -177,7 +177,7 @@ export class Store {
   private streamingText = "";
   private streamingRequestId: string | null = null;
   private streamingTruncated = false;
-  private streamingThrottleMs = 16; // ~60fps
+  private streamingThrottleMs = 11; // ~90fps
   private lastStreamingEmit = 0;
 
   // ─── Reasoning ───

@@ -72,6 +72,10 @@ export interface PendingRequest {
   messageId: number
   text: string
   startedAt: number
+  /** true once response or error has been sent to the user */
+  settled: boolean
+  /** timestamp of last progress message sent (throttle) */
+  lastProgressAt?: number
 }
 
 export interface ChatSession {

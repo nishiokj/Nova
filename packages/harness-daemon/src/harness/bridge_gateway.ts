@@ -58,6 +58,7 @@ interface HarnessLike {
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
   getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
+  ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): void;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
@@ -327,13 +328,16 @@ export class BridgeGateway {
       graphd.sessionUpdateStatus(sessionKey, 'active');
     }
 
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir: state.workingDir ?? this.workingDir,
+      includeUserPreferences: true,
+    });
+
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
 
     // Load and emit per-agent-type model selections if available
     if (graphd) {
-      this.hydrateSessionModelSelections(sessionKey);
-
       // Send persisted selections directly to this connection to avoid session-channel races
       const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
       const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
@@ -381,30 +385,6 @@ export class BridgeGateway {
     }
   }
 
-  private hydrateSessionModelSelections(sessionKey: string): void {
-    const graphd = this.harness.getGraphD?.();
-    if (!graphd) {
-      return;
-    }
-
-    const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
-    const modelSelectionsMap = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections');
-
-    if (!modelSelectionsMap) {
-      return;
-    }
-
-    for (const [agentType, selection] of Object.entries(modelSelectionsMap)) {
-      if (selection?.provider && selection?.model) {
-        const isHidden = hiddenModels.some((hidden) => hidden.trim().toLowerCase() === selection.model.trim().toLowerCase());
-        if (!isHidden) {
-          this.harness.setSessionSelectedModel?.(sessionKey, agentType, selection);
-        }
-      }
-    }
-    graphd.sessionUpdateMetadata(sessionKey, { model_selections: modelSelectionsMap });
-  }
-
   private handleSendText(
     connectionId: string,
     data: Record<string, unknown> | undefined,
@@ -417,12 +397,21 @@ export class BridgeGateway {
       profiler.end('handleSendText', 'handler');
       return;
     }
+
+    // Per-request working_dir takes precedence over init-time state, which takes precedence over daemon default
+    const requestWorkingDir = typeof data?.working_dir === 'string' && data.working_dir.length > 0
+      ? data.working_dir
+      : null;
+    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
+
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir,
+      includeUserPreferences: true,
+    });
+
     // Check 'standard' agent type selection - this is the main/default that must be set
     let activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
     if (!activeSelection?.model || !activeSelection?.provider) {
-      // Session may have been evicted after timeout - try to hydrate from DB before erroring
-      this.hydrateSessionModelSelections(sessionKey);
-      // Re-check after hydration attempt
       activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
       if (!activeSelection?.model || !activeSelection?.provider) {
         this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
@@ -441,12 +430,6 @@ export class BridgeGateway {
       this.sendError(connectionId, `No API key configured for provider: ${activeSelection.provider}`);
       return;
     }
-
-    // Per-request working_dir takes precedence over init-time state, which takes precedence over daemon default
-    const requestWorkingDir = typeof data?.working_dir === 'string' && data.working_dir.length > 0
-      ? data.working_dir
-      : null;
-    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
 
     const text = String(data?.text ?? '');
     if (!text.trim()) {
@@ -1384,11 +1367,13 @@ export class BridgeGateway {
     const agentType = typeof data?.agent_type === 'string' ? data.agent_type : null;
     const returnAll = data?.all === true || !agentType;
 
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir: state.workingDir ?? this.workingDir,
+      includeUserPreferences: true,
+    });
+
     if (returnAll) {
       const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
-      if (existingSelections.size === 0) {
-        this.hydrateSessionModelSelections(sessionKey);
-      }
       // Return all model selections
       const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
       const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
@@ -1405,10 +1390,6 @@ export class BridgeGateway {
 
     // Return selection for specific agent type
     let selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
-    if (!selectedModel) {
-      this.hydrateSessionModelSelections(sessionKey);
-      selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
-    }
 
     this.sendAuthResponse(connectionId, 'get_model', {
       success: true,
@@ -1435,6 +1416,11 @@ export class BridgeGateway {
       this.sendError(connectionId, 'Session not initialized. Call init first.');
       return;
     }
+
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir: state.workingDir ?? this.workingDir,
+      includeUserPreferences: true,
+    });
 
     // Check if already running a Ralph loop
     if (state.ralphLoop) {

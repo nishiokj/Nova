@@ -1,0 +1,9 @@
+{
+  "id": "01KFW9MCHY6JGDQNC6NH1EXAB4",
+  "type": "sync:collect",
+  "payload": "{\"syncJobId\":\"01KFW9MCHXAF4Q7AF7V12TSTGC\",\"connector\":\"imessage\",\"accountId\":\"01KFVY7FR2ZB06FBX19REGTXCA\",\"jobType\":\"incremental\"}",
+  "error": "UNDEFINED_VALUE: Undefined values are not allowed",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T04:40:13.630Z",
+  "diedAt": "2026-01-26T04:40:17.035Z"
+}

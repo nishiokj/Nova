@@ -200,12 +200,16 @@ export class TelegramConnector {
       session = this.sessions.get(chatId)!
     }
 
+    // Clean up any stale requests before adding new ones
+    this.reapStaleRequests()
+
     // Track this request
     this.pendingRequests.set(requestId, {
       chatId,
       messageId: message.message_id,
       text,
       startedAt: Date.now(),
+      settled: false,
     })
     this.responseBuffers.set(requestId, '')
 
@@ -302,11 +306,11 @@ export class TelegramConnector {
         break
 
       case 'response':
-        this.handleResponseEvent(requestId, pending)
+        void this.handleResponseEvent(requestId, pending)
         break
 
       case 'error':
-        this.handleErrorEvent(requestId, event, pending)
+        void this.handleErrorEvent(requestId, event, pending)
         break
 
       case 'user_prompt':
@@ -314,10 +318,23 @@ export class TelegramConnector {
         break
 
       case 'status':
-      case 'progress':
-        // Keep typing indicator active
         void this.sendChatAction(pending.chatId, 'typing')
         break
+
+      case 'progress': {
+        const progData = event.data as { message?: string; kind?: string } | undefined
+        void this.sendChatAction(pending.chatId, 'typing')
+
+        // Send progress text for tool/work events, throttled to 1 per 10s
+        if (progData?.message && (progData.kind === 'tool' || progData.kind === 'work')) {
+          const now = Date.now()
+          if (!pending.lastProgressAt || now - pending.lastProgressAt > 10_000) {
+            pending.lastProgressAt = now
+            void this.sendMessage(pending.chatId, progData.message)
+          }
+        }
+        break
+      }
     }
   }
 
@@ -373,34 +390,41 @@ export class TelegramConnector {
     void this.sendChatAction(pending.chatId, 'typing')
   }
 
-  private handleResponseEvent(requestId: string, pending: PendingRequest): void {
-    const text = this.responseBuffers.get(requestId) ?? ''
-
-    // Cleanup
+  private async handleResponseEvent(requestId: string, pending: PendingRequest): Promise<void> {
+    if (!pending.settled) {
+      pending.settled = true
+      const text = this.responseBuffers.get(requestId) ?? ''
+      if (text.trim()) {
+        await this.sendLongMessage(pending.chatId, text, pending.messageId)
+      } else {
+        await this.sendMessage(pending.chatId, '(No response)', undefined, pending.messageId)
+      }
+    }
+    // Always clean up
     this.pendingRequests.delete(requestId)
     this.responseBuffers.delete(requestId)
-
-    // Send response to Telegram
-    if (text.trim()) {
-      void this.sendLongMessage(pending.chatId, text, pending.messageId)
-    } else {
-      void this.sendMessage(pending.chatId, '(No response)', undefined, pending.messageId)
-    }
   }
 
-  private handleErrorEvent(
+  private async handleErrorEvent(
     requestId: string,
     event: BridgeEvent,
     pending: PendingRequest
-  ): void {
+  ): Promise<void> {
+    if (pending.settled) return // Already handled by another path
+    pending.settled = true
+
+    // Flush accumulated buffer first
+    const buffer = this.responseBuffers.get(requestId) ?? ''
+    if (buffer.trim()) {
+      await this.sendLongMessage(pending.chatId, buffer, pending.messageId)
+    }
+
     const data = event.data as { message?: string } | undefined
     const errorMsg = data?.message ?? 'Unknown error'
+    await this.sendMessage(pending.chatId, `Error: ${errorMsg}`, undefined, pending.messageId)
 
-    // Cleanup
-    this.pendingRequests.delete(requestId)
-    this.responseBuffers.delete(requestId)
-
-    void this.sendMessage(pending.chatId, `Error: ${errorMsg}`, undefined, pending.messageId)
+    // Don't delete yet — response event may arrive and do final cleanup.
+    // Timeout reaper will catch any leaked state.
   }
 
   private handleUserPromptEvent(
@@ -441,6 +465,20 @@ export class TelegramConnector {
   // ===========================================================================
 
   async sendMessage(
+    chatId: number,
+    text: string,
+    parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML',
+    replyToMessageId?: number
+  ): Promise<boolean> {
+    const result = await this._sendMessageRaw(chatId, text, parseMode, replyToMessageId)
+    if (!result && parseMode) {
+      // Markdown rejected — retry as plain text
+      return this._sendMessageRaw(chatId, text, undefined, replyToMessageId)
+    }
+    return result
+  }
+
+  private async _sendMessageRaw(
     chatId: number,
     text: string,
     parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML',
@@ -517,6 +555,28 @@ export class TelegramConnector {
   // ===========================================================================
   // Utilities
   // ===========================================================================
+
+  private reapStaleRequests(): void {
+    const now = Date.now()
+    const TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+
+    for (const [requestId, pending] of this.pendingRequests) {
+      if (now - pending.startedAt <= TIMEOUT_MS) continue
+
+      if (!pending.settled) {
+        // Unsettled + stale: flush buffer, notify user, clean up
+        pending.settled = true
+        const buffer = this.responseBuffers.get(requestId) ?? ''
+        if (buffer.trim()) {
+          void this.sendLongMessage(pending.chatId, buffer, pending.messageId)
+        }
+        void this.sendMessage(pending.chatId, 'Request timed out.', undefined, pending.messageId)
+      }
+      // Settled or not, stale entries get cleaned up
+      this.pendingRequests.delete(requestId)
+      this.responseBuffers.delete(requestId)
+    }
+  }
 
   private generateRequestId(updateId: number, messageId: number): string {
     return `tg_${updateId}_${messageId}_${Date.now()}`

@@ -1,0 +1,15 @@
+{
+  "id": "01KFXRQJA71P0G93S4J8DS5Y61",
+  "type": "sync:collect",
+  "payload": {
+    "syncJobId": "01KFXRQJA0D5DF5PHD2G824W3B",
+    "connector": "claude_sessions",
+    "accountId": "01KFVRYKRN75P0TSY86PTBK22Z",
+    "jobType": "incremental",
+    "cursor": "{\"projectIndex\":0,\"sessionIndex\":62,\"messageOffset\":20}"
+  },
+  "error": "Failed to fetch page after 3 attempts: The \"paths[1]\" property must be of type string, got undefined",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T18:23:20.903Z",
+  "diedAt": "2026-01-26T18:23:45.687Z"
+}

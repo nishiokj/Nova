@@ -227,6 +227,10 @@ export class MicroQueue {
     const handler = this.handlers.get(queueJob.job_type)
     if (!handler) {
       // No handler registered - mark as dead
+      console.error('[MicroQueue] No handler registered for job type:', {
+        jobId: queueJob.id,
+        jobType: queueJob.job_type,
+      })
       await this.repo.fail(
         queueJob.id,
         `No handler registered for job type: ${queueJob.job_type}`,
@@ -367,6 +371,15 @@ export class MicroQueue {
 
     const isLastAttempt = queueJob.attempt_count >= this.config.maxAttempts
     const shouldDie = result.noRetry || isLastAttempt
+
+    console.error('[MicroQueue] Job failed:', {
+      jobId: queueJob.id,
+      jobType: queueJob.job_type,
+      attempt: queueJob.attempt_count,
+      maxAttempts: this.config.maxAttempts,
+      willRetry: !shouldDie,
+      error: errorMessage,
+    })
 
     if (shouldDie) {
       await this.repo.fail(queueJob.id, errorMessage, { markDead: true })

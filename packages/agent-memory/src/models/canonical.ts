@@ -126,6 +126,7 @@ export type Account = z.infer<typeof AccountSchema>
 export const MessageSchema = BaseEntitySchema.extend({
   entity_type: z.literal('message'),
   thread_id: z.string().optional(),
+  conversation_id: UlidSchema.optional(),
   parent_id: UlidSchema.optional(),
   sender_identity_id: UlidSchema.optional(),
   recipient_identity_ids: z.array(UlidSchema).default([]),
@@ -164,10 +165,10 @@ export const EventSchema = BaseEntitySchema.extend({
 export type Event = z.infer<typeof EventSchema>
 
 /**
- * Task: Issue, PR, todo item, ticket
+ * Issue: Work item (issue, PR, ticket)
  */
-export const TaskSchema = BaseEntitySchema.extend({
-  entity_type: z.literal('task'),
+export const IssueSchema = BaseEntitySchema.extend({
+  entity_type: z.literal('issue'),
   title: z.string().min(1),
   description: z.string().optional(),
   status: z.enum(['open', 'in_progress', 'closed', 'cancelled']).default('open'),
@@ -176,12 +177,12 @@ export const TaskSchema = BaseEntitySchema.extend({
   assignee_identity_ids: z.array(UlidSchema).default([]),
   due_at: z.string().datetime().optional(),
   completed_at: z.string().datetime().optional(),
-  parent_task_id: UlidSchema.optional(),
+  parent_issue_id: UlidSchema.optional(),
   labels: z.array(z.string()).default([]),
   platform_url: z.string().url().optional(),
 })
 
-export type Task = z.infer<typeof TaskSchema>
+export type Issue = z.infer<typeof IssueSchema>
 
 /**
  * Notification: Alert, mention, update notification
@@ -298,10 +299,19 @@ export type Attachment = z.infer<typeof AttachmentSchema>
 // ============ Entity Type Enum ============
 
 export const EntityTypeSchema = z.enum([
-  'person', 'identity', 'org', 'account',
-  'message', 'event', 'task', 'notification', 'observation', 'preference',
+  'person',
+  'identity',
+  'org',
+  'account',
+  'message',
   'conversation',
-  'link', 'attachment',
+  'issue',
+  'notification',
+  'event',
+  'observation',
+  'preference',
+  'link',
+  'attachment',
 ])
 
 export type EntityType = z.infer<typeof EntityTypeSchema>
@@ -318,12 +328,12 @@ export type CanonicalEntity =
   | Org
   | Account
   | Message
-  | Event
-  | Task
   | Notification
+  | Conversation
+  | Issue
+  | Event
   | Observation
   | Preference
-  | Conversation
   | Link
   | Attachment
 
@@ -338,12 +348,12 @@ export const EntitySchemas = {
   org: OrgSchema,
   account: AccountSchema,
   message: MessageSchema,
-  event: EventSchema,
-  task: TaskSchema,
+  issue: IssueSchema,
   notification: NotificationSchema,
+  conversation: ConversationSchema,
+  event: EventSchema,
   observation: ObservationSchema,
   preference: PreferenceSchema,
-  conversation: ConversationSchema,
   link: LinkSchema,
   attachment: AttachmentSchema,
 } as const

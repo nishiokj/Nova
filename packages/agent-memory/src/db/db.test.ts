@@ -166,18 +166,14 @@ describeWithDb('Database Module - Integration Tests', () => {
     test('creates and retrieves canonical entity', async () => {
       const data = {
         id: generateCanonicalId(),
-        entity_type: 'person' as const,
-        display_name: 'Test User',
-        emails: ['test@example.com'],
-        phones: [],
-        usernames: [],
-        org_ids: [],
-        identity_ids: [],
+        entity_type: 'issue' as const,
+        title: 'Test Issue',
+        status: 'open' as const,
         source_refs: [
           {
             connector: 'github' as const,
             account_id: 'acc1',
-            entity_type: 'user',
+            entity_type: 'issue',
             source_id: '123',
             last_synced_at: new Date().toISOString(),
           },
@@ -186,21 +182,21 @@ describeWithDb('Database Module - Integration Tests', () => {
         updated_at: new Date().toISOString(),
       }
 
-      const created = await repo().create('person', data, 'Test User')
+      const created = await repo().create('issue', data, 'Test Issue')
       expect(created.id).toBeDefined()
-      expect(created.entity_type).toBe('person')
-      expect(created.display_text).toBe('Test User')
+      expect(created.entity_type).toBe('issue')
+      expect(created.display_text).toBe('Test Issue')
 
       const found = await repo().findById(created.id)
       expect(found).not.toBeNull()
-      expect((found?.data as { display_name?: string }).display_name).toBe('Test User')
+      expect((found?.data as { title?: string }).title).toBe('Test Issue')
     })
 
     test('soft deletes entity', async () => {
       const data = {
         id: generateCanonicalId(),
-        entity_type: 'task' as const,
-        title: 'Test Task',
+        entity_type: 'issue' as const,
+        title: 'Test Issue',
         status: 'open' as const,
         source_refs: [
           {
@@ -215,7 +211,7 @@ describeWithDb('Database Module - Integration Tests', () => {
         updated_at: new Date().toISOString(),
       }
 
-      const created = await repo().create('task', data)
+      const created = await repo().create('issue', data)
       expect(await repo().findById(created.id)).not.toBeNull()
 
       await repo().softDelete(created.id)
@@ -235,26 +231,22 @@ describeWithDb('Database Module - Integration Tests', () => {
       // Create canonical entity first
       const entityData = {
         id: generateCanonicalId(),
-        entity_type: 'person' as const,
-        display_name: 'Mapping Test',
+        entity_type: 'issue' as const,
+        title: 'Mapping Test',
+        status: 'open' as const,
         source_refs: [
           {
             connector: 'github' as const,
             account_id: 'acc1',
-            entity_type: 'user',
+            entity_type: 'issue',
             source_id: 'map-test',
             last_synced_at: new Date().toISOString(),
           },
         ],
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-        emails: [],
-        phones: [],
-        usernames: [],
-        org_ids: [],
-        identity_ids: [],
       }
-      const entity = await entityRepo().create('person', entityData)
+      const entity = await entityRepo().create('issue', entityData)
 
       // Create raw envelope
       const envInput = {
@@ -274,16 +266,18 @@ describeWithDb('Database Module - Integration Tests', () => {
       const sourceRefKey = sourceRefToKey({
         connector: 'github',
         account_id: 'acc1',
-        entity_type: 'user',
+        entity_type: 'issue',
         source_id: `map-test-${entity.id}`,
       })
 
       const mapping = await mappingRepo().create({
         canonical_entity_id: entity.id,
-        canonical_entity_type: 'person',
+        canonical_entity_type: 'issue',
         raw_envelope_id: envelope.id,
         source_ref_key: sourceRefKey,
         mapping_confidence: 0.95,
+        transformation_id: 'github:issue:v1',
+        transformation_version: 1,
       })
 
       expect(mapping.id).toBeDefined()

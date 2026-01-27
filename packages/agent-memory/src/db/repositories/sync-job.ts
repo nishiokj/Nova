@@ -19,7 +19,7 @@ export interface SyncJob {
   job_type: SyncJobType
   status: SyncJobStatus
   priority: number
-  cursor_state?: Record<string, unknown>
+  cursor_state?: string | Record<string, unknown>
   items_fetched: number
   items_processed: number
   items_failed: number
@@ -39,7 +39,7 @@ export interface SyncJobRow {
   job_type: string
   status: string
   priority: number
-  cursor_state: Record<string, unknown> | null
+  cursor_state: string | Record<string, unknown> | null
   items_fetched: number
   items_processed: number
   items_failed: number
@@ -98,9 +98,16 @@ export interface SyncJobRepository {
     id: string,
     progress: { fetched?: number; processed?: number; failed?: number }
   ): Promise<SyncJob | null>
-  updateCursor(id: string, cursor: Record<string, unknown>): Promise<SyncJob | null>
+  updateCursor(id: string, cursor: string | Record<string, unknown>): Promise<SyncJob | null>
   scheduleRetry(id: string, retryAt: Date): Promise<SyncJob | null>
 }
+
+/**
+ * Maximum allowed size for cursor_state in bytes.
+ * Cursors should be tiny (< 1 KB). Anything over 64 KB is a bug
+ * (e.g. double-wrapping accumulation from wrapping/unwrapping mismatch).
+ */
+const MAX_CURSOR_STATE_BYTES = 64 * 1024
 
 export function createSyncJobRepository(ctx: RepositoryContext): SyncJobRepository {
   const { sql } = ctx
@@ -181,6 +188,22 @@ export function createSyncJobRepository(ctx: RepositoryContext): SyncJobReposito
       const id = generateCanonicalId()
       const now = new Date()
 
+      let cursorJsonb: string | null = null
+      if (input.cursor_state) {
+        cursorJsonb = JSON.stringify(input.cursor_state)
+        const bytes = Buffer.byteLength(cursorJsonb, 'utf8')
+        if (bytes > MAX_CURSOR_STATE_BYTES) {
+          console.error('[SyncJob] cursor_state exceeds max size, dropping', {
+            id,
+            connector: input.connector,
+            accountId: input.account_id,
+            bytes,
+            maxBytes: MAX_CURSOR_STATE_BYTES,
+          })
+          cursorJsonb = null
+        }
+      }
+
       const [row] = await sql<SyncJobRow[]>`
         INSERT INTO sync_jobs (
           id, connector, account_id, job_type, status, priority,
@@ -192,7 +215,7 @@ export function createSyncJobRepository(ctx: RepositoryContext): SyncJobReposito
           ${input.job_type},
           'pending',
           ${input.priority ?? 0},
-          ${input.cursor_state ? JSON.stringify(input.cursor_state) : null}::jsonb,
+          ${cursorJsonb}::jsonb,
           ${now},
           ${input.metadata ? JSON.stringify(input.metadata) : null}::jsonb
         )
@@ -208,7 +231,7 @@ export function createSyncJobRepository(ctx: RepositoryContext): SyncJobReposito
       const [row] = await sql<SyncJobRow[]>`
         UPDATE sync_jobs
         SET status = 'running', started_at = ${now}
-        WHERE id = ${id} AND status = 'pending'
+        WHERE id = ${id} AND status IN ('pending', 'failed')
         RETURNING *
       `
 
@@ -237,7 +260,7 @@ export function createSyncJobRepository(ctx: RepositoryContext): SyncJobReposito
             completed_at = ${now},
             last_error = ${error},
             retry_count = retry_count + 1
-        WHERE id = ${id} AND status = 'running'
+        WHERE id = ${id} AND status IN ('pending', 'running')
         RETURNING *
       `
 
@@ -286,9 +309,36 @@ export function createSyncJobRepository(ctx: RepositoryContext): SyncJobReposito
     },
 
     async updateCursor(id, cursor) {
+      // Normalize cursor for JSONB storage:
+      // - Object cursors serialize directly
+      // - String cursors that are valid JSON pass through (stored as the parsed JSON value)
+      // - Plain string cursors get JSON.stringify'd (stored as a JSON string value)
+      let cursorJsonb: string
+      if (typeof cursor === 'object') {
+        cursorJsonb = JSON.stringify(cursor)
+      } else {
+        try {
+          JSON.parse(cursor)
+          cursorJsonb = cursor // Already valid JSON, store as parsed value
+        } catch {
+          cursorJsonb = JSON.stringify(cursor) // Wrap plain string as JSON string
+        }
+      }
+
+      const bytes = Buffer.byteLength(cursorJsonb, 'utf8')
+      if (bytes > MAX_CURSOR_STATE_BYTES) {
+        console.error('[SyncJob] cursor too large, refusing to store', {
+          id,
+          bytes,
+          maxBytes: MAX_CURSOR_STATE_BYTES,
+          preview: cursorJsonb.slice(0, 200),
+        })
+        return this.findById(id)
+      }
+
       const [row] = await sql<SyncJobRow[]>`
         UPDATE sync_jobs
-        SET cursor_state = ${JSON.stringify(cursor)}::jsonb
+        SET cursor_state = ${cursorJsonb}::jsonb
         WHERE id = ${id}
         RETURNING *
       `

@@ -176,6 +176,7 @@ describe('Configuration Schema', () => {
       expect(config.gmail.rateLimit).toBe(10)
       expect(config.gmail.excludeLabels).toEqual(['SPAM', 'TRASH'])
       expect(config.imessage.syncAttachments).toBe(true)
+      expect(config.imessage.maxTextBytes).toBe(1024 * 1024)
     })
 
     test('accepts connector credentials', () => {

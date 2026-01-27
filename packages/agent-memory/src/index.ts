@@ -66,8 +66,8 @@ export {
   type Message,
   EventSchema,
   type Event,
-  TaskSchema,
-  type Task,
+  IssueSchema,
+  type Issue,
   NotificationSchema,
   type Notification,
   ObservationSchema,
@@ -157,6 +157,23 @@ export {
   type SyncTaskInput,
   type SyncType,
   type TaskMode,
+  // Derived Job
+  createDerivedJobRepository,
+  type DerivedJobRepository,
+  type DerivedJob,
+  type DerivedJobInput,
+  type DerivedJobStatus,
+  // Derived Task
+  createDerivedTaskRepository,
+  type DerivedTaskRepository,
+  type DerivedTask,
+  type DerivedTaskInput,
+  type DerivedTaskMode,
+  // Transformations
+  createTransformationRepository,
+  type TransformationRepository,
+  type TransformationRecord,
+  type TransformationInput,
 } from './db/index.js'
 
 // Auth Layer
@@ -224,6 +241,17 @@ export {
   type SchedulerConfig,
   type SchedulerEvent,
 } from './sync/index.js'
+
+// Derived Processing
+export {
+  DerivedTaskIntegration,
+  type DerivedIntegrationConfig,
+} from './derived/integration.js'
+export {
+  runDerivedScript,
+  type DerivedRunContext,
+  type DerivedRunResult,
+} from './derived/runner.js'
 
 // Connector SDK
 export {
@@ -331,7 +359,6 @@ export {
   type GitHubIssueCommentEvent,
   // GitHub Transformations
   githubTransforms,
-  userTransform,
   issueTransform,
   pullRequestTransform,
   commentTransform,
