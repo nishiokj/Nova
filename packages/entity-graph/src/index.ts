@@ -24,6 +24,7 @@ import {
   usersOf,
   blastRadius,
   dependentsOf,
+  unusedExports,
   graphStats,
 } from './queries.js'
 import { cleanExpiredLeases } from './leasing.js'
@@ -121,6 +122,10 @@ export class EntityGraph {
     return dependentsOf(this.sql, entityId, entityKind)
   }
 
+  async unusedExports(filepath?: string): Promise<Entity[]> {
+    return unusedExports(this.sql, filepath)
+  }
+
   async graphStats(): Promise<GraphStats> {
     return graphStats(this.sql)
   }
@@ -163,6 +168,7 @@ export {
   usersOf,
   blastRadius,
   dependentsOf,
+  unusedExports,
   graphStats,
 } from './queries.js'
 export { acquireLease, releaseLease, cleanExpiredLeases } from './leasing.js'

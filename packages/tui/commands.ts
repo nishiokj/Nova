@@ -75,6 +75,8 @@ export const HELP_LINES: string[] = [
   "  /ralph-loop     Start iterative loop",
   "  /ralph-loop cancel  Cancel active loop",
   "  /async <goal>   Start async session with watcher oversight",
+  "  /async cancel   Cancel running async session",
+  "  /async status   Check async session status",
   "  /theme          List or set color theme",
   "  /voice          Toggle voice mode",
   "  /clear          Clear history",

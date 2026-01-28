@@ -5,10 +5,14 @@
  */
 
 import path from 'node:path'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { mkdir } from 'node:fs/promises'
 import { createWriteStream, type WriteStream } from 'node:fs'
 
-const DEFAULT_LOG_DIR = path.resolve(process.cwd(), 'logs', 'derived')
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const PROJECT_ROOT = path.join(__dirname, '../../../')
+const DEFAULT_LOG_DIR = path.resolve(PROJECT_ROOT, 'logs', 'derived')
 
 export function getDerivedLogDir(): string {
   return process.env.DERIVED_LOG_DIR || DEFAULT_LOG_DIR

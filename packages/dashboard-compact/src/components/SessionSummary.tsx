@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { Session, LLMCall, ToolCall } from '@shared/domain/models';
+import type { Session, LLMCall, ToolCall, WatcherDecision } from '@shared/domain/models';
 import { formatDuration } from '@shared/lib/time';
 import { StatusDot } from './StatusDot';
 import { TurnRow, TurnTableHeader, TOOL_COLUMNS } from './TurnRow';
@@ -161,6 +161,61 @@ export function SessionSummary({ session, onClose }: SessionSummaryProps) {
                   </span>
                 </div>
                 <div className="summary-request-input">{req.userInput}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {(session.watcherDecisions ?? []).length > 0 && (
+          <div className="summary-watcher">
+            <div className="summary-section-title">Watcher Decisions</div>
+            {session.watcherDecisions.map((d, i) => (
+              <div key={i} className="summary-watcher-item">
+                <div className="summary-watcher-header">
+                  <span className="summary-watcher-time">
+                    {new Date(d.timestamp).toLocaleString()}
+                  </span>
+                  <span className={`trigger-badge trigger-${d.trigger}`}>
+                    {d.trigger}
+                  </span>
+                  <span className={`action-badge action-${d.action}`}>
+                    {d.action}
+                  </span>
+                  {d.workItemId && (
+                    <span className="text-muted">{d.workItemId.slice(0, 8)}</span>
+                  )}
+                </div>
+                {(d.question || d.answer) && (
+                  <dl className="summary-watcher-qa">
+                    {d.question && (
+                      <>
+                        <dt>Question</dt>
+                        <dd>{d.question}</dd>
+                      </>
+                    )}
+                    {d.answer && (
+                      <>
+                        <dt>Answer</dt>
+                        <dd className="text-green">{d.answer}</dd>
+                      </>
+                    )}
+                  </dl>
+                )}
+                <div className="summary-watcher-rationale">{d.rationale}</div>
+                {d.qualityGate && (
+                  <div>
+                    <span className={`watcher-gate ${d.qualityGate.passed ? 'gate-pass' : 'gate-fail'}`}>
+                      Quality Gate: {d.qualityGate.passed ? 'PASS' : 'FAIL'}
+                    </span>
+                    {d.qualityGate.issues && d.qualityGate.issues.length > 0 && (
+                      <div className="gate-issues">
+                        {d.qualityGate.issues.map((issue, j) => (
+                          <div key={j}>- {issue}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>

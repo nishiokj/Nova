@@ -101,6 +101,8 @@ export interface PendingRequest {
 
 export interface ChatSession {
   initialized: boolean
+  /** The active session key for this chat (e.g. "telegram:123" or "telegram:123:1706000000") */
+  sessionKey: string
   /** Request ID waiting for user_prompt response */
   pendingUserPrompt?: string
   /** Last activity timestamp for session cleanup */

@@ -11,6 +11,7 @@ import type { Sql } from 'postgres'
 import type { EntityGraphConfig, EntityGraphHooks, EntityGraphHookResult } from './types.js'
 import { acquireLease, releaseLease } from './leasing.js'
 import { parseFile, persistParseResult } from './pipeline.js'
+import { blastRadius } from './queries.js'
 import path from 'path'
 
 /** Tools that modify files and need lease coordination */
@@ -80,9 +81,9 @@ export function createEntityGraphHooks(sql: Sql, config: EntityGraphConfig): Ent
     },
 
     /**
-     * Post-tool-use hook: release lease, fire-and-forget reparse + notify.
-     * Returns immediately — reparse runs in background to avoid adding
-     * latency to every file write.
+     * Post-tool-use hook: release lease, compute blast radius, reparse.
+     * Blast radius runs BEFORE reparse because persistParseResult wipes
+     * inbound edges — those edges are needed for the dependency walk.
      */
     async postToolUse(
       agentId: string,
@@ -105,8 +106,23 @@ export function createEntityGraphHooks(sql: Sql, config: EntityGraphConfig): Ent
       // Release the lease synchronously (important for other agents)
       await releaseLease(sql, relPath, agentId)
 
+      // Compute blast radius BEFORE reparse — reparse wipes inbound edges
+      let affected: string[] = []
+      try {
+        affected = await blastRadius(sql, relPath)
+      } catch {
+        // Non-fatal — blast radius is advisory
+      }
+
       // Fire-and-forget reparse — don't block tool response
       void reparse(sql, relPath, config)
+
+      if (affected.length > 0) {
+        return {
+          action: 'allow',
+          context: `[entity-graph] ${affected.length} file(s) depend on "${relPath}": ${affected.join(', ')}`,
+        }
+      }
 
       return { action: 'allow' }
     },

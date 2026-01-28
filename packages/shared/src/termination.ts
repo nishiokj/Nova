@@ -57,4 +57,6 @@ export type OrchestratorTerminationReason =
   | 'agent_error'
   // Semantic errors (continuable by Ralph Loop)
   | 'no_action'
-  | 'invalid_action';
+  | 'invalid_action'
+  // Watcher periodic oversight
+  | 'cadence_audit';

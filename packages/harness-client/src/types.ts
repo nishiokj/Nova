@@ -65,7 +65,9 @@ export type BridgeCommandType =
   | 'watcher_defocus'
   | 'watcher_reanchor'
   | 'watcher_summarize'
-  | 'async_start';
+  | 'async_start'
+  | 'async_cancel'
+  | 'async_status';
 
 export type BridgeEventType =
   | 'ready'

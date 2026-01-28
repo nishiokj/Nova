@@ -17,6 +17,7 @@ import type {
 } from './types.js'
 
 export * from './types.js'
+export { sendTelegramMessage, notifyAllUsers } from './notify.js'
 
 // ============================================================================
 // TelegramConnector
@@ -191,7 +192,7 @@ export class TelegramConnector {
         await this.sendMessage(chatId,
           `Hello${message.from?.first_name ? ` ${message.from.first_name}` : ''}!\n\n` +
           `I'm an AI assistant. Send me a message and I'll help you.\n\n` +
-          `Session: \`telegram:${chatId}\`\n\n` +
+          `Session: \`${this.getSessionKey(chatId)}\`\n\n` +
           `Commands:\n` +
           `/new - Start fresh conversation\n` +
           `/async <goal> - Start an async session\n` +
@@ -200,13 +201,24 @@ export class TelegramConnector {
         )
         return true
 
-      case '/new':
+      case '/new': {
+        // Close the existing session on the bridge side so context is persisted + cleared
+        const oldSession = this.sessions.get(chatId)
+        if (oldSession?.initialized) {
+          this.client.send({ type: 'session_close', data: {} })
+        }
         this.sessions.delete(chatId)
+
+        // Generate a unique session key so init doesn't reload old context
+        const newSessionKey = `telegram:${chatId}:${Date.now()}`
+        await this.initSession(chatId, newSessionKey)
+
         await this.sendMessage(chatId,
-          `Started new session: \`telegram:${chatId}\`\n\nPrevious context cleared.`,
+          `Started new session: \`${newSessionKey}\`\n\nPrevious context cleared.`,
           'Markdown'
         )
         return true
+      }
 
       case '/async': {
         const goal = command.slice(cmd.length).trim()
@@ -230,9 +242,9 @@ export class TelegramConnector {
           return true
         }
 
-        const sessionKey = `telegram:${chatId}`
         let session = this.sessions.get(chatId)
         if (!session?.initialized) {
+          const sessionKey = this.getSessionKey(chatId)
           await this.initSession(chatId, sessionKey)
           session = this.sessions.get(chatId)!
         }
@@ -299,12 +311,12 @@ export class TelegramConnector {
     }
 
     const chatId = message.chat.id
-    const sessionKey = `telegram:${chatId}`
     const requestId = this.generateRequestId(update.update_id, message.message_id)
 
     // Initialize session if needed
     let session = this.sessions.get(chatId)
     if (!session?.initialized) {
+      const sessionKey = this.getSessionKey(chatId)
       await this.initSession(chatId, sessionKey)
       session = this.sessions.get(chatId)!
     }
@@ -475,6 +487,13 @@ export class TelegramConnector {
     return true
   }
 
+  /**
+   * Get the session key for a chat, falling back to the deterministic default.
+   */
+  private getSessionKey(chatId: number): string {
+    return this.sessions.get(chatId)?.sessionKey ?? `telegram:${chatId}`
+  }
+
   private async initSession(chatId: number, sessionKey: string): Promise<void> {
     this.client.subscribeSession(sessionKey)
 
@@ -491,7 +510,7 @@ export class TelegramConnector {
       await this.client.setDangerousMode(true)
     }
 
-    this.sessions.set(chatId, { initialized: true })
+    this.sessions.set(chatId, { initialized: true, sessionKey })
   }
 
   // ===========================================================================

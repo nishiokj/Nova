@@ -544,14 +544,57 @@ export interface WatcherAction {
   reason: string;
   answer?: { text: string; contextAddendum?: string };
   realign?: { systemMessage: string; newGoal?: string };
-  workItems?: Array<{
-    goal: string;
-    objective: string;
-    agent: string;
-    dependencies?: string[];
-    targetPaths?: string[];
-  }>;
+  workItems?: WatcherWorkItem[];
   qualityGate?: { passed: boolean; issues?: string[] };
+}
+
+// ============================================
+// WORK LOG TYPES
+// ============================================
+
+/**
+ * Entry types for the session work log.
+ */
+export type WorkLogEntryType =
+  | 'files_modified'      // Auto-logged via hook
+  | 'agent_completed'     // Auto-logged via hook + agent summary
+  | 'watcher_note'        // Watcher annotation (cadence audit, quality gate notes)
+  | 'session_start';      // Session initialization
+
+/**
+ * A single entry in the session work log.
+ * JSONL format at .watcher/<sessionId>/work-log.jsonl
+ */
+export interface WorkLogEntry {
+  timestamp: string;
+  type: WorkLogEntryType;
+  workId?: string;
+  agentType?: string;
+  paths?: string[];               // files written/edited
+  agentSummary?: string;          // agent's own response (reused, not regenerated)
+  watcherNote?: string;           // watcher's semantic annotation
+  metrics?: {
+    toolCallsMade: number;
+    llmCallsMade: number;
+    durationMs: number;
+    contextPercentUsed: number;
+  };
+}
+
+// ============================================
+// WATCHER WORK ITEM (with bounds)
+// ============================================
+
+/**
+ * A work item created by the watcher with optional budget bounds.
+ */
+export interface WatcherWorkItem {
+  goal: string;
+  objective: string;
+  agent: string;
+  dependencies?: string[];
+  targetPaths?: string[];
+  bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
 }
 
 /**
@@ -566,4 +609,12 @@ export interface DecisionLogEntry {
   answer?: string;
   rationale: string;
   workItemId?: string;
+  qualityGate?: { passed: boolean; issues?: string[] };
+  /** Execution metrics snapshot for audit trail */
+  executionMetrics?: {
+    toolCallsMade: number;
+    filesModified: string[];
+    durationMs: number;
+    contextPercentUsed: number;
+  };
 }

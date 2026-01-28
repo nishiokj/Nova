@@ -8,8 +8,10 @@
 import type { StopHookResult, StopHookContext } from 'agent';
 import type { WatcherAction } from './types.js';
 import type { DecisionLog } from './decision-log.js';
+import type { WorkLog } from './work-log.js';
 import { writeSalienceFile, salienceFilePath } from './salience.js';
 import { createDecisionLog } from './decision-log.js';
+import { createWorkLog } from './work-log.js';
 import { createWatcherStopHook } from './watcher-agent.js';
 
 // ============================================
@@ -31,7 +33,9 @@ export interface AsyncSessionConfig {
 export interface AsyncSessionResult {
   salienceFilePath: string;
   decisionLogPath: string;
+  workLogPath: string;
   decisionLog: DecisionLog;
+  workLog: WorkLog;
   stopHook: (ctx: StopHookContext) => Promise<StopHookResult>;
   planningObjective: string;
 }
@@ -64,23 +68,36 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
   // 2. Create decision log
   const decisionLog = await createDecisionLog(config.workingDir, config.sessionId);
 
-  // 3. Create watcher stopHook
+  // 3. Create work log
+  const workLog = await createWorkLog(config.workingDir, config.sessionId);
+
+  // Write session_start entry
+  await workLog.append({
+    timestamp: new Date().toISOString(),
+    type: 'session_start',
+    watcherNote: `Session started with goal: ${config.goal.slice(0, 200)}`,
+  }).catch(() => {});
+
+  // 4. Create watcher stopHook
   const stopHook = createWatcherStopHook({
     sessionId: config.sessionId,
     salienceFilePath: salience,
     decisionLog,
+    workLog,
     workingDir: config.workingDir,
     runAgent: config.runAgent,
     onCreateWorkItems: config.onCreateWorkItems,
   });
 
-  // 4. Build planning objective
-  const planningObjective = buildPlanningObjective(config.goal, salience, decisionLog.filePath());
+  // 5. Build planning objective
+  const planningObjective = buildPlanningObjective(config.goal, salience, decisionLog.filePath(), workLog.filePath());
 
   return {
     salienceFilePath: salience,
     decisionLogPath: decisionLog.filePath(),
+    workLogPath: workLog.filePath(),
     decisionLog,
+    workLog,
     stopHook,
     planningObjective,
   };
@@ -96,13 +113,14 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
  * The planning agent is a standard agent that:
  * - Reads the salience file for context
  * - Explores the codebase as needed
+ * - Asks clarifying questions (answered by watcher or escalated to user)
  * - Produces a structured handoff spec via PromptUser or handoffSpec
- * - Uses PromptUser for clarifying questions (answered by watcher via stopHook)
  */
 function buildPlanningObjective(
   goal: string,
   saliencePath: string,
-  decisionLogPath: string
+  decisionLogPath: string,
+  workLogPath: string
 ): string {
   return `## Async Planning Session
 
@@ -113,17 +131,23 @@ You are planning the execution of the following goal:
 ### Context Files
 - Salience file: ${saliencePath} — contains the session goal and operating principles
 - Decision log: ${decisionLogPath} — records decisions made during this session
+- Work log: ${workLogPath} — session memory of all agent activity
 
-### Your Task
+### Phase 1: Understanding (REQUIRED)
+Before producing a plan, you MUST ask clarifying questions:
+1. Read the salience file for goal and principles.
+2. Explore the codebase — use Glob, Grep, Read.
+3. Ask 2-5 clarifying questions via PromptUser to resolve ambiguity.
+   - The watcher answers questions using best judgment when context meaningfully informs the decision.
+   - Questions the watcher cannot answer are escalated to the user.
+   - Focus on: scope boundaries, design trade-offs, ordering constraints.
+DO NOT skip Phase 1.
 
-1. **Read the salience file** to understand the goal and principles.
-2. **Explore the codebase** to understand the current state — use Glob, Grep, Read, and Bash as needed.
-3. **Ask clarifying questions** via PromptUser if you need to resolve ambiguity. The watcher will attempt to answer autonomously; if it can't, the user will be prompted.
-4. **Produce a plan** as a structured handoff spec when ready.
+### Phase 2: Produce Plan
+When questions are answered:
+1. **Produce a plan** as a structured handoff spec (set goalStateReached=true and include handoffSpec).
 
 ### Handoff Spec Format
-
-When your plan is ready, output it as a handoff spec (set goalStateReached=true and include handoffSpec):
 
 The handoffSpec should be a JSON string with this structure:
 \`\`\`json
@@ -141,6 +165,12 @@ The handoffSpec should be a JSON string with this structure:
   ]
 }
 \`\`\`
+
+### Parallelization
+- The orchestrator runs independent work items concurrently via Promise.all.
+- Design work items to maximize parallelism — prefer independent items over serial chains.
+- Only use dependencies when there's a genuine ordering constraint.
+- Set generous bounds on work items (e.g., maxToolCalls: 200, maxLlmCalls: 30).
 
 ### Principles
 - Each work item = one atomic unit of work = one git commit

@@ -68,10 +68,12 @@ import {
   createWatcherStopHook,
   writeSalienceFile,
   createDecisionLog,
+  createWorkLog,
   type DecisionDatabase,
   type DecisionMemory,
   type WatcherAction,
   type DecisionLog,
+  type WorkLog,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
 import { registerHook } from 'orchestrator';
@@ -319,6 +321,7 @@ export class AgentHarness {
   private orchestratorRunner: OrchestratorRunner;
   private decisionDatabases = new Map<string, DecisionDatabase>();
   private watcherEngines = new Map<string, DecisionEngine>();
+  private sessionWorkLogs = new Map<string, WorkLog>();
   private entityGraph: EntityGraph | null = null;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
@@ -574,6 +577,7 @@ export class AgentHarness {
     }
     this.decisionDatabases.delete(sessionKey);
     this.watcherEngines.delete(sessionKey);
+    this.sessionWorkLogs.delete(sessionKey);
   }
 
   /**
@@ -1376,17 +1380,24 @@ export class AgentHarness {
       },
 
       postToolUse: async (toolName: string, args: Record<string, unknown>, toolResult: ToolResult): Promise<ToolHookResult> => {
-        // Entity graph: release lease + re-parse modified file
+        // Entity graph: release lease, compute blast radius, re-parse modified file
+        let egModified = false;
         if (egHooks) {
           try {
-            await egHooks.postToolUse(sessionKey, toolName, args);
+            const egResult = await egHooks.postToolUse(sessionKey, toolName, args);
+            if (egResult.context) {
+              toolResult = { ...toolResult, output: toolResult.output + '\n\n' + egResult.context };
+              egModified = true;
+            }
           } catch (err) {
             logger.warning('Entity graph postToolUse failed', { error: String(err) });
           }
         }
 
         if (!executor) {
-          return { action: 'allow' };
+          return egModified
+            ? { action: 'modify', modifiedResult: toolResult }
+            : { action: 'allow' };
         }
 
         const context: HookContext = {
@@ -1399,11 +1410,16 @@ export class AgentHarness {
           workingDir,
         };
         const result = await executor.execute('PostToolUse', context);
-        return {
-          action: result.action,
-          message: result.message,
-          modifiedResult: result.modified as ToolResult | undefined,
-        };
+
+        // If executor modified the result, use its version.
+        // Otherwise, propagate entity-graph context if present.
+        if (result.action === 'modify' && result.modified) {
+          return { action: 'modify', message: result.message, modifiedResult: result.modified as unknown as ToolResult };
+        }
+        if (egModified) {
+          return { action: 'modify', modifiedResult: toolResult };
+        }
+        return { action: result.action, message: result.message };
       },
     };
   }
@@ -1807,11 +1823,46 @@ export class AgentHarness {
     });
 
     const decisionLog = await createDecisionLog(workingDir, sessionKey);
+    const workLog = await createWorkLog(workingDir, sessionKey);
+    this.sessionWorkLogs.set(sessionKey, workLog);
+
+    // Write session_start entry
+    await workLog.append({
+      timestamp: new Date().toISOString(),
+      type: 'session_start',
+      watcherNote: `Session started with goal: ${goal.slice(0, 200)}`,
+    }).catch(() => {});
+
+    // Register auto-logging hooks for files_modified and agent_completed
+    registerHook('files_modified', async (event: { type: string; paths?: string[] }, ctx: { workId: string; agentType: string }) => {
+      if (event.type === 'files_modified' && event.paths) {
+        await workLog.append({
+          timestamp: new Date().toISOString(),
+          type: 'files_modified',
+          workId: ctx.workId,
+          agentType: ctx.agentType,
+          paths: event.paths,
+        }).catch(() => {});
+      }
+    });
+
+    registerHook('agent_completed', async (event: { type: string; workId?: string; invalidatedPaths?: string[] }, ctx: { workId: string; agentType: string }) => {
+      if (event.type === 'agent_completed') {
+        await workLog.append({
+          timestamp: new Date().toISOString(),
+          type: 'agent_completed',
+          workId: ctx.workId ?? event.workId,
+          agentType: ctx.agentType,
+          paths: event.invalidatedPaths,
+        }).catch(() => {});
+      }
+    });
 
     return createWatcherStopHook({
       sessionId: sessionKey,
       salienceFilePath: saliencePath,
       decisionLog,
+      workLog,
       workingDir,
       runAgent: (objective: string) => this.runWatcherAgent(objective, sessionKey),
       onDecision: (entry) => {
@@ -1822,6 +1873,14 @@ export class AgentHarness {
           rationale: entry.rationale,
           answer: entry.answer,
         });
+        this.eventBus.publish(createEvent('watcher_decision', {
+          trigger: entry.trigger,
+          watcherAction: entry.watcherAction,
+          question: entry.question,
+          answer: entry.answer,
+          rationale: entry.rationale,
+          qualityGate: entry.qualityGate,
+        }, entry.workItemId, '', sessionKey));
       },
     });
   }

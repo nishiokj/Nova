@@ -43,6 +43,13 @@ export type {
   WatcherActionType,
   WatcherAction,
   DecisionLogEntry,
+
+  // Work Log Types
+  WorkLogEntryType,
+  WorkLogEntry,
+
+  // Watcher Work Item (with bounds)
+  WatcherWorkItem,
 } from './types.js';
 
 export {
@@ -113,6 +120,11 @@ export {
   createDecisionLog,
 } from './decision-log.js';
 export type { DecisionLog } from './decision-log.js';
+
+export {
+  createWorkLog,
+} from './work-log.js';
+export type { WorkLog } from './work-log.js';
 
 // ============================================
 // WATCHER AGENT (LLM-backed StopHook)

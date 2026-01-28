@@ -362,6 +362,22 @@ export class HarnessClient extends EventEmitter {
     return this.sendAuthCommand('async_start', data);
   }
 
+  async asyncCancel(): Promise<{ success: boolean; error?: string }> {
+    return this.sendAuthCommand('async_cancel', {});
+  }
+
+  async asyncStatus(): Promise<{
+    success: boolean;
+    running?: boolean;
+    requestId?: string;
+    goal?: string;
+    startedAt?: number;
+    elapsedMs?: number;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('async_status', {});
+  }
+
   // =========================================================================
   // Watcher Commands
   // =========================================================================

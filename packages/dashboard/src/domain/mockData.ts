@@ -2,8 +2,8 @@ import { computeSessionInsights, type AgentRequest, type Session } from './model
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 
-function sess(partial: Omit<Session, 'insights'>): Session {
-  return { ...partial, insights: computeSessionInsights(partial) };
+function sess(partial: Omit<Session, 'insights' | 'watcherDecisions'> & { watcherDecisions?: Session['watcherDecisions'] }): Session {
+  return { ...partial, watcherDecisions: partial.watcherDecisions ?? [], insights: computeSessionInsights({ ...partial, watcherDecisions: partial.watcherDecisions ?? [] }) };
 }
 
 // ============================================

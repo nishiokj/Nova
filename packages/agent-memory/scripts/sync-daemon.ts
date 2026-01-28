@@ -29,6 +29,7 @@ import postgres from 'postgres'
 import ngrok from 'ngrok'
 import { SyncDaemon } from '../src/daemon/index.js'
 import { TelegramConnector } from '../src/connectors/telegram/index.js'
+import { notifyAllUsers } from '../src/connectors/telegram/notify.js'
 
 // Load .env from project root
 await loadEnvFile(join(import.meta.dir, '../../../.env'))
@@ -61,6 +62,37 @@ async function loadEnvFile(path: string): Promise<void> {
   } catch {
     // .env file not found, continue with existing env
   }
+}
+
+// ── Module-scope Telegram config for crash notifications ─────────────────────
+// Parsed early so global error handlers can send notifications even if main()
+// hasn't finished (or has thrown). For private chats, user_id === chat_id.
+const telegramBotToken: string | undefined = process.env.TELEGRAM_BOT_TOKEN
+const telegramChatIds: number[] = (process.env.TELEGRAM_ALLOWED_USERS ?? '')
+  .split(',')
+  .map(id => parseInt(id.trim(), 10))
+  .filter(id => !isNaN(id))
+
+let lastCrashNotificationMs = 0
+const CRASH_NOTIFY_COOLDOWN_MS = 30_000
+
+async function notifyCrash(label: string, error: unknown): Promise<void> {
+  if (!telegramBotToken || telegramChatIds.length === 0) return
+
+  const now = Date.now()
+  if (now - lastCrashNotificationMs < CRASH_NOTIFY_COOLDOWN_MS) return
+  lastCrashNotificationMs = now
+
+  const message = error instanceof Error
+    ? `${error.message}\n\n${error.stack ?? ''}`
+    : String(error)
+
+  await notifyAllUsers(
+    telegramBotToken,
+    telegramChatIds,
+    `🚨 *Sync Daemon ${label}*\n\n\`\`\`\n${message}\n\`\`\``,
+    'Markdown',
+  ).catch(() => {}) // swallow — we're already in an error handler
 }
 
 interface DaemonConfig {
@@ -109,7 +141,7 @@ function loadConfig(): DaemonConfig {
     telegramAllowedUsers,
     harnessHost: process.env.HARNESS_HOST ?? '127.0.0.1',
     harnessPort: parseInt(process.env.HARNESS_PORT ?? '9555', 10),
-    workingDir: process.env.WORKING_DIR ?? process.cwd(),
+    workingDir: process.env.WORKING_DIR ?? join(import.meta.dir, '../../../'),
   }
 
   const missing = required.filter(key => !config[key])

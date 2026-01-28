@@ -42,6 +42,8 @@ export type BridgeCommandType =
   | "ralph_loop_start"
   | "ralph_loop_cancel"
   | "async_start"
+  | "async_cancel"
+  | "async_status"
   | "watcher_status"
   | "watcher_context"
   | "watcher_search"

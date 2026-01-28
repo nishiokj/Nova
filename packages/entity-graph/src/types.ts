@@ -113,6 +113,8 @@ export interface EntityGraphHooks {
 export interface EntityGraphHookResult {
   action: 'allow' | 'block'
   message?: string
+  /** Optional context to append to the tool result (e.g., blast radius info) */
+  context?: string
 }
 
 // --- Re-export Sql for consumers ---

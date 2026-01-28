@@ -207,6 +207,40 @@ export async function dependentsOf(
 }
 
 /**
+ * Find exported entities with no inbound references.
+ * These are candidates for dead code — exported but never imported,
+ * called, used, extended, or implemented by anything in the graph.
+ * Excludes 'file' entities (files are structural, not "exports").
+ */
+export async function unusedExports(sql: Sql, filepath?: string): Promise<Entity[]> {
+  const rows = filepath
+    ? await sql<EntityRow[]>`
+        SELECT e.* FROM entity_graph.entities e
+        WHERE e.exported = true
+          AND e.kind != 'file'
+          AND e.filepath = ${filepath}
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.imports WHERE imported_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.calls WHERE callee_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.uses WHERE used_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.extends WHERE parent_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.implements WHERE interface_id = e.id)
+        ORDER BY e.filepath, e.start_line ASC NULLS LAST
+      `
+    : await sql<EntityRow[]>`
+        SELECT e.* FROM entity_graph.entities e
+        WHERE e.exported = true
+          AND e.kind != 'file'
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.imports WHERE imported_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.calls WHERE callee_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.uses WHERE used_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.extends WHERE parent_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM entity_graph.implements WHERE interface_id = e.id)
+        ORDER BY e.filepath, e.start_line ASC NULLS LAST
+      `
+  return rows.map(rowToEntity)
+}
+
+/**
  * Get aggregate stats for the entity graph.
  */
 export async function graphStats(sql: Sql): Promise<GraphStats> {

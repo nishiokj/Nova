@@ -11,6 +11,7 @@
   --green: #4ade80;
   --red: #f87171;
   --yellow: #facc15;
+  --purple: #a78bfa;
   --sidebar-width: 220px;
 }
 
@@ -676,6 +677,7 @@ body {
 .text-green { color: var(--green); }
 .text-red { color: var(--red); }
 .text-yellow { color: var(--yellow); }
+.text-purple { color: var(--purple); }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
@@ -791,6 +793,186 @@ body {
   font-size: 9px;
   color: var(--muted);
   text-transform: uppercase;
+}
+
+/* ================================
+   WATCHER TAB & BADGES
+   ================================ */
+
+.session-card-tabs .tab.has-watcher {
+  color: var(--purple);
+}
+
+.session-card-tabs .tab.has-watcher.active {
+  border-bottom-color: var(--purple);
+}
+
+.watcher-badge {
+  font-size: 8px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: rgba(167, 139, 250, 0.2);
+  color: var(--purple);
+  flex-shrink: 0;
+}
+
+.watcher-list {
+  padding: 2px;
+}
+
+.watcher-item {
+  padding: 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 9px;
+}
+
+.watcher-item:last-child {
+  border-bottom: none;
+}
+
+.watcher-item-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.watcher-item-time {
+  font-size: 8px;
+  color: var(--muted);
+}
+
+/* Trigger badges */
+.trigger-badge {
+  font-size: 8px;
+  padding: 0 3px;
+  border-radius: 2px;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.trigger-session_init { background: rgba(34, 211, 238, 0.2); color: var(--cyan); }
+.trigger-prompt_user { background: rgba(250, 204, 21, 0.2); color: var(--yellow); }
+.trigger-bounds_exceeded,
+.trigger-agent_error { background: rgba(248, 113, 113, 0.2); color: var(--red); }
+.trigger-work_item_completed { background: rgba(74, 222, 128, 0.2); color: var(--green); }
+.trigger-cadence_audit,
+.trigger-scope_collision { background: rgba(167, 139, 250, 0.2); color: var(--purple); }
+
+/* Action badges */
+.action-badge {
+  font-size: 8px;
+  padding: 0 3px;
+  border-radius: 2px;
+  font-weight: 500;
+}
+
+.action-answer { background: rgba(74, 222, 128, 0.2); color: var(--green); }
+.action-realign { background: rgba(250, 204, 21, 0.2); color: var(--yellow); }
+.action-escalate { background: rgba(248, 113, 113, 0.2); color: var(--red); }
+.action-quality_gate { background: rgba(167, 139, 250, 0.2); color: var(--purple); }
+.action-continue,
+.action-split,
+.action-create_work_item { background: rgba(113, 113, 122, 0.2); color: var(--muted); }
+
+/* Watcher text content */
+.watcher-question {
+  color: var(--cyan);
+  font-size: 9px;
+  margin-top: 2px;
+}
+
+.watcher-answer {
+  color: var(--green);
+  font-size: 9px;
+  margin-top: 1px;
+}
+
+.watcher-rationale {
+  color: var(--muted);
+  font-size: 8px;
+  font-style: italic;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.watcher-gate {
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-top: 2px;
+  display: inline-block;
+}
+
+.gate-pass {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--green);
+}
+
+.gate-fail {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--red);
+}
+
+.gate-issues {
+  font-size: 8px;
+  color: var(--red);
+  margin-top: 1px;
+  padding-left: 8px;
+}
+
+/* Summary watcher section */
+.summary-watcher {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+}
+
+.summary-watcher-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.summary-watcher-item:last-child {
+  border-bottom: none;
+}
+
+.summary-watcher-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.summary-watcher-time {
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.summary-watcher-rationale {
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.summary-watcher-qa {
+  margin-top: 4px;
+  font-size: 10px;
+}
+
+.summary-watcher-qa dt {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.summary-watcher-qa dd {
+  margin-left: 0;
+  margin-bottom: 4px;
 }
 
 /* ================================

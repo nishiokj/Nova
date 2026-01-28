@@ -280,6 +280,33 @@ export type InternalHookEvent =
     };
 
 /**
+ * Snapshot of agent execution state, provided to stop hooks for informed decisions.
+ */
+export interface ExecutionSnapshot {
+  toolHistory: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    success: boolean;
+    durationMs: number;
+    outputPreview?: string; // first ~500 chars
+  }>;
+  filesModified: string[];
+  filesRead: string[];
+  metrics: {
+    llmCallsMade: number;
+    toolCallsMade: number;
+    toolCallsSucceeded: number;
+    toolCallsFailed: number;
+    durationMs: number;
+    inputTokens: number;
+    outputTokens: number;
+    contextPercentUsed: number;
+  };
+  artifacts?: Array<{ sourcePath: string; name: string; kind: string; insight?: string }>;
+  fullResponse: string;
+}
+
+/**
  * Result from a stop hook - can block termination and re-inject a prompt.
  */
 export interface StopHookResult {
@@ -289,6 +316,16 @@ export interface StopHookResult {
   reason?: string;
   /** System message to prepend */
   systemMessage?: string;
+  /** Deferred work items for async dispatch (enqueued after stop hook processing) */
+  deferredWork?: Array<{
+    goal: string;
+    objective: string;
+    agent: string;
+    background: boolean;
+    dependencies?: string[];
+    targetPaths?: string[];
+    bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
+  }>;
 }
 
 /**
@@ -309,6 +346,8 @@ export interface StopHookContext {
     multiSelect?: boolean;
     questionType?: string;
   };
+  /** Execution snapshot for enriched stop hook evaluation */
+  executionSnapshot?: ExecutionSnapshot;
 }
 
 /**

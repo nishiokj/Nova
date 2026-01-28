@@ -61,11 +61,13 @@ function loadConfig(metadata: Record<string, unknown> | undefined): BookmarksCon
     }
   }
 
+  const projectRoot = path.join(import.meta.dir, '../../../')
+
   return {
     sessionKey: (metadata?.sessionKey as string) ?? 'x-bookmarks-digest',
     harnessHost: (metadata?.harnessHost as string) ?? '127.0.0.1',
     harnessPort: (metadata?.harnessPort as number) ?? 9555,
-    outputDir: (metadata?.outputDir as string) ?? path.resolve(process.cwd(), 'data/x-bookmarks-digest'),
+    outputDir: (metadata?.outputDir as string) ?? path.resolve(projectRoot, 'data/x-bookmarks-digest'),
     responseTimeoutMs: (metadata?.responseTimeoutMs as number) ?? 10 * 60 * 1000,
     maxBookmarks: (metadata?.maxBookmarks as number) ?? 20,
     authStatePath:'auth-states/x-auth.json',

@@ -88,6 +88,8 @@ interface RalphLoopInfo {
 interface AsyncRunInfo {
   requestId: string;
   goal: string;
+  cancelled: boolean;
+  startedAt: number;
 }
 
 interface ConnectionState {
@@ -301,6 +303,12 @@ export class BridgeGateway {
         // Async session commands
         case 'async_start':
           void this.handleAsyncStart(connectionId, command.data, state);
+          return;
+        case 'async_cancel':
+          this.handleAsyncCancel(connectionId, state);
+          return;
+        case 'async_status':
+          this.handleAsyncStatus(connectionId, state);
           return;
         // Watcher commands
         case 'watcher_status':
@@ -1776,7 +1784,7 @@ export class BridgeGateway {
 
       const requestId = generateRequestId();
       state.activeRequestId = requestId;
-      state.asyncRun = { requestId, goal };
+      state.asyncRun = { requestId, goal, cancelled: false, startedAt: Date.now() };
 
       // Start the harness run with the watcher stopHook and planning objective as input
       const handle = this.harness.run({
@@ -1809,6 +1817,61 @@ export class BridgeGateway {
       state.asyncRun = null;
       this.sendError(connectionId, `Failed to start async session: ${message}`);
     }
+  }
+
+  private handleAsyncCancel(connectionId: string, state: ConnectionState): void {
+    if (!state.asyncRun) {
+      this.sendError(connectionId, 'No async session is currently running.');
+      return;
+    }
+
+    const { requestId, goal } = state.asyncRun;
+    const sessionKey = state.sessionKey;
+
+    // Mark as cancelled so the watcher stopHook can detect it
+    state.asyncRun.cancelled = true;
+
+    // Clear async state
+    state.asyncRun = null;
+    if (state.activeRequestId === requestId) {
+      state.activeRequestId = null;
+    }
+
+    // Emit cancellation response on the session channel
+    this.sendEvent(connectionId, {
+      type: 'response',
+      data: {
+        success: true,
+        content: '',
+        metadata: {
+          kind: 'async_complete',
+          payload: {
+            reason: 'manual_cancel',
+            requestId,
+            goal,
+          },
+        },
+      },
+    }, sessionKey ? sessionChannel(sessionKey) : 'direct');
+  }
+
+  private handleAsyncStatus(connectionId: string, state: ConnectionState): void {
+    if (!state.asyncRun) {
+      this.sendAuthResponse(connectionId, 'async_status', {
+        success: true,
+        running: false,
+      });
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'async_status', {
+      success: true,
+      running: true,
+      requestId: state.asyncRun.requestId,
+      goal: state.asyncRun.goal,
+      startedAt: state.asyncRun.startedAt,
+      elapsedMs: Date.now() - state.asyncRun.startedAt,
+    });
   }
 
   // =========================================================================

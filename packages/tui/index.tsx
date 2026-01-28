@@ -1274,6 +1274,41 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
       return;
     }
+    if (kind === "async_cancel") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      const cancelGoal = (payload?.goal as string) ?? "";
+      store.addMessage("system", `Async session cancelled.${cancelGoal ? `\nGoal was: ${cancelGoal}` : ""}`);
+      return;
+    }
+    if (kind === "async_status") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.running) {
+        const elapsed = typeof payload.elapsedMs === "number" ? Math.round(payload.elapsedMs / 1000) : null;
+        store.addMessage(
+          "system",
+          `Async session running\n` +
+          `  Goal: ${payload.goal ?? "unknown"}\n` +
+          `  Request: ${payload.requestId ?? "unknown"}` +
+          (elapsed !== null ? `\n  Elapsed: ${elapsed}s` : "")
+        );
+      } else {
+        store.addMessage("system", "No async session is currently running.");
+      }
+      return;
+    }
+    if (kind === "async_complete") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      const reason = (payload?.reason as string) ?? "unknown";
+      const asyncGoal = (payload?.goal as string) ?? "";
+      const reasonMessages: Record<string, string> = {
+        manual_cancel: `Async session cancelled.${asyncGoal ? ` Goal was: ${asyncGoal}` : ""}`,
+        goal_reached: `Async session completed - goal reached.`,
+        error: `Async session failed.`,
+        timeout: `Async session timed out.`,
+      };
+      store.addMessage("system", reasonMessages[reason] ?? `Async session ended: ${reason}`);
+      return;
+    }
 
     if (kind === "ralph_loop_complete") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
@@ -2846,13 +2881,29 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
       case "/async": {
-        if (!arg?.trim()) {
+        const asyncArg = arg?.trim() ?? "";
+
+        if (asyncArg === "cancel") {
+          store.addMessage("system", "Cancelling async session...");
+          sendCommand("async_cancel", {});
+          return;
+        }
+
+        if (asyncArg === "status") {
+          sendCommand("async_status", {});
+          return;
+        }
+
+        if (!asyncArg) {
           store.addMessage(
             "system",
             "Usage: /async <goal>\n\n" +
             "Starts an async session with watcher oversight.\n" +
             "The watcher agent autonomously answers questions,\n" +
             "quality-gates completed work, and realigns drifting agents.\n\n" +
+            "Subcommands:\n" +
+            "  /async cancel   Cancel running async session\n" +
+            "  /async status   Check async session status\n\n" +
             "Examples:\n" +
             "  /async implement user authentication\n" +
             "  /async refactor the payment module to use Stripe"
@@ -2860,7 +2911,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           return;
         }
 
-        const goal = arg.trim();
+        const goal = asyncArg;
         store.batch(() => {
           store.addMessage("system", `Starting async session...\nGoal: ${goal}`);
           store.setState("sending");

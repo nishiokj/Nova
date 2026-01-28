@@ -60,11 +60,13 @@ function loadConfig(metadata: Record<string, unknown> | undefined): DigestConfig
     }
   }
 
+  const projectRoot = path.join(import.meta.dir, '../../../')
+
   return {
     sessionKey: (metadata?.sessionKey as string) ?? 'daily-digest',
     harnessHost: (metadata?.harnessHost as string) ?? '127.0.0.1',
     harnessPort: (metadata?.harnessPort as number) ?? 9555,
-    outputDir: (metadata?.outputDir as string) ?? path.resolve(process.cwd(), 'data/daily-digest'),
+    outputDir: (metadata?.outputDir as string) ?? path.resolve(projectRoot, 'data/daily-digest'),
     responseTimeoutMs: (metadata?.responseTimeoutMs as number) ?? 5 * 60 * 1000,
     maxConversations: (metadata?.maxConversations as number) ?? 25,
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? null,

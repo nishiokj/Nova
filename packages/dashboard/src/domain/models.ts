@@ -210,6 +210,17 @@ export type SessionInsights = {
   totalOutputTokens: number;
 };
 
+export interface WatcherDecision {
+  timestamp: ISODateTime;
+  trigger: string;
+  action: string;
+  question?: string;
+  answer?: string;
+  rationale: string;
+  workItemId?: string;
+  qualityGate?: { passed: boolean; issues?: string[] };
+}
+
 export type Session = {
   id: string;
   userId: string;
@@ -221,6 +232,7 @@ export type Session = {
   tags: string[];
   meta: KV;
   requests: AgentRequest[];
+  watcherDecisions: WatcherDecision[];
   insights: SessionInsights;
 };
 
