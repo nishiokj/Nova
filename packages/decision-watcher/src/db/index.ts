@@ -157,16 +157,26 @@ export class InMemoryDecisionDatabase implements DecisionDatabase {
 /**
  * File-based implementation of DecisionDatabase.
  * Persists decisions to a JSON file.
- *
- * @TODO Implement this for production use
  */
 export class FileDecisionDatabase implements DecisionDatabase {
   private db: InMemoryDecisionDatabase;
   private filepath: string;
+  private loaded: boolean = false;
 
-  constructor(filepath: string) {
+  constructor(filepath: string, autoLoad: boolean = true) {
     this.filepath = filepath;
     this.db = new InMemoryDecisionDatabase();
+
+    // Auto-load on construction if requested
+    if (autoLoad) {
+      // Load asynchronously but don't await - allows DB to be used immediately
+      void this.load().catch(err => {
+        // If file doesn't exist yet, that's fine - it will be created on first save
+        if (!err.message.includes('ENOENT')) {
+          console.error(`[FileDecisionDatabase] Failed to load from ${filepath}:`, err);
+        }
+      });
+    }
   }
 
   async search(
@@ -190,26 +200,79 @@ export class FileDecisionDatabase implements DecisionDatabase {
 
   async upsert(entry: DecisionEntry): Promise<void> {
     await this.db.upsert(entry);
-    // TODO: Persist to file
+    await this.save();
   }
 
   async delete(id: string): Promise<void> {
     await this.db.delete(id);
-    // TODO: Persist to file
+    await this.save();
   }
 
   /**
    * Load entries from file.
+   * Populates the in-memory database with entries from the JSON file.
+   * If the file doesn't exist, clears the database (starts fresh).
    */
   async load(): Promise<void> {
-    // TODO: Implement file loading
+    try {
+      const fs = await import('fs/promises');
+      const data = await fs.readFile(this.filepath, 'utf-8');
+
+      // Parse JSON and populate database
+      const entries = JSON.parse(data) as DecisionEntry[];
+
+      // Clear existing entries and reload
+      await this.db.clear();
+
+      // Upsert all entries
+      await this.db.upsertMany(entries);
+
+      this.loaded = true;
+    } catch (err) {
+      // If file doesn't exist, that's okay - start with empty database
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+        this.db.clear();
+        this.loaded = true;
+        return;
+      }
+
+      // Re-throw other errors
+      throw err;
+    }
   }
 
   /**
    * Save entries to file.
+   * Serializes all entries from the in-memory database to JSON.
    */
   async save(): Promise<void> {
-    // TODO: Implement file saving
+    try {
+      const fs = await import('fs/promises');
+
+      // Get all entries from in-memory database
+      const entries = await this.db.getAll();
+
+      // Ensure directory exists
+      await fs.mkdir(this.filepath.split('/').slice(0, -1).join('/'), { recursive: true });
+
+      // Write to file with atomic write pattern (write to temp, then rename)
+      const tempPath = `${this.filepath}.tmp`;
+      await fs.writeFile(tempPath, JSON.stringify(entries, null, 2), 'utf-8');
+      await fs.rename(tempPath, this.filepath);
+
+      this.loaded = true;
+    } catch (err) {
+      console.error(`[FileDecisionDatabase] Failed to save to ${this.filepath}:`, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Clear all entries.
+   */
+  async clear(): Promise<void> {
+    await this.db.clear();
+    await this.save();
   }
 }
 
