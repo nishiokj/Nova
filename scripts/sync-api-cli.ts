@@ -31,6 +31,7 @@ import {
   type CodingPreference,
   type CodingDecision,
 } from '../packages/agent-memory/src/client/index.js'
+import { sendTelegramMessage, notifyAllUsers } from '../packages/agent-memory/src/connectors/telegram/notify.js'
 
 const SYNC_DAEMON_URL = process.env.SYNC_DAEMON_URL || 'http://localhost:3001'
 const CALLBACK_PORT = parseInt(process.env.OAUTH_CALLBACK_PORT || '9876', 10)
@@ -2007,6 +2008,12 @@ function printHelp(): void {
 
     \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
 
+  \x1b[1mtelegram\x1b[0m                          Telegram Bot API
+    send <message>                 Send a message via Bot API (no daemon needed)
+      --chat <chatId>              Target a specific chat (default: all allowed users)
+
+    \x1b[90mRequires: TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS env vars\x1b[0m
+
 \x1b[4mWorkflow:\x1b[0m
 
   \x1b[90m# 1. Discover available connectors\x1b[0m
@@ -2074,6 +2081,7 @@ async function main(): Promise<void> {
       limit: { type: 'string' },
       offset: { type: 'string' },
       lines: { type: 'string' },
+      chat: { type: 'string' },
     },
     allowPositionals: true,
   })

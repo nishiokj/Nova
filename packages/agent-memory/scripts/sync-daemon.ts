@@ -331,10 +331,12 @@ async function main() {
 // Global error handlers to prevent crashes
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught exception (continuing):', error)
+  void notifyCrash('Uncaught Exception', error)
 })
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   console.error('❌ Unhandled rejection (continuing):', reason)
+  void notifyCrash('Unhandled Rejection', reason)
 })
 
 // Start with restart capability
@@ -349,6 +351,7 @@ async function startWithRetry(maxRetries = 3) {
     } catch (error) {
       retries++
       console.error(`❌ Fatal error (attempt ${retries}/${maxRetries}):`, error)
+      void notifyCrash(`Fatal Error (${retries}/${maxRetries})`, error)
 
       if (retries < maxRetries) {
         const delay = Math.min(5000 * retries, 30000)
