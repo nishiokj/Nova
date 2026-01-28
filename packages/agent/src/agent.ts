@@ -48,6 +48,12 @@ import { TOOL_LIMITS, getMaxOutputLength, isRefusal } from './constants.js';
  */
 const LLM_STREAM_TIMEOUT_MS = 240_000;
 
+/**
+ * Cadence check interval: every N LLM iterations, invoke the watcher hook.
+ * For a 50-iteration budget this gives 5 check-ins; for 20 iterations, 2.
+ */
+const CADENCE_CHECK_INTERVAL = 10;
+
 // Re-export circuit breaker functions for backwards compatibility
 export { resetProviderCircuit, getCircuitStatus };
 
@@ -755,6 +761,24 @@ export class Agent {
       if (this.hooks?.shouldStop?.()) {
         result.terminationReason = 'user_stopped';
         break;
+      }
+
+      // Cadence check: watcher intervention point (every N LLM calls)
+      if (this.hooks?.cadenceCheck && iteration > 0 && iteration % CADENCE_CHECK_INTERVAL === 0) {
+        const cadenceResult = await this.hooks.cadenceCheck({
+          llmCallsMade: metrics.llmCallsMade,
+          toolCallsMade: metrics.toolCallsMade,
+          durationMs: Date.now() - startTime,
+        });
+        if (cadenceResult.action === 'inject' && cadenceResult.systemMessage) {
+          localContext.addMessage('system', cadenceResult.systemMessage);
+        } else if (cadenceResult.action === 'stop') {
+          if (cadenceResult.systemMessage) {
+            localContext.addMessage('system', cadenceResult.systemMessage);
+          }
+          result.terminationReason = 'watcher_stopped';
+          break;
+        }
       }
 
       // 1. Pre-checks: bounds and context management

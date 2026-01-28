@@ -203,8 +203,7 @@ export type WatcherAnswerSource =
   | 'database-match'      // Direct match found in decision database
   | 'synthesized'         // Synthesized from multiple decisions/preferences
   | 'inferred'            // Inferred from existing decisions using LLM
-  | 'uncertain'           // Too uncertain, should ask user
-  | 'escalate';           // Critical decision that requires user input
+  | 'uncertain';          // Too uncertain, use fallback answer
 
 /**
  * The confidence level in the watcher's answer.
@@ -373,14 +372,6 @@ export interface DecisionWatcherConfig {
   /** Minimum confidence threshold to auto-answer */
   minConfidenceThreshold: number; // 0-1
 
-  /** When enabled, always escalate critical questions to user */
-  escalateCritical: boolean;
-
-  /**
-   * When enabled, escalate if answer has warnings.
-   */
-  escalateWithWarnings: boolean;
-
   /**
    * Maximum number of decisions to consult per question.
    */
@@ -473,11 +464,6 @@ export interface WatcherIntegrationConfig {
   onAnswer?: (question: UserPromptInfo, answer: PromptUserAnswer, response: WatcherResponse) => void;
 
   /**
-   * Optional callback when watcher escalates to user.
-   */
-  onEscalate?: (question: UserPromptInfo, response: WatcherResponse) => void;
-
-  /**
    * Optional callback when watcher detects inconsistency.
    */
   onInconsistency?: (message: string) => void;
@@ -498,7 +484,6 @@ export interface PromptUserHookEvent {
  */
 export type PromptUserHookResult =
   | { action: 'answer'; answer: PromptUserAnswer }
-  | { action: 'escalate'; response: WatcherResponse }
   | { action: 'block'; reason: string };
 
 // ============================================
@@ -528,7 +513,6 @@ export type WatcherActionType =
   | 'split'
   | 'create_work_item'
   | 'quality_gate'
-  | 'escalate'
   | 'continue';
 
 /**

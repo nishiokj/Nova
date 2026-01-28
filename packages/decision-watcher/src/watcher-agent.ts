@@ -19,19 +19,38 @@ import type { WorkLog } from './work-log.js';
 // CONFIG
 // ============================================
 
+/** Default timeout increased to 90s - watcher needs time to read files + reason */
+const DEFAULT_TIMEOUT_MS = 90_000;
+
+/** Per-trigger timeout configuration - critical paths get more time */
+const TIMEOUT_BY_TRIGGER: Record<WatcherTrigger, number> = {
+  session_init: 60_000,        // Session bootstrap
+  prompt_user: 120_000,        // Most critical - must answer user questions
+  work_item_completed: 90_000, // Quality gate evaluation
+  bounds_exceeded: 75_000,     // May need to realign or split work
+  cadence_audit: 60_000,       // Periodic check - can be faster
+  agent_error: 75_000,         // Error diagnosis needs context
+  scope_collision: 60_000,     // Concurrency conflict resolution
+};
+
+/** Max retries before giving up */
+const MAX_RETRIES = 2;
+
 export interface WatcherAgentConfig {
   sessionId: string;
   salienceFilePath: string;
   decisionLog: DecisionLog;
   workLog: WorkLog;
   workingDir: string;
+  /** Skill file paths that provide context for decision making */
+  skillPaths?: string[];
   /** Runs the watcher agent with a trigger-specific objective and returns structured output. */
   runAgent: (objective: string) => Promise<WatcherAction>;
   /** Called when the watcher produces split/create_work_item actions. */
   onCreateWorkItems?: (items: WatcherAction['workItems']) => void;
   /** Called after every watcher decision for observability/debugging. */
   onDecision?: (entry: DecisionLogEntry) => void;
-  /** Timeout for watcher agent execution (default: 30000ms) */
+  /** Base timeout for watcher agent execution (default: 90000ms). Per-trigger timeouts take precedence. */
   watcherTimeoutMs?: number;
 }
 
@@ -247,25 +266,42 @@ async function handlePromptUser(
 
   const snapshotContext = formatSnapshotForTrigger('prompt_user', ctx);
 
+  // Build skill files section if any are provided
+  const skillFilesSection = config.skillPaths?.length
+    ? `\n**IMPORTANT: Read these skill files for context:**\n${config.skillPaths.map(p => `- ${p}`).join('\n')}\n`
+    : '';
+
   const objective = `You are the watcher for session ${config.sessionId}.
 Read the salience file at: ${config.salienceFilePath}
 Read the decision log at: ${config.decisionLog.filePath()}
 Read the work log at: ${config.workLog.filePath()} — this is your session memory of all agent activity.
-
+${skillFilesSection}
 The agent has paused to ask the user a question:
 
 **Question**: ${questionText}${optionsText}
 **Context**: ${prompt?.context ?? 'none'}
 ${snapshotContext}
 
+**CRITICAL: You are operating in async mode. There is NO user available to answer questions. You MUST answer.**
+
 Your job:
 1. Read the salience file for the session goal and operating principles.
 2. Read the decision log for prior decisions in this session.
 3. Read the work log for session activity context.
-4. Determine if you can answer this question based on the goal, principles, and prior decisions.
-5. Use your best judgment when context meaningfully informs the decision. Don't escalate questions you can reasonably answer from the salience file, decision log, work log, or common engineering sense.
-6. If yes: return action "answer" with text and optional contextAddendum.
-7. If no: return action "escalate" with reason explaining why the user must decide.`;
+4. **Read any skill files listed above** — they contain critical context about tools, workflows, and preferences.
+5. ANSWER the question using the available context. You have no choice — there is no user to defer to.
+
+Guidelines for answering:
+- Use the salience file as your primary source of truth for project goals and preferences.
+- **Use skill files to understand available tools, workflows, and user preferences.**
+- For technical decisions: follow common engineering practices and conventions from the codebase.
+- For ambiguous requirements: make a reasonable choice that aligns with the session goal.
+- For options-based questions: pick the most sensible option given the context.
+- If truly uncertain: pick the first/default option and explain your reasoning.
+
+Return action "answer" with:
+- text: Your answer to the question
+- contextAddendum (optional): Additional context for the agent about why you chose this answer`;
 
   const action = await runAndLog(config, 'prompt_user', objective, ctx);
 
@@ -279,8 +315,17 @@ Your job:
     };
   }
 
-  // escalate / continue — let the orchestrator pause for user input
-  return { decision: 'allow' };
+  // Watcher failed to provide an answer (timeout, error, wrong action, etc.)
+  // Provide a default answer to keep async session moving.
+  const defaultAnswer = prompt?.options?.[0]
+    ? (typeof prompt.options[0] === 'string' ? prompt.options[0] : (prompt.options[0] as { label?: string }).label ?? 'Continue')
+    : 'Continue with your best judgment.';
+
+  return {
+    decision: 'block',
+    reason: defaultAnswer,
+    systemMessage: `[Watcher auto-answer (fallback)]: Watcher did not provide answer (action: ${action.watcherAction}). Using default: ${defaultAnswer}`,
+  };
 }
 
 async function handleBoundsExceeded(
@@ -321,8 +366,8 @@ Set generous bounds (maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000).
   if ((action.watcherAction === 'split' || action.watcherAction === 'create_work_item') && action.workItems?.length) {
     try {
       config.onCreateWorkItems?.(action.workItems);
-    } catch {
-      // Callback failure is non-fatal — don't break the stop hook promise chain
+    } catch (err) {
+      console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
     }
     // Map work items to deferredWork for orchestrator dispatch
     return {
@@ -336,6 +381,16 @@ Set generous bounds (maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000).
         targetPaths: w.targetPaths,
         bounds: w.bounds,
       })),
+    };
+  }
+
+  // Watcher failed (timeout/error) on bounds_exceeded — provide a realignment
+  // nudge so the agent can wrap up instead of silently terminating.
+  if (action.reason?.includes('Watcher agent error') || action.reason?.includes('Watcher timeout')) {
+    return {
+      decision: 'block',
+      reason: 'Wrap up your current work and report progress.',
+      systemMessage: `[Watcher fallback — bounds exceeded]: Agent hit ${ctx.terminationReason}. Wrap up and summarize what was accomplished.`,
     };
   }
 
@@ -359,7 +414,7 @@ ${snapshotContext}
 Your job:
 1. Diagnose whether this is recoverable (check tool history for what failed and why).
 2. If recoverable: return action "realign" with a systemMessage containing fix instructions.
-3. If not recoverable: return action "escalate" with reason.`;
+3. If not recoverable: return action "continue" to allow termination.`;
 
   const action = await runAndLog(config, 'agent_error', objective, ctx);
 
@@ -394,7 +449,9 @@ async function handleGoalReached(
       durationMs: snap.metrics.durationMs,
       contextPercentUsed: snap.metrics.contextPercentUsed,
     } : undefined,
-  }).catch(() => {});
+  }).catch(err => {
+    console.warn('[WATCHER] Work log write failed (agent_completed):', err instanceof Error ? err.message : String(err));
+  });
 
   const snapshotContext = formatSnapshotForTrigger('work_item_completed', ctx);
 
@@ -433,8 +490,8 @@ Set generous bounds (maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000).
   if ((action.watcherAction === 'split' || action.watcherAction === 'create_work_item') && action.workItems?.length) {
     try {
       config.onCreateWorkItems?.(action.workItems);
-    } catch {
-      // Callback failure is non-fatal
+    } catch (err) {
+      console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
     }
     return {
       decision: 'allow',
@@ -482,7 +539,9 @@ Your job — progress check:
     timestamp: new Date().toISOString(),
     type: 'watcher_note',
     watcherNote: `[cadence audit] ${action.watcherAction}: ${action.reason}`,
-  }).catch(() => {});
+  }).catch(err => {
+    console.warn('[WATCHER] Work log write failed (cadence audit):', err instanceof Error ? err.message : String(err));
+  });
 
   if (action.watcherAction === 'realign' && action.realign) {
     return {
@@ -495,8 +554,8 @@ Your job — progress check:
   if ((action.watcherAction === 'split' || action.watcherAction === 'create_work_item') && action.workItems?.length) {
     try {
       config.onCreateWorkItems?.(action.workItems);
-    } catch {
-      // Callback failure is non-fatal
+    } catch (err) {
+      console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
     }
     return {
       decision: 'allow',
@@ -516,12 +575,79 @@ Your job — progress check:
 }
 
 // ============================================
+// FALLBACK BEHAVIOR
+// ============================================
+
+/**
+ * Determine the appropriate fallback action when the watcher fails or times out.
+ * Different triggers have different safety requirements.
+ */
+function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: StopHookContext): WatcherAction {
+  const errorMsg = error.message;
+
+  switch (trigger) {
+    case 'prompt_user':
+      // MUST answer - use first option as fallback
+      return {
+        watcherAction: 'answer',
+        answer: { text: 'Continue' },
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Using default answer`,
+      };
+
+    case 'cadence_audit':
+      // Don't terminate on oversight failure - let agent continue working
+      return {
+        watcherAction: 'continue',
+        reason: `Oversight unavailable (${errorMsg.slice(0, 50)}): Agent continues`,
+      };
+
+    case 'bounds_exceeded':
+      // Graceful degradation - tell agent to wrap up
+      return {
+        watcherAction: 'realign',
+        realign: {
+          systemMessage: `[Watcher unavailable] Resource bounds hit (${ctx.terminationReason}). Wrap up your current work and report what was accomplished.`,
+        },
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Requesting wrap-up`,
+      };
+
+    case 'agent_error':
+      // Can't diagnose - allow termination but log
+      return {
+        watcherAction: 'continue',
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Cannot diagnose error, allowing termination`,
+      };
+
+    case 'work_item_completed':
+      // Can't verify quality - allow termination
+      return {
+        watcherAction: 'continue',
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Quality gate skipped`,
+      };
+
+    case 'session_init':
+    case 'scope_collision':
+      // Non-critical triggers - allow termination
+      return {
+        watcherAction: 'continue',
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)})`,
+      };
+
+    default:
+      return {
+        watcherAction: 'continue',
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)})`,
+      };
+  }
+}
+
+// ============================================
 // HELPERS
 // ============================================
 
 /**
- * Run the watcher agent and append the result to the decision log.
- * Wraps execution with optional timeout and populates execution metrics.
+ * Run the watcher agent with retry logic and append the result to the decision log.
+ * Wraps execution with per-trigger timeout and exponential backoff on failure.
  */
 async function runAndLog(
   config: WatcherAgentConfig,
@@ -529,21 +655,39 @@ async function runAndLog(
   objective: string,
   ctx: StopHookContext
 ): Promise<WatcherAction> {
-  let action: WatcherAction;
-  const timeoutMs = config.watcherTimeoutMs ?? 30_000;
+  const baseTimeout = TIMEOUT_BY_TRIGGER[trigger] ?? config.watcherTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let action: WatcherAction | null = null;
+  let lastError: Error | null = null;
 
-  try {
-    const agentPromise = config.runAgent(objective);
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Watcher timeout after ${timeoutMs}ms`)), timeoutMs)
-    );
-    action = await Promise.race([agentPromise, timeoutPromise]);
-  } catch (err) {
-    // If the watcher agent fails or times out, default to allowing termination
-    action = {
-      watcherAction: 'continue',
-      reason: `Watcher agent error: ${err instanceof Error ? err.message : String(err)}`,
-    };
+  // Retry loop with exponential backoff on timeout
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // Increase timeout on each retry: base * (1, 1.5, 2)
+    const timeout = Math.round(baseTimeout * (1 + attempt * 0.5));
+
+    try {
+      const agentPromise = config.runAgent(objective);
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Watcher timeout after ${timeout}ms`)), timeout)
+      );
+
+      action = await Promise.race([agentPromise, timeoutPromise]);
+      break; // Success - exit retry loop
+
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      if (attempt < MAX_RETRIES) {
+        console.warn(`[WATCHER] Attempt ${attempt + 1}/${MAX_RETRIES + 1} failed for ${trigger}: ${lastError.message}. Retrying...`);
+      } else {
+        console.error(`[WATCHER] All ${MAX_RETRIES + 1} attempts failed for ${trigger}: ${lastError.message}`);
+      }
+    }
+  }
+
+  // If all retries failed, use trigger-specific fallback
+  if (!action) {
+    action = getFallbackAction(trigger, lastError ?? new Error('Unknown error'), ctx);
+    console.warn(`[WATCHER] Using fallback for ${trigger}: ${action.watcherAction} - ${action.reason}`);
   }
 
   // Build execution metrics from snapshot for audit trail
@@ -569,14 +713,14 @@ async function runAndLog(
 
   try {
     await config.decisionLog.append(entry);
-  } catch {
-    // Decision log write failure is non-fatal
+  } catch (err) {
+    console.warn('[WATCHER] Decision log write failed:', err instanceof Error ? err.message : String(err));
   }
 
   try {
     config.onDecision?.(entry);
-  } catch {
-    // Callback failure is non-fatal — don't break the stop hook promise chain
+  } catch (err) {
+    console.warn('[WATCHER] onDecision callback failed:', err instanceof Error ? err.message : String(err));
   }
 
   return action;

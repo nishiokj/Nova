@@ -2,7 +2,7 @@
 import { Client } from 'pg'
 import { parse } from 'pg-connection-string'
 
-const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/jesus'
+const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/agent_memory'
 
 // Parse connection string
 const config = parse(DATABASE_URL)

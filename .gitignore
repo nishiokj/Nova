@@ -65,3 +65,6 @@ htmlcovrepo-test/
 /tui-ts/**/repo-test/
 .claude
 .envrc
+
+# Regenerate rebuild log
+.regenerate.log

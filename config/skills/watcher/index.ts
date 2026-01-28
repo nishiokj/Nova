@@ -39,7 +39,7 @@ export const WATCHER_ACTION_SCHEMA: StructuredOutputSchema = {
       // Watcher-specific fields
       watcherAction: {
         type: 'string',
-        enum: ['answer', 'realign', 'split', 'create_work_item', 'quality_gate', 'escalate', 'continue'],
+        enum: ['answer', 'realign', 'split', 'create_work_item', 'quality_gate', 'continue'],
         description: 'The watcher decision type',
       },
       reason: {

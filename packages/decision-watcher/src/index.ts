@@ -81,19 +81,6 @@ export {
 } from './engine/index.js';
 
 // ============================================
-// WATCHER
-// ============================================
-
-export type {
-  DecisionWatcher,
-} from './watcher/index.js';
-
-export {
-  DEFAULT_WATCHER_CONFIG,
-  createDecisionWatcher,
-} from './watcher/index.js';
-
-// ============================================
 // INTEGRATION
 // ============================================
 
@@ -141,5 +128,6 @@ export type { WatcherAgentConfig } from './watcher-agent.js';
 
 export {
   initAsyncSession,
+  buildPlanningObjective,
 } from './session-init.js';
 export type { AsyncSessionConfig, AsyncSessionResult } from './session-init.js';

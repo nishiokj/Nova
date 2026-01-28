@@ -36,12 +36,14 @@ export interface SalienceParams {
   goal: string;
   mode: 'async' | 'interactive';
   principles?: string[];
+  /** Skill file paths to include - these provide context for decision making */
+  skillPaths?: string[];
 }
 
 const DEFAULT_PRINCIPLES = [
   'Surface ambiguity aggressively — implicit boundaries and shared ownership are questions, not silent choices.',
   'Establish invariants — record what decisions imply. Make boundaries and contracts explicit.',
-  'Separation of concerns is non-negotiable — detect concern-mixing and escalate.',
+  'Separation of concerns is non-negotiable — detect and address concern-mixing.',
   'Minimal intervention — only act with clear benefit.',
   'One work item = one git commit. Keep units of work atomic and reviewable.',
 ];
@@ -50,7 +52,7 @@ const DEFAULT_PRINCIPLES = [
  * Generate salience file content as markdown.
  */
 export function createSalienceContent(params: SalienceParams): string {
-  const { sessionId, goal, mode, principles = DEFAULT_PRINCIPLES } = params;
+  const { sessionId, goal, mode, principles = DEFAULT_PRINCIPLES, skillPaths = [] } = params;
   const timestamp = new Date().toISOString();
 
   const lines = [
@@ -64,11 +66,26 @@ export function createSalienceContent(params: SalienceParams): string {
     '',
     ...principles.map((p, i) => `${i + 1}. ${p}`),
     '',
+  ];
+
+  // Add skill files section if any are provided
+  if (skillPaths.length > 0) {
+    lines.push(
+      '## Skill Files',
+      '',
+      'These skill files provide context for decision making. **Read them before answering questions.**',
+      '',
+      ...skillPaths.map(p => `- ${p}`),
+      '',
+    );
+  }
+
+  lines.push(
     '## Session Notes',
     '',
     '_No notes yet. The watcher will append observations here._',
     '',
-  ];
+  );
 
   return lines.join('\n');
 }

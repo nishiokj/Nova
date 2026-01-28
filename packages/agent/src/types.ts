@@ -205,6 +205,23 @@ export interface ToolHookResult {
  * Hooks for tool execution lifecycle.
  * These are optional callbacks that can block or modify tool execution.
  */
+/**
+ * Metrics passed to cadence check hook for informed intervention decisions.
+ */
+export interface AgentCadenceMetrics {
+  llmCallsMade: number;
+  toolCallsMade: number;
+  durationMs: number;
+}
+
+/**
+ * Result from cadence check hook - watcher's steering directive.
+ */
+export interface AgentCadenceResult {
+  action: 'continue' | 'inject' | 'stop';
+  systemMessage?: string;
+}
+
 export interface AgentHooks {
   /**
    * Called before a tool is executed.
@@ -230,6 +247,12 @@ export interface AgentHooks {
    * Returns true if agent should stop immediately (e.g., user typed "stop").
    */
   shouldStop?: () => boolean;
+
+  /**
+   * Called every N iterations inside the agent loop for watcher intervention.
+   * Gives the watcher a synchronization point to steer or stop the agent mid-run.
+   */
+  cadenceCheck?: (metrics: AgentCadenceMetrics) => Promise<AgentCadenceResult>;
 }
 
 // ============================================

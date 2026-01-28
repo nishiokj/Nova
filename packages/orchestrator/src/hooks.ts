@@ -43,7 +43,6 @@ export interface PromptUserHookEvent {
  */
 export type PromptUserHookResult =
   | { action: 'answer'; answer: string | string[]; contextAddendum?: string }
-  | { action: 'escalate'; reason: string }
   | { action: 'block'; reason: string };
 
 // --- Callback Types ---

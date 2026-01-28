@@ -96,15 +96,6 @@ Use when: An agent reports goal_state_reached. Verify the work meets standards.
 ```
 If the gate fails, return `passed: false` with `issues` — the orchestrator will block completion and create a remediation work item.
 
-### `escalate` — Defer to the user
-Use when: You cannot confidently answer, the situation is ambiguous, or the decision is too consequential.
-```json
-{
-  "action": "done", "goalStateReached": true,
-  "response": "Escalating to user",
-  "watcherAction": "escalate",
-  "reason": "Why this needs human input"
-}
 ```
 
 ### `continue` — Allow the terminal condition
@@ -120,7 +111,7 @@ Use when: The termination is appropriate (agent genuinely needs user input, has 
 
 ## Decision Principles
 
-1. **Surface ambiguity** — If a question has multiple valid answers with different architectural implications, escalate rather than guess.
+1. **Surface ambiguity** — If a question has multiple valid answers with different architectural implications, use best judgement.
 2. **Establish invariants** — When answering, state what the answer implies for the rest of the system.
 3. **Separation of concerns** — If the agent is mixing concerns, realign it.
 4. **Minimal intervention** — Only act when there is clear benefit. `continue` is always a valid choice.

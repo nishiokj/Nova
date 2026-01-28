@@ -66,6 +66,7 @@ import {
   createWatcherConfig,
   DEFAULT_DECISIONS,
   createWatcherStopHook,
+  buildPlanningObjective,
   writeSalienceFile,
   createDecisionLog,
   createWorkLog,
@@ -1815,11 +1816,26 @@ export class AgentHarness {
     sessionKey: string,
     goal: string,
     workingDir: string
-  ): Promise<import('orchestrator').StopHookHandler> {
+  ): Promise<{ stopHook: import('orchestrator').StopHookHandler; planningObjective: string }> {
+    // Discover skill files for context
+    const skillsDir = this.config.skills.directory
+      ? path.resolve(workingDir, this.config.skills.directory)
+      : path.resolve(workingDir, 'config/skills');
+    const skillStubs = loadSkillDefinitions(skillsDir);
+    const skillPaths: string[] = [];
+    for (const stub of skillStubs) {
+      if (!stub.enabled) continue;
+      const full = getSkillDefinition(skillsDir, stub.name);
+      if (full?.sourcePath) {
+        skillPaths.push(full.sourcePath);
+      }
+    }
+
     const saliencePath = await writeSalienceFile(workingDir, {
       sessionId: sessionKey,
       goal,
       mode: 'async',
+      skillPaths,
     });
 
     const decisionLog = await createDecisionLog(workingDir, sessionKey);
@@ -1831,7 +1847,9 @@ export class AgentHarness {
       timestamp: new Date().toISOString(),
       type: 'session_start',
       watcherNote: `Session started with goal: ${goal.slice(0, 200)}`,
-    }).catch(() => {});
+    }).catch(err => {
+      console.warn('[HARNESS] Work log write failed (session_start):', err instanceof Error ? err.message : String(err));
+    });
 
     // Register auto-logging hooks for files_modified and agent_completed
     registerHook('files_modified', async (event: { type: string; paths?: string[] }, ctx: { workId: string; agentType: string }) => {
@@ -1842,7 +1860,9 @@ export class AgentHarness {
           workId: ctx.workId,
           agentType: ctx.agentType,
           paths: event.paths,
-        }).catch(() => {});
+        }).catch(err => {
+          console.warn('[HARNESS] Work log write failed (files_modified):', err instanceof Error ? err.message : String(err));
+        });
       }
     });
 
@@ -1854,16 +1874,19 @@ export class AgentHarness {
           workId: ctx.workId ?? event.workId,
           agentType: ctx.agentType,
           paths: event.invalidatedPaths,
-        }).catch(() => {});
+        }).catch(err => {
+          console.warn('[HARNESS] Work log write failed (agent_completed):', err instanceof Error ? err.message : String(err));
+        });
       }
     });
 
-    return createWatcherStopHook({
+    const stopHook = createWatcherStopHook({
       sessionId: sessionKey,
       salienceFilePath: saliencePath,
       decisionLog,
       workLog,
       workingDir,
+      skillPaths,
       runAgent: (objective: string) => this.runWatcherAgent(objective, sessionKey),
       onDecision: (entry) => {
         this.logger.info('Watcher decision', {
@@ -1883,6 +1906,12 @@ export class AgentHarness {
         }, entry.workItemId, '', sessionKey));
       },
     });
+
+    const planningObjective = buildPlanningObjective(
+      goal, saliencePath, decisionLog.filePath(), workLog.filePath(), skillPaths
+    );
+
+    return { stopHook, planningObjective };
   }
 
   // =========================================================================

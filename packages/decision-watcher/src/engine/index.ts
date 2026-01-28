@@ -113,16 +113,12 @@ export class DecisionEngine {
           return await this.synthesizeAnswer(matches, context, startTime);
         }
 
-        // Can't synthesize - escalate
-        return this.createEscalateResponse(matches, 'low-confidence', startTime);
+        // Can't synthesize - return uncertain response
+        return this.createUncertainResponse(matches, 'low-confidence', startTime);
       }
 
       // Step 3: Check for consistency issues
       const warnings = await this.checkConsistency(bestMatch.entry, context);
-
-      if (warnings.length > 0 && this.config.escalateWithWarnings) {
-        return this.createEscalateResponse(matches, 'warnings', startTime, warnings);
-      }
 
       // Step 4: Build final answer
       return this.createAnswerResponse(bestMatch, matches, warnings, startTime);
@@ -364,7 +360,7 @@ export class DecisionEngine {
       }
     }
 
-    // Can't answer - escalate
+    // Can't answer - return uncertain response
     return {
       source: 'uncertain',
       confidence: 'none',
@@ -389,7 +385,7 @@ export class DecisionEngine {
     startTime: number
   ): Promise<WatcherResponse> {
     if (!this.llm) {
-      return this.createEscalateResponse(matches, 'no-llm', startTime);
+      return this.createUncertainResponse(matches, 'no-llm', startTime);
     }
 
     const topEntries = matches.slice(0, 5).map(m => m.entry);
@@ -439,7 +435,7 @@ export class DecisionEngine {
       };
     } catch (error) {
       console.error('[DecisionEngine] Synthesis failed:', error);
-      return this.createEscalateResponse(matches, 'synthesis-failed', startTime);
+      return this.createUncertainResponse(matches, 'synthesis-failed', startTime);
     }
   }
 
@@ -541,18 +537,18 @@ export class DecisionEngine {
   }
 
   /**
-   * Create an escalate response.
+   * Create an uncertain response when we can't confidently answer.
    */
-  private createEscalateResponse(
+  private createUncertainResponse(
     matches: Array<{ entry: DecisionEntry; score: number }>,
     reason: string,
     startTime: number,
     additionalWarnings: string[] = []
   ): WatcherResponse {
     return {
-      source: 'escalate',
+      source: 'uncertain',
       confidence: 'none',
-      answer: `Escalating to user: ${reason}`,
+      answer: `Uncertain: ${reason}`,
       relevantDecisions: matches.slice(0, 3).map(m => ({
         id: m.entry.id,
         decision: 'decision' in m.entry ? m.entry.decision : m.entry.preference,

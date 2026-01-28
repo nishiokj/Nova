@@ -76,7 +76,9 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
     timestamp: new Date().toISOString(),
     type: 'session_start',
     watcherNote: `Session started with goal: ${config.goal.slice(0, 200)}`,
-  }).catch(() => {});
+  }).catch(err => {
+    console.warn('[WATCHER] Work log write failed (session_start):', err instanceof Error ? err.message : String(err));
+  });
 
   // 4. Create watcher stopHook
   const stopHook = createWatcherStopHook({
@@ -113,15 +115,20 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
  * The planning agent is a standard agent that:
  * - Reads the salience file for context
  * - Explores the codebase as needed
- * - Asks clarifying questions (answered by watcher or escalated to user)
+ * - Asks clarifying questions (answered by watcher autonomously)
  * - Produces a structured handoff spec via PromptUser or handoffSpec
  */
-function buildPlanningObjective(
+export function buildPlanningObjective(
   goal: string,
   saliencePath: string,
   decisionLogPath: string,
-  workLogPath: string
+  workLogPath: string,
+  skillPaths?: string[]
 ): string {
+  const skillSection = skillPaths?.length
+    ? `\n### Skill Files\n**Read these skill files for critical context about tools, workflows, and preferences:**\n${skillPaths.map(p => `- ${p}`).join('\n')}\n`
+    : '';
+
   return `## Async Planning Session
 
 You are planning the execution of the following goal:
@@ -132,14 +139,15 @@ You are planning the execution of the following goal:
 - Salience file: ${saliencePath} — contains the session goal and operating principles
 - Decision log: ${decisionLogPath} — records decisions made during this session
 - Work log: ${workLogPath} — session memory of all agent activity
-
+${skillSection}
 ### Phase 1: Understanding (REQUIRED)
-Before producing a plan, you MUST ask clarifying questions:
+Before producing a plan, you MUST:
 1. Read the salience file for goal and principles.
-2. Explore the codebase — use Glob, Grep, Read.
-3. Ask 2-5 clarifying questions via PromptUser to resolve ambiguity.
-   - The watcher answers questions using best judgment when context meaningfully informs the decision.
-   - Questions the watcher cannot answer are escalated to the user.
+2. **Read any skill files listed above** — they contain critical context about tools, workflows, and user preferences.
+3. Explore the codebase — use Glob, Grep, Read.
+4. Ask 2-5 clarifying questions via PromptUser to resolve ambiguity.
+   - The watcher answers questions using best judgment and available context.
+   - The watcher MUST answer — there is no user to defer to in async mode.
    - Focus on: scope boundaries, design trade-offs, ordering constraints.
 DO NOT skip Phase 1.
 
