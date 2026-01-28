@@ -76,6 +76,8 @@ export interface IMessageConnectorConfig {
   pageSize?: number
   /** Sync attachments metadata (default: true) */
   syncAttachments?: boolean
+  /** Max message text bytes before truncation (default: 1048576) */
+  maxTextBytes?: number
   /** Only sync messages from specific chat identifiers */
   chatFilter?: string[]
   /** Only sync iMessage or SMS (default: both) */
@@ -83,6 +85,7 @@ export interface IMessageConnectorConfig {
 }
 
 const DEFAULT_CHAT_DB_PATH = join(homedir(), 'Library', 'Messages', 'chat.db')
+const DEFAULT_MAX_TEXT_BYTES = 1024 * 1024
 
 // ============ Cursor Types ============
 
@@ -119,6 +122,7 @@ export class IMessageConnector implements Connector {
   private readonly databasePath: string
   private readonly pageSize: number
   private readonly syncAttachments: boolean
+  private readonly maxTextBytes: number
   private readonly chatFilter?: string[]
   private readonly serviceFilter?: string[]
   private db: Database | null = null
@@ -127,6 +131,7 @@ export class IMessageConnector implements Connector {
     this.databasePath = config.databasePath ?? DEFAULT_CHAT_DB_PATH
     this.pageSize = config.pageSize ?? 100
     this.syncAttachments = config.syncAttachments ?? true
+    this.maxTextBytes = config.maxTextBytes ?? DEFAULT_MAX_TEXT_BYTES
     this.chatFilter = config.chatFilter
     this.serviceFilter = config.serviceFilter
   }
@@ -360,7 +365,20 @@ export class IMessageConnector implements Connector {
     let cursor: IncrementalCursor
     if (options.cursor) {
       try {
-        cursor = JSON.parse(options.cursor) as IncrementalCursor
+        const parsed = JSON.parse(options.cursor) as Record<string, unknown>
+        if (typeof parsed.sinceRowId === 'number') {
+          // Incremental cursor format
+          cursor = { sinceRowId: parsed.sinceRowId, sinceDate: (parsed.sinceDate as number) ?? 0 }
+        } else if (typeof parsed.lastRowId === 'number') {
+          // Backfill cursor format — adapt to incremental
+          cursor = { sinceRowId: parsed.lastRowId, sinceDate: (parsed.lastDate as number) ?? 0 }
+        } else {
+          // Unknown cursor shape, fall back to 'since'
+          const sinceDate = options.since
+            ? new Date(options.since)
+            : new Date(Date.now() - 24 * 60 * 60 * 1000)
+          cursor = { sinceRowId: 0, sinceDate: this.dateToMacosTimestamp(sinceDate) }
+        }
       } catch {
         // Use 'since' as fallback
         const sinceDate = options.since
@@ -473,6 +491,14 @@ export class IMessageConnector implements Connector {
     }
 
     const timestamp = macosTimestampToISOString(msg.date)
+    const textInfo = normalizeMessageText(msg.text, this.maxTextBytes)
+    if (textInfo.truncated) {
+      console.warn('[IMessageConnector] Truncated message text', {
+        guid: msg.guid,
+        originalBytes: textInfo.originalBytes,
+        maxBytes: this.maxTextBytes,
+      })
+    }
 
     // Determine the sender ID
     const senderId = msg.is_from_me
@@ -481,7 +507,7 @@ export class IMessageConnector implements Connector {
 
     const sourceData = {
       guid: msg.guid,
-      text: msg.text,
+      text: textInfo.text,
       timestamp,
       is_from_me: msg.is_from_me === 1,
       is_read: msg.is_read === 1,
@@ -500,6 +526,9 @@ export class IMessageConnector implements Connector {
       reaction_to: msg.associated_message_type > 0 ? msg.associated_message_guid : null,
       reply_to: msg.reply_to_guid,
       send_effect: msg.expressive_send_style_id,
+      text_truncated: textInfo.truncated || undefined,
+      text_bytes: textInfo.bytes,
+      text_original_bytes: textInfo.originalBytes,
     }
 
     // Validate the output
@@ -539,7 +568,7 @@ export class IMessageConnector implements Connector {
    */
   registerTransforms(registry: { register<T>(t: Transformation<T>): void }): void {
     for (const transform of imessageTransforms) {
-      registry.register(transform)
+      registry.register(transform as Transformation)
     }
   }
 
@@ -552,6 +581,52 @@ export class IMessageConnector implements Connector {
   close(): void {
     this.closeDatabase()
   }
+}
+
+function normalizeMessageText(
+  text: string | null,
+  maxBytes: number
+): { text: string | null; truncated: boolean; bytes?: number; originalBytes?: number } {
+  if (text == null) return { text, truncated: false }
+
+  const originalBytes = Buffer.byteLength(text, 'utf8')
+  if (maxBytes <= 0 || originalBytes <= maxBytes) {
+    return { text, truncated: false, bytes: originalBytes, originalBytes }
+  }
+
+  const truncatedText = truncateTextByBytes(text, maxBytes)
+  const bytes = Buffer.byteLength(truncatedText, 'utf8')
+  return { text: truncatedText, truncated: true, bytes, originalBytes }
+}
+
+function truncateTextByBytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return text
+
+  // Start with a conservative slice based on code units.
+  let end = Math.min(text.length, maxBytes)
+  let slice = text.slice(0, end)
+  let sliceBytes = Buffer.byteLength(slice, 'utf8')
+
+  // Scale down quickly if we overshot.
+  while (sliceBytes > maxBytes && end > 0) {
+    end = Math.floor(end * (maxBytes / sliceBytes))
+    slice = text.slice(0, end)
+    sliceBytes = Buffer.byteLength(slice, 'utf8')
+  }
+
+  // Final trim to guarantee byte limit.
+  while (sliceBytes > maxBytes && end > 0) {
+    end -= 1
+    slice = text.slice(0, end)
+    sliceBytes = Buffer.byteLength(slice, 'utf8')
+  }
+
+  // Drop an incomplete trailing UTF-8 sequence if present.
+  if (slice.endsWith('\uFFFD')) {
+    slice = slice.slice(0, -1)
+  }
+
+  return slice
 }
 
 // ============ Factory ============

@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
-import type { Session, LLMCall, ToolCall, AgentRequest, WorkItem } from '@shared/domain/models';
+import type { Session, LLMCall, ToolCall, AgentRequest, WorkItem, WatcherDecision } from '@shared/domain/models';
 import { StatusDot } from './StatusDot';
 import { TurnRow, TurnTableHeader, UserRequestRow, TOOL_COLUMNS } from './TurnRow';
 
-type TabType = 'turns' | 'logs' | 'files';
+type TabType = 'turns' | 'logs' | 'files' | 'watcher';
 
 interface SessionCardProps {
   session: Session;
@@ -182,10 +182,14 @@ export function SessionCard({ session, onExpand }: SessionCardProps) {
     }));
   }, [allToolCalls]);
 
+  const watcherDecisions = session.watcherDecisions ?? [];
+
   const visibleFiles = filesTouched.slice(0, MAX_VISIBLE_FILES);
   const hasMoreFiles = filesTouched.length > MAX_VISIBLE_FILES;
   const visibleErrors = errors.slice(0, MAX_VISIBLE_LOGS);
   const hasMoreErrors = errors.length > MAX_VISIBLE_LOGS;
+  const visibleWatcher = watcherDecisions.slice(0, MAX_VISIBLE_LOGS);
+  const hasMoreWatcher = watcherDecisions.length > MAX_VISIBLE_LOGS;
 
   return (
     <div className="session-card">
@@ -193,6 +197,9 @@ export function SessionCard({ session, onExpand }: SessionCardProps) {
         <StatusDot status={session.state} />
         <span className="session-card-id">{shortId}</span>
         <span className="session-card-desc">{description}</span>
+        {watcherDecisions.length > 0 && (
+          <span className="watcher-badge">{watcherDecisions.length}</span>
+        )}
       </div>
 
       <div className="session-card-tabs">
@@ -213,6 +220,12 @@ export function SessionCard({ session, onExpand }: SessionCardProps) {
           onClick={() => setActiveTab('files')}
         >
           Files ({filesTouched.length})
+        </button>
+        <button
+          className={`tab ${activeTab === 'watcher' ? 'active' : ''} ${watcherDecisions.length > 0 ? 'has-watcher' : ''}`}
+          onClick={() => setActiveTab('watcher')}
+        >
+          Watcher {watcherDecisions.length > 0 && `(${watcherDecisions.length})`}
         </button>
       </div>
 
@@ -237,6 +250,13 @@ export function SessionCard({ session, onExpand }: SessionCardProps) {
             files={visibleFiles}
             hasMore={hasMoreFiles}
             totalCount={filesTouched.length}
+          />
+        )}
+        {activeTab === 'watcher' && (
+          <WatcherTab
+            decisions={visibleWatcher}
+            hasMore={hasMoreWatcher}
+            totalCount={watcherDecisions.length}
           />
         )}
       </div>
@@ -409,6 +429,68 @@ function FilesTab({
             </div>
           );
         })}
+      </div>
+    </>
+  );
+}
+
+function WatcherTab({
+  decisions,
+  hasMore,
+  totalCount,
+}: {
+  decisions: WatcherDecision[];
+  hasMore: boolean;
+  totalCount: number;
+}) {
+  if (decisions.length === 0) {
+    return <div className="tab-empty">No watcher decisions</div>;
+  }
+
+  return (
+    <>
+      {hasMore && (
+        <div className="tab-truncated">
+          {decisions.length} of {totalCount}
+        </div>
+      )}
+      <div className="watcher-list">
+        {decisions.map((d, i) => (
+          <div key={i} className="watcher-item">
+            <div className="watcher-item-header">
+              <span className="watcher-item-time">
+                {new Date(d.timestamp).toLocaleTimeString()}
+              </span>
+              <span className={`trigger-badge trigger-${d.trigger}`}>
+                {d.trigger}
+              </span>
+              <span className={`action-badge action-${d.action}`}>
+                {d.action}
+              </span>
+            </div>
+            {d.question && (
+              <div className="watcher-question">Q: {d.question}</div>
+            )}
+            {d.answer && (
+              <div className="watcher-answer">A: {d.answer}</div>
+            )}
+            <div className="watcher-rationale">{d.rationale}</div>
+            {d.qualityGate && (
+              <div>
+                <span className={`watcher-gate ${d.qualityGate.passed ? 'gate-pass' : 'gate-fail'}`}>
+                  {d.qualityGate.passed ? 'PASS' : 'FAIL'}
+                </span>
+                {d.qualityGate.issues && d.qualityGate.issues.length > 0 && (
+                  <div className="gate-issues">
+                    {d.qualityGate.issues.map((issue, j) => (
+                      <div key={j}>- {issue}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
     </>
   );

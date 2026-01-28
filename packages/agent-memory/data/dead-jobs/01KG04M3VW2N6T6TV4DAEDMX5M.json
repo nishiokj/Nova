@@ -1,0 +1,11 @@
+{
+  "id": "01KG04M3VW2N6T6TV4DAEDMX5M",
+  "type": "derived:run",
+  "payload": {
+    "derivedJobId": "01KG04M3VT15HXTD532AJB7WJ1"
+  },
+  "error": "undefined is not an object (evaluating 'processingLog.findProcessedEntityIds')",
+  "attemptCount": 1,
+  "createdAt": "2026-01-27T16:29:39.580Z",
+  "diedAt": "2026-01-27T16:29:39.691Z"
+}

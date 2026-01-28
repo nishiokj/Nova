@@ -6,11 +6,45 @@
  */
 
 import { spawn } from 'child_process';
-import type { InternalHookEvent, InternalHookContext, StopHookResult } from 'agent';
+import type { InternalHookEvent, InternalHookContext, StopHookResult, StopHookContext, StopHookHandler } from 'agent';
+
+// Re-export stop hook types from agent (canonical location)
+export type { StopHookContext, StopHookHandler };
 
 // --- Event Types ---
 
-export type HookEventType = InternalHookEvent['type'] | 'stop';
+export type HookEventType = InternalHookEvent['type'] | 'stop' | 'prompt_user';
+
+/**
+ * PromptUser hook event - fired when agent requests user input.
+ */
+export interface PromptUserHookEvent {
+  type: 'prompt_user';
+  workItemId: string;
+  prompt: {
+    question: string;
+    options?: Array<string | { label: string; description?: string }>;
+    context?: string;
+    multiSelect?: boolean;
+    questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';
+    questions?: Array<{
+      question: string;
+      options?: Array<string | { label: string; description?: string }>;
+      context?: string;
+      multiSelect?: boolean;
+      questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';
+    }>;
+  };
+  timestamp: number;
+}
+
+/**
+ * PromptUser hook result - determines what happens next.
+ */
+export type PromptUserHookResult =
+  | { action: 'answer'; answer: string | string[]; contextAddendum?: string }
+  | { action: 'escalate'; reason: string }
+  | { action: 'block'; reason: string };
 
 // --- Callback Types ---
 
@@ -20,26 +54,18 @@ export type HookCallback<T extends InternalHookEvent = InternalHookEvent> = (
   ctx: InternalHookContext
 ) => Promise<void>;
 
+/** TypeScript callback for prompt_user hooks */
+export type PromptUserHookHandler = (
+  event: PromptUserHookEvent
+) => Promise<PromptUserHookResult>;
+
 /** Shell command hook - spawns subprocess, pipes JSON to stdin */
 export interface ShellHook {
   command: string;
   timeout?: number; // ms, default 60000
 }
 
-export type HookEntry = HookCallback | ShellHook;
-
-// --- Stop Hook Types (blocking, can re-inject prompts) ---
-
-export interface StopHookContext {
-  workId: string;
-  response: string;
-  terminationReason: string;
-  iteration: number;
-  agentType: string;
-  sessionKey: string;
-}
-
-export type StopHookHandler = (context: StopHookContext) => StopHookResult | Promise<StopHookResult>;
+export type HookEntry = HookCallback | ShellHook | PromptUserHookHandler;
 
 // --- Registry ---
 
@@ -73,6 +99,10 @@ export function getHooks(event: HookEventType): HookEntry[] {
 
 function isShellHook(h: HookEntry): h is ShellHook {
   return typeof h === 'object' && 'command' in h;
+}
+
+function isPromptUserHook(event: HookEventType, hook: HookEntry): hook is PromptUserHookHandler {
+  return event === 'prompt_user' && typeof hook === 'function';
 }
 
 /**
@@ -146,8 +176,12 @@ export async function executeHooks(
     try {
       if (isShellHook(hook)) {
         await executeShellHook(hook, payload, ctx);
+      } else if (isPromptUserHook(event, hook)) {
+        // PromptUser hooks have different signature - they return PromptUserHookResult
+        await hook(payload as unknown as PromptUserHookEvent);
       } else {
-        await hook(payload, ctx);
+        const callback = hook as HookCallback;
+        await callback(payload, ctx);
       }
     } catch (err) {
       console.error(`[HOOK:${event}] Error:`, err);

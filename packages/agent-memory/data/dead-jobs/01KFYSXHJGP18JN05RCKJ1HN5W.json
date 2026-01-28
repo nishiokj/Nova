@@ -1,0 +1,14 @@
+{
+  "id": "01KFYSXHJGP18JN05RCKJ1HN5W",
+  "type": "sync:collect",
+  "payload": {
+    "syncJobId": "01KFYSXHJGP18JN05RCKJ1HN5V",
+    "connector": "rex_sessions",
+    "accountId": "01KFYHSDKRDJ3STPMN99TMKZ3E",
+    "jobType": "backfill"
+  },
+  "error": "No connector registered for: rex_sessions",
+  "attemptCount": 3,
+  "createdAt": "2026-01-27T04:03:19.760Z",
+  "diedAt": "2026-01-27T04:03:34.612Z"
+}

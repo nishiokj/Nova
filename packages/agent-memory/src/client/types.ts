@@ -201,6 +201,110 @@ export interface BackfillResponse {
   job: SyncJob
 }
 
+// ============ Processing ============
+
+export interface ProcessResultItem {
+  success: boolean
+  envelopeId: string
+  entityIds: string[]
+  mappings: Array<Record<string, unknown>>
+  error?: string
+}
+
+export interface BatchProcessResult {
+  total: number
+  succeeded: number
+  failed: number
+  results: ProcessResultItem[]
+}
+
+export interface ProcessJobResponse {
+  job: SyncJob
+  result: BatchProcessResult
+}
+
+export interface ProcessAllResponse {
+  result: BatchProcessResult
+}
+
+export interface ProcessErroredResponse {
+  result: BatchProcessResult
+}
+
+export interface ReprocessFilteredRequest {
+  connector?: string
+  entityType?: string
+  transformationIds?: string[]
+}
+
+export interface ReprocessFilteredResponse {
+  result: BatchProcessResult
+}
+
+export interface ProcessErroredResponse {
+  result: BatchProcessResult
+}
+
+// ============ Transformations ============
+
+export interface TransformationSummary {
+  id: string
+  name: string
+  source: {
+    connector: ConnectorType
+    entityType: string
+  }
+  outputType: string | string[]
+  enabled: boolean
+  version: number
+  description?: string
+}
+
+export interface TransformationListResponse {
+  transformations: TransformationSummary[]
+}
+
+// ============ Derived Tasks ============
+
+export type DerivedTaskMode = 'once' | 'recurring' | 'event'
+
+export interface DerivedTask {
+  id: string
+  name: string
+  script_path: string
+  mode: DerivedTaskMode
+  interval_ms: number | null
+  enabled: boolean
+  last_job_id: string | null
+  next_run_at: string | null
+  metadata?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface DerivedTaskListResponse {
+  tasks: DerivedTask[]
+}
+
+export interface DerivedTaskResponse {
+  task: DerivedTask
+  recentJobs?: DerivedJob[]
+}
+
+export interface DerivedTaskSandboxResult {
+  job: DerivedJob
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'timeout'
+  durationMs: number
+  lastError?: string
+  logPath?: string
+}
+
+export interface DerivedTaskCreateResponse {
+  task: DerivedTask
+  sandbox?: DerivedTaskSandboxResult
+  sandboxError?: string
+}
+
 // ============ Jobs ============
 
 export type SyncJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -248,6 +352,46 @@ export interface RetryResponse {
   originalJob: SyncJob
 }
 
+// ============ Derived Jobs ============
+
+export type DerivedJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export interface DerivedJob {
+  id: string
+  task_id: string
+  status: DerivedJobStatus
+  priority: number
+  created_at: string
+  started_at?: string
+  completed_at?: string
+  last_error?: string
+  retry_count: number
+  next_retry_at?: string
+  metadata?: Record<string, unknown>
+  output_ref?: string
+}
+
+export interface DerivedJobListResponse {
+  jobs: DerivedJob[]
+}
+
+export interface DerivedJobResponse {
+  job: DerivedJob
+  queueStats?: QueueStats
+}
+
+export interface DerivedJobLogsResponse {
+  logPath: string
+  exists: boolean
+  lines: string[]
+  truncated: boolean
+}
+
+export interface DerivedRetryResponse {
+  job: DerivedJob
+  originalJob: DerivedJob
+}
+
 // ============ Data ============
 
 export interface Entity {
@@ -279,13 +423,75 @@ export interface ApiError {
   message?: string
 }
 
+// ============ Preferences ============
+
+export interface CodingPreference {
+  id: string
+  category: string
+  kind: string
+  preference: string
+  entity_free_formulation: string
+  scope: string
+  context: string
+  failure_mode_prevented: string
+  signal_strength: 'explicit' | 'implicit'
+  evidence_count: number
+  evidence_notes: unknown
+  counterexample: string
+  confidence: 'low' | 'medium' | 'high'
+  created_at: string
+  rank: number
+}
+
+export interface PreferencesSearchResponse {
+  preferences: CodingPreference[]
+  total: number
+  query: string
+  filters: {
+    category?: string
+    kind?: string
+    confidence?: string
+  }
+}
+
 export class SyncClientError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly code?: string
+    public readonly code?: string,
+    public readonly data?: unknown
   ) {
     super(message)
     this.name = 'SyncClientError'
+  }
+}
+
+// ============ Decisions ============
+
+export interface CodingDecision {
+  id: string
+  category: string
+  decision: string
+  rationale: string
+  alternatives_considered: string
+  tradeoffs: string
+  scope: string
+  project_context: string
+  task_context: string
+  confidence: 'low' | 'medium' | 'high'
+  signal_strength: 'explicit' | 'implicit'
+  reversibility: 'easy' | 'moderate' | 'hard'
+  created_at: string
+  rank?: number
+  similarity?: number
+}
+
+export interface DecisionsSearchResponse {
+  decisions: CodingDecision[]
+  total: number
+  query?: string
+  filters?: {
+    category?: string
+    confidence?: string
   }
 }

@@ -1,1 +1,0 @@
-{"root":["./src/index.ts","./src/orchestrator.ts","./src/ralph-loop.ts","./src/hooks/agent-completed.ts","./src/hooks/artifacts-discovered.ts","./src/hooks/context-threshold.ts","./src/hooks/files-modified.ts","./src/hooks/hook-test.ts","./src/hooks/index.ts","./src/hooks/stop-hook.ts","./src/hooks/tool-batch-completed.ts","./src/hooks/turn-completed.ts"],"version":"5.9.3"}

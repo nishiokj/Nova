@@ -8,16 +8,13 @@
  */
 
 import { generateCanonicalId, sourceRefToKey } from '../../ids.js'
-import type { Identity, Task, Message, Notification } from '../../models/canonical.js'
+import type { CanonicalSourceRef, Issue, Message, Notification } from '../../models/canonical.js'
 import type { Transformation, TransformResult, TransformOutput, TransformContext } from '../../transform/types.js'
-import type { RawEnvelope } from '../../models/raw.js'
 import {
-  GitHubUserSchema,
   GitHubIssueSchema,
   GitHubPullRequestSchema,
   GitHubCommentSchema,
   GitHubNotificationSchema,
-  type GitHubUser,
   type GitHubIssue,
   type GitHubPullRequest,
   type GitHubComment,
@@ -34,7 +31,7 @@ function createSourceRef(
   entityType: string,
   sourceId: string,
   sourceVersion?: string
-): Identity['source_refs'][0] {
+): CanonicalSourceRef {
   return {
     connector: 'github',
     account_id: accountId,
@@ -48,7 +45,7 @@ function createSourceRef(
 /**
  * Create base entity fields.
  */
-function createBaseEntity(id: string, sourceRef: Identity['source_refs'][0]) {
+function createBaseEntity(id: string, sourceRef: CanonicalSourceRef) {
   const now = new Date().toISOString()
   return {
     id,
@@ -58,77 +55,20 @@ function createBaseEntity(id: string, sourceRef: Identity['source_refs'][0]) {
   }
 }
 
-// ============ Helper: Build User Identity ============
-
-/**
- * Helper to build an Identity from a GitHub user.
- */
-function buildIdentity(
-  accountId: string,
-  user: GitHubUser
-): { entity: Identity; output: TransformOutput } {
-  const sourceRef = createSourceRef(accountId, 'user', String(user.id), user.updated_at)
-
-  const identity: Identity = {
-    ...createBaseEntity(generateCanonicalId(), sourceRef),
-    entity_type: 'identity',
-    platform: 'github',
-    platform_user_id: String(user.id),
-    username: user.login,
-    display_name: user.name ?? user.login,
-    email: user.email ?? undefined,
-    avatar_url: user.avatar_url,
-    profile_url: user.html_url,
-  }
-
-  return {
-    entity: identity,
-    output: {
-      entityType: 'identity',
-      data: identity,
-      displayText: `${identity.display_name} (@${user.login})`,
-      sourceRefKey: sourceRefToKey(sourceRef),
-    },
-  }
-}
-
-// ============ User Transformation ============
-
-/**
- * Transforms GitHub User to canonical Identity.
- */
-export const userTransform: Transformation<GitHubUser> = {
-  id: 'github:user:v1',
-  name: 'GitHub User → Identity',
-  source: {
-    connector: 'github',
-    entityType: 'user',
-  },
-  inputSchema: GitHubUserSchema,
-  outputType: 'identity',
-  transform(source: GitHubUser, ctx: TransformContext): TransformResult {
-    const { entity, output } = buildIdentity(ctx.accountId, source)
-    return { primary: output }
-  },
-  onError: 'skip',
-  enabled: true,
-  version: 1,
-}
-
 // ============ Issue Transformation ============
 
 /**
- * Transforms GitHub Issue to canonical Task.
+ * Transforms GitHub Issue to canonical Issue.
  */
 export const issueTransform: Transformation<GitHubIssue> = {
   id: 'github:issue:v1',
-  name: 'GitHub Issue → Task',
+  name: 'GitHub Issue → Issue',
   source: {
     connector: 'github',
     entityType: 'issue',
   },
   inputSchema: GitHubIssueSchema,
-  outputType: 'task',
+  outputType: 'issue',
   transform(source: GitHubIssue, ctx: TransformContext): TransformResult {
     const sourceRef = createSourceRef(
       ctx.accountId,
@@ -138,14 +78,14 @@ export const issueTransform: Transformation<GitHubIssue> = {
     )
 
     // Determine status
-    let status: Task['status'] = 'open'
+    let status: Issue['status'] = 'open'
     if (source.state === 'closed') {
       status = source.state_reason === 'not_planned' ? 'cancelled' : 'closed'
     }
 
-    const task: Task = {
+    const issue: Issue = {
       ...createBaseEntity(generateCanonicalId(), sourceRef),
-      entity_type: 'task',
+      entity_type: 'issue',
       title: source.title,
       description: source.body ?? undefined,
       status,
@@ -163,29 +103,14 @@ export const issueTransform: Transformation<GitHubIssue> = {
     }
 
     const primary: TransformOutput = {
-      entityType: 'task',
-      data: task,
+      entityType: 'issue',
+      data: issue,
       displayText: `#${source.number}: ${source.title}`,
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    const related: TransformOutput[] = []
-
-    // Map the issue creator as a related entity
-    if (source.user) {
-      const creator = buildIdentity(ctx.accountId, source.user)
-      related.push(creator.output)
-    }
-
-    // Map assignees
-    for (const assignee of source.assignees ?? []) {
-      const assigneeIdentity = buildIdentity(ctx.accountId, assignee as GitHubUser)
-      related.push(assigneeIdentity.output)
-    }
-
     return {
       primary,
-      related: related.length > 0 ? related : undefined,
     }
   },
   onError: 'skip',
@@ -196,17 +121,17 @@ export const issueTransform: Transformation<GitHubIssue> = {
 // ============ Pull Request Transformation ============
 
 /**
- * Transforms GitHub Pull Request to canonical Task.
+ * Transforms GitHub Pull Request to canonical Issue.
  */
 export const pullRequestTransform: Transformation<GitHubPullRequest> = {
   id: 'github:pull_request:v1',
-  name: 'GitHub Pull Request → Task',
+  name: 'GitHub Pull Request → Issue',
   source: {
     connector: 'github',
     entityType: 'pull_request',
   },
   inputSchema: GitHubPullRequestSchema,
-  outputType: 'task',
+  outputType: 'issue',
   transform(source: GitHubPullRequest, ctx: TransformContext): TransformResult {
     const sourceRef = createSourceRef(
       ctx.accountId,
@@ -216,7 +141,7 @@ export const pullRequestTransform: Transformation<GitHubPullRequest> = {
     )
 
     // Determine status
-    let status: Task['status'] = 'open'
+    let status: Issue['status'] = 'open'
     if (source.merged) {
       status = 'closed'
     } else if (source.state === 'closed') {
@@ -225,9 +150,9 @@ export const pullRequestTransform: Transformation<GitHubPullRequest> = {
       status = 'in_progress'
     }
 
-    const task: Task = {
+    const issue: Issue = {
       ...createBaseEntity(generateCanonicalId(), sourceRef),
-      entity_type: 'task',
+      entity_type: 'issue',
       title: source.title,
       description: source.body ?? undefined,
       status,
@@ -249,29 +174,14 @@ export const pullRequestTransform: Transformation<GitHubPullRequest> = {
     }
 
     const primary: TransformOutput = {
-      entityType: 'task',
-      data: task,
+      entityType: 'issue',
+      data: issue,
       displayText: `PR #${source.number}: ${source.title}`,
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    const related: TransformOutput[] = []
-
-    // Map creator
-    if (source.user) {
-      const creator = buildIdentity(ctx.accountId, source.user)
-      related.push(creator.output)
-    }
-
-    // Map assignees
-    for (const assignee of source.assignees ?? []) {
-      const assigneeIdentity = buildIdentity(ctx.accountId, assignee as GitHubUser)
-      related.push(assigneeIdentity.output)
-    }
-
     return {
       primary,
-      related: related.length > 0 ? related : undefined,
     }
   },
   onError: 'skip',
@@ -325,17 +235,8 @@ export const commentTransform: Transformation<GitHubComment> = {
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    const related: TransformOutput[] = []
-
-    // Map comment author
-    if (source.user) {
-      const author = buildIdentity(ctx.accountId, source.user)
-      related.push(author.output)
-    }
-
     return {
       primary,
-      related: related.length > 0 ? related : undefined,
     }
   },
   onError: 'skip',
@@ -418,7 +319,6 @@ export const notificationTransform: Transformation<GitHubNotification> = {
  * All GitHub transformations.
  */
 export const githubTransforms = [
-  userTransform,
   issueTransform,
   pullRequestTransform,
   commentTransform,

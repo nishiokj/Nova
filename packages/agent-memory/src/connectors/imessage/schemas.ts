@@ -193,6 +193,9 @@ export const IMessageSourceSchema = z.object({
   reaction_to: z.string().nullable().optional(),
   reply_to: z.string().nullable().optional(),
   send_effect: z.string().nullable().optional(),
+  text_truncated: z.boolean().optional(),
+  text_bytes: z.number().int().nonnegative().optional(),
+  text_original_bytes: z.number().int().nonnegative().optional(),
 })
 
 export type IMessageSource = z.infer<typeof IMessageSourceSchema>

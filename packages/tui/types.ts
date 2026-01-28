@@ -40,7 +40,20 @@ export type BridgeCommandType =
   | "get_model"
   | "set_dangerous_mode"
   | "ralph_loop_start"
-  | "ralph_loop_cancel";
+  | "ralph_loop_cancel"
+  | "async_start"
+  | "async_cancel"
+  | "async_status"
+  | "watcher_status"
+  | "watcher_context"
+  | "watcher_search"
+  | "watcher_decisions"
+  | "watcher_inspect"
+  | "watcher_memory"
+  | "watcher_focus"
+  | "watcher_defocus"
+  | "watcher_reanchor"
+  | "watcher_summarize";
 
 export type BridgeEventType =
   | "ready"

@@ -37,6 +37,15 @@ export {
 } from './sync-job.js'
 
 export {
+  createDerivedJobRepository,
+  type DerivedJobRepository,
+  type DerivedJob,
+  type DerivedJobInput,
+  type DerivedJobRow,
+  type DerivedJobStatus,
+} from './derived-job.js'
+
+export {
   createAccountRepository,
   type AccountRepository,
   type Account,
@@ -80,9 +89,45 @@ export {
 } from './sync-task.js'
 
 export {
+  createDerivedTaskRepository,
+  type DerivedTaskRepository,
+  type DerivedTask,
+  type DerivedTaskInput,
+  type DerivedTaskRow,
+  type DerivedTaskMode,
+} from './derived-task.js'
+
+export {
+  createTransformationRepository,
+  type TransformationRepository,
+  type TransformationRecord,
+  type TransformationInput,
+  type TransformationRow,
+} from './transformations.js'
+
+export {
   createRegisteredConnectorRepository,
   type RegisteredConnectorRepository,
   type RegisteredConnector,
   type RegisteredConnectorInput,
   type RegisteredConnectorRow,
 } from './registered-connector.js'
+
+export {
+  createDerivedProcessingLogRepository,
+  type DerivedProcessingLogRepository,
+  type DerivedProcessingLogRow,
+  type DerivedProcessingLogEntry,
+  type MarkProcessedInput,
+  type ProcessingLogStats,
+} from './derived-processing-log.js'
+
+export {
+  createCodingDecisionsRepository,
+  type CodingDecisionsRepository,
+  type CodingDecisionRow,
+  type CodingDecisionRowWithRank,
+  type CodingDecisionRowWithSimilarity,
+  type DecisionSearchOptions,
+  type DecisionSimilarityOptions,
+} from './coding-decisions.js'

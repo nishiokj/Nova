@@ -5,7 +5,7 @@
  */
 
 import { generateCanonicalId, sourceRefToKey } from '../../ids.js'
-import type { Identity, Message, Conversation } from '../../models/canonical.js'
+import type { CanonicalSourceRef, Message, Conversation } from '../../models/canonical.js'
 import type { Transformation, TransformResult, TransformOutput } from '../../transform/types.js'
 import { IMessageSourceSchema, IChatSourceSchema, type IMessageSource, type IChatSource } from './schemas.js'
 
@@ -16,7 +16,7 @@ function createSourceRef(
   entityType: string,
   sourceId: string,
   sourceVersion?: string
-): Identity['source_refs'][0] {
+): CanonicalSourceRef {
   return {
     connector: 'imessage',
     account_id: accountId,
@@ -27,7 +27,7 @@ function createSourceRef(
   }
 }
 
-function createBaseEntity(id: string, sourceRef: Identity['source_refs'][0]) {
+function createBaseEntity(id: string, sourceRef: CanonicalSourceRef) {
   const now = new Date().toISOString()
   return {
     id,
@@ -50,38 +50,6 @@ function normalizeContactId(id: string): string {
   return id.replace(/[^\d+]/g, '')
 }
 
-/**
- * Build an Identity entity from a contact ID (phone or email).
- */
-function buildIdentity(
-  accountId: string,
-  contactId: string
-): { entity: Identity; output: TransformOutput } {
-  const normalizedId = normalizeContactId(contactId)
-  const sourceRef = createSourceRef(accountId, 'contact', normalizedId)
-
-  const isEmail = contactId.includes('@')
-
-  const identity: Identity = {
-    ...createBaseEntity(generateCanonicalId(), sourceRef),
-    entity_type: 'identity',
-    platform: 'imessage',
-    platform_user_id: normalizedId,
-    display_name: contactId, // Use original as display name
-    email: isEmail ? contactId.toLowerCase() : undefined,
-  }
-
-  return {
-    entity: identity,
-    output: {
-      entityType: 'identity',
-      data: identity,
-      displayText: contactId,
-      sourceRefKey: sourceRefToKey(sourceRef),
-    },
-  }
-}
-
 // ============ Transformations ============
 
 /**
@@ -95,10 +63,12 @@ export const imessageMessageTransform: Transformation<IMessageSource> = {
     entityType: 'message',
   },
   inputSchema: IMessageSourceSchema,
-  outputType: 'message',
+  outputType: ['conversation', 'message'],
 
   transform(source, ctx): TransformResult {
     const sourceRef = createSourceRef(ctx.accountId, 'message', source.guid)
+    const conversationSourceRef = createSourceRef(ctx.accountId, 'chat', source.chat.guid)
+    const conversationSourceRefKey = sourceRefToKey(conversationSourceRef)
 
     // Build the canonical message
     const message: Message = {
@@ -129,6 +99,10 @@ export const imessageMessageTransform: Transformation<IMessageSource> = {
         send_effect: source.send_effect,
         reaction_to: source.reaction_to,
         reply_to: source.reply_to,
+        conversation_source_ref_key: conversationSourceRefKey,
+        ...(source.text_truncated ? { text_truncated: true } : {}),
+        ...(source.text_original_bytes != null ? { text_original_bytes: source.text_original_bytes } : {}),
+        ...(source.text_bytes != null ? { text_bytes: source.text_bytes } : {}),
       },
     }
 
@@ -139,26 +113,24 @@ export const imessageMessageTransform: Transformation<IMessageSource> = {
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    const related: TransformOutput[] = []
-
-    // Create identity for the other party (not "me")
-    if (!source.is_from_me && source.sender.id !== 'unknown') {
-      const senderIdentity = buildIdentity(ctx.accountId, source.sender.id)
-      related.push(senderIdentity.output)
-      message.sender_identity_id = senderIdentity.entity.id
-    }
-
-    // For messages I sent, create identity for the chat recipient
-    // (use chat.identifier as the recipient)
-    if (source.is_from_me && source.chat.identifier) {
-      const recipientIdentity = buildIdentity(ctx.accountId, source.chat.identifier)
-      related.push(recipientIdentity.output)
-      message.recipient_identity_ids.push(recipientIdentity.entity.id)
-    }
-
     return {
       primary,
-      related: related.length > 0 ? related : undefined,
+      related: [{
+        entityType: 'conversation',
+        data: {
+          ...createBaseEntity(generateCanonicalId(), conversationSourceRef),
+          entity_type: 'conversation',
+          platform: 'imessage',
+          message_ids: [],
+          message_count: 0,
+          participants: [],
+          started_at: source.timestamp,
+          topic: source.chat.display_name ?? source.chat.identifier,
+          is_archived: false,
+        } satisfies Conversation,
+        displayText: source.chat.display_name ?? source.chat.identifier,
+        sourceRefKey: conversationSourceRefKey,
+      }],
     }
   },
 
@@ -216,16 +188,8 @@ export const imessageChatTransform: Transformation<IChatSource> = {
       sourceRefKey: sourceRefToKey(sourceRef),
     }
 
-    // Create identities for all participants
-    const related: TransformOutput[] = []
-    for (const participant of source.participants) {
-      const identity = buildIdentity(ctx.accountId, participant)
-      related.push(identity.output)
-    }
-
     return {
       primary,
-      related: related.length > 0 ? related : undefined,
     }
   },
 

@@ -21,7 +21,8 @@ import type {
   ResponseData,
 } from './types.js';
 
-export * from './types.js';
+export * from './types.js'
+export type { Attachment } from './types.js';
 
 // Valid bridge event types for runtime validation
 const VALID_EVENT_TYPES = new Set<BridgeEventType>([
@@ -346,6 +347,79 @@ export class HarnessClient extends EventEmitter {
     error?: string;
   }> {
     return this.sendAuthCommand('set_dangerous_mode', { enabled });
+  }
+
+  // =========================================================================
+  // Async Session Commands
+  // =========================================================================
+
+  async asyncStart(
+    goal: string,
+    workingDir?: string
+  ): Promise<{ success: boolean; sessionKey?: string; requestId?: string; goal?: string; error?: string }> {
+    const data: Record<string, unknown> = { goal };
+    if (workingDir) data.working_dir = workingDir;
+    return this.sendAuthCommand('async_start', data);
+  }
+
+  async asyncCancel(): Promise<{ success: boolean; error?: string }> {
+    return this.sendAuthCommand('async_cancel', {});
+  }
+
+  async asyncStatus(): Promise<{
+    success: boolean;
+    running?: boolean;
+    requestId?: string;
+    goal?: string;
+    startedAt?: number;
+    elapsedMs?: number;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('async_status', {});
+  }
+
+  // =========================================================================
+  // Watcher Commands
+  // =========================================================================
+
+  async watcherStatus(): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
+    return this.sendAuthCommand('watcher_status', {});
+  }
+
+  async watcherContext(): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
+    return this.sendAuthCommand('watcher_context', {});
+  }
+
+  async watcherSearch(query: string): Promise<{ success: boolean; results?: unknown[]; error?: string }> {
+    return this.sendAuthCommand('watcher_search', { query });
+  }
+
+  async watcherDecisions(): Promise<{ success: boolean; decisions?: unknown[]; error?: string }> {
+    return this.sendAuthCommand('watcher_decisions', {});
+  }
+
+  async watcherInspect(id: string): Promise<{ success: boolean; decision?: Record<string, unknown>; error?: string }> {
+    return this.sendAuthCommand('watcher_inspect', { id });
+  }
+
+  async watcherMemory(): Promise<{ success: boolean; memory?: Record<string, unknown>; error?: string }> {
+    return this.sendAuthCommand('watcher_memory', {});
+  }
+
+  async watcherFocus(topic: string): Promise<{ success: boolean; topic?: string; error?: string }> {
+    return this.sendAuthCommand('watcher_focus', { topic });
+  }
+
+  async watcherDefocus(): Promise<{ success: boolean; error?: string }> {
+    return this.sendAuthCommand('watcher_defocus', {});
+  }
+
+  async watcherReanchor(goal: string): Promise<{ success: boolean; goal?: string; error?: string }> {
+    return this.sendAuthCommand('watcher_reanchor', { goal });
+  }
+
+  async watcherSummarize(): Promise<{ success: boolean; ledger?: Record<string, unknown>; error?: string }> {
+    return this.sendAuthCommand('watcher_summarize', {});
   }
 
   // =========================================================================

@@ -9,7 +9,7 @@ import type { ConnectorType } from '../../ids.js'
 import { generateCanonicalId } from '../../ids.js'
 import type { RepositoryContext } from './types.js'
 
-export type AuthType = 'oauth2' | 'api_key' | 'basic' | 'token'
+export type AuthType = 'oauth2' | 'api_key' | 'basic' | 'token' | 'local'
 
 /**
  * Account credentials (encrypted).

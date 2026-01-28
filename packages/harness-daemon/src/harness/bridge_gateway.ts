@@ -58,17 +58,38 @@ interface HarnessLike {
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
   getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
+  ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): void;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
   getPermissionChecker?(): PermissionChecker;  // DEPRECATED: Use getSessionPermissionChecker instead
   getSessionPermissionChecker?(sessionKey: string): PermissionChecker | null;  // Per-session permission checker
+  // Watcher CLI methods
+  watcherStatus?(sessionKey: string): Record<string, unknown>;
+  watcherContext?(sessionKey: string): Record<string, unknown>;
+  watcherSearch?(sessionKey: string, query: string): Promise<Record<string, unknown>>;
+  watcherDecisions?(sessionKey: string): Promise<Record<string, unknown>>;
+  watcherInspect?(sessionKey: string, id: string): Promise<Record<string, unknown>>;
+  watcherMemory?(sessionKey: string): Record<string, unknown>;
+  watcherFocus?(sessionKey: string, topic: string): Record<string, unknown>;
+  watcherDefocus?(sessionKey: string): Record<string, unknown>;
+  watcherReanchor?(sessionKey: string, goal: string): Record<string, unknown>;
+  watcherSummarize?(sessionKey: string): Record<string, unknown>;
+  /** Create an LLM-backed watcher stopHook for a session. */
+  createWatcherStopHookForSession?(sessionKey: string, goal: string, workingDir: string): Promise<import('orchestrator').StopHookHandler>;
 }
 
 interface RalphLoopInfo {
   requestId: string;
   cancelled: boolean;
+}
+
+interface AsyncRunInfo {
+  requestId: string;
+  goal: string;
+  cancelled: boolean;
+  startedAt: number;
 }
 
 interface ConnectionState {
@@ -79,6 +100,7 @@ interface ConnectionState {
   activeRequestId: string | null;
   planMode: boolean;
   ralphLoop: RalphLoopInfo | null;
+  asyncRun: AsyncRunInfo | null;
 }
 
 export class BridgeGateway {
@@ -117,6 +139,9 @@ export class BridgeGateway {
 
   handleDisconnect(connectionId: string): void {
     const state = this.connections.get(connectionId);
+    if (state) {
+      state.asyncRun = null;
+    }
     // Use lastSessionKey as fallback - session_close may have nulled sessionKey but we still need cleanup
     const sessionKeyToClose = state?.sessionKey ?? state?.lastSessionKey;
     if (sessionKeyToClose) {
@@ -275,6 +300,47 @@ export class BridgeGateway {
         case 'set_dangerous_mode':
           this.handleSetDangerousMode(connectionId, command.data);
           return;
+        // Async session commands
+        case 'async_start':
+          void this.handleAsyncStart(connectionId, command.data, state);
+          return;
+        case 'async_cancel':
+          this.handleAsyncCancel(connectionId, state);
+          return;
+        case 'async_status':
+          this.handleAsyncStatus(connectionId, state);
+          return;
+        // Watcher commands
+        case 'watcher_status':
+          this.handleWatcherStatus(connectionId, state);
+          return;
+        case 'watcher_context':
+          this.handleWatcherContext(connectionId, state);
+          return;
+        case 'watcher_search':
+          void this.handleWatcherSearch(connectionId, command.data, state);
+          return;
+        case 'watcher_decisions':
+          void this.handleWatcherDecisions(connectionId, state);
+          return;
+        case 'watcher_inspect':
+          void this.handleWatcherInspect(connectionId, command.data, state);
+          return;
+        case 'watcher_memory':
+          this.handleWatcherMemory(connectionId, state);
+          return;
+        case 'watcher_focus':
+          this.handleWatcherFocus(connectionId, command.data, state);
+          return;
+        case 'watcher_defocus':
+          this.handleWatcherDefocus(connectionId, state);
+          return;
+        case 'watcher_reanchor':
+          this.handleWatcherReanchor(connectionId, command.data, state);
+          return;
+        case 'watcher_summarize':
+          this.handleWatcherSummarize(connectionId, state);
+          return;
         case 'shutdown':
           this.sendError(connectionId, 'Shutdown is not supported via bridge');
           return;
@@ -327,13 +393,16 @@ export class BridgeGateway {
       graphd.sessionUpdateStatus(sessionKey, 'active');
     }
 
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir: state.workingDir ?? this.workingDir,
+      includeUserPreferences: true,
+    });
+
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
 
     // Load and emit per-agent-type model selections if available
     if (graphd) {
-      this.hydrateSessionModelSelections(sessionKey);
-
       // Send persisted selections directly to this connection to avoid session-channel races
       const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
       const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
@@ -381,30 +450,6 @@ export class BridgeGateway {
     }
   }
 
-  private hydrateSessionModelSelections(sessionKey: string): void {
-    const graphd = this.harness.getGraphD?.();
-    if (!graphd) {
-      return;
-    }
-
-    const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
-    const modelSelectionsMap = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections');
-
-    if (!modelSelectionsMap) {
-      return;
-    }
-
-    for (const [agentType, selection] of Object.entries(modelSelectionsMap)) {
-      if (selection?.provider && selection?.model) {
-        const isHidden = hiddenModels.some((hidden) => hidden.trim().toLowerCase() === selection.model.trim().toLowerCase());
-        if (!isHidden) {
-          this.harness.setSessionSelectedModel?.(sessionKey, agentType, selection);
-        }
-      }
-    }
-    graphd.sessionUpdateMetadata(sessionKey, { model_selections: modelSelectionsMap });
-  }
-
   private handleSendText(
     connectionId: string,
     data: Record<string, unknown> | undefined,
@@ -417,12 +462,21 @@ export class BridgeGateway {
       profiler.end('handleSendText', 'handler');
       return;
     }
+
+    // Per-request working_dir takes precedence over init-time state, which takes precedence over daemon default
+    const requestWorkingDir = typeof data?.working_dir === 'string' && data.working_dir.length > 0
+      ? data.working_dir
+      : null;
+    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
+
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir,
+      includeUserPreferences: true,
+    });
+
     // Check 'standard' agent type selection - this is the main/default that must be set
     let activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
     if (!activeSelection?.model || !activeSelection?.provider) {
-      // Session may have been evicted after timeout - try to hydrate from DB before erroring
-      this.hydrateSessionModelSelections(sessionKey);
-      // Re-check after hydration attempt
       activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
       if (!activeSelection?.model || !activeSelection?.provider) {
         this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
@@ -441,12 +495,6 @@ export class BridgeGateway {
       this.sendError(connectionId, `No API key configured for provider: ${activeSelection.provider}`);
       return;
     }
-
-    // Per-request working_dir takes precedence over init-time state, which takes precedence over daemon default
-    const requestWorkingDir = typeof data?.working_dir === 'string' && data.working_dir.length > 0
-      ? data.working_dir
-      : null;
-    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
 
     const text = String(data?.text ?? '');
     if (!text.trim()) {
@@ -1159,8 +1207,9 @@ export class BridgeGateway {
     // closeSession handles persist + marking inactive
     this.harness.closeSession?.(sessionKey);
 
-    // Clear the connection's session reference
+    // Clear the connection's session and async references
     state.sessionKey = null;
+    state.asyncRun = null;
 
     this.sendAuthResponse(connectionId, 'session_close', {
       success: true,
@@ -1384,11 +1433,13 @@ export class BridgeGateway {
     const agentType = typeof data?.agent_type === 'string' ? data.agent_type : null;
     const returnAll = data?.all === true || !agentType;
 
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir: state.workingDir ?? this.workingDir,
+      includeUserPreferences: true,
+    });
+
     if (returnAll) {
       const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
-      if (existingSelections.size === 0) {
-        this.hydrateSessionModelSelections(sessionKey);
-      }
       // Return all model selections
       const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
       const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
@@ -1405,10 +1456,6 @@ export class BridgeGateway {
 
     // Return selection for specific agent type
     let selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
-    if (!selectedModel) {
-      this.hydrateSessionModelSelections(sessionKey);
-      selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
-    }
 
     this.sendAuthResponse(connectionId, 'get_model', {
       success: true,
@@ -1435,6 +1482,11 @@ export class BridgeGateway {
       this.sendError(connectionId, 'Session not initialized. Call init first.');
       return;
     }
+
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir: state.workingDir ?? this.workingDir,
+      includeUserPreferences: true,
+    });
 
     // Check if already running a Ralph loop
     if (state.ralphLoop) {
@@ -1661,7 +1713,292 @@ export class BridgeGateway {
     });
   }
 
-  private streamRunEvents(requestId: string, handle: AgentRunHandle): void {
+  // =========================================================================
+  // Async Session Handler
+  // =========================================================================
+
+  private async handleAsyncStart(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): Promise<void> {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendError(connectionId, 'Session not initialized. Call init first.');
+      return;
+    }
+
+    // Prevent concurrent async runs
+    if (state.asyncRun) {
+      this.sendError(connectionId, `An async session is already running (request: ${state.asyncRun.requestId}). Wait for it to finish or close the session.`);
+      return;
+    }
+
+    // Allow per-request working_dir overrides (mirrors send_text behavior)
+    const requestWorkingDir =
+      typeof data?.working_dir === 'string' && data.working_dir.length > 0 ? data.working_dir : undefined;
+    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
+    if (requestWorkingDir) {
+      state.workingDir = requestWorkingDir;
+    }
+
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir,
+      includeUserPreferences: true,
+    });
+
+    // Validate model selection
+    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
+    if (!activeSelection?.model || !activeSelection?.provider) {
+      this.sendError(connectionId, 'No model selected. Use /models to choose one before starting an async session.');
+      return;
+    }
+    if (!this.harness.hasApiKey(activeSelection.provider)) {
+      this.sendEvent(connectionId, {
+        type: 'provider_key_required',
+        data: {
+          provider: activeSelection.provider,
+          model: activeSelection.model,
+          reasoning: activeSelection.reasoning,
+        },
+      });
+      this.sendError(connectionId, `No API key configured for provider: ${activeSelection.provider}`);
+      return;
+    }
+
+    // Extract goal from data
+    const goal = typeof data?.goal === 'string' ? data.goal.trim() : '';
+    if (!goal) {
+      this.sendError(connectionId, 'Async session requires a goal.');
+      return;
+    }
+
+    // Create watcher stopHook for this session
+    if (!this.harness.createWatcherStopHookForSession) {
+      this.sendError(connectionId, 'Async sessions are not supported by this harness.');
+      return;
+    }
+
+    try {
+      const stopHook = await this.harness.createWatcherStopHookForSession(sessionKey, goal, workingDir);
+
+      const requestId = generateRequestId();
+      state.activeRequestId = requestId;
+      state.asyncRun = { requestId, goal, cancelled: false, startedAt: Date.now() };
+
+      // Start the harness run with the watcher stopHook and planning objective as input
+      const handle = this.harness.run({
+        requestId,
+        inputText: goal,
+        sessionKey,
+        workingDir,
+        stopHook,
+      });
+
+      this.streamRunEvents(requestId, handle, () => {
+        // Clean up async state when the run completes (success or failure)
+        if (state.asyncRun?.requestId === requestId) {
+          state.asyncRun = null;
+        }
+        if (state.activeRequestId === requestId) {
+          state.activeRequestId = null;
+        }
+      });
+
+      // Notify client that async session started
+      this.sendAuthResponse(connectionId, 'async_start', {
+        success: true,
+        sessionKey,
+        requestId,
+        goal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      state.asyncRun = null;
+      this.sendError(connectionId, `Failed to start async session: ${message}`);
+    }
+  }
+
+  private handleAsyncCancel(connectionId: string, state: ConnectionState): void {
+    if (!state.asyncRun) {
+      this.sendError(connectionId, 'No async session is currently running.');
+      return;
+    }
+
+    const { requestId, goal } = state.asyncRun;
+    const sessionKey = state.sessionKey;
+
+    // Mark as cancelled so the watcher stopHook can detect it
+    state.asyncRun.cancelled = true;
+
+    // Clear async state
+    state.asyncRun = null;
+    if (state.activeRequestId === requestId) {
+      state.activeRequestId = null;
+    }
+
+    // Emit cancellation response on the session channel
+    this.sendEvent(connectionId, {
+      type: 'response',
+      data: {
+        success: true,
+        content: '',
+        metadata: {
+          kind: 'async_complete',
+          payload: {
+            reason: 'manual_cancel',
+            requestId,
+            goal,
+          },
+        },
+      },
+    }, sessionKey ? sessionChannel(sessionKey) : 'direct');
+  }
+
+  private handleAsyncStatus(connectionId: string, state: ConnectionState): void {
+    if (!state.asyncRun) {
+      this.sendAuthResponse(connectionId, 'async_status', {
+        success: true,
+        running: false,
+      });
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'async_status', {
+      success: true,
+      running: true,
+      requestId: state.asyncRun.requestId,
+      goal: state.asyncRun.goal,
+      startedAt: state.asyncRun.startedAt,
+      elapsedMs: Date.now() - state.asyncRun.startedAt,
+    });
+  }
+
+  // =========================================================================
+  // Watcher Command Handlers
+  // =========================================================================
+
+  private handleWatcherStatus(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_status', { success: false, error: 'No active session' });
+      return;
+    }
+    const result = this.harness.watcherStatus?.(sessionKey) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_status', { success: true, ...result });
+  }
+
+  private handleWatcherContext(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_context', { success: false, error: 'No active session' });
+      return;
+    }
+    const result = this.harness.watcherContext?.(sessionKey) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_context', { success: true, ...result });
+  }
+
+  private async handleWatcherSearch(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): Promise<void> {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_search', { success: false, error: 'No active session' });
+      return;
+    }
+    const query = typeof data?.query === 'string' ? data.query : '';
+    if (!query) {
+      this.sendAuthResponse(connectionId, 'watcher_search', { success: false, error: 'Missing query' });
+      return;
+    }
+    const result = await this.harness.watcherSearch?.(sessionKey, query) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_search', { success: true, ...result });
+  }
+
+  private async handleWatcherDecisions(connectionId: string, state: ConnectionState): Promise<void> {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_decisions', { success: false, error: 'No active session' });
+      return;
+    }
+    const result = await this.harness.watcherDecisions?.(sessionKey) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_decisions', { success: true, ...result });
+  }
+
+  private async handleWatcherInspect(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): Promise<void> {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_inspect', { success: false, error: 'No active session' });
+      return;
+    }
+    const id = typeof data?.id === 'string' ? data.id : '';
+    if (!id) {
+      this.sendAuthResponse(connectionId, 'watcher_inspect', { success: false, error: 'Missing decision id' });
+      return;
+    }
+    const result = await this.harness.watcherInspect?.(sessionKey, id) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_inspect', { success: true, ...result });
+  }
+
+  private handleWatcherMemory(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_memory', { success: false, error: 'No active session' });
+      return;
+    }
+    const result = this.harness.watcherMemory?.(sessionKey) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_memory', { success: true, ...result });
+  }
+
+  private handleWatcherFocus(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_focus', { success: false, error: 'No active session' });
+      return;
+    }
+    const topic = typeof data?.topic === 'string' ? data.topic : '';
+    if (!topic) {
+      this.sendAuthResponse(connectionId, 'watcher_focus', { success: false, error: 'Missing topic' });
+      return;
+    }
+    const result = this.harness.watcherFocus?.(sessionKey, topic) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_focus', { success: true, ...result });
+  }
+
+  private handleWatcherDefocus(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_defocus', { success: false, error: 'No active session' });
+      return;
+    }
+    const result = this.harness.watcherDefocus?.(sessionKey) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_defocus', { success: true, ...result });
+  }
+
+  private handleWatcherReanchor(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_reanchor', { success: false, error: 'No active session' });
+      return;
+    }
+    const goal = typeof data?.goal === 'string' ? data.goal : '';
+    if (!goal) {
+      this.sendAuthResponse(connectionId, 'watcher_reanchor', { success: false, error: 'Missing goal' });
+      return;
+    }
+    const result = this.harness.watcherReanchor?.(sessionKey, goal) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_reanchor', { success: true, ...result });
+  }
+
+  private handleWatcherSummarize(connectionId: string, state: ConnectionState): void {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'watcher_summarize', { success: false, error: 'No active session' });
+      return;
+    }
+    const result = this.harness.watcherSummarize?.(sessionKey) ?? { error: 'Not supported' };
+    this.sendAuthResponse(connectionId, 'watcher_summarize', { success: true, ...result });
+  }
+
+  private streamRunEvents(requestId: string, handle: AgentRunHandle, onComplete?: () => void): void {
     const channel = runChannel(requestId);
     const asyncId = profiler.asyncBegin(`stream:${requestId}`, 'stream');
 
@@ -1685,6 +2022,7 @@ export class BridgeGateway {
           // Errors are already emitted via events.
         }
         profiler.asyncEnd(`stream:${requestId}`, asyncId, 'stream', { eventCount });
+        onComplete?.();
       }
     })();
   }
@@ -1692,7 +2030,7 @@ export class BridgeGateway {
   private getOrCreateConnectionState(connectionId: string): ConnectionState {
     const existing = this.connections.get(connectionId);
     if (existing) return existing;
-    const state: ConnectionState = { sessionKey: null, lastSessionKey: null, workingDir: null, activeRequestId: null, planMode: false, ralphLoop: null };
+    const state: ConnectionState = { sessionKey: null, lastSessionKey: null, workingDir: null, activeRequestId: null, planMode: false, ralphLoop: null, asyncRun: null };
     this.connections.set(connectionId, state);
     return state;
   }

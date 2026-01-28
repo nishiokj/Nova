@@ -1,0 +1,15 @@
+{
+  "id": "01KFWP26DDGPNZKJHAHQD9RH8W",
+  "type": "sync:collect",
+  "payload": {
+    "syncJobId": "01KFWP26D8EMJEP158P69894PW",
+    "connector": "claude_sessions",
+    "accountId": "01KFVRYKRN75P0TSY86PTBK22Z",
+    "jobType": "incremental",
+    "cursor": "{\"projectIndex\":0,\"sessionIndex\":62,\"messageOffset\":20}"
+  },
+  "error": "Failed to start job: 01KFWP26D8EMJEP158P69894PW",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T08:17:29.005Z",
+  "diedAt": "2026-01-26T08:17:39.625Z"
+}

@@ -65,17 +65,17 @@ class TestConnector extends BaseConnector {
     // Register test mapper
     this.registerMapper({
       sourceEntityType: 'issue',
-      targetEntityType: 'task',
+      targetEntityType: 'issue',
       sourceSchema: z.object({
         id: z.number(),
         title: z.string(),
         body: z.string().optional(),
       }),
       map: (source, context): MappedEntity => ({
-        entityType: 'task',
+        entityType: 'issue',
         data: {
           id: 'test-id',
-          entity_type: 'task',
+          entity_type: 'issue',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           source_refs: [context.sourceRef],
@@ -287,7 +287,7 @@ describe('BaseConnector', () => {
     const mapper = connector.getMapper('issue')
     expect(mapper).toBeDefined()
     expect(mapper!.sourceEntityType).toBe('issue')
-    expect(mapper!.targetEntityType).toBe('task')
+    expect(mapper!.targetEntityType).toBe('issue')
   })
 
   test('getMapper returns undefined for unknown type', () => {

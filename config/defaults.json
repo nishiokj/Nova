@@ -133,12 +133,31 @@
       },
       "tools": ["WebFetch", "WebSearch"],
       "output_schema": "agent_action"
+    },
+
+    "watcher": {
+      "$comment": "Oversight agent for async mode. Answers questions, audits, quality gates.",
+      "llm": {
+        "role": "standard",
+        "max_tokens": 32000,
+        "temperature": 0.3
+      },
+      "budget": {
+        "max_iterations": 8,
+        "max_tool_calls": 20,
+        "max_duration_ms": 30000
+      },
+      "tools": ["Read", "Glob", "Grep", "Bash"],
+      "output_schema": "watcher_action"
     }
   },
 
   "tools": {
     "bash_timeout_ms": 120000,
-    "max_output_length": 10000
+    "max_output_length": 10000,
+    "browser": {
+      "default_screenshot_dir": "~/Desktop"
+    }
   },
 
   "graphd": {
@@ -146,6 +165,14 @@
     "host": "127.0.0.1",
     "port": 9444,
     "db_path": "~/.graphd/graphd.db"
+  },
+
+  "entity_graph": {
+    "enabled": true,
+    "database_url": "postgresql://postgres:postgres@localhost:5432/agent_memory",
+    "startup_scan": true,
+    "lease_duration_sec": 30,
+    "lease_wait_timeout_ms": 10000
   },
 
   "context": {

@@ -11,6 +11,7 @@ import type {
   SystemContext,
   UserPrompt,
   ContextWindowMetrics,
+  WatcherDecision,
 } from '../domain/models'
 import { computeSessionInsights } from '../domain/models'
 import type { GraphDSession, GraphDMessage } from './api'
@@ -433,12 +434,39 @@ function createRequestFromEvents(
   }
 }
 
+function extractWatcherDecisions(
+  meta: Record<string, unknown>,
+  createdAt: string
+): WatcherDecision[] {
+  const agentEvents = meta.agent_events as unknown[] | undefined
+  if (!agentEvents || !Array.isArray(agentEvents)) return []
+
+  return agentEvents
+    .filter((e): e is Record<string, unknown> =>
+      (e as Record<string, unknown>).type === 'watcher_decision'
+    )
+    .map((e) => {
+      const data = (e.data ?? {}) as Record<string, unknown>
+      return {
+        timestamp: toISOTimestamp(e.timestamp, createdAt),
+        trigger: (data.trigger as string) ?? 'unknown',
+        action: (data.watcherAction as string) ?? (data.watcher_action as string) ?? 'unknown',
+        question: data.question as string | undefined,
+        answer: data.answer as string | undefined,
+        rationale: (data.rationale as string) ?? '',
+        workItemId: (e.work_item_id as string) ?? (e.workItemId as string) ?? undefined,
+        qualityGate: (data.qualityGate ?? data.quality_gate) as { passed: boolean; issues?: string[] } | undefined,
+      }
+    })
+}
+
 export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] = []): Session {
   const meta = raw.metadata_json ? JSON.parse(raw.metadata_json) : {}
   const createdAt = unixToIso(raw.created_at)
 
   // Parse agent requests from event metadata
   const requests: AgentRequest[] = parseRequestsFromMetadata(meta, raw.session_key, createdAt, messages)
+  const watcherDecisions: WatcherDecision[] = extractWatcherDecisions(meta, createdAt)
 
   // Infer session state from requests if we have them
   const hasRunningRequests = requests.some(r => r.state === 'running')
@@ -469,6 +497,7 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
       ...meta,
     },
     requests,
+    watcherDecisions,
   }
 
   return {

@@ -110,11 +110,17 @@ export interface MicroQueueStats {
  * await queue.stop()
  * ```
  */
+export interface HandlerOptions {
+  /** Override maxJobRuntime for this handler (ms) */
+  timeout?: number
+}
+
 export class MicroQueue {
   private repo: JobQueueRepository
   private config: Required<QueueConfig>
   private workerId: string
   private handlers: Map<string, JobHandler<unknown>>
+  private handlerOptions: Map<string, HandlerOptions>
   private isRunning: boolean = false
   private isStopping: boolean = false
   private currentJob: { id: string; heartbeat: NodeJS.Timeout } | null = null
@@ -125,6 +131,7 @@ export class MicroQueue {
     this.config = { ...DEFAULT_CONFIG, ...config }
     this.workerId = ulid()
     this.handlers = new Map()
+    this.handlerOptions = new Map()
   }
 
   /** Get the unique worker ID for this instance */
@@ -141,11 +148,14 @@ export class MicroQueue {
    * Register a handler for a job type.
    * Only one handler per job type is allowed.
    */
-  register<T>(jobType: string, handler: JobHandler<T>): this {
+  register<T>(jobType: string, handler: JobHandler<T>, options?: HandlerOptions): this {
     if (this.handlers.has(jobType)) {
       throw new Error(`Handler already registered for job type: ${jobType}`)
     }
     this.handlers.set(jobType, handler as JobHandler<unknown>)
+    if (options) {
+      this.handlerOptions.set(jobType, options)
+    }
     return this
   }
 
@@ -153,6 +163,7 @@ export class MicroQueue {
    * Unregister a handler for a job type.
    */
   unregister(jobType: string): boolean {
+    this.handlerOptions.delete(jobType)
     return this.handlers.delete(jobType)
   }
 
@@ -227,6 +238,10 @@ export class MicroQueue {
     const handler = this.handlers.get(queueJob.job_type)
     if (!handler) {
       // No handler registered - mark as dead
+      console.error('[MicroQueue] No handler registered for job type:', {
+        jobId: queueJob.id,
+        jobType: queueJob.job_type,
+      })
       await this.repo.fail(
         queueJob.id,
         `No handler registered for job type: ${queueJob.job_type}`,
@@ -261,10 +276,11 @@ export class MicroQueue {
     }
 
     try {
+      const timeout = this.handlerOptions.get(queueJob.job_type)?.timeout ?? this.config.maxJobRuntime
       const result = await withTimeout(
         handler(job),
-        this.config.maxJobRuntime,
-        `Job ${queueJob.id} exceeded max runtime of ${this.config.maxJobRuntime}ms`
+        timeout,
+        `Job ${queueJob.id} exceeded max runtime of ${timeout}ms`
       )
 
       if (result.success) {
@@ -367,6 +383,15 @@ export class MicroQueue {
 
     const isLastAttempt = queueJob.attempt_count >= this.config.maxAttempts
     const shouldDie = result.noRetry || isLastAttempt
+
+    console.error('[MicroQueue] Job failed:', {
+      jobId: queueJob.id,
+      jobType: queueJob.job_type,
+      attempt: queueJob.attempt_count,
+      maxAttempts: this.config.maxAttempts,
+      willRetry: !shouldDie,
+      error: errorMessage,
+    })
 
     if (shouldDie) {
       await this.repo.fail(queueJob.id, errorMessage, { markDead: true })

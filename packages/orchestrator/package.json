@@ -23,7 +23,8 @@
     "tools": "workspace:*",
     "context": "workspace:*",
     "work": "workspace:*",
-    "comms-bus": "workspace:*"
+    "comms-bus": "workspace:*",
+    "decision-watcher": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

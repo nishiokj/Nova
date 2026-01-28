@@ -1,223 +1,108 @@
 /**
- * Watcher Skill - Meta-agent for monitoring and intervening in agent execution.
+ * Watcher Skill - LLM-backed oversight agent for async multi-agent execution.
  *
- * Minimal implementation:
- * - Prompt in SKILL.md
- * - Structured output schema
- * - GlobalState snapshot helper
+ * The watcher intercepts orchestrator terminal conditions via the StopHookHandler
+ * mechanism, runs as an agent with Bash/Read/Glob/Grep tools, and returns
+ * structured WatcherAction output.
  */
 
-import type { ContextWindowSnapshot, ArtifactItem, StructuredOutputSchema } from 'types';
-
-// ============================================
-// TYPES
-// ============================================
-
-/**
- * Watcher decision output.
- */
-export interface WatcherDecision {
-  action: 'none' | 'compact' | 'enqueue_subagent' | 'snapshot';
-  reason: string;
-  subagentConfig?: {
-    agent: string;
-    goal: string;
-    objective: string;
-  };
-}
-
-/**
- * Uncertainty reduction tracking (0-100 scale per category).
- */
-export interface UncertaintyReduction {
-  structural: number;
-  relational: number;
-  behavioral: number;
-  contractual: number;
-}
-
-/**
- * GlobalState snapshot for watcher input.
- */
-export interface GlobalState {
-  contextUtilization: number;
-  totalArtifacts: number;
-  totalToolCalls: number;
-  totalLlmCalls: number;
-  totalTokens: number;
-  filesModified: string[];
-  filesRead: string[];
-  uncertaintyReduction: UncertaintyReduction;
-}
+import type { StructuredOutputSchema } from 'types';
 
 // ============================================
 // SCHEMA
 // ============================================
 
 /**
- * Structured output schema for watcher decisions.
+ * Structured output schema for watcher actions.
+ * Matches the WatcherAction type in decision-watcher/src/types.ts.
  */
-export const WATCHER_OUTPUT_SCHEMA: StructuredOutputSchema = {
-  name: 'watcher_decision',
+export const WATCHER_ACTION_SCHEMA: StructuredOutputSchema = {
+  name: 'watcher_action',
   strict: true,
   schema: {
     type: 'object',
     properties: {
+      // Standard Agent protocol fields (required for Agent loop to work)
       action: {
         type: 'string',
-        enum: ['none', 'compact', 'enqueue_subagent', 'snapshot'],
-        description: 'The intervention action to take',
+        enum: ['done', 'continue'],
+        description: 'Standard agent action: "done" when decision is ready, "continue" to keep using tools',
+      },
+      response: {
+        type: ['string', 'null'],
+        description: 'Human-readable summary of the watcher decision',
+      },
+      goalStateReached: {
+        type: ['boolean', 'null'],
+        description: 'Set to true when returning the watcher decision',
+      },
+      // Watcher-specific fields
+      watcherAction: {
+        type: 'string',
+        enum: ['answer', 'realign', 'split', 'create_work_item', 'quality_gate', 'escalate', 'continue'],
+        description: 'The watcher decision type',
       },
       reason: {
         type: 'string',
-        description: 'Brief explanation for this decision',
+        description: 'Rationale for this decision',
       },
-      subagentConfig: {
-        type: 'object',
+      answer: {
+        type: ['object', 'null'],
         properties: {
-          agent: { type: 'string', description: 'Agent type to dispatch' },
-          goal: { type: 'string', description: 'High-level goal' },
-          objective: { type: 'string', description: 'Specific objective' },
+          text: { type: 'string', description: 'The answer text to inject' },
+          contextAddendum: { type: ['string', 'null'], description: 'Additional context to append' },
         },
-        required: ['agent', 'goal', 'objective'],
+        required: ['text'],
+        additionalProperties: false,
+      },
+      realign: {
+        type: ['object', 'null'],
+        properties: {
+          systemMessage: { type: 'string', description: 'System message to inject into context' },
+          newGoal: { type: ['string', 'null'], description: 'Replacement goal if the current one has drifted' },
+        },
+        required: ['systemMessage'],
+        additionalProperties: false,
+      },
+      workItems: {
+        type: ['array', 'null'],
+        items: {
+          type: 'object',
+          properties: {
+            goal: { type: 'string', description: 'High-level goal for this work item' },
+            objective: { type: 'string', description: 'Specific objective' },
+            agent: { type: 'string', description: 'Agent type to use' },
+            dependencies: {
+              type: ['array', 'null'],
+              items: { type: 'string' },
+              description: 'Work item IDs this depends on',
+            },
+            targetPaths: {
+              type: ['array', 'null'],
+              items: { type: 'string' },
+              description: 'File paths this work item should focus on',
+            },
+          },
+          required: ['goal', 'objective', 'agent'],
+          additionalProperties: false,
+        },
+        description: 'Work items to create (for split/create_work_item actions)',
+      },
+      qualityGate: {
+        type: ['object', 'null'],
+        properties: {
+          passed: { type: 'boolean', description: 'Whether the quality gate passed' },
+          issues: {
+            type: ['array', 'null'],
+            items: { type: 'string' },
+            description: 'Issues found during quality check',
+          },
+        },
+        required: ['passed'],
         additionalProperties: false,
       },
     },
-    required: ['action', 'reason'],
+    required: ['action', 'response', 'goalStateReached', 'watcherAction', 'reason', 'answer', 'realign', 'workItems', 'qualityGate'],
     additionalProperties: false,
   },
-};
-
-// ============================================
-// HELPERS
-// ============================================
-
-/**
- * Calculate uncertainty reduction from artifacts.
- */
-function calculateUncertaintyReduction(artifacts: ArtifactItem[]): UncertaintyReduction {
-  const counts = { structural: 0, relational: 0, behavioral: 0, contractual: 0 };
-
-  for (const artifact of artifacts) {
-    if (artifact.reduces && artifact.reduces in counts) {
-      counts[artifact.reduces as keyof typeof counts]++;
-    }
-  }
-
-  const total = artifacts.length || 1;
-  return {
-    structural: Math.min(100, (counts.structural / total) * 100),
-    relational: Math.min(100, (counts.relational / total) * 100),
-    behavioral: Math.min(100, (counts.behavioral / total) * 100),
-    contractual: Math.min(100, (counts.contractual / total) * 100),
-  };
-}
-
-/**
- * Create a GlobalState snapshot from context.
- */
-export function createGlobalState(
-  snapshot: ContextWindowSnapshot,
-  metrics: { toolCalls: number; llmCalls: number },
-  filesModified: string[] = []
-): GlobalState {
-  const artifacts = snapshot.items.filter(
-    (item): item is ArtifactItem => item.type === 'artifact'
-  );
-
-  return {
-    contextUtilization: snapshot.metrics.percentageUsed,
-    totalArtifacts: artifacts.length,
-    totalToolCalls: metrics.toolCalls,
-    totalLlmCalls: metrics.llmCalls,
-    totalTokens: snapshot.metrics.inputTokens + snapshot.metrics.outputTokens,
-    filesModified,
-    filesRead: snapshot.readFiles,
-    uncertaintyReduction: calculateUncertaintyReduction(artifacts),
-  };
-}
-
-/**
- * Format GlobalState as a string for the watcher's objective.
- */
-export function formatGlobalStateObjective(state: GlobalState): string {
-  return `Evaluate the following execution state and decide if intervention is needed.
-
-## Current State
-
-- **Context utilization**: ${(state.contextUtilization * 100).toFixed(1)}%
-- **Artifacts discovered**: ${state.totalArtifacts}
-- **Tool calls**: ${state.totalToolCalls}
-- **LLM calls**: ${state.totalLlmCalls}
-- **Total tokens**: ${state.totalTokens}
-- **Files modified**: ${state.filesModified.length > 0 ? state.filesModified.join(', ') : 'none'}
-- **Files read**: ${state.filesRead.length}
-
-## Uncertainty Reduction
-
-- Structural: ${state.uncertaintyReduction.structural.toFixed(0)}%
-- Relational: ${state.uncertaintyReduction.relational.toFixed(0)}%
-- Behavioral: ${state.uncertaintyReduction.behavioral.toFixed(0)}%
-- Contractual: ${state.uncertaintyReduction.contractual.toFixed(0)}%
-
-Based on this state, decide: compact, enqueue_subagent, snapshot, or none.`;
-}
-
-// ============================================
-// WATCHER AGENT CONFIG
-// ============================================
-
-/**
- * Watcher agent configuration.
- * No tools - uses structured output for decisions.
- */
-export const WATCHER_AGENT_CONFIG = {
-  type: 'watcher',
-  systemPrompt: `You are a meta-agent observing the execution state of another agent. Your job is to decide if intervention is needed.
-
-## Decision Criteria
-
-### Compact (action: 'compact')
-- Context utilization > 75%
-- Many file contents could be deduplicated
-
-### Enqueue Subagent (action: 'enqueue_subagent')
-- Primary agent is stuck or looping
-- A specific subtask would benefit from focused exploration
-
-### Snapshot (action: 'snapshot')
-- Significant milestone reached
-- About to attempt risky operation
-
-### None (action: 'none')
-- Execution is progressing normally
-- No clear benefit to intervention
-
-## Principles
-1. Minimal intervention - Only act when there's clear benefit
-2. Preserve momentum - Don't interrupt productive work
-3. Trust the primary - You're a safety net, not a micromanager`,
-  tools: [], // No tools - structured output only
-  budget: {
-    maxIterations: 1, // Single decision
-    maxToolCalls: 0,
-    maxDurationMs: 10_000,
-  },
-  outputSchema: WATCHER_OUTPUT_SCHEMA,
-};
-
-// ============================================
-// THRESHOLDS
-// ============================================
-
-/**
- * Default thresholds for triggering watcher evaluation.
- */
-export const WATCHER_THRESHOLDS = {
-  /** Context usage percentage that triggers watcher */
-  contextUsagePercent: 0.6,
-  /** Minimum iterations between watcher runs */
-  minIterationGap: 5,
-  /** Artifact count that triggers watcher */
-  artifactThreshold: 15,
 };

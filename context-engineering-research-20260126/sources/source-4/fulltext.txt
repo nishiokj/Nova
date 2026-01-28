@@ -1,0 +1,902 @@
+
+		
+		
+		
+				
+			
+				
+				
+			
+		
+		
+
+		
+      
+		
+
+	
+	
+		
+			
+				
+					
+					
+	
+					
+					
+										
+
+					
+
+				
+				
+				
+					
+						
+							MENUFeatured
+Open source
+Computer vision
+Hardware
+Natural language processing
+Speech & Audio
+ML applications
+
+							
+								Featured
+Open source
+Computer vision
+Hardware
+Natural language processing
+Speech & Audio
+ML applications
+
+							
+						
+						
+				
+				
+
+				
+					
+					
+												
+												
+
+					
+				
+
+
+			
+		
+
+		
+
+		
+	
+
+
+
+
+
+    
+        
+            
+                Close
+            
+        
+        
+                        
+                
+
+Popular Posts				
+
+
+                
+
+                
+
+                                                
+                            
+                                
+                            
+                        
+                        
+                        
+                    
+                                
+                                    
+                                     
+   
+	 
+
+	
+	
+		ML applications	
+   
+	                                    
+                                
+								
+								
+									Jan 26, 2026								
+
+                                
+                                    
+                                    NVIDIA Revolutionizes Climate Tech with ‘Earth-2’: The World’s First Fully Open Accelerated AI Weather Stack
+                                    
+                                
+								
+								
+                                
+                            
+            
+
+                    
+                
+                
+
+					
+					
+                				
+
+
+                
+
+                
+
+                                                
+                            
+                                
+                            
+                        
+                        
+                        
+                    
+                                
+                                    
+                                     
+   
+	 
+
+	
+	
+		Computer vision	
+   
+	                                    
+                                
+								
+								
+									Jan 26, 2026								
+
+                                
+                                    
+                                    TikTok Data Center Outage Triggers Trust Crisis for New US Owners
+                                    
+                                
+								
+								
+                                
+                            
+            
+
+                    
+                
+                
+
+					
+					
+                				
+
+
+                
+
+                
+
+                                                
+                            
+                                
+                            
+                        
+                        
+                        
+                    
+                                
+                                    
+                                     
+   
+	 
+
+	
+	
+		Hardware	
+   
+	                                    
+                                
+								
+								
+									Jan 26, 2026								
+
+                                
+                                    
+                                    AI Is Causing Cultural Stagnation, Researchers Find
+                                    
+                                
+								
+								
+                                
+                            
+            
+
+                    
+                
+                
+
+					
+					
+                				
+
+
+                
+
+                
+
+                                                
+                            
+                                
+                            
+                        
+                        
+                        
+                    
+                                
+                                    
+                                     
+   
+	 
+
+	
+	
+		Open source	
+   
+	                                    
+                                
+								
+								
+									Jan 26, 2026								
+
+                                
+                                    
+                                    Apple’s new AirTag is louder and can be found across longer distances
+                                    
+                                
+								
+								
+                                
+                            
+            
+
+                    
+                
+                
+
+					
+					
+                                        
+                        
+                    
+    
+
+
+
+
+
+
+
+
+
+	
+		
+			
+		
+			
+								
+
+
+		
+
+	
+
+
+	
+		
+
+		
+		
+			
+
+				
+					
+						
+
+														
+								 
+   
+	 
+
+	
+	
+		ML applications	
+   
+								
+								
+							
+							
+							Agentic Context Engineering (ACE): Self-Improving LLMs via Evolving Contexts, Not Fine-Tuning							
+
+							
+								
+
+									
+																			
+									
+									
+
+										
+											Editorial Team										
+
+										
+											October 10, 2025
+											 4 Min Read
+										
+									
+								
+
+									
+
+							
+						
+					  
+
+				
+							
+				
+				
+								
+									
+									
+								
+				
+					
+					
+						
+						 
+
+
+TL;DR: A team of researchers from Stanford University, SambaNova Systems and UC Berkeley introduce ACE framework that improves LLM performance by editing and growing the input context instead of updating model weights. Context is treated as a living “playbook” maintained by three roles—Generator, Reflector, Curator—with small delta items merged incrementally to avoid brevity bias and context collapse. Reported gains: +10.6% on AppWorld agent tasks, +8.6% on finance reasoning, and ~86.9% average latency reduction vs strong context-adaptation baselines. On the AppWorld leaderboard snapshot (Sept 20, 2025), ReAct+ACE (59.4%) ≈ IBM CUGA (60.3%, GPT-4.1) while using DeepSeek-V3.1.
+
+https://arxiv.org/pdf/2510.04618
+
+What ACE changes?
+ACE positions “context engineering” as a first-class alternative to parameter updates. Instead of compressing instructions into short prompts, ACE accumulates and organizes domain-specific tactics over time, arguing that higher context density improves agentic tasks where tools, multi-turn state, and failure modes matter.
+Method: Generator → Reflector → Curator
+
+Generator executes tasks and produces trajectories (reasoning/tool calls), exposing helpful vs harmful moves.
+Reflector distills concrete lessons from those traces.
+Curator converts lessons into typed delta items (with helpful/harmful counters) and merges them deterministically, with de-duplication and pruning to keep the playbook targeted.
+
+Two design choices—incremental delta updates and grow-and-refine—preserve useful history and prevent “context collapse” from monolithic rewrites. To isolate context effects, the research team fixes the same base LLM (non-thinking DeepSeek-V3.1) across all three roles. 
+Benchmarks
+AppWorld (agents): Built on the official ReAct baseline, ReAct+ACE outperforms strong baselines (ICL, GEPA, Dynamic Cheatsheet), with +10.6% average over selected baselines and ~+7.6% over Dynamic Cheatsheet in online adaptation. On the Sept 20, 2025 leaderboard, ReAct+ACE 59.4% vs IBM CUGA 60.3% (GPT-4.1); ACE surpasses CUGA on the harder test-challenge split, while using a smaller open-source base model.
+Finance (XBRL): On FiNER token tagging and XBRL Formula numerical reasoning, ACE reports +8.6% average over baselines with ground-truth labels for offline adaptation; it also works with execution-only feedback, though quality of signals matters. 
+
+https://arxiv.org/pdf/2510.04618
+
+
+https://arxiv.org/pdf/2510.04618
+
+Cost and latency
+ACE’s non-LLM merges plus localized updates reduce adaptation overhead substantially:
+
+Offline (AppWorld): −82.3% latency and −75.1% rollouts vs GEPA.
+Online (FiNER): −91.5% latency and −83.6% token cost vs Dynamic Cheatsheet.
+
+
+https://arxiv.org/pdf/2510.04618
+
+Key Takeaways
+
+ACE = context-first adaptation: Improves LLMs by incrementally editing an evolving “playbook” (delta items) curated by Generator→Reflector→Curator, using the same base LLM (non-thinking DeepSeek-V3.1) to isolate context effects and avoid collapse from monolithic rewrites. 
+Measured gains: ReAct+ACE reports +10.6% over strong baselines on AppWorld and achieves 59.4% vs IBM CUGA 60.3% (GPT-4.1) on the Sept 20, 2025 leaderboard snapshot; finance benchmarks (FiNER + XBRL Formula) show +8.6% average over baselines. 
+Lower overhead than reflective-rewrite baselines: ACE reduces adaptation latency by ~82–92% and rollouts/token cost by ~75–84%, contrasting with Dynamic Cheatsheet’s persistent memory and GEPA’s Pareto prompt evolution approaches. 
+
+Conclusion
+ACE positions context engineering as a first-class alternative to weight updates: maintain a persistent, curated playbook that accumulates task-specific tactics, yielding measurable gains on AppWorld and finance reasoning while cutting adaptation latency and token rollouts versus reflective-rewrite baselines. The approach is practical—deterministic merges, delta items, and long-context–aware serving—and its limits are clear: outcomes track feedback quality and task complexity. If adopted, agent stacks may “self-tune” primarily through evolving context rather than new checkpoints.
+
+Check out the PAPER here. Feel free to check out our GitHub Page for Tutorials, Codes and Notebooks. Also, feel free to follow us on Twitter and don’t forget to join our 100k+ ML SubReddit and Subscribe to our Newsletter. Wait! are you on telegram? now you can join us on telegram as well.
+
+
+
+
+
+
+
+
+
+Asif Razzaq is the CEO of Marktechpost Media Inc.. As a visionary entrepreneur and engineer, Asif is committed to harnessing the potential of Artificial Intelligence for social good. His most recent endeavor is the launch of an Artificial Intelligence Media Platform, Marktechpost, which stands out for its in-depth coverage of machine learning and deep learning news that is both technically sound and easily understandable by a wide audience. The platform boasts of over 2 million monthly views, illustrating its popularity among audiences.
+
+
+
+
+
+
+
+
+ 🙌 Follow MARKTECHPOST: Add us as a preferred source on Google.
+
+
+Source link 
+						
+						
+
+					
+				
+				
+				
+							
+			
+					   
+							    
+	
+    
+
+            
+        
+                      
+                          
+                    
+            
+			
+								Previous Post			
+			
+            Suspect Fantasized About Arson on ChatGPT Before Setting Deadly Fire That Killed 12, Prosecutors Say
+          
+        
+
+      
+	  
+            	  
+      
+	  
+        
+                      
+                         
+                    
+            
+			
+						Next Post			
+			
+            Kyndryl sued for firing non-white workers, disabled vet • The Register
+          
+        
+      
+      
+
+    
+    
+
+  			
+			
+
+						
+					
+			
+
+   
+      
+         SearchSearch
+
+Recent PostsNVIDIA Revolutionizes Climate Tech with ‘Earth-2’: The World’s First Fully Open Accelerated AI Weather Stack
+TikTok Data Center Outage Triggers Trust Crisis for New US Owners
+AI Is Causing Cultural Stagnation, Researchers Find
+Apple’s new AirTag is louder and can be found across longer distances
+Doom runs inside a design modeler • The Register
+Archives	January 2026
+	December 2025
+	November 2025
+	October 2025
+	September 2025
+	August 2025
+	July 2025
+	June 2025
+	May 2025
+	April 2025
+	March 2025
+	February 2025
+	January 2025
+	December 2024
+	November 2024
+	October 2024
+	September 2024
+	August 2024
+	July 2024
+	June 2024
+	May 2024
+	April 2024
+Categories	Computer vision
+
+	Featured
+
+	Hardware
+
+	ML applications
+
+	Natural language processing
+
+	Open source
+
+	Speech & Audio
+
+       
+   
+
+		
+		
+				
+			
+			
+				
+					Related Posts    
+	
+	
+
+
+	
+
+	
+
+
+			
+				
+					
+				
+			
+		
+			
+		
+				 
+
+				
+                    2.6k Views
+                
+                
+                
+                    5 Minute read
+                
+
+
+            	
+						
+				
+					
+						Transforming Partial Differential Equations PDE Solutions with ‘TENG’: Harnessing Machine Learning for Enhanced Accuracy and Efficiency
+					
+				
+
+				
+					Partial differential equations (PDEs) are required for modeling dynamic systems in science and engineering,
+				
+
+				
+				
+					
+						By Editorial Team					
+
+					
+						April 22, 2024					
+				
+				
+
+					
+			
+
+
+		
+	
+	
+				
+				
+	
+	
+	
+        
+	
+	
+
+
+	
+
+	
+
+
+			
+				
+					
+				
+			
+		
+			
+		
+				 
+
+				
+                    2.6k Views
+                
+                
+                
+                    5 Minute read
+                
+
+
+            	
+						
+				
+					
+						Researchers at Stanford University Explore Direct Preference Optimization (DPO): A New Frontier in Machine Learning and Human Feedback
+					
+				
+
+				
+					Exploring the synergy between reinforcement learning (RL) and large language models (LLMs) reveals a
+				
+
+				
+				
+					
+						By Editorial Team					
+
+					
+						April 22, 2024					
+				
+				
+
+					
+			
+
+
+		
+	
+	
+				
+				
+	
+	
+	
+        
+	
+	
+
+
+	
+
+	
+
+
+			
+				
+					
+				
+			
+		
+			
+		
+				 
+
+				
+                    2.6k Views
+                
+                
+                
+                    5 Minute read
+                
+
+
+            	
+						
+				
+					
+						Formal Interaction Model (FIM): A Mathematics-based Machine Learning Model that Formalizes How AI and Users Shape One Another
+					
+				
+
+				
+					Machine learning has become an important domain that has contributed to developing platforms and
+				
+
+				
+				
+					
+						By Editorial Team					
+
+					
+						April 22, 2024					
+				
+				
+
+					
+			
+
+
+		
+	
+	
+				
+				
+	
+	
+	
+    				
+			
+			
+		
+			 
+	
+
+
+
+
+
+
+
+
+
+
+	
+    
+		        
+            
+                
+				
+					                    
+                        
+
+
+Please be advised that Meta Ai Labs™ is not affiliated with, endorsed by, or connected to Meta Platforms, Inc. (formerly Facebook, Inc.) or its associated trademarks. Any use of Meta's trademarks or branding in relation to Meta Ai Labs™ is unauthorized. Thank you for your understanding.
+                    
+					 
+					
+					                    
+						Featured
+Open source
+Computer vision
+Hardware
+Natural language processing
+Speech & Audio
+ML applications
+                    
+					 
+					
+					                    
+						Important LinksHome
+About
+Advertising Solutions
+Privacy
+Terms
+Podcast
+                    
+					 
+					
+										
+					
+					
+                
+            
+        
+				
+            
+                
+				
+					
+					
+					 
+						
+						
+							COPYRIGHT © META AI LABS™ , ALL RIGHT RESERVED						
+
+					
+
+					
+						
+												
+						
+                    
+
+
+                    
+                
+            
+
+            
+        
+	
+    
+	
+	
+	
+		 
+		
+	
+	
+   
+{"prefetch":[{"source":"document","where":{"and":[{"href_matches":"\/*"},{"not":{"href_matches":["\/wp-*.php","\/wp-admin\/*","\/wp-content\/uploads\/*","\/wp-content\/*","\/wp-content\/plugins\/*","\/wp-content\/themes\/minerva\/*","\/*\\?(.+)"]}},{"not":{"selector_matches":"a[rel~=\"nofollow\"]"}},{"not":{"selector_matches":".no-prefetch, .no-prefetch a"}}]},"eagerness":"conservative"}]}
+
+			
+				const lazyloadRunObserver = () => {
+					const lazyloadBackgrounds = document.querySelectorAll( `.e-con.e-parent:not(.e-lazyloaded)` );
+					const lazyloadBackgroundObserver = new IntersectionObserver( ( entries ) => {
+						entries.forEach( ( entry ) => {
+							if ( entry.isIntersecting ) {
+								let lazyloadBackground = entry.target;
+								if( lazyloadBackground ) {
+									lazyloadBackground.classList.add( 'e-lazyloaded' );
+								}
+								lazyloadBackgroundObserver.unobserve( entry.target );
+							}
+						});
+					}, { rootMargin: '200px 0px 200px 0px' } );
+					lazyloadBackgrounds.forEach( ( lazyloadBackground ) => {
+						lazyloadBackgroundObserver.observe( lazyloadBackground );
+					} );
+				};
+				const events = [
+					'DOMContentLoaded',
+					'elementor/lazyload/observe',
+				];
+				events.forEach( ( event ) => {
+					document.addEventListener( event, lazyloadRunObserver );
+				} );
+			
+			
+
+
+/* <![CDATA[ */
+wp.i18n.setLocaleData( { 'text direction\u0004ltr': [ 'ltr' ] } );
+/* ]]> */
+
+
+
+/* <![CDATA[ */
+var wpcf7 = {
+    "api": {
+        "root": "https:\/\/metaailabs.com\/wp-json\/",
+        "namespace": "contact-form-7\/v1"
+    }
+};
+/* ]]> */
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* <![CDATA[ */
+var wpcf7_recaptcha = {
+    "sitekey": "6LcMzsMpAAAAAMfSjM4hrRrQt1TcQHGz2R2Ftqxl",
+    "actions": {
+        "homepage": "homepage",
+        "contactform": "contactform"
+    }
+};
+/* ]]> */
+
+
+
+   
+
+
+

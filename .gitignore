@@ -31,6 +31,9 @@ evals/results/*/*/*
 # Graphd database (local cache, not shared)
 .graphd/
 
+# Authentication states (sensitive cookies)
+auth-states/
+
 # Release binaries
 dist/binaries/
 *.exe
@@ -61,3 +64,4 @@ htmlcovrepo-test/
 # local worktrees
 /tui-ts/**/repo-test/
 .claude
+.envrc

@@ -12,6 +12,10 @@ import type { SyncTask, SyncTaskRepository } from '../db/repositories/sync-task.
 import type { AccountRepository } from '../db/repositories/account.js'
 import type { SyncEngine } from './engine.js'
 import type { SyncJob } from '../db/repositories/sync-job.js'
+import type { DerivedTask, DerivedTaskRepository } from '../db/repositories/derived-task.js'
+import type { DerivedJob } from '../db/repositories/derived-job.js'
+import type { DerivedTaskIntegration } from '../derived/integration.js'
+import { isAgentMemoryError } from '../errors/index.js'
 
 // ============ Configuration ============
 
@@ -30,6 +34,184 @@ const DEFAULT_CONFIG: Required<Omit<SchedulerConfig, 'webhookBaseUrl'>> & Pick<S
   webhookBaseUrl: undefined,
 }
 
+const MAX_LOG_STRING_CHARS = 2_000_000
+const MAX_LOG_DEPTH = 6
+const MAX_LOG_ARRAY_LENGTH = 1000
+const MAX_LOG_OBJECT_KEYS = 2000
+
+const ERROR_TOP_LEVEL_KEYS = [
+  'code',
+  'errno',
+  'syscall',
+  'path',
+  'status',
+  'statusCode',
+  'type',
+  'name',
+  'message',
+  'stack',
+] as const
+
+const ERROR_DB_KEYS = [
+  'schema',
+  'table',
+  'column',
+  'constraint',
+  'detail',
+  'hint',
+  'where',
+  'routine',
+  'severity',
+] as const
+
+const ERROR_QUERY_KEYS = ['sql', 'query', 'statement', 'parameters', 'values'] as const
+
+const ERROR_META_KEYS = ['meta', 'data', 'details', 'response', 'request'] as const
+
+function truncateString(value: string): string {
+  if (value.length <= MAX_LOG_STRING_CHARS) return value
+  const omitted = value.length - MAX_LOG_STRING_CHARS
+  return `${value.slice(0, MAX_LOG_STRING_CHARS)}...[truncated ${omitted} chars]`
+}
+
+function sanitizeForLog(value: unknown, seen = new WeakSet<object>(), depth = 0): unknown {
+  if (typeof value === 'string') return truncateString(value)
+  if (typeof value !== 'object' || value === null) return value
+
+  if (seen.has(value)) return '[Circular]'
+  if (depth >= MAX_LOG_DEPTH) return '[MaxDepth]'
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    const limit = Math.min(value.length, MAX_LOG_ARRAY_LENGTH)
+    const items = value.slice(0, limit).map((item) => sanitizeForLog(item, seen, depth + 1))
+    if (value.length > limit) {
+      items.push(`[+${value.length - limit} more items]`)
+    }
+    return items
+  }
+
+  const entries = Object.entries(value)
+  const result: Record<string, unknown> = {}
+  const limit = Math.min(entries.length, MAX_LOG_OBJECT_KEYS)
+  for (let i = 0; i < limit; i++) {
+    const [key, entryValue] = entries[i]
+    result[key] = sanitizeForLog(entryValue, seen, depth + 1)
+  }
+  if (entries.length > limit) {
+    result.__omitted__ = `+${entries.length - limit} keys`
+  }
+  return result
+}
+
+function toError(error: unknown): Error {
+  if (error instanceof Error) return error
+  if (typeof error === 'string') return new Error(error)
+  try {
+    return new Error(JSON.stringify(error))
+  } catch {
+    return new Error(String(error))
+  }
+}
+
+function collectKeys(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  keys: readonly string[]
+): void {
+  for (const key of keys) {
+    if (target[key] === undefined && source[key] !== undefined) {
+      target[key] = source[key]
+    }
+  }
+}
+
+function serializeError(error: unknown): Record<string, unknown> {
+  const err = toError(error)
+  const errAny = err as unknown as Record<string, unknown>
+
+  const output: Record<string, unknown> = {
+    name: err.name,
+    message: err.message,
+    stack: err.stack,
+  }
+
+  if (isAgentMemoryError(err)) {
+    output.code = err.code
+    output.category = err.category
+    output.severity = err.severity
+    output.retryable = err.retryable
+    output.context = err.context
+    output.timestamp = err.timestamp?.toISOString?.() ?? err.timestamp
+  }
+
+  collectKeys(output, errAny, ERROR_TOP_LEVEL_KEYS)
+
+  const db: Record<string, unknown> = {}
+  collectKeys(db, errAny, ERROR_DB_KEYS)
+  if (Object.keys(db).length > 0) {
+    output.db = db
+  }
+
+  const query: Record<string, unknown> = {}
+  collectKeys(query, errAny, ERROR_QUERY_KEYS)
+  if (Object.keys(query).length > 0) {
+    output.query = query
+  }
+
+  const meta: Record<string, unknown> = {}
+  collectKeys(meta, errAny, ERROR_META_KEYS)
+  if (Object.keys(meta).length > 0) {
+    output.meta = meta
+  }
+
+  const cause = (err as { cause?: unknown }).cause
+  if (cause) {
+    output.cause = serializeError(cause)
+  }
+
+  const extras: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(errAny)) {
+    if (output[key] !== undefined) continue
+    if (key === 'cause') continue
+    extras[key] = value
+  }
+  if (Object.keys(extras).length > 0) {
+    output.extras = extras
+  }
+
+  if (error && typeof error === 'object' && error !== err) {
+    const rawExtras: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(error as Record<string, unknown>)) {
+      if (output[key] !== undefined || extras[key] !== undefined) continue
+      rawExtras[key] = value
+    }
+    if (Object.keys(rawExtras).length > 0) {
+      output.raw = rawExtras
+    }
+  }
+
+  return sanitizeForLog(output) as Record<string, unknown>
+}
+
+function buildTaskContext(task: SyncTask): Record<string, unknown> {
+  return sanitizeForLog({
+    id: task.id,
+    connector: task.connector,
+    accountId: task.account_id,
+    syncType: task.sync_type,
+    mode: task.mode,
+    entityTypes: task.entity_types,
+    intervalMs: task.interval_ms,
+    enabled: task.enabled,
+    lastJobId: task.last_job_id,
+    nextRunAt: task.next_run_at,
+    webhookSubscriptionId: task.webhook_subscription_id,
+    createdAt: task.created_at,
+    updatedAt: task.updated_at,
+  }) as Record<string, unknown>
+}
+
 // ============ Events ============
 
 export type SchedulerEvent =
@@ -39,6 +221,9 @@ export type SchedulerEvent =
   | { type: 'scheduler:task_executed'; task: SyncTask; job: SyncJob }
   | { type: 'scheduler:task_disabled'; task: SyncTask }
   | { type: 'scheduler:task_error'; task: SyncTask; error: Error }
+  | { type: 'scheduler:derived_task_executed'; task: DerivedTask; job: DerivedJob }
+  | { type: 'scheduler:derived_task_disabled'; task: DerivedTask }
+  | { type: 'scheduler:derived_task_error'; task: DerivedTask; error: Error }
   | { type: 'scheduler:webhook_subscribed'; task: SyncTask; subscription: WebhookSubscription }
   | { type: 'scheduler:webhook_unsubscribed'; task: SyncTask }
   | { type: 'scheduler:webhook_error'; task: SyncTask; error: Error }
@@ -78,7 +263,9 @@ export class Scheduler {
     private authProvider: AuthProvider,
     private connectors: Map<ConnectorType, Connector>,
     config: SchedulerConfig = {},
-    private accountRepo?: AccountRepository
+    private accountRepo?: AccountRepository,
+    private derivedTaskRepo?: DerivedTaskRepository,
+    private derivedIntegration?: DerivedTaskIntegration
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config }
   }
@@ -93,6 +280,22 @@ export class Scheduler {
     return this
   }
 
+  /**
+   * Register a connector for dynamic registration.
+   * Called when a connector is registered after daemon startup.
+   */
+  registerConnector(connector: Connector): void {
+    this.connectors.set(connector.type, connector)
+  }
+
+  /**
+   * Unload a connector (remove from memory).
+   * Does not affect the database registration.
+   */
+  unloadConnector(type: ConnectorType): boolean {
+    return this.connectors.delete(type)
+  }
+
   // ============ Lifecycle ============
 
   /**
@@ -105,6 +308,15 @@ export class Scheduler {
 
     this.isRunning = true
     this.emit({ type: 'scheduler:started' })
+
+    // Kick an immediate tick so due tasks run without waiting for pollInterval.
+    void this.tick().catch((error) => {
+      console.error('[Scheduler] Initial tick error:', {
+        error: serializeError(error),
+        pollInterval: this.config.pollInterval,
+        batchSize: this.config.batchSize,
+      })
+    })
 
     // Start the poll loop
     this.schedulePoll()
@@ -148,14 +360,28 @@ export class Scheduler {
       try {
         await this.executeTask(task)
         processed++
+        console.log('[Scheduler] Task executed:', {
+          taskId: task.id,
+          connector: task.connector,
+          accountId: task.account_id,
+          syncType: task.sync_type,
+          mode: task.mode,
+        })
       } catch (error) {
+        const err = toError(error)
+        console.error('[Scheduler] Task error:', {
+          task: buildTaskContext(task),
+          error: serializeError(error),
+        })
         this.emit({
           type: 'scheduler:task_error',
           task,
-          error: error instanceof Error ? error : new Error(String(error)),
+          error: err,
         })
       }
     }
+
+    processed += await this.tickDerivedTasks()
 
     this.emit({ type: 'scheduler:tick', processed })
     return processed
@@ -174,10 +400,16 @@ export class Scheduler {
         try {
           await this.subscribeTask(task.id)
         } catch (error) {
+          console.error('[Scheduler] Webhook subscription error:', {
+            task: buildTaskContext(task),
+            webhookBaseUrl: this.config.webhookBaseUrl,
+            error: serializeError(error),
+          })
+          const err = toError(error)
           this.emit({
             type: 'scheduler:webhook_error',
             task,
-            error: error instanceof Error ? error : new Error(String(error)),
+            error: err,
           })
         }
       }
@@ -299,7 +531,11 @@ export class Scheduler {
         await this.tick()
       } catch (error) {
         // Log error but continue polling
-        console.error('[Scheduler] Poll error:', error)
+        console.error('[Scheduler] Poll error:', {
+          error: serializeError(error),
+          pollInterval: this.config.pollInterval,
+          batchSize: this.config.batchSize,
+        })
       }
 
       this.schedulePoll()
@@ -321,9 +557,26 @@ export class Scheduler {
       })
     } else {
       // Look up account's sync_cursor for incremental syncs
-      const cursor = this.accountRepo
+      let cursor = this.accountRepo
         ? (await this.accountRepo.findById(task.account_id))?.sync_cursor
         : undefined
+
+      // Guard against bloated cursors (e.g. from past double-wrapping bugs).
+      // A valid cursor is < 1 KB; anything over 64 KB is corrupt data.
+      if (cursor && Buffer.byteLength(cursor, 'utf8') > 64 * 1024) {
+        console.error('[Scheduler] Corrupt sync_cursor detected, resetting', {
+          taskId: task.id,
+          connector: task.connector,
+          accountId: task.account_id,
+          cursorBytes: Buffer.byteLength(cursor, 'utf8'),
+        })
+        // Clear the corrupt cursor so it doesn't poison future runs
+        if (this.accountRepo) {
+          await this.accountRepo.updateSyncState(task.account_id, undefined)
+        }
+        cursor = undefined
+      }
+
       job = await this.engine.scheduleIncremental(task.connector, task.account_id, cursor, {
         entityTypes: task.entity_types ?? undefined,
       })
@@ -343,6 +596,57 @@ export class Scheduler {
     }
 
     this.emit({ type: 'scheduler:task_executed', task, job })
+  }
+
+  private async tickDerivedTasks(): Promise<number> {
+    if (!this.derivedTaskRepo || !this.derivedIntegration) return 0
+
+    const tasks = await this.derivedTaskRepo.findDueForExecution(this.config.batchSize)
+    let processed = 0
+
+    for (const task of tasks) {
+      try {
+        await this.executeDerivedTask(task)
+        processed++
+        console.log('[Scheduler] Derived task executed:', {
+          taskId: task.id,
+          name: task.name,
+          mode: task.mode,
+        })
+      } catch (error) {
+        const err = toError(error)
+        console.error('[Scheduler] Derived task error:', {
+          task: sanitizeForLog(task),
+          error: serializeError(error),
+        })
+        this.emit({
+          type: 'scheduler:derived_task_error',
+          task,
+          error: err,
+        })
+      }
+    }
+
+    return processed
+  }
+
+  private async executeDerivedTask(task: DerivedTask): Promise<void> {
+    if (!this.derivedIntegration || !this.derivedTaskRepo) {
+      throw new Error('Derived task integration is not configured')
+    }
+
+    const job = await this.derivedIntegration.scheduleTask(this.engine, task)
+    await this.derivedTaskRepo.markExecuted(task.id, job.id)
+
+    if (task.mode === 'once') {
+      await this.derivedTaskRepo.update(task.id, { enabled: false })
+      this.emit({ type: 'scheduler:derived_task_disabled', task })
+    } else if (task.mode === 'recurring' && task.interval_ms) {
+      const nextRunAt = new Date(Date.now() + task.interval_ms)
+      await this.derivedTaskRepo.updateNextRunAt(task.id, nextRunAt)
+    }
+
+    this.emit({ type: 'scheduler:derived_task_executed', task, job })
   }
 
   private emit(event: SchedulerEvent): void {

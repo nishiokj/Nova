@@ -131,7 +131,7 @@ export class Collector {
       account_id: accountId,
       job_type: 'incremental',
       priority: options.priority ?? 0,
-      cursor_state: cursor ? { cursor } : undefined,
+      cursor_state: cursor ? parseCursorForStorage(cursor) : undefined,
       metadata: { entityTypes: options.entityTypes },
     })
 
@@ -210,12 +210,19 @@ export class Collector {
     // Start the job
     const startedJob = await this.syncJobRepo.start(job.id)
     if (!startedJob) {
-      throw new CollectError(`Failed to start job: ${job.id}`)
+      const current = await this.syncJobRepo.findById(job.id)
+      const status = current?.status ?? 'unknown'
+      const lastError = current?.last_error ? ` last_error=${current.last_error}` : ''
+      throw new CollectError(`Failed to start job: ${job.id} (status=${status}${lastError})`)
     }
 
     this.emit({ type: 'sync:started', job: startedJob })
 
-    let cursor = job.cursor_state?.cursor as string | undefined
+    // Recover cursor string from cursor_state.
+    // cursor_state is JSONB: could be a parsed JSON object (e.g., { sinceRowId: 500 }),
+    // a legacy wrapper { cursor: "..." }, or a plain string.
+    let cursor = recoverCursor(job.cursor_state as string | Record<string, unknown> | undefined)
+
     let pageCount = 0
     let totalFetched = 0
     let totalCreated = 0
@@ -237,7 +244,7 @@ export class Collector {
             this.emit({ type: 'collect:rate_limited', job, retryAfter: error.retryAfter })
             // Save cursor and schedule retry
             if (cursor) {
-              await this.syncJobRepo.updateCursor(job.id, { cursor })
+              await this.syncJobRepo.updateCursor(job.id, cursor)
             }
             const retryAt = new Date(Date.now() + error.retryAfter * 1000)
             await this.syncJobRepo.fail(job.id, error.message)
@@ -270,7 +277,7 @@ export class Collector {
         // Capture final cursor even when done (e.g., Gmail's updated historyId)
         if (result.nextCursor) {
           cursor = result.nextCursor
-          await this.syncJobRepo.updateCursor(job.id, { cursor })
+          await this.syncJobRepo.updateCursor(job.id, cursor)
         }
 
         // Check if we're done
@@ -286,7 +293,17 @@ export class Collector {
 
       // Update account sync_cursor with the final cursor value
       if (cursor && this.config.accountRepo) {
-        await this.config.accountRepo.updateSyncState(job.account_id, cursor)
+        const cursorBytes = Buffer.byteLength(cursor, 'utf8')
+        if (cursorBytes > 64 * 1024) {
+          console.error('[Collector] cursor too large to save to account, skipping', {
+            connector: job.connector,
+            accountId: job.account_id,
+            jobId: job.id,
+            bytes: cursorBytes,
+          })
+        } else {
+          await this.config.accountRepo.updateSyncState(job.account_id, cursor)
+        }
       }
 
       // Complete the job
@@ -322,16 +339,37 @@ export class Collector {
     cursor?: string,
     entityTypes?: string[]
   ): Promise<FetchPageResult> {
-    // Get auth context if auth provider is available
+    // Get auth context if needed; local connectors should not require credentials.
     let ctx: ConnectorContext | undefined
-    if (this.config.authProvider) {
+    if (adapter.authConfig.type === 'local') {
+      ctx = { accountId }
+    } else if (adapter.authConfig.type === 'credential_reference') {
+      if (!this.config.authProvider) {
+        throw new CollectError('Auth provider required for credential_reference connector', false, {
+          accountId,
+          connector: adapter.type,
+        })
+      }
+      try {
+        ctx = await this.config.authProvider.getContext(
+          adapter.authConfig.accountId,
+          adapter.authConfig.additionalScopes ?? []
+        )
+      } catch (error) {
+        throw new CollectError(
+          `Failed to get auth context: ${error instanceof Error ? error.message : String(error)}`,
+          true,
+          { accountId, connector: adapter.type }
+        )
+      }
+    } else if (this.config.authProvider) {
       try {
         ctx = await this.config.authProvider.getContext(accountId)
       } catch (error) {
         throw new CollectError(
           `Failed to get auth context: ${error instanceof Error ? error.message : String(error)}`,
           true,
-          { accountId }
+          { accountId, connector: adapter.type }
         )
       }
     } else {
@@ -344,8 +382,24 @@ export class Collector {
     for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {
       try {
         if (collectionMethod === 'incremental' && adapter.fetchChanges) {
+          let cursorOption: string | undefined
+          let sinceOption: string | undefined
+          if (cursor) {
+            try {
+              const parsed = JSON.parse(cursor) as unknown
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                cursorOption = cursor
+              } else {
+                sinceOption = cursor
+              }
+            } catch {
+              sinceOption = cursor
+            }
+          }
+
           return await adapter.fetchChanges(ctx!, {
-            since: cursor,
+            cursor: cursorOption,
+            since: sinceOption,
             limit: this.config.pageSize,
             entityTypes,
           })
@@ -389,6 +443,78 @@ export class Collector {
     syncJobId: string,
     collectionMethod: CollectionMethod
   ): Promise<{ created: number; duplicates: number }> {
+    const MAX_RAW_DATA_BYTES = 256 * 1024 * 1024
+    const invalidItems: Array<{ index: number; missing: string[] }> = []
+    const rawDataBytes: Record<number, number> = {}
+    for (const [index, item] of items.entries()) {
+      const missing: string[] = []
+      if (!item) {
+        missing.push('item')
+      } else {
+        if (!item.source_id) missing.push('source_id')
+        if (!item.entity_type) missing.push('entity_type')
+        if (item.raw_data === undefined) missing.push('raw_data')
+        if (item.raw_data !== undefined) {
+          try {
+            const rawJson = JSON.stringify(item.raw_data)
+            if (rawJson === undefined) {
+              missing.push('raw_data_serializable')
+            } else {
+              const bytes = Buffer.byteLength(rawJson, 'utf8')
+              rawDataBytes[index] = bytes
+              if (bytes > MAX_RAW_DATA_BYTES) {
+                missing.push('raw_data_too_large')
+              }
+            }
+          } catch {
+            missing.push('raw_data_serializable')
+          }
+        }
+      }
+      if (missing.length > 0) {
+        invalidItems.push({ index, missing })
+      }
+    }
+
+    if (invalidItems.length > 0) {
+      const sample = invalidItems[0]
+      const sampleItem = items[sample.index]
+      console.warn('[Collector] Dropping invalid source items', {
+        connector,
+        accountId,
+        syncJobId,
+        totalItems: items.length,
+        totalInvalid: invalidItems.length,
+        invalidSample: invalidItems.slice(0, 3).map((entry) => ({
+          index: entry.index,
+          missing: entry.missing,
+          source_id: items[entry.index]?.source_id,
+          entity_type: items[entry.index]?.entity_type,
+          raw_bytes: rawDataBytes[entry.index],
+        })),
+      })
+
+      // Keep only valid items; if none remain, fail the job with context.
+      const invalidIndexes = new Set(invalidItems.map((i) => i.index))
+      items = items.filter((_, index) => !invalidIndexes.has(index))
+      if (items.length === 0) {
+        throw new CollectError(
+          `All source items invalid. Example index ${sample.index}: ${sample.missing.join(', ')}`,
+          false,
+          {
+            connector,
+            accountId,
+            syncJobId,
+            totalItems: invalidItems.length,
+            invalidSample: invalidItems.slice(0, 3),
+            sampleSourceId: sampleItem?.source_id,
+            sampleEntityType: sampleItem?.entity_type,
+            sampleRawBytes: rawDataBytes[sample.index],
+          }
+        )
+      }
+    }
+
     const envelopes: RawEnvelopeInput[] = items.map((item) => {
       const rawDataHash = computeRawDataHash(item.raw_data)
       const keys = computeIdempotencyKeys(
@@ -437,4 +563,55 @@ export class Collector {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Parse a cursor string for JSONB storage.
+ * If the cursor is valid JSON that parses to an object, store the object directly.
+ * Otherwise, wrap it as { cursor: "..." } so it fits Record<string, unknown>.
+ */
+function parseCursorForStorage(cursor: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(cursor)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {}
+  return { cursor }
+}
+
+/**
+ * Recover a cursor string from cursor_state (JSONB).
+ *
+ * cursor_state can be:
+ * - A raw cursor object (e.g. { sinceRowId: 500 }) → re-serialize to JSON string
+ * - A legacy wrapper { cursor: "..." } → extract the inner string
+ * - A string (from postgres driver edge cases) → parse and recurse, or use as-is
+ * - undefined/null → undefined
+ *
+ * This function safely unwraps any depth of legacy { cursor } wrapping to prevent
+ * cursor accumulation (where each sync cycle wraps the previous cursor in another layer).
+ */
+function recoverCursor(cursorState: string | Record<string, unknown> | undefined): string | undefined {
+  if (cursorState == null) return undefined
+
+  if (typeof cursorState === 'string') {
+    // Try to parse and recurse — handles cases where JSONB was returned as string
+    try {
+      const parsed = JSON.parse(cursorState)
+      if (typeof parsed === 'object' && parsed !== null) {
+        return recoverCursor(parsed as Record<string, unknown>)
+      }
+    } catch {}
+    return cursorState
+  }
+
+  // Object: unwrap legacy { cursor: "..." } wrapper
+  if ('cursor' in cursorState && typeof cursorState.cursor === 'string') {
+    // Recurse in case the inner value is itself wrapped
+    return recoverCursor(cursorState.cursor)
+  }
+
+  // Raw cursor object — re-serialize for connector use
+  return JSON.stringify(cursorState)
 }

@@ -1,0 +1,14 @@
+{
+  "id": "01KFYNRKBA4CZYT1KJZ4VW1Z8R",
+  "type": "sync:collect",
+  "payload": {
+    "syncJobId": "01KFYNRKB7SD4QG1GVF7JRYMFV",
+    "connector": "imessage",
+    "accountId": "01KFVY7FR2ZB06FBX19REGTXCA",
+    "jobType": "incremental"
+  },
+  "error": "Cannot resume job in status: running",
+  "attemptCount": 3,
+  "createdAt": "2026-01-27T02:50:43.433Z",
+  "diedAt": "2026-01-27T02:52:08.358Z"
+}

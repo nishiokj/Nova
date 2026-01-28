@@ -1,0 +1,14 @@
+{
+  "id": "01KFWBD4B0ZKNSSB82P9G6BTKC",
+  "type": "sync:collect",
+  "payload": {
+    "syncJobId": "01KFWBD4AZA90719T4TTEPEKZR",
+    "connector": "claude_sessions",
+    "accountId": "01KFVRYKRN75P0TSY86PTBK22Z",
+    "jobType": "backfill"
+  },
+  "error": "Failed to start job: 01KFWBD4AZA90719T4TTEPEKZR",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T05:11:12.992Z",
+  "diedAt": "2026-01-26T05:11:16.363Z"
+}

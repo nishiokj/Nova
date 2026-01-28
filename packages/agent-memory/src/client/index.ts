@@ -13,12 +13,33 @@ import type {
   AuthUrlResponse,
   AvailableConnectorsResponse,
   BackfillResponse,
+  CodingPreference,
+  CodingDecision,
   ConnectorInfo,
   ConnectorListResponse,
   ConnectorRegistrationResponse,
   ConnectorResponse,
   ConnectorSanityResponse,
   ConnectorUnregisterResponse,
+  DecisionsSearchResponse,
+  DerivedJob,
+  DerivedJobListResponse,
+  DerivedJobResponse,
+  DerivedJobLogsResponse,
+  DerivedRetryResponse,
+  DerivedTask,
+  DerivedTaskCreateResponse,
+  DerivedTaskListResponse,
+  DerivedTaskResponse,
+  DerivedTaskMode,
+  ProcessAllResponse,
+  ProcessErroredResponse,
+  ProcessJobResponse,
+  PreferencesSearchResponse,
+  ReprocessFilteredRequest,
+  ReprocessFilteredResponse,
+  TransformationListResponse,
+  TransformationSummary,
   DeviceAuthPollResponse,
   DeviceAuthResponse,
   HealthResponse,
@@ -119,7 +140,7 @@ export class SyncClient {
         }
         // Prefer message field for detailed errors, fall back to error field
         const errorMessage = errorData.message || errorData.error || `HTTP ${response.status}`
-        throw new SyncClientError(errorMessage, response.status, errorData.code)
+        throw new SyncClientError(errorMessage, response.status, errorData.code, errorData)
       }
 
       const contentType = response.headers.get('content-type')
@@ -574,6 +595,55 @@ export class SyncClient {
     },
   }
 
+  // ============ Derived Tasks ============
+
+  /**
+   * Derived task management methods.
+   */
+  derivedTasks = {
+    /**
+     * List derived tasks.
+     * @param opts.enabled - Filter by enabled status
+     * @param opts.name - Filter by name
+     */
+    list: async (opts?: { enabled?: boolean; name?: string }): Promise<DerivedTask[]> => {
+      const params = new URLSearchParams()
+      if (opts?.enabled !== undefined) params.set('enabled', String(opts.enabled))
+      if (opts?.name) params.set('name', opts.name)
+      const query = params.toString()
+      const response = await this.get<DerivedTaskListResponse>(`/derived/tasks${query ? `?${query}` : ''}`)
+      return response.tasks
+    },
+
+    /**
+     * Get derived task by ID with recent jobs.
+     */
+    get: async (id: string): Promise<DerivedTaskResponse> => {
+      return this.get<DerivedTaskResponse>(`/derived/tasks/${id}`)
+    },
+
+    /**
+     * Create a derived task.
+     */
+    create: async (opts: {
+      name: string
+      scriptPath: string
+      mode: DerivedTaskMode
+      intervalMs?: number
+      metadata?: Record<string, unknown>
+    }): Promise<DerivedTaskCreateResponse> => {
+      return this.post<DerivedTaskCreateResponse>('/derived/tasks', opts)
+    },
+
+    /**
+     * Run a derived task immediately.
+     */
+    run: async (id: string, opts?: { priority?: number; metadata?: Record<string, unknown> }): Promise<DerivedJob> => {
+      const response = await this.post<{ job: DerivedJob }>(`/derived/tasks/${id}/run`, opts)
+      return response.job
+    },
+  }
+
   // ============ Jobs ============
 
   /**
@@ -626,8 +696,194 @@ export class SyncClient {
       return this.post<RetryResponse>(`/jobs/${id}/retry`)
     },
   }
+
+  // ============ Derived Jobs ============
+
+  /**
+   * Derived job management methods.
+   */
+  derivedJobs = {
+    /**
+     * List derived jobs.
+     * @param opts.status - Filter by status ('pending', 'running')
+     * @param opts.taskId - Filter by task
+     * @param opts.limit - Max number of jobs to return
+     */
+    list: async (opts?: {
+      status?: string
+      taskId?: string
+      limit?: number
+    }): Promise<DerivedJob[]> => {
+      const params = new URLSearchParams()
+      if (opts?.status) params.set('status', opts.status)
+      if (opts?.taskId) params.set('taskId', opts.taskId)
+      if (opts?.limit) params.set('limit', String(opts.limit))
+      const query = params.toString()
+      const response = await this.get<DerivedJobListResponse>(`/derived/jobs${query ? `?${query}` : ''}`)
+      return response.jobs
+    },
+
+    /**
+     * Get derived job by ID with queue stats.
+     */
+    get: async (id: string): Promise<DerivedJobResponse> => {
+      return this.get<DerivedJobResponse>(`/derived/jobs/${id}`)
+    },
+
+    /**
+     * Fetch derived job logs (tail).
+     */
+    logs: async (id: string, opts?: { lines?: number }): Promise<DerivedJobLogsResponse> => {
+      const params = new URLSearchParams()
+      if (opts?.lines) params.set('lines', String(opts.lines))
+      const query = params.toString()
+      return this.get<DerivedJobLogsResponse>(`/derived/jobs/${id}/logs${query ? `?${query}` : ''}`)
+    },
+
+    /**
+     * Cancel a pending or running derived job.
+     */
+    cancel: async (id: string): Promise<DerivedJob> => {
+      const response = await this.post<{ job: DerivedJob }>(`/derived/jobs/${id}/cancel`)
+      return response.job
+    },
+
+    /**
+     * Retry a failed derived job.
+     */
+    retry: async (id: string): Promise<DerivedRetryResponse> => {
+      return this.post<DerivedRetryResponse>(`/derived/jobs/${id}/retry`)
+    },
+  }
+
+  // ============ Processing ============
+
+  /**
+   * Processing methods for raw envelopes.
+   */
+  processing = {
+    /**
+     * Process a specific sync job by ID.
+     */
+    processJob: async (id: string, opts?: { transformationIds?: string[] }): Promise<ProcessJobResponse> => {
+      return this.post<ProcessJobResponse>(`/process/jobs/${id}`, opts)
+    },
+
+    /**
+     * Process all unprocessed envelopes.
+     */
+    processAll: async (opts?: { transformationIds?: string[] }): Promise<ProcessAllResponse> => {
+      return this.post<ProcessAllResponse>('/process/all', opts)
+    },
+
+    /**
+     * Reprocess all errored envelopes.
+     */
+    processErrored: async (opts?: { transformationIds?: string[] }): Promise<ProcessErroredResponse> => {
+      return this.post<ProcessErroredResponse>('/process/errored', opts)
+    },
+
+    /**
+     * Reprocess all envelopes matching a scope filter.
+     */
+    reprocess: async (opts?: ReprocessFilteredRequest): Promise<ReprocessFilteredResponse> => {
+      return this.post<ReprocessFilteredResponse>('/process/reprocess', opts)
+    },
+  }
+
+  // ============ Transformations ============
+
+  /**
+   * Transformation listing methods.
+   */
+  transformations = {
+    /**
+     * List registered transformations.
+     */
+    list: async (opts?: {
+      connector?: string
+      entityTypes?: string[]
+    }): Promise<TransformationSummary[]> => {
+      const params = new URLSearchParams()
+      if (opts?.connector) params.set('connector', opts.connector)
+      if (opts?.entityTypes?.length) params.set('entityType', opts.entityTypes.join(','))
+      const query = params.toString()
+      const response = await this.get<TransformationListResponse>(`/transformations${query ? `?${query}` : ''}`)
+      return response.transformations
+    },
+  }
+
+  // ============ Preferences ============
+
+  /**
+   * Preferences search methods.
+   */
+  preferences = {
+    /**
+     * Search coding preferences with full-text search.
+     * @param opts.q - Search query (required)
+     * @param opts.category - Filter by category
+     * @param opts.kind - Filter by kind
+     * @param opts.confidence - Filter by confidence
+     * @param opts.limit - Max results (default: 20)
+     * @param opts.offset - Pagination offset (default: 0)
+     */
+    search: async (opts: {
+      q: string
+      category?: string
+      kind?: string
+      confidence?: string
+      limit?: number
+      offset?: number
+    }): Promise<PreferencesSearchResponse> => {
+      const params = new URLSearchParams()
+      params.set('q', opts.q)
+      if (opts.category) params.set('category', opts.category)
+      if (opts.kind) params.set('kind', opts.kind)
+      if (opts.confidence) params.set('confidence', opts.confidence)
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+      if (opts.offset !== undefined) params.set('offset', String(opts.offset))
+      const query = params.toString()
+      return this.get<PreferencesSearchResponse>(`/preferences/search?${query}`)
+    },
+  }
+
+  // ============ Decisions ============
+
+  /**
+   * Decisions search methods.
+   */
+  decisions = {
+    /**
+     * Search coding decisions with full-text search.
+     * @param opts.q - Search query (required)
+     * @param opts.category - Filter by category
+     * @param opts.confidence - Filter by confidence
+     * @param opts.limit - Max results (default: 20)
+     * @param opts.offset - Pagination offset (default: 0)
+     */
+    search: async (opts: {
+      q: string
+      category?: string
+      confidence?: string
+      limit?: number
+      offset?: number
+    }): Promise<DecisionsSearchResponse> => {
+      const params = new URLSearchParams()
+      params.set('q', opts.q)
+      if (opts.category) params.set('category', opts.category)
+      if (opts.confidence) params.set('confidence', opts.confidence)
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+      if (opts.offset !== undefined) params.set('offset', String(opts.offset))
+      const query = params.toString()
+      return this.get<DecisionsSearchResponse>(`/decisions/search?${query}`)
+    },
+  }
 }
 
 // Re-export types
 export * from './types.js'
 export { captureOAuthCallback, getCallbackUri, type OAuthResult, type OAuthCallbackOptions } from './oauth.js'
+
+// Add CodingDecision to default export for CLI import compatibility
+export type { CodingDecision } from './types.js'

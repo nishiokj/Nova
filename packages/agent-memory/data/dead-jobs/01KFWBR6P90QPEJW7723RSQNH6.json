@@ -1,0 +1,14 @@
+{
+  "id": "01KFWBR6P90QPEJW7723RSQNH6",
+  "type": "sync:collect",
+  "payload": {
+    "syncJobId": "01KFWBR6P5HW39CA6628V1NT95",
+    "connector": "claude_sessions",
+    "accountId": "01KFVRYKRN75P0TSY86PTBK22Z",
+    "jobType": "incremental"
+  },
+  "error": "Failed to start job: 01KFWBR6P5HW39CA6628V1NT95",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T05:17:15.849Z",
+  "diedAt": "2026-01-26T05:17:19.657Z"
+}

@@ -14,22 +14,31 @@ import type { AuthProvider } from '../auth/provider.js'
 import type { Account, AccountRepository } from '../db/repositories/account.js'
 import type { SyncJob, SyncJobRepository } from '../db/repositories/sync-job.js'
 import type { SyncTask, SyncTaskRepository } from '../db/repositories/sync-task.js'
+import type { DerivedJob, DerivedJobRepository } from '../db/repositories/derived-job.js'
+import type { DerivedTask, DerivedTaskRepository } from '../db/repositories/derived-task.js'
 import type { RawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import type { CanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import type { EntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
 import type { RegisteredConnectorRepository, RegisteredConnector } from '../db/repositories/registered-connector.js'
+import type { CodingPreferencesRepository } from '../db/repositories/coding-preferences.js'
+import type { CodingDecisionsRepository } from '../db/repositories/coding-decisions.js'
 import type { RawEnvelope } from '../models/raw.js'
 import { validateEntity, type EntityType } from '../models/canonical.js'
 import { createAccountRepository } from '../db/repositories/account.js'
 import { createSyncJobRepository } from '../db/repositories/sync-job.js'
 import { createSyncTaskRepository } from '../db/repositories/sync-task.js'
+import { createDerivedJobRepository } from '../db/repositories/derived-job.js'
+import { createDerivedTaskRepository } from '../db/repositories/derived-task.js'
 import { createRawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import { createCanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import { createEntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
 import { createRegisteredConnectorRepository } from '../db/repositories/registered-connector.js'
+import { createCodingPreferencesRepository } from '../db/repositories/coding-preferences.js'
+import { createCodingDecisionsRepository } from '../db/repositories/coding-decisions.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
+import { DerivedTaskIntegration, type DerivedIntegrationConfig } from '../derived/integration.js'
 import { DatabaseAuthProvider, type AuthProviderConfig } from '../auth/provider.js'
 import { OAuthProviderRegistry, oauthProviders } from '../auth/oauth-providers.js'
 import { HttpServer, type ServerConfig } from './server.js'
@@ -56,6 +65,8 @@ export interface DaemonConfig {
   scheduler?: SchedulerConfig
   /** Engine config */
   engine?: SyncEngineConfig
+  /** Derived task integration config */
+  derived?: DerivedIntegrationConfig
 }
 
 interface AuthStatePayload {
@@ -96,6 +107,7 @@ export class SyncDaemon {
   // Public readonly access to internal components
   readonly engine: SyncEngine
   readonly scheduler: Scheduler
+  readonly derivedIntegration: DerivedTaskIntegration
   readonly authProvider: AuthProvider
   readonly collector: Collector
   readonly oauthProviders: OAuthProviderRegistry
@@ -104,46 +116,61 @@ export class SyncDaemon {
   readonly accountRepo: AccountRepository
   readonly syncJobRepo: SyncJobRepository
   readonly taskRepo: SyncTaskRepository
+  readonly derivedJobRepo: DerivedJobRepository
+  readonly derivedTaskRepo: DerivedTaskRepository
   readonly envelopeRepo: RawEnvelopeRepository
   readonly entityRepo: CanonicalEntityRepository
   readonly mappingRepo: EntitySourceMappingRepository
   readonly connectorRepo: RegisteredConnectorRepository
+  readonly preferencesRepo: CodingPreferencesRepository
+  readonly decisionsRepo: CodingDecisionsRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
   private config: DaemonConfig
   private isRunning = false
+  private registeredConnectorsLoaded = false
 
   private constructor(
     config: DaemonConfig,
     server: HttpServer,
     engine: SyncEngine,
     scheduler: Scheduler,
+    derivedIntegration: DerivedTaskIntegration,
     authProvider: AuthProvider,
     collector: Collector,
     oauthProviderRegistry: OAuthProviderRegistry,
     accountRepo: AccountRepository,
     syncJobRepo: SyncJobRepository,
     taskRepo: SyncTaskRepository,
+    derivedJobRepo: DerivedJobRepository,
+    derivedTaskRepo: DerivedTaskRepository,
     envelopeRepo: RawEnvelopeRepository,
     entityRepo: CanonicalEntityRepository,
     mappingRepo: EntitySourceMappingRepository,
-    connectorRepo: RegisteredConnectorRepository
+    connectorRepo: RegisteredConnectorRepository,
+    preferencesRepo: CodingPreferencesRepository,
+    decisionsRepo: CodingDecisionsRepository
   ) {
     this.config = config
     this.server = server
     this.engine = engine
     this.scheduler = scheduler
+    this.derivedIntegration = derivedIntegration
     this.authProvider = authProvider
     this.collector = collector
     this.oauthProviders = oauthProviderRegistry
     this.accountRepo = accountRepo
     this.syncJobRepo = syncJobRepo
     this.taskRepo = taskRepo
+    this.derivedJobRepo = derivedJobRepo
+    this.derivedTaskRepo = derivedTaskRepo
     this.envelopeRepo = envelopeRepo
     this.entityRepo = entityRepo
     this.mappingRepo = mappingRepo
     this.connectorRepo = connectorRepo
+    this.preferencesRepo = preferencesRepo
+    this.decisionsRepo = decisionsRepo
   }
 
   /**
@@ -164,10 +191,14 @@ export class SyncDaemon {
     const accountRepo = createAccountRepository(ctx)
     const syncJobRepo = createSyncJobRepository(ctx)
     const taskRepo = createSyncTaskRepository(ctx)
+    const derivedJobRepo = createDerivedJobRepository(ctx)
+    const derivedTaskRepo = createDerivedTaskRepository(ctx)
     const envelopeRepo = createRawEnvelopeRepository(ctx)
     const entityRepo = createCanonicalEntityRepository(ctx)
     const mappingRepo = createEntitySourceMappingRepository(ctx)
     const connectorRepo = createRegisteredConnectorRepository(ctx)
+    const preferencesRepo = createCodingPreferencesRepository(ctx)
+    const decisionsRepo = createCodingDecisionsRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -188,6 +219,10 @@ export class SyncDaemon {
       },
     })
 
+    // Create derived task integration (uses shared queue)
+    const derivedIntegration = new DerivedTaskIntegration(sql, config.derived)
+    derivedIntegration.registerHandlers(engine)
+
     // Create collector (for direct webhook ingestion)
     const collector = new Collector(sql, {
       authProvider,
@@ -204,7 +239,9 @@ export class SyncDaemon {
         ...config.scheduler,
         webhookBaseUrl,
       },
-      accountRepo
+      accountRepo,
+      derivedTaskRepo,
+      derivedIntegration
     )
 
     // Create HTTP server
@@ -219,16 +256,21 @@ export class SyncDaemon {
       server,
       engine,
       scheduler,
+      derivedIntegration,
       authProvider,
       collector,
       oauthProviders,
       accountRepo,
       syncJobRepo,
       taskRepo,
+      derivedJobRepo,
+      derivedTaskRepo,
       envelopeRepo,
       entityRepo,
       mappingRepo,
-      connectorRepo
+      connectorRepo,
+      preferencesRepo,
+      decisionsRepo
     )
 
     // Store connectors map reference in daemon for registration
@@ -249,6 +291,7 @@ export class SyncDaemon {
     ;(this as any)._connectors?.set(connector.type, connector)
     this.engine.registerConnector(connector)
     this.collector.registerConnector(connector)
+    this.scheduler.registerConnector(connector)
     return this
   }
 
@@ -276,6 +319,8 @@ export class SyncDaemon {
     }
     this.connectors.delete(type)
     ;(this as any)._connectors?.delete(type)
+    this.engine.unregisterConnector(type)
+    this.scheduler.unloadConnector(type)
     return true
   }
 
@@ -293,6 +338,7 @@ export class SyncDaemon {
    * Called at daemon startup to restore registered connectors.
    */
   async loadRegisteredConnectors(): Promise<LoadConnectorsResult> {
+    this.registeredConnectorsLoaded = true
     const result: LoadConnectorsResult = {
       loaded: [],
       errors: [],
@@ -302,6 +348,9 @@ export class SyncDaemon {
     const registered = await this.connectorRepo.findEnabled()
 
     for (const reg of registered) {
+      if (this.connectors.has(reg.type)) {
+        continue
+      }
       if (!hasFactory(reg.type)) {
         result.skipped.push(reg.type)
         continue
@@ -379,7 +428,7 @@ export class SyncDaemon {
   /**
    * Start all daemon components.
    * - HTTP server
-   * - SyncEngine (queue worker)
+   * - SyncEngine (queue worker - processes sync AND derived jobs)
    * - Scheduler
    */
   async start(): Promise<void> {
@@ -387,7 +436,11 @@ export class SyncDaemon {
       throw new Error('Daemon is already running')
     }
 
-    // Start in order: server → engine → scheduler
+    if (!this.registeredConnectorsLoaded) {
+      await this.loadRegisteredConnectors()
+    }
+
+    // Start in order: server → engines → scheduler
     await this.server.start()
     await this.engine.start()
     await this.scheduler.start()
@@ -401,7 +454,7 @@ export class SyncDaemon {
   async stop(): Promise<void> {
     if (!this.isRunning) return
 
-    // Stop in reverse order: scheduler → engine → server
+    // Stop in reverse order: scheduler → engines → server
     await this.scheduler.stop()
     await this.engine.stop()
     await this.server.stop()
@@ -943,7 +996,7 @@ export class SyncDaemon {
     if (options.mode === 'webhook' && !connector.subscribe) {
       addCheck('capabilities', 'error', 'Connector does not implement webhook subscribe()')
     }
-    if (options.syncType === 'incremental' && !connector.fetchChanges) {
+    if (options.syncType === 'incremental' && options.mode !== 'webhook' && !connector.fetchChanges) {
       addCheck('capabilities', 'error', 'Connector does not implement fetchChanges()')
     }
 
@@ -1013,6 +1066,35 @@ export class SyncDaemon {
       }
 
       addCheck(fetchLabel, 'ok', `Fetched ${fetchResult.items.length} sample item(s)`)
+
+      const invalidSamples: Array<{ index: number; missing: string[] }> = []
+      for (const [index, item] of fetchResult.items.entries()) {
+        const missing: string[] = []
+        if (!item.entity_type) missing.push('entity_type')
+        if (!item.source_id) missing.push('source_id')
+        if (item.raw_data === undefined) missing.push('raw_data')
+        if (item.raw_data !== undefined) {
+          try {
+            const rawJson = JSON.stringify(item.raw_data)
+            if (rawJson === undefined) {
+              missing.push('raw_data_serializable')
+            }
+          } catch {
+            missing.push('raw_data_serializable')
+          }
+        }
+        if (missing.length > 0) {
+          invalidSamples.push({ index, missing })
+        }
+      }
+
+      if (invalidSamples.length > 0) {
+        addCheck(`fetch:${entityType}:shape`, 'error', 'Sample items missing required fields', {
+          totalInvalid: invalidSamples.length,
+          invalidSample: invalidSamples.slice(0, 3),
+        })
+        continue
+      }
 
       const sampleItem = fetchResult.items.find((item) => item.entity_type === entityType) ?? fetchResult.items[0]
       const transform = this.engine.findTransformations(connector.type, sampleItem.entity_type)[0]
@@ -1223,17 +1305,18 @@ export class SyncDaemon {
     cursor?: string
   ): Promise<{ ok: boolean; items: Array<{ entity_type: string; raw_data: unknown; source_id: string; source_timestamp?: string; source_version?: string }>; error?: string }> {
     try {
+      const sampleLimit = 5
       if (syncType === 'incremental' && connector.fetchChanges) {
         const result = await connector.fetchChanges(ctx, {
           since: cursor,
-          limit: 1,
+          limit: sampleLimit,
           entityTypes: [entityType],
         })
         return { ok: true, items: result.items }
       }
 
       const result = await connector.fetchPage(ctx, {
-        limit: 1,
+        limit: sampleLimit,
         entityTypes: [entityType],
       })
       return { ok: true, items: result.items }

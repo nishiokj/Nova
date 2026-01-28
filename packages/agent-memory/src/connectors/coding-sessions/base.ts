@@ -149,7 +149,7 @@ export abstract class CodingAgentSessionConnector implements Connector {
     }
 
     const projects = await this.listProjects()
-    if (cursorState.projectIndex >= projects.length) {
+    if (cursorState.projectIndex >= projects.length || !projects[cursorState.projectIndex]) {
       return { items: [], hasMore: false }
     }
 
@@ -231,14 +231,22 @@ export abstract class CodingAgentSessionConnector implements Connector {
     }
     if (options.cursor) {
       try {
-        cursorState = JSON.parse(options.cursor) as IncrementalCursor
+        const parsed = JSON.parse(options.cursor) as Record<string, unknown>
+        cursorState = {
+          projectIndex: typeof parsed.projectIndex === 'number' ? parsed.projectIndex : 0,
+          sessionIndex: typeof parsed.sessionIndex === 'number' ? parsed.sessionIndex : 0,
+          // Handle backfill cursor format (has messageOffset instead of lastModified)
+          lastModified: typeof parsed.lastModified === 'string'
+            ? parsed.lastModified
+            : sinceDate.toISOString(),
+        }
       } catch {
         // Invalid cursor, use defaults
       }
     }
 
     const projects = await this.listProjects()
-    if (cursorState.projectIndex >= projects.length) {
+    if (cursorState.projectIndex >= projects.length || !projects[cursorState.projectIndex]) {
       return { items: [], hasMore: false }
     }
 
@@ -301,7 +309,7 @@ export abstract class CodingAgentSessionConnector implements Connector {
     try {
       const entries = await readdir(this.sessionsPath, { withFileTypes: true })
       let projects = entries
-        .filter(e => e.isDirectory())
+        .filter(e => e.isDirectory() && typeof e.name === 'string')
         .map(e => e.name)
 
       if (this.projectFilter && this.projectFilter.length > 0) {
@@ -315,13 +323,13 @@ export abstract class CodingAgentSessionConnector implements Connector {
   }
 
   protected async listSessions(project: string): Promise<SessionFile[]> {
-    const projectPath = join(this.sessionsPath, project)
     try {
+      const projectPath = join(this.sessionsPath, project)
       const entries = await readdir(projectPath, { withFileTypes: true })
       const sessions: SessionFile[] = []
 
       for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        if (entry.isFile() && typeof entry.name === 'string' && entry.name.endsWith('.jsonl')) {
           const sessionId = entry.name.replace('.jsonl', '')
           const filePath = join(projectPath, entry.name)
           const stats = await stat(filePath)

@@ -27,7 +27,10 @@ export type {
   InternalHookContext,
   InternalHookHandler,
   InternalHookQueue,
+  ExecutionSnapshot,
   StopHookResult,
+  StopHookContext,
+  StopHookHandler,
 } from './types.js';
 
 export { DEFAULT_AGENT_BUDGET, DEFAULT_LLM_PARAMS, noopEmit, noopHookQueue } from './types.js';
@@ -36,7 +39,10 @@ export {
   EXPLORER_PROMPT,
   RUNTIME_SCRIPT_PROMPT,
   STANDARD_PROMPT,
+  WATCHER_PROMPT,
+  ASYNC_MODE_ADDENDUM,
   getAgentPrompt,
+  getAsyncModeAddendum,
   buildAgentConfig,
   buildEnvironmentPrompt,
   PLANNING_PROMPT_ADDENDUM,

@@ -52,6 +52,12 @@ export {
   type SyncJobInput,
   type SyncJobStatus,
   type SyncJobType,
+  // Derived Job
+  createDerivedJobRepository,
+  type DerivedJobRepository,
+  type DerivedJob,
+  type DerivedJobInput,
+  type DerivedJobStatus,
   // Account
   createAccountRepository,
   type AccountRepository,
@@ -72,4 +78,15 @@ export {
   type SyncTaskInput,
   type SyncType,
   type TaskMode,
+  // Derived Task
+  createDerivedTaskRepository,
+  type DerivedTaskRepository,
+  type DerivedTask,
+  type DerivedTaskInput,
+  type DerivedTaskMode,
+  // Transformations
+  createTransformationRepository,
+  type TransformationRepository,
+  type TransformationRecord,
+  type TransformationInput,
 } from './repositories/index.js'

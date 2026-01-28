@@ -8,6 +8,7 @@
     "start": "bun run src/index.ts",
     "profile": "bun --inspect run src/index.ts",
     "profile:cpu": "BUN_JSC_dumpSamplingProfilerData=1 bun run src/index.ts",
+    "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "build": "tsc",
     "test": "bun test"
@@ -16,6 +17,7 @@
     "agent": "workspace:*",
     "comms-bus": "workspace:*",
     "context": "workspace:*",
+    "entity-graph": "workspace:*",
     "graphd": "workspace:*",
     "llm": "workspace:*",
     "minimatch": "^10.1.1",
@@ -23,6 +25,7 @@
     "shared": "workspace:*",
     "tools": "workspace:*",
     "types": "workspace:*",
+    "decision-watcher": "workspace:*",
     "work": "workspace:*"
   },
   "devDependencies": {

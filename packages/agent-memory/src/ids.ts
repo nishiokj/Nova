@@ -28,6 +28,8 @@ export const ConnectorTypeSchema = z.enum([
   'imessage',
   'claude_sessions',
   'rex_sessions',
+  'google-calendar',
+  'obsidian',
 ])
 export type ConnectorType = z.infer<typeof ConnectorTypeSchema>
 

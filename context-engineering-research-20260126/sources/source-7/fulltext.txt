@@ -1,0 +1,96 @@
+
+    
+      
+      
+
+
+
+    
+      Skip to content
+
+      
+    
+      
+      
+      
+
+
+
+  
+  {"props":{"docsUrl":"https://docs.github.com/get-started/accessibility/keyboard-shortcuts"}}
+  
+
+
+
+
+
+
+      
+
+          
+
+              
+
+
+
+
+
+  /* Override primer focus outline color for marketing header dropdown links for better contrast */
+  [data-color-mode="light"] .HeaderMenu-dropdown-link:focus-visible,
+  [data-color-mode="light"] .HeaderMenu-trailing-link a:focus-visible {
+    outline-color: var(--color-accent-fg);
+  }
+
+
+
+  Navigation Menu
+
+  
+    Toggle navigation
+  
+
+  
+    
+      
+          
+    
+            
+            
+  
+
+      
+
+      
+        
+    
+
+      
+
+      
+          
+            Sign in
+          
+              
+    
+        
+    
+
+Appearance settings
+
+      
+    
+  
+
+      
+    
+
+
+    
+      
+            
+
+
+
+  
+  {"props":{"should_use_dotcom_links":true}}
+  PlatformAI CODE CREATIONGitHub CopilotWrite better code with AIGitHub SparkBuild and deploy intelligent appsGitHub ModelsManage and compare promptsMCP RegistryNewIntegrate external toolsDEVELOPER WORKFLOWSActionsAutomate any workflowCodespacesInstant dev environmentsIssuesPlan and track workCode ReviewManage code changesAPPLICATION SECURITYGitHub Advanced SecurityFind and fix vulnerabilities

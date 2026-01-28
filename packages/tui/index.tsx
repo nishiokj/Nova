@@ -1249,6 +1249,67 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       });
       return;
     }
+    if (typeof kind === "string" && kind.startsWith("watcher_")) {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      store.batch(() => {
+        if (payload?.success === false) {
+          store.addMessage("system", `Watcher error: ${payload?.error ?? "Unknown error"}`);
+        } else {
+          store.addMessage("system", formatWatcherPayload(kind, payload));
+        }
+        store.clearProgress();
+        store.setState("idle");
+      });
+      return;
+    }
+    if (kind === "async_start") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.success) {
+        store.addMessage("system", `Async session active. Watcher oversight enabled.\nRequest: ${payload?.requestId ?? "unknown"}`);
+      } else {
+        store.batch(() => {
+          store.addMessage("system", `Failed to start async session: ${payload?.error ?? "unknown error"}`);
+          store.setState("idle");
+        });
+      }
+      return;
+    }
+    if (kind === "async_cancel") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      const cancelGoal = (payload?.goal as string) ?? "";
+      store.addMessage("system", `Async session cancelled.${cancelGoal ? `\nGoal was: ${cancelGoal}` : ""}`);
+      return;
+    }
+    if (kind === "async_status") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.running) {
+        const elapsed = typeof payload.elapsedMs === "number" ? Math.round(payload.elapsedMs / 1000) : null;
+        store.addMessage(
+          "system",
+          `Async session running\n` +
+          `  Goal: ${payload.goal ?? "unknown"}\n` +
+          `  Request: ${payload.requestId ?? "unknown"}` +
+          (elapsed !== null ? `\n  Elapsed: ${elapsed}s` : "")
+        );
+      } else {
+        store.addMessage("system", "No async session is currently running.");
+      }
+      return;
+    }
+    if (kind === "async_complete") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      const reason = (payload?.reason as string) ?? "unknown";
+      const asyncGoal = (payload?.goal as string) ?? "";
+      const reasonMessages: Record<string, string> = {
+        manual_cancel: `Async session cancelled.${asyncGoal ? ` Goal was: ${asyncGoal}` : ""}`,
+        goal_reached: `Async session completed - goal reached.`,
+        error: `Async session failed.`,
+        timeout: `Async session timed out.`,
+      };
+      store.addMessage("system", reasonMessages[reason] ?? `Async session ended: ${reason}`);
+      return;
+    }
+
     if (kind === "ralph_loop_complete") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
       const reason = (payload?.reason as RalphCompletionReason) ?? "error";
@@ -1595,7 +1656,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     // Always include working_dir with requests that trigger agent execution
     // This ensures tools run in the correct directory regardless of where daemon was started
-    const needsWorkingDir = type === "send_text" || type === "user_prompt_response" || type === "ralph_loop_start";
+    const needsWorkingDir =
+      type === "send_text" ||
+      type === "user_prompt_response" ||
+      type === "ralph_loop_start" ||
+      type === "async_start";
     const payload = needsWorkingDir
       ? { ...data, working_dir: process.cwd() }
       : data;
@@ -2010,14 +2075,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         // Regular text input
         if (input && !key.ctrl && !key.meta) {
           // Filter control chars and escape sequence fragments that leak through
+          // Preserve whitespace: tab (\x09), newline (\x0a), carriage return (\x0d)
+          // Remove other control characters: NUL through \x08, \x0b-\x0c, \x0e-\x1f, DEL (\x7f)
           const printable = input
-            .replace(/[\x00-\x1f\x7f]/g, "")  // Control characters
-            .replace(/\[200~/g, "")            // Bracketed paste start
-            .replace(/\[201~/g, "")            // Bracketed paste end
-            .replace(/\[[ABCD]/g, "")          // Arrow key fragments [A, [B, [C, [D
-            .replace(/O[ABCD]/g, "")           // Alt arrow key fragments OA, OB, OC, OD
-            .replace(/\[\d+~/g, "")            // Function/special keys [5~, [6~, etc.
-            .replace(/\[\d+;\d+[~ABCDHF]/g, "")// Modified keys with parameters
+            .replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, "")  // Control chars except tab/newline/cr
+            .replace(/\[200~/g, "")                        // Bracketed paste start
+            .replace(/\[201~/g, "")                        // Bracketed paste end
+            .replace(/\[[ABCD]/g, "")                      // Arrow key fragments [A, [B, [C, [D
+            .replace(/O[ABCD]/g, "")                       // Alt arrow key fragments OA, OB, OC, OD
+            .replace(/\[\d+~/g, "")                        // Function/special keys [5~, [6~, etc.
+            .replace(/\[\d+;\d+[~ABCDHF]/g, "")            // Modified keys with parameters
             .replace(/\[<\d+;\d+;\d+[Mm]/g, "")// Mouse sequences
             .replace(/\[?\[/g, "");            // Leftover brackets from sequences
           if (printable) {
@@ -2471,16 +2538,18 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Only insert printable characters (filter out control chars that weren't handled above)
     if (input && !key.ctrl && !key.meta) {
       // Filter control chars and escape sequence fragments that leak through
+      // Preserve whitespace: tab (\x09), newline (\x0a), carriage return (\x0d), form feed (\x0c)
+      // Remove other control characters: NUL through \x08 (includes \x07 BEL), \x0b-\x0c, \x0e-\x1f, DEL (\x7f)
       const printable = input
-        .replace(/[\x00-\x1f\x7f]/g, "")       // Control characters
-        .replace(/\[200~/g, "")                 // Bracketed paste start
-        .replace(/\[201~/g, "")                 // Bracketed paste end
-        .replace(/\[[ABCD]/g, "")               // Arrow key fragments [A, [B, [C, [D
-        .replace(/O[ABCD]/g, "")                // Alt arrow key fragments OA, OB, OC, OD
-        .replace(/\[\d+~/g, "")                 // Function/special keys [5~, [6~, etc.
-        .replace(/\[\d+;\d+[~ABCDHF]/g, "")     // Modified keys with parameters
-        .replace(/\[<\d+;\d+;\d+[Mm]/g, "")     // Mouse sequences
-        .replace(/\[?\[/g, "");                 // Leftover brackets from sequences
+        .replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, "")  // Control chars except tab/newline/cr
+        .replace(/\[200~/g, "")                        // Bracketed paste start
+        .replace(/\[201~/g, "")                        // Bracketed paste end
+        .replace(/\[[ABCD]/g, "")                      // Arrow key fragments [A, [B, [C, [D
+        .replace(/O[ABCD]/g, "")                       // Alt arrow key fragments OA, OB, OC, OD
+        .replace(/\[\d+~/g, "")                        // Function/special keys [5~, [6~, etc.
+        .replace(/\[\d+;\d+[~ABCDHF]/g, "")            // Modified keys with parameters
+        .replace(/\[<\d+;\d+;\d+[Mm]/g, "")            // Mouse sequences
+        .replace(/\[?\[/g, "");                        // Leftover brackets from sequences
       if (printable) {
         store.insertInput(printable);
         refreshAutocomplete();
@@ -2672,6 +2741,77 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.addMessage("system", "Compacting conversation context...");
         sendCommand("compact_context");
         return;
+      case "/watcher": {
+        // Parse subcommand from arg
+        const subParts = (arg ?? "").trim().split(/\s+/);
+        const subCommand = subParts[0]?.toLowerCase() || "status";
+        const subArg = subParts.slice(1).join(" ");
+
+        switch (subCommand) {
+          case "status":
+            sendCommand("watcher_status");
+            break;
+          case "context":
+            sendCommand("watcher_context");
+            break;
+          case "search":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher search <query>");
+              return;
+            }
+            sendCommand("watcher_search", { query: subArg });
+            break;
+          case "decisions":
+            sendCommand("watcher_decisions");
+            break;
+          case "inspect":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher inspect <id>");
+              return;
+            }
+            sendCommand("watcher_inspect", { id: subArg });
+            break;
+          case "memory":
+            sendCommand("watcher_memory");
+            break;
+          case "focus":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher focus <topic>");
+              return;
+            }
+            sendCommand("watcher_focus", { topic: subArg });
+            break;
+          case "defocus":
+            sendCommand("watcher_defocus");
+            break;
+          case "reanchor":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher reanchor <goal>");
+              return;
+            }
+            sendCommand("watcher_reanchor", { goal: subArg });
+            break;
+          case "summarize":
+            store.addMessage("system", "Triggering watcher summarization...");
+            sendCommand("watcher_summarize");
+            break;
+          default:
+            store.addMessage("system",
+              "Usage: /watcher [subcommand]\n" +
+              "  status         Watcher status + config\n" +
+              "  context        Context window telemetry\n" +
+              "  search <query> Search decisions\n" +
+              "  decisions      List all decisions\n" +
+              "  inspect <id>   Inspect decision detail\n" +
+              "  memory         Session decision memory\n" +
+              "  focus <topic>  Set scoring bias\n" +
+              "  defocus        Clear scoring bias\n" +
+              "  reanchor <goal> Update salience goal\n" +
+              "  summarize      Compact + epistemic ledger"
+            );
+        }
+        return;
+      }
       case "/plan": {
         const currentPlanMode = snapshot.planMode;
         store.batch(() => {
@@ -2738,6 +2878,46 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           maxIterations: ralphArgs.maxIterations,
           completionPromise: ralphArgs.completionPromise,
         });
+        return;
+      }
+      case "/async": {
+        const asyncArg = arg?.trim() ?? "";
+
+        if (asyncArg === "cancel") {
+          store.addMessage("system", "Cancelling async session...");
+          sendCommand("async_cancel", {});
+          return;
+        }
+
+        if (asyncArg === "status") {
+          sendCommand("async_status", {});
+          return;
+        }
+
+        if (!asyncArg) {
+          store.addMessage(
+            "system",
+            "Usage: /async <goal>\n\n" +
+            "Starts an async session with watcher oversight.\n" +
+            "The watcher agent autonomously answers questions,\n" +
+            "quality-gates completed work, and realigns drifting agents.\n\n" +
+            "Subcommands:\n" +
+            "  /async cancel   Cancel running async session\n" +
+            "  /async status   Check async session status\n\n" +
+            "Examples:\n" +
+            "  /async implement user authentication\n" +
+            "  /async refactor the payment module to use Stripe"
+          );
+          return;
+        }
+
+        const goal = asyncArg;
+        store.batch(() => {
+          store.addMessage("system", `Starting async session...\nGoal: ${goal}`);
+          store.setState("sending");
+        });
+
+        sendCommand("async_start", { goal });
         return;
       }
       case "/theme": {
@@ -2882,7 +3062,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     : colors.muted;
   const scrollInfo = snapshot.scrollOffset > 0
     ? `Scroll: ${snapshot.scrollOffset} lines up`
-    : "At bottom";
+    : "";
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
 
   // Header lines with theme colors
@@ -3380,6 +3560,94 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       )}
     </Box>
   );
+}
+
+function formatWatcherPayload(kind: string, payload: Record<string, unknown> | undefined): string {
+  if (!payload) return "No data returned.";
+
+  switch (kind) {
+    case "watcher_status": {
+      const lines = ["[Watcher Status]"];
+      lines.push(`  Enabled: ${payload.enabled ?? "unknown"}`);
+      lines.push(`  Session: ${payload.sessionKey ?? "none"}`);
+      lines.push(`  Focus: ${payload.focusTopic ?? "none"}`);
+      lines.push(`  Salience Goal: ${payload.salienceGoal ?? "default"}`);
+      lines.push(`  Context Items: ${payload.contextItems ?? 0}`);
+      return lines.join("\n");
+    }
+    case "watcher_context": {
+      const metrics = payload.metrics as Record<string, unknown> | undefined;
+      if (!metrics) return "[Watcher Context]\n  No metrics available.";
+      const lines = ["[Watcher Context]"];
+      for (const [key, value] of Object.entries(metrics)) {
+        lines.push(`  ${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
+      }
+      return lines.join("\n");
+    }
+    case "watcher_search": {
+      const results = payload.results as Array<Record<string, unknown>> | undefined;
+      if (!results || results.length === 0) return `[Watcher Search] No results for "${payload.query}"`;
+      const lines = [`[Watcher Search] ${results.length} result(s) for "${payload.query}"`];
+      for (const r of results) {
+        lines.push(`  [${r.id}] (${r.category}, ${r.priority}) ${r.summary}`);
+      }
+      return lines.join("\n");
+    }
+    case "watcher_decisions": {
+      const decisions = payload.decisions as Array<Record<string, unknown>> | undefined;
+      if (!decisions || decisions.length === 0) return "[Watcher Decisions] No decisions in database.";
+      const lines = [`[Watcher Decisions] ${decisions.length} total`];
+      for (const d of decisions) {
+        lines.push(`  [${d.id}] ${d.type} (${d.category}, ${d.priority}) ${d.summary}`);
+      }
+      return lines.join("\n");
+    }
+    case "watcher_inspect": {
+      const decision = payload.decision as Record<string, unknown> | undefined;
+      if (!decision) return `[Watcher Inspect] ${payload.error ?? "Not found"}`;
+      return `[Watcher Inspect]\n${JSON.stringify(decision, null, 2)}`;
+    }
+    case "watcher_memory": {
+      const lines = ["[Watcher Memory]"];
+      lines.push(`  Decisions Made: ${payload.decisionsMade ?? 0}`);
+      lines.push(`  Consistency Score: ${payload.consistencyScore ?? 1.0}`);
+      const patterns = payload.patterns as string[] | undefined;
+      if (patterns && patterns.length > 0) {
+        lines.push(`  Patterns: ${patterns.join(", ")}`);
+      }
+      const decisions = payload.decisions as Array<Record<string, unknown>> | undefined;
+      if (decisions && decisions.length > 0) {
+        lines.push("  Recent:");
+        for (const d of decisions.slice(-5)) {
+          lines.push(`    Q: ${d.question} -> A: ${String(d.answer).slice(0, 80)}`);
+        }
+      }
+      return lines.join("\n");
+    }
+    case "watcher_focus":
+      return `[Watcher Focus] Set to: ${payload.topic}`;
+    case "watcher_defocus":
+      return "[Watcher Focus] Cleared.";
+    case "watcher_reanchor":
+      return `[Watcher Reanchor] Goal set to: ${payload.goal}`;
+    case "watcher_summarize": {
+      const compaction = payload.compaction as Record<string, unknown> | undefined;
+      const ledger = payload.ledger as Record<string, unknown> | undefined;
+      const lines = ["[Watcher Summarize]"];
+      if (compaction) {
+        lines.push(`  Compaction: ${compaction.itemsRemoved} items removed, ${compaction.bytesRecovered} bytes recovered`);
+      }
+      if (ledger) {
+        lines.push(`  Focus: ${ledger.focusTopic ?? "none"}`);
+        lines.push(`  Goal: ${ledger.salienceGoal ?? "default"}`);
+        lines.push(`  Decisions Made: ${ledger.decisionsMade ?? 0}`);
+        lines.push(`  Consistency: ${ledger.consistencyScore ?? 1.0}`);
+      }
+      return lines.join("\n");
+    }
+    default:
+      return JSON.stringify(payload, null, 2);
+  }
 }
 
 function roleColor(role?: Role): string | undefined {

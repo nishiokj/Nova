@@ -12,9 +12,11 @@
  *
  * Usage:
  * ```ts
- * const orchestrator = new Orchestrator({
+ * const orchestrator = new Orchestrator({}, ...);
+ * const runtime = {
  *   stopHook: createRalphStopHook({ prompt: '...', maxIterations: 20, completionPromise: 'DONE' }),
- * }, ...);
+ * };
+ * await orchestrator.execute(context, '...', 'standard', cwd, runtime);
  * ```
  */
 
@@ -268,25 +270,26 @@ export async function runRalphLoop<T>(
 // ============================================
 
 /**
- * Create a Ralph Loop stop hook for orchestrator config.
+ * Create a Ralph Loop stop hook for orchestrator runtime.
  *
- * Returns a StopHookHandler to pass to orchestrator config.
+ * Returns a StopHookHandler to pass to orchestrator runtime.
  * The hook maintains iteration state via closure - each orchestrator
  * instance gets its own isolated state.
  *
  * Usage:
  * ```ts
- * const orchestrator = new Orchestrator({
+ * const orchestrator = new Orchestrator({}, toolRegistry, llm, emit, requestId);
+ * const runtime = {
  *   stopHook: createRalphStopHook({
  *     prompt: 'Build a REST API',
  *     maxIterations: 20,
  *     completionPromise: 'TASK COMPLETE',
  *     onIteration: (state) => console.log(`Iteration ${state.iteration}`),
  *   }),
- * }, toolRegistry, llm, emit, requestId);
+ * };
  *
  * // Run orchestrator - Ralph Loop intercepts each goal_state_reached
- * await orchestrator.execute(context, 'Build a REST API', 'standard', cwd);
+ * await orchestrator.execute(context, 'Build a REST API', 'standard', cwd, runtime);
  * ```
  */
 /** Minimum ms between iterations before triggering death spiral detection */

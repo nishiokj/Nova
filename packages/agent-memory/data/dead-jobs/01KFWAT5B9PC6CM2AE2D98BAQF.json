@@ -1,0 +1,9 @@
+{
+  "id": "01KFWAT5B9PC6CM2AE2D98BAQF",
+  "type": "sync:collect",
+  "payload": "{\"syncJobId\":\"01KFWAT5B7QQTEKDTC96YV4916\",\"connector\":\"claude_sessions\",\"accountId\":\"01KFVRYKRN75P0TSY86PTBK22Z\",\"jobType\":\"backfill\"}",
+  "error": "UNDEFINED_VALUE: Undefined values are not allowed",
+  "attemptCount": 3,
+  "createdAt": "2026-01-26T05:00:51.432Z",
+  "diedAt": "2026-01-26T05:00:55.237Z"
+}

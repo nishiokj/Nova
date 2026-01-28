@@ -91,13 +91,13 @@ export function createRegisteredConnectorRepository(ctx: RepositoryContext): Reg
 
     async register(input) {
       const now = new Date()
-      const configJson = JSON.stringify(input.config ?? {})
+      const config = sql.json((input.config ?? {}) as any)
       const [row] = await sql<RegisteredConnectorRow[]>`
         INSERT INTO registered_connectors (type, enabled, config, registered_at, updated_at)
         VALUES (
           ${input.type},
           ${input.enabled ?? true},
-          ${configJson}::jsonb,
+          ${config},
           ${now},
           ${now}
         )
@@ -112,10 +112,9 @@ export function createRegisteredConnectorRepository(ctx: RepositoryContext): Reg
 
     async updateConfig(type, config) {
       const now = new Date()
-      const configJson = JSON.stringify(config)
       const [row] = await sql<RegisteredConnectorRow[]>`
         UPDATE registered_connectors
-        SET config = ${configJson}::jsonb, updated_at = ${now}
+        SET config = ${sql.json(config as any)}, updated_at = ${now}
         WHERE type = ${type}
         RETURNING *
       `

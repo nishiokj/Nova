@@ -29,6 +29,7 @@ import postgres from 'postgres'
 import ngrok from 'ngrok'
 import { SyncDaemon } from '../src/daemon/index.js'
 import { TelegramConnector } from '../src/connectors/telegram/index.js'
+import { notifyAllUsers } from '../src/connectors/telegram/notify.js'
 
 // Load .env from project root
 await loadEnvFile(join(import.meta.dir, '../../../.env'))
@@ -63,17 +64,57 @@ async function loadEnvFile(path: string): Promise<void> {
   }
 }
 
+// ── Module-scope Telegram config for crash notifications ─────────────────────
+// Parsed early so global error handlers can send notifications even if main()
+// hasn't finished (or has thrown). For private chats, user_id === chat_id.
+const telegramBotToken: string | undefined = process.env.TELEGRAM_BOT_TOKEN
+const telegramChatIds: number[] = (process.env.TELEGRAM_ALLOWED_USERS ?? '')
+  .split(',')
+  .map(id => parseInt(id.trim(), 10))
+  .filter(id => !isNaN(id))
+
+let lastCrashNotificationMs = 0
+const CRASH_NOTIFY_COOLDOWN_MS = 30_000
+
+async function notifyCrash(label: string, error: unknown): Promise<void> {
+  if (!telegramBotToken || telegramChatIds.length === 0) return
+
+  const now = Date.now()
+  if (now - lastCrashNotificationMs < CRASH_NOTIFY_COOLDOWN_MS) return
+  lastCrashNotificationMs = now
+
+  const message = error instanceof Error
+    ? `${error.message}\n\n${error.stack ?? ''}`
+    : String(error)
+
+  await notifyAllUsers(
+    telegramBotToken,
+    telegramChatIds,
+    `🚨 *Sync Daemon ${label}*\n\n\`\`\`\n${message}\n\`\`\``,
+    'Markdown',
+  ).catch(() => {}) // swallow — we're already in an error handler
+}
+
 interface DaemonConfig {
   databaseUrl: string
   encryptionKey: string
   webhookBaseUrl?: string
   port: number
+  autoProcess: boolean
   // Telegram (optional)
   telegramBotToken?: string
   telegramAllowedUsers?: number[]
   harnessHost: string
   harnessPort: number
   workingDir: string
+}
+
+function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+  if (value == null || value.trim() === '') return defaultValue
+  const normalized = value.trim().toLowerCase()
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false
+  return defaultValue
 }
 
 function loadConfig(): DaemonConfig {
@@ -94,12 +135,13 @@ function loadConfig(): DaemonConfig {
     encryptionKey: process.env.CREDENTIAL_ENCRYPTION_KEY || '',
     webhookBaseUrl: process.env.WEBHOOK_BASE_URL || '',
     port: parseInt(process.env.SYNC_DAEMON_PORT || '3001', 10),
+    autoProcess: parseBooleanEnv(process.env.AGENT_MEMORY_SYNC_AUTO_PROCESS, true),
     // Telegram
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
     telegramAllowedUsers,
     harnessHost: process.env.HARNESS_HOST ?? '127.0.0.1',
     harnessPort: parseInt(process.env.HARNESS_PORT ?? '9555', 10),
-    workingDir: process.env.WORKING_DIR ?? process.cwd(),
+    workingDir: process.env.WORKING_DIR ?? join(import.meta.dir, '../../../'),
   }
 
   const missing = required.filter(key => !config[key])
@@ -152,6 +194,7 @@ async function main() {
   console.log(`  Database: ${config.databaseUrl.replace(/:[^:@]+@/, ':****@')}`)
   console.log(`  Webhook Base: ${webhookBaseUrl}`)
   console.log(`  Port: ${config.port}`)
+  console.log(`  Auto Process: ${config.autoProcess}`)
 
   // Create database connection
   console.log('\n📡 Connecting to database...')
@@ -166,6 +209,9 @@ async function main() {
     encryptionKey: Buffer.from(config.encryptionKey, 'hex'),
     port: config.port,
     webhookBaseUrl,
+    engine: {
+      autoProcess: config.autoProcess,
+    },
   })
 
   // Load registered connectors from database
@@ -285,10 +331,12 @@ async function main() {
 // Global error handlers to prevent crashes
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught exception (continuing):', error)
+  void notifyCrash('Uncaught Exception', error)
 })
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   console.error('❌ Unhandled rejection (continuing):', reason)
+  void notifyCrash('Unhandled Rejection', reason)
 })
 
 // Start with restart capability
@@ -303,6 +351,7 @@ async function startWithRetry(maxRetries = 3) {
     } catch (error) {
       retries++
       console.error(`❌ Fatal error (attempt ${retries}/${maxRetries}):`, error)
+      void notifyCrash(`Fatal Error (${retries}/${maxRetries})`, error)
 
       if (retries < maxRetries) {
         const delay = Math.min(5000 * retries, 30000)

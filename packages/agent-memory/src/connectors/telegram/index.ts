@@ -5,16 +5,19 @@
  * Handles message routing, session management, and user prompts.
  */
 
-import { HarnessClient, type BridgeEvent } from 'harness-client'
+import { HarnessClient, type BridgeEvent, type Attachment } from 'harness-client'
 import type {
   TelegramConnectorConfig,
   TelegramUpdate,
   TelegramMessage,
+  TelegramFile,
+  PhotoSize,
   PendingRequest,
   ChatSession,
 } from './types.js'
 
 export * from './types.js'
+export { sendTelegramMessage, notifyAllUsers } from './notify.js'
 
 // ============================================================================
 // TelegramConnector
@@ -27,6 +30,7 @@ export class TelegramConnector {
   private readonly workingDir: string
   private readonly allowedUserIds: Set<number> | null
   private readonly dangerousMode: boolean
+  private readonly fetchTimeoutMs: number = 30000 // 30s timeout for API calls
 
   private client: HarnessClient
   private connected = false
@@ -37,6 +41,13 @@ export class TelegramConnector {
   private pendingRequests = new Map<string, PendingRequest>()
   /** requestId → accumulated response text */
   private responseBuffers = new Map<string, string>()
+
+  /** Background cleanup interval */
+  private reaperInterval: NodeJS.Timeout | null = null
+  /** Reconnection queue for messages sent while disconnected */
+  private messageQueue: Array<{ update: TelegramUpdate; retryCount: number }> = []
+  /** Whether reconnection is in progress */
+  private reconnecting = false
 
   constructor(config: TelegramConnectorConfig) {
     this.botToken = config.botToken
@@ -81,14 +92,36 @@ export class TelegramConnector {
     await this.client.connect()
     this.connected = true
     console.log('[TelegramConnector] Connected to harness')
+
+    // Start background cleanup interval
+    this.startReaper()
   }
 
   disconnect(): void {
+    // Stop reaper
+    if (this.reaperInterval) {
+      clearInterval(this.reaperInterval)
+      this.reaperInterval = null
+    }
+
     this.client.close()
     this.connected = false
     this.sessions.clear()
     this.pendingRequests.clear()
     this.responseBuffers.clear()
+    this.messageQueue = []
+  }
+
+  /**
+   * Start background reaper to clean up stale requests periodically.
+   * Runs every 60 seconds instead of only on new messages.
+   */
+  private startReaper(): void {
+    if (this.reaperInterval) return
+
+    this.reaperInterval = setInterval(() => {
+      this.reapStaleRequests()
+    }, 60_000) // Check every minute
   }
 
   isConnected(): boolean {
@@ -116,10 +149,15 @@ export class TelegramConnector {
       return false
     }
 
-    const text = message.text ?? message.caption
-    if (!text?.trim()) return false
+    const text = message.text ?? message.caption ?? ''
+    const hasMedia = message.photo?.length || message.document
 
-    // Handle commands
+    // Reject if no text and no media
+    if (!text.trim() && !hasMedia) {
+      return false
+    }
+
+    // Handle commands (only if there's text)
     if (text.startsWith('/')) {
       return this.handleCommand(message, text)
     }
@@ -131,7 +169,13 @@ export class TelegramConnector {
     }
 
     // Regular message - send to harness
-    return this.processMessage(update, message, text)
+    const photoFileId = message.photo?.[message.photo.length - 1]?.file_id
+    const documentFileId = message.document?.file_id
+
+    return this.processMessage(update, message, text, {
+      photo: photoFileId ? { file_id: photoFileId } : undefined,
+      document: documentFileId ? { file_id: documentFileId } : undefined,
+    })
   }
 
   // ===========================================================================
@@ -148,21 +192,92 @@ export class TelegramConnector {
         await this.sendMessage(chatId,
           `Hello${message.from?.first_name ? ` ${message.from.first_name}` : ''}!\n\n` +
           `I'm an AI assistant. Send me a message and I'll help you.\n\n` +
-          `Session: \`telegram:${chatId}\`\n\n` +
+          `Session: \`${this.getSessionKey(chatId)}\`\n\n` +
           `Commands:\n` +
           `/new - Start fresh conversation\n` +
+          `/async <goal> - Start an async session\n` +
           `/help - Show this message`,
           'Markdown'
         )
         return true
 
-      case '/new':
+      case '/new': {
+        // Close the existing session on the bridge side so context is persisted + cleared
+        const oldSession = this.sessions.get(chatId)
+        if (oldSession?.initialized) {
+          this.client.send({ type: 'session_close', data: {} })
+        }
         this.sessions.delete(chatId)
+
+        // Generate a unique session key so init doesn't reload old context
+        const newSessionKey = `telegram:${chatId}:${Date.now()}`
+        await this.initSession(chatId, newSessionKey)
+
         await this.sendMessage(chatId,
-          `Started new session: \`telegram:${chatId}\`\n\nPrevious context cleared.`,
+          `Started new session: \`${newSessionKey}\`\n\nPrevious context cleared.`,
           'Markdown'
         )
         return true
+      }
+
+      case '/async': {
+        const goal = command.slice(cmd.length).trim()
+        if (!goal) {
+          await this.sendMessage(
+            chatId,
+            `Usage: /async <goal>\n\n` +
+              `Starts an async session with watcher oversight.\n` +
+              `Example:\n` +
+              `/async refactor the payment module to use Stripe`
+          )
+          return true
+        }
+
+        if (!this.connected) {
+          await this.sendMessage(chatId, '🔄 Reconnecting... Please try /async again in a moment.')
+          if (!this.reconnecting) {
+            this.reconnecting = true
+            void this.attemptReconnect()
+          }
+          return true
+        }
+
+        let session = this.sessions.get(chatId)
+        if (!session?.initialized) {
+          const sessionKey = this.getSessionKey(chatId)
+          await this.initSession(chatId, sessionKey)
+          session = this.sessions.get(chatId)!
+        }
+
+        session.lastActivityAt = Date.now()
+        this.reapStaleRequests()
+
+        await this.sendMessage(chatId, `🟡 Starting async session...\nGoal: ${goal}`)
+
+        const result = await this.client.asyncStart(goal, this.workingDir)
+        if (!result.success) {
+          await this.sendMessage(chatId, `⚠️ Failed to start async session: ${result.error ?? 'Unknown error'}`)
+          return true
+        }
+
+        if (result.requestId) {
+          this.pendingRequests.set(result.requestId, {
+            chatId,
+            messageId: message.message_id,
+            text: goal,
+            startedAt: Date.now(),
+            settled: false,
+          })
+          this.responseBuffers.set(result.requestId, '')
+          this.client.subscribeRun(result.requestId)
+        }
+
+        await this.sendMessage(
+          chatId,
+          `✅ Async session started.\nRequest: ${result.requestId ?? 'unknown'}`
+        )
+        return true
+      }
 
       default:
         // Unknown command - treat as regular message
@@ -177,27 +292,87 @@ export class TelegramConnector {
   private async processMessage(
     update: TelegramUpdate,
     message: TelegramMessage,
-    text: string
+    text: string,
+    attachments?: { photo?: { file_id: string }, document?: { file_id: string } }
   ): Promise<boolean> {
+    // Handle disconnection with reconnection queue
     if (!this.connected) {
-      try {
-        await this.connect()
-      } catch (err) {
-        console.error('[TelegramConnector] Failed to connect:', err)
-        await this.sendMessage(message.chat.id, 'Service unavailable. Try again later.')
-        return false
+      // Queue the message for retry and inform user
+      this.messageQueue.push({ update, retryCount: 0 })
+
+      // Try to reconnect in background
+      if (!this.reconnecting) {
+        this.reconnecting = true
+        void this.attemptReconnect()
       }
+
+      await this.sendMessage(message.chat.id, '🔄 Reconnecting... Your message is queued.')
+      return true
     }
 
     const chatId = message.chat.id
-    const sessionKey = `telegram:${chatId}`
     const requestId = this.generateRequestId(update.update_id, message.message_id)
 
     // Initialize session if needed
     let session = this.sessions.get(chatId)
     if (!session?.initialized) {
+      const sessionKey = this.getSessionKey(chatId)
       await this.initSession(chatId, sessionKey)
       session = this.sessions.get(chatId)!
+    }
+
+    // Update session activity timestamp
+    session.lastActivityAt = Date.now()
+
+    // Clean up any stale requests before adding new ones
+    this.reapStaleRequests()
+
+    // Build attachment list if present
+    const attachmentList: Attachment[] = []
+    let attachmentFailed = false
+
+    if (attachments?.photo) {
+      try {
+        const file = await this.getFile(attachments.photo.file_id)
+        if (file?.file_path) {
+          attachmentList.push({
+            type: 'image',
+            url: this.getFileUrl(file),
+            file_id: file.file_id,
+            mimeType: 'image/jpeg',
+            size: file.file_size,
+          })
+          await this.sendChatAction(chatId, 'upload_photo')
+        } else {
+          attachmentFailed = true
+          await this.sendMessage(chatId, '⚠️ Failed to retrieve photo. Message will be sent without attachment.')
+        }
+      } catch (err) {
+        console.error('[TelegramConnector] Photo fetch error:', err)
+        attachmentFailed = true
+        await this.sendMessage(chatId, '⚠️ Failed to retrieve photo. Message will be sent without attachment.')
+      }
+    }
+
+    if (attachments?.document) {
+      try {
+        const file = await this.getFile(attachments.document.file_id)
+        if (file?.file_path) {
+          attachmentList.push({
+            type: 'document',
+            url: this.getFileUrl(file),
+            file_id: file.file_id,
+          })
+          await this.sendChatAction(chatId, 'upload_document')
+        } else {
+          attachmentFailed = true
+          await this.sendMessage(chatId, '⚠️ Failed to retrieve document. Message will be sent without attachment.')
+        }
+      } catch (err) {
+        console.error('[TelegramConnector] Document fetch error:', err)
+        attachmentFailed = true
+        await this.sendMessage(chatId, '⚠️ Failed to retrieve document. Message will be sent without attachment.')
+      }
     }
 
     // Track this request
@@ -206,23 +381,76 @@ export class TelegramConnector {
       messageId: message.message_id,
       text,
       startedAt: Date.now(),
+      settled: false,
+      attachments: attachmentList.length > 0 ? attachmentList : undefined,
     })
     this.responseBuffers.set(requestId, '')
 
     // Subscribe to run events and send message
     this.client.subscribeRun(requestId)
-    this.client.send({
-      type: 'send_text',
+
+    // Determine command type based on attachments
+    const commandType = attachmentList.length > 0 ? 'send_media' : 'send_text'
+    const sent = this.client.send({
+      type: commandType,
       data: {
         text,
         client_request_id: requestId,
+        attachments: attachmentList.length > 0 ? attachmentList : undefined,
       },
     })
+
+    if (!sent) {
+      console.error('[TelegramConnector] Failed to send message to harness')
+      await this.sendMessage(chatId, '⚠️ Failed to send message to service. Please try again.')
+      this.pendingRequests.delete(requestId)
+      this.responseBuffers.delete(requestId)
+      return false
+    }
 
     // Send typing indicator
     await this.sendChatAction(chatId, 'typing')
 
     return true
+  }
+
+  /**
+   * Attempt to reconnect to harness and process queued messages.
+   */
+  private async attemptReconnect(): Promise<void> {
+    const MAX_RETRIES = 3
+    const RETRY_DELAY_MS = 2000
+
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      try {
+        console.log(`[TelegramConnector] Reconnection attempt ${i + 1}/${MAX_RETRIES}`)
+        await this.client.connect()
+        this.connected = true
+        console.log('[TelegramConnector] Reconnected successfully')
+
+        // Process queued messages
+        const queue = [...this.messageQueue]
+        this.messageQueue = []
+
+        for (const item of queue) {
+          try {
+            await this.handleUpdate(item.update)
+          } catch (err) {
+            console.error('[TelegramConnector] Failed to process queued message:', err)
+          }
+        }
+
+        return
+      } catch (err) {
+        console.error(`[TelegramConnector] Reconnection attempt ${i + 1} failed:`, err)
+        if (i < MAX_RETRIES - 1) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+        }
+      }
+    }
+
+    console.error('[TelegramConnector] All reconnection attempts failed')
+    this.reconnecting = false
   }
 
   private async handleUserPromptResponse(
@@ -259,6 +487,13 @@ export class TelegramConnector {
     return true
   }
 
+  /**
+   * Get the session key for a chat, falling back to the deterministic default.
+   */
+  private getSessionKey(chatId: number): string {
+    return this.sessions.get(chatId)?.sessionKey ?? `telegram:${chatId}`
+  }
+
   private async initSession(chatId: number, sessionKey: string): Promise<void> {
     this.client.subscribeSession(sessionKey)
 
@@ -275,7 +510,7 @@ export class TelegramConnector {
       await this.client.setDangerousMode(true)
     }
 
-    this.sessions.set(chatId, { initialized: true })
+    this.sessions.set(chatId, { initialized: true, sessionKey })
   }
 
   // ===========================================================================
@@ -283,80 +518,101 @@ export class TelegramConnector {
   // ===========================================================================
 
   private handleEvent(event: BridgeEvent, channel: string): void {
-    // Handle direct channel events (errors, provider_key_required, etc.)
-    if (channel === 'direct') {
-      this.handleDirectEvent(event)
-      return
-    }
+    try {
+      // Handle direct channel events (errors, provider_key_required, etc.)
+      if (channel === 'direct') {
+        this.handleDirectEvent(event)
+        return
+      }
 
-    // Extract requestId from channel (run:requestId)
-    const requestId = channel.startsWith('run:') ? channel.slice(4) : null
-    if (!requestId) return
+      // Extract requestId from channel (run:requestId)
+      const requestId = channel.startsWith('run:') ? channel.slice(4) : null
+      if (!requestId) return
 
-    const pending = this.pendingRequests.get(requestId)
-    if (!pending) return
+      const pending = this.pendingRequests.get(requestId)
+      if (!pending) return
 
-    switch (event.type) {
-      case 'stream':
-        this.handleStreamEvent(requestId, event, pending)
-        break
+      switch (event.type) {
+        case 'stream':
+          this.handleStreamEvent(requestId, event, pending)
+          break
 
-      case 'response':
-        this.handleResponseEvent(requestId, pending)
-        break
+        case 'response':
+          void this.handleResponseEvent(requestId, pending)
+          break
 
-      case 'error':
-        this.handleErrorEvent(requestId, event, pending)
-        break
+        case 'error':
+          void this.handleErrorEvent(requestId, event, pending)
+          break
 
-      case 'user_prompt':
-        this.handleUserPromptEvent(requestId, event, pending)
-        break
+        case 'user_prompt':
+          this.handleUserPromptEvent(requestId, event, pending)
+          break
 
-      case 'status':
-      case 'progress':
-        // Keep typing indicator active
-        void this.sendChatAction(pending.chatId, 'typing')
-        break
+        case 'status':
+          void this.sendChatAction(pending.chatId, 'typing')
+          break
+
+        case 'progress': {
+          const progData = event.data as { message?: string; kind?: string } | undefined
+          void this.sendChatAction(pending.chatId, 'typing')
+
+          // Send progress text for tool/work events, throttled to 1 per 10s
+          if (progData?.message && (progData.kind === 'tool' || progData.kind === 'work')) {
+            const now = Date.now()
+            if (!pending.lastProgressAt || now - pending.lastProgressAt > 10_000) {
+              pending.lastProgressAt = now
+              void this.sendMessage(pending.chatId, progData.message)
+            }
+          }
+          break
+        }
+      }
+    } catch (err) {
+      console.error('[TelegramConnector] Unhandled error in handleEvent:', err)
     }
   }
 
   private handleDirectEvent(event: BridgeEvent): void {
-    const data = event.data as Record<string, unknown> | undefined
+    try {
+      const data = event.data as Record<string, unknown> | undefined
 
-    switch (event.type) {
-      case 'error': {
-        const message = typeof data?.message === 'string' ? data.message : 'Unknown error'
-        console.error('[TelegramConnector] Direct error:', message)
-        // Send to all active sessions - we don't know which chat triggered this
-        for (const [chatId] of this.sessions) {
-          void this.sendMessage(chatId, `⚠️ ${message}`)
+      switch (event.type) {
+        case 'error': {
+          const message = typeof data?.message === 'string' ? data.message : 'Unknown error'
+          console.error('[TelegramConnector] Direct error:', message)
+          // Send to all active sessions - we don't know which chat triggered this
+          for (const [chatId] of this.sessions) {
+            void this.sendMessage(chatId, `⚠️ ${message}`)
+          }
+          break
         }
-        break
-      }
 
-      case 'provider_key_required': {
-        const provider = typeof data?.provider === 'string' ? data.provider : 'unknown'
-        const model = typeof data?.model === 'string' ? data.model : 'unknown'
-        console.warn(`[TelegramConnector] Provider key required: ${provider} for ${model}`)
-        for (const [chatId] of this.sessions) {
-          void this.sendMessage(chatId, `⚠️ API key required for ${provider} (${model})`)
+        case 'provider_key_required': {
+          const provider = typeof data?.provider === 'string' ? data.provider : 'unknown'
+          const model = typeof data?.model === 'string' ? data.model : 'unknown'
+          console.warn(`[TelegramConnector] Provider key required: ${provider} for ${model}`)
+          for (const [chatId] of this.sessions) {
+            void this.sendMessage(chatId, `⚠️ API key required for ${provider} (${model}). Please configure in your settings.`)
+          }
+          break
         }
-        break
-      }
 
-      case 'model_changed': {
-        const model = typeof data?.model === 'string' ? data.model : null
-        const provider = typeof data?.provider === 'string' ? data.provider : null
-        if (model && provider) {
-          console.log(`[TelegramConnector] Model changed: ${provider}/${model}`)
+        case 'model_changed': {
+          const model = typeof data?.model === 'string' ? data.model : null
+          const provider = typeof data?.provider === 'string' ? data.provider : null
+          if (model && provider) {
+            console.log(`[TelegramConnector] Model changed: ${provider}/${model}`)
+          }
+          break
         }
-        break
-      }
 
-      default:
-        // Log but don't crash on unknown direct events
-        console.log(`[TelegramConnector] Direct event: ${event.type}`)
+        default:
+          // Log but don't crash on unknown direct events
+          console.log(`[TelegramConnector] Direct event: ${event.type}`)
+      }
+    } catch (err) {
+      console.error('[TelegramConnector] Unhandled error in handleDirectEvent:', err)
     }
   }
 
@@ -365,42 +621,73 @@ export class TelegramConnector {
     event: BridgeEvent,
     pending: PendingRequest
   ): void {
-    const data = event.data as { chunk?: string; is_reasoning?: boolean } | undefined
-    if (data?.chunk && !data.is_reasoning) {
-      const buffer = this.responseBuffers.get(requestId) ?? ''
-      this.responseBuffers.set(requestId, buffer + data.chunk)
-    }
-    void this.sendChatAction(pending.chatId, 'typing')
-  }
-
-  private handleResponseEvent(requestId: string, pending: PendingRequest): void {
-    const text = this.responseBuffers.get(requestId) ?? ''
-
-    // Cleanup
-    this.pendingRequests.delete(requestId)
-    this.responseBuffers.delete(requestId)
-
-    // Send response to Telegram
-    if (text.trim()) {
-      void this.sendLongMessage(pending.chatId, text, pending.messageId)
-    } else {
-      void this.sendMessage(pending.chatId, '(No response)', undefined, pending.messageId)
+    try {
+      const data = event.data as { chunk?: string; is_reasoning?: boolean } | undefined
+      if (data?.chunk && !data.is_reasoning) {
+        const buffer = this.responseBuffers.get(requestId) ?? ''
+        this.responseBuffers.set(requestId, buffer + data.chunk)
+      }
+      void this.sendChatAction(pending.chatId, 'typing')
+    } catch (err) {
+      console.error('[TelegramConnector] Error in handleStreamEvent:', err)
     }
   }
 
-  private handleErrorEvent(
+  private async handleResponseEvent(requestId: string, pending: PendingRequest): Promise<void> {
+    try {
+      if (!pending.settled) {
+        pending.settled = true
+        const text = this.responseBuffers.get(requestId) ?? ''
+        if (text.trim()) {
+          await this.sendLongMessage(pending.chatId, text, pending.messageId)
+        } else {
+          await this.sendMessage(pending.chatId, '(No response)', undefined, pending.messageId)
+        }
+      }
+    } catch (err) {
+      console.error('[TelegramConnector] Error in handleResponseEvent:', err)
+      await this.sendMessage(pending.chatId, '⚠️ Failed to send response. Please try again.', undefined, pending.messageId)
+    } finally {
+      // Always clean up
+      this.pendingRequests.delete(requestId)
+      this.responseBuffers.delete(requestId)
+    }
+  }
+
+  private async handleErrorEvent(
     requestId: string,
     event: BridgeEvent,
     pending: PendingRequest
-  ): void {
-    const data = event.data as { message?: string } | undefined
-    const errorMsg = data?.message ?? 'Unknown error'
+  ): Promise<void> {
+    try {
+      if (pending.settled) return // Already handled by another path
+      pending.settled = true
 
-    // Cleanup
-    this.pendingRequests.delete(requestId)
-    this.responseBuffers.delete(requestId)
+      // Flush accumulated buffer first
+      const buffer = this.responseBuffers.get(requestId) ?? ''
+      if (buffer.trim()) {
+        await this.sendLongMessage(pending.chatId, buffer, pending.messageId)
+      }
 
-    void this.sendMessage(pending.chatId, `Error: ${errorMsg}`, undefined, pending.messageId)
+      const data = event.data as { message?: string } | undefined
+      const errorMsg = data?.message ?? 'Unknown error'
+
+      // Provide more actionable error messages
+      let userMessage = `Error: ${errorMsg}`
+      if (errorMsg.includes('timeout') || errorMsg.includes('timed out')) {
+        userMessage += '\n\n💡 Tip: The request took too long. Try breaking it into smaller tasks.'
+      } else if (errorMsg.includes('rate limit')) {
+        userMessage += '\n\n💡 Tip: Please wait a moment before trying again.'
+      }
+
+      await this.sendMessage(pending.chatId, userMessage, undefined, pending.messageId)
+    } catch (err) {
+      console.error('[TelegramConnector] Error in handleErrorEvent:', err)
+    } finally {
+      // Always clean up to prevent memory leaks
+      this.pendingRequests.delete(requestId)
+      this.responseBuffers.delete(requestId)
+    }
   }
 
   private handleUserPromptEvent(
@@ -408,32 +695,36 @@ export class TelegramConnector {
     event: BridgeEvent,
     pending: PendingRequest
   ): void {
-    const data = event.data as {
-      question?: string
-      options?: Array<string | { label: string; description?: string }>
-    } | undefined
+    try {
+      const data = event.data as {
+        question?: string
+        options?: Array<string | { label: string; description?: string }>
+      } | undefined
 
-    const question = data?.question ?? 'The assistant has a question:'
-    const options = data?.options
+      const question = data?.question ?? 'The assistant has a question:'
+      const options = data?.options
 
-    // Mark session as waiting for user prompt response
-    const session = this.sessions.get(pending.chatId)
-    if (session) {
-      session.pendingUserPrompt = requestId
+      // Mark session as waiting for user prompt response
+      const session = this.sessions.get(pending.chatId)
+      if (session) {
+        session.pendingUserPrompt = requestId
+      }
+
+      // Format question with options
+      let formattedQuestion = `*Question:*\n\n${question}`
+      if (options?.length) {
+        formattedQuestion += '\n\n*Options:*\n'
+        options.forEach((opt, i) => {
+          const label = typeof opt === 'string' ? opt : opt.label
+          formattedQuestion += `${i + 1}. ${label}\n`
+        })
+        formattedQuestion += '\n_Reply with a number or type your answer._'
+      }
+
+      void this.sendMessage(pending.chatId, formattedQuestion, 'Markdown')
+    } catch (err) {
+      console.error('[TelegramConnector] Error in handleUserPromptEvent:', err)
     }
-
-    // Format question with options
-    let formattedQuestion = `*Question:*\n\n${question}`
-    if (options?.length) {
-      formattedQuestion += '\n\n*Options:*\n'
-      options.forEach((opt, i) => {
-        const label = typeof opt === 'string' ? opt : opt.label
-        formattedQuestion += `${i + 1}. ${label}\n`
-      })
-      formattedQuestion += '\n_Reply with a number or type your answer._'
-    }
-
-    void this.sendMessage(pending.chatId, formattedQuestion, 'Markdown')
   }
 
   // ===========================================================================
@@ -446,10 +737,28 @@ export class TelegramConnector {
     parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML',
     replyToMessageId?: number
   ): Promise<boolean> {
+    const result = await this._sendMessageRaw(chatId, text, parseMode, replyToMessageId)
+    if (!result && parseMode) {
+      // Markdown rejected — retry as plain text and log fallback
+      console.log('[TelegramConnector] Markdown rejected, falling back to plain text')
+      return this._sendMessageRaw(chatId, text, undefined, replyToMessageId)
+    }
+    return result
+  }
+
+  private async _sendMessageRaw(
+    chatId: number,
+    text: string,
+    parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML',
+    replyToMessageId?: number
+  ): Promise<boolean> {
     try {
       const body: Record<string, unknown> = { chat_id: chatId, text }
       if (parseMode) body.parse_mode = parseMode
       if (replyToMessageId) body.reply_to_message_id = replyToMessageId
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeoutMs)
 
       const response = await fetch(
         `${this.apiBaseUrl}/bot${this.botToken}/sendMessage`,
@@ -457,8 +766,11 @@ export class TelegramConnector {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: controller.signal,
         }
       )
+
+      clearTimeout(timeoutId)
 
       if (!response.ok) {
         const err = await response.text()
@@ -468,7 +780,11 @@ export class TelegramConnector {
 
       return true
     } catch (err) {
-      console.error('[TelegramConnector] sendMessage error:', err)
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.error('[TelegramConnector] sendMessage timeout')
+      } else {
+        console.error('[TelegramConnector] sendMessage error:', err)
+      }
       return false
     }
   }
@@ -495,21 +811,139 @@ export class TelegramConnector {
     }
   }
 
+  // ===========================================================================
+  // Telegram API - File Operations
+  // ===========================================================================
+
+  /**
+   * Get file info from Telegram servers.
+   * Returns file_path which can be used to construct a download URL.
+   */
+  async getFile(fileId: string): Promise<TelegramFile | null> {
+    try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeoutMs)
+
+      const response = await fetch(
+        `${this.apiBaseUrl}/bot${this.botToken}/getFile`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_id: fileId }),
+          signal: controller.signal,
+        }
+      )
+
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        const err = await response.text()
+        console.error('[TelegramConnector] getFile failed:', err)
+        return null
+      }
+
+      const data = await response.json() as { ok: boolean; result: TelegramFile }
+      return data.result
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.error('[TelegramConnector] getFile timeout')
+      } else {
+        console.error('[TelegramConnector] getFile error:', err)
+      }
+      return null
+    }
+  }
+
+  /**
+   * Get the download URL for a file from Telegram.
+   */
+  getFileUrl(file: TelegramFile): string {
+    if (!file.file_path) return ''
+    return `${this.apiBaseUrl}/file/bot${this.botToken}/${file.file_path}`
+  }
+
+  // ===========================================================================
+  // Telegram API - Sending
+  // ===========================================================================
+
   async sendChatAction(
     chatId: number,
     action: 'typing' | 'upload_photo' | 'upload_document'
   ): Promise<boolean> {
     try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeoutMs)
+
       const response = await fetch(
         `${this.apiBaseUrl}/bot${this.botToken}/sendChatAction`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ chat_id: chatId, action }),
+          signal: controller.signal,
         }
       )
+
+      clearTimeout(timeoutId)
       return response.ok
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.error('[TelegramConnector] sendChatAction timeout')
+      }
+      return false
+    }
+  }
+
+  async sendPhoto(
+    chatId: number,
+    photo: string,
+    caption?: string
+  ): Promise<boolean> {
+    try {
+      const formData = new FormData()
+      formData.append('chat_id', String(chatId))
+
+      // If photo is a URL or file path, send as string
+      // If it's binary data (starts with base64 pattern), send as Buffer
+      if (photo.startsWith('http://') || photo.startsWith('https://') || photo.startsWith('/')) {
+        formData.append('photo', photo)
+      } else {
+        // Assume it's base64 encoded image data
+        const buffer = Buffer.from(photo, 'base64')
+        formData.append('photo', new Blob([buffer]), 'image.png')
+      }
+
+      if (caption) {
+        formData.append('caption', caption)
+      }
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeoutMs)
+
+      const response = await fetch(
+        `${this.apiBaseUrl}/bot${this.botToken}/sendPhoto`,
+        {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        }
+      )
+
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        const err = await response.text()
+        console.error('[TelegramConnector] sendPhoto failed:', err)
+        return false
+      }
+
+      return true
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.error('[TelegramConnector] sendPhoto timeout')
+      } else {
+        console.error('[TelegramConnector] sendPhoto error:', err)
+      }
       return false
     }
   }
@@ -517,6 +951,44 @@ export class TelegramConnector {
   // ===========================================================================
   // Utilities
   // ===========================================================================
+
+  private reapStaleRequests(): void {
+    const now = Date.now()
+    const TIMEOUT_MS = 3 * 60 * 1000 // Reduced to 3 minutes for better UX
+
+    for (const [requestId, pending] of this.pendingRequests) {
+      if (now - pending.startedAt <= TIMEOUT_MS) continue
+
+      if (!pending.settled) {
+        // Unsettled + stale: flush buffer, notify user, clean up
+        pending.settled = true
+        const buffer = this.responseBuffers.get(requestId) ?? ''
+        if (buffer.trim()) {
+          void this.sendLongMessage(pending.chatId, buffer, pending.messageId)
+        }
+        void this.sendMessage(
+          pending.chatId,
+          '⏰ Request timed out. The service may be overloaded. Please try again.',
+          undefined,
+          pending.messageId
+        )
+      }
+      // Settled or not, stale entries get cleaned up
+      this.pendingRequests.delete(requestId)
+      this.responseBuffers.delete(requestId)
+    }
+
+    // Clean up old sessions (inactive for > 24 hours and not pending)
+    const ONE_DAY = 24 * 60 * 60 * 1000
+    for (const [chatId, session] of this.sessions) {
+      if (!session.pendingUserPrompt && session.lastActivityAt) {
+        if (now - session.lastActivityAt > ONE_DAY) {
+          this.sessions.delete(chatId)
+          console.log(`[TelegramConnector] Cleaned up inactive session: ${chatId}`)
+        }
+      }
+    }
+  }
 
   private generateRequestId(updateId: number, messageId: number): string {
     return `tg_${updateId}_${messageId}_${Date.now()}`
@@ -658,6 +1130,10 @@ export class TelegramConnector {
             continue
           }
 
+          // Reset conflict counter on other errors to avoid unnecessary backoff
+          if (this.pollingConflictCount > 0) {
+            this.pollingConflictCount = 0
+          }
           console.error('[TelegramConnector] getUpdates failed:', errorText)
           await new Promise(r => setTimeout(r, intervalMs))
           continue

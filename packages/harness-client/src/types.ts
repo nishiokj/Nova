@@ -2,9 +2,19 @@
  * Shared types for harness communication.
  */
 
+export interface Attachment {
+  type: 'image' | 'document' | 'audio' | 'video'
+  url?: string
+  file_id?: string
+  mimeType?: string
+  size?: number
+  metadata?: Record<string, unknown>
+}
+
 export type BridgeCommandType =
   | 'init'
   | 'send_text'
+  | 'send_media'
   | 'voice_start'
   | 'voice_stop'
   | 'get_config'
@@ -44,7 +54,20 @@ export type BridgeCommandType =
   | 'get_model'
   | 'set_dangerous_mode'
   | 'ralph_loop_start'
-  | 'ralph_loop_cancel';
+  | 'ralph_loop_cancel'
+  | 'watcher_status'
+  | 'watcher_context'
+  | 'watcher_search'
+  | 'watcher_decisions'
+  | 'watcher_inspect'
+  | 'watcher_memory'
+  | 'watcher_focus'
+  | 'watcher_defocus'
+  | 'watcher_reanchor'
+  | 'watcher_summarize'
+  | 'async_start'
+  | 'async_cancel'
+  | 'async_status';
 
 export type BridgeEventType =
   | 'ready'

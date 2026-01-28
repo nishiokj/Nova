@@ -9,7 +9,8 @@
 
 import type { Transformation, TransformContext, TransformResult } from '../../transform/types.js'
 import { generateCanonicalId, sourceRefToKey } from '../../ids.js'
-import type { Identity } from '../../models/canonical.js'
+import type { ConnectorType } from '../../ids.js'
+import type { CanonicalSourceRef } from '../../models/canonical.js'
 import {
   ClaudeSessionMessageSchema,
   ClaudeSummaryMessageSchema,
@@ -17,6 +18,12 @@ import {
   type ClaudeUserMessage,
   type ClaudeAssistantMessage,
   type ClaudeSummaryMessage,
+  RexSessionMessageSchema,
+  RexSummaryMessageSchema,
+  type RexSessionMessage,
+  type RexUserMessage,
+  type RexAssistantMessage,
+  type RexSummaryMessage,
 } from './schemas.js'
 
 // ============ Helper Functions ============
@@ -25,10 +32,11 @@ function createSourceRef(
   accountId: string,
   entityType: string,
   sourceId: string,
-  sourceVersion?: string
-): Identity['source_refs'][0] {
+  sourceVersion?: string,
+  connector: ConnectorType = 'claude_sessions'
+): CanonicalSourceRef {
   return {
-    connector: 'claude_sessions',
+    connector,
     account_id: accountId,
     entity_type: entityType,
     source_id: sourceId,
@@ -37,7 +45,7 @@ function createSourceRef(
   }
 }
 
-function createBaseEntity(id: string, sourceRef: Identity['source_refs'][0]) {
+function createBaseEntity(id: string, sourceRef: CanonicalSourceRef) {
   const now = new Date().toISOString()
   return {
     id,
@@ -114,6 +122,7 @@ export const claudeSessionTransform: Transformation<ClaudeSessionMessage[]> = {
 
     const sessionId = firstUserMsg.sessionId
     const messageIds: string[] = []
+    const conversationSourceRefKey = `claude_sessions:${ctx.accountId}:conversation:${sessionId}`
 
     // Create Message entities for each turn
     const conversationalMessages = messages.filter(
@@ -150,6 +159,7 @@ export const claudeSessionTransform: Transformation<ClaudeSessionMessage[]> = {
               cwd: msg.cwd,
               git_branch: msg.gitBranch,
               claude_version: msg.version,
+              conversation_source_ref_key: conversationSourceRefKey,
             },
           },
           displayText: textContent.slice(0, 200),
@@ -158,7 +168,6 @@ export const claudeSessionTransform: Transformation<ClaudeSessionMessage[]> = {
     })
 
     // Create Conversation entity
-    const conversationSourceRefKey = `claude_sessions:${ctx.accountId}:conversation:${sessionId}`
 
     // Extract summary if present
     const summaryMsg = messages.find(m => m.type === 'summary')
@@ -221,7 +230,7 @@ export const claudeMessageTransform: Transformation<ClaudeSessionMessage> = {
 
   inputSchema: ClaudeSessionMessageSchema,
 
-  outputType: 'message',
+  outputType: ['conversation', 'message'],
 
   transform: (msg: ClaudeSessionMessage, ctx: TransformContext): TransformResult => {
     if (msg.type !== 'user' && msg.type !== 'assistant') {
@@ -235,6 +244,8 @@ export const claudeMessageTransform: Transformation<ClaudeSessionMessage> = {
       : []
 
     const sourceRef = createSourceRef(ctx.accountId, 'message', msg.uuid)
+    const conversationSourceRef = createSourceRef(ctx.accountId, 'conversation', msg.sessionId)
+    const conversationSourceRefKey = sourceRefToKey(conversationSourceRef)
 
     return {
       primary: {
@@ -257,10 +268,35 @@ export const claudeMessageTransform: Transformation<ClaudeSessionMessage> = {
             cwd: msg.cwd,
             git_branch: msg.gitBranch,
             claude_version: msg.version,
+            conversation_source_ref_key: conversationSourceRefKey,
           },
         },
         displayText: textContent.slice(0, 200),
       },
+      related: [{
+        entityType: 'conversation',
+        sourceRefKey: conversationSourceRefKey,
+        data: {
+          ...createBaseEntity(generateCanonicalId(), conversationSourceRef),
+          entity_type: 'conversation',
+          platform: 'unknown',
+          message_ids: [],
+          message_count: 0,
+          participants: [],
+          started_at: msg.timestamp,
+          topic: msg.slug ?? `Session ${msg.sessionId.slice(0, 8)}...`,
+          is_archived: false,
+          metadata: {
+            agent: 'claude',
+            session_id: msg.sessionId,
+            project_path: msg.cwd,
+            git_branch: msg.gitBranch,
+            claude_version: msg.version,
+            slug: msg.slug,
+          },
+        },
+        displayText: msg.slug ?? `Session ${msg.sessionId.slice(0, 8)}...`,
+      }],
     }
   },
 
@@ -271,12 +307,12 @@ export const claudeMessageTransform: Transformation<ClaudeSessionMessage> = {
 }
 
 /**
- * Transform Claude session summary to an Observation entity.
+ * Transform Claude session summary to a Notification entity.
  * Summaries are AI-generated synopses of session conversations.
  */
 export const claudeSummaryTransform: Transformation<ClaudeSummaryMessage> = {
-  id: 'claude_sessions:summary_to_observation',
-  name: 'Claude Summary → Observation',
+  id: 'claude_sessions:summary_to_notification',
+  name: 'Claude Summary → Notification',
 
   source: {
     connector: 'claude_sessions',
@@ -285,7 +321,7 @@ export const claudeSummaryTransform: Transformation<ClaudeSummaryMessage> = {
 
   inputSchema: ClaudeSummaryMessageSchema,
 
-  outputType: 'observation',
+  outputType: 'notification',
 
   transform: (msg: ClaudeSummaryMessage, ctx: TransformContext): TransformResult => {
     const meta = (msg as { _meta?: { sessionId?: string; project?: string } })._meta ?? {}
@@ -293,14 +329,15 @@ export const claudeSummaryTransform: Transformation<ClaudeSummaryMessage> = {
 
     return {
       primary: {
-        entityType: 'observation',
+        entityType: 'notification',
         sourceRefKey: sourceRefToKey(sourceRef),
         data: {
           ...createBaseEntity(generateCanonicalId(), sourceRef),
-          entity_type: 'observation',
-          content: msg.summary,
-          observation_type: 'summary',
-          related_entity_ids: [],
+          entity_type: 'notification',
+          notification_type: 'session_summary',
+          title: 'Session Summary',
+          body: msg.summary,
+          triggered_at: new Date().toISOString(),
           metadata: {
             agent: 'claude',
             session_id: meta.sessionId,
@@ -316,7 +353,143 @@ export const claudeSummaryTransform: Transformation<ClaudeSummaryMessage> = {
   onError: 'skip',
   enabled: true,
   version: 1,
-  description: 'Transforms Claude session summaries into Observation canonical entities',
+  description: 'Transforms Claude session summaries into Notification canonical entities',
+}
+
+// ============ Rex Session Transformations ============
+
+/**
+ * Transform individual Rex session message to Message entity.
+ * Used when processing messages one at a time (incremental sync).
+ */
+export const rexMessageTransform: Transformation<RexSessionMessage> = {
+  id: 'rex_sessions:message_to_message',
+  name: 'Rex Message → Message',
+
+  source: {
+    connector: 'rex_sessions',
+    entityType: 'session_message',
+    filter: (raw: unknown) => {
+      const msg = raw as { type?: string }
+      return msg.type === 'user' || msg.type === 'assistant'
+    },
+  },
+
+  inputSchema: RexSessionMessageSchema,
+
+  outputType: ['conversation', 'message'],
+
+  transform: (msg: RexSessionMessage, ctx: TransformContext): TransformResult => {
+    if (msg.type !== 'user' && msg.type !== 'assistant') {
+      throw new Error(`Unexpected message type: ${msg.type}`)
+    }
+
+    const meta = (msg as { _meta?: { sessionId?: string; project?: string } })._meta ?? {}
+    const textContent = extractTextContent(msg.content)
+    const sessionId = msg.session_id
+
+    const sourceRef = createSourceRef(ctx.accountId, 'message', msg.id, undefined, 'rex_sessions')
+    const conversationSourceRef = createSourceRef(ctx.accountId, 'conversation', sessionId, undefined, 'rex_sessions')
+    const conversationSourceRefKey = sourceRefToKey(conversationSourceRef)
+
+    return {
+      primary: {
+        entityType: 'message',
+        sourceRefKey: sourceRefToKey(sourceRef),
+        data: {
+          ...createBaseEntity(generateCanonicalId(), sourceRef),
+          entity_type: 'message',
+          thread_id: sessionId,
+          body_text: textContent,
+          sent_at: msg.timestamp,
+          labels: [msg.type],
+          metadata: {
+            role: msg.type,
+            session_id: sessionId,
+            project: meta.project,
+            model: msg.type === 'assistant' ? msg.model : undefined,
+            tokens: msg.type === 'assistant' ? msg.tokens : undefined,
+            conversation_source_ref_key: conversationSourceRefKey,
+          },
+        },
+        displayText: textContent.slice(0, 200),
+      },
+      related: [{
+        entityType: 'conversation',
+        sourceRefKey: conversationSourceRefKey,
+        data: {
+          ...createBaseEntity(generateCanonicalId(), conversationSourceRef),
+          entity_type: 'conversation',
+          platform: 'unknown',
+          message_ids: [],
+          message_count: 0,
+          participants: [],
+          started_at: msg.timestamp,
+          topic: `Session ${sessionId.slice(0, 8)}...`,
+          is_archived: false,
+          metadata: {
+            agent: 'rex',
+            session_id: sessionId,
+            project: meta.project,
+          },
+        },
+        displayText: `Session ${sessionId.slice(0, 8)}...`,
+      }],
+    }
+  },
+
+  onError: 'skip',
+  enabled: true,
+  version: 1,
+  description: 'Transforms individual Rex session messages into Message canonical entities',
+}
+
+/**
+ * Transform Rex session summary to a Notification entity.
+ */
+export const rexSummaryTransform: Transformation<RexSummaryMessage> = {
+  id: 'rex_sessions:summary_to_notification',
+  name: 'Rex Summary → Notification',
+
+  source: {
+    connector: 'rex_sessions',
+    entityType: 'session_summary',
+  },
+
+  inputSchema: RexSummaryMessageSchema,
+
+  outputType: 'notification',
+
+  transform: (msg: RexSummaryMessage, ctx: TransformContext): TransformResult => {
+    const meta = (msg as { _meta?: { sessionId?: string; project?: string } })._meta ?? {}
+    const sourceRef = createSourceRef(ctx.accountId, 'summary', msg.session_id, undefined, 'rex_sessions')
+
+    return {
+      primary: {
+        entityType: 'notification',
+        sourceRefKey: sourceRefToKey(sourceRef),
+        data: {
+          ...createBaseEntity(generateCanonicalId(), sourceRef),
+          entity_type: 'notification',
+          notification_type: 'session_summary',
+          title: 'Session Summary',
+          body: msg.summary,
+          triggered_at: msg.created_at,
+          metadata: {
+            agent: 'rex',
+            session_id: msg.session_id,
+            project: meta.project,
+          },
+        },
+        displayText: msg.summary.slice(0, 200),
+      },
+    }
+  },
+
+  onError: 'skip',
+  enabled: true,
+  version: 1,
+  description: 'Transforms Rex session summaries into Notification canonical entities',
 }
 
 // ============ Exports ============
@@ -325,4 +498,9 @@ export const transforms = [
   claudeSessionTransform,
   claudeMessageTransform,
   claudeSummaryTransform,
+]
+
+export const rexTransforms = [
+  rexMessageTransform,
+  rexSummaryTransform,
 ]

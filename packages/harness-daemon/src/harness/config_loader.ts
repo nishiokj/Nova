@@ -18,6 +18,7 @@ import {
   DEFAULT_CONTEXT_CONFIG,
   DEFAULT_SKILLS_CONFIG,
   DEFAULT_HOOKS_CONFIG,
+  DEFAULT_ENTITY_GRAPH_CONFIG,
   DEFAULT_AUTH_CONFIG,
   DEFAULT_MODELS_CONFIG,
   type FullHarnessConfig,
@@ -613,6 +614,15 @@ export function createConfigFromFile(
       enabled: fileConfig.hooks?.enabled ?? DEFAULT_HOOKS_CONFIG.enabled,
       directory: resolvedHooksDir, // NOW AN ABSOLUTE PATH (if set)
       definitions: fileConfig.hooks?.definitions ?? [],
+    },
+    entityGraph: {
+      enabled: fileConfig.entity_graph?.enabled ?? DEFAULT_ENTITY_GRAPH_CONFIG.enabled,
+      databaseUrl: fileConfig.entity_graph?.database_url,
+      include: fileConfig.entity_graph?.include,
+      exclude: fileConfig.entity_graph?.exclude,
+      leaseDurationSec: fileConfig.entity_graph?.lease_duration_sec ?? DEFAULT_ENTITY_GRAPH_CONFIG.lease_duration_sec ?? 30,
+      startupScan: fileConfig.entity_graph?.startup_scan ?? DEFAULT_ENTITY_GRAPH_CONFIG.startup_scan ?? true,
+      leaseWaitTimeoutMs: fileConfig.entity_graph?.lease_wait_timeout_ms ?? DEFAULT_ENTITY_GRAPH_CONFIG.lease_wait_timeout_ms ?? 10_000,
     },
     auth: {
       enabled: fileConfig.auth?.enabled ?? DEFAULT_AUTH_CONFIG.enabled,

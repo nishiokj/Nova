@@ -24,13 +24,11 @@ import {
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
-import { Orchestrator } from 'orchestrator';
 import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData } from 'types';
+import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind } from 'types';
 import { ContextWindow } from 'context';
-import { createWorkItem } from 'work';
-import { coerceStructuredOutput, profiler } from 'shared';
+import { profiler, buildLLMRequestConfig } from 'shared';
 import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
@@ -58,8 +56,28 @@ import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './sk
 import { SessionStore } from './session_store.js';
 import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 import { PermissionChecker } from './permissions.js';
+import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
 import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
+import {
+  DecisionEngine,
+  InMemoryDecisionDatabase,
+  createDecisionEngine,
+  createWatcherConfig,
+  DEFAULT_DECISIONS,
+  createWatcherStopHook,
+  writeSalienceFile,
+  createDecisionLog,
+  createWorkLog,
+  type DecisionDatabase,
+  type DecisionMemory,
+  type WatcherAction,
+  type DecisionLog,
+  type WorkLog,
+} from 'decision-watcher';
+import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
+import { registerHook } from 'orchestrator';
+import { createWorkItem } from 'work';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -300,8 +318,13 @@ export class AgentHarness {
   private hookExecutor: HookExecutor | null = null;
   private providerKeyService: HarnessProviderKeyService;
   private permissionChecker: PermissionChecker;
+  private orchestratorRunner: OrchestratorRunner;
+  private decisionDatabases = new Map<string, DecisionDatabase>();
+  private watcherEngines = new Map<string, DecisionEngine>();
+  private sessionWorkLogs = new Map<string, WorkLog>();
+  private entityGraph: EntityGraph | null = null;
 
-  constructor(config: FullHarnessConfig, logger?: HarnessLogger) {
+  constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
     this.sessionTtlMs = config.context.sessionTtlMs;
@@ -457,6 +480,8 @@ export class AgentHarness {
       this.logger.info('PermissionChecker initialized', { workingDir });
     }
 
+    this.orchestratorRunner = orchestratorRunner ?? new DefaultOrchestratorRunner();
+
     const defaultAgent = config.agents[config.defaultAgent];
     this.logger.info('AgentHarness initialized', {
       defaultAgent: config.defaultAgent,
@@ -550,10 +575,13 @@ export class AgentHarness {
       entry.store.close();
       this.sessionStores.delete(sessionKey);
     }
+    this.decisionDatabases.delete(sessionKey);
+    this.watcherEngines.delete(sessionKey);
+    this.sessionWorkLogs.delete(sessionKey);
   }
 
   /**
-   * Start async services (GraphD).
+   * Start async services (GraphD, EntityGraph).
    */
   async start(): Promise<boolean> {
     if (this.graphd && !this.graphdStarted) {
@@ -577,6 +605,48 @@ export class AgentHarness {
         throw error;
       }
     }
+
+    // Initialize EntityGraph if enabled
+    if (this.config.entityGraph.enabled && !this.entityGraph) {
+      try {
+        const dbUrl = this.config.entityGraph.databaseUrl
+          ?? process.env.ENTITY_GRAPH_DATABASE_URL
+          ?? process.env.DATABASE_URL;
+
+        if (!dbUrl) {
+          this.logger.warning('EntityGraph enabled but no database URL configured (entity_graph.database_url or DATABASE_URL env)');
+        } else {
+          const postgres = (await import('postgres')).default;
+          const sql = postgres(dbUrl, { max: 5, idle_timeout: 30, connect_timeout: 10 });
+
+          const entityGraphConfig: EntityGraphConfig = {
+            sourceRoot: this.config.tools.workingDir,
+            include: this.config.entityGraph.include,
+            exclude: this.config.entityGraph.exclude,
+            leaseDurationSec: this.config.entityGraph.leaseDurationSec,
+            startupScan: this.config.entityGraph.startupScan,
+            leaseWaitTimeoutMs: this.config.entityGraph.leaseWaitTimeoutMs,
+          };
+
+          this.entityGraph = new EntityGraph(sql, entityGraphConfig);
+          await this.entityGraph.initialize();
+          this.logger.info('EntityGraph initialized (scan running in background)');
+
+          // Register files_modified hook handler
+          const hooks = this.entityGraph.getHooks();
+          registerHook('files_modified', async (event: { type: string; paths?: string[] }) => {
+            if (event.type === 'files_modified' && event.paths) {
+              await hooks.onFilesModified(event.paths);
+            }
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error('EntityGraph failed to start', { error: message });
+        // Non-fatal — daemon continues without entity graph
+      }
+    }
+
     return true;
   }
 
@@ -602,6 +672,59 @@ export class AgentHarness {
     });
     this.sessionStores.set(sessionKey, { store, lastAccessMs: now });
     return store;
+  }
+
+  /**
+   * Single entrypoint for session rehydration (context + model selections).
+   */
+  ensureSessionHydrated(
+    sessionKey: string,
+    options: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean } = {}
+  ): SessionStore {
+    const store = this.getOrCreateSessionStore(sessionKey, options.dangerousMode ?? false, options.workingDir);
+    // Hydrate context + session metadata (paused state, permissions, model selections).
+    store.getContext();
+
+    if (options.includeUserPreferences !== false) {
+      this.hydrateModelSelectionsFromPreferences(sessionKey, store);
+    }
+
+    return store;
+  }
+
+  private hydrateModelSelectionsFromPreferences(sessionKey: string, store: SessionStore): void {
+    if (!this.isGraphDReady() || !this.graphd) {
+      return;
+    }
+    if (store.getAllModelSelections().size > 0) {
+      return;
+    }
+
+    const hiddenModels = this.graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+    const modelSelectionsMap = this.graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>(
+      'user_prefs:model_selections'
+    );
+    if (!modelSelectionsMap) {
+      return;
+    }
+
+    let applied = 0;
+    for (const [agentType, selection] of Object.entries(modelSelectionsMap)) {
+      if (selection?.provider && selection?.model) {
+        const isHidden = hiddenModels.some(
+          (hidden) => hidden.trim().toLowerCase() === selection.model.trim().toLowerCase()
+        );
+        if (!isHidden) {
+          store.setModelSelection(agentType, selection);
+          applied += 1;
+        }
+      }
+    }
+
+    if (applied > 0) {
+      // Keep session metadata aligned with global preferences.
+      this.graphd.sessionUpdateMetadata(sessionKey, { model_selections: modelSelectionsMap });
+    }
   }
 
   setSessionSelectedModel(sessionKey: string, agentType: string, selectedModel: ModelSelection | null): void {
@@ -680,7 +803,7 @@ export class AgentHarness {
     const eventQueue = new AsyncEventQueue();
 
     this.pruneSessionStores('run');
-    const store = this.getOrCreateSessionStore(sessionKey);
+    const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
     const paused = store.getPausedState();
 
     // Determine if this is a resume (paused state exists) or fresh run
@@ -882,30 +1005,6 @@ export class AgentHarness {
         }
 
         const llmAdapter = this.llmAdapter;
-
-        // Hydrate model selections from GraphD if store is empty (session startup)
-        if (store.getAllModelSelections().size === 0 && this.isGraphDReady()) {
-          try {
-            const session = this.graphd!.sessionGet(sessionKey);
-            const metadata = session?.metadata as Record<string, unknown> | undefined;
-            // Load per-agent-type model selections from GraphD
-            const modelSelections = metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string }> | undefined;
-            if (modelSelections) {
-              for (const [agentType, selection] of Object.entries(modelSelections)) {
-                if (selection?.provider && selection?.model) {
-                  store.setModelSelection(agentType, {
-                    provider: selection.provider,
-                    model: selection.model,
-                    reasoning: selection.reasoning,
-                  });
-                }
-              }
-              this.logger.debug('Hydrated model selections from GraphD', { count: Object.keys(modelSelections).length });
-            }
-          } catch {
-            // Ignore errors getting selected model
-          }
-        }
 
         // All requests go through orchestrator (loop-until-goal architecture)
         // Orchestrator handles interruptions internally via checkInterruption() callback
@@ -1185,6 +1284,7 @@ export class AgentHarness {
     const executor = this.hookExecutor;
     const workingDir = this.config.tools.workingDir;
     const logger = this.logger;
+    const egHooks = this.entityGraph?.getHooks() ?? null;
 
     // Get the session store to use its per-session permission checker
     const sessionStore = this.getOrCreateSessionStore(sessionKey);
@@ -1249,6 +1349,15 @@ export class AgentHarness {
           }
         }
 
+        // Entity graph file lease check
+        if (egHooks) {
+          const egResult = await egHooks.preToolUse(sessionKey, toolName, args);
+          if (egResult.action === 'block') {
+            logger.info('Entity graph lease blocked', { toolName, message: egResult.message });
+            return { action: 'block', message: egResult.message };
+          }
+        }
+
         // Run hook executor if available
         if (executor) {
           const context: HookContext = {
@@ -1271,8 +1380,24 @@ export class AgentHarness {
       },
 
       postToolUse: async (toolName: string, args: Record<string, unknown>, toolResult: ToolResult): Promise<ToolHookResult> => {
+        // Entity graph: release lease, compute blast radius, re-parse modified file
+        let egModified = false;
+        if (egHooks) {
+          try {
+            const egResult = await egHooks.postToolUse(sessionKey, toolName, args);
+            if (egResult.context) {
+              toolResult = { ...toolResult, output: toolResult.output + '\n\n' + egResult.context };
+              egModified = true;
+            }
+          } catch (err) {
+            logger.warning('Entity graph postToolUse failed', { error: String(err) });
+          }
+        }
+
         if (!executor) {
-          return { action: 'allow' };
+          return egModified
+            ? { action: 'modify', modifiedResult: toolResult }
+            : { action: 'allow' };
         }
 
         const context: HookContext = {
@@ -1285,13 +1410,37 @@ export class AgentHarness {
           workingDir,
         };
         const result = await executor.execute('PostToolUse', context);
-        return {
-          action: result.action,
-          message: result.message,
-          modifiedResult: result.modified as ToolResult | undefined,
-        };
+
+        // If executor modified the result, use its version.
+        // Otherwise, propagate entity-graph context if present.
+        if (result.action === 'modify' && result.modified) {
+          return { action: 'modify', message: result.message, modifiedResult: result.modified as unknown as ToolResult };
+        }
+        if (egModified) {
+          return { action: 'modify', modifiedResult: toolResult };
+        }
+        return { action: result.action, message: result.message };
       },
     };
+  }
+
+  private attachArtifactSubscriber(context: ContextWindow): () => void {
+    return this.eventBus.subscribe('artifact_discovered', (event: AgentEvent<ArtifactDiscoveredData>) => {
+      const data = event.data;
+      if (!data?.artifact) {
+        return;
+      }
+      context.addArtifact({
+        sourcePath: data.artifact.sourcePath,
+        line: data.artifact.line,
+        kind: data.artifact.kind as ArtifactKind,
+        name: data.artifact.name,
+        signature: data.artifact.signature,
+        insight: data.artifact.insight,
+        relevance: data.artifact.relevance,
+        discoveredBy: data.agentType,
+      });
+    });
   }
 
   /**
@@ -1355,45 +1504,75 @@ export class AgentHarness {
         }
       : undefined;
 
-    // Build orchestrator config with optional hooks
-    const orchestratorConfig: {
-      stopHook?: typeof stopHook;
-      checkInterruption?: () => boolean;
-      checkStopRequest?: () => boolean;
-    } = {};
-    if (stopHook) {
-      orchestratorConfig.stopHook = stopHook;
-    }
-    // Pass interruption check callback so orchestrator can avoid premature termination
-    // when user messages arrived during execution.
-    // The callback drains the queue (clear on check) so subsequent checks return false.
-    if (store) {
-      orchestratorConfig.checkInterruption = () => {
+    // Build orchestrator runtime with optional hooks
+    const sessionKey = context.sessionKey;
+    let lastWatcherIteration = 0;
+    const MIN_WATCHER_GAP = 5;
+
+    const runtime = {
+      stopHook,
+      onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
+      // Pass interruption check callback so orchestrator can avoid premature termination
+      // when user messages arrived during execution.
+      // The callback drains the queue (clear on check) so subsequent checks return false.
+      checkInterruption: store ? () => {
         const pending = store.drainQueuedMessages();
         return pending.length > 0;
-      };
+      } : undefined,
       // Pass stop request check so agent can exit loop early on explicit "stop" from user
-      orchestratorConfig.checkStopRequest = () => store.hasPendingStopRequest();
-    }
+      checkStopRequest: store ? () => store.hasPendingStopRequest() : undefined,
+      // Watcher evaluation — rule-based, fires every MIN_WATCHER_GAP iterations
+      onIteration: (state: { iteration: number; context: ContextWindow; totalToolCalls: number; totalLlmCalls: number; elapsedMs: number }) => {
+        if (state.iteration - lastWatcherIteration < MIN_WATCHER_GAP) return;
+        lastWatcherIteration = state.iteration;
 
-    const orchestrator = new Orchestrator(
-      orchestratorConfig,
-      this.toolRegistry,
-      llm,
-      emit,
-      requestId,
-      this.logger,
-      this.agentRegistry,
-      hooks,
-      planModeOptions,
-      this.eventBus,
-      getModelSelection
-    );
+        const pct = state.context.metrics.percentageUsed;
+        const engine = this.getOrCreateWatcherEngine(sessionKey);
+        const memory = engine.getSessionMemory(sessionKey);
+        const hasDecisions = (memory?.decisionsMade.length ?? 0) > 0;
+
+        // Summarize (compact + epistemic ledger) when context is high and decisions exist
+        if (pct > 0.70 && hasDecisions) {
+          this.logger.info('Watcher: summarizing (context high + decisions in play)', { pct, sessionKey });
+          this.watcherSummarize(sessionKey);
+          return;
+        }
+
+        // Plain compact when context is high but no decisions to ledger
+        if (pct > 0.75) {
+          this.logger.info('Watcher: triggering compact (context > 75%)', { pct, sessionKey });
+          this.watcherSummarize(sessionKey);
+          return;
+        }
+      },
+    };
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    const sessionDb = this.getOrCreateDecisionDatabase(context.sessionKey);
     const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
-    const result = await orchestrator.execute(context, goal, agentType, effectiveWorkingDir);
+    const result = await this.orchestratorRunner.execute({
+      config: {
+        asyncMode: {
+          enabled: true,
+          database: sessionDb,
+        },
+      },
+      toolRegistry: this.toolRegistry,
+      llm,
+      emit,
+      requestId,
+      logger: this.logger,
+      agentRegistry: this.agentRegistry,
+      hooks,
+      planModeOptions,
+      getModelSelection,
+      context,
+      goal,
+      agentType,
+      cwd: effectiveWorkingDir,
+      runtime,
+    });
     profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls, paused: result.paused });
 
     // Handle handoff: store handoffSpec for approval in paused state
@@ -1445,11 +1624,8 @@ export class AgentHarness {
    * Returns conversation history that should be displayed in TUI.
    */
   getSessionHistory(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
-    const entry = this.sessionStores.get(sessionKey);
-    if (!entry) {
-      return [];
-    }
-    return entry.store.getMessageHistory();
+    const store = this.ensureSessionHydrated(sessionKey, { includeUserPreferences: false });
+    return store.getMessageHistory();
   }
 
   /**
@@ -1540,6 +1716,357 @@ export class AgentHarness {
     }
   }
 
+  // =========================================================================
+  // Watcher Agent: LLM-backed StopHook
+  // =========================================================================
+
+  /**
+   * Run the watcher agent with a trigger-specific objective.
+   * Creates a mini Agent instance, executes it, and parses the structured WatcherAction output.
+   */
+  private async runWatcherAgent(objective: string, sessionKey: string): Promise<WatcherAction> {
+    // Get the watcher agent config from registry
+    if (!this.agentRegistry.has('watcher')) {
+      this.logger.warning('Watcher agent type not registered, defaulting to continue');
+      return { watcherAction: 'continue', reason: 'Watcher agent not configured' };
+    }
+
+    const agentConfig = this.agentRegistry.getConfig('watcher');
+
+    // Get model selection for the watcher agent type
+    const store = this.sessionStores.get(sessionKey)?.store;
+    const modelSelection = store?.getModelSelection('watcher')
+      ?? store?.getModelSelection('standard');
+
+    if (!modelSelection) {
+      this.logger.warning('No model selection available for watcher agent');
+      return { watcherAction: 'continue', reason: 'No model selection for watcher' };
+    }
+
+    const llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
+
+    const agent = new Agent(agentConfig, {
+      llm: this.llmAdapter,
+      toolRegistry: this.toolRegistry,
+      llmConfig,
+      agentRegistry: this.agentRegistry,
+      getModelSelection: store
+        ? (t: string) => store.getModelSelection(t)
+        : undefined,
+    });
+
+    // Create a minimal context for the watcher
+    const context = new ContextWindow(sessionKey, 200_000);
+    const workingDir = this.config.tools.workingDir;
+
+    const workItem = createWorkItem({
+      goal: 'watcher_evaluation',
+      objective,
+      agent: 'watcher',
+      bounds: {
+        maxToolCalls: agentConfig.budget.maxToolCalls,
+        maxDurationMs: agentConfig.budget.maxDurationMs,
+        maxLlmCalls: agentConfig.budget.maxIterations,
+      },
+    });
+
+    try {
+      const result = await agent.run({ globalContext: context, workItem, cwd: workingDir });
+      const structured = result.structuredOutput as Record<string, unknown> | undefined;
+
+      // Runtime validation: ensure structured output is a valid WatcherAction
+      if (
+        structured &&
+        typeof structured === 'object' &&
+        typeof structured.watcherAction === 'string' &&
+        structured.watcherAction.length > 0
+      ) {
+        return {
+          watcherAction: structured.watcherAction as WatcherAction['watcherAction'],
+          reason: typeof structured.reason === 'string' ? structured.reason : '',
+          answer: structured.answer as WatcherAction['answer'],
+          realign: structured.realign as WatcherAction['realign'],
+          workItems: structured.workItems as WatcherAction['workItems'],
+          qualityGate: structured.qualityGate as WatcherAction['qualityGate'],
+        };
+      }
+
+      // Fallback: structured output missing or malformed
+      this.logger.warning('Watcher agent returned invalid structured output', {
+        sessionKey,
+        hasStructured: !!structured,
+        watcherAction: structured?.watcherAction,
+      });
+      return { watcherAction: 'continue', reason: result.response || 'Watcher produced no valid structured output' };
+    } catch (err) {
+      this.logger.error('Watcher agent execution failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionKey,
+      });
+      return { watcherAction: 'continue', reason: `Watcher error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  /**
+   * Create a watcher-backed StopHookHandler for a session.
+   * This is the bridge between the orchestrator's stopHook mechanism and the LLM-backed watcher.
+   */
+  async createWatcherStopHookForSession(
+    sessionKey: string,
+    goal: string,
+    workingDir: string
+  ): Promise<import('orchestrator').StopHookHandler> {
+    const saliencePath = await writeSalienceFile(workingDir, {
+      sessionId: sessionKey,
+      goal,
+      mode: 'async',
+    });
+
+    const decisionLog = await createDecisionLog(workingDir, sessionKey);
+    const workLog = await createWorkLog(workingDir, sessionKey);
+    this.sessionWorkLogs.set(sessionKey, workLog);
+
+    // Write session_start entry
+    await workLog.append({
+      timestamp: new Date().toISOString(),
+      type: 'session_start',
+      watcherNote: `Session started with goal: ${goal.slice(0, 200)}`,
+    }).catch(() => {});
+
+    // Register auto-logging hooks for files_modified and agent_completed
+    registerHook('files_modified', async (event: { type: string; paths?: string[] }, ctx: { workId: string; agentType: string }) => {
+      if (event.type === 'files_modified' && event.paths) {
+        await workLog.append({
+          timestamp: new Date().toISOString(),
+          type: 'files_modified',
+          workId: ctx.workId,
+          agentType: ctx.agentType,
+          paths: event.paths,
+        }).catch(() => {});
+      }
+    });
+
+    registerHook('agent_completed', async (event: { type: string; workId?: string; invalidatedPaths?: string[] }, ctx: { workId: string; agentType: string }) => {
+      if (event.type === 'agent_completed') {
+        await workLog.append({
+          timestamp: new Date().toISOString(),
+          type: 'agent_completed',
+          workId: ctx.workId ?? event.workId,
+          agentType: ctx.agentType,
+          paths: event.invalidatedPaths,
+        }).catch(() => {});
+      }
+    });
+
+    return createWatcherStopHook({
+      sessionId: sessionKey,
+      salienceFilePath: saliencePath,
+      decisionLog,
+      workLog,
+      workingDir,
+      runAgent: (objective: string) => this.runWatcherAgent(objective, sessionKey),
+      onDecision: (entry) => {
+        this.logger.info('Watcher decision', {
+          sessionKey,
+          trigger: entry.trigger,
+          watcherAction: entry.watcherAction,
+          rationale: entry.rationale,
+          answer: entry.answer,
+        });
+        this.eventBus.publish(createEvent('watcher_decision', {
+          trigger: entry.trigger,
+          watcherAction: entry.watcherAction,
+          question: entry.question,
+          answer: entry.answer,
+          rationale: entry.rationale,
+          qualityGate: entry.qualityGate,
+        }, entry.workItemId, '', sessionKey));
+      },
+    });
+  }
+
+  // =========================================================================
+  // Decision Watcher: Per-session database & engine
+  // =========================================================================
+
+  /**
+   * Get or create a per-session DecisionDatabase, seeded with DEFAULT_DECISIONS.
+   */
+  getOrCreateDecisionDatabase(sessionKey: string): DecisionDatabase {
+    let db = this.decisionDatabases.get(sessionKey);
+    if (!db) {
+      db = new InMemoryDecisionDatabase(DEFAULT_DECISIONS);
+      this.decisionDatabases.set(sessionKey, db);
+    }
+    return db;
+  }
+
+  /**
+   * Get or create a per-session DecisionEngine.
+   */
+  private getOrCreateWatcherEngine(sessionKey: string): DecisionEngine {
+    let engine = this.watcherEngines.get(sessionKey);
+    if (!engine) {
+      const db = this.getOrCreateDecisionDatabase(sessionKey);
+      engine = createDecisionEngine(db, createWatcherConfig());
+      this.watcherEngines.set(sessionKey, engine);
+    }
+    return engine;
+  }
+
+  // =========================================================================
+  // Watcher CLI Commands
+  // =========================================================================
+
+  watcherStatus(sessionKey: string): Record<string, unknown> {
+    const engine = this.getOrCreateWatcherEngine(sessionKey);
+    const entry = this.sessionStores.get(sessionKey);
+    const contextSnapshot = entry?.store.getCachedContextSnapshot();
+
+    return {
+      enabled: true,
+      sessionKey,
+      focusTopic: engine.getFocus(),
+      salienceGoal: engine.getSalienceGoal(),
+      contextLoaded: !!contextSnapshot,
+      contextItems: contextSnapshot?.items.length ?? 0,
+    };
+  }
+
+  watcherContext(sessionKey: string): Record<string, unknown> {
+    const entry = this.sessionStores.get(sessionKey);
+    if (!entry) {
+      return { error: 'No session store found', sessionKey };
+    }
+
+    const context = entry.store.getContext();
+
+    return {
+      sessionKey,
+      metrics: context.metrics,
+    };
+  }
+
+  async watcherSearch(sessionKey: string, query: string): Promise<Record<string, unknown>> {
+    const db = this.getOrCreateDecisionDatabase(sessionKey);
+    const results = await db.search(query, { limit: 10 });
+
+    return {
+      query,
+      count: results.length,
+      results: results.map(entry => ({
+        id: entry.id,
+        category: entry.category,
+        priority: entry.priority,
+        summary: 'decision' in entry ? entry.decision.slice(0, 120) : entry.preference.slice(0, 120),
+        keywords: entry.keywords,
+      })),
+    };
+  }
+
+  async watcherDecisions(sessionKey: string): Promise<Record<string, unknown>> {
+    const db = this.getOrCreateDecisionDatabase(sessionKey);
+    const all = await db.getAll();
+
+    return {
+      count: all.length,
+      decisions: all.map(entry => ({
+        id: entry.id,
+        category: entry.category,
+        priority: entry.priority,
+        type: 'decision' in entry ? 'decision' : 'preference',
+        summary: 'decision' in entry ? entry.decision.slice(0, 120) : entry.preference.slice(0, 120),
+      })),
+    };
+  }
+
+  async watcherInspect(sessionKey: string, id: string): Promise<Record<string, unknown>> {
+    const db = this.getOrCreateDecisionDatabase(sessionKey);
+    const entry = await db.get(id);
+
+    if (!entry) {
+      return { error: `Decision '${id}' not found` };
+    }
+
+    return { decision: entry };
+  }
+
+  watcherMemory(sessionKey: string): Record<string, unknown> {
+    const engine = this.getOrCreateWatcherEngine(sessionKey);
+    const memory = engine.getSessionMemory(sessionKey);
+
+    if (!memory) {
+      return {
+        sessionKey,
+        decisionsMade: 0,
+        patterns: [],
+        warnings: [],
+        consistencyScore: 1.0,
+      };
+    }
+
+    return {
+      sessionKey,
+      decisionsMade: memory.decisionsMade.length,
+      decisions: memory.decisionsMade,
+      patterns: memory.patterns,
+      warnings: memory.warnings,
+      consistencyScore: memory.consistencyScore,
+    };
+  }
+
+  watcherFocus(sessionKey: string, topic: string): Record<string, unknown> {
+    const engine = this.getOrCreateWatcherEngine(sessionKey);
+    engine.setFocus(topic);
+    return { success: true, topic };
+  }
+
+  watcherDefocus(sessionKey: string): Record<string, unknown> {
+    const engine = this.getOrCreateWatcherEngine(sessionKey);
+    engine.clearFocus();
+    return { success: true };
+  }
+
+  watcherReanchor(sessionKey: string, goal: string): Record<string, unknown> {
+    const engine = this.getOrCreateWatcherEngine(sessionKey);
+    engine.setSalienceGoal(goal);
+    return { success: true, goal };
+  }
+
+  watcherSummarize(sessionKey: string): Record<string, unknown> {
+    const entry = this.sessionStores.get(sessionKey);
+    if (!entry) {
+      return { error: 'No session store found' };
+    }
+
+    const context = entry.store.getContext();
+    const result = context.compact({
+      deduplicateByPath: true,
+      maxFileContentCount: 15,
+      truncateOutputsTo: 3000,
+    });
+
+    entry.store.persistContext();
+
+    const engine = this.getOrCreateWatcherEngine(sessionKey);
+    const memory = engine.getSessionMemory(sessionKey);
+
+    return {
+      success: true,
+      compaction: {
+        itemsRemoved: result.itemsRemoved,
+        bytesRecovered: result.bytesRecovered,
+      },
+      ledger: {
+        focusTopic: engine.getFocus(),
+        salienceGoal: engine.getSalienceGoal(),
+        decisionsMade: memory?.decisionsMade.length ?? 0,
+        consistencyScore: memory?.consistencyScore ?? 1.0,
+        patterns: memory?.patterns ?? [],
+      },
+    };
+  }
+
   /**
    * Shutdown the harness.
    */
@@ -1592,6 +2119,12 @@ export class AgentHarness {
       }
     }
     this.toolRegistry.clearCache();
+
+    // Clean up entity graph
+    if (this.entityGraph) {
+      this.entityGraph = null;
+      this.logger.info('EntityGraph stopped');
+    }
 
     // Close provider key service (releases LocalProviderManager resources)
     this.providerKeyService.close();

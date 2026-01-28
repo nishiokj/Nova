@@ -1,0 +1,11 @@
+{
+  "id": "01KG08FF3AMSQ457F38MS4SCDZ",
+  "type": "derived:run",
+  "payload": {
+    "derivedJobId": "01KG08FF374Y0298GT0G33566P"
+  },
+  "error": "Failed to load derived script at /Users/jevinnishioka/Desktop/jesus/packages/agent-memory/packages/agent-memory/scripts/derive_preference_embeddings.ts: ResolveMessage: Cannot find module '/Users/jevinnishioka/Desktop/jesus/packages/agent-memory/packages/agent-memory/scripts/derive_preference_embeddings.ts' from '/Users/jevinnishioka/Desktop/jesus/packages/agent-memory/src/derived/runner.ts'",
+  "attemptCount": 1,
+  "createdAt": "2026-01-27T17:37:01.546Z",
+  "diedAt": "2026-01-27T17:37:01.598Z"
+}

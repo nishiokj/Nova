@@ -2,11 +2,10 @@
  * Processor - Process Phase
  *
  * Handles transforming RawEnvelopes into canonical entities.
- * Pipeline: Validate → Normalize → Upsert → Entity Resolution
+ * Pipeline: Validate → Normalize → Upsert
  *
  * Design principles:
  * - Idempotent: reprocessing the same envelope produces the same result
- * - Atomic: each envelope is processed in its own transaction
  * - Fail fast: validation errors are caught early
  * - Traceable: full lineage from canonical entity to raw source
  */
@@ -14,8 +13,6 @@
 import type { Sql } from 'postgres'
 import type { RawEnvelope } from '../models/raw.js'
 import type { CanonicalEntity, EntityType } from '../models/canonical.js'
-import type { ConnectorType, SourceRef } from '../ids.js'
-import { sourceRefToKey, generateCanonicalId } from '../ids.js'
 import type { RawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import type { CanonicalEntityRepository, StoredEntity } from '../db/repositories/canonical-entity.js'
 import type { EntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
@@ -30,7 +27,6 @@ import type {
   BatchProcessResult,
   SyncEvent,
 } from './types.js'
-import type { Connector } from '../connector/sdk/types.js'
 import { ProcessError, ValidationError } from './types.js'
 import { TransformationRegistry } from '../transform/registry.js'
 import type { Transformation, TransformContext, TransformOutput } from '../transform/types.js'
@@ -42,16 +38,23 @@ export interface ProcessorConfig {
   batchSize?: number
   /** Whether to continue on individual envelope errors (default: true) */
   continueOnError?: boolean
-  /** Maximum concurrent entity resolution operations (default: 10) */
-  resolutionConcurrency?: number
   /** Transformation registry for processing envelopes */
   transformRegistry?: TransformationRegistry
+}
+
+export interface ProcessOptions {
+  /** Specific transformation IDs to run (default: all matching) */
+  transformationIds?: string[]
+}
+
+export interface ProcessFilter {
+  connector?: RawEnvelope['connector']
+  entityType?: string
 }
 
 const DEFAULT_CONFIG = {
   batchSize: 50,
   continueOnError: true,
-  resolutionConcurrency: 10,
 }
 
 // ============ Processor ============
@@ -67,7 +70,6 @@ export class Processor {
   private entityRepo: CanonicalEntityRepository
   private mappingRepo: EntitySourceMappingRepository
   private syncJobRepo: SyncJobRepository
-  private connectors: Map<ConnectorType, Connector> = new Map()
   private transformRegistry: TransformationRegistry
   private eventHandler?: (event: SyncEvent) => void
 
@@ -91,14 +93,6 @@ export class Processor {
   }
 
   /**
-   * Register a connector for entity mapping.
-   */
-  registerConnector(connector: Connector): this {
-    this.connectors.set(connector.type, connector)
-    return this
-  }
-
-  /**
    * Set an event handler for sync events.
    */
   onEvent(handler: (event: SyncEvent) => void): this {
@@ -109,28 +103,24 @@ export class Processor {
   /**
    * Process all unprocessed envelopes.
    */
-  async processAll(): Promise<BatchProcessResult> {
+  async processAll(options: ProcessOptions = {}): Promise<BatchProcessResult> {
     const results: ProcessResult[] = []
-    let offset = 0
 
     while (true) {
       const batch = await this.envelopeRepo.findUnprocessed({
         limit: this.config.batchSize,
-        offset: 0, // Always 0 because we mark processed
       })
 
       if (batch.items.length === 0) break
 
       for (const envelope of batch.items) {
-        const result = await this.processOne(envelope)
+        const result = await this.processOne(envelope, options)
         results.push(result)
 
         if (!result.success && !this.config.continueOnError) {
           return this.aggregateResults(results)
         }
       }
-
-      offset += batch.items.length
 
       if (!batch.hasMore) break
     }
@@ -139,9 +129,80 @@ export class Processor {
   }
 
   /**
+   * Process all unprocessed envelopes with a scope filter.
+   */
+  async processAllFiltered(
+    filter: ProcessFilter,
+    options: ProcessOptions = {}
+  ): Promise<BatchProcessResult> {
+    const results: ProcessResult[] = []
+
+    while (true) {
+      const batch = await this.envelopeRepo.findUnprocessedFiltered(filter, {
+        limit: this.config.batchSize,
+      })
+
+      if (batch.items.length === 0) break
+
+      for (const envelope of batch.items) {
+        const result = await this.processOne(envelope, options)
+        results.push(result)
+
+        if (!result.success && !this.config.continueOnError) {
+          return this.aggregateResults(results)
+        }
+      }
+
+      if (!batch.hasMore) break
+    }
+
+    return this.aggregateResults(results)
+  }
+
+  /**
+   * Reprocess all errored envelopes.
+   */
+  async processErrored(options: ProcessOptions = {}): Promise<BatchProcessResult> {
+    const results: ProcessResult[] = []
+
+    while (true) {
+      const batch = await this.envelopeRepo.findErrored({
+        limit: this.config.batchSize,
+      })
+
+      if (batch.items.length === 0) break
+
+      for (const envelope of batch.items) {
+        const result = await this.processOne(envelope, options)
+        results.push(result)
+
+        if (!result.success && !this.config.continueOnError) {
+          return this.aggregateResults(results)
+        }
+      }
+
+      if (!batch.hasMore) break
+    }
+
+    return this.aggregateResults(results)
+  }
+
+  /**
+   * Reprocess all envelopes that match a scope filter.
+   * Clears processed_at and processing_error before reprocessing.
+   */
+  async reprocessFiltered(
+    filter: ProcessFilter,
+    options: ProcessOptions = {}
+  ): Promise<BatchProcessResult> {
+    await this.envelopeRepo.clearProcessed(filter)
+    return this.processAllFiltered(filter, options)
+  }
+
+  /**
    * Process envelopes from a specific sync job.
    */
-  async processSyncJob(syncJobId: string): Promise<BatchProcessResult> {
+  async processSyncJob(syncJobId: string, options: ProcessOptions = {}): Promise<BatchProcessResult> {
     const results: ProcessResult[] = []
     const envelopes = await this.envelopeRepo.findBySyncJob(syncJobId)
 
@@ -149,7 +210,7 @@ export class Processor {
       // Skip already processed
       if (envelope.processed_at) continue
 
-      const result = await this.processOne(envelope)
+      const result = await this.processOne(envelope, options)
       results.push(result)
 
       // Update job progress
@@ -169,7 +230,7 @@ export class Processor {
   /**
    * Process a single envelope by ID.
    */
-  async processById(envelopeId: string): Promise<ProcessResult> {
+  async processById(envelopeId: string, options: ProcessOptions = {}): Promise<ProcessResult> {
     const envelope = await this.envelopeRepo.findById(envelopeId)
     if (!envelope) {
       return {
@@ -181,14 +242,14 @@ export class Processor {
       }
     }
 
-    return this.processOne(envelope)
+    return this.processOne(envelope, options)
   }
 
   /**
    * Reprocess all envelopes from a sync job (replay).
    * Clears processed_at before reprocessing.
    */
-  async reprocessSyncJob(syncJobId: string): Promise<BatchProcessResult> {
+  async reprocessSyncJob(syncJobId: string, options: ProcessOptions = {}): Promise<BatchProcessResult> {
     const envelopes = await this.envelopeRepo.findBySyncJob(syncJobId)
 
     // Clear processed state
@@ -200,12 +261,12 @@ export class Processor {
       `
     }
 
-    return this.processSyncJob(syncJobId)
+    return this.processSyncJob(syncJobId, options)
   }
 
   // ============ Internal Processing ============
 
-  private async processOne(envelope: RawEnvelope): Promise<ProcessResult> {
+  private async processOne(envelope: RawEnvelope, options: ProcessOptions = {}): Promise<ProcessResult> {
     const result: ProcessResult = {
       success: false,
       envelopeId: envelope.id,
@@ -220,22 +281,15 @@ export class Processor {
         envelope.entity_type
       )
 
-      if (transforms.length === 0) {
+      const selectedTransforms = options.transformationIds?.length
+        ? transforms.filter((t) => options.transformationIds?.includes(t.id))
+        : transforms
+
+      if (selectedTransforms.length === 0) {
         throw new ProcessError(
-          `No transformation registered for: ${envelope.connector}:${envelope.entity_type}`
-        )
-      }
-
-      // Use the first matching transform (could support multiple in future)
-      const transform = transforms[0]
-
-      // 1. Validate source data against transform's input schema
-      const parseResult = transform.inputSchema.safeParse(envelope.raw_data)
-      if (!parseResult.success) {
-        throw new ValidationError(
-          `Validation failed for ${envelope.entity_type}: ${parseResult.error.message}`,
-          parseResult.error,
-          { envelopeId: envelope.id }
+          options.transformationIds?.length
+            ? `No matching transformations registered for: ${envelope.connector}:${envelope.entity_type}`
+            : `No transformation registered for: ${envelope.connector}:${envelope.entity_type}`
         )
       }
 
@@ -250,41 +304,62 @@ export class Processor {
           this.entityRepo.findByType(type, { limit }).then(r => r.items),
       }
 
-      // 3. Execute transformation
-      const transformResults = transform.transform(parseResult.data, ctx)
-      const resultsArray = Array.isArray(transformResults) ? transformResults : [transformResults]
-
-      // 4. Process all outputs (primary + related)
-      for (const transformResult of resultsArray) {
-        const outputs: TransformOutput[] = [transformResult.primary]
-        if (transformResult.related) {
-          outputs.push(...transformResult.related)
+      for (const transform of selectedTransforms) {
+        // 1. Validate source data against transform's input schema
+        const parseResult = transform.inputSchema.safeParse(envelope.raw_data)
+        if (!parseResult.success) {
+          throw new ValidationError(
+            `Validation failed for ${transform.id} (${envelope.entity_type}): ${parseResult.error.message}`,
+            parseResult.error,
+            { envelopeId: envelope.id }
+          )
         }
 
-        for (const output of outputs) {
+        // 3. Execute transformation
+        const transformResults = transform.transform(parseResult.data, ctx)
+        const resultsArray = Array.isArray(transformResults) ? transformResults : [transformResults]
+
+        // 4. Process all outputs (primary + related)
+        for (const transformResult of resultsArray) {
+          const outputs: TransformOutput[] = [transformResult.primary]
+          if (transformResult.related) {
+            outputs.push(...transformResult.related)
+          }
+          outputs.sort((a, b) => {
+            if (a.entityType === 'conversation' && b.entityType !== 'conversation') return -1
+            if (a.entityType !== 'conversation' && b.entityType === 'conversation') return 1
+            return 0
+          })
+
+          for (const output of outputs) {
           const mapped: MappedEntity = {
             entityType: output.entityType,
             data: output.data as MappedEntity['data'],
             displayText: output.displayText,
             sourceRefKey: output.sourceRefKey,
+            transformationId: transform.id,
+            transformationVersion: transform.version,
           }
 
-          const { entity, isNew } = await this.upsertEntity(mapped, envelope)
+            const { entity } = await this.upsertEntity(mapped, envelope)
 
-          result.entityIds.push(entity.id)
-          result.mappings.push({
-            canonical_entity_id: entity.id,
-            canonical_entity_type: output.entityType,
-            raw_envelope_id: envelope.id,
-            source_ref_key: output.sourceRefKey,
-            mapping_confidence: 1.0,
-          })
+            result.entityIds.push(entity.id)
+            result.mappings.push({
+              canonical_entity_id: entity.id,
+              canonical_entity_type: output.entityType,
+              raw_envelope_id: envelope.id,
+              source_ref_key: output.sourceRefKey,
+              transformation_id: transform.id,
+              transformation_version: transform.version,
+              mapping_confidence: 1.0,
+            })
 
-          this.emit({
-            type: 'process:entity',
-            entityId: entity.id,
-            entityType: output.entityType,
-          })
+            this.emit({
+              type: 'process:entity',
+              entityId: entity.id,
+              entityType: output.entityType,
+            })
+          }
         }
       }
 
@@ -310,8 +385,33 @@ export class Processor {
     mapped: MappedEntity,
     envelope: RawEnvelope
   ): Promise<{ entity: StoredEntity; isNew: boolean }> {
+    let mappedData = mapped.data as Record<string, unknown>
+    if (mapped.entityType === 'message' && mappedData && typeof mappedData === 'object') {
+      const metadata = (mappedData as { metadata?: Record<string, unknown> }).metadata
+      const conversationSourceRefKey = typeof metadata?.conversation_source_ref_key === 'string'
+        ? metadata.conversation_source_ref_key
+        : undefined
+
+      if (conversationSourceRefKey) {
+        const conversationMapping = await this.mappingRepo.findBySourceRefKey(
+          conversationSourceRefKey,
+          mapped.transformationId
+        )
+        if (conversationMapping) {
+          mappedData = {
+            ...mappedData,
+            conversation_id: conversationMapping.canonical_entity_id,
+          }
+          mapped = { ...mapped, data: mappedData as MappedEntity['data'] }
+        }
+      }
+    }
+
     // Check if entity already exists for this source ref
-    const existingMapping = await this.mappingRepo.findBySourceRefKey(mapped.sourceRefKey)
+    const existingMapping = await this.mappingRepo.findBySourceRefKey(
+      mapped.sourceRefKey,
+      mapped.transformationId
+    )
 
     if (existingMapping) {
       // Update existing entity
@@ -328,6 +428,8 @@ export class Processor {
           canonical_entity_type: mapped.entityType,
           raw_envelope_id: envelope.id,
           source_ref_key: mapped.sourceRefKey,
+          transformation_id: mapped.transformationId,
+          transformation_version: mapped.transformationVersion,
           mapping_confidence: 1.0,
         })
 
@@ -348,6 +450,8 @@ export class Processor {
       canonical_entity_type: mapped.entityType,
       raw_envelope_id: envelope.id,
       source_ref_key: mapped.sourceRefKey,
+      transformation_id: mapped.transformationId,
+      transformation_version: mapped.transformationVersion,
       mapping_confidence: 1.0,
     })
 
@@ -373,4 +477,3 @@ export class Processor {
     }
   }
 }
-

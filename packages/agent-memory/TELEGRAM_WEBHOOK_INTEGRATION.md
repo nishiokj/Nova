@@ -77,12 +77,18 @@ bun run packages/harness-daemon/src/harness/daemon.ts \
 
 ```typescript
 import { HarnessDaemon } from 'harness-daemon';
+import path from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.join(__dirname, '../../../');
 
 async function main() {
   const daemon = new HarnessDaemon({
     port: 9555,
     webhookPort: 3001,
-    workingDir: process.cwd(),
+    workingDir: PROJECT_ROOT,
   });
 
   // Start the bus server (for TUI connections)

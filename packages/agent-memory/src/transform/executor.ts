@@ -1,5 +1,6 @@
 import type { Sql } from 'postgres'
 import type { RawEnvelope } from '../models/raw.js'
+import type { CanonicalEntity } from '../models/canonical.js'
 import type { RawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import type { CanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import type { EntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
@@ -369,12 +370,15 @@ export class TransformExecutor {
     envelope: RawEnvelope,
     transformation: Transformation
   ): Promise<{ entityId: string; isNew: boolean }> {
-    const existingMapping = await this.mappingRepo.findBySourceRefKey(output.sourceRefKey)
+    const existingMapping = await this.mappingRepo.findBySourceRefKey(
+      output.sourceRefKey,
+      transformation.id
+    )
 
     if (existingMapping) {
       const updated = await this.entityRepo.update(
         existingMapping.canonical_entity_id,
-        output.data,
+        output.data as Partial<CanonicalEntity>,
         output.displayText
       )
 
@@ -393,7 +397,7 @@ export class TransformExecutor {
       }
     }
 
-    const created = await this.entityRepo.create(output.entityType, output.data, output.displayText)
+    const created = await this.entityRepo.create(output.entityType, output.data as CanonicalEntity, output.displayText)
 
     await this.mappingRepo.create({
       canonical_entity_id: created.id,

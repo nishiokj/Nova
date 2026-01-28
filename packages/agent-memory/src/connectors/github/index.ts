@@ -49,7 +49,6 @@ import {
   pullRequestTransform,
   commentTransform,
   notificationTransform,
-  userTransform,
 } from './transforms.js'
 
 // ============ Constants ============
@@ -621,7 +620,7 @@ export class GitHubConnector extends BaseConnector {
    */
   registerTransforms(registry: { register<T>(t: Transformation<T>): void }): void {
     for (const transform of githubTransforms) {
-      registry.register(transform)
+      registry.register(transform as Transformation)
     }
   }
 }
@@ -659,7 +658,6 @@ export function createGitHubConnector(
 export * from './schemas.js'
 export {
   githubTransforms,
-  userTransform,
   issueTransform,
   pullRequestTransform,
   commentTransform,

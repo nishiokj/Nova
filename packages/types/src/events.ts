@@ -37,7 +37,8 @@ export type OrchestratorEventType =
   | 'runtime_script_created'
   | 'workitem_status'
   | 'goal_achieved'
-  | 'goal_not_achieved';
+  | 'goal_not_achieved'
+  | 'watcher_decision';
 
 /**
  * All event types.
@@ -311,6 +312,19 @@ export interface AgentReasoningData {
   agentType: string;
   /** Whether this is a final chunk or streaming */
   isFinal?: boolean;
+}
+
+/**
+ * Data for watcher_decision event.
+ * Emitted when the decision watcher makes an autonomous decision.
+ */
+export interface WatcherDecisionData {
+  trigger: string;
+  watcherAction: string;
+  question?: string;
+  answer?: string;
+  rationale: string;
+  qualityGate?: { passed: boolean; issues?: string[] };
 }
 
 /**
