@@ -2357,6 +2357,46 @@ async function main(): Promise<void> {
         }
         break
 
+      case 'telegram':
+        switch (subcommand) {
+          case 'send': {
+            const message = args.join(' ')
+            if (!message) throw new Error('Missing message text. Usage: telegram send <message>')
+
+            const botToken = process.env.TELEGRAM_BOT_TOKEN
+            if (!botToken) throw new Error('TELEGRAM_BOT_TOKEN not set')
+
+            const chatFlag = values.chat as string | undefined
+            if (chatFlag) {
+              const chatId = parseInt(chatFlag, 10)
+              if (isNaN(chatId)) throw new Error(`Invalid chat ID: ${chatFlag}`)
+              const ok = await sendTelegramMessage(botToken, chatId, message)
+              if (ok) {
+                printSuccess(`Sent to chat ${chatId}`)
+              } else {
+                throw new Error(`Failed to send to chat ${chatId}`)
+              }
+            } else {
+              const allowedUsers = process.env.TELEGRAM_ALLOWED_USERS
+              if (!allowedUsers) throw new Error('TELEGRAM_ALLOWED_USERS not set (or use --chat <id>)')
+
+              const chatIds = allowedUsers
+                .split(',')
+                .map(id => parseInt(id.trim(), 10))
+                .filter(id => !isNaN(id))
+
+              if (chatIds.length === 0) throw new Error('No valid chat IDs in TELEGRAM_ALLOWED_USERS')
+
+              await notifyAllUsers(botToken, chatIds, message)
+              printSuccess(`Sent to ${chatIds.length} chat(s)`)
+            }
+            break
+          }
+          default:
+            throw new Error(`Unknown subcommand: telegram ${subcommand || '(none)'}. Available: send`)
+        }
+        break
+
       default:
         printError(`Unknown command: ${command}`)
         printHelp()
