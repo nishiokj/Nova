@@ -8,6 +8,8 @@
 // Telegram API Types
 // ============================================================================
 
+import type { Attachment } from 'harness-client'
+
 export interface TelegramUser {
   id: number
   is_bot: boolean
@@ -26,6 +28,21 @@ export interface TelegramChat {
   last_name?: string
 }
 
+export interface PhotoSize {
+  file_id: string
+  file_unique_id: string
+  width: number
+  height: number
+  file_size?: number
+}
+
+export interface TelegramFile {
+  file_id: string
+  file_unique_id: string
+  file_size?: number
+  file_path?: string
+}
+
 export interface TelegramMessage {
   message_id: number
   from?: TelegramUser
@@ -33,6 +50,8 @@ export interface TelegramMessage {
   date: number
   text?: string
   caption?: string
+  photo?: PhotoSize[]
+  document?: TelegramFile
   reply_to_message?: TelegramMessage
 }
 
@@ -76,10 +95,14 @@ export interface PendingRequest {
   settled: boolean
   /** timestamp of last progress message sent (throttle) */
   lastProgressAt?: number
+  /** attachments sent with this request */
+  attachments?: Attachment[]
 }
 
 export interface ChatSession {
   initialized: boolean
   /** Request ID waiting for user_prompt response */
   pendingUserPrompt?: string
+  /** Last activity timestamp for session cleanup */
+  lastActivityAt?: number
 }

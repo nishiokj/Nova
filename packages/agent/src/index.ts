@@ -28,6 +28,8 @@ export type {
   InternalHookHandler,
   InternalHookQueue,
   StopHookResult,
+  StopHookContext,
+  StopHookHandler,
 } from './types.js';
 
 export { DEFAULT_AGENT_BUDGET, DEFAULT_LLM_PARAMS, noopEmit, noopHookQueue } from './types.js';

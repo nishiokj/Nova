@@ -69,7 +69,10 @@ export class BridgeClient extends EventEmitter {
       const validated = validateBridgeEvent(event);
       if (!validated) {
         profiler.end(`bridge.client.validate:${event.type}`, 'tui');
-        this.emit('error', { message: 'Malformed event from bridge' });
+        // Provide detailed error information for debugging
+        const errorMsg = `Malformed event from bridge. Type: ${event?.type ?? 'undefined'}, Data: ${JSON.stringify(event?.data ?? {}).slice(0, 200)}`;
+        console.error('[BridgeClient] Validation failed:', errorMsg);
+        this.emit('error', { message: errorMsg });
         return;
       }
       profiler.end(`bridge.client.validate:${event.type}`, 'tui');
@@ -158,5 +161,9 @@ export class BridgeClient extends EventEmitter {
 
   async setDangerousMode(enabled: boolean) {
     return this.client.setDangerousMode(enabled);
+  }
+
+  async asyncStart(goal: string, workingDir?: string) {
+    return this.client.asyncStart(goal, workingDir);
   }
 }

@@ -47,9 +47,9 @@ export class InMemoryDecisionDatabase implements DecisionDatabase {
       results = results.filter(e => e.category === options.category);
     }
 
-    // Filter by scope if specified
+    // Filter by scope if specified (only Decision has scope)
     if (options?.scope) {
-      results = results.filter(e => e.scope === options.scope);
+      results = results.filter(e => 'scope' in e && e.scope === options.scope);
     }
 
     // Score and sort by relevance
@@ -94,14 +94,17 @@ export class InMemoryDecisionDatabase implements DecisionDatabase {
     normalizedQuery: string,
     queryWords: string[]
   ): number {
+    // Only Decision has questionPattern and appliesTo
+    const isDec = 'decision' in entry;
+
     let score = 0;
 
     // Check question pattern / decision text
-    const targetText = 'decision' in entry ? entry.decision : entry.preference;
+    const targetText = isDec ? entry.decision : entry.preference;
     const lowerTarget = targetText.toLowerCase();
 
-    // Exact phrase match in question pattern
-    if ('questionPattern' in entry) {
+    // Exact phrase match in question pattern (Decision only)
+    if (isDec && entry.questionPattern) {
       const patternLower = entry.questionPattern.toLowerCase();
       if (patternLower.includes(normalizedQuery)) {
         score += 50;

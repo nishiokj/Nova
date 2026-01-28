@@ -21,11 +21,9 @@ import type {
   DecisionWatcherConfig,
   DecisionMemory,
   DecisionCategory,
-  isDecision,
-  isPreference,
+  DecisionScope,
 } from '../types.js';
-import type { LLMAdapter, Message } from '@jesus/llm';
-import { isDecision as _isDecision, isPreference as _isPreference } from '../types.js';
+import type { LLMAdapter, Message } from 'llm';
 
 // ============================================
 // DECISION ENGINE
@@ -39,11 +37,56 @@ export class DecisionEngine {
   private config: DecisionWatcherConfig;
   private llm?: LLMAdapter;
   private sessionMemories: Map<string, DecisionMemory> = new Map();
+  private focusTopic: string | null = null;
+  private salienceGoal: string | null = null;
 
   constructor(db: DecisionDatabase, config: DecisionWatcherConfig) {
     this.db = db;
     this.config = config;
     this.llm = config.llm;
+  }
+
+  /**
+   * Set a focus topic that biases scoring towards matching decisions.
+   */
+  setFocus(topic: string): void {
+    this.focusTopic = topic;
+  }
+
+  /**
+   * Clear the focus topic, returning to neutral scoring.
+   */
+  clearFocus(): void {
+    this.focusTopic = null;
+  }
+
+  /**
+   * Get the current focus topic.
+   */
+  getFocus(): string | null {
+    return this.focusTopic;
+  }
+
+  /**
+   * Set an override goal for salience scoring.
+   * When set, this overrides context.goal in buildSearchQuery.
+   */
+  setSalienceGoal(goal: string): void {
+    this.salienceGoal = goal;
+  }
+
+  /**
+   * Get the current salience goal override.
+   */
+  getSalienceGoal(): string | null {
+    return this.salienceGoal;
+  }
+
+  /**
+   * Get the underlying database.
+   */
+  getDatabase(): DecisionDatabase {
+    return this.db;
   }
 
   /**
@@ -120,7 +163,7 @@ export class DecisionEngine {
    * Build search query from context.
    */
   private buildSearchQuery(context: WatcherContext): string {
-    const parts = [context.goal];
+    const parts = [this.salienceGoal ?? context.goal];
 
     // Add question text
     parts.push(context.prompt.question);
@@ -145,12 +188,14 @@ export class DecisionEngine {
    * Calculate match score for an entry.
    */
   private calculateMatchScore(entry: DecisionEntry, query: string, context: WatcherContext): number {
+    const isDec = 'decision' in entry;
+
     let score = 0;
     const normalizedQuery = query.toLowerCase();
     const queryWords = normalizedQuery.split(/\s+/).filter(w => w.length > 2);
 
-    // Check question pattern
-    if ('questionPattern' in entry) {
+    // Check question pattern (Decision only)
+    if (isDec && entry.questionPattern) {
       const patternLower = entry.questionPattern.toLowerCase();
       if (patternLower.includes(normalizedQuery) || normalizedQuery.includes(patternLower)) {
         score += 40;
@@ -170,13 +215,13 @@ export class DecisionEngine {
       score += 10;
     }
 
-    // Scope relevance
-    if (this.isScopeRelevant(entry.scope, context)) {
+    // Scope relevance (Decision only - Preference doesn't have scope)
+    if (isDec && this.isScopeRelevant(entry.scope, context)) {
       score += 10;
     }
 
-    // Project-specific applicability
-    if (entry.appliesTo) {
+    // Project-specific applicability (Decision only)
+    if (isDec && entry.appliesTo) {
       let applicable = true;
       if (entry.appliesTo.language && context.projectContext?.language) {
         applicable = entry.appliesTo.language === context.projectContext.language;
@@ -188,6 +233,17 @@ export class DecisionEngine {
         score += 20;
       } else {
         score = 0; // Not applicable
+      }
+    }
+
+    // Focus topic bonus
+    if (this.focusTopic) {
+      const focusLower = this.focusTopic.toLowerCase();
+      for (const kw of entry.keywords) {
+        if (kw.toLowerCase().includes(focusLower) || focusLower.includes(kw.toLowerCase())) {
+          score += 25;
+          break;
+        }
       }
     }
 
@@ -206,7 +262,7 @@ export class DecisionEngine {
   /**
    * Check if scope is relevant to context.
    */
-  private isScopeRelevant(scope: DecisionCategory, context: WatcherContext): boolean {
+  private isScopeRelevant(scope: DecisionScope, context: WatcherContext): boolean {
     if (scope === 'global') return true;
     if (scope === 'project') return !!context.projectContext;
     if (scope === 'language') return !!context.projectContext?.language;
@@ -341,7 +397,7 @@ export class DecisionEngine {
     const prompt = this.buildSynthesisPrompt(context, topEntries);
 
     try {
-      const response = await this.llm.complete({
+      const response = await this.llm.respond({
         messages: [
           {
             role: 'system',
@@ -353,7 +409,7 @@ export class DecisionEngine {
           },
         ],
         llm: {
-          provider: this.config.llmModel?.provider ?? 'unknown',
+          provider: this.config.llmModel?.provider as any,
           model: this.config.llmModel?.model ?? 'unknown',
           maxTokens: 1000,
           temperature: 0.3,
@@ -400,7 +456,7 @@ export class DecisionEngine {
 
     const prompt = this.buildInferencePrompt(context, allDecisions);
 
-    const response = await this.llm.complete({
+    const response = await this.llm.respond({
       messages: [
         {
           role: 'system',
@@ -412,7 +468,7 @@ export class DecisionEngine {
         },
       ],
       llm: {
-        provider: this.config.llmModel?.provider ?? 'unknown',
+        provider: this.config.llmModel?.provider as any,
         model: this.config.llmModel?.model ?? 'unknown',
         maxTokens: 1500,
         temperature: 0.4,
@@ -604,13 +660,14 @@ The output should be a clear, direct answer that addresses the user's question.`
 
     const decisionsSection = entries.map(entry => {
       const isDec = 'decision' in entry;
+      const decision = isDec ? entry as Decision : null;
       return `
 **${isDec ? 'Decision' : 'Preference'} [${entry.category}, ${entry.priority}]**:
 ${isDec ? entry.decision : entry.preference}
 ${isDec && entry.rationale ? `Rationale: ${entry.rationale}` : ''}
 ${isDec && entry.alternatives.length > 0 ? `Alternatives considered: ${entry.alternatives.join(', ')}` : ''}
 ${isDec && entry.implications.length > 0 ? `Implications: ${entry.implications.join(', ')}` : ''}
-${entry.appliesTo ? `Applies to: ${JSON.stringify(entry.appliesTo)}` : ''}
+${isDec && decision && decision.appliesTo ? `Applies to: ${JSON.stringify(decision.appliesTo)}` : ''}
 `;
     }).join('\n---\n');
 

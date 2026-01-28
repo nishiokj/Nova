@@ -17,6 +17,8 @@ import { registerAuthRoutes } from './auth.js'
 import { registerWebhookRoutes } from './webhooks.js'
 import { registerDataRoutes } from './data.js'
 import { registerConnectorRoutes } from './connectors.js'
+import { registerPreferencesRoutes } from './preferences.js'
+import { registerDecisionsRoutes } from './decisions.js'
 
 /**
  * Register all API routes.
@@ -33,6 +35,8 @@ export function registerRoutes(server: HttpServer, daemon: SyncDaemon): void {
   registerWebhookRoutes(server, daemon)
   registerDataRoutes(server, daemon)
   registerConnectorRoutes(server, daemon)
+  registerPreferencesRoutes(server, daemon)
+  registerDecisionsRoutes(server, daemon.decisionsRepo)
 }
 
 export { registerAccountRoutes } from './accounts.js'
@@ -46,3 +50,5 @@ export { registerAuthRoutes } from './auth.js'
 export { registerWebhookRoutes } from './webhooks.js'
 export { registerDataRoutes } from './data.js'
 export { registerConnectorRoutes } from './connectors.js'
+export { registerPreferencesRoutes } from './preferences.js'
+export { registerDecisionsRoutes } from './decisions.js'

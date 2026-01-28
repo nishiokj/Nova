@@ -8,6 +8,7 @@
     "dev": "bun run index.tsx",
     "start": "bun run index.tsx",
     "build": "bun build index.tsx --outdir dist --target node && cp node_modules/yoga-wasm-web/dist/yoga.wasm dist/yoga.wasm",
+    "clean": "rm -rf dist",
     "lint": "bun tsc --noEmit",
     "test": "bun test"
   },

@@ -21,6 +21,7 @@ import { createClaudeSessionConnector } from './coding-sessions/claude.js'
 import { createRexSessionConnector } from './coding-sessions/rex.js'
 import { createIMessageConnector } from './imessage/index.js'
 import { createGoogleCalendarConnector } from './google-calendar/index.js'
+import { createObsidianConnector } from './obsidian/index.js'
 
 // ============ Types ============
 
@@ -80,6 +81,10 @@ export const CONNECTOR_FACTORIES: Record<ConnectorType, ConnectorFactoryEntry> =
   'google-calendar': {
     factory: createGoogleCalendarConnector,
     displayName: 'Google Calendar',
+  },
+  obsidian: {
+    factory: createObsidianConnector,
+    displayName: 'Obsidian',
   },
   // Telegram is handled separately - it's a real-time harness bridge, not a sync connector
   telegram: {

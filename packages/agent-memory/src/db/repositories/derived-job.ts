@@ -169,7 +169,7 @@ export function createDerivedJobRepository(ctx: RepositoryContext): DerivedJobRe
           ${input.priority ?? 0},
           ${now},
           0,
-          ${input.metadata ?? null}
+          ${input.metadata ? sql.json(input.metadata as any) : null}
         )
         RETURNING *
       `
@@ -237,7 +237,7 @@ export function createDerivedJobRepository(ctx: RepositoryContext): DerivedJobRe
     async updateMetadata(id, metadata) {
       const [row] = await sql<DerivedJobRow[]>`
         UPDATE derived_jobs
-        SET metadata = ${metadata}
+        SET metadata = ${sql.json(metadata as any)}
         WHERE id = ${id}
         RETURNING *
       `

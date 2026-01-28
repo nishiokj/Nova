@@ -7,6 +7,7 @@ export {
   Orchestrator,
   type OrchestratorConfig,
   type OrchestratorRuntime,
+  type IterationState,
   DEFAULT_ORCHESTRATOR_CONFIG,
   type OrchestratorResult,
   type OrchestratorMetrics,

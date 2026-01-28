@@ -6,6 +6,7 @@
 
 import type { HttpServer } from '../server.js'
 import type { SyncDaemon } from '../index.js'
+import type { ConnectorType } from '../../ids.js'
 import { notFound } from '../server.js'
 
 export function registerProcessRoutes(server: HttpServer, daemon: SyncDaemon): void {
@@ -52,7 +53,7 @@ export function registerProcessRoutes(server: HttpServer, daemon: SyncDaemon): v
     } | undefined
 
     const result = await engine.reprocessFiltered(
-      { connector: body?.connector, entityType: body?.entityType },
+      { connector: body?.connector as ConnectorType | undefined, entityType: body?.entityType },
       { transformationIds: body?.transformationIds }
     )
     return { body: { result } }

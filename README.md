@@ -84,6 +84,19 @@ cd apps/harness-daemon && bun run start
 cd ../tui && bun run start
 ```
 
+## Quick Setup for Stealth Browser Authentication
+
+```bash
+# Login to multiple sites once with stealth settings
+./multi-site-auth-stealth.sh
+
+# Use saved authentication states
+./multi-site-auth-usage.sh x snapshot -i
+./multi-site-auth-usage.sh github open https://github.com/dashboard
+```
+
+See the [Stealth Browser Authentication](#stealth-browser-authentication) section below for full details.
+
 ## Project Structure
 
 ```
@@ -214,6 +227,43 @@ to point at the same bus endpoint (defaults: `127.0.0.1:9555`).
 - `stream` - Response streaming
 - `response` - Final response
 - `error` - Error notification
+
+## Stealth Browser Authentication
+
+The project includes scripts for logging into multiple websites once with stealth/anti-detection settings, then reusing those authentication sessions:
+
+```bash
+# First time: Login and save authentication state
+./multi-site-auth-stealth.sh
+# This opens a visible Chrome browser with anti-detection settings
+# Complete login manually (handles 2FA, captchas, OAuth)
+# State is saved to ./auth-states/<site>-auth.json
+
+# Later: Use saved authentication state
+./multi-site-auth-usage.sh [site] [action] [args...]
+
+# Examples:
+./multi-site-auth-usage.sh x open https://x.com
+./multi-site-auth-usage.sh github snapshot -i
+./multi-site-auth-usage.sh google-ai screenshot /tmp/google-ai.png
+
+# Show all available authenticated sites
+./multi-site-auth-usage.sh
+```
+
+**Supported sites:**
+- `x` - X/Twitter
+- `google-ai` - Google AI Studio
+- `youtube` - YouTube
+- `github` - GitHub
+
+**Stealth features:**
+- Uses real Chrome browser (not bundled Chromium)
+- Anti-detection launch arguments
+- Realistic user agent string
+- No automation flags exposed
+
+**Important:** Never commit `auth-states/` directory - it contains sensitive authentication cookies!
 
 ## Documentation
 

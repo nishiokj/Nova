@@ -119,7 +119,7 @@ login_and_save_state() {
     echo ""
 
     # Build launch command
-    LAUNCH_CMD="agent-browser --session \"$site_name\" --headless=false"
+    LAUNCH_CMD="agent-browser --session \"$site_name\" --headed"
 
     if [[ -n "$CHROME_PATH" ]]; then
         LAUNCH_CMD="$LAUNCH_CMD --executable-path \"$CHROME_PATH\""
@@ -128,7 +128,7 @@ login_and_save_state() {
         echo "   ⚠️  Chrome not found, using bundled Chromium (less stealth)"
     fi
 
-    LAUNCH_CMD="$LAUNCH_CMD --user-agent \"$USER_AGENT\" --args=\"$STEALTH_ARGS\" open \"$login_url\""
+    LAUNCH_CMD="$LAUNCH_CMD --user-agent \"$USER_AGENT\" --args $STEALTH_ARGS open \"$login_url\""
 
     # Open site in headed mode with stealth settings
     eval "$LAUNCH_CMD"
@@ -157,7 +157,11 @@ login_and_save_state() {
 
     # Save authentication state
     echo "💾 Saving authentication state to: $state_file"
-    agent-browser --session "$site_name" state save "$state_file"
+    agent-browser --session "$site_name" state save "$state_file" 2>/dev/null || {
+        echo "❌ Failed to save state"
+        agent-browser --session "$site_name" close
+        return 1
+    }
 
     # Close the browser
     agent-browser --session "$site_name" close
@@ -222,12 +226,14 @@ if [[ -n "$CHROME_PATH" ]]; then
     echo "     --executable-path \"$CHROME_PATH\" \\"
     echo "     --user-agent \"$USER_AGENT\" \\"
     echo "     --args=\"$STEALTH_ARGS\" \\"
-    echo "     state load ./auth-states/<site>-auth.json"
+    echo "     --state ./auth-states/<site>-auth.json \\"
+    echo "     open <url>"
 else
     echo "   agent-browser --session <site> \\"
     echo "     --user-agent \"$USER_AGENT\" \\"
     echo "     --args=\"$STEALTH_ARGS\" \\"
-    echo "     state load ./auth-states/<site>-auth.json"
+    echo "     --state ./auth-states/<site>-auth.json \\"
+    echo "     open <url>"
 fi
 echo ""
 echo "Security reminder: Never commit auth-state files!"

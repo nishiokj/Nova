@@ -1,5 +1,5 @@
 {
-  "name": "@jesus/decision-watcher",
+  "name": "decision-watcher",
   "version": "0.1.0",
   "type": "module",
   "description": "Decision watcher for async agent orchestration - auto-answers PromptUser questions using a curated decision and preference database",
@@ -32,16 +32,18 @@
     }
   },
   "scripts": {
+    "clean": "rm -rf dist",
     "build": "tsc",
     "watch": "tsc --watch",
     "test": "bun test",
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {
-    "@jesus/agent": "workspace:*",
-    "@jesus/types": "workspace:*",
-    "@jesus/shared": "workspace:*",
-    "@jesus/agent-memory": "workspace:*",
+    "agent": "workspace:*",
+    "types": "workspace:*",
+    "shared": "workspace:*",
+    "agent-memory": "workspace:*",
+    "llm": "workspace:*",
     "zod": "^3.24.1"
   },
   "devDependencies": {

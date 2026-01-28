@@ -291,8 +291,18 @@ export interface DerivedTaskResponse {
   recentJobs?: DerivedJob[]
 }
 
+export interface DerivedTaskSandboxResult {
+  job: DerivedJob
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'timeout'
+  durationMs: number
+  lastError?: string
+  logPath?: string
+}
+
 export interface DerivedTaskCreateResponse {
   task: DerivedTask
+  sandbox?: DerivedTaskSandboxResult
+  sandboxError?: string
 }
 
 // ============ Jobs ============
@@ -370,6 +380,13 @@ export interface DerivedJobResponse {
   queueStats?: QueueStats
 }
 
+export interface DerivedJobLogsResponse {
+  logPath: string
+  exists: boolean
+  lines: string[]
+  truncated: boolean
+}
+
 export interface DerivedRetryResponse {
   job: DerivedJob
   originalJob: DerivedJob
@@ -406,6 +423,37 @@ export interface ApiError {
   message?: string
 }
 
+// ============ Preferences ============
+
+export interface CodingPreference {
+  id: string
+  category: string
+  kind: string
+  preference: string
+  entity_free_formulation: string
+  scope: string
+  context: string
+  failure_mode_prevented: string
+  signal_strength: 'explicit' | 'implicit'
+  evidence_count: number
+  evidence_notes: unknown
+  counterexample: string
+  confidence: 'low' | 'medium' | 'high'
+  created_at: string
+  rank: number
+}
+
+export interface PreferencesSearchResponse {
+  preferences: CodingPreference[]
+  total: number
+  query: string
+  filters: {
+    category?: string
+    kind?: string
+    confidence?: string
+  }
+}
+
 export class SyncClientError extends Error {
   constructor(
     message: string,
@@ -415,5 +463,35 @@ export class SyncClientError extends Error {
   ) {
     super(message)
     this.name = 'SyncClientError'
+  }
+}
+
+// ============ Decisions ============
+
+export interface CodingDecision {
+  id: string
+  category: string
+  decision: string
+  rationale: string
+  alternatives_considered: string
+  tradeoffs: string
+  scope: string
+  project_context: string
+  task_context: string
+  confidence: 'low' | 'medium' | 'high'
+  signal_strength: 'explicit' | 'implicit'
+  reversibility: 'easy' | 'moderate' | 'hard'
+  created_at: string
+  rank?: number
+  similarity?: number
+}
+
+export interface DecisionsSearchResponse {
+  decisions: CodingDecision[]
+  total: number
+  query?: string
+  filters?: {
+    category?: string
+    confidence?: string
   }
 }

@@ -568,7 +568,7 @@ export class IMessageConnector implements Connector {
    */
   registerTransforms(registry: { register<T>(t: Transformation<T>): void }): void {
     for (const transform of imessageTransforms) {
-      registry.register(transform)
+      registry.register(transform as Transformation)
     }
   }
 

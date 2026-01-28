@@ -97,7 +97,7 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
           ${input.intervalMs ?? null},
           true,
           ${nextRunAt},
-          ${input.metadata ?? null},
+          ${input.metadata ? sql.json(input.metadata as any) : null},
           ${now},
           ${now}
         )
@@ -139,7 +139,7 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
         UPDATE derived_tasks
         SET interval_ms = COALESCE(${updates.interval_ms ?? null}, interval_ms),
             enabled = COALESCE(${updates.enabled ?? null}, enabled),
-            metadata = COALESCE(${updates.metadata ?? null}, metadata),
+            metadata = COALESCE(${updates.metadata ? sql.json(updates.metadata as any) : null}, metadata),
             updated_at = ${now}
         WHERE id = ${id}
         RETURNING *

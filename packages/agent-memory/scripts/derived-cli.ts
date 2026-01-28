@@ -22,6 +22,8 @@ import {
 import {
   createDerivedJobRepository,
 } from '../src/db/repositories/derived-job.js'
+import { generateCanonicalId } from '../src/ids.js'
+import { loadScriptMetadata, type DerivedMetadataSchema } from '../src/derived/runner.js'
 
 interface CliOptions {
   help: boolean
@@ -121,6 +123,39 @@ Environment:
 
 // ============ Commands ============
 
+function validateMetadata(
+  metadata: Record<string, unknown> | undefined,
+  schema: DerivedMetadataSchema,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...metadata }
+  const errors: string[] = []
+
+  for (const [field, def] of Object.entries(schema.fields)) {
+    const value = result[field]
+
+    if (value === undefined || value === null) {
+      if (def.required) {
+        errors.push(`  Missing required field: ${field} (${def.type}) — ${def.description}`)
+      } else if (def.default !== undefined) {
+        result[field] = def.default
+      }
+      continue
+    }
+
+    // Type check
+    if (typeof value !== def.type) {
+      errors.push(`  Field "${field}" must be ${def.type}, got ${typeof value} — ${def.description}`)
+    }
+  }
+
+  if (errors.length > 0) {
+    console.error('Error: Metadata validation failed:\n' + errors.join('\n'))
+    process.exit(1)
+  }
+
+  return result
+}
+
 async function createTask(
   name: string,
   scriptPath: string,
@@ -142,6 +177,14 @@ async function createTask(
       console.error('Error: Invalid JSON in --metadata')
       process.exit(1)
     }
+  }
+
+  // Validate metadata against script's schema
+  const schema = await loadScriptMetadata(scriptPath)
+  if (schema) {
+    metadata = validateMetadata(metadata, schema)
+    // Only pass metadata if it has keys (avoid empty object)
+    if (Object.keys(metadata).length === 0) metadata = undefined
   }
 
   const task = await taskRepo.create({
@@ -198,6 +241,7 @@ async function listTasks(
 async function runTask(
   taskId: string,
   options: CliOptions,
+  sql: ReturnType<typeof postgres>,
   taskRepo: ReturnType<typeof createDerivedTaskRepository>,
   jobRepo: ReturnType<typeof createDerivedJobRepository>
 ): Promise<void> {
@@ -223,6 +267,17 @@ async function runTask(
     metadata,
   })
 
+  // Enqueue to job_queue so the MicroQueue worker picks it up
+  const queueId = generateCanonicalId()
+  const idempotencyKey = `derived:${task.id}:${job.id}`
+  const payload = JSON.stringify({ derivedJobId: job.id })
+
+  await sql`
+    INSERT INTO job_queue (id, job_type, payload, status, priority, visible_at, max_attempts, idempotency_key)
+    VALUES (${queueId}, 'derived:run', ${payload}::jsonb, 'pending', ${options.priority ?? 0}, NOW(), 3, ${idempotencyKey})
+    ON CONFLICT (idempotency_key) DO NOTHING
+  `
+
   await taskRepo.markExecuted(task.id, job.id)
 
   if (task.mode === 'once') {
@@ -236,8 +291,9 @@ async function runTask(
   console.log(`  Task: ${task.name} (${task.id})`)
   console.log(`  Priority: ${job.priority}`)
   console.log(`  Status: ${job.status}`)
+  console.log(`  Queue ID: ${queueId}`)
   console.log('')
-  console.log('Note: This only creates the job. The SyncEngine queue must be running to process it.')
+  console.log('Job enqueued. The sync daemon must be running to process it.')
   console.log('Start the sync daemon: bun run scripts/sync-daemon.ts')
 }
 
@@ -330,7 +386,7 @@ async function main(): Promise<void> {
           process.exit(1)
         }
         const taskId = args[1]
-        await runTask(taskId, options, taskRepo, jobRepo)
+        await runTask(taskId, options, sql, taskRepo, jobRepo)
         break
       }
       case 'logs': {

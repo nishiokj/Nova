@@ -20,6 +20,8 @@ import type { RawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import type { CanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import type { EntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
 import type { RegisteredConnectorRepository, RegisteredConnector } from '../db/repositories/registered-connector.js'
+import type { CodingPreferencesRepository } from '../db/repositories/coding-preferences.js'
+import type { CodingDecisionsRepository } from '../db/repositories/coding-decisions.js'
 import type { RawEnvelope } from '../models/raw.js'
 import { validateEntity, type EntityType } from '../models/canonical.js'
 import { createAccountRepository } from '../db/repositories/account.js'
@@ -31,10 +33,12 @@ import { createRawEnvelopeRepository } from '../db/repositories/raw-envelope.js'
 import { createCanonicalEntityRepository } from '../db/repositories/canonical-entity.js'
 import { createEntitySourceMappingRepository } from '../db/repositories/entity-source-mapping.js'
 import { createRegisteredConnectorRepository } from '../db/repositories/registered-connector.js'
+import { createCodingPreferencesRepository } from '../db/repositories/coding-preferences.js'
+import { createCodingDecisionsRepository } from '../db/repositories/coding-decisions.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
-import { DerivedTaskIntegration } from '../derived/integration.js'
+import { DerivedTaskIntegration, type DerivedIntegrationConfig } from '../derived/integration.js'
 import { DatabaseAuthProvider, type AuthProviderConfig } from '../auth/provider.js'
 import { OAuthProviderRegistry, oauthProviders } from '../auth/oauth-providers.js'
 import { HttpServer, type ServerConfig } from './server.js'
@@ -61,6 +65,8 @@ export interface DaemonConfig {
   scheduler?: SchedulerConfig
   /** Engine config */
   engine?: SyncEngineConfig
+  /** Derived task integration config */
+  derived?: DerivedIntegrationConfig
 }
 
 interface AuthStatePayload {
@@ -116,11 +122,14 @@ export class SyncDaemon {
   readonly entityRepo: CanonicalEntityRepository
   readonly mappingRepo: EntitySourceMappingRepository
   readonly connectorRepo: RegisteredConnectorRepository
+  readonly preferencesRepo: CodingPreferencesRepository
+  readonly decisionsRepo: CodingDecisionsRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
   private config: DaemonConfig
   private isRunning = false
+  private registeredConnectorsLoaded = false
 
   private constructor(
     config: DaemonConfig,
@@ -139,7 +148,9 @@ export class SyncDaemon {
     envelopeRepo: RawEnvelopeRepository,
     entityRepo: CanonicalEntityRepository,
     mappingRepo: EntitySourceMappingRepository,
-    connectorRepo: RegisteredConnectorRepository
+    connectorRepo: RegisteredConnectorRepository,
+    preferencesRepo: CodingPreferencesRepository,
+    decisionsRepo: CodingDecisionsRepository
   ) {
     this.config = config
     this.server = server
@@ -158,6 +169,8 @@ export class SyncDaemon {
     this.entityRepo = entityRepo
     this.mappingRepo = mappingRepo
     this.connectorRepo = connectorRepo
+    this.preferencesRepo = preferencesRepo
+    this.decisionsRepo = decisionsRepo
   }
 
   /**
@@ -184,6 +197,8 @@ export class SyncDaemon {
     const entityRepo = createCanonicalEntityRepository(ctx)
     const mappingRepo = createEntitySourceMappingRepository(ctx)
     const connectorRepo = createRegisteredConnectorRepository(ctx)
+    const preferencesRepo = createCodingPreferencesRepository(ctx)
+    const decisionsRepo = createCodingDecisionsRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -253,7 +268,9 @@ export class SyncDaemon {
       envelopeRepo,
       entityRepo,
       mappingRepo,
-      connectorRepo
+      connectorRepo,
+      preferencesRepo,
+      decisionsRepo
     )
 
     // Store connectors map reference in daemon for registration
@@ -274,6 +291,7 @@ export class SyncDaemon {
     ;(this as any)._connectors?.set(connector.type, connector)
     this.engine.registerConnector(connector)
     this.collector.registerConnector(connector)
+    this.scheduler.registerConnector(connector)
     return this
   }
 
@@ -301,6 +319,8 @@ export class SyncDaemon {
     }
     this.connectors.delete(type)
     ;(this as any)._connectors?.delete(type)
+    this.engine.unregisterConnector(type)
+    this.scheduler.unloadConnector(type)
     return true
   }
 
@@ -318,6 +338,7 @@ export class SyncDaemon {
    * Called at daemon startup to restore registered connectors.
    */
   async loadRegisteredConnectors(): Promise<LoadConnectorsResult> {
+    this.registeredConnectorsLoaded = true
     const result: LoadConnectorsResult = {
       loaded: [],
       errors: [],
@@ -327,6 +348,9 @@ export class SyncDaemon {
     const registered = await this.connectorRepo.findEnabled()
 
     for (const reg of registered) {
+      if (this.connectors.has(reg.type)) {
+        continue
+      }
       if (!hasFactory(reg.type)) {
         result.skipped.push(reg.type)
         continue
@@ -410,6 +434,10 @@ export class SyncDaemon {
   async start(): Promise<void> {
     if (this.isRunning) {
       throw new Error('Daemon is already running')
+    }
+
+    if (!this.registeredConnectorsLoaded) {
+      await this.loadRegisteredConnectors()
     }
 
     // Start in order: server → engines → scheduler

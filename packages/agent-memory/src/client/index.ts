@@ -13,15 +13,19 @@ import type {
   AuthUrlResponse,
   AvailableConnectorsResponse,
   BackfillResponse,
+  CodingPreference,
+  CodingDecision,
   ConnectorInfo,
   ConnectorListResponse,
   ConnectorRegistrationResponse,
   ConnectorResponse,
   ConnectorSanityResponse,
   ConnectorUnregisterResponse,
+  DecisionsSearchResponse,
   DerivedJob,
   DerivedJobListResponse,
   DerivedJobResponse,
+  DerivedJobLogsResponse,
   DerivedRetryResponse,
   DerivedTask,
   DerivedTaskCreateResponse,
@@ -31,6 +35,7 @@ import type {
   ProcessAllResponse,
   ProcessErroredResponse,
   ProcessJobResponse,
+  PreferencesSearchResponse,
   ReprocessFilteredRequest,
   ReprocessFilteredResponse,
   TransformationListResponse,
@@ -626,9 +631,8 @@ export class SyncClient {
       mode: DerivedTaskMode
       intervalMs?: number
       metadata?: Record<string, unknown>
-    }): Promise<DerivedTask> => {
-      const response = await this.post<DerivedTaskCreateResponse>('/derived/tasks', opts)
-      return response.task
+    }): Promise<DerivedTaskCreateResponse> => {
+      return this.post<DerivedTaskCreateResponse>('/derived/tasks', opts)
     },
 
     /**
@@ -727,6 +731,16 @@ export class SyncClient {
     },
 
     /**
+     * Fetch derived job logs (tail).
+     */
+    logs: async (id: string, opts?: { lines?: number }): Promise<DerivedJobLogsResponse> => {
+      const params = new URLSearchParams()
+      if (opts?.lines) params.set('lines', String(opts.lines))
+      const query = params.toString()
+      return this.get<DerivedJobLogsResponse>(`/derived/jobs/${id}/logs${query ? `?${query}` : ''}`)
+    },
+
+    /**
      * Cancel a pending or running derived job.
      */
     cancel: async (id: string): Promise<DerivedJob> => {
@@ -798,8 +812,78 @@ export class SyncClient {
       return response.transformations
     },
   }
+
+  // ============ Preferences ============
+
+  /**
+   * Preferences search methods.
+   */
+  preferences = {
+    /**
+     * Search coding preferences with full-text search.
+     * @param opts.q - Search query (required)
+     * @param opts.category - Filter by category
+     * @param opts.kind - Filter by kind
+     * @param opts.confidence - Filter by confidence
+     * @param opts.limit - Max results (default: 20)
+     * @param opts.offset - Pagination offset (default: 0)
+     */
+    search: async (opts: {
+      q: string
+      category?: string
+      kind?: string
+      confidence?: string
+      limit?: number
+      offset?: number
+    }): Promise<PreferencesSearchResponse> => {
+      const params = new URLSearchParams()
+      params.set('q', opts.q)
+      if (opts.category) params.set('category', opts.category)
+      if (opts.kind) params.set('kind', opts.kind)
+      if (opts.confidence) params.set('confidence', opts.confidence)
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+      if (opts.offset !== undefined) params.set('offset', String(opts.offset))
+      const query = params.toString()
+      return this.get<PreferencesSearchResponse>(`/preferences/search?${query}`)
+    },
+  }
+
+  // ============ Decisions ============
+
+  /**
+   * Decisions search methods.
+   */
+  decisions = {
+    /**
+     * Search coding decisions with full-text search.
+     * @param opts.q - Search query (required)
+     * @param opts.category - Filter by category
+     * @param opts.confidence - Filter by confidence
+     * @param opts.limit - Max results (default: 20)
+     * @param opts.offset - Pagination offset (default: 0)
+     */
+    search: async (opts: {
+      q: string
+      category?: string
+      confidence?: string
+      limit?: number
+      offset?: number
+    }): Promise<DecisionsSearchResponse> => {
+      const params = new URLSearchParams()
+      params.set('q', opts.q)
+      if (opts.category) params.set('category', opts.category)
+      if (opts.confidence) params.set('confidence', opts.confidence)
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+      if (opts.offset !== undefined) params.set('offset', String(opts.offset))
+      const query = params.toString()
+      return this.get<DecisionsSearchResponse>(`/decisions/search?${query}`)
+    },
+  }
 }
 
 // Re-export types
 export * from './types.js'
 export { captureOAuthCallback, getCallbackUri, type OAuthResult, type OAuthCallbackOptions } from './oauth.js'
+
+// Add CodingDecision to default export for CLI import compatibility
+export type { CodingDecision } from './types.js'

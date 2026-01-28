@@ -39,21 +39,6 @@ SITES="x google-ai youtube github"
 # FUNCTIONS
 # ══════════════════════════════════════════════════════════════
 
-# Load auth state for a site
-load_auth_state() {
-    local site_name="$1"
-    local state_file="$STATE_DIR/${site_name}-auth.json"
-
-    if [[ ! -f "$state_file" ]]; then
-        echo "❌ No auth state found for: $site_name"
-        echo "   Run ./multi-site-auth-setup.sh first"
-        exit 1
-    fi
-
-    echo "📂 Loading auth state: $state_file"
-    agent-browser --session "$site_name" state load "$state_file"
-}
-
 # Show all available sites
 show_sites() {
     echo ""
@@ -128,19 +113,29 @@ fi
 # Shift off first two arguments (site_name and action)
 shift 2 || true
 
-# Load auth state
-load_auth_state "$site_name"
+# Set state file path
+state_file="$STATE_DIR/${site_name}-auth.json"
 
-# Execute command
+# Check if state file exists
+if [[ ! -f "$state_file" ]]; then
+    echo "❌ No auth state found for: $site_name"
+    echo "   Run ./multi-site-auth-stealth.sh first"
+    exit 1
+fi
+
+echo "📂 Loading auth state: $state_file"
+echo ""
+
+# Execute command with state loaded via --state flag
 echo ""
 echo "╔═══════════════════════════════════════════════════════════╗"
 echo "║  SITE: $site_name                                            ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
-echo "🔵 Executing: agent-browser --session $site_name $action $*"
+echo "🔵 Executing: agent-browser --session $site_name --state $state_file $action $*"
 echo ""
 
-agent-browser --session "$site_name" "$action" "$@"
+agent-browser --session "$site_name" --state "$state_file" "$action" "$@"
 
 echo ""
 echo "✅ Command completed"

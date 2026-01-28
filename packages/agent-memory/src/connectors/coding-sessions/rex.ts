@@ -10,11 +10,13 @@
 import { z } from 'zod'
 import type { ConnectorType } from '../../ids.js'
 import type { SourceItem } from '../../sync/types.js'
+import type { TransformationRegistry } from '../../transform/registry.js'
 import { CodingAgentSessionConnector } from './base.js'
 import {
   RexSessionMessageSchema,
   type RexSessionMessage,
 } from './schemas.js'
+import { rexTransforms } from './transforms.js'
 
 // ============ Configuration ============
 
@@ -89,6 +91,15 @@ export class RexSessionConnector extends CodingAgentSessionConnector {
         },
       },
       source_timestamp: sourceTimestamp,
+    }
+  }
+
+  /**
+   * Register Rex session transformations with a registry.
+   */
+  registerTransforms(registry: TransformationRegistry): void {
+    for (const transform of rexTransforms) {
+      registry.register(transform as any)
     }
   }
 }

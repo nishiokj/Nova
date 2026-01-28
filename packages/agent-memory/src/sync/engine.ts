@@ -168,11 +168,21 @@ export class SyncEngine {
   }
 
   /**
+   * Unregister a connector and its transforms.
+   */
+  unregisterConnector(type: ConnectorType): void {
+    this.connectors.delete(type)
+    for (const t of this.transformRegistry.findByConnector(type)) {
+      this.transformRegistry.unregister(t.id)
+    }
+  }
+
+  /**
    * Manually register a transformation.
    */
   registerTransform<T>(transform: Transformation<T>): this {
     this.transformRegistry.register(transform)
-    void this.persistTransformation(transform)
+    void this.persistTransformation(transform as Transformation)
     return this
   }
 
@@ -243,10 +253,11 @@ export class SyncEngine {
    */
   registerDerivedJobHandler(
     jobType: string,
-    handler: (job: Job<DerivedJobPayload>) => Promise<JobResult>
+    handler: (job: Job<DerivedJobPayload>) => Promise<JobResult>,
+    options?: { timeout?: number }
   ): this {
     this.derivedJobHandlers.set(jobType, handler)
-    this.queue.register<DerivedJobPayload>(jobType, handler)
+    this.queue.register<DerivedJobPayload>(jobType, handler, options)
     return this
   }
 
@@ -424,7 +435,7 @@ export class SyncEngine {
    * Reprocess all envelopes that match a scope filter.
    */
   async reprocessFiltered(
-    filter: { connector?: string; entityType?: string },
+    filter: { connector?: ConnectorType; entityType?: string },
     options: { transformationIds?: string[] } = {}
   ): Promise<BatchProcessResult> {
     return this.processor.reprocessFiltered(filter, options)

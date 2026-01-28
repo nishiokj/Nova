@@ -47,7 +47,7 @@ export type BaseEntity = z.infer<typeof BaseEntitySchema>
 
 // ============ Platform Enum ============
 
-export const PlatformSchema = z.enum(['github', 'gmail', 'xcom', 'imessage', 'unknown'])
+export const PlatformSchema = z.enum(['github', 'gmail', 'xcom', 'imessage', 'obsidian', 'unknown'])
 export type Platform = z.infer<typeof PlatformSchema>
 
 // ============ Core Entities ============

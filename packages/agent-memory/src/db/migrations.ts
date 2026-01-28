@@ -8,7 +8,6 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { TransactionSql } from 'postgres'
 import type { Database } from './connection.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -146,16 +145,17 @@ export async function migrate(
 
     if (!dryRun) {
       // Run migration in a transaction
-      await db.sql.begin(async (tx: TransactionSql) => {
+      await db.sql.begin(async (tx) => {
         // Execute the migration SQL
         await tx.unsafe(migration.sql)
 
         // Record the migration as applied
-        await tx`
-          INSERT INTO schema_migrations (version, description)
-          VALUES (${migration.version}, ${migration.description})
-          ON CONFLICT (version) DO NOTHING
-        `
+        await tx.unsafe(
+          `INSERT INTO schema_migrations (version, description)
+           VALUES ($1, $2)
+           ON CONFLICT (version) DO NOTHING`,
+          [migration.version, migration.description]
+        )
       })
     }
 

@@ -128,7 +128,7 @@ function collectKeys(
 
 function serializeError(error: unknown): Record<string, unknown> {
   const err = toError(error)
-  const errAny = err as Record<string, unknown>
+  const errAny = err as unknown as Record<string, unknown>
 
   const output: Record<string, unknown> = {
     name: err.name,
@@ -278,6 +278,22 @@ export class Scheduler {
   onEvent(handler: (event: SchedulerEvent) => void): this {
     this.eventHandlers.push(handler)
     return this
+  }
+
+  /**
+   * Register a connector for dynamic registration.
+   * Called when a connector is registered after daemon startup.
+   */
+  registerConnector(connector: Connector): void {
+    this.connectors.set(connector.type, connector)
+  }
+
+  /**
+   * Unload a connector (remove from memory).
+   * Does not affect the database registration.
+   */
+  unloadConnector(type: ConnectorType): boolean {
+    return this.connectors.delete(type)
   }
 
   // ============ Lifecycle ============

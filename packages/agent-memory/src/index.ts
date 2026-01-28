@@ -249,8 +249,12 @@ export {
 } from './derived/integration.js'
 export {
   runDerivedScript,
+  loadScriptMetadata,
   type DerivedRunContext,
   type DerivedRunResult,
+  type ProcessingLog,
+  type MetadataFieldDef,
+  type DerivedMetadataSchema,
 } from './derived/runner.js'
 
 // Connector SDK

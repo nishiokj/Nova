@@ -15,7 +15,7 @@
 // CORE TYPES
 // ============================================
 
-export {
+export type {
   // Decision Types
   DecisionCategory,
   DecisionPriority,
@@ -23,8 +23,6 @@ export {
   Decision,
   Preference,
   DecisionEntry,
-  isDecision,
-  isPreference,
 
   // Watcher Response Types
   WatcherAnswerSource,
@@ -40,10 +38,16 @@ export {
   DecisionWatcherConfig,
   DecisionDatabase,
 
-  // Integration Types
-  WatcherIntegrationConfig,
-  PromptUserHookEvent,
-  PromptUserHookResult,
+  // Watcher Action Types (LLM-backed watcher)
+  WatcherTrigger,
+  WatcherActionType,
+  WatcherAction,
+  DecisionLogEntry,
+} from './types.js';
+
+export {
+  isDecision,
+  isPreference,
 } from './types.js';
 
 // ============================================
@@ -65,10 +69,7 @@ export {
 // ============================================
 
 export {
-  // Engine
   DecisionEngine,
-
-  // Factory
   createDecisionEngine,
 } from './engine/index.js';
 
@@ -76,12 +77,12 @@ export {
 // WATCHER
 // ============================================
 
-export {
-  // Watcher
+export type {
   DecisionWatcher,
-  DEFAULT_WATCHER_CONFIG,
+} from './watcher/index.js';
 
-  // Factory
+export {
+  DEFAULT_WATCHER_CONFIG,
   createDecisionWatcher,
 } from './watcher/index.js';
 
@@ -90,14 +91,43 @@ export {
 // ============================================
 
 export {
-  // Integration
-  WatcherIntegration,
-  createPromptUserHook,
-  createOrchestratorHookHandler,
   createWatcherConfig,
   shouldEnableAsyncMode,
-
-  // Default Decisions
   DEFAULT_DECISIONS,
   createSeededDatabase,
 } from './integration/index.js';
+
+// ============================================
+// SALIENCE & DECISION LOG
+// ============================================
+
+export {
+  salienceDir,
+  salienceFilePath,
+  createSalienceContent,
+  writeSalienceFile,
+} from './salience.js';
+export type { SalienceParams } from './salience.js';
+
+export {
+  createDecisionLog,
+} from './decision-log.js';
+export type { DecisionLog } from './decision-log.js';
+
+// ============================================
+// WATCHER AGENT (LLM-backed StopHook)
+// ============================================
+
+export {
+  createWatcherStopHook,
+} from './watcher-agent.js';
+export type { WatcherAgentConfig } from './watcher-agent.js';
+
+// ============================================
+// SESSION INIT (Async session bootstrap)
+// ============================================
+
+export {
+  initAsyncSession,
+} from './session-init.js';
+export type { AsyncSessionConfig, AsyncSessionResult } from './session-init.js';

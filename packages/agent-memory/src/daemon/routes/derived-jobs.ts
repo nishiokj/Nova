@@ -7,6 +7,8 @@
 import type { HttpServer } from '../server.js'
 import type { SyncDaemon } from '../index.js'
 import { badRequest, notFound } from '../server.js'
+import { readFile, stat } from 'node:fs/promises'
+import { getDerivedLogPath } from '../../derived/logging.js'
 
 export function registerDerivedJobRoutes(server: HttpServer, daemon: SyncDaemon): void {
   const { derivedJobRepo, derivedTaskRepo, derivedIntegration, engine } = daemon
@@ -41,6 +43,40 @@ export function registerDerivedJobRoutes(server: HttpServer, daemon: SyncDaemon)
     const stats = await derivedIntegration.getQueueStats(engine)
 
     return { body: { job, queueStats: stats } }
+  })
+
+  // Get derived job logs
+  server.get('/derived/jobs/:id/logs', async (req) => {
+    const job = await derivedJobRepo.findById(req.params.id)
+    if (!job) {
+      throw notFound(`Derived job not found: ${req.params.id}`)
+    }
+
+    const limit = req.query.lines ? parseInt(req.query.lines, 10) : 200
+    const logPath = (job.metadata?._logPath as string | undefined) ?? getDerivedLogPath(job.id)
+
+    let exists = true
+    try {
+      await stat(logPath)
+    } catch {
+      exists = false
+    }
+
+    if (!exists) {
+      return { body: { logPath, exists: false, lines: [], truncated: false } }
+    }
+
+    const content = await readFile(logPath, 'utf-8')
+    let lines = content.split(/\r?\n/)
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines = lines.slice(0, -1)
+
+    let truncated = false
+    if (Number.isFinite(limit) && limit > 0 && lines.length > limit) {
+      truncated = true
+      lines = lines.slice(-limit)
+    }
+
+    return { body: { logPath, exists: true, lines, truncated } }
   })
 
   // Cancel a derived job

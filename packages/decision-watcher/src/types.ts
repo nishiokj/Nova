@@ -6,8 +6,8 @@
  * curated database of decisions and preferences.
  */
 
-import type { UserPromptInfo, UserPromptQuestion } from '@jesus/agent';
-import type { LLMAdapter } from '@jesus/llm';
+import type { UserPromptInfo } from 'agent';
+import type { LLMAdapter } from 'llm';
 
 // ============================================
 // DECISION TYPES
@@ -121,7 +121,7 @@ export interface Decision {
     language?: string;
     /** Framework (e.g., 'react', 'express') */
     framework?: string;
-    /** File patterns (e.g., '**/*.ts', 'src/**/*') */
+    /** File patterns (e.g., '*.ts', 'src/**') */
     filePatterns?: string[];
   };
 
@@ -186,6 +186,11 @@ export function isDecision(entry: DecisionEntry): entry is Decision {
 export function isPreference(entry: DecisionEntry): entry is Preference {
   return 'preference' in entry && 'strength' in entry;
 }
+
+/**
+ * Re-export UserPromptInfo from 'agent' for convenience
+ */
+export type { UserPromptInfo };
 
 // ============================================
 // WATCHER RESPONSE TYPES
@@ -495,3 +500,70 @@ export type PromptUserHookResult =
   | { action: 'answer'; answer: PromptUserAnswer }
   | { action: 'escalate'; response: WatcherResponse }
   | { action: 'block'; reason: string };
+
+// ============================================
+// WATCHER TRIGGER & ACTION TYPES
+// ============================================
+
+/**
+ * Trigger types for the LLM-backed watcher.
+ * Each trigger maps to a specific orchestrator terminal condition or lifecycle event.
+ */
+export type WatcherTrigger =
+  | 'session_init'
+  | 'prompt_user'
+  | 'bounds_exceeded'
+  | 'agent_error'
+  | 'work_item_completed'
+  | 'scope_collision'
+  | 'cadence_audit';
+
+/**
+ * Structured watcher output action types.
+ * These determine what the watcher instructs the orchestrator to do.
+ */
+export type WatcherActionType =
+  | 'answer'
+  | 'realign'
+  | 'split'
+  | 'create_work_item'
+  | 'quality_gate'
+  | 'escalate'
+  | 'continue';
+
+/**
+ * Structured output from the watcher agent.
+ * Returned by the LLM-backed watcher after evaluating a trigger.
+ *
+ * The LLM output schema wraps this in the standard Agent protocol
+ * (action: "done"|"continue", goalStateReached, response). The
+ * watcher-specific decision lives in `watcherAction`.
+ */
+export interface WatcherAction {
+  watcherAction: WatcherActionType;
+  reason: string;
+  answer?: { text: string; contextAddendum?: string };
+  realign?: { systemMessage: string; newGoal?: string };
+  workItems?: Array<{
+    goal: string;
+    objective: string;
+    agent: string;
+    dependencies?: string[];
+    targetPaths?: string[];
+  }>;
+  qualityGate?: { passed: boolean; issues?: string[] };
+}
+
+/**
+ * Decision log entry persisted as JSONL.
+ * Records every watcher invocation for auditability.
+ */
+export interface DecisionLogEntry {
+  timestamp: string;
+  trigger: WatcherTrigger;
+  watcherAction: WatcherActionType;
+  question?: string;
+  answer?: string;
+  rationale: string;
+  workItemId?: string;
+}

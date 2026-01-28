@@ -77,6 +77,7 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
     conversation: 'canonical_conversation',
     issue: 'canonical_issue',
     notification: 'canonical_notification',
+    event: 'canonical_event',
     preference: 'canonical_preference',
   }
   const allTables = Object.values(tableByType).filter((t): t is string => !!t)

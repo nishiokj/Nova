@@ -1,260 +1,195 @@
 # Derived Tasks
 
-Derived tasks are post-processing scripts that run on synced canonical data. They enable you to transform, analyze, or extract insights from the data after it has been synced and normalized.
+Derived tasks are automated jobs that process your data and generate insights on a schedule.
+
+## Available Tasks
+
+### Daily X Bookmarks Digest
+
+Fetches your X.com bookmarks for the day, analyzes each one, researches linked content, and sends you a high-signal summary with action items.
+
+**Location:** `scripts/derive-x-bookmarks.ts`
+
+**Features:**
+- Visits x.com using your saved auth state (`auth-states/x-auth.json`)
+- Retrieves bookmarks created today
+- Researches each bookmark (on X.com, web, or via linked content)
+- Generates concise, high-signal analysis (no slop, no trivial info)
+- Creates action items based on content
+- Sends summary to Telegram
+
+**Setup:**
+1. Ensure X auth state exists: `auth-states/x-auth.json`
+2. Run via CLI: `bun run scripts/derived-cli.ts create x-bookmarks-digest scripts/derive-x-bookmarks.ts --mode recurring --interval-ms 86400000`
+3. Set schedule to 8pm Central Time (your local timezone)
+
+**Output:**
+- Markdown file: `data/x-bookmarks-digest/YYYY-MM-DD.md`
+- Telegram notification with summary and action items
+
+### Daily Conversation Digest
+
+Analyzes your conversations across platforms (iMessage, Gmail, Telegram, coding sessions) to extract signal - what you're working on, recurring patterns, themes, and decisions.
+
+**Location:** `scripts/derive-daily-digest.ts`
+
+**Features:**
+- Queries today's canonical conversations
+- Feeds to harness agent incrementally
+- Maintains signal map across runs (persistent session)
+- Extracts active threads, recurring work, themes, decisions
+- Sends daily synthesis to Telegram
+
+**Setup:**
+```bash
+bun run scripts/derived-cli.ts create daily-digest scripts/derive-daily-digest.ts --mode recurring --interval-ms 86400000
+```
+
+## CLI Usage
+
+### Create a Task
+
+```bash
+bun run scripts/derived-cli.ts create <name> <script-path> [options]
+```
+
+**Options:**
+- `--mode <once|recurring|event>` - Task mode (default: once)
+- `--interval-ms <ms>` - Interval for recurring mode
+- `--priority <number>` - Job priority (default: 0)
+- `--metadata <json>` - Metadata to attach to task/job
+
+### Examples
+
+**Create once-off task:**
+```bash
+bun run scripts/derived-cli.ts create x-bookmarks-digest scripts/derive-x-bookmarks.ts --mode once
+```
+
+**Create recurring task (daily at 8pm Central):**
+```bash
+bun run scripts/derived-cli.ts create x-bookmarks-digest scripts/derive-x-bookmarks.ts \
+  --mode recurring \
+  --interval-ms 86400000 \
+  --metadata '{"schedule":"20:00 CST","telegramChatId":123456789}'
+```
+
+**Create recurring task (every hour):**
+```bash
+bun run scripts/derived-cli.ts create aggregate-stats scripts/aggregate-stats.ts \
+  --mode recurring \
+  --interval-ms 3600000
+```
+
+### List Tasks
+
+```bash
+bun run scripts/derived-cli.ts list
+```
+
+### Run Task Immediately
+
+```bash
+bun run scripts/derived-cli.ts run <task-id>
+```
+
+### View Task Logs
+
+```bash
+bun run scripts/derived-cli.ts logs <task-id>
+```
+
+## Environment Variables
+
+- `DATABASE_URL` - PostgreSQL connection string (required)
+- `TELEGRAM_BOT_TOKEN` - Bot token for notifications
+- `TELEGRAM_ALLOWED_USERS` - Comma-separated list of allowed user IDs
+- `HARNESS_HOST` - Harness daemon host (default: 127.0.0.1)
+- `HARNESS_PORT` - Harness daemon port (default: 9555)
+
+## Task Script Structure
+
+Derived task scripts must export a `run()` function:
+
+```typescript
+import type { DerivedRunContext, DerivedRunResult } from '../src/derived/runner.js'
+
+export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
+  const { sql, task, logger } = ctx
+  
+  // Your logic here
+  
+  return {
+    metadata: {
+      // Task-specific metadata
+    }
+  }
+}
+```
+
+**Context provides:**
+- `sql` - Database query interface
+- `task` - Task record with metadata
+- `logger` - Logging interface
+
+## Scheduling Recurring Tasks
+
+To schedule a task for a specific local time:
+
+1. Calculate the interval in milliseconds (daily = 86400000)
+2. Set the initial `next_run_at` in the database to your desired start time
+3. The sync daemon will update `next_run_at` automatically after each run
+
+**Example: Schedule for 8pm Central Time daily:**
+
+```sql
+-- First run at 8pm CST today
+UPDATE derived_tasks 
+SET next_run_at = (DATE_TRUNC('day', NOW() AT TIME ZONE 'America/Chicago') 
+                 + INTERVAL '20 hours')
+WHERE name = 'x-bookmarks-digest';
+
+-- Set interval to 24 hours
+UPDATE derived_tasks 
+SET interval_ms = 86400000
+WHERE name = 'x-bookmarks-digest';
+```
+
+The sync daemon will automatically adjust `next_run_at` by adding `interval_ms` after each successful run.
+
+## Troubleshooting
+
+**Task not running?**
+- Check sync daemon is running: `bun run scripts/sync-daemon.ts`
+- Verify task is enabled: `bun run scripts/derived-cli.ts list`
+- Check next_run_at: Query `SELECT * FROM derived_tasks WHERE name = 'x-bookmarks-digest'`
+
+**Harness connection failed?**
+- Ensure harness-daemon is running
+- Check HARNESS_HOST and HARNESS_PORT settings
+- Verify no firewall blocking connection
+
+**Telegram not receiving notifications?**
+- Check TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS are set
+- Verify telegramChatId in task metadata matches your user ID
+- Check bot permissions (can send messages to your chat)
 
 ## Architecture
 
 ```
-Sync (Collect/Process) → Raw Envelopes → Canonical Entities
-                                              ↓
-                                      Derived Tasks (run on canonical data)
-                                              ↓
-                                      Derived Output
+derived-cli.ts
+    ↓ (creates task in DB)
+derived_tasks table
+    ↓ (scheduled by sync daemon)
+job_queue table
+    ↓ (picked up by MicroQueue worker)
+derived:run job
+    ↓ (executes script)
+derive-x-bookmarks.ts / derive-daily-digest.ts
+    ↓ (communicates via HarnessClient)
+harness-daemon
+    ↓ (uses agent-browser skill)
+x.com / web scraping
+    ↓ (sends output)
+Telegram connector → Your phone
 ```
-
-## Components
-
-1. **Derived Script** - A TypeScript module that exports a `run()` function
-2. **Derived Task** - Database record that defines when/how to run the script
-3. **Derived Job** - Database record that tracks each execution
-4. **DerivedEngine** - Queue-based worker that processes jobs
-
-## Creating a Derived Task Script
-
-A derived task script is a TypeScript module with the following interface:
-
-```typescript
-import type {
-  DerivedRunContext,
-  DerivedRunResult,
-} from '../src/derived/runner.js'
-
-export async function run(
-  ctx: DerivedRunContext
-): Promise<DerivedRunResult> {
-  const { sql, task, job, logger } = ctx
-
-  // 1. Read from database
-  const data = await sql`SELECT * FROM canonical_entities LIMIT 100`
-
-  // 2. Process/transform data
-  const result = processData(data)
-
-  // 3. Write back to database (optional)
-  // await sql`INSERT INTO ...`
-
-  // 4. Return result
-  return {
-    outputRef: `output_${job.id}`,
-    metadata: { processed: result.length },
-  }
-}
-```
-
-### Context Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `sql` | `Sql` | Postgres database connection |
-| `task` | `DerivedTask` | The task definition (name, mode, config) |
-| `job` | `DerivedJob` | The current job execution tracking |
-| `logger` | `Logger` | Logging utility with `info`, `warn`, `error`, `debug` |
-
-### Result Format
-
-```typescript
-interface DerivedRunResult {
-  outputRef?: string        // Reference to stored output (optional)
-  metadata?: Record<string, unknown>  // Arbitrary metadata to store with job
-}
-```
-
-## Registering a Derived Task
-
-### Via CLI
-
-```bash
-# Create a once-off task
-bun run scripts/derived-cli.ts create extract-preferences scripts/derive-preferences.ts --mode once
-
-# Create a recurring task (every hour)
-bun run scripts/derived-cli.ts create aggregate-stats scripts/derive-stats.ts --mode recurring --interval-ms 3600000
-
-# List all tasks
-bun run scripts/derived-cli.ts list
-```
-
-### Via HTTP API
-
-```bash
-# Create a task
-curl -X POST http://localhost:3001/api/derived/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "extract-preferences",
-    "scriptPath": "scripts/derive-preferences.ts",
-    "mode": "once",
-    "metadata": {
-      "limit": 100
-    }
-  }'
-
-# List tasks
-curl http://localhost:3001/api/derived/tasks
-
-# Run a task immediately
-curl -X POST http://localhost:3001/api/derived/tasks/{id}/run \
-  -H "Content-Type: application/json" \
-  -d '{"priority": 10}'
-```
-
-## Running Derived Tasks
-
-Derived tasks are processed by the **DerivedEngine**, which is part of the SyncDaemon.
-
-### 1. Ensure SyncDaemon is Running
-
-```bash
-bun run packages/agent-memory/scripts/sync-daemon.ts
-```
-
-The DerivedEngine starts automatically and begins polling for pending jobs.
-
-### 2. Trigger a Task
-
-**Option A: Run immediately via API**
-```bash
-curl -X POST http://localhost:3001/api/derived/tasks/{id}/run
-```
-
-**Option B: Wait for scheduler (recurring/event tasks)**
-The scheduler will automatically trigger tasks when their `next_run_at` time is reached.
-
-### 3. Monitor Execution
-
-```bash
-# View job logs via CLI
-bun run scripts/derived-cli.ts logs {task-id}
-
-# Or via API
-curl http://localhost:3001/api/derived/jobs?taskId={task-id}
-```
-
-## Task Modes
-
-| Mode | Description |
-|------|-------------|
-| `once` | Runs once, then auto-disables |
-| `recurring` | Runs repeatedly at `interval_ms` |
-| `event` | Triggered manually via API |
-
-## Examples
-
-### Example 1: Entity Statistics (Simple)
-
-See `scripts/derive-example.ts` - computes basic statistics about canonical entities.
-
-```typescript
-export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
-  const { sql, logger } = ctx
-
-  const stats = await sql`
-    SELECT type, COUNT(*) as count
-    FROM canonical_entities
-    GROUP BY type
-  `
-
-  logger.info(`Found ${stats.length} entity types`)
-
-  return { metadata: { stats } }
-}
-```
-
-### Example 2: Preference Extraction (Complex)
-
-See `scripts/derive-preferences.ts` - extracts user preferences using LLM:
-1. Fetches raw envelopes from database
-2. Parses conversation content
-3. Chunks large conversations
-4. Calls Gemini API to extract preferences
-5. Deduplicates and returns results
-
-## Accessing Script Configuration
-
-Pass configuration via the `metadata` field when creating the task:
-
-```bash
-bun run scripts/derived-cli.ts create my-task scripts/my-script.ts \
-  --metadata '{"limit": 500, "afterDate": "2025-01-01"}'
-```
-
-Then access in your script:
-
-```typescript
-export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
-  const config = ctx.task.metadata as { limit?: number; afterDate?: string } | undefined
-
-  const limit = config?.limit ?? 100
-  const afterDate = config?.afterDate
-
-  const data = await sql`
-    SELECT * FROM canonical_entities
-    WHERE created_at >= ${afterDate}
-    LIMIT ${limit}
-  `
-  // ...
-}
-```
-
-## Error Handling
-
-Errors in your script will:
-1. Be logged to the console
-2. Be stored in the job's `last_error` field
-3. Mark the job as `failed`
-4. Trigger retry logic (if configured)
-
-Throw errors for recoverable failures:
-
-```typescript
-export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY not set')
-  }
-  // ...
-}
-```
-
-## Best Practices
-
-1. **Keep scripts idempotent** - Running the same script multiple times should be safe
-2. **Use the logger** - Log progress and errors for debugging
-3. **Return metadata** - Store useful summary information in the result
-4. **Handle large datasets** - Use batching/pagination for large queries
-5. **Document dependencies** - Note any required environment variables or APIs
-
-## Troubleshooting
-
-### Job stuck in `pending` status
-- Verify SyncDaemon is running with DerivedEngine
-- Check logs for queue processing errors
-
-### Script not found
-- Ensure `scriptPath` is relative to project root
-- Verify file is a valid TypeScript module with `run()` export
-
-### Environment variables not available
-- Derived tasks run in the SyncDaemon process
-- Set env vars before starting `sync-daemon.ts`
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/derived/tasks` | GET | List all tasks |
-| `/api/derived/tasks` | POST | Create a task |
-| `/api/derived/tasks/:id` | GET | Get task details |
-| `/api/derived/tasks/:id/run` | POST | Run task immediately |
-| `/api/derived/jobs` | GET | List jobs |
-| `/api/derived/jobs/stats` | GET | Get queue stats |

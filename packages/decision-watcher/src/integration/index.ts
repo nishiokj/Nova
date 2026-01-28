@@ -1,157 +1,15 @@
 /**
  * Decision Watcher Integration
  *
- * Integration layer for connecting decision watcher to orchestrator's
- * hook system. This enables async mode by intercepting PromptUser events.
+ * Helper functions for decision watcher configuration and seeding.
+ * The watcher now integrates via the StopHookHandler mechanism
+ * (see watcher-agent.ts), not via orchestrator hook callbacks.
  */
 
 import type {
-  DecisionWatcher,
   DecisionDatabase,
   DecisionWatcherConfig,
-  WatcherIntegrationConfig,
-  PromptUserHookEvent,
-  PromptUserHookResult,
-  PromptUserAnswer,
 } from '../types.js';
-import { createDecisionWatcher } from '../watcher/index.js';
-
-// ============================================
-// WATCHER INTEGRATION
-// ============================================
-
-/**
- * Integration class that connects watcher to orchestrator hooks.
- */
-export class WatcherIntegration {
-  private watcher: DecisionWatcher;
-  private config: WatcherIntegrationConfig;
-  private active = false;
-
-  constructor(
-    db: DecisionDatabase,
-    config: DecisionWatcherConfig & Partial<WatcherIntegrationConfig>
-  ) {
-    this.watcher = createDecisionWatcher(db, config);
-
-    this.config = {
-      watcherConfig: config,
-      injectAnswer: config.injectAnswer ?? this.defaultInjectAnswer,
-      onAnswer: config.onAnswer,
-      onEscalate: config.onEscalate,
-      onInconsistency: config.onInconsistency,
-    };
-
-    // Start the watcher
-    this.watcher.start(this.config);
-
-    this.active = true;
-  }
-
-  /**
-   * Handle a PromptUser hook event.
-   * This is the main entry point called by the orchestrator.
-   */
-  async handlePromptUser(event: PromptUserHookEvent): Promise<PromptUserHookResult> {
-    if (!this.active) {
-      return { action: 'block', reason: 'Watcher integration not active' };
-    }
-
-    return await this.watcher.handlePromptUser(event);
-  }
-
-  /**
-   * Stop the integration.
-   */
-  stop(): void {
-    this.watcher.stop();
-    this.active = false;
-  }
-
-  /**
-   * Check if integration is active.
-   */
-  isActive(): boolean {
-    return this.active;
-  }
-
-  /**
-   * Get watcher statistics.
-   */
-  getStats() {
-    return this.watcher.getStats();
-  }
-
-  /**
-   * Clear session memory.
-   */
-  clearSession(sessionId: string): void {
-    this.watcher.clearSession(sessionId);
-  }
-
-  /**
-   * Default answer injection implementation.
-   *
-   * In production, this would be replaced with actual orchestrator integration
-   * that injects the answer into the agent's context and continues execution.
-   *
-   * This is a placeholder that logs what would happen.
-   */
-  private defaultInjectAnswer(answer: PromptUserAnswer, workItemId: string): void {
-    console.log(`[WatcherIntegration] Injecting answer for work item ${workItemId}:`, answer.answer);
-
-    // TODO: Integrate with orchestrator to actually inject answer
-    // This would involve:
-    // 1. Getting the work item from orchestrator
-    // 2. Adding the answer to the agent's context
-    // 3. Triggering continuation of the work item
-    //
-    // The actual implementation depends on orchestrator's API design.
-    // This is a hook integration point that will be wired up separately.
-  }
-}
-
-// ============================================
-// ORCHESTRATOR HOOK INTEGRATION
-// ============================================
-
-/**
- * Create a hook handler for PromptUser events that can be registered
- * with the orchestrator's hook system.
- *
- * Usage in orchestrator:
- * ```typescript
- * import { createPromptUserHook } from '@jesus/decision-watcher';
- *
- * const watcherIntegration = createPromptUserHook(db, config);
- *
- * // Register with orchestrator
- * registerHook('prompt_user', watcherIntegration.handlePromptUser);
- * ```
- */
-export function createPromptUserHook(
-  db: DecisionDatabase,
-  config: DecisionWatcherConfig & Partial<WatcherIntegrationConfig>
-): WatcherIntegration {
-  return new WatcherIntegration(db, config);
-}
-
-/**
- * Type-safe hook handler for orchestrator integration.
- *
- * This function returns a handler that matches the orchestrator's
- * hook callback signature.
- */
-export function createOrchestratorHookHandler(
-  db: DecisionDatabase,
-  config: DecisionWatcherConfig & Partial<WatcherIntegrationConfig>
-) {
-  const integration = new WatcherIntegration(db, config);
-
-  return async (event: PromptUserHookEvent): Promise<PromptUserHookResult> => {
-    return await integration.handlePromptUser(event);
-  };
-}
 
 // ============================================
 // HELPER FUNCTIONS
@@ -178,15 +36,16 @@ export function createWatcherConfig(
 /**
  * Check if async mode should be enabled based on config.
  */
-export function shouldEnableAsyncMode(
+export async function shouldEnableAsyncMode(
   db: DecisionDatabase,
   config?: DecisionWatcherConfig
-): boolean {
+): Promise<boolean> {
   if (!config) return false;
   if (!config.enabled) return false;
 
   // Check if database has any decisions
-  const hasDecisions = db.getAll().then(entries => entries.length > 0);
+  const allEntries = await db.getAll();
+  const hasDecisions = allEntries.length > 0;
 
   // We're in async mode if enabled and we have decisions
   return config.enabled && hasDecisions;

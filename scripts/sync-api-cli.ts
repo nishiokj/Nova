@@ -13,6 +13,8 @@
  * See: packages/agent-memory/src/connectors/README.md for adding connectors.
  */
 
+import { existsSync, readdirSync } from 'node:fs'
+import path from 'node:path'
 import { parseArgs } from 'node:util'
 import {
   SyncClient,
@@ -26,6 +28,8 @@ import {
   type SyncTask,
   type DerivedTask,
   type DerivedJob,
+  type CodingPreference,
+  type CodingDecision,
 } from '../packages/agent-memory/src/client/index.js'
 
 const SYNC_DAEMON_URL = process.env.SYNC_DAEMON_URL || 'http://localhost:3001'
@@ -735,6 +739,94 @@ const CONNECTOR_CONFIG_FIELDS: Record<string, ConfigField[]> = {
   ],
 }
 
+// ============ Derived Script Discovery ============
+// Known directory for derived task scripts, relative to project root
+
+const DERIVED_SCRIPTS_DIR = 'packages/agent-memory/scripts'
+
+/** Scan for derive*.ts scripts (excluding test files) */
+function discoverDerivedScripts(): { name: string; path: string }[] {
+  try {
+    const absDir = path.resolve(process.cwd(), DERIVED_SCRIPTS_DIR)
+    const files = readdirSync(absDir)
+    return files
+      .filter((f) => /^derive[_-].*\.ts$/.test(f) && !f.includes('.test.'))
+      .sort()
+      .map((f) => ({
+        name: f.replace(/\.ts$/, ''),
+        path: `${DERIVED_SCRIPTS_DIR}/${f}`,
+      }))
+  } catch {
+    return []
+  }
+}
+
+/** Known metadata fields per script. Key is the script filename (without extension). */
+const DERIVED_SCRIPT_METADATA: Record<string, ConfigField[]> = {
+  'derive-example': [
+    {
+      key: 'limit',
+      label: 'Entity limit',
+      description: 'Max entities to query (default: 1000)',
+    },
+  ],
+  derive_preferences: [
+    {
+      key: 'limit',
+      label: 'Conversation limit',
+      description: 'Max conversations to process per run (default: 200)',
+    },
+    {
+      key: 'max_chunks',
+      label: 'Max chunks',
+      description: 'Max Gemini request chunks to send (default: 12)',
+    },
+  ],
+  derive_preference_embeddings: [
+    {
+      key: 'limit',
+      label: 'Preference limit',
+      description: 'Max preferences to embed per run (default: 500)',
+      envVar: 'OPENAI_API_KEY',
+    },
+  ],
+  'derive-daily-digest': [
+    {
+      key: 'telegramChatId',
+      label: 'Telegram Chat ID',
+      description: 'Telegram chat ID to send digest to',
+      envVar: 'TELEGRAM_ALLOWED_USERS',
+    },
+    {
+      key: 'sessionKey',
+      label: 'Session Key',
+      description: 'Harness session key (default: daily-digest)',
+    },
+    {
+      key: 'harnessHost',
+      label: 'Harness Host',
+      description: 'Harness daemon host (default: localhost)',
+      envVar: 'HARNESS_HOST',
+    },
+    {
+      key: 'harnessPort',
+      label: 'Harness Port',
+      description: 'Harness daemon port (default: 4000)',
+      envVar: 'HARNESS_PORT',
+    },
+    {
+      key: 'maxConversations',
+      label: 'Max Conversations',
+      description: 'Max conversations to include in digest (default: 50)',
+    },
+    {
+      key: 'outputDir',
+      label: 'Output Directory',
+      description: 'Directory for digest output files (default: data/daily-digest)',
+    },
+  ],
+}
+
 async function cmdConnectorRegister(type: string, configJson?: string): Promise<void> {
   printHeader(`Register Connector: ${type}`)
 
@@ -1236,23 +1328,54 @@ async function cmdDerivedTasksList(): Promise<void> {
 async function cmdDerivedTasksCreate(): Promise<void> {
   printHeader('Create Derived Task')
 
-  const name = await prompt('Task name')
+  // 1. Discover available scripts
+  const scripts = discoverDerivedScripts()
+  let scriptPath: string
+
+  if (scripts.length > 0) {
+    const options = [
+      ...scripts.map((s) => `${s.name.padEnd(35)} ${s.path}`),
+      'other'.padEnd(35) + ' Enter a custom path',
+    ]
+    const selected = await promptSelect('Select script', options)
+
+    if (selected.trim().startsWith('other')) {
+      const custom = await prompt('Script path')
+      if (!custom) throw new Error('Script path is required')
+      scriptPath = custom
+    } else {
+      // Extract path from the selected option (after the padded name)
+      const selectedIdx = options.indexOf(selected)
+      scriptPath = scripts[selectedIdx].path
+    }
+  } else {
+    console.log('  \x1b[33m!\x1b[0m No scripts found in ' + DERIVED_SCRIPTS_DIR)
+    const custom = await prompt('Script path')
+    if (!custom) throw new Error('Script path is required')
+    scriptPath = custom
+  }
+
+  // 2. Validate script exists
+  const resolvedScript = path.isAbsolute(scriptPath) ? scriptPath : path.resolve(process.cwd(), scriptPath)
+  if (!existsSync(resolvedScript)) {
+    throw new Error(`Script not found: ${resolvedScript}\n  Check the path and try again.`)
+  }
+
+  // 3. Task name (default from script filename)
+  const scriptBaseName = path.basename(scriptPath, '.ts')
+  const name = await prompt('Task name', scriptBaseName)
   if (!name) {
     throw new Error('Task name is required')
   }
 
-  const defaultScriptPath = 'packages/agent-memory/scripts/derived/'
-  const scriptPath = await prompt('Script path', defaultScriptPath)
-  if (!scriptPath) {
-    throw new Error('Script path is required')
-  }
-
+  // 4. Mode selection
   const mode = await promptSelect('Mode?', [
     'once      - Run once and complete',
     'recurring - Run on a schedule',
     'event     - Triggered by external events',
   ]).then((s) => s.split(' ')[0] as 'once' | 'recurring' | 'event')
 
+  // 5. Interval for recurring
   let intervalMs: number | undefined
   if (mode === 'recurring') {
     console.log('\n\x1b[90mCommon intervals: 5m, 15m, 30m, 1h, 6h, 24h\x1b[0m')
@@ -1284,17 +1407,83 @@ async function cmdDerivedTasksCreate(): Promise<void> {
     }
   }
 
+  // 6. Metadata - interactive prompts for known scripts, raw JSON fallback
   let metadata: Record<string, unknown> | undefined
-  const metadataStr = await prompt('Metadata (optional JSON)', '')
-  if (metadataStr) {
-    try {
-      metadata = JSON.parse(metadataStr)
-    } catch {
-      throw new Error('Metadata must be valid JSON')
+  const knownFields = DERIVED_SCRIPT_METADATA[scriptBaseName]
+
+  if (knownFields && knownFields.length > 0) {
+    console.log('\n\x1b[1mScript configuration\x1b[0m')
+    console.log('  \x1b[90mThese values are passed to the script as task.metadata.\x1b[0m')
+    console.log('  \x1b[90mLeave blank for defaults.\x1b[0m\n')
+
+    metadata = {}
+    for (const field of knownFields) {
+      const envValue = field.envVar ? process.env[field.envVar] : undefined
+      if (envValue && field.secret) {
+        console.log(`  \x1b[32m✓\x1b[0m ${field.label}: \x1b[90m(from ${field.envVar})\x1b[0m`)
+        continue // env vars for secrets don't go into metadata — the script reads them directly
+      }
+
+      const reqLabel = field.required ? ' \x1b[31m*\x1b[0m' : ''
+      const envHint = field.envVar ? ` \x1b[90m(env: ${field.envVar})\x1b[0m` : ''
+      console.log(`  ${field.label}${reqLabel}${envHint}`)
+      console.log(`  \x1b[90m${field.description}\x1b[0m`)
+
+      const value = await prompt('  > ', field.defaultValue)
+      if (value) {
+        // Parse numbers and booleans
+        if (/^\d+$/.test(value)) {
+          metadata[field.key] = parseInt(value, 10)
+        } else if (value === 'true' || value === 'false') {
+          metadata[field.key] = value === 'true'
+        } else {
+          metadata[field.key] = value
+        }
+      } else if (field.required) {
+        throw new Error(`${field.label} is required`)
+      }
+      console.log('')
+    }
+
+    // Remove empty metadata
+    if (Object.keys(metadata).length === 0) {
+      metadata = undefined
+    }
+  } else {
+    // Unknown script — offer raw JSON with explanation
+    console.log('\n  \x1b[90mMetadata is passed to the script as task.metadata (a JSON object).\x1b[0m')
+    console.log('  \x1b[90mScripts use it for runtime configuration (limits, API keys, output paths, etc).\x1b[0m')
+    const metadataStr = await prompt('Metadata JSON (optional)', '')
+    if (metadataStr) {
+      try {
+        metadata = JSON.parse(metadataStr)
+      } catch {
+        throw new Error('Metadata must be valid JSON')
+      }
     }
   }
 
-  const task = await client.derivedTasks.create({
+  // 7. Summary and confirm
+  console.log('\n' + '─'.repeat(50))
+  console.log('\x1b[1mDerived Task Summary\x1b[0m')
+  console.log(`  Name:   ${name}`)
+  console.log(`  Script: ${scriptPath}`)
+  console.log(`  Mode:   ${mode}`)
+  if (intervalMs) {
+    console.log(`  Interval: ${formatInterval(intervalMs)}`)
+  }
+  if (metadata) {
+    console.log(`  Config: ${JSON.stringify(metadata)}`)
+  }
+  console.log('─'.repeat(50))
+
+  const confirmed = await promptConfirm('\nCreate this task?')
+  if (!confirmed) {
+    console.log('\nCancelled.')
+    return
+  }
+
+  const created = await client.derivedTasks.create({
     name,
     scriptPath,
     mode,
@@ -1303,7 +1492,22 @@ async function cmdDerivedTasksCreate(): Promise<void> {
   })
 
   printSuccess('Derived task created')
-  printDerivedTask(task)
+  printDerivedTask(created.task)
+
+  if (created.sandbox) {
+    console.log('\n  Sandbox validation:')
+    console.log(`    Status: ${created.sandbox.status}`)
+    console.log(`    Job ID: ${created.sandbox.job.id.slice(0, 8)}`)
+    if (created.sandbox.lastError) {
+      console.log(`    Error: ${created.sandbox.lastError}`)
+    }
+    if (created.sandbox.logPath) {
+      console.log(`    Log: ${created.sandbox.logPath}`)
+    }
+  } else if (created.sandboxError) {
+    console.log('\n  Sandbox validation failed to start:')
+    console.log(`    Error: ${created.sandboxError}`)
+  }
 }
 
 async function cmdDerivedTasksRun(id: string): Promise<void> {
@@ -1373,6 +1577,10 @@ async function cmdDerivedJobsList(): Promise<void> {
   printHeader('Derived Jobs')
   const jobs = await client.derivedJobs.list({ limit: 20 })
   lastDerivedJobsList = jobs
+  if (lastDerivedTasksList.length === 0) {
+    lastDerivedTasksList = await client.derivedTasks.list()
+  }
+  const taskNameMap = new Map(lastDerivedTasksList.map((t) => [t.id, t.name]))
   if (jobs.length === 0) {
     console.log('  No derived jobs found.')
   } else {
@@ -1380,8 +1588,9 @@ async function cmdDerivedJobsList(): Promise<void> {
       const status = job.status
       const shortId = job.id.slice(0, 8)
       const indexLabel = `\x1b[90m#${i + 1}\x1b[0m `
-      console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m ${status}`)
-      console.log(`    Task: ${job.task_id.slice(0, 8)}`)
+      const taskName = taskNameMap.get(job.task_id)
+      const taskLabel = taskName ? `\x1b[33m${taskName}\x1b[0m` : job.task_id.slice(0, 8)
+      console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m ${status}  ${taskLabel}`)
     })
     console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference derived jobs (e.g., "derived-jobs get #1")\x1b[0m`)
   }
@@ -1391,9 +1600,14 @@ async function cmdDerivedJobsGet(id: string): Promise<void> {
   const resolvedId = await resolveDerivedJobId(id)
   printHeader('Derived Job Details')
   const { job, queueStats } = await client.derivedJobs.get(resolvedId)
+  if (lastDerivedTasksList.length === 0) {
+    lastDerivedTasksList = await client.derivedTasks.list()
+  }
+  const taskName = lastDerivedTasksList.find((t) => t.id === job.task_id)?.name
   console.log(`  \x1b[36m${job.id}\x1b[0m ${job.status}`)
-  console.log(`    Task: ${job.task_id}`)
+  console.log(`    Task: ${taskName ? `\x1b[33m${taskName}\x1b[0m (${job.task_id.slice(0, 8)})` : job.task_id}`)
   if (job.output_ref) console.log(`    Output: ${job.output_ref}`)
+  if (job.metadata?._logPath) console.log(`    Log: ${job.metadata._logPath}`)
   if (job.last_error) console.log(`    \x1b[31mError: ${job.last_error}\x1b[0m`)
   if (queueStats) {
     console.log('\n  Queue stats:')
@@ -1405,6 +1619,27 @@ async function cmdDerivedJobsGet(id: string): Promise<void> {
       console.log(`    Avg time: ${Math.round(queueStats.avgProcessTime / 1000)}s`)
     }
   }
+}
+
+async function cmdDerivedJobsLogs(id: string, lines?: number): Promise<void> {
+  const resolvedId = await resolveDerivedJobId(id)
+  printHeader('Derived Job Logs')
+  const response = await client.derivedJobs.logs(resolvedId, { lines })
+  console.log(`  Log file: ${response.logPath}`)
+  if (!response.exists) {
+    console.log('  (log file not found yet)')
+    return
+  }
+  if (response.truncated) {
+    console.log(`  Showing last ${response.lines.length} lines\n`)
+  } else {
+    console.log('')
+  }
+  if (response.lines.length === 0) {
+    console.log('  (no log output yet)')
+    return
+  }
+  response.lines.forEach((line) => console.log(line))
 }
 
 async function cmdDerivedJobsCancel(id: string): Promise<void> {
@@ -1548,6 +1783,125 @@ async function cmdProcessReprocess(): Promise<void> {
   console.log(`  Result: ${result.succeeded} succeeded, ${result.failed} failed (total ${result.total})`)
 }
 
+// --- Preferences ---
+
+function printPreference(pref: CodingPreference): void {
+  const shortId = pref.id.slice(0, 8)
+  const confidenceColors: Record<string, string> = {
+    low: '\x1b[33m',
+    medium: '\x1b[36m',
+    high: '\x1b[32m',
+  }
+  const confidenceColor = confidenceColors[pref.confidence] || ''
+  const confidenceText = `${confidenceColor}${pref.confidence}\x1b[0m`
+
+  console.log(`  \x1b[36m${shortId}\x1b[0m rank:${pref.rank.toFixed(2)} ${confidenceText}`)
+  console.log(`    Category: ${pref.category} / ${pref.kind}`)
+  console.log(`    Scope: ${pref.scope}`)
+  console.log(`    \x1b[1m${pref.preference}\x1b[0m`)
+  if (pref.context !== pref.preference) {
+    console.log(`    \x1b[90m${pref.context.slice(0, 100)}${pref.context.length > 100 ? '...' : ''}\x1b[0m`)
+  }
+  console.log(`    Evidence: ${pref.evidence_count} (${pref.signal_strength})`)
+}
+
+async function cmdPreferencesSearch(query: string, opts?: {
+  category?: string
+  kind?: string
+  confidence?: string
+  limit?: number
+  offset?: number
+}): Promise<void> {
+  printHeader(`Search Preferences: ${query}`)
+
+  const response = await client.preferences.search({
+    q: query,
+    category: opts?.category,
+    kind: opts?.kind,
+    confidence: opts?.confidence,
+    limit: opts?.limit,
+    offset: opts?.offset,
+  })
+
+  if (response.preferences.length === 0) {
+    console.log('  No results found.')
+    console.log('  Try a different search query or check filters.')
+    return
+  }
+
+  console.log(`  \x1b[90mFound ${response.total} result${response.total === 1 ? '' : 's'}\x1b[0m\n`)
+
+  response.preferences.forEach(printPreference)
+
+  if (response.filters.category || response.filters.kind || response.filters.confidence) {
+    console.log('\n  Filters applied:')
+    if (response.filters.category) console.log(`    category: ${response.filters.category}`)
+    if (response.filters.kind) console.log(`    kind: ${response.filters.kind}`)
+    if (response.filters.confidence) console.log(`    confidence: ${response.filters.confidence}`)
+  }
+}
+
+// --- Decisions ---
+
+function printDecision(dec: CodingDecision): void {
+  const shortId = dec.id.slice(0, 8)
+  const confidenceColors: Record<string, string> = {
+    low: '\x1b[33m',
+    medium: '\x1b[36m',
+    high: '\x1b[32m',
+  }
+  const confidenceColor = confidenceColors[dec.confidence] || ''
+  const confidenceText = `${confidenceColor}${dec.confidence}\x1b[0m`
+
+  const rankText = dec.rank !== undefined ? `rank:${dec.rank.toFixed(2)} ` : ''
+  const simText = dec.similarity !== undefined ? `sim:${dec.similarity.toFixed(2)} ` : ''
+
+  console.log(`  \x1b[36m${shortId}\x1b[0m ${rankText}${simText}${confidenceText}`)
+  console.log(`    Category: ${dec.category}`)
+  console.log(`    Scope: ${dec.scope}`)
+  console.log(`    \x1b[1m${dec.decision}\x1b[0m`)
+  if (dec.rationale) {
+    console.log(`    \x1b[90mRationale: ${dec.rationale.slice(0, 100)}${dec.rationale.length > 100 ? '...' : ''}\x1b[0m`)
+  }
+  if (dec.tradeoffs) {
+    console.log(`    Tradeoffs: ${dec.tradeoffs.slice(0, 100)}${dec.tradeoffs.length > 100 ? '...' : ''}`)
+  }
+  console.log(`    Signal: ${dec.signal_strength} | Reversibility: ${dec.reversibility}`)
+}
+
+async function cmdDecisionsSearch(query: string, opts?: {
+  category?: string
+  confidence?: string
+  limit?: number
+  offset?: number
+}): Promise<void> {
+  printHeader(`Search Decisions: ${query}`)
+
+  const response = await client.decisions.search({
+    q: query,
+    category: opts?.category,
+    confidence: opts?.confidence,
+    limit: opts?.limit,
+    offset: opts?.offset,
+  })
+
+  if (response.decisions.length === 0) {
+    console.log('  No results found.')
+    console.log('  Try a different search query or check filters.')
+    return
+  }
+
+  console.log(`  \x1b[90mFound ${response.total} result${response.total === 1 ? '' : 's'}\x1b[0m\n`)
+
+  response.decisions.forEach(printDecision)
+
+  if (response.filters?.category || response.filters?.confidence) {
+    console.log('\n  Filters applied:')
+    if (response.filters.category) console.log(`    category: ${response.filters.category}`)
+    if (response.filters.confidence) console.log(`    confidence: ${response.filters.confidence}`)
+  }
+}
+
 // ============ CLI Router ============
 
 function printHelp(): void {
@@ -1615,10 +1969,27 @@ function printHelp(): void {
   \x1b[1mderived-jobs\x1b[0m                      Monitor derived jobs
     list                           List recent derived jobs (shows #N indices)
     get <id>                       Get derived job details
+    logs <id>                      Show derived job logs (tail)
+      --lines <n>                  Number of log lines to show (default: 200)
     cancel <id>                    Cancel running derived job
     retry <id>                     Retry failed derived job
 
     \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
+
+  \x1b[1mpreferences\x1b[0m                       Search coding preferences (TasteIndex)
+    search <query>                Search preferences by query
+      --category <category>         Filter by category
+      --kind <kind>                Filter by kind (principle_candidate, local_convention, ignore)
+      --confidence <confidence>      Filter by confidence (low, medium, high)
+      --limit <n>                  Results limit (default: 20)
+      --offset <n>                 Pagination offset (default: 0)
+
+  \x1b[1mdecisions\x1b[0m                        Search coding decisions
+    search <query>                Search decisions by query
+      --category <category>         Filter by category
+      --confidence <confidence>      Filter by confidence (low, medium, high)
+      --limit <n>                  Results limit (default: 20)
+      --offset <n>                 Pagination offset (default: 0)
 
   \x1b[1mprocess\x1b[0m                          Process raw envelopes
     job <id>                       Process envelopes for a sync job
@@ -1671,6 +2042,14 @@ function printHelp(): void {
   sync-api-cli auth login gmail     \x1b[90m# First Google connector\x1b[0m
   sync-api-cli auth login calendar  \x1b[90m# Prompts: "Found existing Google credentials"\x1b[0m
 
+  \x1b[90m# Search coding preferences (TasteIndex)\x1b[0m
+  sync-api-cli preferences search "typescript"
+  sync-api-cli preferences search "test" --category testing
+  sync-api-cli preferences search "code" --confidence high --limit 10
+  sync-api-cli decisions search "database"
+  sync-api-cli decisions search "architecture" --category design
+  sync-api-cli decisions search "api" --confidence high --limit 10
+
 \x1b[4mAdding Connectors:\x1b[0m
 
   See: packages/agent-memory/src/connectors/README.md
@@ -1689,6 +2068,12 @@ async function main(): Promise<void> {
     options: {
       help: { type: 'boolean', short: 'h', default: false },
       headless: { type: 'boolean', default: false },
+      category: { type: 'string' },
+      kind: { type: 'string' },
+      confidence: { type: 'string' },
+      limit: { type: 'string' },
+      offset: { type: 'string' },
+      lines: { type: 'string' },
     },
     allowPositionals: true,
   })
@@ -1865,6 +2250,13 @@ async function main(): Promise<void> {
             if (!args[0]) throw new Error('Missing derived job ID')
             await cmdDerivedJobsGet(args[0])
             break
+          case 'logs':
+            if (!args[0]) throw new Error('Missing derived job ID')
+            await cmdDerivedJobsLogs(
+              args[0],
+              values.lines ? parseInt(values.lines as string, 10) : undefined
+            )
+            break
           case 'cancel':
             if (!args[0]) throw new Error('Missing derived job ID')
             await cmdDerivedJobsCancel(args[0])
@@ -1895,6 +2287,39 @@ async function main(): Promise<void> {
             break
           default:
             throw new Error(`Unknown subcommand: process ${subcommand || '(none)'}`)
+        }
+        break
+
+      case 'preferences':
+        switch (subcommand) {
+          case 'search':
+            if (!args[0]) throw new Error('Missing search query')
+            await cmdPreferencesSearch(args[0], {
+              category: values.category as string | undefined,
+              kind: values.kind as string | undefined,
+              confidence: values.confidence as string | undefined,
+              limit: values.limit ? parseInt(values.limit as string, 10) : undefined,
+              offset: values.offset ? parseInt(values.offset as string, 10) : undefined,
+            })
+            break
+          default:
+            throw new Error(`Unknown subcommand: preferences ${subcommand || '(none)'}`)
+        }
+        break
+
+      case 'decisions':
+        switch (subcommand) {
+          case 'search':
+            if (!args[0]) throw new Error('Missing search query')
+            await cmdDecisionsSearch(args[0], {
+              category: values.category as string | undefined,
+              confidence: values.confidence as string | undefined,
+              limit: values.limit ? parseInt(values.limit as string, 10) : undefined,
+              offset: values.offset ? parseInt(values.offset as string, 10) : undefined,
+            })
+            break
+          default:
+            throw new Error(`Unknown subcommand: decisions ${subcommand || '(none)'}`)
         }
         break
 

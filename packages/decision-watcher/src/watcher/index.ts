@@ -10,7 +10,6 @@
 
 import type {
   DecisionDatabase,
-  DecisionEngine,
   WatcherContext,
   WatcherResponse,
   PromptUserAnswer,
@@ -20,6 +19,7 @@ import type {
   PromptUserHookResult,
   UserPromptInfo,
 } from '../types.js';
+import type { DecisionEngine } from '../engine/index.js';
 import { createDecisionEngine } from '../engine/index.js';
 
 // ============================================
@@ -196,7 +196,7 @@ export class DecisionWatcher {
     // If it's a multiple choice question, select the matching option
     if (prompt.options && !Array.isArray(response.answer)) {
       const answerStr = String(response.answer).toLowerCase();
-      const matchingOption = prompt.options.find(opt => {
+      const matchingOption = prompt.options.find((opt: string | { label: string; description?: string }) => {
         const optStr = typeof opt === 'string' ? opt.toLowerCase() : opt.label.toLowerCase();
         return optStr.includes(answerStr) || answerStr.includes(optStr);
       });

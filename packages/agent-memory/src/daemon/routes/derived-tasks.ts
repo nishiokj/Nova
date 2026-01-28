@@ -7,6 +7,7 @@
 import type { HttpServer } from '../server.js'
 import type { SyncDaemon } from '../index.js'
 import { badRequest, notFound } from '../server.js'
+import { TaskSandbox, type DerivedTaskSandboxResult } from '../../derived/sandbox.js'
 
 export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon): void {
   const { derivedTaskRepo, derivedJobRepo, derivedIntegration, engine } = daemon
@@ -65,7 +66,7 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       throw badRequest('intervalMs must be at least 1000ms for recurring tasks')
     }
 
-    const task = await derivedTaskRepo.create({
+    let task = await derivedTaskRepo.create({
       name: body.name,
       scriptPath: body.scriptPath,
       mode: body.mode,
@@ -73,7 +74,32 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       metadata: body.metadata,
     })
 
-    return { status: 201, body: { task } }
+    let sandbox: DerivedTaskSandboxResult | undefined
+    let sandboxError: string | undefined
+    try {
+      const timeoutMs = 12000
+      const job = await derivedIntegration.scheduleTask(engine, task, {
+        metadata: { _sandbox: true, _sandboxTimeoutMs: timeoutMs },
+      })
+
+      await derivedTaskRepo.markExecuted(task.id, job.id)
+
+      if (task.mode === 'once') {
+        await derivedTaskRepo.update(task.id, { enabled: false })
+      } else if (task.mode === 'recurring' && task.interval_ms) {
+        const nextRunAt = new Date(Date.now() + task.interval_ms)
+        await derivedTaskRepo.updateNextRunAt(task.id, nextRunAt)
+      }
+
+      task = (await derivedTaskRepo.findById(task.id)) ?? task
+
+      const sandboxRunner = new TaskSandbox(derivedJobRepo)
+      sandbox = await sandboxRunner.observe(job.id, { timeoutMs })
+    } catch (error) {
+      sandboxError = error instanceof Error ? error.message : String(error)
+    }
+
+    return { status: 201, body: { task, sandbox, sandboxError } }
   })
 
   // Run derived task immediately

@@ -10,10 +10,12 @@
 
 import postgres from 'postgres'
 import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-// Load .env from project root
-await loadEnvFile(join(import.meta.dir, '../../../.env'))
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const PROJECT_ROOT = join(__dirname, '../../../')
+const MIGRATIONS_DIR = join(__dirname, '../src/db/migrations')
 
 async function loadEnvFile(path: string): Promise<void> {
   try {
@@ -39,8 +41,6 @@ async function loadEnvFile(path: string): Promise<void> {
     // .env file not found, continue with existing env
   }
 }
-
-const MIGRATIONS_DIR = join(import.meta.dir, '../src/db/migrations')
 
 async function main() {
   const databaseUrl = process.env.DATABASE_URL
@@ -68,6 +68,14 @@ async function main() {
       console.log(`✓ Found ${appliedVersions.size} applied migrations`)
     } else {
       console.log('✓ No migrations applied yet')
+      // Create schema_migrations table
+      await sql`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          description TEXT
+        )
+      `
     }
 
     // Get migration files
@@ -91,7 +99,21 @@ async function main() {
       console.log(`\n🔄 Running migration: ${migration.filename}`)
       const content = await readFile(migration.path, 'utf-8')
 
-      await sql.unsafe(content)
+      // Run migration in a transaction
+      await sql.begin(async (tx) => {
+        await tx.unsafe(content)
+
+        // Extract description from first comment line
+        const descMatch = content.match(/^--\s*(.+)/m)
+        const description = descMatch ? descMatch[1].trim() : migration.filename
+
+        await tx`
+          INSERT INTO schema_migrations (version, description)
+          VALUES (${migration.version}, ${description})
+          ON CONFLICT (version) DO NOTHING
+        `
+      })
+
       applied++
       console.log(`✓ Migration ${migration.version} complete`)
     }
@@ -110,4 +132,7 @@ async function main() {
   }
 }
 
+// Load .env and run
+await loadEnvFile(join(PROJECT_ROOT, '.env'))
 main()
+

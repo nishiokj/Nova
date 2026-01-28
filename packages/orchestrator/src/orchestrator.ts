@@ -31,8 +31,6 @@ import { BoundsChecker } from './bounds-checker.js';
 import type {
   DecisionDatabase,
   DecisionWatcherConfig,
-  WatcherIntegration,
-  createOrchestratorHookHandler,
 } from 'decision-watcher';
 
 // --- Types ---
@@ -75,6 +73,17 @@ export interface OrchestratorConfig {
 /**
  * Per-execution runtime hooks and callbacks.
  */
+/**
+ * State passed to the onIteration callback for watcher evaluation.
+ */
+export interface IterationState {
+  iteration: number;
+  context: ContextWindow;
+  totalToolCalls: number;
+  totalLlmCalls: number;
+  elapsedMs: number;
+}
+
 export interface OrchestratorRuntime {
   /** Per-request stop hook - intercepts goal completion */
   stopHook?: StopHookHandler;
@@ -94,6 +103,13 @@ export interface OrchestratorRuntime {
    * Return a cleanup function to run when execution ends.
    */
   onStart?: (context: ContextWindow) => void | (() => void);
+  /**
+   * Called each iteration with execution state.
+   * Used by the watcher to evaluate rules and steer the decision engine.
+   * May be sync or async — if async, the orchestrator does not await it
+   * (fire-and-forget to avoid blocking the loop).
+   */
+  onIteration?: (state: IterationState) => void;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -187,7 +203,6 @@ export class Orchestrator {
   private getModelSelection?: (agentType: string) => ModelSelection | null;
   private hookQueue: InternalHookQueue;
   private boundsChecker: BoundsChecker;
-  private watcherIntegration?: WatcherIntegration;
 
   // Work queue state for DAG-based execution
   private workQueue: WorkItem[] = [];
@@ -223,100 +238,6 @@ export class Orchestrator {
       maxToolCalls: this.config.maxToolCalls,
     });
 
-    // Initialize decision watcher if async mode is enabled
-    if (this.config.asyncMode?.enabled && this.config.asyncMode.database) {
-      this.initializeWatcherIntegration();
-    }
-  }
-
-  /**
-   * Initialize decision watcher integration for async mode.
-   */
-  private initializeWatcherIntegration(): void {
-    const { enabled, database, watcherConfig } = this.config.asyncMode!;
-    if (!enabled || !database) {
-      return;
-    }
-
-    try {
-      const hookHandler = createOrchestratorHookHandler(database, {
-        enabled: true,
-        llm: this.llm,
-        llmModel: {
-          provider: this.getModelSelection?.('standard')?.provider ?? 'unknown',
-          model: this.getModelSelection?.('standard')?.model ?? 'unknown',
-        },
-        ...watcherConfig,
-        injectAnswer: (answer, workItemId) => this.injectWatcherAnswer(answer, workItemId),
-        onAnswer: (prompt, answer, response) => {
-          this.log('info', 'Watcher answered PromptUser question', {
-            question: prompt.question,
-            answer: Array.isArray(answer.answer) ? answer.answer.join(', ') : String(answer.answer).slice(0, 100),
-            confidence: response.confidence,
-          });
-        },
-        onEscalate: (prompt, response) => {
-          this.log('info', 'Watcher escalated PromptUser to user', {
-            question: prompt.question,
-            reason: response.source,
-          });
-        },
-        onInconsistency: (message) => {
-          this.log('warning', 'Watcher detected inconsistency', { message });
-        },
-      });
-
-      // Store the hook handler for later use
-      // Note: In a full implementation, this would be registered with hooks system
-      this.watcherIntegration = {
-        handlePromptUser: hookHandler,
-      } as unknown as WatcherIntegration;
-
-      this.log('info', 'Decision watcher initialized for async mode');
-    } catch (error) {
-      this.log('error', 'Failed to initialize decision watcher', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  /**
-   * Inject watcher answer into execution context.
-   * This is called when the watcher decides to auto-answer a PromptUser question.
-   */
-  private injectWatcherAnswer(answer: {
-    answer: string | string[];
-    selectedOption?: string | string[];
-    shouldContinue: boolean;
-    contextAddendum?: string;
-  }, workItemId: string): void {
-    // Find the work item and inject the answer
-    const workItem = this.workQueue.find(w => w.workId === workItemId);
-    if (!workItem) {
-      this.log('warning', 'Work item not found for watcher answer injection', { workItemId });
-      return;
-    }
-
-    // Inject the answer as if user responded
-    // In a full implementation, this would resume execution with the answer
-    // For now, we'll log what would happen
-    this.log('info', 'Injecting watcher answer for work item', {
-      workItemId,
-      answer: Array.isArray(answer.answer) ? answer.answer.join(', ') : answer.answer,
-    });
-
-    // TODO: Implement actual answer injection and resumption
-    // This requires:
-    // 1. Modifying the work item's objective to include the answer
-    // 2. Creating a system message with the answer
-    // 3. Continuing execution without waiting for user input
-  }
-
-  /**
-   * Check if watcher should handle a PromptUser event.
-   */
-  private shouldUseWatcher(): boolean {
-    return !!this.watcherIntegration && this.config.asyncMode?.enabled;
   }
 
   /**
@@ -558,6 +479,9 @@ export class Orchestrator {
       });
       const now = Date.now();
       const elapsed = now - startTime;
+
+      // Watcher evaluation — fire-and-forget, does not block the loop
+      runtime?.onIteration?.({ iteration, context, totalToolCalls, totalLlmCalls, elapsedMs: elapsed });
 
       // AUTO-COMPACT with hysteresis
       const percentUsed = context.metrics.percentageUsed;
@@ -1131,7 +1055,8 @@ export class Orchestrator {
     response: string,
     iteration: number,
     agentType: string,
-    runtime?: OrchestratorRuntime
+    runtime?: OrchestratorRuntime,
+    userPrompt?: UserPromptInfo
   ): Promise<import('agent').StopHookResult | null> {
     if (!runtime?.stopHook) return null;
 
@@ -1143,6 +1068,13 @@ export class Orchestrator {
         iteration,
         agentType,
         sessionKey: context.sessionKey,
+        userPrompt: userPrompt ? {
+          question: userPrompt.question,
+          options: userPrompt.options,
+          context: userPrompt.context,
+          multiSelect: userPrompt.multiSelect,
+          questionType: userPrompt.questionType,
+        } : undefined,
       });
     } catch (err) {
       this.log('warning', 'Stop hook error', { error: String(err) });
@@ -1272,7 +1204,7 @@ export class Orchestrator {
       }
       this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question, questionType: result.userPrompt.questionType });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, 'user_input_required', result.response ?? '', iteration, agentType, runtime);
+      const stopResult = await this.callStopHook(context, 'user_input_required', result.response ?? '', iteration, agentType, runtime, result.userPrompt);
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration)) {
         return { terminal: null, shouldContinue: true };
       }

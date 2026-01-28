@@ -222,3 +222,34 @@ export {
   googleCalendarTransforms,
   googleCalendarEventTransform,
 } from './google-calendar/index.js'
+
+// Obsidian Connector
+export {
+  // Connector
+  ObsidianConnector,
+  createObsidianConnector,
+  type ObsidianConnectorConfig,
+  // Schemas
+  ObsidianNoteRowSchema,
+  ObsidianParsedNoteSchema,
+  ObsidianVaultSchema,
+  ObsidianNoteSourceSchema,
+  type ObsidianNoteRow,
+  type ObsidianParsedNote,
+  type ObsidianVault,
+  type ObsidianNoteSource,
+  // Utilities
+  unixTimestampToISOString,
+  extractTitle,
+  extractTags,
+  extractInternalLinks,
+  extractExternalLinks,
+  extractHeadings,
+  extractExcerpt,
+  parseFrontmatter,
+  countWords,
+  countCharacters,
+  // Transformations
+  obsidianNoteTransform,
+  obsidianTransforms,
+} from './obsidian/index.js'

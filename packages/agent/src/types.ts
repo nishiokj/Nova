@@ -292,6 +292,31 @@ export interface StopHookResult {
 }
 
 /**
+ * Context passed to a stop hook when the orchestrator reaches a terminal condition.
+ */
+export interface StopHookContext {
+  workId: string;
+  response: string;
+  terminationReason: string;
+  iteration: number;
+  agentType: string;
+  sessionKey: string;
+  /** The actual PromptUser question/options when terminationReason is 'user_input_required' */
+  userPrompt?: {
+    question: string;
+    options?: Array<string | { label: string; description?: string }>;
+    context?: string;
+    multiSelect?: boolean;
+    questionType?: string;
+  };
+}
+
+/**
+ * A stop hook handler that can block orchestrator termination.
+ */
+export type StopHookHandler = (context: StopHookContext) => StopHookResult | Promise<StopHookResult>;
+
+/**
  * Context passed to internal hook handlers.
  */
 export interface InternalHookContext {

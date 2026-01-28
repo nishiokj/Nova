@@ -620,7 +620,7 @@ export class GitHubConnector extends BaseConnector {
    */
   registerTransforms(registry: { register<T>(t: Transformation<T>): void }): void {
     for (const transform of githubTransforms) {
-      registry.register(transform)
+      registry.register(transform as Transformation)
     }
   }
 }

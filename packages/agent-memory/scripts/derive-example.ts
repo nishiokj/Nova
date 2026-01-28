@@ -14,7 +14,16 @@ import type { Sql } from 'postgres'
 import type {
   DerivedRunContext,
   DerivedRunResult,
+  DerivedMetadataSchema,
 } from '../src/derived/runner.js'
+
+// ─── Metadata Schema ─────────────────────────────────────────────────────────
+
+export const metadata: DerivedMetadataSchema = {
+  fields: {
+    limit: { type: 'number', default: 1000, description: 'Max entity types to return' },
+  },
+}
 
 /**
  * Main run function - called by DerivedEngine

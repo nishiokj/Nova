@@ -6,7 +6,10 @@
  */
 
 import { spawn } from 'child_process';
-import type { InternalHookEvent, InternalHookContext, StopHookResult } from 'agent';
+import type { InternalHookEvent, InternalHookContext, StopHookResult, StopHookContext, StopHookHandler } from 'agent';
+
+// Re-export stop hook types from agent (canonical location)
+export type { StopHookContext, StopHookHandler };
 
 // --- Event Types ---
 
@@ -64,19 +67,6 @@ export interface ShellHook {
 
 export type HookEntry = HookCallback | ShellHook | PromptUserHookHandler;
 
-// --- Stop Hook Types (blocking, can re-inject prompts) ---
-
-export interface StopHookContext {
-  workId: string;
-  response: string;
-  terminationReason: string;
-  iteration: number;
-  agentType: string;
-  sessionKey: string;
-}
-
-export type StopHookHandler = (context: StopHookContext) => StopHookResult | Promise<StopHookResult>;
-
 // --- Registry ---
 
 const registry = new Map<HookEventType, HookEntry[]>();
@@ -109,6 +99,10 @@ export function getHooks(event: HookEventType): HookEntry[] {
 
 function isShellHook(h: HookEntry): h is ShellHook {
   return typeof h === 'object' && 'command' in h;
+}
+
+function isPromptUserHook(event: HookEventType, hook: HookEntry): hook is PromptUserHookHandler {
+  return event === 'prompt_user' && typeof hook === 'function';
 }
 
 /**
@@ -182,12 +176,12 @@ export async function executeHooks(
     try {
       if (isShellHook(hook)) {
         await executeShellHook(hook, payload, ctx);
-      } else if (event === 'prompt_user') {
+      } else if (isPromptUserHook(event, hook)) {
         // PromptUser hooks have different signature - they return PromptUserHookResult
-        const promptUserHook = hook as PromptUserHookHandler;
-        await promptUserHook(payload as unknown as PromptUserHookEvent);
+        await hook(payload as unknown as PromptUserHookEvent);
       } else {
-        await hook(payload, ctx);
+        const callback = hook as HookCallback;
+        await callback(payload, ctx);
       }
     } catch (err) {
       console.error(`[HOOK:${event}] Error:`, err);

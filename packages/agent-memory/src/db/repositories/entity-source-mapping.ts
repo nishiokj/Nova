@@ -25,7 +25,7 @@ function rowToMapping(row: EntitySourceMappingRow): EntitySourceMapping {
   return {
     id: row.id,
     canonical_entity_id: row.canonical_entity_id,
-    canonical_entity_type: row.canonical_entity_type,
+    canonical_entity_type: row.canonical_entity_type as EntitySourceMapping['canonical_entity_type'],
     raw_envelope_id: row.raw_envelope_id,
     source_ref_key: row.source_ref_key,
     transformation_id: row.transformation_id ?? undefined,

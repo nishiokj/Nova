@@ -18,9 +18,12 @@
     "daemon": "./scripts/start.sh",
     "daemon:only": "bun run scripts/sync-daemon.ts",
     "kill": "lsof -ti:3001 | xargs kill -9 2>/dev/null || true",
-    "db:migrate": "bun run scripts/migrate.ts"
+    "db:migrate": "bun run scripts/migrate.ts",
+    "register": "bun run scripts/register-connector.ts",
+    "setup": "bun run scripts/setup.ts"
   },
   "dependencies": {
+    "@google/genai": "^1.38.0",
     "harness-client": "workspace:*",
     "ngrok": "^5.0.0-beta.2",
     "open": "^10.1.0",

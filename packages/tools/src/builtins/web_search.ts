@@ -184,9 +184,15 @@ function parseSearchResults(html: string, maxResults: number): SearchResult[] {
 
   // Extract all links
   while ((match = linkRegex.exec(html)) !== null) {
-    const url = decodeURIComponent(match[1]);
+    const url = match[1];
     const title = stripHtml(match[2]).trim();
-    if (url && title && !url.startsWith('/') && !url.includes('duckduckgo.com')) {
+
+    if (url && title) {
+      // Skip internal DDG navigation links (starting with /)
+      if (url.startsWith('/')) {
+        continue;
+      }
+
       // Extract actual URL from DDG redirect
       const actualUrl = extractActualUrl(url);
       if (actualUrl) {

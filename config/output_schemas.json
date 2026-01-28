@@ -159,6 +159,82 @@
         },
         "required": ["action", "response", "goalStateReached", "handoffSpec", "goal", "workItems", "awaitingUserInput"]
       }
+    },
+
+    "watcher_action": {
+      "name": "watcher_action",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["done", "continue"],
+            "description": "Standard agent action: 'done' when watcher decision is ready, 'continue' to keep using tools"
+          },
+          "response": {
+            "type": ["string", "null"],
+            "description": "Human-readable summary of what the watcher decided"
+          },
+          "goalStateReached": {
+            "type": ["boolean", "null"],
+            "description": "Set to true when returning the watcher decision"
+          },
+          "watcherAction": {
+            "type": "string",
+            "enum": ["answer", "realign", "split", "create_work_item", "quality_gate", "escalate", "continue"],
+            "description": "The watcher decision type"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Rationale for this decision"
+          },
+          "answer": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "text": { "type": "string", "description": "The answer text to inject" },
+              "contextAddendum": { "type": ["string", "null"], "description": "Additional context to append" }
+            },
+            "required": ["text"]
+          },
+          "realign": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "systemMessage": { "type": "string", "description": "System message to inject into context" },
+              "newGoal": { "type": ["string", "null"], "description": "Replacement goal if the current one has drifted" }
+            },
+            "required": ["systemMessage"]
+          },
+          "workItems": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "goal": { "type": "string" },
+                "objective": { "type": "string" },
+                "agent": { "type": "string" },
+                "dependencies": { "type": ["array", "null"], "items": { "type": "string" } },
+                "targetPaths": { "type": ["array", "null"], "items": { "type": "string" } }
+              },
+              "required": ["goal", "objective", "agent"]
+            }
+          },
+          "qualityGate": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "passed": { "type": "boolean" },
+              "issues": { "type": ["array", "null"], "items": { "type": "string" } }
+            },
+            "required": ["passed"]
+          }
+        },
+        "required": ["action", "response", "goalStateReached", "watcherAction", "reason", "answer", "realign", "workItems", "qualityGate"]
+      }
     }
   }
 }

@@ -356,6 +356,9 @@ export class GmailConnector extends BaseConnector {
       if (!parsed.success) {
         throw new Error('Failed to parse Gmail profile for history cursor')
       }
+      if (!parsed.data.historyId) {
+        throw new Error('Gmail profile missing historyId for incremental sync')
+      }
       cursorState.historyId = parsed.data.historyId
     }
 

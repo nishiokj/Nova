@@ -146,6 +146,17 @@ export const HooksConfigSchema = z.object({
   definitions: z.array(HookConfigEntrySchema).optional(),
 });
 
+/** Entity Graph configuration */
+export const EntityGraphConfigSchema = z.object({
+  enabled: z.boolean(),
+  database_url: z.string().optional(),
+  include: z.array(z.string()).optional(),
+  exclude: z.array(z.string()).optional(),
+  lease_duration_sec: z.number().positive().optional(),
+  startup_scan: z.boolean().optional(),
+  lease_wait_timeout_ms: z.number().positive().optional(),
+});
+
 /** Auth configuration */
 export const AuthConfigSchema = z.object({
   enabled: z.boolean(),
@@ -184,6 +195,7 @@ export const HarnessConfigFileSchema = z.object({
   context: ContextConfigSchema.optional(),
   skills: SkillsConfigSchema.optional(),
   hooks: HooksConfigSchema.optional(),
+  entity_graph: EntityGraphConfigSchema.optional(),
   auth: AuthConfigSchema.optional(),
 });
 
@@ -207,6 +219,7 @@ export type SkillConfigEntry = z.infer<typeof SkillConfigEntrySchema>;
 export type HookConfigEntry = z.infer<typeof HookConfigEntrySchema>;
 export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
 export type HooksConfigSection = z.infer<typeof HooksConfigSchema>;
+export type EntityGraphConfigSection = z.infer<typeof EntityGraphConfigSchema>;
 export type AuthConfigSection = z.infer<typeof AuthConfigSchema>;
 export type ModelConfigEntry = z.infer<typeof ModelConfigEntrySchema>;
 export type ModelsConfigSection = z.infer<typeof ModelsConfigSchema>;
@@ -281,6 +294,15 @@ export interface FullHarnessConfig {
     directory?: string;
     definitions: HookConfigEntry[];
   };
+  entityGraph: {
+    enabled: boolean;
+    databaseUrl?: string;
+    include?: string[];
+    exclude?: string[];
+    leaseDurationSec: number;
+    startupScan: boolean;
+    leaseWaitTimeoutMs: number;
+  };
   auth: {
     enabled: boolean;
     host: string;
@@ -333,6 +355,13 @@ export const DEFAULT_HOOKS_CONFIG: HooksConfigSection = {
   enabled: true,
   directory: 'config/hooks',
   definitions: [],
+};
+
+export const DEFAULT_ENTITY_GRAPH_CONFIG: EntityGraphConfigSection = {
+  enabled: false,
+  startup_scan: true,
+  lease_duration_sec: 30,
+  lease_wait_timeout_ms: 10_000,
 };
 
 export const DEFAULT_AUTH_CONFIG: AuthConfigSection = {

@@ -68,12 +68,21 @@ interface DaemonConfig {
   encryptionKey: string
   webhookBaseUrl?: string
   port: number
+  autoProcess: boolean
   // Telegram (optional)
   telegramBotToken?: string
   telegramAllowedUsers?: number[]
   harnessHost: string
   harnessPort: number
   workingDir: string
+}
+
+function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+  if (value == null || value.trim() === '') return defaultValue
+  const normalized = value.trim().toLowerCase()
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false
+  return defaultValue
 }
 
 function loadConfig(): DaemonConfig {
@@ -94,6 +103,7 @@ function loadConfig(): DaemonConfig {
     encryptionKey: process.env.CREDENTIAL_ENCRYPTION_KEY || '',
     webhookBaseUrl: process.env.WEBHOOK_BASE_URL || '',
     port: parseInt(process.env.SYNC_DAEMON_PORT || '3001', 10),
+    autoProcess: parseBooleanEnv(process.env.AGENT_MEMORY_SYNC_AUTO_PROCESS, true),
     // Telegram
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
     telegramAllowedUsers,
@@ -152,6 +162,7 @@ async function main() {
   console.log(`  Database: ${config.databaseUrl.replace(/:[^:@]+@/, ':****@')}`)
   console.log(`  Webhook Base: ${webhookBaseUrl}`)
   console.log(`  Port: ${config.port}`)
+  console.log(`  Auto Process: ${config.autoProcess}`)
 
   // Create database connection
   console.log('\n📡 Connecting to database...')
@@ -166,6 +177,9 @@ async function main() {
     encryptionKey: Buffer.from(config.encryptionKey, 'hex'),
     port: config.port,
     webhookBaseUrl,
+    engine: {
+      autoProcess: config.autoProcess,
+    },
   })
 
   // Load registered connectors from database

@@ -79,7 +79,7 @@ export class GoogleCalendarConnector extends BaseConnector {
     supportsBackfill: true,
     supportsIncrementalSync: true,
     supportsWebhook: true,
-    supportsWrite: false, // MVP is read-only
+    supportsWrite: true,
     supportedEntityTypes: ['event'],
   }
 
@@ -87,7 +87,7 @@ export class GoogleCalendarConnector extends BaseConnector {
     type: 'oauth2_provider',
     provider: 'google',
     scopes: [
-      'https://www.googleapis.com/auth/calendar.readonly',
+      'https://www.googleapis.com/auth/calendar',
     ],
   }
 
@@ -114,41 +114,42 @@ export class GoogleCalendarConnector extends BaseConnector {
 
   /**
    * List Google Calendar accounts (returns the authenticated user).
+   * Uses the Calendar API's own calendarList endpoint instead of userinfo,
+   * so we don't need openid/profile/email scopes.
    */
   async listAccounts(ctx: ConnectorContext): Promise<AccountInfo[]> {
-    // Google Calendar uses People API for profile, or we can get user info from tokens
-    // For simplicity, we'll use the user info endpoint
-    const response = await this.authenticatedRequest<{
-      id: string
-      email: string
-      verified_email: boolean
-      name: string
-      given_name: string
-      family_name: string
-      picture: string
-      locale: string
-    }>(
+    const response = await this.authenticatedRequest<GoogleCalendarList>(
       ctx,
-      'https://www.googleapis.com/oauth2/v3/userinfo'
+      `${this.apiBaseUrl}/users/me/calendarList`
     )
 
     if (!response.ok) {
-      console.error('[GoogleCalendarConnector] Profile request failed:', response.status, response.data)
-      throw new Error(`Failed to get user profile: ${response.status}`)
+      console.error('[GoogleCalendarConnector] CalendarList request failed:', response.status, response.data)
+      throw new Error(`Failed to get calendar list: ${response.status}`)
     }
 
-    const userInfo = response.data
+    const parsed = GoogleCalendarListSchema.safeParse(response.data)
+    if (!parsed.success) {
+      throw new Error(`Failed to parse calendar list: ${parsed.error.message}`)
+    }
+
+    const primary = parsed.data.items.find(cal => cal.primary)
+    if (!primary) {
+      throw new Error('No primary calendar found — cannot determine account identity')
+    }
+
+    // Primary calendar id is the user's email address
+    const email = primary.id
     return [{
-      externalId: userInfo.id,
-      displayName: userInfo.name || userInfo.email.split('@')[0],
-      email: userInfo.email,
-      avatarUrl: userInfo.picture,
-      username: userInfo.email,
+      externalId: email,
+      displayName: primary.summary || email.split('@')[0],
+      email,
+      username: email,
       isPrimary: true,
       metadata: {
-        email: userInfo.email,
-        verified_email: userInfo.verified_email,
-        locale: userInfo.locale,
+        email,
+        timezone: primary.timeZone,
+        calendarCount: parsed.data.items.length,
       },
     }]
   }
@@ -444,7 +445,7 @@ export class GoogleCalendarConnector extends BaseConnector {
 
     const response = await this.authenticatedRequest<{ resourceId: string; expiration: string }>(
       ctx,
-      `${this.apiBaseUrl}/users/me/calendars/${encodeURIComponent(calendarId)}/events/watch`,
+      `${this.apiBaseUrl}/calendars/${encodeURIComponent(calendarId)}/events/watch`,
       { method: 'POST', body: watchBody }
     )
 
@@ -529,7 +530,7 @@ export class GoogleCalendarConnector extends BaseConnector {
 
     const response = await this.authenticatedRequest<GoogleCalendarEventList>(
       ctx,
-      `${this.apiBaseUrl}/users/me/calendars/${encodeURIComponent(calendarId)}/events`,
+      `${this.apiBaseUrl}/calendars/${encodeURIComponent(calendarId)}/events`,
       { params }
     )
 
@@ -605,7 +606,7 @@ export class GoogleCalendarConnector extends BaseConnector {
 
     const response = await this.authenticatedRequest<GoogleCalendarEventList>(
       ctx,
-      `${this.apiBaseUrl}/users/me/calendars/${encodeURIComponent(calendarId)}/events`,
+      `${this.apiBaseUrl}/calendars/${encodeURIComponent(calendarId)}/events`,
       { params }
     )
 

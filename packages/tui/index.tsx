@@ -1249,6 +1249,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       });
       return;
     }
+    if (typeof kind === "string" && kind.startsWith("watcher_")) {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      store.batch(() => {
+        if (payload?.success === false) {
+          store.addMessage("system", `Watcher error: ${payload?.error ?? "Unknown error"}`);
+        } else {
+          store.addMessage("system", formatWatcherPayload(kind, payload));
+        }
+        store.clearProgress();
+        store.setState("idle");
+      });
+      return;
+    }
+    if (kind === "async_start") {
+      const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.success) {
+        store.addMessage("system", `Async session active. Watcher oversight enabled.\nRequest: ${payload?.requestId ?? "unknown"}`);
+      } else {
+        store.batch(() => {
+          store.addMessage("system", `Failed to start async session: ${payload?.error ?? "unknown error"}`);
+          store.setState("idle");
+        });
+      }
+      return;
+    }
+
     if (kind === "ralph_loop_complete") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
       const reason = (payload?.reason as RalphCompletionReason) ?? "error";
@@ -1595,7 +1621,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     // Always include working_dir with requests that trigger agent execution
     // This ensures tools run in the correct directory regardless of where daemon was started
-    const needsWorkingDir = type === "send_text" || type === "user_prompt_response" || type === "ralph_loop_start";
+    const needsWorkingDir =
+      type === "send_text" ||
+      type === "user_prompt_response" ||
+      type === "ralph_loop_start" ||
+      type === "async_start";
     const payload = needsWorkingDir
       ? { ...data, working_dir: process.cwd() }
       : data;
@@ -2676,6 +2706,77 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.addMessage("system", "Compacting conversation context...");
         sendCommand("compact_context");
         return;
+      case "/watcher": {
+        // Parse subcommand from arg
+        const subParts = (arg ?? "").trim().split(/\s+/);
+        const subCommand = subParts[0]?.toLowerCase() || "status";
+        const subArg = subParts.slice(1).join(" ");
+
+        switch (subCommand) {
+          case "status":
+            sendCommand("watcher_status");
+            break;
+          case "context":
+            sendCommand("watcher_context");
+            break;
+          case "search":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher search <query>");
+              return;
+            }
+            sendCommand("watcher_search", { query: subArg });
+            break;
+          case "decisions":
+            sendCommand("watcher_decisions");
+            break;
+          case "inspect":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher inspect <id>");
+              return;
+            }
+            sendCommand("watcher_inspect", { id: subArg });
+            break;
+          case "memory":
+            sendCommand("watcher_memory");
+            break;
+          case "focus":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher focus <topic>");
+              return;
+            }
+            sendCommand("watcher_focus", { topic: subArg });
+            break;
+          case "defocus":
+            sendCommand("watcher_defocus");
+            break;
+          case "reanchor":
+            if (!subArg) {
+              store.addMessage("system", "Usage: /watcher reanchor <goal>");
+              return;
+            }
+            sendCommand("watcher_reanchor", { goal: subArg });
+            break;
+          case "summarize":
+            store.addMessage("system", "Triggering watcher summarization...");
+            sendCommand("watcher_summarize");
+            break;
+          default:
+            store.addMessage("system",
+              "Usage: /watcher [subcommand]\n" +
+              "  status         Watcher status + config\n" +
+              "  context        Context window telemetry\n" +
+              "  search <query> Search decisions\n" +
+              "  decisions      List all decisions\n" +
+              "  inspect <id>   Inspect decision detail\n" +
+              "  memory         Session decision memory\n" +
+              "  focus <topic>  Set scoring bias\n" +
+              "  defocus        Clear scoring bias\n" +
+              "  reanchor <goal> Update salience goal\n" +
+              "  summarize      Compact + epistemic ledger"
+            );
+        }
+        return;
+      }
       case "/plan": {
         const currentPlanMode = snapshot.planMode;
         store.batch(() => {
@@ -2742,6 +2843,30 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           maxIterations: ralphArgs.maxIterations,
           completionPromise: ralphArgs.completionPromise,
         });
+        return;
+      }
+      case "/async": {
+        if (!arg?.trim()) {
+          store.addMessage(
+            "system",
+            "Usage: /async <goal>\n\n" +
+            "Starts an async session with watcher oversight.\n" +
+            "The watcher agent autonomously answers questions,\n" +
+            "quality-gates completed work, and realigns drifting agents.\n\n" +
+            "Examples:\n" +
+            "  /async implement user authentication\n" +
+            "  /async refactor the payment module to use Stripe"
+          );
+          return;
+        }
+
+        const goal = arg.trim();
+        store.batch(() => {
+          store.addMessage("system", `Starting async session...\nGoal: ${goal}`);
+          store.setState("sending");
+        });
+
+        sendCommand("async_start", { goal });
         return;
       }
       case "/theme": {
@@ -2886,7 +3011,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     : colors.muted;
   const scrollInfo = snapshot.scrollOffset > 0
     ? `Scroll: ${snapshot.scrollOffset} lines up`
-    : "At bottom";
+    : "";
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
 
   // Header lines with theme colors
@@ -3384,6 +3509,94 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       )}
     </Box>
   );
+}
+
+function formatWatcherPayload(kind: string, payload: Record<string, unknown> | undefined): string {
+  if (!payload) return "No data returned.";
+
+  switch (kind) {
+    case "watcher_status": {
+      const lines = ["[Watcher Status]"];
+      lines.push(`  Enabled: ${payload.enabled ?? "unknown"}`);
+      lines.push(`  Session: ${payload.sessionKey ?? "none"}`);
+      lines.push(`  Focus: ${payload.focusTopic ?? "none"}`);
+      lines.push(`  Salience Goal: ${payload.salienceGoal ?? "default"}`);
+      lines.push(`  Context Items: ${payload.contextItems ?? 0}`);
+      return lines.join("\n");
+    }
+    case "watcher_context": {
+      const metrics = payload.metrics as Record<string, unknown> | undefined;
+      if (!metrics) return "[Watcher Context]\n  No metrics available.";
+      const lines = ["[Watcher Context]"];
+      for (const [key, value] of Object.entries(metrics)) {
+        lines.push(`  ${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
+      }
+      return lines.join("\n");
+    }
+    case "watcher_search": {
+      const results = payload.results as Array<Record<string, unknown>> | undefined;
+      if (!results || results.length === 0) return `[Watcher Search] No results for "${payload.query}"`;
+      const lines = [`[Watcher Search] ${results.length} result(s) for "${payload.query}"`];
+      for (const r of results) {
+        lines.push(`  [${r.id}] (${r.category}, ${r.priority}) ${r.summary}`);
+      }
+      return lines.join("\n");
+    }
+    case "watcher_decisions": {
+      const decisions = payload.decisions as Array<Record<string, unknown>> | undefined;
+      if (!decisions || decisions.length === 0) return "[Watcher Decisions] No decisions in database.";
+      const lines = [`[Watcher Decisions] ${decisions.length} total`];
+      for (const d of decisions) {
+        lines.push(`  [${d.id}] ${d.type} (${d.category}, ${d.priority}) ${d.summary}`);
+      }
+      return lines.join("\n");
+    }
+    case "watcher_inspect": {
+      const decision = payload.decision as Record<string, unknown> | undefined;
+      if (!decision) return `[Watcher Inspect] ${payload.error ?? "Not found"}`;
+      return `[Watcher Inspect]\n${JSON.stringify(decision, null, 2)}`;
+    }
+    case "watcher_memory": {
+      const lines = ["[Watcher Memory]"];
+      lines.push(`  Decisions Made: ${payload.decisionsMade ?? 0}`);
+      lines.push(`  Consistency Score: ${payload.consistencyScore ?? 1.0}`);
+      const patterns = payload.patterns as string[] | undefined;
+      if (patterns && patterns.length > 0) {
+        lines.push(`  Patterns: ${patterns.join(", ")}`);
+      }
+      const decisions = payload.decisions as Array<Record<string, unknown>> | undefined;
+      if (decisions && decisions.length > 0) {
+        lines.push("  Recent:");
+        for (const d of decisions.slice(-5)) {
+          lines.push(`    Q: ${d.question} -> A: ${String(d.answer).slice(0, 80)}`);
+        }
+      }
+      return lines.join("\n");
+    }
+    case "watcher_focus":
+      return `[Watcher Focus] Set to: ${payload.topic}`;
+    case "watcher_defocus":
+      return "[Watcher Focus] Cleared.";
+    case "watcher_reanchor":
+      return `[Watcher Reanchor] Goal set to: ${payload.goal}`;
+    case "watcher_summarize": {
+      const compaction = payload.compaction as Record<string, unknown> | undefined;
+      const ledger = payload.ledger as Record<string, unknown> | undefined;
+      const lines = ["[Watcher Summarize]"];
+      if (compaction) {
+        lines.push(`  Compaction: ${compaction.itemsRemoved} items removed, ${compaction.bytesRecovered} bytes recovered`);
+      }
+      if (ledger) {
+        lines.push(`  Focus: ${ledger.focusTopic ?? "none"}`);
+        lines.push(`  Goal: ${ledger.salienceGoal ?? "default"}`);
+        lines.push(`  Decisions Made: ${ledger.decisionsMade ?? 0}`);
+        lines.push(`  Consistency: ${ledger.consistencyScore ?? 1.0}`);
+      }
+      return lines.join("\n");
+    }
+    default:
+      return JSON.stringify(payload, null, 2);
+  }
 }
 
 function roleColor(role?: Role): string | undefined {
