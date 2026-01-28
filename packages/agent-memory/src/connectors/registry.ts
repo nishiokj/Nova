@@ -22,6 +22,7 @@ import { createRexSessionConnector } from './coding-sessions/rex.js'
 import { createIMessageConnector } from './imessage/index.js'
 import { createGoogleCalendarConnector } from './google-calendar/index.js'
 import { createObsidianConnector } from './obsidian/index.js'
+import { createWatcherSessionsConnector } from './watcher-sessions/index.js'
 
 // ============ Types ============
 
@@ -95,6 +96,10 @@ export const CONNECTOR_FACTORIES: Record<ConnectorType, ConnectorFactoryEntry> =
   xcom: {
     factory: () => { throw new Error('X.com connector not yet implemented') },
     displayName: 'X (Twitter)',
+  },
+  watcher_sessions: {
+    factory: createWatcherSessionsConnector,
+    displayName: 'Watcher Sessions',
   },
 }
 

@@ -1203,6 +1203,7 @@ export class Orchestrator {
           questionType: userPrompt.questionType,
         } : undefined,
         executionSnapshot: agentResult ? this.buildExecutionSnapshot(agentResult, context) : undefined,
+        handoffSpec: agentResult?.handoffSpec,
       });
     } catch (err) {
       this.log('warning', 'Stop hook error', { error: String(err) });
@@ -1430,12 +1431,39 @@ export class Orchestrator {
         context.addAgentResultContext(result);
         return this.createInterruptionResult(agentType);
       }
-      this.log('info', 'Handoff requested - executing with spec', { workId, specLength: result.handoffSpec.length });
+      this.log('info', 'Handoff requested - checking approval', { workId, specLength: result.handoffSpec.length });
       context.addAgentResultContext(result);
+
+      // Call stop hook for approval (watcher in async mode, or no-op in sync mode)
       const stopResult = await this.callStopHook(context, 'handoff_requested', result.response ?? '', iteration, agentType, runtime, undefined, result);
+
+      // If stop hook blocks, the watcher rejected the plan - planner should revise
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'handoff_requested')) {
         return { terminal: null, shouldContinue: true };
       }
+
+      // Stop hook allowed - check if watcher approved (has stop hook registered)
+      // If a stop hook is registered and returned 'allow', the watcher approved the plan
+      // Parse the spec and enqueue work items
+      if (stopResult && stopResult.decision === 'allow') {
+        const workItems = this.parseHandoffSpec(result.handoffSpec, goal);
+        if (workItems.length > 0) {
+          this.log('info', 'Handoff approved - enqueueing work items', {
+            workId,
+            itemCount: workItems.length,
+            items: workItems.map(w => ({ id: w.workId, objective: w.objective.slice(0, 50) })),
+          });
+          for (const item of workItems) {
+            this.enqueue(item);
+          }
+          // Continue the loop to execute the queued work
+          return { terminal: null, shouldContinue: true };
+        }
+        // Empty spec or parse failed - log warning and pause for user
+        this.log('warning', 'Handoff spec parse returned no work items', { workId });
+      }
+
+      // No stop hook or parse failed - pause for user approval (sync mode)
       return {
         terminal: this.createResult({
           success: true,
@@ -1703,5 +1731,51 @@ export class Orchestrator {
 
     // No terminal condition - execution should continue
     return { terminal: null, shouldContinue: false };
+  }
+
+  /**
+   * Parse a handoffSpec JSON string into WorkItems.
+   * Returns empty array on parse failure.
+   */
+  private parseHandoffSpec(spec: string, sessionGoal: string): WorkItem[] {
+    try {
+      const parsed = JSON.parse(spec) as {
+        goal?: string;
+        context?: string;
+        workItems?: Array<{
+          id?: string;
+          objective: string;
+          delta?: string;
+          agent?: string;
+          domain?: string;
+          dependencies?: string[];
+          targetPaths?: string[];
+        }>;
+      };
+
+      if (!parsed.workItems || !Array.isArray(parsed.workItems)) {
+        this.log('warning', 'Handoff spec missing workItems array', { spec: spec.slice(0, 200) });
+        return [];
+      }
+
+      const planGoal = parsed.goal ?? sessionGoal;
+
+      return parsed.workItems.map((item, index) => createWorkItem({
+        goal: planGoal,
+        objective: item.objective,
+        delta: item.delta,
+        agent: item.agent ?? 'standard',
+        domain: item.domain,
+        dependencies: item.dependencies ?? [],
+        targetPaths: item.targetPaths ?? [],
+        stepNum: index + 1,
+      }));
+    } catch (err) {
+      this.log('error', 'Failed to parse handoff spec', {
+        error: err instanceof Error ? err.message : String(err),
+        specPreview: spec.slice(0, 200),
+      });
+      return [];
+    }
   }
 }

@@ -235,6 +235,39 @@
         },
         "required": ["action", "response", "goalStateReached", "watcherAction", "reason", "answer", "realign", "workItems", "qualityGate"]
       }
+    },
+
+    "planner_output": {
+      "name": "planner_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["done", "continue"],
+            "description": "Standard agent action: 'done' when plan is ready, 'continue' to keep exploring"
+          },
+          "response": {
+            "type": ["string", "null"],
+            "description": "Human-readable summary of the plan"
+          },
+          "goalStateReached": {
+            "type": ["boolean", "null"],
+            "description": "Set to true when the plan is complete"
+          },
+          "handoffSpec": {
+            "type": ["string", "null"],
+            "description": "JSON string containing the work breakdown (goal, context, workItems[])"
+          },
+          "awaitingUserInput": {
+            "type": ["boolean", "null"],
+            "description": "Set to true when asking a clarifying question"
+          }
+        },
+        "required": ["action", "response", "goalStateReached", "handoffSpec", "awaitingUserInput"]
+      }
     }
   }
 }

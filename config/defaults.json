@@ -149,6 +149,22 @@
       },
       "tools": ["Read", "Glob", "Grep", "Bash"],
       "output_schema": "watcher_action"
+    },
+
+    "planner": {
+      "$comment": "Planning agent for async mode. Produces structured work breakdowns.",
+      "llm": {
+        "role": "standard",
+        "max_tokens": 32000,
+        "temperature": 0.3
+      },
+      "budget": {
+        "max_iterations": 15,
+        "max_tool_calls": 60,
+        "max_duration_ms": 180000
+      },
+      "tools": ["Read", "Glob", "Grep", "PromptUser"],
+      "output_schema": "planner_output"
     }
   },
 

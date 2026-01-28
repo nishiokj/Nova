@@ -714,39 +714,45 @@ bun run scripts/sync-api-cli.ts connectors disable <type>
 bun run scripts/sync-api-cli.ts connectors enable <type>
 ```
 
-## Error Observation & Improvement Log
+## Swarm Feedback Loops
 
-When you encounter errors, failures, or friction while using CLIs, tools, APIs, or scripts — **do not just silently retry or ignore them**. Instead:
+You are part of a swarm of agents building and operating this system. Your observations are invaluable — you see friction, failures, and opportunities that no human would notice. **Report them.**
 
-1. **Log the issue** to `data/jimmy-observations.md` with:
+### Issue Reporting (`/jesus/issues.md`)
+
+When you encounter errors, failures, or friction:
+
+1. **Log the issue** to `/jesus/issues.md` with:
    - What you were trying to do
    - The tool/CLI/command that failed
    - The error message or unexpected behavior
-   - Your assessment: is this a bug, missing feature, bad DX, stale docs, or configuration issue?
-   - A concrete suggestion for how to fix or improve it
+   - Your assessment: bug, bad DX, missing feature, stale docs, config issue, slop?
+   - A concrete suggestion for how to fix it
 
 2. **Do not spin your wheels** — If a tool fails twice with the same error, stop retrying. Either:
-   - Try a different approach to accomplish the goal
-   - Log the issue and move on to other productive work
-   - Ask Jevin if the issue is blocking
+   - Try a different approach
+   - Log the issue and move on
+   - Mark it as a blocker if critical
 
-3. **Note slop and cruft** — Dead code, duplicated logic, multiple sources of truth, unnecessary types, vestigial abstractions, and other structural debt are all worth logging. Slop reduction is extremely valuable. If you notice code that serves no purpose, types that duplicate other types, or two modules doing the same thing differently — log it.
+3. **Note slop and cruft** — Dead code, duplicated logic, multiple sources of truth, unnecessary types, vestigial abstractions. Slop reduction is extremely valuable.
 
-4. **Categorize observations** using these tags:
-   - `[BUG]` — Something is broken and needs fixing
-   - `[DX]` — Developer experience friction (bad error messages, missing help text, confusing API)
-   - `[MISSING]` — A feature or capability that should exist but doesn't
-   - `[DOCS]` — Documentation is wrong, missing, or misleading
-   - `[CONFIG]` — Environment, auth, or configuration issue
-   - `[SLOP]` — Dead code, duplication, multiple sources of truth, unnecessary types, vestigial abstractions
+**Tags:** `[BUG]` `[DX]` `[MISSING]` `[DOCS]` `[CONFIG]` `[SLOP]` `[BLOCKER]`
 
-**Example entry:**
-```markdown
-### 2025-01-28 — [DX] sync-api-cli derived-tasks create
-Tried to create a derived task but the interactive wizard crashed when no scripts were found in the expected directory. Error: `Cannot read properties of undefined (reading 'map')`. The CLI should handle this gracefully with a message like "No derived scripts found in packages/agent-memory/scripts/". **Suggestion:** Add an empty-state check before the selection prompt.
-```
+### Feature Suggestions (`/jesus/feature_suggestions.md`)
 
-This log serves as a backlog of improvements for Jevin to review, prioritize, and implement. Your observations as a power user of these tools are invaluable for making the system better.
+When you spot opportunities for improvement:
+
+1. **Log the suggestion** to `/jesus/feature_suggestions.md` with:
+   - What you were doing when you noticed this
+   - What could be better
+   - Concrete proposal
+   - Why it matters (efficiency, reliability, capability)
+
+**Categories:** `[TOOLING]` `[ARCHITECTURE]` `[DX]` `[AUTOMATION]` `[INTEGRATION]` `[PERFORMANCE]`
+
+### Why This Matters
+
+You are building the system you run on. Every issue you report improves your own future execution. Every suggestion you make could become a feature you use. This is a closed loop — your feedback directly shapes the system.
 
 ## Summary
 

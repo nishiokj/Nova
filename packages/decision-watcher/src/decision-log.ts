@@ -6,8 +6,8 @@
  */
 
 import fs from 'fs/promises';
-import path from 'path';
 import type { DecisionLogEntry } from './types.js';
+import { sessionDir, decisionsLogPath } from './session-paths.js';
 
 // ============================================
 // DECISION LOG INTERFACE
@@ -30,16 +30,16 @@ export interface DecisionLog {
 
 /**
  * Create a JSONL-based decision log for a session.
- * Path: .watcher/<sessionId>/decisions.jsonl
+ * Path: .watcher/{YYYY-MM-DD}/{sessionId}/decisions.jsonl
  */
 export async function createDecisionLog(
   workingDir: string,
   sessionId: string
 ): Promise<DecisionLog> {
-  const dir = path.join(workingDir, '.watcher', sessionId);
+  const dir = sessionDir(workingDir, sessionId);
   await fs.mkdir(dir, { recursive: true });
 
-  const logPath = path.join(dir, 'decisions.jsonl');
+  const logPath = decisionsLogPath(workingDir, sessionId);
 
   // Ensure the file exists (touch)
   await fs.appendFile(logPath, '', 'utf-8');

@@ -253,3 +253,26 @@ export {
   obsidianNoteTransform,
   obsidianTransforms,
 } from './obsidian/index.js'
+
+// Watcher Sessions Connector
+export {
+  // Connector
+  WatcherSessionsConnector,
+  createWatcherSessionsConnector,
+  type WatcherSessionsConnectorConfig,
+  // Schemas
+  ExecutionMetricsSchema,
+  QualityGateSchema,
+  DecisionEntrySchema,
+  WorkLogEntrySchema,
+  WatcherDecisionSourceSchema,
+  WatcherWorkLogSourceSchema,
+  type ExecutionMetrics,
+  type QualityGate,
+  type DecisionEntry,
+  type WorkLogEntry,
+  type WatcherDecisionSource,
+  type WatcherWorkLogSource,
+  // Transformations (empty - uses derived task)
+  watcherSessionsTransforms,
+} from './watcher-sessions/index.js'

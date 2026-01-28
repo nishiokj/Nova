@@ -131,3 +131,20 @@ export {
   type DecisionSearchOptions,
   type DecisionSimilarityOptions,
 } from './coding-decisions.js'
+
+export {
+  createAgentGoalsRepository,
+  type AgentGoalsRepository,
+  type AgentGoalRow,
+  type AgentGoalInput,
+  type GoalFilterOptions,
+} from './agent-goals.js'
+
+export {
+  createAgentActionsRepository,
+  type AgentActionsRepository,
+  type AgentActionRow,
+  type AgentActionInput,
+  type ActionFilterOptions,
+  type OutcomeSignal,
+} from './agent-actions.js'

@@ -10,6 +10,13 @@ import type { RepositoryContext, PaginationOptions, PaginatedResult } from './ty
 
 export type DerivedTaskMode = 'once' | 'recurring' | 'event'
 
+export interface TriggerConfig {
+  type: 'webhook' | 'database' | 'scheduler'
+  connector?: string
+  eventType?: string | string[]  // '*' for all events
+  filters?: Record<string, unknown>
+}
+
 export interface DerivedTask {
   id: string
   name: string
@@ -20,6 +27,7 @@ export interface DerivedTask {
   last_job_id: string | null
   next_run_at: string | null
   metadata?: Record<string, unknown>
+  trigger_config?: TriggerConfig
   created_at: string
   updated_at: string
 }
@@ -34,6 +42,7 @@ export interface DerivedTaskRow {
   last_job_id: string | null
   next_run_at: Date | null
   metadata: Record<string, unknown> | null
+  trigger_config: Record<string, unknown> | null
   created_at: Date
   updated_at: Date
 }
@@ -49,6 +58,7 @@ function rowToDerivedTask(row: DerivedTaskRow): DerivedTask {
     last_job_id: row.last_job_id,
     next_run_at: row.next_run_at?.toISOString() ?? null,
     metadata: row.metadata ?? undefined,
+    trigger_config: (row.trigger_config as unknown) as TriggerConfig | undefined,
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
   }
@@ -60,6 +70,7 @@ export interface DerivedTaskInput {
   mode: DerivedTaskMode
   intervalMs?: number
   metadata?: Record<string, unknown>
+  triggerConfig?: TriggerConfig
 }
 
 export interface DerivedTaskRepository {
@@ -67,10 +78,14 @@ export interface DerivedTaskRepository {
   findById(id: string): Promise<DerivedTask | null>
   findAll(limit?: number): Promise<DerivedTask[]>
   findByName(name: string): Promise<DerivedTask[]>
-  update(id: string, updates: Partial<Pick<DerivedTask, 'interval_ms' | 'enabled' | 'metadata'>>): Promise<DerivedTask | null>
+  update(id: string, updates: Partial<Pick<DerivedTask, 'interval_ms' | 'enabled' | 'metadata' | 'trigger_config'>>): Promise<DerivedTask | null>
   delete(id: string): Promise<boolean>
 
   findDueForExecution(limit?: number): Promise<DerivedTask[]>
+
+  // Webhook trigger lookups
+  findWebhookTriggers(connector: string, eventType: string): Promise<DerivedTask[]>
+  findAllWebhookTriggers(): Promise<DerivedTask[]>
 
   markExecuted(id: string, jobId: string): Promise<DerivedTask | null>
   updateNextRunAt(id: string, nextRunAt: Date): Promise<boolean>
@@ -88,7 +103,7 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
       const [row] = await sql<DerivedTaskRow[]>`
         INSERT INTO derived_tasks (
           id, name, script_path, mode, interval_ms,
-          enabled, next_run_at, metadata, created_at, updated_at
+          enabled, next_run_at, metadata, trigger_config, created_at, updated_at
         ) VALUES (
           ${id},
           ${input.name},
@@ -98,6 +113,7 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
           true,
           ${nextRunAt},
           ${input.metadata ? sql.json(input.metadata as any) : null},
+          ${input.triggerConfig ? sql.json(input.triggerConfig as any) : null},
           ${now},
           ${now}
         )
@@ -140,6 +156,7 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
         SET interval_ms = COALESCE(${updates.interval_ms ?? null}, interval_ms),
             enabled = COALESCE(${updates.enabled ?? null}, enabled),
             metadata = COALESCE(${updates.metadata ? sql.json(updates.metadata as any) : null}, metadata),
+            trigger_config = COALESCE(${updates.trigger_config ? sql.json(updates.trigger_config as any) : null}, trigger_config),
             updated_at = ${now}
         WHERE id = ${id}
         RETURNING *
@@ -163,6 +180,40 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
           AND (next_run_at IS NULL OR next_run_at <= NOW())
         ORDER BY next_run_at ASC NULLS FIRST
         LIMIT ${limit}
+      `
+      return rows.map(rowToDerivedTask)
+    },
+
+    async findWebhookTriggers(connector: string, eventType: string): Promise<DerivedTask[]> {
+      // Find tasks that match:
+      // 1. Enabled
+      // 2. Mode = 'event'
+      // 3. trigger_config.type = 'webhook'
+      // 4. Matching connector
+      // 5. Matching eventType (either '*' or exact match)
+      const rows = await sql<DerivedTaskRow[]>`
+        SELECT * FROM derived_tasks
+        WHERE enabled = true
+          AND mode = 'event'
+          AND trigger_config->>'type' = 'webhook'
+          AND trigger_config->>'connector' = ${connector}
+          AND (
+            trigger_config->>'eventType' = '*'
+            OR trigger_config->>'eventType' = ${eventType}
+            OR ${eventType} = ANY(
+              SELECT jsonb_array_elements_text(trigger_config->'eventType')
+            )
+          )
+      `
+      return rows.map(rowToDerivedTask)
+    },
+
+    async findAllWebhookTriggers(): Promise<DerivedTask[]> {
+      const rows = await sql<DerivedTaskRow[]>`
+        SELECT * FROM derived_tasks
+        WHERE enabled = true
+          AND mode = 'event'
+          AND trigger_config->>'type' = 'webhook'
       `
       return rows.map(rowToDerivedTask)
     },

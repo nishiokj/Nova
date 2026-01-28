@@ -30,6 +30,8 @@ import {
   type DerivedJob,
   type CodingPreference,
   type CodingDecision,
+  type AgentGoal,
+  type AgentAction,
 } from '../packages/agent-memory/src/client/index.js'
 import { sendTelegramMessage, notifyAllUsers } from '../packages/agent-memory/src/connectors/telegram/notify.js'
 
@@ -1408,7 +1410,72 @@ async function cmdDerivedTasksCreate(): Promise<void> {
     }
   }
 
-  // 6. Metadata - interactive prompts for known scripts, raw JSON fallback
+  // 6. Event trigger configuration
+  let triggerConfig: {
+    type: 'webhook' | 'database' | 'scheduler'
+    connector?: string
+    eventType?: string | string[]
+    filters?: Record<string, unknown>
+  } | undefined
+  if (mode === 'event') {
+    console.log('\n\x1b[1mEvent trigger configuration\x1b[0m')
+    console.log('  \x1b[90mConfigure when this task should be triggered.\x1b[0m\n')
+
+    const triggerType = await promptSelect('Trigger type?', [
+      'webhook   - Trigger on external webhook (e.g., Gmail push notifications)',
+      'database  - Trigger on database changes (not yet implemented)',
+      'scheduler  - Trigger on scheduler events (not yet implemented)',
+    ]).then((s) => s.split(' ')[0] as 'webhook' | 'database' | 'scheduler')
+
+    if (triggerType === 'database' || triggerType === 'scheduler') {
+      throw new Error(`${triggerType} triggers are not yet implemented. Use 'webhook'.`)
+    }
+
+    // Webhook configuration
+    if (triggerType === 'webhook') {
+      // Show available connectors
+      const connectors = await client.connectors.list()
+      if (connectors.length === 0) {
+        throw new Error('No connectors registered. Run: connectors register <type>')
+      }
+
+      console.log('\n  Available connectors:')
+      const connectorOptions = connectors.map((c) => `${c.type.padEnd(15)} ${c.displayName}`)
+      const selectedConnector = await promptSelect('Which connector?', connectorOptions)
+      const connector = connectors.find((c) => selectedConnector.includes(c.type))?.type!
+
+      // Event type
+      console.log('\n\x1b[90mEvent types vary by connector.\x1b[0m')
+      console.log('  \x1b[90mExamples: message_received, issue_opened, message_created\x1b[0m')
+      const eventType = await prompt('Event type (or * for all)', '*')
+
+      // Optional filters
+      const useFilters = await promptConfirm('Add filters for this trigger?', false)
+      let filters: Record<string, unknown> | undefined
+
+      if (useFilters) {
+        console.log('\n  \x1b[90mEnter filters as JSON (e.g., {"from": "reservations@example.com"}).\x1b[0m')
+        console.log('  \x1b[90mFilters are passed to the script in task.metadata.\x1b[0m')
+        const filtersJson = await prompt('Filters JSON (optional)', '')
+        if (filtersJson) {
+          try {
+            filters = JSON.parse(filtersJson)
+          } catch {
+            throw new Error('Filters must be valid JSON')
+          }
+        }
+      }
+
+      triggerConfig = {
+        type: triggerType,
+        connector,
+        eventType: eventType === '*' ? '*' : eventType,
+        filters,
+      }
+    }
+  }
+
+  // 7. Metadata - interactive prompts for known scripts, raw JSON fallback
   let metadata: Record<string, unknown> | undefined
   const knownFields = DERIVED_SCRIPT_METADATA[scriptBaseName]
 
@@ -1464,7 +1531,7 @@ async function cmdDerivedTasksCreate(): Promise<void> {
     }
   }
 
-  // 7. Summary and confirm
+  // 8. Summary and confirm
   console.log('\n' + '─'.repeat(50))
   console.log('\x1b[1mDerived Task Summary\x1b[0m')
   console.log(`  Name:   ${name}`)
@@ -1473,8 +1540,14 @@ async function cmdDerivedTasksCreate(): Promise<void> {
   if (intervalMs) {
     console.log(`  Interval: ${formatInterval(intervalMs)}`)
   }
+  if (triggerConfig) {
+    console.log(`  Trigger: ${triggerConfig.type} / ${triggerConfig.connector} / ${triggerConfig.eventType}`)
+  }
   if (metadata) {
     console.log(`  Config: ${JSON.stringify(metadata)}`)
+  }
+  if (triggerConfig?.filters) {
+    console.log(`  Filters: ${JSON.stringify(triggerConfig.filters)}`)
   }
   console.log('─'.repeat(50))
 
@@ -1490,6 +1563,7 @@ async function cmdDerivedTasksCreate(): Promise<void> {
     mode,
     intervalMs,
     metadata,
+    triggerConfig,
   })
 
   printSuccess('Derived task created')
@@ -1903,6 +1977,321 @@ async function cmdDecisionsSearch(query: string, opts?: {
   }
 }
 
+// ============ Goals ============
+
+function printGoal(goal: import('../packages/agent-memory/src/client/types.js').AgentGoal, index?: number): void {
+  const statusColors: Record<string, string> = {
+    active: '\x1b[32m',
+    paused: '\x1b[33m',
+    completed: '\x1b[36m',
+    failed: '\x1b[31m',
+    abandoned: '\x1b[90m',
+  }
+  const color = statusColors[goal.status] || ''
+  const indexLabel = index !== undefined ? `\x1b[90m#${index + 1}\x1b[0m ` : ''
+  const shortId = goal.id.slice(0, 8)
+
+  console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m ${color}${goal.status}\x1b[0m`)
+
+  if (goal.title) {
+    console.log(`    \x1b[1m${goal.title}\x1b[0m`)
+  }
+
+  if (goal.description) {
+    const desc = goal.description.length > 80 ? goal.description.slice(0, 80) + '...' : goal.description
+    console.log(`    \x1b[90m${desc}\x1b[0m`)
+  }
+
+  if (goal.priority !== undefined && goal.priority !== 0) {
+    console.log(`    Priority: ${goal.priority}`)
+  }
+
+  if (goal.deadline) {
+    const deadline = new Date(goal.deadline)
+    const relative = formatRelativeTime(deadline)
+    console.log(`    Deadline: ${relative}`)
+  }
+
+  if (goal.parent_id) {
+    console.log(`    Parent: ${goal.parent_id.slice(0, 8)}`)
+  }
+
+  if (goal.completed_at) {
+    console.log(`    Completed: ${formatRelativeTime(new Date(goal.completed_at))}`)
+  }
+}
+
+// Short ID index for goals
+let lastGoalsList: import('../packages/agent-memory/src/client/types.js').AgentGoal[] = []
+
+async function cmdGoalsList(options?: {
+  status?: string
+  parent_id?: string
+}): Promise<void> {
+  printHeader('Goals')
+  const goals = await client.goals.list({
+    status: options?.status as 'active' | 'paused' | 'completed' | 'failed' | 'abandoned' | undefined,
+    parent_id: options?.parent_id === 'null' ? null : options?.parent_id,
+  })
+  lastGoalsList = goals
+
+  if (goals.length === 0) {
+    console.log('  No goals found.')
+    console.log('  Use "goals create" to create a goal.')
+  } else {
+    goals.forEach((goal, i) => printGoal(goal, i))
+    console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference goals\x1b[0m`)
+  }
+}
+
+async function cmdGoalsGet(id: string): Promise<void> {
+  printHeader('Goal Details')
+  const goal = await client.goals.get(id)
+  printGoal(goal)
+  console.log(`\n  Full ID: \x1b[36m${goal.id}\x1b[0m`)
+
+  if (goal.success_criteria) {
+    console.log(`\n  Success Criteria:`)
+    console.log(`    ${JSON.stringify(goal.success_criteria, null, 2).split('\n').join('\n    ')}`)
+  }
+}
+
+async function cmdGoalsCreate(): Promise<void> {
+  printHeader('Create Goal')
+
+  const title = await prompt('Title')
+  if (!title) throw new Error('Title is required')
+
+  const description = await prompt('Description (optional)', '')
+
+  const priorityInput = await prompt('Priority', '0')
+  const priority = parseFloat(priorityInput)
+  if (isNaN(priority)) throw new Error('Invalid priority')
+
+  const statusOptions = ['active', 'paused', 'completed', 'failed', 'abandoned']
+  const status = await promptSelect('Status', statusOptions, 0) as 'active' | 'paused' | 'completed' | 'failed' | 'abandoned'
+
+  const deadlineInput = await prompt('Deadline (ISO date, optional)', '')
+  const deadline = deadlineInput ? new Date(deadlineInput) : undefined
+
+  const goal = await client.goals.create({
+    title,
+    description: description || undefined,
+    priority,
+    status,
+    deadline: deadline?.toISOString(),
+  })
+
+  printSuccess('Goal created')
+  printGoal(goal)
+}
+
+async function cmdGoalsUpdate(id: string): Promise<void> {
+  printHeader('Update Goal')
+
+  const goal = await client.goals.get(id)
+
+  const title = await prompt('Title', goal.title)
+  const description = await prompt('Description', goal.description || '')
+  const priorityInput = await prompt('Priority', String(goal.priority))
+  const priority = parseFloat(priorityInput)
+  const statusOptions = ['active', 'paused', 'completed', 'failed', 'abandoned']
+  const status = await promptSelect('Status', statusOptions, statusOptions.indexOf(goal.status)) as 'active' | 'paused' | 'completed' | 'failed' | 'abandoned'
+
+  const updated = await client.goals.update(id, {
+    title,
+    description: description || undefined,
+    priority,
+    status,
+  })
+
+  printSuccess('Goal updated')
+  printGoal(updated)
+}
+
+async function cmdGoalsComplete(id: string): Promise<void> {
+  printHeader('Complete Goal')
+  const updated = await client.goals.complete(id)
+  printSuccess(`Goal ${id.slice(0, 8)} marked as completed`)
+  printGoal(updated)
+}
+
+async function cmdGoalsDelete(id: string): Promise<void> {
+  printHeader('Delete Goal')
+  await client.goals.delete(id)
+  printSuccess(`Goal ${id.slice(0, 8)} deleted`)
+}
+
+async function cmdGoalsActive(): Promise<void> {
+  printHeader('Active Goals')
+  const goals = await client.goals.getActive()
+  if (goals.length === 0) {
+    console.log('  No active goals found.')
+  } else {
+    goals.forEach((goal, i) => printGoal(goal, i))
+  }
+}
+
+async function cmdGoalsDueSoon(): Promise<void> {
+  const hoursInput = await prompt('Hours ahead', '24')
+  const hours = parseInt(hoursInput, 10)
+
+  printHeader(`Goals Due Within ${hours} Hours`)
+  const goals = await client.goals.getDueSoon(hours)
+  if (goals.length === 0) {
+    console.log('  No goals due soon.')
+  } else {
+    goals.forEach((goal, i) => printGoal(goal, i))
+  }
+}
+
+// ============ Actions ============
+
+function printAction(action: import('../packages/agent-memory/src/client/types.js').AgentAction, index?: number): void {
+  const signalColors: Record<string, string> = {
+    positive: '\x1b[32m',
+    negative: '\x1b[31m',
+    neutral: '\x1b[33m',
+    unknown: '\x1b[90m',
+  }
+  const color = signalColors[action.outcome_signal] || ''
+  const indexLabel = index !== undefined ? `\x1b[90m#${index + 1}\x1b[0m ` : ''
+  const shortId = action.id.slice(0, 8)
+
+  console.log(`  ${indexLabel}\x1b[36m${shortId}\x1b[0m ${action.action_type} ${color}${action.outcome_signal}\x1b[0m`)
+
+  if (action.predicted_outcome) {
+    console.log(`    Predicted: ${action.predicted_outcome.slice(0, 100)}${action.predicted_outcome.length > 100 ? '...' : ''}`)
+  }
+
+  if (action.actual_outcome) {
+    console.log(`    Actual: ${action.actual_outcome.slice(0, 100)}${action.actual_outcome.length > 100 ? '...' : ''}`)
+  }
+
+  if (action.resolved_at) {
+    const resolved = new Date(action.resolved_at)
+    console.log(`    Resolved: ${formatRelativeTime(resolved)}`)
+  } else {
+    console.log(`    \x1b[33mPending resolution\x1b[0m`)
+  }
+
+  console.log(`    Created: ${formatRelativeTime(new Date(action.created_at))}`)
+}
+
+// Short ID index for actions
+let lastActionsList: import('../packages/agent-memory/src/client/types.js').AgentAction[] = []
+
+async function cmdActionsList(options?: {
+  action_type?: string
+  outcome_signal?: string
+  resolved?: string
+}): Promise<void> {
+  printHeader('Actions')
+  const actions = await client.actions.list({
+    action_type: options?.action_type,
+    outcome_signal: options?.outcome_signal as 'positive' | 'negative' | 'neutral' | 'unknown' | undefined,
+    resolved: options?.resolved === 'true' ? true : options?.resolved === 'false' ? false : undefined,
+  })
+  lastActionsList = actions
+
+  if (actions.length === 0) {
+    console.log('  No actions found.')
+    console.log('  Use "actions create" to log an action.')
+  } else {
+    actions.forEach((action, i) => printAction(action, i))
+    console.log(`\n  \x1b[90mTip: Use #1, #2, etc. to reference actions\x1b[0m`)
+  }
+}
+
+async function cmdActionsGet(id: string): Promise<void> {
+  printHeader('Action Details')
+  const action = await client.actions.get(id)
+  printAction(action)
+  console.log(`\n  Full ID: \x1b[36m${action.id}\x1b[0m`)
+
+  if (action.context) {
+    console.log(`\n  Context:`)
+    console.log(`    ${JSON.stringify(action.context, null, 2).split('\n').join('\n    ')}`)
+  }
+
+  if (action.parameters) {
+    console.log(`\n  Parameters:`)
+    console.log(`    ${JSON.stringify(action.parameters, null, 2).split('\n').join('\n    ')}`)
+  }
+
+  if (action.feedback) {
+    console.log(`\n  Feedback:`)
+    console.log(`    ${JSON.stringify(action.feedback, null, 2).split('\n').join('\n    ')}`)
+  }
+}
+
+async function cmdActionsCreate(): Promise<void> {
+  printHeader('Create Action')
+
+  const actionType = await prompt('Action type', '')
+  if (!actionType) throw new Error('Action type is required')
+
+  const predictedOutcome = await prompt('Predicted outcome (optional)', '')
+  const outcomeSignalOptions = ['unknown', 'positive', 'negative', 'neutral']
+  const outcomeSignal = await promptSelect('Initial outcome signal', outcomeSignalOptions, 0) as 'positive' | 'negative' | 'neutral' | 'unknown'
+
+  const action = await client.actions.create({
+    action_type: actionType,
+    predicted_outcome: predictedOutcome || undefined,
+    outcome_signal,
+  })
+
+  printSuccess('Action logged')
+  printAction(action)
+}
+
+async function cmdActionsRecordOutcome(id: string): Promise<void> {
+  printHeader('Record Outcome')
+
+  const actualOutcome = await prompt('Actual outcome', '')
+  if (!actualOutcome) throw new Error('Actual outcome is required')
+
+  const outcomeSignalOptions = ['positive', 'negative', 'neutral']
+  const outcomeSignal = await promptSelect('Outcome signal', outcomeSignalOptions, 0) as 'positive' | 'negative' | 'neutral'
+
+  const action = await client.actions.recordOutcome(id, {
+    actual_outcome: actualOutcome,
+    outcome_signal,
+  })
+
+  printSuccess('Outcome recorded')
+  printAction(action)
+}
+
+async function cmdActionsUnresolved(): Promise<void> {
+  printHeader('Unresolved Actions')
+  const actions = await client.actions.getUnresolved()
+  if (actions.length === 0) {
+    console.log('  No unresolved actions found.')
+  } else {
+    actions.forEach((action, i) => printAction(action, i))
+  }
+}
+
+async function cmdActionsStats(): Promise<void> {
+  const actionType = await prompt('Action type', '')
+  if (!actionType) throw new Error('Action type is required')
+
+  printHeader(`Success Rate: ${actionType}`)
+  const stats = await client.actions.getSuccessRate(actionType)
+
+  console.log(`  Total: ${stats.total}`)
+  console.log(`  Positive: ${stats.positive}`)
+  console.log(`  Negative: ${stats.negative}`)
+  console.log(`  Rate: ${(stats.rate * 100).toFixed(1)}%`)
+}
+
+async function cmdActionsDelete(id: string): Promise<void> {
+  printHeader('Delete Action')
+  await client.actions.delete(id)
+  printSuccess(`Action ${id.slice(0, 8)} deleted`)
+}
+
 // ============ CLI Router ============
 
 function printHelp(): void {
@@ -1991,6 +2380,29 @@ function printHelp(): void {
       --confidence <confidence>      Filter by confidence (low, medium, high)
       --limit <n>                  Results limit (default: 20)
       --offset <n>                 Pagination offset (default: 0)
+
+  \x1b[1mgoals\x1b[0m                            Agent goal management
+    list                           List all goals (shows #N indices)
+    get <id>                       Get goal details
+    create                         Create a goal (interactive)
+    update <id>                    Update a goal (interactive)
+    complete <id>                  Mark a goal as completed
+    delete <id>                    Delete a goal
+    active                         List active goals ordered by priority
+    due-soon                       List goals due within N hours (prompt)
+
+    \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
+
+  \x1b[1mactions\x1b[0m                          Agent action tracking
+    list                           List all actions (shows #N indices)
+    get <id>                       Get action details
+    create                         Log an action (interactive)
+    record-outcome <id>           Record outcome for an action
+    unresolved                     List actions pending resolution
+    stats                          Show success rate for action type
+    delete <id>                    Delete an action
+
+    \x1b[90m<id> can be: #1 (index), prefix (01JD...), or full ULID\x1b[0m
 
   \x1b[1mprocess\x1b[0m                          Process raw envelopes
     job <id>                       Process envelopes for a sync job
@@ -2328,6 +2740,74 @@ async function main(): Promise<void> {
             break
           default:
             throw new Error(`Unknown subcommand: decisions ${subcommand || '(none)'}`)
+        }
+        break
+
+      case 'goals':
+        switch (subcommand) {
+          case 'list':
+          case undefined:
+            await cmdGoalsList()
+            break
+          case 'get':
+            if (!args[0]) throw new Error('Missing goal ID')
+            await cmdGoalsGet(args[0])
+            break
+          case 'create':
+            await cmdGoalsCreate()
+            break
+          case 'update':
+            if (!args[0]) throw new Error('Missing goal ID')
+            await cmdGoalsUpdate(args[0])
+            break
+          case 'complete':
+            if (!args[0]) throw new Error('Missing goal ID')
+            await cmdGoalsComplete(args[0])
+            break
+          case 'delete':
+            if (!args[0]) throw new Error('Missing goal ID')
+            await cmdGoalsDelete(args[0])
+            break
+          case 'active':
+            await cmdGoalsActive()
+            break
+          case 'due-soon':
+            await cmdGoalsDueSoon()
+            break
+          default:
+            throw new Error(`Unknown subcommand: goals ${subcommand || '(none)'}`)
+        }
+        break
+
+      case 'actions':
+        switch (subcommand) {
+          case 'list':
+          case undefined:
+            await cmdActionsList()
+            break
+          case 'get':
+            if (!args[0]) throw new Error('Missing action ID')
+            await cmdActionsGet(args[0])
+            break
+          case 'create':
+            await cmdActionsCreate()
+            break
+          case 'record-outcome':
+            if (!args[0]) throw new Error('Missing action ID')
+            await cmdActionsRecordOutcome(args[0])
+            break
+          case 'unresolved':
+            await cmdActionsUnresolved()
+            break
+          case 'stats':
+            await cmdActionsStats()
+            break
+          case 'delete':
+            if (!args[0]) throw new Error('Missing action ID')
+            await cmdActionsDelete(args[0])
+            break
+          default:
+            throw new Error(`Unknown subcommand: actions ${subcommand || '(none)'}`)
         }
         break
 

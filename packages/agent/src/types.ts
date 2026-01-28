@@ -300,6 +300,15 @@ export type InternalHookEvent =
       terminationReason: AgentTerminationReason;
       filesRead: string[];
       invalidatedPaths: string[];
+      /** Agent's final response text */
+      response?: string;
+      /** Execution metrics */
+      metrics?: {
+        toolCallsMade: number;
+        llmCallsMade: number;
+      };
+      /** Context window percentage used */
+      contextPercentUsed?: number;
     };
 
 /**
@@ -371,6 +380,8 @@ export interface StopHookContext {
   };
   /** Execution snapshot for enriched stop hook evaluation */
   executionSnapshot?: ExecutionSnapshot;
+  /** Handoff spec when terminationReason is 'handoff_requested' */
+  handoffSpec?: string;
 }
 
 /**

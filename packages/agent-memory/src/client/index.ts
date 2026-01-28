@@ -9,6 +9,15 @@ import type {
   Account,
   AccountListResponse,
   AccountResponse,
+  ActionCreateInput,
+  ActionOutcomeInput,
+  ActionResponse,
+  ActionStats,
+  ActionStatsResponse,
+  ActionUpdateInput,
+  ActionsResponse,
+  AgentAction,
+  AgentGoal,
   AuthStatusResponse,
   AuthUrlResponse,
   AvailableConnectorsResponse,
@@ -32,30 +41,36 @@ import type {
   DerivedTaskListResponse,
   DerivedTaskResponse,
   DerivedTaskMode,
+  DeviceAuthPollResponse,
+  DeviceAuthResponse,
+  GoalCreateInput,
+  GoalResponse,
+  GoalsResponse,
+  GoalUpdateInput,
+  HealthResponse,
+  InternalEvent,
+  JobListResponse,
+  JobResponse,
+  PreferencesSearchResponse,
   ProcessAllResponse,
   ProcessErroredResponse,
   ProcessJobResponse,
-  PreferencesSearchResponse,
-  ReprocessFilteredRequest,
-  ReprocessFilteredResponse,
-  TransformationListResponse,
-  TransformationSummary,
-  DeviceAuthPollResponse,
-  DeviceAuthResponse,
-  HealthResponse,
-  JobListResponse,
-  JobResponse,
   ProvidersResponse,
   RegisteredConnector,
+  ReprocessFilteredRequest,
+  ReprocessFilteredResponse,
   RetryResponse,
   SanityCheckResult,
   SyncJob,
   SyncTask,
   SyncType,
-  TaskMode,
-  TaskSanityResponse,
   TaskListResponse,
+  TaskMode,
   TaskResponse,
+  TaskSanityResponse,
+  TransformationListResponse,
+  TransformationSummary,
+  TriggerConfig,
 } from './types.js'
 import { SyncClientError } from './types.js'
 
@@ -631,6 +646,7 @@ export class SyncClient {
       mode: DerivedTaskMode
       intervalMs?: number
       metadata?: Record<string, unknown>
+      triggerConfig?: TriggerConfig
     }): Promise<DerivedTaskCreateResponse> => {
       return this.post<DerivedTaskCreateResponse>('/derived/tasks', opts)
     },
@@ -877,6 +893,316 @@ export class SyncClient {
       if (opts.offset !== undefined) params.set('offset', String(opts.offset))
       const query = params.toString()
       return this.get<DecisionsSearchResponse>(`/decisions/search?${query}`)
+    },
+  }
+
+  // ============ Goals ============
+
+  /**
+   * Agent goals management methods.
+   */
+  goals = {
+    /**
+     * List goals with optional filters.
+     * @param opts.status - Filter by status
+     * @param opts.parent_id - Filter by parent goal ID
+     * @param opts.limit - Max results (default: 50)
+     * @param opts.offset - Pagination offset (default: 0)
+     */
+    list: async (opts?: {
+      status?: 'active' | 'paused' | 'completed' | 'failed' | 'abandoned'
+      parent_id?: string | null
+      limit?: number
+      offset?: number
+    }): Promise<AgentGoal[]> => {
+      const params = new URLSearchParams()
+      if (opts?.status) params.set('status', opts.status)
+      if (opts?.parent_id === null) params.set('parent_id', 'null')
+      else if (opts?.parent_id) params.set('parent_id', opts.parent_id)
+      if (opts?.limit) params.set('limit', String(opts.limit))
+      if (opts?.offset) params.set('offset', String(opts.offset))
+      const query = params.toString()
+      const response = await this.get<GoalsResponse>(`/goals${query ? `?${query}` : ''}`)
+      return response.goals
+    },
+
+    /**
+     * Get active goals ordered by priority.
+     * @param limit - Max results (default: 50)
+     */
+    getActive: async (limit = 50): Promise<AgentGoal[]> => {
+      const response = await this.get<GoalsResponse>(`/goals/active?limit=${limit}`)
+      return response.goals
+    },
+
+    /**
+     * Get goals due soon.
+     * @param hours - Hours horizon (default: 24)
+     * @param limit - Max results (default: 20)
+     */
+    getDueSoon: async (hours = 24, limit = 20): Promise<AgentGoal[]> => {
+      const response = await this.get<GoalsResponse>(`/goals/due-soon?hours=${hours}&limit=${limit}`)
+      return response.goals
+    },
+
+    /**
+     * Get a goal by ID.
+     */
+    get: async (id: string): Promise<AgentGoal> => {
+      const response = await this.get<GoalResponse>(`/goals/${id}`)
+      return response.goal
+    },
+
+    /**
+     * Create a new goal.
+     */
+    create: async (input: GoalCreateInput): Promise<AgentGoal> => {
+      const response = await this.post<GoalResponse>('/goals', input)
+      return response.goal
+    },
+
+    /**
+     * Update a goal.
+     */
+    update: async (id: string, input: GoalUpdateInput): Promise<AgentGoal> => {
+      const response = await this.patch<GoalResponse>(`/goals/${id}`, input)
+      return response.goal
+    },
+
+    /**
+     * Mark a goal as completed.
+     */
+    complete: async (id: string): Promise<AgentGoal> => {
+      const response = await this.post<GoalResponse>(`/goals/${id}/complete`)
+      return response.goal
+    },
+
+    /**
+     * Update goal priority.
+     */
+    updatePriority: async (id: string, priority: number): Promise<AgentGoal> => {
+      const response = await this.patch<GoalResponse>(`/goals/${id}/priority`, { priority })
+      return response.goal
+    },
+
+    /**
+     * Delete a goal.
+     */
+    delete: async (id: string): Promise<boolean> => {
+      await this.delete<{ deleted: boolean }>(`/goals/${id}`)
+      return true
+    },
+  }
+
+  // ============ Actions ============
+
+  /**
+   * Agent actions tracking methods.
+   */
+  actions = {
+    /**
+     * List actions with optional filters.
+     * @param opts.action_type - Filter by action type
+     * @param opts.outcome_signal - Filter by outcome signal
+     * @param opts.resolved - Filter by resolved status
+     * @param opts.since - Filter actions since date
+     * @param opts.limit - Max results (default: 100)
+     * @param opts.offset - Pagination offset (default: 0)
+     */
+    list: async (opts?: {
+      action_type?: string
+      outcome_signal?: 'positive' | 'negative' | 'neutral' | 'unknown'
+      resolved?: boolean
+      since?: Date
+      limit?: number
+      offset?: number
+    }): Promise<AgentAction[]> => {
+      const params = new URLSearchParams()
+      if (opts?.action_type) params.set('action_type', opts.action_type)
+      if (opts?.outcome_signal) params.set('outcome_signal', opts.outcome_signal)
+      if (opts?.resolved !== undefined) params.set('resolved', String(opts.resolved))
+      if (opts?.since) params.set('since', opts.since.toISOString())
+      if (opts?.limit) params.set('limit', String(opts.limit))
+      if (opts?.offset) params.set('offset', String(opts.offset))
+      const query = params.toString()
+      const response = await this.get<ActionsResponse>(`/actions${query ? `?${query}` : ''}`)
+      return response.actions
+    },
+
+    /**
+     * Get unresolved actions.
+     * @param limit - Max results (default: 50)
+     */
+    getUnresolved: async (limit = 50): Promise<AgentAction[]> => {
+      const response = await this.get<ActionsResponse>(`/actions/unresolved?limit=${limit}`)
+      return response.actions
+    },
+
+    /**
+     * Get recent actions.
+     * @param limit - Max results (default: 20)
+     */
+    getRecent: async (limit = 20): Promise<AgentAction[]> => {
+      const response = await this.get<ActionsResponse>(`/actions/recent?limit=${limit}`)
+      return response.actions
+    },
+
+    /**
+     * Get success rate for an action type.
+     * @param actionType - Action type to analyze
+     * @param since - Optional start date for analysis
+     */
+    getSuccessRate: async (actionType: string, since?: Date): Promise<ActionStats> => {
+      const params = new URLSearchParams()
+      params.set('action_type', actionType)
+      if (since) params.set('since', since.toISOString())
+      const response = await this.get<ActionStatsResponse>(`/actions/stats?${params}`)
+      return response.stats
+    },
+
+    /**
+     * Get an action by ID.
+     */
+    get: async (id: string): Promise<AgentAction> => {
+      const response = await this.get<ActionResponse>(`/actions/${id}`)
+      return response.action
+    },
+
+    /**
+     * Create a new action record.
+     */
+    create: async (input: ActionCreateInput): Promise<AgentAction> => {
+      const response = await this.post<ActionResponse>('/actions', input)
+      return response.action
+    },
+
+    /**
+     * Update an action.
+     */
+    update: async (id: string, input: ActionUpdateInput): Promise<AgentAction> => {
+      const response = await this.patch<ActionResponse>(`/actions/${id}`, input)
+      return response.action
+    },
+
+    /**
+     * Record the outcome of an action.
+     */
+    recordOutcome: async (id: string, input: ActionOutcomeInput): Promise<AgentAction> => {
+      const response = await this.post<ActionResponse>(`/actions/${id}/outcome`, input)
+      return response.action
+    },
+
+    /**
+     * Delete an action.
+     */
+    delete: async (id: string): Promise<boolean> => {
+      await this.delete<{ deleted: boolean }>(`/actions/${id}`)
+      return true
+    },
+  }
+
+  // ============ Events ============
+
+  /**
+   * Internal event streaming methods.
+   */
+  events = {
+    /**
+     * Subscribe to internal daemon events using Server-Sent Events (SSE).
+     * Returns an async iterator of events.
+     * @param opts.types - Event types to filter by (e.g., ['webhook:received', 'scheduler:task_executed'])
+     * @param opts.source - Filter by event source ('webhook', 'scheduler', 'engine', 'daemon')
+     * @example
+     * ```ts
+     * for await (const event of await client.events.subscribe()) {
+     *   console.log('Event:', event.type, event.data)
+     * }
+     * ```
+     */
+    subscribe: async (opts?: {
+      types?: string[]
+      source?: 'webhook' | 'scheduler' | 'engine' | 'daemon'
+    }): Promise<AsyncIterable<InternalEvent>> => {
+      const params = new URLSearchParams()
+      if (opts?.types?.length) params.set('types', opts.types.join(','))
+      if (opts?.source) params.set('source', opts.source)
+      const query = params.toString()
+      const url = `${this.baseUrl}/api/events/stream${query ? `?${query}` : ''}`
+
+      const response = await fetch(url, {
+        headers: {
+          ...this.headers,
+        },
+      })
+
+      if (!response.ok) {
+        const errorBody = await response.text()
+        throw new SyncClientError(`Failed to subscribe to events: ${errorBody}`, response.status)
+      }
+
+      const contentType = response.headers.get('content-type')
+      if (!contentType?.includes('text/event-stream')) {
+        throw new SyncClientError('Expected text/event-stream response', response.status)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new SyncClientError('Response body is not readable', response.status)
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      return {
+        async *[Symbol.asyncIterator]() {
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+
+              buffer += decoder.decode(value, { stream: true })
+              const lines = buffer.split('\n')
+              buffer = lines.pop() || ''
+
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  const data = line.slice(6).trim()
+                  if (data) {
+                    try {
+                      const event = JSON.parse(data) as InternalEvent
+                      yield event
+                    } catch (error) {
+                      console.error('[SyncClient] Failed to parse event:', error)
+                    }
+                  }
+                }
+              }
+            }
+          } finally {
+            reader.releaseLock()
+          }
+        },
+      }
+    },
+
+    /**
+     * List recent internal events (not live stream).
+     * @param opts.limit - Max events to return (default: 100)
+     * @param opts.types - Event types to filter by
+     * @param opts.source - Filter by event source
+     */
+    list: async (opts?: {
+      limit?: number
+      types?: string[]
+      source?: 'webhook' | 'scheduler' | 'engine' | 'daemon'
+    }): Promise<InternalEvent[]> => {
+      const params = new URLSearchParams()
+      if (opts?.limit) params.set('limit', String(opts.limit))
+      if (opts?.types?.length) params.set('types', opts.types.join(','))
+      if (opts?.source) params.set('source', opts.source)
+      const query = params.toString()
+      const response = await this.get<{ events: InternalEvent[] }>(`/events${query ? `?${query}` : ''}`)
+      return response.events
     },
   }
 }

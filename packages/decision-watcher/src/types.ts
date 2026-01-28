@@ -501,7 +501,8 @@ export type WatcherTrigger =
   | 'agent_error'
   | 'work_item_completed'
   | 'scope_collision'
-  | 'cadence_audit';
+  | 'cadence_audit'
+  | 'handoff_approval';
 
 /**
  * Structured watcher output action types.
@@ -514,6 +515,28 @@ export type WatcherActionType =
   | 'create_work_item'
   | 'quality_gate'
   | 'continue';
+
+/**
+ * Valid watcher action types for each trigger.
+ * This prevents LLM from being presented with invalid options.
+ */
+export const VALID_ACTIONS_BY_TRIGGER: Record<WatcherTrigger, WatcherActionType[]> = {
+  prompt_user: ['answer'],
+  bounds_exceeded: ['realign', 'split', 'create_work_item'],
+  agent_error: ['realign', 'continue'],
+  work_item_completed: ['quality_gate', 'split', 'create_work_item'],
+  cadence_audit: ['continue', 'realign', 'split', 'create_work_item'],
+  session_init: [],  // No action - initialization only
+  scope_collision: ['continue', 'realign'],  // Allow parallel or redirect one agent
+  handoff_approval: ['continue', 'realign'],  // Approve plan or request revision
+};
+
+/**
+ * Get valid actions for a specific trigger.
+ */
+export function getValidActions(trigger: WatcherTrigger): WatcherActionType[] {
+  return VALID_ACTIONS_BY_TRIGGER[trigger];
+}
 
 /**
  * Structured output from the watcher agent.
@@ -533,36 +556,177 @@ export interface WatcherAction {
 }
 
 // ============================================
-// WORK LOG TYPES
+// WORK LOG TYPES (Session Level)
 // ============================================
 
 /**
- * Entry types for the session work log.
+ * Session-level work log entry types.
+ * Tracks WorkItems at a high level - status, brief notes.
+ * Gives the watcher session-wide awareness without drowning in details.
+ *
+ * JSONL format at .watcher/{date}/{sessionId}/work-log.jsonl
  */
-export type WorkLogEntryType =
-  | 'files_modified'      // Auto-logged via hook
-  | 'agent_completed'     // Auto-logged via hook + agent summary
-  | 'watcher_note'        // Watcher annotation (cadence audit, quality gate notes)
-  | 'session_start';      // Session initialization
+export type WorkLogEntry =
+  | WorkLogSessionStart
+  | WorkLogWorkItemCreated
+  | WorkLogWorkItemStatus
+  | WorkLogNote;
 
 /**
- * A single entry in the session work log.
- * JSONL format at .watcher/<sessionId>/work-log.jsonl
+ * Session started.
  */
-export interface WorkLogEntry {
+export interface WorkLogSessionStart {
+  type: 'session_start';
   timestamp: string;
-  type: WorkLogEntryType;
+  goal: string;
+  mode: 'async' | 'interactive';
+}
+
+/**
+ * WorkItem was created/queued.
+ */
+export interface WorkLogWorkItemCreated {
+  type: 'workitem_created';
+  timestamp: string;
+  workId: string;
+  objective: string;
+  agent: string;
+  domain?: string;
+  dependencies?: string[];
+  /** Which workitem spawned this one (if split/created by watcher) */
+  parentWorkId?: string;
+}
+
+/**
+ * WorkItem status changed.
+ */
+export interface WorkLogWorkItemStatus {
+  type: 'workitem_status';
+  timestamp: string;
+  workId: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  /** Brief summary - 1-2 sentences max */
+  summary?: string;
+  /** Duration if completed/failed */
+  durationMs?: number;
+  /** Files modified (just paths, for quick reference) */
+  filesModified?: string[];
+}
+
+/**
+ * Session-level note (watcher observations, important events).
+ * NOT for detailed conversation - that goes in workitem logs.
+ */
+export interface WorkLogNote {
+  type: 'note';
+  timestamp: string;
+  /** Which workitem this relates to (optional) */
   workId?: string;
-  agentType?: string;
-  paths?: string[];               // files written/edited
-  agentSummary?: string;          // agent's own response (reused, not regenerated)
-  watcherNote?: string;           // watcher's semantic annotation
-  metrics?: {
-    toolCallsMade: number;
-    llmCallsMade: number;
-    durationMs: number;
-    contextPercentUsed: number;
-  };
+  note: string;
+  /** Source of the note */
+  source: 'watcher' | 'orchestrator' | 'user';
+}
+
+// ============================================
+// WORKITEM LOG TYPES (WorkItem Level)
+// ============================================
+
+/**
+ * WorkItem-level entry types (JSONL format for streaming).
+ * Each line is a JSON object with a `type` discriminator.
+ * Contains full conversation, tool calls, and scoped decisions.
+ *
+ * JSONL format at .watcher/{date}/{sessionId}/workitems/{workId}.jsonl
+ */
+export type WorkItemEntry =
+  | WorkItemInitEntry
+  | WorkItemMessageEntry
+  | WorkItemToolCallEntry
+  | WorkItemDecisionEntry
+  | WorkItemStatusEntry
+  | WorkItemMetricsEntry;
+
+/**
+ * Initial entry when workitem is created.
+ */
+export interface WorkItemInitEntry {
+  type: 'init';
+  timestamp: string;
+  workId: string;
+  objective: string;
+  agent: string;
+  domain?: string;
+  dependencies?: string[];
+  targetPaths?: string[];
+}
+
+/**
+ * Conversation message (streamed during agent execution).
+ * Captures the agent's reasoning - this is what gives the watcher context.
+ */
+export interface WorkItemMessageEntry {
+  type: 'message';
+  timestamp: string;
+  role: 'system' | 'user' | 'assistant';
+  /** Content - truncated if very long (>3000 chars) */
+  content: string;
+  /** If this was a watcher-injected answer */
+  watcherInjected?: boolean;
+}
+
+/**
+ * Tool call record (streamed during agent execution).
+ * Shows what the agent investigated - critical for watcher context.
+ */
+export interface WorkItemToolCallEntry {
+  type: 'tool_call';
+  timestamp: string;
+  tool: string;
+  /** Summarized args (file paths, patterns, not full content) */
+  args: Record<string, unknown>;
+  success: boolean;
+  /** Brief result summary - NOT the full output */
+  resultSummary?: string;
+  durationMs: number;
+}
+
+/**
+ * Decision made by watcher for this workitem.
+ * Scoped - only this workitem's decisions, not global.
+ */
+export interface WorkItemDecisionEntry {
+  type: 'decision';
+  timestamp: string;
+  trigger: WatcherTrigger;
+  question?: string;
+  answer?: string;
+  rationale: string;
+  action: WatcherActionType;
+}
+
+/**
+ * Status change (started, completed, failed).
+ */
+export interface WorkItemStatusEntry {
+  type: 'status';
+  timestamp: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  error?: string;
+  agentSummary?: string;
+}
+
+/**
+ * Metrics snapshot (can be updated periodically or at end).
+ */
+export interface WorkItemMetricsEntry {
+  type: 'metrics';
+  timestamp: string;
+  toolCalls: number;
+  llmCalls: number;
+  contextPercentUsed: number;
+  durationMs: number;
+  filesRead: string[];
+  filesModified: string[];
 }
 
 // ============================================
@@ -576,6 +740,13 @@ export interface WatcherWorkItem {
   goal: string;
   objective: string;
   agent: string;
+  /**
+   * Domain tag for parallelization control.
+   * WorkItems in the same domain may have collision potential (e.g., modifying same files).
+   * Different domains are safe to parallelize.
+   * Examples: 'frontend', 'backend', 'tests', 'docs', 'config'
+   */
+  domain?: string;
   dependencies?: string[];
   targetPaths?: string[];
   bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };

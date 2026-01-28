@@ -13,6 +13,7 @@ import { writeSalienceFile, salienceFilePath } from './salience.js';
 import { createDecisionLog } from './decision-log.js';
 import { createWorkLog } from './work-log.js';
 import { createWatcherStopHook } from './watcher-agent.js';
+import { getWorkItemLog } from './workitem-log.js';
 
 // ============================================
 // TYPES
@@ -73,9 +74,10 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
 
   // Write session_start entry
   await workLog.append({
-    timestamp: new Date().toISOString(),
     type: 'session_start',
-    watcherNote: `Session started with goal: ${config.goal.slice(0, 200)}`,
+    timestamp: new Date().toISOString(),
+    goal: config.goal,
+    mode: 'async',
   }).catch(err => {
     console.warn('[WATCHER] Work log write failed (session_start):', err instanceof Error ? err.message : String(err));
   });
@@ -86,6 +88,7 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
     salienceFilePath: salience,
     decisionLog,
     workLog,
+    getWorkItemLog: (workId: string) => getWorkItemLog(config.workingDir, config.sessionId, workId),
     workingDir: config.workingDir,
     runAgent: config.runAgent,
     onCreateWorkItems: config.onCreateWorkItems,
@@ -112,77 +115,64 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
 /**
  * Build the objective string for the planning agent.
  *
- * The planning agent is a standard agent that:
- * - Reads the salience file for context
- * - Explores the codebase as needed
+ * The planning agent:
+ * - Reads the salience file for context and principles
+ * - Explores the codebase minimally (just enough to plan)
  * - Asks clarifying questions (answered by watcher autonomously)
- * - Produces a structured handoff spec via PromptUser or handoffSpec
+ * - Produces a structured handoff spec
+ *
+ * NOTE: Skill knowledge is baked into the system prompt. Do NOT tell the agent to read skill files.
  */
 export function buildPlanningObjective(
   goal: string,
   saliencePath: string,
   decisionLogPath: string,
-  workLogPath: string,
-  skillPaths?: string[]
+  workLogPath: string
 ): string {
-  const skillSection = skillPaths?.length
-    ? `\n### Skill Files\n**Read these skill files for critical context about tools, workflows, and preferences:**\n${skillPaths.map(p => `- ${p}`).join('\n')}\n`
-    : '';
+  return `## Goal
 
-  return `## Async Planning Session
+${goal}
 
-You are planning the execution of the following goal:
+## Context Files
 
-**Goal**: ${goal}
+- **Salience**: ${saliencePath} — session goal and principles
+- **Decision log**: ${decisionLogPath} — prior decisions this session
+- **Work log**: ${workLogPath} — session activity
 
-### Context Files
-- Salience file: ${saliencePath} — contains the session goal and operating principles
-- Decision log: ${decisionLogPath} — records decisions made during this session
-- Work log: ${workLogPath} — session memory of all agent activity
-${skillSection}
-### Phase 1: Understanding (REQUIRED)
-Before producing a plan, you MUST:
-1. Read the salience file for goal and principles.
-2. **Read any skill files listed above** — they contain critical context about tools, workflows, and user preferences.
-3. Explore the codebase — use Glob, Grep, Read.
-4. Ask 2-5 clarifying questions via PromptUser to resolve ambiguity.
-   - The watcher answers questions using best judgment and available context.
-   - The watcher MUST answer — there is no user to defer to in async mode.
-   - Focus on: scope boundaries, design trade-offs, ordering constraints.
-DO NOT skip Phase 1.
+## Your Task
 
-### Phase 2: Produce Plan
-When questions are answered:
-1. **Produce a plan** as a structured handoff spec (set goalStateReached=true and include handoffSpec).
+1. **Read the salience file** for goal context and operating principles.
+2. **Explore minimally** — use Glob/Grep/Read to understand what needs to change.
+3. **Ask questions** — use PromptUser if the goal is ambiguous. The watcher answers.
+4. **Produce a plan** — output your handoffSpec when ready.
 
-### Handoff Spec Format
+## handoffSpec Format
 
-The handoffSpec should be a JSON string with this structure:
+Your handoffSpec MUST be valid JSON:
 \`\`\`json
 {
   "goal": "the overall goal",
+  "context": "key context discovered during planning",
   "workItems": [
     {
       "id": "work-1",
-      "objective": "specific objective for this unit of work",
-      "delta": "what changes when this is done (one git commit)",
+      "objective": "specific objective with file paths",
+      "delta": "what changes (one commit)",
       "agent": "standard",
+      "domain": "backend",
       "dependencies": [],
-      "targetPaths": ["path/to/focus/on"]
+      "targetPaths": ["path/to/file.ts"]
     }
   ]
 }
 \`\`\`
 
-### Parallelization
-- The orchestrator runs independent work items concurrently via Promise.all.
-- Design work items to maximize parallelism — prefer independent items over serial chains.
-- Only use dependencies when there's a genuine ordering constraint.
-- Set generous bounds on work items (e.g., maxToolCalls: 200, maxLlmCalls: 30).
+## Principles
 
-### Principles
-- Each work item = one atomic unit of work = one git commit
-- Work items can run in parallel when they have no dependencies
-- Be specific in objectives — include file paths, function names, expected behavior
-- Dependencies form a DAG — downstream items wait for upstream ones`;
+- **Atomic**: Each work item = one commit
+- **Parallel**: Independent items run concurrently (minimize dependencies)
+- **Specific**: Include file paths in objectives
+- **Bounded**: Max 5-7 work items. If bigger, split the goal first.
+
+When ready: set \`goalStateReached: true\`, \`action: "done"\`, and include \`handoffSpec\`.`;
 }

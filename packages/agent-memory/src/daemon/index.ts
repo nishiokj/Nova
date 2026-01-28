@@ -22,6 +22,8 @@ import type { EntitySourceMappingRepository } from '../db/repositories/entity-so
 import type { RegisteredConnectorRepository, RegisteredConnector } from '../db/repositories/registered-connector.js'
 import type { CodingPreferencesRepository } from '../db/repositories/coding-preferences.js'
 import type { CodingDecisionsRepository } from '../db/repositories/coding-decisions.js'
+import type { AgentGoalsRepository } from '../db/repositories/agent-goals.js'
+import type { AgentActionsRepository } from '../db/repositories/agent-actions.js'
 import type { RawEnvelope } from '../models/raw.js'
 import { validateEntity, type EntityType } from '../models/canonical.js'
 import { createAccountRepository } from '../db/repositories/account.js'
@@ -35,6 +37,8 @@ import { createEntitySourceMappingRepository } from '../db/repositories/entity-s
 import { createRegisteredConnectorRepository } from '../db/repositories/registered-connector.js'
 import { createCodingPreferencesRepository } from '../db/repositories/coding-preferences.js'
 import { createCodingDecisionsRepository } from '../db/repositories/coding-decisions.js'
+import { createAgentGoalsRepository } from '../db/repositories/agent-goals.js'
+import { createAgentActionsRepository } from '../db/repositories/agent-actions.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
@@ -45,6 +49,15 @@ import { HttpServer, type ServerConfig } from './server.js'
 import { registerRoutes } from './routes/index.js'
 import { createConnector, listFactoryTypes, hasFactory, type LoadConnectorsResult } from '../connectors/registry.js'
 import { TransformationRegistry } from '../transform/registry.js'
+
+// ============ Internal Event Types ============
+
+export interface InternalEvent {
+  type: string
+  source?: 'webhook' | 'scheduler' | 'engine' | 'daemon'
+  timestamp: string
+  data?: Record<string, unknown>
+}
 
 // ============ Configuration ============
 
@@ -124,12 +137,15 @@ export class SyncDaemon {
   readonly connectorRepo: RegisteredConnectorRepository
   readonly preferencesRepo: CodingPreferencesRepository
   readonly decisionsRepo: CodingDecisionsRepository
+  readonly goalsRepo: AgentGoalsRepository
+  readonly actionsRepo: AgentActionsRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
   private config: DaemonConfig
   private isRunning = false
   private registeredConnectorsLoaded = false
+  private internalEventHandlers: Array<(event: InternalEvent) => void> = []
 
   private constructor(
     config: DaemonConfig,
@@ -150,7 +166,9 @@ export class SyncDaemon {
     mappingRepo: EntitySourceMappingRepository,
     connectorRepo: RegisteredConnectorRepository,
     preferencesRepo: CodingPreferencesRepository,
-    decisionsRepo: CodingDecisionsRepository
+    decisionsRepo: CodingDecisionsRepository,
+    goalsRepo: AgentGoalsRepository,
+    actionsRepo: AgentActionsRepository
   ) {
     this.config = config
     this.server = server
@@ -171,6 +189,8 @@ export class SyncDaemon {
     this.connectorRepo = connectorRepo
     this.preferencesRepo = preferencesRepo
     this.decisionsRepo = decisionsRepo
+    this.goalsRepo = goalsRepo
+    this.actionsRepo = actionsRepo
   }
 
   /**
@@ -199,6 +219,8 @@ export class SyncDaemon {
     const connectorRepo = createRegisteredConnectorRepository(ctx)
     const preferencesRepo = createCodingPreferencesRepository(ctx)
     const decisionsRepo = createCodingDecisionsRepository(ctx)
+    const goalsRepo = createAgentGoalsRepository(ctx)
+    const actionsRepo = createAgentActionsRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -270,7 +292,9 @@ export class SyncDaemon {
       mappingRepo,
       connectorRepo,
       preferencesRepo,
-      decisionsRepo
+      decisionsRepo,
+      goalsRepo,
+      actionsRepo
     )
 
     // Store connectors map reference in daemon for registration
@@ -875,6 +899,43 @@ export class SyncDaemon {
     await this.accountRepo.activate(account.id)
 
     return (await this.accountRepo.findById(account.id))!
+  }
+
+  // ============ Internal Event System ============
+
+  /**
+   * Subscribe to internal daemon events.
+   * Returns an unsubscribe function.
+   */
+  onInternalEvent(handler: (event: InternalEvent) => void): () => void {
+    this.internalEventHandlers.push(handler)
+    return () => {
+      const idx = this.internalEventHandlers.indexOf(handler)
+      if (idx >= 0) this.internalEventHandlers.splice(idx, 1)
+    }
+  }
+
+  /**
+   * Emit an internal event.
+   * Used by internal components to broadcast events.
+   */
+  emitInternalEvent(event: Omit<InternalEvent, 'timestamp'>): void {
+    const fullEvent: InternalEvent = {
+      ...event,
+      timestamp: new Date().toISOString(),
+    }
+
+    // Notify all handlers
+    for (const handler of this.internalEventHandlers) {
+      try {
+        handler(fullEvent)
+      } catch (error) {
+        console.error('[SyncDaemon] Internal event handler error:', {
+          event: fullEvent,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
   }
 
   // ============ Sanity Checks ============

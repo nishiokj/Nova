@@ -70,6 +70,13 @@ export interface WorkItem {
   readonly delta?: string;
   /** Agent type to execute this work */
   readonly agent: string;
+  /**
+   * Domain tag for parallelization control.
+   * WorkItems in the same domain may have collision potential (e.g., modifying same files).
+   * Different domains are safe to parallelize.
+   * Examples: 'frontend', 'backend', 'tests', 'docs', 'config'
+   */
+  readonly domain?: string;
   /** Dependencies (work IDs) that must complete first */
   readonly dependencies: readonly string[];
   /** Target file paths to operate on */
@@ -107,6 +114,7 @@ export function createWorkItem(params: {
   objective: string;
   delta?: string;
   agent?: string;
+  domain?: string;
   dependencies?: string[];
   targetPaths?: string[];
   toolHint?: string;
@@ -123,6 +131,7 @@ export function createWorkItem(params: {
     objective: params.objective,
     delta: params.delta,
     agent: params.agent ?? 'standard',
+    domain: params.domain,
     dependencies: Object.freeze(params.dependencies ?? []),
     targetPaths: Object.freeze(params.targetPaths ?? []),
     toolHint: params.toolHint,

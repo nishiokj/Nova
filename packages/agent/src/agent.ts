@@ -713,6 +713,13 @@ export class Agent {
       terminationReason: result.terminationReason ?? 'exception',
       filesRead: result.filesRead,
       invalidatedPaths: result.invalidatedPaths,
+      // Include response and metrics for workitem log tracking
+      response: result.response,
+      metrics: {
+        toolCallsMade: metrics.toolCallsMade,
+        llmCallsMade: metrics.llmCallsMade,
+      },
+      contextPercentUsed: result.localContext.metrics.percentageUsed,
     }, this.buildHookContext(workItem));
 
     profiler.asyncEnd(`agent.run:${this.config.type}`, runAsyncId, 'agent', {

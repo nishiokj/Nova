@@ -7,24 +7,28 @@
  */
 
 import fs from 'fs/promises';
-import path from 'path';
+import {
+  sessionDir,
+  saliencePath as getSaliencePath,
+  workitemsDir,
+} from './session-paths.js';
 
 // ============================================
-// PATH HELPERS
+// PATH HELPERS (re-exported for compatibility)
 // ============================================
 
 /**
  * Get the directory for a watcher session's artifacts.
  */
 export function salienceDir(workingDir: string, sessionId: string): string {
-  return path.join(workingDir, '.watcher', sessionId);
+  return sessionDir(workingDir, sessionId);
 }
 
 /**
  * Get the salience file path for a session.
  */
 export function salienceFilePath(workingDir: string, sessionId: string): string {
-  return path.join(salienceDir(workingDir, sessionId), 'salience.md');
+  return getSaliencePath(workingDir, sessionId);
 }
 
 // ============================================
@@ -36,8 +40,6 @@ export interface SalienceParams {
   goal: string;
   mode: 'async' | 'interactive';
   principles?: string[];
-  /** Skill file paths to include - these provide context for decision making */
-  skillPaths?: string[];
 }
 
 const DEFAULT_PRINCIPLES = [
@@ -52,7 +54,7 @@ const DEFAULT_PRINCIPLES = [
  * Generate salience file content as markdown.
  */
 export function createSalienceContent(params: SalienceParams): string {
-  const { sessionId, goal, mode, principles = DEFAULT_PRINCIPLES, skillPaths = [] } = params;
+  const { sessionId, goal, mode, principles = DEFAULT_PRINCIPLES } = params;
   const timestamp = new Date().toISOString();
 
   const lines = [
@@ -66,26 +68,11 @@ export function createSalienceContent(params: SalienceParams): string {
     '',
     ...principles.map((p, i) => `${i + 1}. ${p}`),
     '',
-  ];
-
-  // Add skill files section if any are provided
-  if (skillPaths.length > 0) {
-    lines.push(
-      '## Skill Files',
-      '',
-      'These skill files provide context for decision making. **Read them before answering questions.**',
-      '',
-      ...skillPaths.map(p => `- ${p}`),
-      '',
-    );
-  }
-
-  lines.push(
     '## Session Notes',
     '',
     '_No notes yet. The watcher will append observations here._',
     '',
-  );
+  ];
 
   return lines.join('\n');
 }
@@ -96,6 +83,7 @@ export function createSalienceContent(params: SalienceParams): string {
 
 /**
  * Write the salience file to disk, creating directories as needed.
+ * Also creates the workitems subdirectory.
  * Returns the file path.
  */
 export async function writeSalienceFile(
@@ -104,6 +92,10 @@ export async function writeSalienceFile(
 ): Promise<string> {
   const dir = salienceDir(workingDir, params.sessionId);
   await fs.mkdir(dir, { recursive: true });
+
+  // Also create workitems subdirectory
+  const workitemsPath = workitemsDir(workingDir, params.sessionId);
+  await fs.mkdir(workitemsPath, { recursive: true });
 
   const filePath = salienceFilePath(workingDir, params.sessionId);
   const content = createSalienceContent(params);

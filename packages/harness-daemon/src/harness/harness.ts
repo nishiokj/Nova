@@ -70,6 +70,7 @@ import {
   writeSalienceFile,
   createDecisionLog,
   createWorkLog,
+  getWorkItemLog,
   type DecisionDatabase,
   type DecisionMemory,
   type WatcherAction,
@@ -1725,7 +1726,7 @@ export class AgentHarness {
    * Run the watcher agent with a trigger-specific objective.
    * Creates a mini Agent instance, executes it, and parses the structured WatcherAction output.
    */
-  private async runWatcherAgent(objective: string, sessionKey: string): Promise<WatcherAction> {
+  private async runWatcherAgent(objective: string, sessionKey: string, trigger?: string): Promise<WatcherAction> {
     // Get the watcher agent config from registry
     if (!this.agentRegistry.has('watcher')) {
       this.logger.warning('Watcher agent type not registered, defaulting to continue');
@@ -1746,7 +1747,48 @@ export class AgentHarness {
 
     const llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
 
-    const agent = new Agent(agentConfig, {
+    // Import getValidActions to build trigger-specific schema
+    const { getValidActions } = await import('decision-watcher');
+
+    // Build trigger-specific output schema
+    // Only present valid action types for this specific trigger
+    const validActions = trigger ? getValidActions(trigger as any) : [];
+    const triggerInfo = trigger ? `\n\nValid actions for this trigger: ${validActions.join(', ')}` : '';
+
+    // Build dynamic schema based on valid actions
+    const actionEnum = validActions.length > 0 ? {
+      watcherAction: {
+        type: 'string',
+        enum: validActions,
+        description: `The action type to take. Valid actions for trigger "${trigger}": ${validActions.join(', ')}`,
+      },
+    } : {
+      watcherAction: {
+        type: 'string',
+        description: 'The action type to take',
+      },
+    };
+
+    const outputSchema = {
+      name: 'WatcherAction',
+      schema: {
+        type: 'object',
+        properties: {
+          ...actionEnum,
+          reason: {
+            type: 'string',
+            description: 'Rationale for this decision',
+          },
+        },
+        required: ['watcherAction', 'reason'],
+        additionalProperties: false,
+      },
+    };
+
+    // Override the agent config's output schema with the trigger-specific one
+    const watcherConfig = { ...agentConfig, outputSchema };
+
+    const agent = new Agent(watcherConfig, {
       llm: this.llmAdapter,
       toolRegistry: this.toolRegistry,
       llmConfig,
@@ -1762,7 +1804,7 @@ export class AgentHarness {
 
     const workItem = createWorkItem({
       goal: 'watcher_evaluation',
-      objective,
+      objective: objective + triggerInfo,
       agent: 'watcher',
       bounds: {
         maxToolCalls: agentConfig.budget.maxToolCalls,
@@ -1817,25 +1859,11 @@ export class AgentHarness {
     goal: string,
     workingDir: string
   ): Promise<{ stopHook: import('orchestrator').StopHookHandler; planningObjective: string }> {
-    // Discover skill files for context
-    const skillsDir = this.config.skills.directory
-      ? path.resolve(workingDir, this.config.skills.directory)
-      : path.resolve(workingDir, 'config/skills');
-    const skillStubs = loadSkillDefinitions(skillsDir);
-    const skillPaths: string[] = [];
-    for (const stub of skillStubs) {
-      if (!stub.enabled) continue;
-      const full = getSkillDefinition(skillsDir, stub.name);
-      if (full?.sourcePath) {
-        skillPaths.push(full.sourcePath);
-      }
-    }
-
+    // NOTE: Skill knowledge is baked into system prompts. No need to discover skill files.
     const saliencePath = await writeSalienceFile(workingDir, {
       sessionId: sessionKey,
       goal,
       mode: 'async',
-      skillPaths,
     });
 
     const decisionLog = await createDecisionLog(workingDir, sessionKey);
@@ -1844,22 +1872,23 @@ export class AgentHarness {
 
     // Write session_start entry
     await workLog.append({
-      timestamp: new Date().toISOString(),
       type: 'session_start',
-      watcherNote: `Session started with goal: ${goal.slice(0, 200)}`,
+      timestamp: new Date().toISOString(),
+      goal,
+      mode: 'async',
     }).catch(err => {
       console.warn('[HARNESS] Work log write failed (session_start):', err instanceof Error ? err.message : String(err));
     });
 
-    // Register auto-logging hooks for files_modified and agent_completed
+    // Register auto-logging hooks for workitem status changes
     registerHook('files_modified', async (event: { type: string; paths?: string[] }, ctx: { workId: string; agentType: string }) => {
       if (event.type === 'files_modified' && event.paths) {
         await workLog.append({
+          type: 'note',
           timestamp: new Date().toISOString(),
-          type: 'files_modified',
           workId: ctx.workId,
-          agentType: ctx.agentType,
-          paths: event.paths,
+          note: `Files modified: ${event.paths.slice(0, 5).join(', ')}${event.paths.length > 5 ? ` (+${event.paths.length - 5} more)` : ''}`,
+          source: 'orchestrator',
         }).catch(err => {
           console.warn('[HARNESS] Work log write failed (files_modified):', err instanceof Error ? err.message : String(err));
         });
@@ -1869,11 +1898,11 @@ export class AgentHarness {
     registerHook('agent_completed', async (event: { type: string; workId?: string; invalidatedPaths?: string[] }, ctx: { workId: string; agentType: string }) => {
       if (event.type === 'agent_completed') {
         await workLog.append({
+          type: 'workitem_status',
           timestamp: new Date().toISOString(),
-          type: 'agent_completed',
-          workId: ctx.workId ?? event.workId,
-          agentType: ctx.agentType,
-          paths: event.invalidatedPaths,
+          workId: ctx.workId ?? event.workId ?? 'unknown',
+          status: 'completed',
+          filesModified: event.invalidatedPaths,
         }).catch(err => {
           console.warn('[HARNESS] Work log write failed (agent_completed):', err instanceof Error ? err.message : String(err));
         });
@@ -1885,9 +1914,9 @@ export class AgentHarness {
       salienceFilePath: saliencePath,
       decisionLog,
       workLog,
+      getWorkItemLog: (workId: string) => getWorkItemLog(workingDir, sessionKey, workId),
       workingDir,
-      skillPaths,
-      runAgent: (objective: string) => this.runWatcherAgent(objective, sessionKey),
+      runAgent: (objective: string, trigger: string) => this.runWatcherAgent(objective, sessionKey, trigger),
       onDecision: (entry) => {
         this.logger.info('Watcher decision', {
           sessionKey,
@@ -1908,7 +1937,7 @@ export class AgentHarness {
     });
 
     const planningObjective = buildPlanningObjective(
-      goal, saliencePath, decisionLog.filePath(), workLog.filePath(), skillPaths
+      goal, saliencePath, decisionLog.filePath(), workLog.filePath()
     );
 
     return { stopHook, planningObjective };
