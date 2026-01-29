@@ -9,8 +9,8 @@
  */
 
 import fs from 'fs/promises';
-import path from 'path';
 import type { WorkLogEntry } from './types.js';
+import { sessionDir, workLogPath as getWorkLogPath } from './session-paths.js';
 
 // ============================================
 // WORK LOG INTERFACE
@@ -33,16 +33,16 @@ export interface WorkLog {
 
 /**
  * Create a JSONL-based work log for a session.
- * Path: .watcher/<sessionId>/work-log.jsonl
+ * Path: .watcher/{YYYY-MM-DD}/{sessionId}/work-log.jsonl
  */
 export async function createWorkLog(
   workingDir: string,
   sessionId: string
 ): Promise<WorkLog> {
-  const dir = path.join(workingDir, '.watcher', sessionId);
+  const dir = sessionDir(workingDir, sessionId);
   await fs.mkdir(dir, { recursive: true });
 
-  const logPath = path.join(dir, 'work-log.jsonl');
+  const logPath = getWorkLogPath(workingDir, sessionId);
 
   // Ensure the file exists (touch)
   await fs.appendFile(logPath, '', 'utf-8');

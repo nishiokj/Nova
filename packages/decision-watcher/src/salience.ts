@@ -7,24 +7,28 @@
  */
 
 import fs from 'fs/promises';
-import path from 'path';
+import {
+  sessionDir,
+  saliencePath as getSaliencePath,
+  workitemsDir,
+} from './session-paths.js';
 
 // ============================================
-// PATH HELPERS
+// PATH HELPERS (re-exported for compatibility)
 // ============================================
 
 /**
  * Get the directory for a watcher session's artifacts.
  */
 export function salienceDir(workingDir: string, sessionId: string): string {
-  return path.join(workingDir, '.watcher', sessionId);
+  return sessionDir(workingDir, sessionId);
 }
 
 /**
  * Get the salience file path for a session.
  */
 export function salienceFilePath(workingDir: string, sessionId: string): string {
-  return path.join(salienceDir(workingDir, sessionId), 'salience.md');
+  return getSaliencePath(workingDir, sessionId);
 }
 
 // ============================================
@@ -41,7 +45,7 @@ export interface SalienceParams {
 const DEFAULT_PRINCIPLES = [
   'Surface ambiguity aggressively — implicit boundaries and shared ownership are questions, not silent choices.',
   'Establish invariants — record what decisions imply. Make boundaries and contracts explicit.',
-  'Separation of concerns is non-negotiable — detect concern-mixing and escalate.',
+  'Separation of concerns is non-negotiable — detect and address concern-mixing.',
   'Minimal intervention — only act with clear benefit.',
   'One work item = one git commit. Keep units of work atomic and reviewable.',
 ];
@@ -79,6 +83,7 @@ export function createSalienceContent(params: SalienceParams): string {
 
 /**
  * Write the salience file to disk, creating directories as needed.
+ * Also creates the workitems subdirectory.
  * Returns the file path.
  */
 export async function writeSalienceFile(
@@ -88,9 +93,57 @@ export async function writeSalienceFile(
   const dir = salienceDir(workingDir, params.sessionId);
   await fs.mkdir(dir, { recursive: true });
 
+  // Also create workitems subdirectory
+  const workitemsPath = workitemsDir(workingDir, params.sessionId);
+  await fs.mkdir(workitemsPath, { recursive: true });
+
   const filePath = salienceFilePath(workingDir, params.sessionId);
   const content = createSalienceContent(params);
   await fs.writeFile(filePath, content, 'utf-8');
 
   return filePath;
+}
+
+/**
+ * Observation entry for salience notes.
+ */
+export interface SalienceObservation {
+  trigger: string;
+  action: string;
+  workId?: string;
+  summary: string;
+}
+
+/**
+ * Append an observation to the Session Notes section of the salience file.
+ * Creates a timestamped note under the "## Session Notes" header.
+ */
+export async function appendSalienceObservation(
+  salienceFilePath: string,
+  observation: SalienceObservation
+): Promise<void> {
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const workIdPart = observation.workId ? ` [${observation.workId.slice(0, 8)}]` : '';
+  const note = `\n### ${timestamp}${workIdPart}\n**${observation.trigger}** → ${observation.action}\n${observation.summary}\n`;
+
+  try {
+    const content = await fs.readFile(salienceFilePath, 'utf-8');
+
+    // Find the Session Notes section and remove the placeholder
+    const placeholder = '_No notes yet. The watcher will append observations here._';
+    let updatedContent: string;
+
+    if (content.includes(placeholder)) {
+      // Replace placeholder with first note
+      updatedContent = content.replace(placeholder, note.trim());
+    } else {
+      // Append to end of file
+      updatedContent = content.trimEnd() + note;
+    }
+
+    await fs.writeFile(salienceFilePath, updatedContent, 'utf-8');
+  } catch (err) {
+    // Log but don't throw - salience updates are non-critical
+    console.warn('[SALIENCE] Failed to append observation:', err instanceof Error ? err.message : String(err));
+  }
 }

@@ -21,6 +21,7 @@ import {
   DEFAULT_ENTITY_GRAPH_CONFIG,
   DEFAULT_AUTH_CONFIG,
   DEFAULT_MODELS_CONFIG,
+  DEFAULT_MEMORY_CONFIG,
   type FullHarnessConfig,
   type ResolvedAgentConfig,
   type ResolvedLLMConfig,
@@ -636,6 +637,11 @@ export function createConfigFromFile(
     models: {
       available: getAllModels(),
       default: fileConfig.models?.default ?? DEFAULT_MODELS_CONFIG.default,
+    },
+    memory: {
+      enabled: fileConfig.memory?.enabled ?? DEFAULT_MEMORY_CONFIG.enabled,
+      baseUrl: fileConfig.memory?.base_url ?? DEFAULT_MEMORY_CONFIG.base_url ?? 'http://localhost:3001',
+      timeoutMs: fileConfig.memory?.timeout_ms ?? DEFAULT_MEMORY_CONFIG.timeout_ms ?? 5000,
     },
     configPath,
     dangerousMode: false, // Set at runtime via CLI flag

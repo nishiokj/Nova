@@ -1,0 +1,51 @@
+{
+  "goal": "Fix critical and high-priority bugs in packages/memory-injector/",
+  "context": "The memory-injector package has 13 documented bugs in BUGS_FOUND.md with 31 tests. Tests already exist and expose the bugs - need to fix the implementation to make tests pass. Key issues: null/undefined content crashes (BUG #1), empty content not filtered (BUG #10), token estimation wrong for non-ASCII (BUG #5), first item too large causes data loss (BUG #6), no deduplication (BUG #13), silent error swallowing (BUG #7), empty query validation (BUG #2).",
+  "workItems": [
+    {
+      "id": "work-1",
+      "objective": "Fix CRITICAL bugs #1 and #10: Handle null/undefined/empty content in packages/memory-injector/src/injector.ts",
+      "delta": "Filter out null, undefined, and empty/whitespace-only content from preferences and decisions before processing. Add guards in the map transformation and filter empty items before building output.",
+      "agent": "standard",
+      "domain": "backend",
+      "dependencies": [],
+      "targetPaths": ["packages/memory-injector/src/injector.ts"]
+    },
+    {
+      "id": "work-2",
+      "objective": "Fix HIGH bug #5: Improve token estimation for non-ASCII characters in packages/memory-injector/src/injector.ts",
+      "delta": "Replace naive Math.ceil(length / 4) with better estimation that accounts for CJK characters (1-2 tokens per char), emoji (1-2 tokens each), and code (special chars split). Consider using a more sophisticated estimation or adding a safety buffer.",
+      "agent": "standard",
+      "domain": "backend",
+      "dependencies": [],
+      "targetPaths": ["packages/memory-injector/src/injector.ts"]
+    },
+    {
+      "id": "work-3",
+      "objective": "Fix HIGH bug #6: Handle items that exceed maxTokens without losing all subsequent items in packages/memory-injector/src/injector.ts",
+      "delta": "Change the loop logic to continue iterating instead of breaking when an item is too large. Skip items that individually exceed maxTokens but continue checking smaller items that would fit.",
+      "agent": "standard",
+      "domain": "backend",
+      "dependencies": [],
+      "targetPaths": ["packages/memory-injector/src/injector.ts"]
+    },
+    {
+      "id": "work-4",
+      "objective": "Fix HIGH bug #13: Add deduplication to prevent same content appearing in both preferences and decisions in packages/memory-injector/src/injector.ts",
+      "delta": "Add deduplication logic after combining and sorting items. Use a Set to track seen content and skip duplicates.",
+      "agent": "standard",
+      "domain": "backend",
+      "dependencies": [],
+      "targetPaths": ["packages/memory-injector/src/injector.ts"]
+    },
+    {
+      "id": "work-5",
+      "objective": "Fix MEDIUM bugs #2 and #7: Add query validation and error logging in packages/memory-injector/src/injector.ts",
+      "delta": "1) Add early return null if query is empty or whitespace-only. 2) Replace silent error swallowing (.catch(() => ...)) with proper error logging before returning empty fallbacks.",
+      "agent": "standard",
+      "domain": "backend",
+      "dependencies": [],
+      "targetPaths": ["packages/memory-injector/src/injector.ts"]
+    }
+  ]
+}

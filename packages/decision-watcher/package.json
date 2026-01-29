@@ -22,10 +22,6 @@
       "types": "./dist/engine/index.d.ts",
       "import": "./dist/engine/index.js"
     },
-    "./watcher": {
-      "types": "./dist/watcher/index.d.ts",
-      "import": "./dist/watcher/index.js"
-    },
     "./integration": {
       "types": "./dist/integration/index.d.ts",
       "import": "./dist/integration/index.js"

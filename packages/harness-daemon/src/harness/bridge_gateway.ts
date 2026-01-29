@@ -76,8 +76,8 @@ interface HarnessLike {
   watcherDefocus?(sessionKey: string): Record<string, unknown>;
   watcherReanchor?(sessionKey: string, goal: string): Record<string, unknown>;
   watcherSummarize?(sessionKey: string): Record<string, unknown>;
-  /** Create an LLM-backed watcher stopHook for a session. */
-  createWatcherStopHookForSession?(sessionKey: string, goal: string, workingDir: string): Promise<import('orchestrator').StopHookHandler>;
+  /** Create an LLM-backed watcher stopHook + planning objective for a session. */
+  createWatcherStopHookForSession?(sessionKey: string, goal: string, workingDir: string): Promise<{ stopHook: import('orchestrator').StopHookHandler; planningObjective: string }>;
 }
 
 interface RalphLoopInfo {
@@ -1780,7 +1780,7 @@ export class BridgeGateway {
     }
 
     try {
-      const stopHook = await this.harness.createWatcherStopHookForSession(sessionKey, goal, workingDir);
+      const { stopHook, planningObjective } = await this.harness.createWatcherStopHookForSession(sessionKey, goal, workingDir);
 
       const requestId = generateRequestId();
       state.activeRequestId = requestId;
@@ -1789,7 +1789,7 @@ export class BridgeGateway {
       // Start the harness run with the watcher stopHook and planning objective as input
       const handle = this.harness.run({
         requestId,
-        inputText: goal,
+        inputText: planningObjective,
         sessionKey,
         workingDir,
         stopHook,

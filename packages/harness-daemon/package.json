@@ -20,6 +20,7 @@
     "entity-graph": "workspace:*",
     "graphd": "workspace:*",
     "llm": "workspace:*",
+    "memory-injector": "workspace:*",
     "minimatch": "^10.1.1",
     "orchestrator": "workspace:*",
     "shared": "workspace:*",

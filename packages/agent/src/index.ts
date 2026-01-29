@@ -2,7 +2,7 @@
  * Agent Module - Barrel Export
  */
 
-export { Agent, type ModelSelection } from './agent.js';
+export { Agent, type ModelSelection, type MemoryInjector } from './agent.js';
 export { AgentRegistry } from './agent-registry.js';
 export {
   circuitBreakerRegistry,
@@ -21,6 +21,8 @@ export type {
   UserPromptInfo,
   EventEmitCallback,
   AgentHooks,
+  AgentCadenceMetrics,
+  AgentCadenceResult,
   ToolHookResult,
   AgentRuntimeConfig,
   InternalHookEvent,
@@ -41,8 +43,10 @@ export {
   STANDARD_PROMPT,
   WATCHER_PROMPT,
   ASYNC_MODE_ADDENDUM,
+  ASYNC_AGENT_PROMPT,
   getAgentPrompt,
   getAsyncModeAddendum,
+  getAsyncAgentPrompt,
   buildAgentConfig,
   buildEnvironmentPrompt,
   PLANNING_PROMPT_ADDENDUM,

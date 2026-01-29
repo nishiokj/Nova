@@ -100,7 +100,10 @@ const ClaudeBaseMessageSchema = z.object({
   uuid: z.string(),
   parentUuid: z.string().nullable().optional(),
   sessionId: z.string(),
-  timestamp: z.string(),
+  timestamp: z.string().refine(
+    (val) => !isNaN(Date.parse(val)),
+    { message: 'Invalid date format - must be ISO 8601 timestamp' }
+  ),
   isSidechain: z.boolean().optional(),
   userType: z.string().optional(),
   cwd: z.string().optional(),
@@ -148,7 +151,10 @@ export const ClaudeFileHistorySnapshotSchema = z.object({
   snapshot: z.object({
     messageId: z.string(),
     trackedFileBackups: z.record(z.unknown()),
-    timestamp: z.string(),
+    timestamp: z.string().refine(
+      (val) => !isNaN(Date.parse(val)),
+      { message: 'Invalid date format - must be ISO 8601 timestamp' }
+    ),
   }),
   isSnapshotUpdate: z.boolean().optional(),
 })
@@ -173,7 +179,10 @@ export type ClaudeSessionMessage = z.infer<typeof ClaudeSessionMessageSchema>
 const RexBaseMessageSchema = z.object({
   id: z.string(),
   session_id: z.string(),
-  timestamp: z.string(),
+  timestamp: z.string().refine(
+    (val) => !isNaN(Date.parse(val)),
+    { message: 'Invalid date format - must be ISO 8601 timestamp' }
+  ),
   parent_id: z.string().nullable().optional(),
 })
 
@@ -196,7 +205,10 @@ export const RexSummaryMessageSchema = z.object({
   type: z.literal('summary'),
   session_id: z.string(),
   summary: z.string(),
-  created_at: z.string(),
+  created_at: z.string().refine(
+    (val) => !isNaN(Date.parse(val)),
+    { message: 'Invalid date format - must be ISO 8601 timestamp' }
+  ),
 })
 
 export const RexSessionMessageSchema = z.discriminatedUnion('type', [

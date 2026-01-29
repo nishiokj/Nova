@@ -65,12 +65,67 @@ export function registerWebhookRoutes(server: HttpServer, daemon: SyncDaemon): v
       await daemon.collector.ingestWebhook(connector as any, accountId, items)
     }
 
+    // Emit internal event for webhook-derived task triggers
+    daemon.emitInternalEvent({
+      type: 'webhook:received',
+      source: 'webhook',
+      data: {
+        connector,
+        accountId,
+        eventType: event.eventType,
+        deliveryId: event.deliveryId,
+        itemCount: items.length,
+        timestamp: event.receivedAt.toISOString(),
+      },
+    })
+
+    // Trigger matching event-based derived tasks
+    const triggeredTasks = await daemon.derivedTaskRepo.findWebhookTriggers(
+      connector,
+      event.eventType
+    )
+
+    for (const task of triggeredTasks) {
+      try {
+        // Schedule derived task with webhook context
+        await daemon.derivedIntegration.scheduleTask(daemon.engine, task, {
+          priority: 10, // High priority for webhook triggers
+          metadata: {
+            _trigger: 'webhook',
+            _webhook: {
+              deliveryId: event.deliveryId,
+              eventType: event.eventType,
+              connector,
+              accountId,
+              itemCount: items.length,
+            },
+            // Merge task-level filters into metadata for the script
+            ...(task.trigger_config?.filters as Record<string, unknown> || {}),
+          },
+        })
+
+        console.log('[Webhook] Triggered derived task:', {
+          taskId: task.id,
+          taskName: task.name,
+          connector,
+          eventType: event.eventType,
+        })
+      } catch (error) {
+        console.error('[Webhook] Failed to trigger derived task:', {
+          taskId: task.id,
+          taskName: task.name,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
     // Return 200 OK to acknowledge receipt
     return {
       body: {
         received: true,
         itemsProcessed: items.length,
         deliveryId: event.deliveryId,
+        derivedTasksTriggered: triggeredTasks.length,
       },
     }
   })

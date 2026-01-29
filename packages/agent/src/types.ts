@@ -205,6 +205,23 @@ export interface ToolHookResult {
  * Hooks for tool execution lifecycle.
  * These are optional callbacks that can block or modify tool execution.
  */
+/**
+ * Metrics passed to cadence check hook for informed intervention decisions.
+ */
+export interface AgentCadenceMetrics {
+  llmCallsMade: number;
+  toolCallsMade: number;
+  durationMs: number;
+}
+
+/**
+ * Result from cadence check hook - watcher's steering directive.
+ */
+export interface AgentCadenceResult {
+  action: 'continue' | 'inject' | 'stop';
+  systemMessage?: string;
+}
+
 export interface AgentHooks {
   /**
    * Called before a tool is executed.
@@ -230,6 +247,12 @@ export interface AgentHooks {
    * Returns true if agent should stop immediately (e.g., user typed "stop").
    */
   shouldStop?: () => boolean;
+
+  /**
+   * Called every N iterations inside the agent loop for watcher intervention.
+   * Gives the watcher a synchronization point to steer or stop the agent mid-run.
+   */
+  cadenceCheck?: (metrics: AgentCadenceMetrics) => Promise<AgentCadenceResult>;
 }
 
 // ============================================
@@ -271,12 +294,40 @@ export type InternalHookEvent =
       paths: string[];
     }
   | {
+      /** Fired when agent produces a message - captures actual conversation content */
+      type: 'agent_message';
+      role: 'assistant';
+      /** Actual message content (truncated to 3000 chars if longer) */
+      content: string;
+      iteration: number;
+    }
+  | {
+      /** Fired for each individual tool call with full details */
+      type: 'tool_call_completed';
+      tool: string;
+      /** Tool arguments (summarized - file paths, patterns, not full content) */
+      args: Record<string, unknown>;
+      success: boolean;
+      /** Result preview - first 500 chars of output */
+      resultPreview?: string;
+      durationMs: number;
+    }
+  | {
       type: 'agent_completed';
       workId: string;
       success: boolean;
       terminationReason: AgentTerminationReason;
       filesRead: string[];
       invalidatedPaths: string[];
+      /** Agent's final response text */
+      response?: string;
+      /** Execution metrics */
+      metrics?: {
+        toolCallsMade: number;
+        llmCallsMade: number;
+      };
+      /** Context window percentage used */
+      contextPercentUsed?: number;
     };
 
 /**
@@ -348,6 +399,8 @@ export interface StopHookContext {
   };
   /** Execution snapshot for enriched stop hook evaluation */
   executionSnapshot?: ExecutionSnapshot;
+  /** Handoff spec when terminationReason is 'handoff_requested' */
+  handoffSpec?: string;
 }
 
 /**
@@ -363,6 +416,8 @@ export interface InternalHookContext {
   agentType: string;
   sessionKey: string;
   requestId: string;
+  /** The objective/goal this work item is trying to accomplish */
+  objective?: string;
 }
 
 /**

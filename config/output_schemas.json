@@ -183,7 +183,7 @@
           },
           "watcherAction": {
             "type": "string",
-            "enum": ["answer", "realign", "split", "create_work_item", "quality_gate", "escalate", "continue"],
+            "enum": ["answer", "realign", "split", "create_work_item", "quality_gate", "continue"],
             "description": "The watcher decision type"
           },
           "reason": {
@@ -234,6 +234,39 @@
           }
         },
         "required": ["action", "response", "goalStateReached", "watcherAction", "reason", "answer", "realign", "workItems", "qualityGate"]
+      }
+    },
+
+    "planner_output": {
+      "name": "planner_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["done", "continue", "handoff"],
+            "description": "Agent action: 'handoff' when plan is ready, 'continue' to keep exploring, 'done' if blocked"
+          },
+          "response": {
+            "type": ["string", "null"],
+            "description": "Human-readable summary of the plan"
+          },
+          "goalStateReached": {
+            "type": ["boolean", "null"],
+            "description": "Set to true when the plan is complete"
+          },
+          "handoffSpec": {
+            "type": ["string", "null"],
+            "description": "JSON string containing the work breakdown (goal, context, workItems[])"
+          },
+          "awaitingUserInput": {
+            "type": ["boolean", "null"],
+            "description": "Set to true when asking a clarifying question"
+          }
+        },
+        "required": ["action", "response", "goalStateReached", "handoffSpec", "awaitingUserInput"]
       }
     }
   }

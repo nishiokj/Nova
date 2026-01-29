@@ -220,9 +220,16 @@ export abstract class CodingAgentSessionConnector implements Connector {
   ): Promise<FetchPageResult> {
     const items: SourceItem[] = []
 
-    const sinceDate = options.since
-      ? new Date(options.since)
-      : new Date(Date.now() - 24 * 60 * 60 * 1000)
+    // Parse since date, falling back to last 24h if invalid or not provided
+    let sinceDate: Date
+    if (options.since) {
+      const parsed = new Date(options.since)
+      sinceDate = isNaN(parsed.getTime())
+        ? new Date(Date.now() - 24 * 60 * 60 * 1000)
+        : parsed
+    } else {
+      sinceDate = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    }
 
     let cursorState: IncrementalCursor = {
       projectIndex: 0,

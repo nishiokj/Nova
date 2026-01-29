@@ -6,6 +6,15 @@
 
 import type { ConnectorType } from '../ids.js'
 
+// ============ Internal Events ============
+
+export interface InternalEvent {
+  type: string
+  source?: 'webhook' | 'scheduler' | 'engine' | 'daemon'
+  timestamp: string
+  data?: Record<string, unknown>
+}
+
 // ============ Health ============
 
 export interface HealthResponse {
@@ -268,6 +277,13 @@ export interface TransformationListResponse {
 
 export type DerivedTaskMode = 'once' | 'recurring' | 'event'
 
+export interface TriggerConfig {
+  type: 'webhook' | 'database' | 'scheduler'
+  connector?: string
+  eventType?: string | string[]  // '*' for all events
+  filters?: Record<string, unknown>
+}
+
 export interface DerivedTask {
   id: string
   name: string
@@ -278,6 +294,7 @@ export interface DerivedTask {
   last_job_id: string | null
   next_run_at: string | null
   metadata?: Record<string, unknown>
+  trigger_config?: TriggerConfig
   created_at: string
   updated_at: string
 }
@@ -494,4 +511,123 @@ export interface DecisionsSearchResponse {
     category?: string
     confidence?: string
   }
+}
+
+// ============ Agent Goals ============
+
+export interface AgentGoal {
+  id: string
+  parent_id: string | null
+  title: string
+  description: string | null
+  success_criteria: unknown
+  priority: number
+  status: 'active' | 'paused' | 'completed' | 'failed' | 'abandoned'
+  deadline: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  metadata: unknown
+}
+
+export interface GoalsResponse {
+  goals: AgentGoal[]
+  total: number
+}
+
+export interface GoalResponse {
+  goal: AgentGoal
+}
+
+export interface GoalCreateInput {
+  id?: string
+  parent_id?: string | null
+  title: string
+  description?: string | null
+  success_criteria?: unknown
+  priority?: number
+  status?: 'active' | 'paused' | 'completed' | 'failed' | 'abandoned'
+  deadline?: string | null
+  completed_at?: string | null
+  metadata?: unknown
+}
+
+export interface GoalUpdateInput {
+  title?: string
+  description?: string | null
+  success_criteria?: unknown
+  priority?: number
+  status?: 'active' | 'paused' | 'completed' | 'failed' | 'abandoned'
+  deadline?: string | null
+  completed_at?: string | null
+  metadata?: unknown
+}
+
+// ============ Agent Actions ============
+
+export type OutcomeSignal = 'positive' | 'negative' | 'neutral' | 'unknown'
+
+export interface AgentAction {
+  id: string
+  action_type: string
+  context: unknown
+  parameters: unknown
+  predicted_outcome: string | null
+  actual_outcome: string | null
+  outcome_signal: OutcomeSignal
+  feedback: unknown
+  created_at: string
+  resolved_at: string | null
+  metadata: unknown
+}
+
+export interface ActionsResponse {
+  actions: AgentAction[]
+  total: number
+}
+
+export interface ActionResponse {
+  action: AgentAction
+}
+
+export interface ActionCreateInput {
+  id?: string
+  action_type: string
+  context?: unknown
+  parameters?: unknown
+  predicted_outcome?: string | null
+  actual_outcome?: string | null
+  outcome_signal?: OutcomeSignal
+  feedback?: unknown
+  resolved_at?: string | null
+  metadata?: unknown
+}
+
+export interface ActionUpdateInput {
+  action_type?: string
+  context?: unknown
+  parameters?: unknown
+  predicted_outcome?: string | null
+  actual_outcome?: string | null
+  outcome_signal?: OutcomeSignal
+  feedback?: unknown
+  resolved_at?: string | null
+  metadata?: unknown
+}
+
+export interface ActionOutcomeInput {
+  actual_outcome: string
+  outcome_signal: OutcomeSignal
+  feedback?: unknown
+}
+
+export interface ActionStats {
+  total: number
+  positive: number
+  negative: number
+  rate: number
+}
+
+export interface ActionStatsResponse {
+  stats: ActionStats
 }

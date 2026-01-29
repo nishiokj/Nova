@@ -48,6 +48,12 @@ import { TOOL_LIMITS, getMaxOutputLength, isRefusal } from './constants.js';
  */
 const LLM_STREAM_TIMEOUT_MS = 240_000;
 
+/**
+ * Cadence check interval: every N LLM iterations, invoke the watcher hook.
+ * For a 50-iteration budget this gives 5 check-ins; for 20 iterations, 2.
+ */
+const CADENCE_CHECK_INTERVAL = 10;
+
 // Re-export circuit breaker functions for backwards compatibility
 export { resetProviderCircuit, getCircuitStatus };
 
@@ -92,6 +98,13 @@ export interface ModelSelection {
 }
 
 /**
+ * Memory injector interface for injecting relevant memory into agent context.
+ */
+export interface MemoryInjector {
+  inject(params: { query: string; maxTokens: number }): Promise<string | null>;
+}
+
+/**
  * Pure execution agent.
  */
 export class Agent {
@@ -105,28 +118,34 @@ export class Agent {
   private hooks?: AgentHooks;
   private internalHookQueue: InternalHookQueue;
   private getModelSelection?: (agentType: string) => ModelSelection | null;
+  private memoryInjector?: MemoryInjector;
+  private sessionKey: string;
 
   constructor(config: AgentConfig, runtime: {
     llm: LLMAdapter;
     toolRegistry: ToolRegistry;
     emit?: EventEmitCallback;
     requestId?: string;
+    sessionKey?: string;
     agentRegistry?: AgentRegistry;
     llmConfig: LLMRequestConfig;
     hooks?: AgentHooks;
     internalHookQueue?: InternalHookQueue;
     getModelSelection?: (agentType: string) => ModelSelection | null;
+    memoryInjector?: MemoryInjector;
   }) {
     this.config = config;
     this.llm = runtime.llm;
     this.toolRegistry = runtime.toolRegistry;
     this.emit = runtime.emit ?? noopEmit;
     this.requestId = runtime.requestId ?? '';
+    this.sessionKey = runtime.sessionKey ?? runtime.requestId ?? '';
     this.agentRegistry = runtime.agentRegistry;
     this.llmConfig = runtime.llmConfig;
     this.hooks = runtime.hooks;
     this.internalHookQueue = runtime.internalHookQueue ?? noopHookQueue;
     this.getModelSelection = runtime.getModelSelection;
+    this.memoryInjector = runtime.memoryInjector;
   }
 
   /**
@@ -136,9 +155,27 @@ export class Agent {
     return {
       workId: workItem.workId,
       agentType: this.config.type,
-      sessionKey: this.requestId,
+      sessionKey: this.sessionKey,
       requestId: this.requestId,
+      objective: workItem.objective,
     };
+  }
+
+  /**
+   * Summarize tool arguments for logging (strip large content, keep paths/patterns).
+   */
+  private summarizeToolArgs(args: Record<string, unknown>): Record<string, unknown> {
+    const summary: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value === 'string' && value.length > 200) {
+        summary[key] = value.slice(0, 200) + '...';
+      } else if (Array.isArray(value) && value.length > 10) {
+        summary[key] = [...value.slice(0, 10), `... and ${value.length - 10} more`];
+      } else {
+        summary[key] = value;
+      }
+    }
+    return summary;
   }
 
   /**
@@ -241,18 +278,18 @@ export class Agent {
    * Build the LLM request parameters for an iteration.
    * Consolidates system prompt, tools, messages, and last-iteration handling.
    */
-  private buildIterationRequest(
+  private async buildIterationRequest(
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow,
     cwd: string,
     iteration: number,
     maxIterations: number
-  ): {
+  ): Promise<{
     messages: Array<Record<string, unknown>>;
     tools: ToolDefinition[] | undefined;
     toolChoice: 'none' | 'auto' | undefined;
-  } {
+  }> {
     const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
 
     const allTools = [
@@ -266,9 +303,25 @@ export class Agent {
       ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
       : '';
 
+    // Memory injection (v1) - only on first iteration to avoid redundant API calls
+    let memoryContent: string | null = null;
+    if (this.memoryInjector) {
+      try {
+        const query = this.buildMemoryQuery(workItem, globalContext);
+        memoryContent = await this.memoryInjector.inject({ query, maxTokens: 1000 });
+      } catch {
+        // Silent fallback - continue without memory
+      }
+    }
+
+    // Combine task context with memory injection
+    const contextWithMemory = memoryContent
+      ? `${taskContext}\n\n${memoryContent}`
+      : taskContext;
+
     const messages = this.buildMessages(
       system,
-      taskContext + lastIterationInstruction,
+      contextWithMemory + lastIterationInstruction,
       workItem,
       globalContext,
       localContext
@@ -707,6 +760,13 @@ export class Agent {
       terminationReason: result.terminationReason ?? 'exception',
       filesRead: result.filesRead,
       invalidatedPaths: result.invalidatedPaths,
+      // Include response and metrics for workitem log tracking
+      response: result.response,
+      metrics: {
+        toolCallsMade: metrics.toolCallsMade,
+        llmCallsMade: metrics.llmCallsMade,
+      },
+      contextPercentUsed: result.localContext.metrics.percentageUsed,
     }, this.buildHookContext(workItem));
 
     profiler.asyncEnd(`agent.run:${this.config.type}`, runAsyncId, 'agent', {
@@ -757,6 +817,24 @@ export class Agent {
         break;
       }
 
+      // Cadence check: watcher intervention point (every N LLM calls)
+      if (this.hooks?.cadenceCheck && iteration > 0 && iteration % CADENCE_CHECK_INTERVAL === 0) {
+        const cadenceResult = await this.hooks.cadenceCheck({
+          llmCallsMade: metrics.llmCallsMade,
+          toolCallsMade: metrics.toolCallsMade,
+          durationMs: Date.now() - startTime,
+        });
+        if (cadenceResult.action === 'inject' && cadenceResult.systemMessage) {
+          localContext.addMessage('system', cadenceResult.systemMessage);
+        } else if (cadenceResult.action === 'stop') {
+          if (cadenceResult.systemMessage) {
+            localContext.addMessage('system', cadenceResult.systemMessage);
+          }
+          result.terminationReason = 'watcher_stopped';
+          break;
+        }
+      }
+
       // 1. Pre-checks: bounds and context management
       const elapsedMs = Date.now() - startTime;
       const boundHit = this.checkBounds(metrics, workItem, elapsedMs);
@@ -767,8 +845,8 @@ export class Agent {
 
       await this.compactIfNeeded(localContext, localReadFiles, workItem);
 
-      // 2. Build LLM request
-      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = this.buildIterationRequest(
+      // 2. Build LLM request (async for memory injection)
+      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = await this.buildIterationRequest(
         workItem,
         globalContext,
         localContext,
@@ -849,6 +927,16 @@ export class Agent {
       const { structuredOutput, action, responseText: rawResponseText } = this.parseIterationResponse(content, result);
       this.extractArtifactsFromOutput(structuredOutput, localContext);
       this.addAssistantMessage(localContext, content, toolCalls);
+
+      // Fire agent_message hook for workitem logging (captures actual content)
+      if (content && content.length > 0) {
+        this.internalHookQueue.enqueue({
+          type: 'agent_message',
+          role: 'assistant',
+          content: content.length > 3000 ? content.slice(0, 3000) + '... [truncated]' : content,
+          iteration,
+        }, this.buildHookContext(workItem));
+      }
 
       // If we streamed the response field, don't include it again in result.response
       // Only use pre-JSON text (if any) to avoid duplicate TUI output
@@ -1010,6 +1098,31 @@ export class Agent {
     }
 
     result.filesRead = Array.from(localReadFiles);
+  }
+
+  /**
+   * Build a query for memory retrieval from workItem objective and recent user messages.
+   */
+  private buildMemoryQuery(workItem: WorkItem, globalContext: ContextWindow): string {
+    const parts: string[] = [];
+
+    // Include workItem objective
+    if (workItem?.objective) {
+      parts.push(workItem.objective);
+    }
+
+    // Include last 3 user messages from global context
+    const items = globalContext.getItemsForLLM();
+    const userMessages = items
+      .filter(item => item.type === 'message' && (item as { role?: string }).role === 'user')
+      .slice(-3)
+      .map(item => (item as { content?: string }).content)
+      .filter((c): c is string => typeof c === 'string');
+
+    parts.push(...userMessages);
+
+    // Cap query length at 500 chars
+    return parts.join(' ').slice(0, 500);
   }
 
   /**
@@ -1241,6 +1354,16 @@ export class Agent {
         success: toolResult.isSuccess,
         durationMs: toolDurationMs,
       }, workItemId));
+
+      // Fire tool_call_completed hook for workitem logging (captures args + result preview)
+      this.internalHookQueue.enqueue({
+        type: 'tool_call_completed',
+        tool: call.name,
+        args: this.summarizeToolArgs(call.arguments),
+        success: toolResult.isSuccess,
+        resultPreview: eventResult?.slice(0, 500),
+        durationMs: toolDurationMs,
+      }, this.buildHookContext(workItem));
 
       // Truncate tool outputs at storage to reduce context size
       // File reads get higher limit (30KB) vs general tools (8KB)
@@ -1708,6 +1831,7 @@ export class Agent {
       toolRegistry: this.toolRegistry,
       emit: this.emit,
       requestId: this.requestId,
+      sessionKey: this.sessionKey,
       agentRegistry: this.agentRegistry,
       llmConfig,
       hooks: this.hooks,

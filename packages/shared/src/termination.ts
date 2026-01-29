@@ -35,6 +35,9 @@ export type AgentTerminationReason =
   | 'stagnation:tool_repeat'
   | 'refusal'
 
+  // Watcher intervention (mid-agent cadence check)
+  | 'watcher_stopped'
+
   // Catch-all for unexpected errors
   | 'exception';
 
@@ -59,4 +62,6 @@ export type OrchestratorTerminationReason =
   | 'no_action'
   | 'invalid_action'
   // Watcher periodic oversight
-  | 'cadence_audit';
+  | 'cadence_audit'
+  // Watcher intervention (mid-agent cadence check stopped the agent)
+  | 'watcher_stopped';

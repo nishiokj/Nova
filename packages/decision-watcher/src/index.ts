@@ -44,9 +44,21 @@ export type {
   WatcherAction,
   DecisionLogEntry,
 
-  // Work Log Types
-  WorkLogEntryType,
+  // Work Log Types (Session Level)
   WorkLogEntry,
+  WorkLogSessionStart,
+  WorkLogWorkItemCreated,
+  WorkLogWorkItemStatus,
+  WorkLogNote,
+
+  // WorkItem Log Types (WorkItem Level)
+  WorkItemEntry,
+  WorkItemInitEntry,
+  WorkItemMessageEntry,
+  WorkItemToolCallEntry,
+  WorkItemDecisionEntry,
+  WorkItemStatusEntry,
+  WorkItemMetricsEntry,
 
   // Watcher Work Item (with bounds)
   WatcherWorkItem,
@@ -81,19 +93,6 @@ export {
 } from './engine/index.js';
 
 // ============================================
-// WATCHER
-// ============================================
-
-export type {
-  DecisionWatcher,
-} from './watcher/index.js';
-
-export {
-  DEFAULT_WATCHER_CONFIG,
-  createDecisionWatcher,
-} from './watcher/index.js';
-
-// ============================================
 // INTEGRATION
 // ============================================
 
@@ -105,6 +104,24 @@ export {
 } from './integration/index.js';
 
 // ============================================
+// SESSION PATHS (centralized path generation)
+// ============================================
+
+export {
+  getDateString,
+  dayDir,
+  sessionDir,
+  saliencePath,
+  decisionsLogPath,
+  workLogPath,
+  planContextPath,
+  workitemsDir,
+  workitemPath,
+  workitemSummaryPath,
+  legacySessionDir,
+} from './session-paths.js';
+
+// ============================================
 // SALIENCE & DECISION LOG
 // ============================================
 
@@ -113,8 +130,9 @@ export {
   salienceFilePath,
   createSalienceContent,
   writeSalienceFile,
+  appendSalienceObservation,
 } from './salience.js';
-export type { SalienceParams } from './salience.js';
+export type { SalienceParams, SalienceObservation } from './salience.js';
 
 export {
   createDecisionLog,
@@ -126,6 +144,21 @@ export {
 } from './work-log.js';
 export type { WorkLog } from './work-log.js';
 
+export {
+  createWorkItemLog,
+  getWorkItemLog,
+  generateWorkItemMarkdown,
+} from './workitem-log.js';
+export type {
+  // Legacy types (backward compatibility)
+  WorkItemStatus,
+  WorkItemLogData,
+  FileChange,
+  WorkItemMetrics,
+  // New interface
+  WorkItemLog,
+} from './workitem-log.js';
+
 // ============================================
 // WATCHER AGENT (LLM-backed StopHook)
 // ============================================
@@ -134,6 +167,7 @@ export {
   createWatcherStopHook,
 } from './watcher-agent.js';
 export type { WatcherAgentConfig } from './watcher-agent.js';
+export { getValidActions } from './types.js';
 
 // ============================================
 // SESSION INIT (Async session bootstrap)
@@ -141,5 +175,23 @@ export type { WatcherAgentConfig } from './watcher-agent.js';
 
 export {
   initAsyncSession,
+  buildPlanningObjective,
 } from './session-init.js';
 export type { AsyncSessionConfig, AsyncSessionResult } from './session-init.js';
+
+// ============================================
+// PLAN CONTEXT (Context handoff from planning to workers)
+// ============================================
+
+export {
+  writePlanContext,
+  readPlanContext,
+  hasPlanContext,
+  generatePlanContextMarkdown,
+  buildPlanContextFromHandoff,
+} from './plan-context.js';
+export type {
+  PlanContextData,
+  KeyFile,
+  QADecision,
+} from './plan-context.js';

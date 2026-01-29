@@ -169,6 +169,13 @@ export const AuthConfigSchema = z.object({
   graphd_db_path: z.string().optional(),
 });
 
+/** Memory injection configuration */
+export const MemoryConfigSchema = z.object({
+  enabled: z.boolean(),
+  base_url: z.string().optional(),
+  timeout_ms: z.number().positive().optional(),
+});
+
 /** Model entry */
 export const ModelConfigEntrySchema = z.object({
   id: z.string(),
@@ -197,6 +204,7 @@ export const HarnessConfigFileSchema = z.object({
   hooks: HooksConfigSchema.optional(),
   entity_graph: EntityGraphConfigSchema.optional(),
   auth: AuthConfigSchema.optional(),
+  memory: MemoryConfigSchema.optional(),
 });
 
 // ============================================
@@ -221,6 +229,7 @@ export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
 export type HooksConfigSection = z.infer<typeof HooksConfigSchema>;
 export type EntityGraphConfigSection = z.infer<typeof EntityGraphConfigSchema>;
 export type AuthConfigSection = z.infer<typeof AuthConfigSchema>;
+export type MemoryConfigSection = z.infer<typeof MemoryConfigSchema>;
 export type ModelConfigEntry = z.infer<typeof ModelConfigEntrySchema>;
 export type ModelsConfigSection = z.infer<typeof ModelsConfigSchema>;
 export type HarnessConfigFile = z.infer<typeof HarnessConfigFileSchema>;
@@ -318,6 +327,11 @@ export interface FullHarnessConfig {
     available: ModelConfigEntry[];
     default?: string;
   };
+  memory: {
+    enabled: boolean;
+    baseUrl: string;
+    timeoutMs: number;
+  };
   configPath?: string;
   /** Dangerous mode - bypasses all permission checks. Set via --dangerous CLI flag. */
   dangerousMode: boolean;
@@ -374,6 +388,12 @@ export const DEFAULT_AUTH_CONFIG: AuthConfigSection = {
 export const DEFAULT_MODELS_CONFIG: ModelsConfigSection = {
   available: [],
   default: undefined,
+};
+
+export const DEFAULT_MEMORY_CONFIG: MemoryConfigSection = {
+  enabled: false,
+  base_url: 'http://localhost:3001',
+  timeout_ms: 5000,
 };
 
 // ============================================

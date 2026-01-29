@@ -51,6 +51,12 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       mode?: 'once' | 'recurring' | 'event'
       intervalMs?: number
       metadata?: Record<string, unknown>
+      triggerConfig?: {
+        type: 'webhook' | 'database' | 'scheduler'
+        connector?: string
+        eventType?: string | string[]
+        filters?: Record<string, unknown>
+      }
     }
 
     if (!body.name) {
@@ -65,6 +71,12 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
     if (body.mode === 'recurring' && (!body.intervalMs || body.intervalMs < 1000)) {
       throw badRequest('intervalMs must be at least 1000ms for recurring tasks')
     }
+    if (body.mode === 'event' && !body.triggerConfig) {
+      throw badRequest('triggerConfig is required for event mode tasks')
+    }
+    if (body.mode !== 'event' && body.triggerConfig) {
+      throw badRequest('triggerConfig is only valid for event mode tasks')
+    }
 
     let task = await derivedTaskRepo.create({
       name: body.name,
@@ -72,6 +84,7 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       mode: body.mode,
       intervalMs: body.intervalMs,
       metadata: body.metadata,
+      triggerConfig: body.triggerConfig,
     })
 
     let sandbox: DerivedTaskSandboxResult | undefined

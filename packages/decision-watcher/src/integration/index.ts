@@ -24,8 +24,6 @@ export function createWatcherConfig(
   return {
     enabled: true,
     minConfidenceThreshold: 0.6,
-    escalateCritical: true,
-    escalateWithWarnings: false,
     maxDecisionsToConsult: 10,
     useLLMSynthesis: true,
     enableConsistencyChecking: true,

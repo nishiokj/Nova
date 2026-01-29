@@ -43,7 +43,6 @@ export interface PromptUserHookEvent {
  */
 export type PromptUserHookResult =
   | { action: 'answer'; answer: string | string[]; contextAddendum?: string }
-  | { action: 'escalate'; reason: string }
   | { action: 'block'; reason: string };
 
 // --- Callback Types ---
@@ -225,6 +224,8 @@ function isValidEventType(event: string): event is HookEventType {
     'files_modified',
     'artifacts_discovered',
     'agent_completed',
+    'agent_message',
+    'tool_call_completed',
     'stop',
   ];
   return validEvents.includes(event as HookEventType);
