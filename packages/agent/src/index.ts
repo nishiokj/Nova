@@ -2,7 +2,7 @@
  * Agent Module - Barrel Export
  */
 
-export { Agent, type ModelSelection } from './agent.js';
+export { Agent, type ModelSelection, type MemoryInjector } from './agent.js';
 export { AgentRegistry } from './agent-registry.js';
 export {
   circuitBreakerRegistry,

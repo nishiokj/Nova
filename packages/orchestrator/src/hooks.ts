@@ -224,6 +224,8 @@ function isValidEventType(event: string): event is HookEventType {
     'files_modified',
     'artifacts_discovered',
     'agent_completed',
+    'agent_message',
+    'tool_call_completed',
     'stop',
   ];
   return validEvents.includes(event as HookEventType);

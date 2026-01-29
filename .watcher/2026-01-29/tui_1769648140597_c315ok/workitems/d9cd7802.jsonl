@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-01-29T01:01:05.833Z","workId":"d9cd7802","objective":"unknown","agent":"standard"}
+{"type":"status","timestamp":"2026-01-29T01:01:05.833Z","status":"in_progress"}
+{"type":"message","timestamp":"2026-01-29T01:01:05.833Z","role":"assistant","content":"Turn 0: 3 tool calls, hasResponse=false"}
+{"type":"message","timestamp":"2026-01-29T01:01:05.833Z","role":"assistant","content":"Turn 1: 4 tool calls, hasResponse=false"}

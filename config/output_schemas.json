@@ -246,8 +246,8 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["done", "continue"],
-            "description": "Standard agent action: 'done' when plan is ready, 'continue' to keep exploring"
+            "enum": ["done", "continue", "handoff"],
+            "description": "Agent action: 'handoff' when plan is ready, 'continue' to keep exploring, 'done' if blocked"
           },
           "response": {
             "type": ["string", "null"],

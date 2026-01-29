@@ -130,8 +130,9 @@ export {
   salienceFilePath,
   createSalienceContent,
   writeSalienceFile,
+  appendSalienceObservation,
 } from './salience.js';
-export type { SalienceParams } from './salience.js';
+export type { SalienceParams, SalienceObservation } from './salience.js';
 
 export {
   createDecisionLog,

@@ -16,6 +16,7 @@ import { getValidActions } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
 import type { WorkItemLog } from './workitem-log.js';
+import { appendSalienceObservation } from './salience.js';
 
 // ============================================
 // CONFIG
@@ -268,6 +269,28 @@ async function handlePromptUser(
     ? `\nOptions: ${JSON.stringify(prompt.options)}`
     : '';
 
+  // Detect potentially ambiguous questions for logging
+  const ambiguousPatterns = [
+    /what (should|would|could) .+ (do|prioritize|focus|work)/i,
+    /what (does|means).+ (value|goal|objective)/i,
+    /which (direction|path|way).+ (should|to)/i,
+    /how (can|do i) .+ provide/i,
+  ];
+  const isAmbiguous = ambiguousPatterns.some(pattern => pattern.test(questionText));
+
+  if (isAmbiguous && !prompt?.options?.length) {
+    console.warn(`[WATCHER] prompt_user: Potentially ambiguous question without options: "${questionText.slice(0, 100)}..."`);
+    // Add observation to salience
+    await appendSalienceObservation(config.salienceFilePath, {
+      trigger: 'prompt_user',
+      action: 'ambiguous_question_detected',
+      workId: ctx.workId,
+      summary: `Ambiguous prompt_user question detected: "${questionText.slice(0, 80)}". Consider providing specific options.`,
+    }).catch(err => {
+      console.warn('[WATCHER] Salience update failed:', err instanceof Error ? err.message : String(err));
+    });
+  }
+
   // Get workitem-level context (full conversation, tool calls, scoped decisions)
   const workItemLog = ctx.workId ? await config.getWorkItemLog(ctx.workId) : null;
   const workItemLogPath = workItemLog?.filePath() ?? 'not available';
@@ -298,21 +321,42 @@ ${snapshotContext}
 
 ## Your Task
 
-**You MUST answer.** There is no user available in async mode.
+**You MUST answer with \`watcherAction: "answer"\`.** There is no user available in async mode.
+
+## Answering Guidelines
+
+1. **Specific options questions**: Pick the option that best aligns with the session goal.
+   - If you're uncertain, pick the first option and explain your reasoning.
+   - Include rationale: why this option fits the goal and principles.
+
+2. **Open-ended questions**: These are usually about goal/scope interpretation.
+   - Reinterpret the question based on the session goal.
+   - If the question asks "what should I do", assume the agent should continue with their best judgment unless you have a clear reason to redirect.
+   - Never return \`watcherAction: "escalate"\` for prompt_user triggers.
+
+3. **Ambiguous requirements**: If the question is genuinely unclear:
+   - Return \`watcherAction: "answer"\` with a clarification question.
+   - Example: "Are you asking about X or Y? Please clarify."
+   - This keeps the loop going while requesting precision.
+
+4. **Default behavior**: If you truly cannot determine a better path:
+   - Return \`watcherAction: "answer"\` with "Continue with your best judgment based on the session goal."
+   - Never return null or empty answers.
+
+## Format Requirements
+
+Your response MUST include:
+- \`watcherAction: "answer"\` (always)
+- \`answer.text: <your answer text>\` (always)
+- \`rationale: <why you chose this>\` (optional but recommended)
+
+**Invalid actions for prompt_user**: \`escalate\`, \`quality_gate\`, \`continue\` (use "answer" for all)
 
 1. Read salience for session goal.
 2. Read work-log for session state (other workitems, completed work).
 3. **Read workitem log for THIS agent's full context** (conversation, tool calls, discoveries).
 4. If needed, use Read/Grep tools to verify agent's findings.
-5. Answer with awareness of both session goal AND agent's specific situation.
-
-Guidelines:
-- Technical decisions: follow codebase conventions the agent discovered.
-- Ambiguous requirements: choose what aligns with session goal.
-- Options questions: pick the most sensible option based on agent's context.
-- Uncertain: pick first option and explain reasoning.
-
-Return \`watcherAction: "answer"\` with your answer text.`;
+5. Answer with awareness of both session goal AND agent's specific situation.`;
 
   const action = await runAndLog(config, 'prompt_user', objective, ctx);
 
@@ -339,16 +383,35 @@ Return \`watcherAction: "answer"\` with your answer text.`;
     };
   }
 
-  // Watcher failed to provide an answer (timeout, error, wrong action, etc.)
-  // Provide a default answer to keep async session moving.
+  // Watcher failed to provide a proper 'answer' action.
+  // Check if the watcher's reason contains useful guidance we can use as an answer.
+  const watcherReason = action.reason ?? '';
+  const hasUsefulReason = watcherReason.length > 20 &&
+    !watcherReason.includes('timeout') &&
+    !watcherReason.includes('error') &&
+    !watcherReason.includes('fallback');
+
+  // If watcher produced reasoning that looks like an actual answer, use it
+  if (hasUsefulReason) {
+    console.warn(`[WATCHER] prompt_user: Watcher returned "${action.watcherAction}" instead of "answer", but has useful reason. Using reason as answer.`);
+    return {
+      decision: 'block',
+      reason: watcherReason,
+      systemMessage: `[Watcher guidance (action was "${action.watcherAction}", not "answer")]: ${watcherReason}`,
+    };
+  }
+
+  // Watcher truly failed - use default answer
   const defaultAnswer = prompt?.options?.[0]
     ? (typeof prompt.options[0] === 'string' ? prompt.options[0] : (prompt.options[0] as { label?: string }).label ?? 'Continue')
     : 'Continue with your best judgment.';
 
+  console.error(`[WATCHER] prompt_user: Watcher failed to answer. Action: "${action.watcherAction}", Reason: "${watcherReason.slice(0, 100)}". Using default: "${defaultAnswer}"`);
+
   return {
     decision: 'block',
     reason: defaultAnswer,
-    systemMessage: `[Watcher auto-answer (fallback)]: Watcher did not provide answer (action: ${action.watcherAction}). Using default: ${defaultAnswer}`,
+    systemMessage: `[Watcher auto-answer (FALLBACK)]: Watcher returned action="${action.watcherAction}" with no useful answer. Default: ${defaultAnswer}. Original reason: ${watcherReason.slice(0, 200)}`,
   };
 }
 
@@ -682,6 +745,15 @@ Your job — progress check:
   }
 
   if (action.watcherAction === 'continue') {
+    // Even when continuing, inject the watcher's assessment as guidance
+    // This makes the cadence audit actually DO something instead of being silent
+    const hasUsefulGuidance = action.reason && action.reason.length > 20;
+    if (hasUsefulGuidance) {
+      return {
+        decision: 'allow',
+        systemMessage: `[Watcher checkpoint (iteration ${ctx.iteration})]: ${action.reason}`,
+      };
+    }
     return { decision: 'allow' };
   }
 
@@ -971,6 +1043,24 @@ async function runAndLog(
     console.warn('[WATCHER] Decision log write failed:', err instanceof Error ? err.message : String(err));
   }
 
+  // Write observation to salience file for memory continuity
+  // Only write significant decisions (not routine continues or fallbacks)
+  const shouldWriteToSalience = action.watcherAction !== 'continue' ||
+    trigger === 'prompt_user' ||
+    trigger === 'work_item_completed';
+
+  if (shouldWriteToSalience) {
+    const summary = buildObservationSummary(trigger, action, ctx);
+    await appendSalienceObservation(config.salienceFilePath, {
+      trigger,
+      action: action.watcherAction,
+      workId: ctx.workId,
+      summary,
+    }).catch(err => {
+      console.warn('[WATCHER] Salience update failed:', err instanceof Error ? err.message : String(err));
+    });
+  }
+
   try {
     config.onDecision?.(entry);
   } catch (err) {
@@ -978,4 +1068,65 @@ async function runAndLog(
   }
 
   return action;
+}
+
+/**
+ * Build a human-readable summary of the watcher observation for salience.
+ */
+function buildObservationSummary(
+  trigger: WatcherTrigger,
+  action: WatcherAction,
+  ctx: StopHookContext
+): string {
+  const parts: string[] = [];
+
+  switch (trigger) {
+    case 'prompt_user':
+      parts.push(`Agent asked: "${ctx.userPrompt?.question?.slice(0, 100) ?? 'unknown'}"`);
+      if (action.answer?.text) {
+        parts.push(`Answered: "${action.answer.text.slice(0, 150)}"`);
+      }
+      break;
+
+    case 'work_item_completed':
+      if (action.qualityGate?.passed) {
+        parts.push('Quality gate passed.');
+      } else if (action.qualityGate?.issues?.length) {
+        parts.push(`Quality issues: ${action.qualityGate.issues.slice(0, 3).join('; ')}`);
+      }
+      if (ctx.executionSnapshot?.filesModified.length) {
+        parts.push(`Modified: ${ctx.executionSnapshot.filesModified.slice(0, 3).join(', ')}`);
+      }
+      break;
+
+    case 'bounds_exceeded':
+      parts.push(`Hit ${ctx.terminationReason} at iteration ${ctx.iteration}.`);
+      if (action.workItems?.length) {
+        parts.push(`Split into ${action.workItems.length} work items.`);
+      } else if (action.realign?.systemMessage) {
+        parts.push('Realigned with guidance.');
+      }
+      break;
+
+    case 'cadence_audit':
+      parts.push(`Progress check at iteration ${ctx.iteration}.`);
+      break;
+
+    case 'agent_error':
+      parts.push(`Error: ${ctx.terminationReason}`);
+      break;
+
+    case 'handoff_approval':
+      parts.push(action.watcherAction === 'continue' ? 'Plan approved.' : 'Plan needs revision.');
+      break;
+
+    default:
+      break;
+  }
+
+  if (action.reason && action.reason.length < 200) {
+    parts.push(action.reason);
+  }
+
+  return parts.join(' ') || 'Decision recorded.';
 }

@@ -103,3 +103,47 @@ export async function writeSalienceFile(
 
   return filePath;
 }
+
+/**
+ * Observation entry for salience notes.
+ */
+export interface SalienceObservation {
+  trigger: string;
+  action: string;
+  workId?: string;
+  summary: string;
+}
+
+/**
+ * Append an observation to the Session Notes section of the salience file.
+ * Creates a timestamped note under the "## Session Notes" header.
+ */
+export async function appendSalienceObservation(
+  salienceFilePath: string,
+  observation: SalienceObservation
+): Promise<void> {
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const workIdPart = observation.workId ? ` [${observation.workId.slice(0, 8)}]` : '';
+  const note = `\n### ${timestamp}${workIdPart}\n**${observation.trigger}** → ${observation.action}\n${observation.summary}\n`;
+
+  try {
+    const content = await fs.readFile(salienceFilePath, 'utf-8');
+
+    // Find the Session Notes section and remove the placeholder
+    const placeholder = '_No notes yet. The watcher will append observations here._';
+    let updatedContent: string;
+
+    if (content.includes(placeholder)) {
+      // Replace placeholder with first note
+      updatedContent = content.replace(placeholder, note.trim());
+    } else {
+      // Append to end of file
+      updatedContent = content.trimEnd() + note;
+    }
+
+    await fs.writeFile(salienceFilePath, updatedContent, 'utf-8');
+  } catch (err) {
+    // Log but don't throw - salience updates are non-critical
+    console.warn('[SALIENCE] Failed to append observation:', err instanceof Error ? err.message : String(err));
+  }
+}

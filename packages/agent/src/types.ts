@@ -294,6 +294,25 @@ export type InternalHookEvent =
       paths: string[];
     }
   | {
+      /** Fired when agent produces a message - captures actual conversation content */
+      type: 'agent_message';
+      role: 'assistant';
+      /** Actual message content (truncated to 3000 chars if longer) */
+      content: string;
+      iteration: number;
+    }
+  | {
+      /** Fired for each individual tool call with full details */
+      type: 'tool_call_completed';
+      tool: string;
+      /** Tool arguments (summarized - file paths, patterns, not full content) */
+      args: Record<string, unknown>;
+      success: boolean;
+      /** Result preview - first 500 chars of output */
+      resultPreview?: string;
+      durationMs: number;
+    }
+  | {
       type: 'agent_completed';
       workId: string;
       success: boolean;
@@ -397,6 +416,8 @@ export interface InternalHookContext {
   agentType: string;
   sessionKey: string;
   requestId: string;
+  /** The objective/goal this work item is trying to accomplish */
+  objective?: string;
 }
 
 /**

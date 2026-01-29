@@ -136,16 +136,16 @@
     },
 
     "watcher": {
-      "$comment": "Oversight agent for async mode. Answers questions, audits, quality gates.",
+      "$comment": "Oversight agent for async mode. Answers questions, audits, quality gates. Needs enough budget to read files AND reason.",
       "llm": {
         "role": "standard",
-        "max_tokens": 32000,
+        "max_tokens": 64000,
         "temperature": 0.3
       },
       "budget": {
-        "max_iterations": 8,
-        "max_tool_calls": 20,
-        "max_duration_ms": 30000
+        "max_iterations": 20,
+        "max_tool_calls": 40,
+        "max_duration_ms": 90000
       },
       "tools": ["Read", "Glob", "Grep", "Bash"],
       "output_schema": "watcher_action"
@@ -155,7 +155,7 @@
       "$comment": "Planning agent for async mode. Produces structured work breakdowns.",
       "llm": {
         "role": "standard",
-        "max_tokens": 32000,
+        "max_tokens": 64000,
         "temperature": 0.3
       },
       "budget": {
@@ -211,5 +211,11 @@
     "host": "127.0.0.1",
     "port": 9556,
     "session_expiry_days": null
+  },
+
+  "memory": {
+    "enabled": true,
+    "base_url": "http://localhost:3001",
+    "timeout_ms": 5000
   }
 }

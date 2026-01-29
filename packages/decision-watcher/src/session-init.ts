@@ -174,5 +174,5 @@ Your handoffSpec MUST be valid JSON:
 - **Specific**: Include file paths in objectives
 - **Bounded**: Max 5-7 work items. If bigger, split the goal first.
 
-When ready: set \`goalStateReached: true\`, \`action: "done"\`, and include \`handoffSpec\`.`;
+When ready: set \`goalStateReached: true\`, \`action: "handoff"\`, and include \`handoffSpec\`.`;
 }
