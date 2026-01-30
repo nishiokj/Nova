@@ -441,7 +441,7 @@ export class Processor {
     const created = await this.entityRepo.create(
       mapped.entityType,
       mapped.data,
-      mapped.displayText
+      { displayText: mapped.displayText }
     )
 
     // Create the source mapping

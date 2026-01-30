@@ -4,6 +4,9 @@
  * Encapsulates the logic for checking iteration, duration, and tool call limits.
  */
 
+import type { TerminationReason } from 'protocol';
+import { assertNever } from 'protocol';
+
 /**
  * Execution limits configuration.
  */
@@ -92,7 +95,7 @@ export class BoundsChecker {
   /**
    * Map violation type to termination reason string.
    */
-  static toTerminationReason(violation: BoundViolation): string {
+  static toTerminationReason(violation: BoundViolation): TerminationReason {
     switch (violation) {
       case 'iterations':
         return 'max_iterations_exceeded';
@@ -100,6 +103,8 @@ export class BoundsChecker {
         return 'max_duration_exceeded';
       case 'toolCalls':
         return 'max_tool_calls_exceeded';
+      default:
+        return assertNever(violation);
     }
   }
 }

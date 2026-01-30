@@ -43,6 +43,7 @@ export {
   type DerivedJobInput,
   type DerivedJobRow,
   type DerivedJobStatus,
+  type FailureClass,
 } from './derived-job.js'
 
 export {
@@ -93,8 +94,10 @@ export {
   type DerivedTaskRepository,
   type DerivedTask,
   type DerivedTaskInput,
+  type DerivedTaskUpdateInput,
   type DerivedTaskRow,
   type DerivedTaskMode,
+  type ReplayPolicy,
 } from './derived-task.js'
 
 export {
@@ -148,3 +151,45 @@ export {
   type ActionFilterOptions,
   type OutcomeSignal,
 } from './agent-actions.js'
+
+export {
+  createConfigFactsRepository,
+  type ConfigFactsRepository,
+  type ConfigFactRow,
+  type ConfigFactInput,
+  type ConfigType,
+  type ValueType,
+} from './config-facts.js'
+
+export {
+  createRuntimeFactsRepository,
+  type RuntimeFactsRepository,
+  type RuntimeFactRow,
+  type RuntimeFactInput,
+  type RuntimeFactType,
+} from './runtime-facts.js'
+
+export {
+  createTestSpecsRepository,
+  type TestSpecsRepository,
+  type TestSpecRow,
+  type TestSpecInput,
+  type TestResult,
+} from './test-specs.js'
+
+export {
+  createEvidenceRetrievalLogRepository,
+  type EvidenceRetrievalLogRepository,
+  type EvidenceRetrievalLogRow,
+  type EvidenceRetrievalLogInput,
+  type RetrievalStatus,
+} from './evidence-retrieval-log.js'
+
+export {
+  createResourcePoolRepository,
+  type ResourcePoolRepository,
+  type ResourcePool,
+  type ResourcePoolInput,
+  type ResourcePoolRow,
+  type CanAcquireResult,
+} from './resource-pool.js'

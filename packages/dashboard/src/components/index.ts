@@ -11,6 +11,7 @@ export * from './QualityIndicator'
 export * from './ExecutionTimeline'
 export * from './ToolCallRow'
 export * from './ReflectionPanel'
+export * from './MemoryInjectionPanel'
 
 // Filters
 export * from './QuickFilters'

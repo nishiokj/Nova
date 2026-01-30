@@ -14,7 +14,7 @@ import type { SyncEngine } from './engine.js'
 import type { SyncJob } from '../db/repositories/sync-job.js'
 import type { DerivedTask, DerivedTaskRepository } from '../db/repositories/derived-task.js'
 import type { DerivedJob } from '../db/repositories/derived-job.js'
-import type { DerivedTaskIntegration } from '../derived/integration.js'
+import { DerivedTaskIntegration } from '../derived/integration.js'
 import { isAgentMemoryError } from '../errors/index.js'
 
 // ============ Configuration ============
@@ -635,7 +635,20 @@ export class Scheduler {
       throw new Error('Derived task integration is not configured')
     }
 
-    const job = await this.derivedIntegration.scheduleTask(this.engine, task)
+    const result = await this.derivedIntegration.scheduleTask(this.engine, task)
+
+    // Skip if blocked by policy
+    if (DerivedTaskIntegration.isBlocked(result)) {
+      this.emit({
+        type: 'scheduler:derived_task_blocked',
+        task,
+        reason: result.reason,
+        retryAfter: result.retryAfter,
+      } as any) // Cast needed as this is a new event type
+      return
+    }
+
+    const job = result
     await this.derivedTaskRepo.markExecuted(task.id, job.id)
 
     if (task.mode === 'once') {

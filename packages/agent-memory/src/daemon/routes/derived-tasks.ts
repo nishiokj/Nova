@@ -8,6 +8,8 @@ import type { HttpServer } from '../server.js'
 import type { SyncDaemon } from '../index.js'
 import { badRequest, notFound } from '../server.js'
 import { TaskSandbox, type DerivedTaskSandboxResult } from '../../derived/sandbox.js'
+import { DerivedTaskIntegration } from '../../derived/integration.js'
+import type { ReplayPolicy } from '../../db/repositories/derived-task.js'
 
 export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon): void {
   const { derivedTaskRepo, derivedJobRepo, derivedIntegration, engine } = daemon
@@ -57,6 +59,15 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
         eventType?: string | string[]
         filters?: Record<string, unknown>
       }
+      // Execution policies
+      replayPolicy?: ReplayPolicy
+      idempotent?: boolean
+      cooldownMs?: number
+      timeoutMs?: number
+      heartbeatIntervalMs?: number
+      rateLimitMax?: number
+      rateLimitWindowMs?: number
+      resourcePool?: string
     }
 
     if (!body.name) {
@@ -78,6 +89,14 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       throw badRequest('triggerConfig is only valid for event mode tasks')
     }
 
+    // Validate policy fields
+    if (body.replayPolicy === 'cooldown' && !body.cooldownMs) {
+      throw badRequest('cooldownMs is required when replayPolicy is "cooldown"')
+    }
+    if (body.rateLimitMax && !body.rateLimitWindowMs) {
+      throw badRequest('rateLimitWindowMs is required when rateLimitMax is set')
+    }
+
     let task = await derivedTaskRepo.create({
       name: body.name,
       scriptPath: body.scriptPath,
@@ -85,29 +104,43 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       intervalMs: body.intervalMs,
       metadata: body.metadata,
       triggerConfig: body.triggerConfig,
+      replayPolicy: body.replayPolicy,
+      idempotent: body.idempotent,
+      cooldownMs: body.cooldownMs,
+      timeoutMs: body.timeoutMs,
+      heartbeatIntervalMs: body.heartbeatIntervalMs,
+      rateLimitMax: body.rateLimitMax,
+      rateLimitWindowMs: body.rateLimitWindowMs,
+      resourcePool: body.resourcePool,
     })
 
     let sandbox: DerivedTaskSandboxResult | undefined
     let sandboxError: string | undefined
     try {
       const timeoutMs = 12000
-      const job = await derivedIntegration.scheduleTask(engine, task, {
+      const result = await derivedIntegration.scheduleTask(engine, task, {
         metadata: { _sandbox: true, _sandboxTimeoutMs: timeoutMs },
       })
 
-      await derivedTaskRepo.markExecuted(task.id, job.id)
+      // Skip sandbox if blocked by policy (shouldn't happen on create, but handle it)
+      if (DerivedTaskIntegration.isBlocked(result)) {
+        sandboxError = result.reason
+      } else {
+        const job = result
+        await derivedTaskRepo.markExecuted(task.id, job.id)
 
-      if (task.mode === 'once') {
-        await derivedTaskRepo.update(task.id, { enabled: false })
-      } else if (task.mode === 'recurring' && task.interval_ms) {
-        const nextRunAt = new Date(Date.now() + task.interval_ms)
-        await derivedTaskRepo.updateNextRunAt(task.id, nextRunAt)
+        if (task.mode === 'once') {
+          await derivedTaskRepo.update(task.id, { enabled: false })
+        } else if (task.mode === 'recurring' && task.interval_ms) {
+          const nextRunAt = new Date(Date.now() + task.interval_ms)
+          await derivedTaskRepo.updateNextRunAt(task.id, nextRunAt)
+        }
+
+        task = (await derivedTaskRepo.findById(task.id)) ?? task
+
+        const sandboxRunner = new TaskSandbox(derivedJobRepo)
+        sandbox = await sandboxRunner.observe(job.id, { timeoutMs })
       }
-
-      task = (await derivedTaskRepo.findById(task.id)) ?? task
-
-      const sandboxRunner = new TaskSandbox(derivedJobRepo)
-      sandbox = await sandboxRunner.observe(job.id, { timeoutMs })
     } catch (error) {
       sandboxError = error instanceof Error ? error.message : String(error)
     }
@@ -120,6 +153,7 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
     const body = req.body as {
       priority?: number
       metadata?: Record<string, unknown>
+      force?: boolean
     }
 
     const task = await derivedTaskRepo.findById(req.params.id)
@@ -127,11 +161,25 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       throw notFound(`Derived task not found: ${req.params.id}`)
     }
 
-    const job = await derivedIntegration.scheduleTask(engine, task, {
+    const result = await derivedIntegration.scheduleTask(engine, task, {
       priority: body?.priority,
       metadata: body?.metadata,
+      force: body?.force,
     })
 
+    // Check if blocked by policy
+    if (DerivedTaskIntegration.isBlocked(result)) {
+      return {
+        status: 429,
+        body: {
+          error: 'policy_blocked',
+          message: result.reason,
+          retryAfter: result.retryAfter,
+        },
+      }
+    }
+
+    const job = result
     await derivedTaskRepo.markExecuted(task.id, job.id)
 
     if (task.mode === 'once') {

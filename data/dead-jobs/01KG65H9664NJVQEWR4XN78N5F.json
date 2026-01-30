@@ -1,0 +1,11 @@
+{
+  "id": "01KG65H9664NJVQEWR4XN78N5F",
+  "type": "derived:run",
+  "payload": {
+    "derivedJobId": "01KG65H964WMF673J6C1GWKT38"
+  },
+  "error": "Job 01KG65H9664NJVQEWR4XN78N5F exceeded max runtime of 1800000ms",
+  "attemptCount": 3,
+  "createdAt": "2026-01-30T00:41:01.893Z",
+  "diedAt": "2026-01-30T02:46:46.837Z"
+}

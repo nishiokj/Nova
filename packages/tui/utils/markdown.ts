@@ -1,6 +1,7 @@
 /**
  * Markdown rendering utilities using marked-terminal.
  * Provides proper terminal markdown rendering with ANSI codes.
+ * Integrates with Tree-sitter syntax highlighting for code blocks.
  */
 
 import { marked } from 'marked';
@@ -9,46 +10,64 @@ import wrapAnsi from 'wrap-ansi';
 import stringWidth from 'string-width';
 import stripAnsi from 'strip-ansi';
 import { Chalk } from 'chalk';
+import { highlightCode } from './syntax.js';
 
 // Create a chalk instance with forced color support
 // This bypasses chalk's auto-detection which fails under Bun
 const chalk = new Chalk({ level: 3 });
 
-// Configure marked with terminal renderer using explicit colors
-// Note: This mutates the global marked instance, but that's fine for our use case
-marked.use(markedTerminal({
-  // Don't reflowText since we handle wrapping ourselves
-  reflowText: false,
-  // Keep width large so marked doesn't wrap
-  width: 9999,
-  // Emoji support
-  emoji: true,
-  // Custom colors using our forced-color chalk instance
-  code: chalk.yellow,
-  blockquote: chalk.gray.italic,
-  heading: chalk.magenta.underline.bold,
-  firstHeading: chalk.magenta.underline.bold,
-  strong: chalk.bold,
-  em: chalk.italic,
-  codespan: chalk.yellow,
-  del: chalk.strikethrough,
-  link: chalk.blue,
-  href: chalk.blue.underline,
-  listitem: chalk.reset,
-  // Table rendering options
-  tableOptions: {
-    chars: {
-      'top': '─', 'top-mid': '┬', 'top-left': '┌', 'top-right': '┐',
-      'bottom': '─', 'bottom-mid': '┴', 'bottom-left': '└', 'bottom-right': '┘',
-      'left': '│', 'left-mid': '├', 'mid': '─', 'mid-mid': '┼',
-      'right': '│', 'right-mid': '┤', 'middle': '│'
+// Create a custom renderer that uses Tree-sitter for code highlighting
+const renderer = new marked.Renderer();
+
+// Override the code block renderer
+renderer.code = function(code: string, language: string | undefined) {
+  // Try Tree-sitter syntax highlighting
+  const highlighted = highlightCode(code, language);
+
+  // Tree-sitter adds background internally, return as-is
+  return '\n' + highlighted + '\n';
+};
+
+// Configure marked with terminal renderer and our custom renderer
+marked.use({
+  renderer,
+  ...markedTerminal({
+    // Don't reflowText since we handle wrapping ourselves
+    reflowText: false,
+    // Keep width large so marked doesn't wrap
+    width: 9999,
+    // Emoji support
+    emoji: true,
+    // Custom colors using our forced-color chalk instance
+    code: chalk.bgBlack.yellow,  // Fallback (renderer.code handles this)
+    blockquote: chalk.gray.italic,
+    heading: chalk.magenta.underline.bold,
+    firstHeading: chalk.magenta.underline.bold,
+    strong: chalk.bold,
+    em: chalk.italic,
+    codespan: chalk.bgBlack.yellow,
+    del: chalk.strikethrough,
+    link: chalk.blue,
+    href: chalk.blue.underline,
+    listitem: chalk.reset,
+    // Table rendering options
+    tableOptions: {
+      chars: {
+        'top': '─', 'top-mid': '┬', 'top-left': '┌', 'top-right': '┐',
+        'bottom': '─', 'bottom-mid': '┴', 'bottom-left': '└', 'bottom-right': '┘',
+        'left': '│', 'left-mid': '├', 'mid': '─', 'mid-mid': '┼',
+        'right': '│', 'right-mid': '┤', 'middle': '│'
+      }
     }
-  }
-}));
+  })
+});
 
 /**
  * Render markdown text to terminal-styled text with ANSI codes.
  * The output can be displayed directly in the terminal.
+ *
+ * Code blocks in supported languages (ts, js, tsx, jsx) will be
+ * syntax-highlighted using Tree-sitter from entity-graph.
  */
 export function renderMarkdown(text: string): string {
   if (!text || typeof text !== 'string') {

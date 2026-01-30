@@ -29,7 +29,7 @@ const AGENT_EVENTS_LOG = path.join(PROJECT_ROOT, 'logs', 'agent_events.log')
 const DAEMON_ENTRY = path.join(PROJECT_ROOT, 'packages', 'harness-daemon', 'src', 'index.ts')
 const LAUNCHER_ENTRY = path.join(PROJECT_ROOT, 'packages', 'launcher', 'index.ts')
 
-const DEFAULT_STALE_MINUTES = 10
+const DEFAULT_STALE_MINUTES = 120
 const DAEMON_READY_TIMEOUT_MS = 15_000
 const CLIENT_CONNECT_TIMEOUT_MS = 5_000
 
@@ -52,8 +52,8 @@ export const metadata: DerivedMetadataSchema = {
   fields: {
     stale_minutes: {
       type: 'number',
-      default: 10,
-      description: 'Log staleness threshold in minutes',
+      default: 120,
+      description: 'Log staleness threshold in minutes (default: 120 = 2 hours)',
     },
     notify: {
       type: 'boolean',
@@ -238,7 +238,7 @@ async function sendTelegramNotification(
 
   if (chatIds.length === 0) return
 
-  const { notifyAllUsers } = await import('../../src/connectors/telegram/notify.js')
+  const { notifyAllUsers } = await import('../src/connectors/telegram/notify.ts')
 
   const lines = [
     `🔧 *Watchdog: Daemon Restarted*`,

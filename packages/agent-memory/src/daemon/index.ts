@@ -118,6 +118,7 @@ interface AuthStatePayload {
  */
 export class SyncDaemon {
   // Public readonly access to internal components
+  readonly sql: Sql
   readonly engine: SyncEngine
   readonly scheduler: Scheduler
   readonly derivedIntegration: DerivedTaskIntegration
@@ -171,6 +172,7 @@ export class SyncDaemon {
     actionsRepo: AgentActionsRepository
   ) {
     this.config = config
+    this.sql = config.sql
     this.server = server
     this.engine = engine
     this.scheduler = scheduler

@@ -9,6 +9,7 @@ import { generateCanonicalId } from '../../ids.js'
 import type { RepositoryContext, PaginationOptions, PaginatedResult } from './types.js'
 
 export type DerivedJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type FailureClass = 'transient' | 'rate_limited' | 'resource' | 'permanent' | 'unknown'
 
 export interface DerivedJob {
   id: string
@@ -23,6 +24,10 @@ export interface DerivedJob {
   next_retry_at?: string
   metadata?: Record<string, unknown>
   output_ref?: string
+  // Failure classification
+  failure_class?: FailureClass
+  retry_after?: number
+  cost_cents?: number
 }
 
 export interface DerivedJobRow {
@@ -38,6 +43,10 @@ export interface DerivedJobRow {
   next_retry_at: Date | null
   metadata: Record<string, unknown> | null
   output_ref: string | null
+  // Failure classification
+  failure_class: string | null
+  retry_after: bigint | null
+  cost_cents: number | null
 }
 
 function rowToDerivedJob(row: DerivedJobRow): DerivedJob {
@@ -54,6 +63,9 @@ function rowToDerivedJob(row: DerivedJobRow): DerivedJob {
     next_retry_at: row.next_retry_at?.toISOString(),
     metadata: row.metadata ?? undefined,
     output_ref: row.output_ref ?? undefined,
+    failure_class: (row.failure_class as FailureClass) ?? undefined,
+    retry_after: row.retry_after !== null ? Number(row.retry_after) : undefined,
+    cost_cents: row.cost_cents ?? undefined,
   }
 }
 
@@ -77,6 +89,20 @@ export interface DerivedJobRepository {
   scheduleRetry(id: string, retryAt: Date): Promise<DerivedJob | null>
   updateMetadata(id: string, metadata: Record<string, unknown>): Promise<DerivedJob | null>
   setOutputRef(id: string, outputRef: string | null): Promise<DerivedJob | null>
+
+  // Policy-related queries
+  /** Find the most recent completed job for a task */
+  findLastCompleted(taskId: string): Promise<DerivedJob | null>
+  /** Count jobs created since a given date for rate limiting */
+  countSince(taskId: string, since: Date): Promise<number>
+  /** Find the oldest job in a time window for rate limit window calculation */
+  findOldestInWindow(taskId: string, windowStart: Date): Promise<DerivedJob | null>
+  /** Count running jobs by resource pool */
+  countRunningByPool(poolId: string): Promise<number>
+  /** Fail a job with failure classification */
+  failWithClass(id: string, error: string, failureClass: FailureClass, retryAfter?: number): Promise<DerivedJob | null>
+  /** Record cost for a job */
+  recordCost(id: string, costCents: number): Promise<DerivedJob | null>
 }
 
 export function createDerivedJobRepository(ctx: RepositoryContext): DerivedJobRepository {
@@ -248,6 +274,75 @@ export function createDerivedJobRepository(ctx: RepositoryContext): DerivedJobRe
       const [row] = await sql<DerivedJobRow[]>`
         UPDATE derived_jobs
         SET output_ref = ${outputRef}
+        WHERE id = ${id}
+        RETURNING *
+      `
+      return row ? rowToDerivedJob(row) : null
+    },
+
+    async findLastCompleted(taskId) {
+      const [row] = await sql<DerivedJobRow[]>`
+        SELECT * FROM derived_jobs
+        WHERE task_id = ${taskId}
+          AND status = 'completed'
+        ORDER BY completed_at DESC
+        LIMIT 1
+      `
+      return row ? rowToDerivedJob(row) : null
+    },
+
+    async countSince(taskId, since) {
+      const [result] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM derived_jobs
+        WHERE task_id = ${taskId}
+          AND created_at >= ${since}
+      `
+      return parseInt(result.count, 10)
+    },
+
+    async findOldestInWindow(taskId, windowStart) {
+      const [row] = await sql<DerivedJobRow[]>`
+        SELECT * FROM derived_jobs
+        WHERE task_id = ${taskId}
+          AND created_at >= ${windowStart}
+        ORDER BY created_at ASC
+        LIMIT 1
+      `
+      return row ? rowToDerivedJob(row) : null
+    },
+
+    async countRunningByPool(poolId) {
+      const [result] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count
+        FROM derived_jobs j
+        JOIN derived_tasks t ON j.task_id = t.id
+        JOIN resource_pools p ON t.resource_pool = p.name
+        WHERE j.status = 'running'
+          AND p.id = ${poolId}
+      `
+      return parseInt(result.count, 10)
+    },
+
+    async failWithClass(id, error, failureClass, retryAfter) {
+      const now = new Date()
+      const [row] = await sql<DerivedJobRow[]>`
+        UPDATE derived_jobs
+        SET status = 'failed',
+            completed_at = ${now},
+            last_error = ${error},
+            retry_count = retry_count + 1,
+            failure_class = ${failureClass},
+            retry_after = ${retryAfter ?? null}
+        WHERE id = ${id}
+        RETURNING *
+      `
+      return row ? rowToDerivedJob(row) : null
+    },
+
+    async recordCost(id, costCents) {
+      const [row] = await sql<DerivedJobRow[]>`
+        UPDATE derived_jobs
+        SET cost_cents = COALESCE(cost_cents, 0) + ${costCents}
         WHERE id = ${id}
         RETURNING *
       `

@@ -78,7 +78,7 @@ describe('Agent', () => {
       systemPrompt: 'Test prompt',
       tools: [],
       budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
-      outputSchema: { name: 'agent_action_output', schema: { type: 'object' }, strict: true },
+      outputSchema: { name: 'agent_action_output', schema: { type: 'object' }, strict: true, schemaId: 'agent_action' },
     };
 
     const agent = new Agent(config, {
@@ -102,7 +102,7 @@ describe('Agent', () => {
       systemPrompt: 'Test prompt',
       tools: ['Read'],
       budget: { maxIterations: 5, maxToolCalls: 10, maxDurationMs: 1000 },
-      outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true },
+      outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
     };
 
     const agent = new Agent(config, {
@@ -140,6 +140,6 @@ describe('Agent', () => {
     const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
 
     expect(result.success).toBe(false);
-    expect(result.terminationReason).toBe('stagnation:tool_repeat');
+    expect(result.terminationReason).toBe('stagnation');
   });
 });

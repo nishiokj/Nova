@@ -2,6 +2,7 @@ import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
 import type { ContextWindowSnapshot, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
+import type { HandoffSpec } from 'protocol';
 import { PermissionChecker } from './permissions.js';
 
 interface SessionStoreOptions {
@@ -28,7 +29,7 @@ export interface PausedState {
   workingDir: string;
   planMode?: boolean;
   userPromptType?: string;
-  handoffSpec?: string; // Stored for execution after user approval
+  handoffSpec?: HandoffSpec; // Stored for execution after user approval
   pausedAt: number; // Timestamp when session entered paused state
 }
 
@@ -38,6 +39,24 @@ interface SessionStoreOptions {
   graphd: GraphDManager | null;
   isGraphDReady: () => boolean;
   logger: HarnessLogger;
+}
+
+function normalizeHandoffSpec(value: unknown): HandoffSpec | undefined {
+  if (!value) return undefined;
+  let candidate = value;
+  if (typeof candidate === 'string') {
+    try {
+      candidate = JSON.parse(candidate);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
+  const spec = candidate as HandoffSpec;
+  if (typeof spec.goal !== 'string' || typeof spec.context !== 'string' || !Array.isArray(spec.workItems)) {
+    return undefined;
+  }
+  return spec;
 }
 
 /**
@@ -67,6 +86,7 @@ export class SessionStore {
   private context: ContextWindow | null = null;
   private pausedState: PausedState | null = null;
   private modelSelections = new Map<string, ModelSelection>();
+  private asyncModeEnabled = false;
 
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
@@ -85,6 +105,14 @@ export class SessionStore {
       this.workingDir,
       options.dangerousMode ?? false
     );
+  }
+
+  setAsyncModeEnabled(enabled: boolean): void {
+    this.asyncModeEnabled = enabled;
+  }
+
+  isAsyncModeEnabled(): boolean {
+    return this.asyncModeEnabled;
   }
 
   getContext(): ContextWindow {
@@ -139,7 +167,15 @@ export class SessionStore {
       const pausedStateMetadata = metadata?.paused_state as Omit<PausedState, 'pausedAt'> | undefined;
 
       if (pausedStateMetadata) {
-        this.pausedState = { ...pausedStateMetadata, pausedAt: Date.now() };
+        const normalizedHandoffSpec = normalizeHandoffSpec(pausedStateMetadata.handoffSpec);
+        if (pausedStateMetadata.handoffSpec && !normalizedHandoffSpec) {
+          this.logger.warning('Dropped invalid paused handoffSpec from metadata', { sessionKey: this.sessionKey });
+        }
+        this.pausedState = {
+          ...pausedStateMetadata,
+          handoffSpec: normalizedHandoffSpec,
+          pausedAt: Date.now(),
+        };
         this.logger.debug('Recovered paused state from GraphD', {
           sessionKey: this.sessionKey,
           goal: this.pausedState.goal,

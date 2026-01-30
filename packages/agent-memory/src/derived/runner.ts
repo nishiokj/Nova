@@ -58,9 +58,17 @@ export interface DerivedRunContext {
   }
 }
 
+import type { FailureClass } from '../db/repositories/derived-job.js'
+
 export interface DerivedRunResult {
   outputRef?: string
   metadata?: Record<string, unknown>
+  /** Classification of failure for retry logic */
+  failureClass?: FailureClass
+  /** Unix timestamp (ms) when retry is allowed */
+  retryAfter?: number
+  /** Cost of this execution in cents */
+  cost_cents?: number
 }
 
 export interface MetadataFieldDef {

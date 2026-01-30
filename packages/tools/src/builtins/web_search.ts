@@ -54,6 +54,7 @@ export async function executeWebSearch(
       toolName: 'WebSearch',
       status: 'error',
       output: 'Search query is required',
+      error: 'Search query is required',
       isSuccess: false,
       durationMs: Date.now() - startTime,
     };
@@ -99,6 +100,7 @@ export async function executeWebSearch(
         toolName: 'WebSearch',
         status: 'error',
         output: `Search request failed (${response.status}): ${response.statusText}`,
+        error: `Search request failed (${response.status}): ${response.statusText}`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
@@ -139,6 +141,7 @@ export async function executeWebSearch(
         toolName: 'WebSearch',
         status: 'error',
         output: `Search timed out after ${FETCH_TIMEOUT_MS / 1000} seconds`,
+        error: `Search timed out after ${FETCH_TIMEOUT_MS / 1000} seconds`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
@@ -149,6 +152,7 @@ export async function executeWebSearch(
       toolName: 'WebSearch',
       status: 'error',
       output: `Web search failed: ${errorMessage}`,
+      error: `Web search failed: ${errorMessage}`,
       isSuccess: false,
       durationMs: Date.now() - startTime,
     };

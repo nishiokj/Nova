@@ -307,13 +307,12 @@ const CONTINUABLE_TERMINATIONS = new Set([
   'user_input_required', // Handled specially with async mode message
   'no_action', // LLM didn't output proper action field - common formatting issue
   'invalid_action', // Invalid action value - try again
-  'stagnation:tool_repeat', // Agent is repeating tool calls - nudge it to try something else
+  'stagnation', // Agent is repeating tool calls - nudge it to try something else
 ]);
 
 /** Termination reasons that can continue IF there's substantial response content */
 const CONDITIONAL_CONTINUABLE = new Set([
   'agent_error', // Agent errors might be recoverable if LLM produced output
-  'exception', // Caught exceptions - recoverable if we have partial output
 ]);
 
 /** Termination reasons that MUST terminate the loop - no recovery */
@@ -358,7 +357,7 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
       return { decision: 'allow' };
     }
 
-    // Conditional continuable (agent_error, exception) - only continue if we have substantial output
+    // Conditional continuable (agent_error) - only continue if we have substantial output
     if (isConditionalContinuable && !hasSubstantialResponse) {
       console.log(`[RalphLoop] Conditional termination (${context.terminationReason}) without substantial response at iteration ${state.iteration}`);
       config.onComplete?.(state, 'error');
@@ -396,9 +395,8 @@ export function createRalphStopHook(config: RalphLoopConfig): StopHookHandler {
     // Handle error conditions that we're retrying - add context about the issue
     const isFormatError = context.terminationReason === 'no_action' ||
                           context.terminationReason === 'invalid_action';
-    const isRecoverableError = context.terminationReason === 'agent_error' ||
-                               context.terminationReason === 'exception';
-    const isStagnation = context.terminationReason === 'stagnation:tool_repeat';
+    const isRecoverableError = context.terminationReason === 'agent_error';
+    const isStagnation = context.terminationReason === 'stagnation';
 
     let errorHint = '';
     if (isFormatError) {

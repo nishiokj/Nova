@@ -70,7 +70,7 @@ function loadConfig(metadata: Record<string, unknown> | undefined): BookmarksCon
     outputDir: (metadata?.outputDir as string) ?? path.resolve(projectRoot, 'data/x-bookmarks-digest'),
     responseTimeoutMs: (metadata?.responseTimeoutMs as number) ?? 10 * 60 * 1000,
     maxBookmarks: (metadata?.maxBookmarks as number) ?? 20,
-    authStatePath:'auth-states/x-auth.json',
+    authStatePath: path.resolve(projectRoot, 'auth-states/x-auth.json'),
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? null,
     telegramChatId,
   }

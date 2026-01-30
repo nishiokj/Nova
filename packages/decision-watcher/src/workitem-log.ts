@@ -89,11 +89,13 @@ export interface WorkItemLog {
   // Convenience methods for streaming
   // ============================================
 
-  /** Append a conversation message */
+  /** Append a conversation message with optional reasoning */
   appendMessage(
     role: 'system' | 'user' | 'assistant',
     content: string,
-    watcherInjected?: boolean
+    watcherInjected?: boolean,
+    /** Agent's reasoning/thinking for this turn */
+    reasoning?: string
   ): Promise<void>;
 
   /** Append a tool call record */
@@ -145,11 +147,14 @@ export interface WorkItemLog {
 // CONSTANTS
 // ============================================
 
-/** Max content length before truncation */
-const MAX_CONTENT_LENGTH = 3000;
+/** Max result summary length for tool outputs (generous - we want useful context) */
+const MAX_RESULT_SUMMARY_LENGTH = 5000;
 
-/** Max result summary length */
-const MAX_RESULT_SUMMARY_LENGTH = 500;
+/** Max reasoning length (extended thinking can be verbose) */
+const MAX_REASONING_LENGTH = 10000;
+
+/** Max agent summary length (for completed status) */
+const MAX_CONTENT_LENGTH = 10000;
 
 // ============================================
 // IMPLEMENTATION
@@ -165,6 +170,8 @@ export async function createWorkItemLog(
     workId: string;
     objective: string;
     agent: string;
+    /** Working directory for this workitem - all paths will be relative to this */
+    cwd?: string;
     domain?: string;
     dependencies?: string[];
     targetPaths?: string[];
@@ -176,11 +183,15 @@ export async function createWorkItemLog(
   const logPath = workitemPath(workingDir, sessionId, initialData.workId);
   const summaryPath = workitemSummaryPath(workingDir, sessionId, initialData.workId);
 
-  // Write init entry
+  // Use provided cwd or fall back to workingDir
+  const cwd = initialData.cwd ?? workingDir;
+
+  // Write init entry with cwd for relative path resolution
   const initEntry: WorkItemInitEntry = {
     type: 'init',
     timestamp: new Date().toISOString(),
     workId: initialData.workId,
+    cwd,
     objective: initialData.objective,
     agent: initialData.agent,
     domain: initialData.domain,
@@ -190,7 +201,7 @@ export async function createWorkItemLog(
 
   await fs.writeFile(logPath, JSON.stringify(initEntry) + '\n', 'utf-8');
 
-  return createWorkItemLogInstance(logPath, summaryPath, initialData.workId);
+  return createWorkItemLogInstance(logPath, summaryPath, initialData.workId, cwd);
 }
 
 /**
@@ -210,8 +221,21 @@ export async function getWorkItemLog(
     return null;
   }
 
+  // Read init entry to get cwd
+  let cwd = workingDir;
+  try {
+    const content = await fs.readFile(logPath, 'utf-8');
+    const firstLine = content.split('\n')[0];
+    if (firstLine) {
+      const initEntry = JSON.parse(firstLine) as WorkItemInitEntry;
+      cwd = initEntry.cwd ?? workingDir;
+    }
+  } catch {
+    // Fall back to workingDir if we can't read init
+  }
+
   const summaryPath = workitemSummaryPath(workingDir, sessionId, workId);
-  return createWorkItemLogInstance(logPath, summaryPath, workId);
+  return createWorkItemLogInstance(logPath, summaryPath, workId, cwd);
 }
 
 /**
@@ -220,7 +244,8 @@ export async function getWorkItemLog(
 function createWorkItemLogInstance(
   logPath: string,
   summaryPath: string,
-  workIdValue: string
+  workIdValue: string,
+  cwd: string
 ): WorkItemLog {
   async function append(entry: WorkItemEntry): Promise<void> {
     const line = JSON.stringify(entry) + '\n';
@@ -264,13 +289,15 @@ function createWorkItemLogInstance(
     async appendMessage(
       role: 'system' | 'user' | 'assistant',
       content: string,
-      watcherInjected?: boolean
+      watcherInjected?: boolean,
+      reasoning?: string
     ): Promise<void> {
       const entry: WorkItemMessageEntry = {
         type: 'message',
         timestamp: new Date().toISOString(),
         role,
-        content: truncate(content, MAX_CONTENT_LENGTH),
+        content,  // Full content - no truncation for proper audit trail
+        reasoning: reasoning ? truncate(reasoning, MAX_REASONING_LENGTH) : undefined,
         watcherInjected,
       };
       await append(entry);
@@ -287,7 +314,7 @@ function createWorkItemLogInstance(
         type: 'tool_call',
         timestamp: new Date().toISOString(),
         tool,
-        args: summarizeArgs(args),
+        args: processArgsForLogging(args, cwd),  // Full args with relative paths
         success,
         resultSummary: resultSummary ? truncate(resultSummary, MAX_RESULT_SUMMARY_LENGTH) : undefined,
         durationMs: durationMs ?? 0,
@@ -396,20 +423,58 @@ function truncate(str: string, maxLen: number): string {
 }
 
 /**
- * Summarize tool args for logging (don't include full file contents, etc.)
+ * Process tool args for logging:
+ * - Convert absolute paths to relative (based on cwd)
+ * - Keep full content for Edit tools (the watcher needs to see what was written)
+ * - Apply reasonable limits only for truly massive content
  */
-function summarizeArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const summary: Record<string, unknown> = {};
+function processArgsForLogging(args: Record<string, unknown>, cwd: string): Record<string, unknown> {
+  const processed: Record<string, unknown> = {};
+
+  // Normalize cwd to ensure consistent path comparison
+  const normalizedCwd = cwd.endsWith('/') ? cwd : cwd + '/';
+
   for (const [key, value] of Object.entries(args)) {
-    if (typeof value === 'string' && value.length > 200) {
-      summary[key] = value.slice(0, 200) + '...';
-    } else if (Array.isArray(value) && value.length > 10) {
-      summary[key] = [...value.slice(0, 10), `... and ${value.length - 10} more`];
+    if (typeof value === 'string') {
+      // Check if it's a path that should be relativized
+      if (isPathKey(key) && value.startsWith(normalizedCwd)) {
+        processed[key] = value.slice(normalizedCwd.length);
+      } else if (value.startsWith(cwd + '/')) {
+        // Handle case without trailing slash
+        processed[key] = value.slice(cwd.length + 1);
+      } else if (isLargeContentKey(key) && value.length > 10000) {
+        // Only truncate truly massive content (10k+), but preserve most of it
+        processed[key] = value.slice(0, 10000) + `\n... [truncated ${value.length - 10000} chars]`;
+      } else {
+        // Keep full content - this is crucial for Edit oldString/newString
+        processed[key] = value;
+      }
+    } else if (Array.isArray(value)) {
+      // Relativize path arrays
+      processed[key] = value.map(item =>
+        typeof item === 'string' && item.startsWith(normalizedCwd)
+          ? item.slice(normalizedCwd.length)
+          : typeof item === 'string' && item.startsWith(cwd + '/')
+            ? item.slice(cwd.length + 1)
+            : item
+      );
     } else {
-      summary[key] = value;
+      processed[key] = value;
     }
   }
-  return summary;
+  return processed;
+}
+
+/** Keys that typically contain file paths */
+function isPathKey(key: string): boolean {
+  const pathKeys = ['path', 'file_path', 'filePath', 'file', 'directory', 'dir', 'cwd'];
+  return pathKeys.includes(key.toLowerCase()) || key.toLowerCase().endsWith('path');
+}
+
+/** Keys that might have very large content (but we still want most of it) */
+function isLargeContentKey(key: string): boolean {
+  const contentKeys = ['content', 'output', 'result', 'body'];
+  return contentKeys.includes(key.toLowerCase());
 }
 
 /**

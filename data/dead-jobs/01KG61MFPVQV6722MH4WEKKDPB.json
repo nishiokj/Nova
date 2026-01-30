@@ -1,0 +1,14 @@
+{
+  "id": "01KG61MFPVQV6722MH4WEKKDPB",
+  "type": "sync:collect",
+  "payload": {
+    "syncJobId": "01KG61MFPSNHF937KBH3FXWPZ3",
+    "connector": "rex_sessions",
+    "accountId": "01KFYHSDKRDJ3STPMN99TMKZ3E",
+    "jobType": "incremental"
+  },
+  "error": "Sync job not found: 01KG61MFPSNHF937KBH3FXWPZ3",
+  "attemptCount": 3,
+  "createdAt": "2026-01-29T23:32:52.571Z",
+  "diedAt": "2026-01-29T23:45:47.693Z"
+}

@@ -14,8 +14,10 @@ export {
   parseAndValidateOutput,
   isValidOutput,
   getOutputSchema,
+  getOutputSchemaJson,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
+  type RoutingOutput,
   type AgentAction,
   type AgentActionOutput,
   type GoalDrivenOutput,
@@ -23,6 +25,8 @@ export {
   type ExplorerOutput,
   type WorkItemOutput,
   type RuntimeScriptOutput,
+  type WatcherActionOutput,
+  type PlannerOutput,
 } from './structured_output.js';
 export { createMicroQueue, type MicroQueue, type MicroQueueOptions } from './microqueue.js';
 export {
@@ -34,9 +38,6 @@ export {
 // Re-export Zod for use across packages
 export { z } from 'zod';
 export type { ZodType, ZodError, ZodSchema, ZodIssue } from 'zod';
-
-// Termination reason types
-export type { AgentTerminationReason, OrchestratorTerminationReason } from './termination.js';
 
 // Profiler for Chrome Trace format output
 export {

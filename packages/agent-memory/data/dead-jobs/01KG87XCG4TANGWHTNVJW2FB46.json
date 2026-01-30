@@ -1,0 +1,11 @@
+{
+  "id": "01KG87XCG4TANGWHTNVJW2FB46",
+  "type": "derived:run",
+  "payload": {
+    "derivedJobId": "01KG87XCG2M49AETEMGXJK28X7"
+  },
+  "error": "Derived job not found: 01KG87XCG2M49AETEMGXJK28X7",
+  "attemptCount": 1,
+  "createdAt": "2026-01-30T20:01:04.515Z",
+  "diedAt": "2026-01-30T20:01:04.591Z"
+}

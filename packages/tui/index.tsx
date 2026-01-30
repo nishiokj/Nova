@@ -35,6 +35,7 @@ import {
   type RalphProgressData,
   type RalphCompletionReason,
   type PermissionRequestData,
+  type TextSegment as HistoryTextSegment,
 } from "./types.js";
 import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
@@ -3381,13 +3382,23 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const bgColor = isUserLine ? colors.userBg : undefined;
             // User messages: 2 chars padding (1 left + 1 right)
             // Agent messages: 2 chars padding (1 left + 1 right)
-            const paddedText = isUserLine ? `  ${line.text}  ` : ` ${line.text} `;
-            const remainingWidth = contentWidth - paddedText.length;
-            const paddingText = remainingWidth > 0 ? " ".repeat(remainingWidth) : "";
+            const leftPad = isUserLine ? 2 : 1;
+            const rightPad = isUserLine ? 2 : 1;
+            const baseText = line.text ?? "";
+            const paddedLength = leftPad + baseText.length + rightPad;
+            const remainingWidth = contentWidth - paddedLength;
+            const rightFill = remainingWidth > 0 ? remainingWidth : 0;
             return (
               <Box key={line.id ?? `hist-${index}`} marginLeft={isUserLine ? -HORIZONTAL_PADDING : 0} marginRight={isUserLine ? -HORIZONTAL_PADDING : 0}>
                 <Text width={isUserLine ? width : undefined} backgroundColor={bgColor}>
-                  <StyledLine text={paddedText + paddingText} baseColor={roleColor(line.role)} italic={isReasoning} />
+                  <StyledLine
+                    text={baseText}
+                    baseColor={roleColor(line.role)}
+                    italic={isReasoning}
+                    segments={line.segments}
+                    padLeft={leftPad}
+                    padRight={rightPad + rightFill}
+                  />
                 </Text>
               </Box>
             );
@@ -3787,7 +3798,7 @@ const syntaxPatterns: SyntaxPattern[] = [
   { pattern: /\b[a-z_][a-zA-Z0-9_]*\(\)/g, colorKey: "func" },
 ];
 
-interface TextSegment {
+interface ParsedSegment {
   text: string;
   color?: string;
   backgroundColor?: string;
@@ -3798,10 +3809,10 @@ interface TextSegment {
 
 const MAX_PARSE_TEXT_LENGTH = 20000;
 const PARSE_CACHE_LIMIT = 200;
-const parseCache = new Map<string, TextSegment[]>();
+const parseCache = new Map<string, ParsedSegment[]>();
 
 /** Parse text into styled segments for syntax highlighting */
-function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
+function parseTextSegments(text: string, baseColor?: string): ParsedSegment[] {
   if (text.length > MAX_PARSE_TEXT_LENGTH) {
     return [{ text, color: baseColor }];
   }
@@ -3813,7 +3824,7 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
   }
 
   const colors = getColors();
-  const segments: TextSegment[] = [];
+  const segments: ParsedSegment[] = [];
 
   // Find all matches with positions
   const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean; underline?: boolean }> = [];
@@ -3873,17 +3884,127 @@ function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
   return result;
 }
 
-/** Render text with syntax highlighting */
-function StyledLine({ text, baseColor, italic: lineItalic }: { text: string; baseColor?: string; italic?: boolean }): JSX.Element {
-  const segments = parseTextSegments(text, baseColor);
+function hasAnsiCodes(text: string): boolean {
+  return /\x1b\[/.test(text);
+}
 
+function resolveSegmentColor(color: HistoryTextSegment["color"], baseColor: string | undefined): string | undefined {
+  const colors = getColors();
+  switch (color) {
+    case "red":
+      return colors.error;
+    case "green":
+      return colors.success;
+    case "yellow":
+      return colors.warning;
+    case "blue":
+      return colors.url;
+    case "magenta":
+      return colors.header;
+    case "cyan":
+      return colors.info;
+    case "white":
+      return colors.text;
+    case "gray":
+      return colors.muted;
+    case "text":
+      return colors.text;
+    case "muted":
+      return colors.muted;
+    default:
+      return baseColor;
+  }
+}
+
+function resolveSegmentBg(bgColor: HistoryTextSegment["bgColor"]): string | undefined {
+  const colors = getColors();
+  switch (bgColor) {
+    case "red":
+      return colors.error;
+    case "green":
+      return colors.success;
+    case "yellow":
+      return colors.warning;
+    case "blue":
+      return colors.info;
+    case "magenta":
+      return colors.header;
+    case "cyan":
+      return colors.info;
+    case "white":
+      return colors.text;
+    case "gray":
+      return colors.muted;
+    case "userBg":
+      return colors.userBg;
+    case "diffContextBg":
+      return colors.diffContextBg;
+    default:
+      return undefined;
+  }
+}
+
+function renderHistorySegments(segments: HistoryTextSegment[], baseColor: string | undefined, lineItalic: boolean | undefined): JSX.Element {
   return (
     <>
       {segments.map((seg, i) => (
-        <Text key={i} color={seg.color} backgroundColor={seg.backgroundColor} bold={seg.bold} italic={lineItalic || seg.italic} underline={seg.underline}>
+        <Text
+          key={i}
+          color={resolveSegmentColor(seg.color, baseColor)}
+          backgroundColor={resolveSegmentBg(seg.bgColor)}
+          bold={seg.bold}
+          italic={lineItalic || seg.italic}
+          underline={seg.underline}
+          dimColor={seg.dim}
+        >
           {seg.text}
         </Text>
       ))}
+    </>
+  );
+}
+
+/** Render text with syntax highlighting */
+function StyledLine({
+  text,
+  baseColor,
+  italic: lineItalic,
+  segments,
+  padLeft,
+  padRight,
+}: {
+  text: string;
+  baseColor?: string;
+  italic?: boolean;
+  segments?: HistoryTextSegment[];
+  padLeft: number;
+  padRight: number;
+}): JSX.Element {
+  const prefix = padLeft > 0 ? " ".repeat(padLeft) : "";
+  const suffix = padRight > 0 ? " ".repeat(padRight) : "";
+
+  if (hasAnsiCodes(text)) {
+    return <Text>{prefix + text + suffix}</Text>;
+  }
+
+  return (
+    <>
+      {prefix ? <Text color={baseColor}>{prefix}</Text> : null}
+      {segments
+        ? renderHistorySegments(segments, baseColor, lineItalic)
+        : parseTextSegments(text, baseColor).map((seg, i) => (
+          <Text
+            key={i}
+            color={seg.color}
+            backgroundColor={seg.backgroundColor}
+            bold={seg.bold}
+            italic={lineItalic || seg.italic}
+            underline={seg.underline}
+          >
+            {seg.text}
+          </Text>
+        ))}
+      {suffix ? <Text color={baseColor}>{suffix}</Text> : null}
     </>
   );
 }

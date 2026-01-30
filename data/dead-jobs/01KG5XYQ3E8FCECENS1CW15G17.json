@@ -1,0 +1,11 @@
+{
+  "id": "01KG5XYQ3E8FCECENS1CW15G17",
+  "type": "derived:run",
+  "payload": {
+    "derivedJobId": "01KG5XYQ3CZD6RQMPG71PK0NQ0"
+  },
+  "error": "{\"error\":{\"code\":429,\"message\":\"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \",\"status\":\"RESOURCE_EXHAUSTED\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.Help\",\"links\":[{\"description\":\"Learn more about Gemini API quotas\",\"url\":\"https://ai.google.dev/gemini-api/docs/rate-limits\"}]}]}}",
+  "attemptCount": 4,
+  "createdAt": "2026-01-29T22:28:33.517Z",
+  "diedAt": "2026-01-29T23:48:39.950Z"
+}

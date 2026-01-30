@@ -6,6 +6,7 @@ import type { StatusTone } from './StatusBadge'
 import { SimpleProgress } from './ProgressBar'
 import { QualityBar } from './QualityIndicator'
 import { VerticalTimeline } from './ExecutionTimeline'
+import { MemoryInjectionList } from './MemoryInjectionPanel'
 import { ReflectionPanel } from './ReflectionPanel'
 import { formatDuration } from '../lib/time'
 import { ContextWindowWidget } from './ContextWindowWidget'
@@ -319,6 +320,17 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
               </span>
               <div className="mt-2 bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
                 <ExecutionFlow llmCalls={request.llmCalls} toolCalls={request.toolCalls} />
+              </div>
+            </div>
+          )}
+
+          {request.memoryInjections.length > 0 && (
+            <div className="pt-3">
+              <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+                Memory Injection ({request.memoryInjections.length})
+              </span>
+              <div className="mt-2 bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
+                <MemoryInjectionList injections={request.memoryInjections} />
               </div>
             </div>
           )}

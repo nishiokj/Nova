@@ -28,7 +28,28 @@ import type { AuthService } from './auth_service.js';
 import { LocalProviderManager } from './local_providers.js';
 import { isOpenAICompatProvider } from 'types';
 import { getAllModels } from 'types';
-import { createRalphStopHook, type RalphCompletionReason, type RalphLoopState } from 'orchestrator';
+import { createHookRegistry, createRalphStopHook, type HookRegistry, type RalphCompletionReason, type RalphLoopState } from 'orchestrator';
+import type { StopHookContext, StopHookResult } from 'agent';
+import {
+  getProtocolId,
+  assertNever,
+  failed,
+  success,
+  type AgentErrorDecision,
+  type BoundsDecision,
+  type CadenceDecision,
+  type ControlEvent,
+  type HandoffDecision,
+  type Hook,
+  type HookContext,
+  type HookOutcome,
+  type PromptAnswerDecision,
+  type QualityGateDecision,
+  type StatePatch,
+  type TerminationReason,
+  type WorkItemSpec,
+} from 'protocol';
+import type { AgentType } from 'agent';
 import type { PermissionChecker } from './permissions.js';
 
 interface BridgeCommand {
@@ -40,12 +61,12 @@ interface HarnessLike {
   run(params: {
     requestId: string;
     inputText: string;
-    tier?: 'simple' | 'standard' | 'complex';
+    tier?: AgentType;
     sessionKey: string;
     workingDir: string;
     context?: string;
     planMode?: boolean;
-    stopHook?: import('orchestrator').StopHookHandler;
+    hookRegistry?: HookRegistry;
   }): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
   getConfig(): FullHarnessConfig;
@@ -76,8 +97,8 @@ interface HarnessLike {
   watcherDefocus?(sessionKey: string): Record<string, unknown>;
   watcherReanchor?(sessionKey: string, goal: string): Record<string, unknown>;
   watcherSummarize?(sessionKey: string): Record<string, unknown>;
-  /** Create an LLM-backed watcher stopHook + planning objective for a session. */
-  createWatcherStopHookForSession?(sessionKey: string, goal: string, workingDir: string): Promise<{ stopHook: import('orchestrator').StopHookHandler; planningObjective: string }>;
+  /** Create an LLM-backed watcher hook registry + planning objective for a session. */
+  createWatcherHookRegistryForSession?(sessionKey: string, goal: string, workingDir: string, watcherDir?: string): Promise<{ hookRegistry: HookRegistry; planningObjective: string }>;
 }
 
 interface RalphLoopInfo {
@@ -101,6 +122,195 @@ interface ConnectionState {
   planMode: boolean;
   ralphLoop: RalphLoopInfo | null;
   asyncRun: AsyncRunInfo | null;
+}
+
+function createHookRegistryFromStopHook(
+  stopHook: (ctx: StopHookContext) => Promise<StopHookResult> | StopHookResult,
+  sessionKey: string
+): HookRegistry {
+  const registry = createHookRegistry();
+  const hooks = buildStopHookAdapterHooks(stopHook, sessionKey);
+  registry.registerHooks({
+    source: `legacy-stop-hook:${sessionKey}`,
+    protocolId: getProtocolId(),
+    hooks,
+  });
+  return registry;
+}
+
+function buildStopHookAdapterHooks(
+  stopHook: (ctx: StopHookContext) => Promise<StopHookResult> | StopHookResult,
+  sessionKey: string
+): Array<Hook<ControlEvent, unknown>> {
+  const base = {
+    policy: { kind: 'retry_then_degrade', maxRetries: 1, backoffMs: 500, degradeTo: 'skip' } as const,
+    criticality: 'critical' as const,
+    idempotency: 'idempotent' as const,
+    priority: 50,
+    timeoutMs: 90_000,
+  };
+
+  const toTerminationReason = (event: ControlEvent): TerminationReason => {
+    switch (event.type) {
+      case 'goal_state_reached':
+        return 'goal_state_reached';
+      case 'bounds_exceeded':
+        switch (event.boundType) {
+          case 'iterations':
+            return 'max_iterations_exceeded';
+          case 'tool_calls':
+            return 'max_tool_calls_exceeded';
+          case 'duration':
+            return 'max_duration_exceeded';
+          default:
+            return assertNever(event.boundType);
+        }
+      case 'user_input_required':
+        return 'user_input_required';
+      case 'cadence_audit':
+        return 'cadence_audit';
+      case 'agent_error':
+        return event.errorType === 'exception' ? 'agent_error' : event.errorType;
+      case 'handoff_requested':
+        return 'handoff_requested';
+      case 'work_item_completed':
+        return 'goal_state_reached';
+      case 'user_stopped':
+        return 'user_stopped';
+      case 'transient_error':
+        switch (event.errorType) {
+          case 'rate_limit':
+            return 'rate_limit';
+          case 'circuit_open':
+            return 'circuit_open';
+          case 'timeout':
+            return 'timeout';
+        }
+      default:
+        return assertNever(event);
+    }
+  };
+
+  const toWorkItemSpecs = (items?: StopHookResult['deferredWork']): WorkItemSpec[] => {
+    if (!items || items.length === 0) return [];
+    return items.map(item => ({
+      goal: item.goal,
+      objective: item.objective,
+      agent: item.agent,
+      dependencies: item.dependencies,
+      targetPaths: item.targetPaths,
+      bounds: item.bounds,
+    }));
+  };
+
+  const buildStopContext = (event: ControlEvent, ctx: HookContext): StopHookContext => ({
+    workId: event.workId,
+    response: 'response' in event ? event.response : '',
+    terminationReason: toTerminationReason(event),
+    iteration: ctx.iteration,
+    agentType: ctx.agentType,
+    sessionKey: ctx.sessionKey,
+    userPrompt: event.type === 'user_input_required' ? {
+      question: event.prompt.question,
+      options: event.prompt.options?.map(option => ({ label: option.label, description: option.description })),
+      context: event.prompt.context,
+      multiSelect: event.prompt.multiSelect,
+    } : undefined,
+    handoffSpec: event.type === 'handoff_requested' ? event.handoffSpec : undefined,
+  });
+
+  const injectGuidancePatch = (message?: string): StatePatch[] | undefined => {
+    if (!message) return undefined;
+    return [{ op: 'inject_guidance', content: message }];
+  };
+
+  const runStopHook = async <D>(
+    event: ControlEvent,
+    ctx: HookContext,
+    mapResult: (result: StopHookResult) => { decision: D; patches?: StatePatch[] }
+  ): Promise<HookOutcome<D>> => {
+    if (event.sessionKey !== sessionKey) {
+      return { kind: 'skip', reason: 'session_mismatch' };
+    }
+    try {
+      const stopResult = await stopHook(buildStopContext(event, ctx));
+      const mapped = mapResult(stopResult);
+      return success(mapped.decision, mapped.patches);
+    } catch (err) {
+      return failed(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const makeHook = <D>(eventType: ControlEvent['type'], mapResult: (event: ControlEvent, result: StopHookResult) => { decision: D; patches?: StatePatch[] }): Hook<ControlEvent, D> => ({
+    ...base,
+    id: `legacy:${sessionKey}:${eventType}`,
+    event: eventType,
+    run: (event: ControlEvent, ctx: HookContext) => runStopHook(event, ctx, (result) => mapResult(event, result)),
+  });
+
+  return [
+    makeHook<QualityGateDecision>('goal_state_reached', (_event, result) => {
+      if (result.decision === 'block') {
+        return {
+          decision: { verdict: 'failed', issues: [result.reason ?? 'Quality gate blocked'] },
+          patches: injectGuidancePatch(result.systemMessage),
+        };
+      }
+      return { decision: { verdict: 'passed' } };
+    }),
+    makeHook<BoundsDecision>('bounds_exceeded', (_event, result) => {
+      const workItems = toWorkItemSpecs(result.deferredWork);
+      if (workItems.length > 0) {
+        return { decision: { action: 'split', workItems } };
+      }
+      if (result.decision === 'block' && result.reason) {
+        return {
+          decision: { action: 'realign', guidance: result.reason },
+          patches: injectGuidancePatch(result.systemMessage),
+        };
+      }
+      if (result.systemMessage) {
+        return { decision: { action: 'wrap_up', summary: result.systemMessage } };
+      }
+      return { decision: { action: 'abort', reason: 'Allowed termination' } };
+    }),
+    makeHook<PromptAnswerDecision>('user_input_required', (_event, result) => {
+      if (result.decision === 'block' && result.reason) {
+        return {
+          decision: { action: 'answer', text: result.reason, confidence: 0.7, contextAddendum: result.systemMessage },
+        };
+      }
+      return { decision: { action: 'defer', to: 'user' } };
+    }),
+    makeHook<CadenceDecision>('cadence_audit', (_event, result) => {
+      const workItems = toWorkItemSpecs(result.deferredWork);
+      if (workItems.length > 0) {
+        return { decision: { action: 'split', workItems } };
+      }
+      if (result.decision === 'block' && result.reason) {
+        return {
+          decision: { action: 'realign', guidance: result.reason },
+          patches: injectGuidancePatch(result.systemMessage),
+        };
+      }
+      if (result.systemMessage) {
+        return { decision: { action: 'inject_guidance', message: result.systemMessage } };
+      }
+      return { decision: { action: 'continue' } };
+    }),
+    makeHook<AgentErrorDecision>('agent_error', (_event, result) => {
+      if (result.decision === 'block' && result.reason) {
+        return { decision: { action: 'retry', guidance: result.reason } };
+      }
+      return { decision: { action: 'abort', reason: result.systemMessage ?? 'Allowed termination' } };
+    }),
+    makeHook<HandoffDecision>('handoff_requested', (_event, result) => {
+      if (result.decision === 'block' && result.reason) {
+        return { decision: { action: 'reject', feedback: result.reason } };
+      }
+      return { decision: { action: 'approve' } };
+    }),
+  ];
 }
 
 export class BridgeGateway {
@@ -508,7 +718,7 @@ export class BridgeGateway {
       ? candidateRequestId
       : generateRequestId();
     const rawTier = typeof data?.tier === 'string' ? data.tier.trim() : '';
-    const tier = rawTier && rawTier !== 'auto' ? rawTier : undefined;
+    const tier = rawTier && rawTier !== 'auto' ? (rawTier as AgentType) : undefined;
 
     // Extract planMode from command data
     const planMode = typeof data?.plan_mode === 'boolean' ? data.plan_mode : state.planMode;
@@ -520,7 +730,7 @@ export class BridgeGateway {
     const handle = this.harness.run({
       requestId: clientRequestId,
       inputText: text,
-      ...(tier ? { tier: tier as 'simple' | 'standard' | 'complex' } : {}),
+      ...(tier ? { tier } : {}),
       sessionKey,
       workingDir,
       planMode,
@@ -1592,14 +1802,16 @@ export class BridgeGateway {
       },
     });
 
-    // Start the harness run with the Ralph stop hook
+    const hookRegistry = createHookRegistryFromStopHook(stopHook, sessionKey);
+
+    // Start the harness run with the Ralph hook registry
     const handle = this.harness.run({
       requestId,
       inputText: prompt,
       sessionKey,
       workingDir,
       planMode: state.planMode,
-      stopHook,
+      hookRegistry,
     });
 
     this.streamRunEvents(requestId, handle);
@@ -1773,26 +1985,29 @@ export class BridgeGateway {
       return;
     }
 
-    // Create watcher stopHook for this session
-    if (!this.harness.createWatcherStopHookForSession) {
+    // Create watcher hook registry for this session
+    if (!this.harness.createWatcherHookRegistryForSession) {
       this.sendError(connectionId, 'Async sessions are not supported by this harness.');
       return;
     }
 
     try {
-      const { stopHook, planningObjective } = await this.harness.createWatcherStopHookForSession(sessionKey, goal, workingDir);
+      this.harness.setSessionAsyncModeEnabled?.(sessionKey, true);
+      // Pass daemon's root as watcherDir for .watcher artifacts, session's workingDir for agent operations
+      const { hookRegistry, planningObjective } = await this.harness.createWatcherHookRegistryForSession(sessionKey, goal, workingDir, this.workingDir);
 
       const requestId = generateRequestId();
       state.activeRequestId = requestId;
       state.asyncRun = { requestId, goal, cancelled: false, startedAt: Date.now() };
 
-      // Start the harness run with the watcher stopHook and planning objective as input
+      // Start the harness run with the watcher hook registry and planning objective as input
       const handle = this.harness.run({
         requestId,
         inputText: planningObjective,
+        tier: 'planner',
         sessionKey,
         workingDir,
-        stopHook,
+        hookRegistry,
       });
 
       this.streamRunEvents(requestId, handle, () => {
@@ -1803,6 +2018,7 @@ export class BridgeGateway {
         if (state.activeRequestId === requestId) {
           state.activeRequestId = null;
         }
+        this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
       });
 
       // Notify client that async session started
@@ -1815,6 +2031,7 @@ export class BridgeGateway {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       state.asyncRun = null;
+      this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
       this.sendError(connectionId, `Failed to start async session: ${message}`);
     }
   }
@@ -1828,7 +2045,7 @@ export class BridgeGateway {
     const { requestId, goal } = state.asyncRun;
     const sessionKey = state.sessionKey;
 
-    // Mark as cancelled so the watcher stopHook can detect it
+    // Mark as cancelled so the watcher hook can detect it
     state.asyncRun.cancelled = true;
 
     // Clear async state
@@ -1836,6 +2053,7 @@ export class BridgeGateway {
     if (state.activeRequestId === requestId) {
       state.activeRequestId = null;
     }
+    this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
 
     // Emit cancellation response on the session channel
     this.sendEvent(connectionId, {

@@ -513,6 +513,40 @@ export interface DecisionsSearchResponse {
   }
 }
 
+// ============ Evidence Retrieval ============
+
+export interface EvidenceRetrieveRequest {
+  task: {
+    objective: string
+    recentMessages: string[]
+    touchedFiles?: string[]
+    iteration: number
+    sessionId: string
+    workItemId?: string
+  }
+  budget: {
+    maxTokens: number
+    maxItems?: number
+    minCoverage?: Partial<Record<string, number>>
+  }
+  options?: {
+    forceV1Fallback?: boolean
+    trace?: boolean
+  }
+}
+
+export interface EvidenceRetrieveResponse {
+  content: string
+  atoms: unknown[]
+  metrics: {
+    totalTokens: number
+    attentionTax: number
+    coverage: Record<string, number>
+    discriminatorsIncluded: number
+    latencyMs: number
+  }
+}
+
 // ============ Agent Goals ============
 
 export interface AgentGoal {

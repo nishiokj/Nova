@@ -8,4 +8,12 @@
  */
 
 export { createMemoryInjector } from './injector.js';
-export type { MemoryInjector, InjectParams, MemoryInjectorConfig } from './types.js';
+export type {
+  MemoryInjector,
+  InjectParams,
+  InjectParamsV2,
+  InjectResultV2,
+  MemoryInjectorConfig,
+  InjectWatcherContextParams,
+  WatcherContextResult,
+} from './types.js';

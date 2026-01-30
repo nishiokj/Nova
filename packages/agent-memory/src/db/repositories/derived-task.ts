@@ -9,6 +9,7 @@ import { generateCanonicalId } from '../../ids.js'
 import type { RepositoryContext, PaginationOptions, PaginatedResult } from './types.js'
 
 export type DerivedTaskMode = 'once' | 'recurring' | 'event'
+export type ReplayPolicy = 'always' | 'on_failure' | 'once' | 'cooldown'
 
 export interface TriggerConfig {
   type: 'webhook' | 'database' | 'scheduler'
@@ -28,6 +29,20 @@ export interface DerivedTask {
   next_run_at: string | null
   metadata?: Record<string, unknown>
   trigger_config?: TriggerConfig
+  // Circuit breaker
+  consecutive_failures: number
+  max_failures: number
+  circuit_open_until: string | null
+  last_error: string | null
+  // Execution policies
+  replay_policy: ReplayPolicy
+  idempotent: boolean
+  cooldown_ms: number | null
+  timeout_ms: number
+  heartbeat_interval_ms: number | null
+  rate_limit_max: number | null
+  rate_limit_window_ms: number | null
+  resource_pool: string | null
   created_at: string
   updated_at: string
 }
@@ -43,6 +58,20 @@ export interface DerivedTaskRow {
   next_run_at: Date | null
   metadata: Record<string, unknown> | null
   trigger_config: Record<string, unknown> | null
+  // Circuit breaker
+  consecutive_failures: number
+  max_failures: number
+  circuit_open_until: Date | null
+  last_error: string | null
+  // Execution policies
+  replay_policy: string | null
+  idempotent: number | null
+  cooldown_ms: number | null
+  timeout_ms: number | null
+  heartbeat_interval_ms: number | null
+  rate_limit_max: number | null
+  rate_limit_window_ms: number | null
+  resource_pool: string | null
   created_at: Date
   updated_at: Date
 }
@@ -59,6 +88,19 @@ function rowToDerivedTask(row: DerivedTaskRow): DerivedTask {
     next_run_at: row.next_run_at?.toISOString() ?? null,
     metadata: row.metadata ?? undefined,
     trigger_config: (row.trigger_config as unknown) as TriggerConfig | undefined,
+    consecutive_failures: row.consecutive_failures ?? 0,
+    max_failures: row.max_failures ?? 3,
+    circuit_open_until: row.circuit_open_until?.toISOString() ?? null,
+    last_error: row.last_error ?? null,
+    // Execution policies with defaults
+    replay_policy: (row.replay_policy as ReplayPolicy) ?? 'always',
+    idempotent: row.idempotent !== null ? row.idempotent === 1 : true,
+    cooldown_ms: row.cooldown_ms ?? null,
+    timeout_ms: row.timeout_ms ?? 30000,
+    heartbeat_interval_ms: row.heartbeat_interval_ms ?? null,
+    rate_limit_max: row.rate_limit_max ?? null,
+    rate_limit_window_ms: row.rate_limit_window_ms ?? null,
+    resource_pool: row.resource_pool ?? null,
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
   }
@@ -71,6 +113,32 @@ export interface DerivedTaskInput {
   intervalMs?: number
   metadata?: Record<string, unknown>
   triggerConfig?: TriggerConfig
+  // Execution policies
+  replayPolicy?: ReplayPolicy
+  idempotent?: boolean
+  cooldownMs?: number
+  timeoutMs?: number
+  heartbeatIntervalMs?: number
+  rateLimitMax?: number
+  rateLimitWindowMs?: number
+  resourcePool?: string
+}
+
+export interface DerivedTaskUpdateInput {
+  interval_ms?: number
+  enabled?: boolean
+  metadata?: Record<string, unknown>
+  trigger_config?: TriggerConfig
+  max_failures?: number
+  // Execution policies
+  replay_policy?: ReplayPolicy
+  idempotent?: boolean
+  cooldown_ms?: number
+  timeout_ms?: number
+  heartbeat_interval_ms?: number
+  rate_limit_max?: number
+  rate_limit_window_ms?: number
+  resource_pool?: string | null
 }
 
 export interface DerivedTaskRepository {
@@ -78,7 +146,7 @@ export interface DerivedTaskRepository {
   findById(id: string): Promise<DerivedTask | null>
   findAll(limit?: number): Promise<DerivedTask[]>
   findByName(name: string): Promise<DerivedTask[]>
-  update(id: string, updates: Partial<Pick<DerivedTask, 'interval_ms' | 'enabled' | 'metadata' | 'trigger_config'>>): Promise<DerivedTask | null>
+  update(id: string, updates: DerivedTaskUpdateInput): Promise<DerivedTask | null>
   delete(id: string): Promise<boolean>
 
   findDueForExecution(limit?: number): Promise<DerivedTask[]>
@@ -89,6 +157,19 @@ export interface DerivedTaskRepository {
 
   markExecuted(id: string, jobId: string): Promise<DerivedTask | null>
   updateNextRunAt(id: string, nextRunAt: Date): Promise<boolean>
+
+  // Circuit breaker
+  /** Record a job failure - increments counter, opens circuit if threshold reached */
+  recordFailure(id: string, error: string, options?: { openCircuit?: boolean }): Promise<DerivedTask | null>
+  /** Record a job success - resets failure counter and closes circuit */
+  recordSuccess(id: string): Promise<DerivedTask | null>
+  /** Manually reset the circuit breaker */
+  resetCircuit(id: string): Promise<DerivedTask | null>
+  /** Find tasks with open circuits */
+  findCircuitOpen(): Promise<DerivedTask[]>
+
+  /** Pause a task (disable it) with a reason stored in last_error */
+  pause(id: string, reason: string): Promise<DerivedTask | null>
 }
 
 export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTaskRepository {
@@ -103,7 +184,10 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
       const [row] = await sql<DerivedTaskRow[]>`
         INSERT INTO derived_tasks (
           id, name, script_path, mode, interval_ms,
-          enabled, next_run_at, metadata, trigger_config, created_at, updated_at
+          enabled, next_run_at, metadata, trigger_config,
+          replay_policy, idempotent, cooldown_ms, timeout_ms,
+          heartbeat_interval_ms, rate_limit_max, rate_limit_window_ms, resource_pool,
+          created_at, updated_at
         ) VALUES (
           ${id},
           ${input.name},
@@ -114,6 +198,14 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
           ${nextRunAt},
           ${input.metadata ? sql.json(input.metadata as any) : null},
           ${input.triggerConfig ? sql.json(input.triggerConfig as any) : null},
+          ${input.replayPolicy ?? 'always'},
+          ${input.idempotent !== false ? 1 : 0},
+          ${input.cooldownMs ?? null},
+          ${input.timeoutMs ?? 30000},
+          ${input.heartbeatIntervalMs ?? null},
+          ${input.rateLimitMax ?? null},
+          ${input.rateLimitWindowMs ?? null},
+          ${input.resourcePool ?? null},
           ${now},
           ${now}
         )
@@ -157,6 +249,15 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
             enabled = COALESCE(${updates.enabled ?? null}, enabled),
             metadata = COALESCE(${updates.metadata ? sql.json(updates.metadata as any) : null}, metadata),
             trigger_config = COALESCE(${updates.trigger_config ? sql.json(updates.trigger_config as any) : null}, trigger_config),
+            max_failures = COALESCE(${updates.max_failures ?? null}, max_failures),
+            replay_policy = COALESCE(${updates.replay_policy ?? null}, replay_policy),
+            idempotent = COALESCE(${updates.idempotent !== undefined ? (updates.idempotent ? 1 : 0) : null}, idempotent),
+            cooldown_ms = COALESCE(${updates.cooldown_ms ?? null}, cooldown_ms),
+            timeout_ms = COALESCE(${updates.timeout_ms ?? null}, timeout_ms),
+            heartbeat_interval_ms = COALESCE(${updates.heartbeat_interval_ms ?? null}, heartbeat_interval_ms),
+            rate_limit_max = COALESCE(${updates.rate_limit_max ?? null}, rate_limit_max),
+            rate_limit_window_ms = COALESCE(${updates.rate_limit_window_ms ?? null}, rate_limit_window_ms),
+            resource_pool = ${updates.resource_pool !== undefined ? updates.resource_pool : sql`resource_pool`},
             updated_at = ${now}
         WHERE id = ${id}
         RETURNING *
@@ -178,6 +279,7 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
         WHERE enabled = true
           AND mode IN ('once', 'recurring')
           AND (next_run_at IS NULL OR next_run_at <= NOW())
+          AND (circuit_open_until IS NULL OR circuit_open_until <= NOW())
         ORDER BY next_run_at ASC NULLS FIRST
         LIMIT ${limit}
       `
@@ -240,6 +342,93 @@ export function createDerivedTaskRepository(ctx: RepositoryContext): DerivedTask
       `
 
       return !!row
+    },
+
+    async recordFailure(id, error, options = {}) {
+      const { openCircuit } = options
+
+      if (openCircuit) {
+        // Immediately open circuit (e.g., for permanent failures)
+        const [row] = await sql<DerivedTaskRow[]>`
+          UPDATE derived_tasks
+          SET
+            consecutive_failures = consecutive_failures + 1,
+            last_error = ${error},
+            circuit_open_until = NOW() + INTERVAL '24 hours',
+            updated_at = NOW()
+          WHERE id = ${id}
+          RETURNING *
+        `
+        return row ? rowToDerivedTask(row) : null
+      }
+
+      // Increment failures, open circuit if threshold reached
+      // Circuit stays open for: 5min * 2^(failures-1), max 24 hours
+      const [row] = await sql<DerivedTaskRow[]>`
+        UPDATE derived_tasks
+        SET
+          consecutive_failures = consecutive_failures + 1,
+          last_error = ${error},
+          circuit_open_until = CASE
+            WHEN consecutive_failures + 1 >= max_failures AND max_failures > 0
+            THEN NOW() + (LEAST(POWER(2, consecutive_failures) * INTERVAL '5 minutes', INTERVAL '24 hours'))
+            ELSE circuit_open_until
+          END,
+          updated_at = NOW()
+        WHERE id = ${id}
+        RETURNING *
+      `
+      return row ? rowToDerivedTask(row) : null
+    },
+
+    async recordSuccess(id) {
+      const [row] = await sql<DerivedTaskRow[]>`
+        UPDATE derived_tasks
+        SET
+          consecutive_failures = 0,
+          circuit_open_until = NULL,
+          last_error = NULL,
+          updated_at = NOW()
+        WHERE id = ${id}
+        RETURNING *
+      `
+      return row ? rowToDerivedTask(row) : null
+    },
+
+    async resetCircuit(id) {
+      const [row] = await sql<DerivedTaskRow[]>`
+        UPDATE derived_tasks
+        SET
+          consecutive_failures = 0,
+          circuit_open_until = NULL,
+          updated_at = NOW()
+        WHERE id = ${id}
+        RETURNING *
+      `
+      return row ? rowToDerivedTask(row) : null
+    },
+
+    async findCircuitOpen() {
+      const rows = await sql<DerivedTaskRow[]>`
+        SELECT * FROM derived_tasks
+        WHERE circuit_open_until IS NOT NULL
+          AND circuit_open_until > NOW()
+        ORDER BY circuit_open_until ASC
+      `
+      return rows.map(rowToDerivedTask)
+    },
+
+    async pause(id, reason) {
+      const [row] = await sql<DerivedTaskRow[]>`
+        UPDATE derived_tasks
+        SET
+          enabled = false,
+          last_error = ${reason},
+          updated_at = NOW()
+        WHERE id = ${id}
+        RETURNING *
+      `
+      return row ? rowToDerivedTask(row) : null
     },
   }
 }

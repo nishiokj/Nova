@@ -48,6 +48,8 @@ export interface TransformOutput {
   data: Record<string, unknown>
   /** Optional display text for search/preview */
   displayText?: string
+  /** When the event actually occurred (for time-range queries) */
+  sourceTimestamp?: Date
 }
 
 /**

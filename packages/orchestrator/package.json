@@ -24,7 +24,8 @@
     "context": "workspace:*",
     "work": "workspace:*",
     "comms-bus": "workspace:*",
-    "decision-watcher": "workspace:*"
+    "decision-watcher": "workspace:*",
+    "protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

@@ -2,6 +2,7 @@ import { computeInputLayout, InputBuffer } from "./buffer.js";
 import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason, PermissionRequestData, TextSegment } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
+import { highlightCode } from "./utils/syntax.js";
 
 /**
  * TUI Store - Central state management for the terminal UI
@@ -2119,8 +2120,13 @@ function renderLineToWidth(line: HistoryLine, width: number): HistoryLine {
     text = " ";
   }
 
+  // Check if text contains ANSI codes (from syntax highlighting)
+  // ANSI escape sequences start with \x1b[
+  const hasAnsiCodes = /\x1b\[/.test(text);
+
   // Step 3: Truncate to width if necessary
-  if (text.length > safeWidth) {
+  // If we have ANSI codes, don't truncate - let Ink handle display width
+  if (!hasAnsiCodes && text.length > safeWidth) {
     text = text.slice(0, safeWidth);
 
     // If we have segments, we also need to truncate them
@@ -2131,7 +2137,8 @@ function renderLineToWidth(line: HistoryLine, width: number): HistoryLine {
   }
 
   // Step 4: Pad to exact width with spaces
-  if (text.length < safeWidth) {
+  // Skip padding for ANSI-highlighted code - let background color provide visual width
+  if (!hasAnsiCodes && text.length < safeWidth) {
     const paddingNeeded = safeWidth - text.length;
     text += " ".repeat(paddingNeeded);
 
@@ -2187,6 +2194,8 @@ function truncateSegmentsToWidth(segments: TextSegment[], maxWidth: number): Tex
  * This handles headers, code blocks, lists, blockquotes that should be
  * separate rows in the terminal.
  *
+ * Code blocks are syntax-highlighted using Tree-sitter for supported languages.
+ *
  * This function strips block-level markdown markers (###, - for lists, etc.)
  * but keeps the text content. Inline markdown (bold, italic, code) is preserved
  * for later processing by parseMarkdownToSegments.
@@ -2209,8 +2218,69 @@ function splitMarkdownIntoLines(
   let normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const rawLines = normalized.split("\n");
 
+  let inCodeBlock = false;
+  let codeBlockLines: string[] = [];
+  let codeBlockLang: string | undefined = undefined;
   let lineIndex = 0;
+
   for (let rawLine of rawLines) {
+    // Check for code fence start/end
+    if (/^```/.test(rawLine.trim())) {
+      if (!inCodeBlock) {
+        // Starting a code block
+        inCodeBlock = true;
+        codeBlockLines = [];
+        // Extract language from ```lang
+        const langMatch = rawLine.trim().match(/^```(\w*)/);
+        codeBlockLang = langMatch ? langMatch[1] : undefined;
+      } else {
+        // Ending a code block
+        inCodeBlock = false;
+        const codeContent = codeBlockLines.join("\n");
+
+        // Apply syntax highlighting
+        const highlighted = highlightCode(codeContent, codeBlockLang);
+
+        // If highlighting was applied (contains ANSI codes), split into lines
+        // Otherwise fall back to original behavior
+        if (highlighted && highlighted !== codeContent) {
+          const highlightedLines = highlighted.split("\n");
+          for (const hlLine of highlightedLines) {
+            const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
+            lines.push({
+              id: lineId,
+              text: hlLine,
+              role,
+              requestId,
+            });
+            lineIndex++;
+          }
+        } else {
+          // No highlighting applied, just output code as regular lines
+          for (let codeLine of codeBlockLines) {
+            const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
+            lines.push({
+              id: lineId,
+              text: codeLine,
+              role,
+              requestId,
+            });
+            lineIndex++;
+          }
+        }
+
+        codeBlockLines = [];
+        codeBlockLang = undefined;
+      }
+      continue; // Skip fence lines
+    }
+
+    if (inCodeBlock) {
+      // Collect code block content
+      codeBlockLines.push(rawLine);
+      continue;
+    }
+
     // Strip block-level markdown markers
     // Headers: "### Header" -> "Header"
     rawLine = rawLine.replace(/^#{1,6}\s+/, "");
@@ -2221,11 +2291,6 @@ function splitMarkdownIntoLines(
 
     // Blockquotes: "> quote" -> "quote"
     rawLine = rawLine.replace(/^>\s+/, "");
-
-    // Code block fences: Remove ``` lines
-    if (rawLine.trim() === "```" || rawLine.trim().startsWith("```")) {
-      continue; // Skip fence lines entirely
-    }
 
     // Horizontal rules: ---, ***, ___ - skip
     if (/^[-*_]{3,}\s*$/.test(rawLine)) {
@@ -2242,6 +2307,25 @@ function splitMarkdownIntoLines(
     });
 
     lineIndex++;
+  }
+
+  // Handle unclosed code block (shouldn't happen but be defensive)
+  if (inCodeBlock && codeBlockLines.length > 0) {
+    const codeContent = codeBlockLines.join("\n");
+    const highlighted = highlightCode(codeContent, codeBlockLang);
+    const outputLines = (highlighted && highlighted !== codeContent)
+      ? highlighted.split("\n")
+      : codeBlockLines;
+    for (let outputLine of outputLines) {
+      const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
+      lines.push({
+        id: lineId,
+        text: outputLine,
+        role,
+        requestId,
+      });
+      lineIndex++;
+    }
   }
 
   return lines;

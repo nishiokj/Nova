@@ -23,6 +23,7 @@ import { execSync, spawn } from 'child_process'
 import { statSync, readFileSync, existsSync } from 'fs'
 import path from 'path'
 import { parseArgs } from 'node:util'
+import postgres from 'postgres'
 import { HarnessClient } from '../packages/harness-client/src/index.js'
 import { notifyAllUsers } from '../packages/agent-memory/src/connectors/telegram/notify.js'
 
@@ -36,7 +37,7 @@ const AGENT_EVENTS_LOG = path.join(PROJECT_ROOT, 'logs', 'agent_events.log')
 const DAEMON_ENTRY = path.join(PROJECT_ROOT, 'packages', 'harness-daemon', 'src', 'index.ts')
 const LAUNCHER_ENTRY = path.join(PROJECT_ROOT, 'packages', 'launcher', 'index.ts')
 
-const DEFAULT_STALE_MINUTES = 10
+const DEFAULT_STALE_MINUTES = 120
 const DAEMON_READY_TIMEOUT_MS = 15_000
 const CLIENT_CONNECT_TIMEOUT_MS = 5_000
 
@@ -50,6 +51,20 @@ interface HealthReport {
   lastLogAgeMinutes: number | null
   lastEventAgeMinutes: number | null
   recentErrors: string[]
+  diagnosis: string
+}
+
+interface JobHealthReport {
+  healthy: boolean
+  totalJobs: number
+  failedJobs: number
+  failureRate: number
+  recentFailures: Array<{
+    id: string
+    connector: string
+    error: string
+    completedAt: string
+  }>
   diagnosis: string
 }
 
@@ -164,6 +179,93 @@ async function runHealthCheck(staleMinutes: number): Promise<HealthReport> {
     lastEventAgeMinutes,
     recentErrors,
     diagnosis,
+  }
+}
+
+// ─── Sync Job Health Check ─────────────────────────────────────────────────────
+
+async function checkJobHealth(lookbackHours = 24, failureThreshold = 0.1): Promise<JobHealthReport> {
+  const databaseUrl = process.env.DATABASE_URL
+  if (!databaseUrl) {
+    return {
+      healthy: true,
+      totalJobs: 0,
+      failedJobs: 0,
+      failureRate: 0,
+      recentFailures: [],
+      diagnosis: 'No DATABASE_URL configured, skipping job health check',
+    }
+  }
+
+  const sql = postgres(databaseUrl)
+
+  try {
+    // Count total and failed jobs in lookback period
+    const [stats] = await sql<{ total: string; failed: string }[]>`
+      SELECT
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE status = 'failed') as failed
+      FROM sync_jobs
+      WHERE created_at >= NOW() - INTERVAL '${sql.unsafe(String(lookbackHours))} hours'
+    `
+
+    const totalJobs = parseInt(stats.total, 10)
+    const failedJobs = parseInt(stats.failed, 10)
+    const failureRate = totalJobs > 0 ? failedJobs / totalJobs : 0
+
+    // Get recent failures with details
+    const recentFailures = await sql<{
+      id: string
+      connector: string
+      last_error: string | null
+      completed_at: Date | null
+    }[]>`
+      SELECT id, connector, last_error, completed_at
+      FROM sync_jobs
+      WHERE status = 'failed'
+        AND created_at >= NOW() - INTERVAL '${sql.unsafe(String(lookbackHours))} hours'
+      ORDER BY completed_at DESC
+      LIMIT 10
+    `
+
+    const healthy = failureRate <= failureThreshold
+    const issues: string[] = []
+
+    if (!healthy) {
+      issues.push(`Job failure rate ${(failureRate * 100).toFixed(1)}% exceeds threshold ${(failureThreshold * 100)}%`)
+    }
+    if (failedJobs > 0) {
+      issues.push(`${failedJobs} failed job(s) in the last ${lookbackHours} hours`)
+    }
+
+    // Group failures by connector for summary
+    const failuresByConnector = recentFailures.reduce((acc, f) => {
+      acc[f.connector] = (acc[f.connector] || 0) + 1
+      return acc
+    }, {} as Record<string, number>)
+
+    if (Object.keys(failuresByConnector).length > 0) {
+      const summary = Object.entries(failuresByConnector)
+        .map(([c, n]) => `${c}: ${n}`)
+        .join(', ')
+      issues.push(`Failures by connector: ${summary}`)
+    }
+
+    return {
+      healthy,
+      totalJobs,
+      failedJobs,
+      failureRate,
+      recentFailures: recentFailures.map((f) => ({
+        id: f.id,
+        connector: f.connector,
+        error: f.last_error ?? 'Unknown error',
+        completedAt: f.completed_at?.toISOString() ?? 'unknown',
+      })),
+      diagnosis: issues.length > 0 ? issues.join('. ') + '.' : 'Sync jobs are healthy',
+    }
+  } finally {
+    await sql.end()
   }
 }
 
@@ -336,6 +438,58 @@ function printReport(report: HealthReport): void {
   console.log()
 }
 
+function printJobReport(report: JobHealthReport): void {
+  const status = report.healthy ? '✅ JOBS HEALTHY' : '❌ JOBS UNHEALTHY'
+  console.log(`\n${status}`)
+  console.log(`  Total jobs:        ${report.totalJobs}`)
+  console.log(`  Failed jobs:       ${report.failedJobs}`)
+  console.log(`  Failure rate:      ${(report.failureRate * 100).toFixed(1)}%`)
+
+  if (report.recentFailures.length > 0) {
+    console.log(`\n  Recent failures:`)
+    for (const failure of report.recentFailures.slice(0, 5)) {
+      console.log(`    → [${failure.connector}] ${failure.error.slice(0, 80)}`)
+    }
+  }
+
+  console.log(`\n  Diagnosis:         ${report.diagnosis}`)
+  console.log()
+}
+
+async function sendJobFailureNotification(report: JobHealthReport): Promise<void> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  const allowedUsers = process.env.TELEGRAM_ALLOWED_USERS
+  if (!botToken || !allowedUsers) {
+    console.log('[watchdog] Telegram notification skipped (no TELEGRAM_BOT_TOKEN or TELEGRAM_ALLOWED_USERS)')
+    return
+  }
+
+  const chatIds = allowedUsers
+    .split(',')
+    .map((id) => parseInt(id.trim(), 10))
+    .filter((id) => !isNaN(id))
+
+  if (chatIds.length === 0) return
+
+  const lines = [
+    `⚠️ *Watchdog: Sync Job Failures*`,
+    ``,
+    `*Stats:* ${report.failedJobs}/${report.totalJobs} failed (${(report.failureRate * 100).toFixed(1)}%)`,
+    ``,
+    `*Diagnosis:* ${report.diagnosis}`,
+  ]
+
+  if (report.recentFailures.length > 0) {
+    lines.push(``, `*Recent failures:*`)
+    for (const failure of report.recentFailures.slice(0, 5)) {
+      lines.push(`• \\[${failure.connector}\\] ${failure.error.slice(0, 60).replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&')}`)
+    }
+  }
+
+  await notifyAllUsers(botToken, chatIds, lines.join('\n'), 'MarkdownV2')
+  console.log('[watchdog] Telegram job failure notification sent')
+}
+
 function buildDiagnosisGoal(report: HealthReport, customGoal?: string): string {
   if (customGoal) return customGoal
 
@@ -390,6 +544,8 @@ async function main(): Promise<void> {
     options: {
       session: { type: 'string' },
       stale: { type: 'string', default: String(DEFAULT_STALE_MINUTES) },
+      lookback: { type: 'string', default: '24' },
+      threshold: { type: 'string', default: '0.1' },
       notify: { type: 'boolean', default: false },
       goal: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
@@ -406,31 +562,43 @@ Usage:
   bun run scripts/watchdog.ts [command] [flags]
 
 Commands:
-  (default)    Check health and auto-restart if unhealthy
+  (default)    Check daemon + job health, auto-restart daemon if unhealthy, notify on failures
   check        Health check only (exit 0 if healthy, 1 if not)
   restart      Force restart and start async diagnosis session
 
 Flags:
   --session <key>     Session key to use for async restart
   --stale <minutes>   Log staleness threshold (default: ${DEFAULT_STALE_MINUTES})
-  --notify            Send Telegram notification on restart
+  --lookback <hours>  Job health lookback period (default: 24)
+  --threshold <rate>  Job failure rate threshold 0-1 (default: 0.1 = 10%)
+  --notify            Send Telegram notification on issues
   --goal <text>       Custom goal for the async diagnosis session
   -h, --help          Show this help
+
+Note: The daemon runs with idle-timeout=0, so logs may be stale during quiet periods.
+      The default staleness threshold of 2 hours prevents unnecessary restarts.
 `)
     process.exit(0)
   }
 
   const command = positionals[0] ?? ''
   const staleMinutes = parseInt(values.stale as string, 10) || DEFAULT_STALE_MINUTES
+  const lookbackHours = parseInt(values.lookback as string, 10) || 24
+  const failureThreshold = parseFloat(values.threshold as string) || 0.1
   const sessionKey = values.session as string | undefined
   const notify = values.notify as boolean
   const customGoal = values.goal as string | undefined
 
-  // ── Check ──
+  // ── Check (daemon + jobs) ──
   if (command === 'check') {
-    const report = await runHealthCheck(staleMinutes)
-    printReport(report)
-    process.exit(report.healthy ? 0 : 1)
+    const daemonReport = await runHealthCheck(staleMinutes)
+    const jobReport = await checkJobHealth(lookbackHours, failureThreshold)
+
+    printReport(daemonReport)
+    printJobReport(jobReport)
+
+    const allHealthy = daemonReport.healthy && jobReport.healthy
+    process.exit(allHealthy ? 0 : 1)
   }
 
   // ── Restart (forced) ──
@@ -464,15 +632,29 @@ Flags:
     process.exit(0)
   }
 
-  // ── Default: check + auto-restart if unhealthy ──
-  const report = await runHealthCheck(staleMinutes)
-  printReport(report)
+  // ── Default: check daemon + jobs, auto-restart daemon if unhealthy, notify on any issues ──
+  const daemonReport = await runHealthCheck(staleMinutes)
+  const jobReport = await checkJobHealth(lookbackHours, failureThreshold)
 
-  if (report.healthy) {
-    console.log('[watchdog] No action needed')
-    process.exit(0)
+  printReport(daemonReport)
+  printJobReport(jobReport)
+
+  // Notify on job failures (independent of daemon health)
+  if (!jobReport.healthy && notify) {
+    await sendJobFailureNotification(jobReport)
   }
 
+  // If daemon is healthy, we're done (job failures are alerted but don't trigger restart)
+  if (daemonReport.healthy) {
+    if (jobReport.healthy) {
+      console.log('[watchdog] All systems healthy')
+    } else {
+      console.log('[watchdog] Daemon healthy, but job failures detected (notification sent)')
+    }
+    process.exit(jobReport.healthy ? 0 : 1)
+  }
+
+  // Daemon is unhealthy - restart it
   console.log('[watchdog] Daemon is unhealthy, initiating restart...')
   killDaemon()
   await new Promise((r) => setTimeout(r, 3000))
@@ -482,17 +664,17 @@ Flags:
   if (!ready) {
     console.error('[watchdog] Daemon failed to start within timeout')
     if (notify) {
-      await sendTelegramNotification(report, null)
+      await sendTelegramNotification(daemonReport, null)
     }
     process.exit(1)
   }
   console.log('[watchdog] Daemon is ready')
 
-  const goal = buildDiagnosisGoal(report, customGoal)
+  const goal = buildDiagnosisGoal(daemonReport, customGoal)
   const asyncResult = await startAsyncDiagnosis(sessionKey, goal)
 
   if (notify) {
-    await sendTelegramNotification(report, asyncResult)
+    await sendTelegramNotification(daemonReport, asyncResult)
   }
 
   if (asyncResult) {

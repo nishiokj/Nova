@@ -113,6 +113,7 @@ export async function executeWebFetch(
       toolName: 'WebFetch',
       status: 'error',
       output: 'URL is required',
+      error: 'URL is required',
       isSuccess: false,
       durationMs: Date.now() - startTime,
     };
@@ -123,6 +124,7 @@ export async function executeWebFetch(
       toolName: 'WebFetch',
       status: 'error',
       output: 'Prompt describing what to extract is required',
+      error: 'Prompt describing what to extract is required',
       isSuccess: false,
       durationMs: Date.now() - startTime,
     };
@@ -141,6 +143,7 @@ export async function executeWebFetch(
         toolName: 'WebFetch',
         status: 'error',
         output: `Invalid URL protocol: ${parsedUrl.protocol}. Only HTTPS is supported.`,
+        error: `Invalid URL protocol: ${parsedUrl.protocol}. Only HTTPS is supported.`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
@@ -150,6 +153,7 @@ export async function executeWebFetch(
       toolName: 'WebFetch',
       status: 'error',
       output: `Invalid URL: ${url}`,
+      error: `Invalid URL: ${url}`,
       isSuccess: false,
       durationMs: Date.now() - startTime,
     };
@@ -182,6 +186,7 @@ export async function executeWebFetch(
         toolName: 'WebFetch',
         status: 'error',
         output: `Invalid redirect protocol: ${responseUrl.protocol}. Only HTTPS is supported.`,
+        error: `Invalid redirect protocol: ${responseUrl.protocol}. Only HTTPS is supported.`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
@@ -192,6 +197,7 @@ export async function executeWebFetch(
         toolName: 'WebFetch',
         status: 'error',
         output: `Failed to fetch URL (${response.status}): ${response.statusText}`,
+        error: `Failed to fetch URL (${response.status}): ${response.statusText}`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
@@ -208,6 +214,7 @@ export async function executeWebFetch(
         toolName: 'WebFetch',
         status: 'error',
         output: `Unsupported content type: ${contentTypeHeader}. WebFetch only supports HTML, JSON, and text content.`,
+        error: `Unsupported content type: ${contentTypeHeader}. WebFetch only supports HTML, JSON, and text content.`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
@@ -286,6 +293,7 @@ export async function executeWebFetch(
         toolName: 'WebFetch',
         status: 'error',
         output: `Request timed out after ${FETCH_TIMEOUT_MS / 1000} seconds`,
+        error: `Request timed out after ${FETCH_TIMEOUT_MS / 1000} seconds`,
         isSuccess: false,
         durationMs: Date.now() - startTime,
       };
@@ -296,6 +304,7 @@ export async function executeWebFetch(
       toolName: 'WebFetch',
       status: 'error',
       output: `Failed to fetch URL: ${errorMessage}`,
+      error: `Failed to fetch URL: ${errorMessage}`,
       isSuccess: false,
       durationMs: Date.now() - startTime,
     };
