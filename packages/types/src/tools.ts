@@ -17,15 +17,25 @@ export type ToolStatus = 'success' | 'error' | 'timeout' | 'cancelled';
 /**
  * Result of executing a tool.
  */
-export interface ToolResult {
-  toolName: string;
-  status: ToolStatus;
-  output: string;
-  error?: string;
-  durationMs: number;
-  isSuccess: boolean;
-  metadata?: Record<string, unknown>;
-}
+export type ToolResult =
+  | {
+      toolName: string;
+      status: 'success';
+      output: string;
+      durationMs: number;
+      isSuccess: true;
+      metadata?: Record<string, unknown>;
+      error?: undefined;
+    }
+  | {
+      toolName: string;
+      status: Exclude<ToolStatus, 'success'>;
+      output: string;
+      error: string;
+      durationMs: number;
+      isSuccess: false;
+      metadata?: Record<string, unknown>;
+    };
 
 /**
  * Create a successful tool result.

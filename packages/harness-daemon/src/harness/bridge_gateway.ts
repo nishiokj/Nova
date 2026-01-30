@@ -5,7 +5,8 @@
 import path from 'path';
 import { type BusServer, BRIDGE_COMMAND_CHANNEL, runChannel, sessionChannel } from 'comms-bus';
 import { profiler } from 'shared';
-import type { AgentRunHandle, BridgeEvent } from './types.js';
+import type { BridgeCommand } from 'harness-client';
+import type { AgentRunHandle, AgentRunResult, BridgeEvent } from './types.js';
 import { createErrorEvent } from './event_translator.js';
 import type { FullHarnessConfig } from './config.js';
 import {
@@ -28,24 +29,40 @@ import type { AuthService } from './auth_service.js';
 import { LocalProviderManager } from './local_providers.js';
 import { isOpenAICompatProvider } from 'types';
 import { getAllModels } from 'types';
-import { createRalphStopHook, type RalphCompletionReason, type RalphLoopState } from 'orchestrator';
+import { createHookRegistry, createRalphStopHook, type HookRegistry, type RalphCompletionReason, type RalphLoopState } from 'orchestrator';
+import type { StopHookContext, StopHookResult } from 'agent';
+import {
+  getProtocolId,
+  assertNever,
+  failed,
+  success,
+  type AgentErrorDecision,
+  type BoundsDecision,
+  type CadenceDecision,
+  type ControlEvent,
+  type HandoffDecision,
+  type Hook,
+  type HookContext,
+  type HookOutcome,
+  type PromptAnswerDecision,
+  type QualityGateDecision,
+  type StatePatch,
+  type TerminationReason,
+  type WorkItemSpec,
+} from 'protocol';
+import type { AgentType } from 'agent';
 import type { PermissionChecker } from './permissions.js';
-
-interface BridgeCommand {
-  type: string;
-  data?: Record<string, unknown>;
-}
 
 interface HarnessLike {
   run(params: {
     requestId: string;
     inputText: string;
-    tier?: 'simple' | 'standard' | 'complex';
+    tier?: AgentType;
     sessionKey: string;
     workingDir: string;
     context?: string;
     planMode?: boolean;
-    stopHook?: import('orchestrator').StopHookHandler;
+    hookRegistry?: HookRegistry;
   }): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
   getConfig(): FullHarnessConfig;
@@ -63,8 +80,17 @@ interface HarnessLike {
   closeSession?(sessionKey: string): void;
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
-  getPermissionChecker?(): PermissionChecker;  // DEPRECATED: Use getSessionPermissionChecker instead
   getSessionPermissionChecker?(sessionKey: string): PermissionChecker | null;  // Per-session permission checker
+  setSessionAsyncModeEnabled?(sessionKey: string, enabled: boolean): void;
+  // Session-level exclusive operation management (prevents concurrent ops from multiple connections)
+  startSessionAsyncRun?(sessionKey: string, info: { requestId: string; goal: string; cancelled: boolean; startedAt: number }): boolean;
+  getSessionAsyncRun?(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null;
+  cancelSessionAsyncRun?(sessionKey: string): void;
+  clearSessionAsyncRun?(sessionKey: string): void;
+  startSessionRalphLoop?(sessionKey: string, info: { requestId: string; cancelled: boolean }): boolean;
+  getSessionRalphLoop?(sessionKey: string): { requestId: string; cancelled: boolean } | null;
+  cancelSessionRalphLoop?(sessionKey: string): void;
+  clearSessionRalphLoop?(sessionKey: string): void;
   // Watcher CLI methods
   watcherStatus?(sessionKey: string): Record<string, unknown>;
   watcherContext?(sessionKey: string): Record<string, unknown>;
@@ -76,8 +102,8 @@ interface HarnessLike {
   watcherDefocus?(sessionKey: string): Record<string, unknown>;
   watcherReanchor?(sessionKey: string, goal: string): Record<string, unknown>;
   watcherSummarize?(sessionKey: string): Record<string, unknown>;
-  /** Create an LLM-backed watcher stopHook + planning objective for a session. */
-  createWatcherStopHookForSession?(sessionKey: string, goal: string, workingDir: string): Promise<{ stopHook: import('orchestrator').StopHookHandler; planningObjective: string }>;
+  /** Create an LLM-backed watcher hook registry + planning objective for a session. */
+  createWatcherHookRegistryForSession?(sessionKey: string, goal: string, workingDir: string, watcherDir?: string): Promise<{ hookRegistry: HookRegistry; planningObjective: string }>;
 }
 
 interface RalphLoopInfo {
@@ -103,6 +129,195 @@ interface ConnectionState {
   asyncRun: AsyncRunInfo | null;
 }
 
+function createHookRegistryFromStopHook(
+  stopHook: (ctx: StopHookContext) => Promise<StopHookResult> | StopHookResult,
+  sessionKey: string
+): HookRegistry {
+  const registry = createHookRegistry();
+  const hooks = buildStopHookAdapterHooks(stopHook, sessionKey);
+  registry.registerHooks({
+    source: `legacy-stop-hook:${sessionKey}`,
+    protocolId: getProtocolId(),
+    hooks,
+  });
+  return registry;
+}
+
+function buildStopHookAdapterHooks(
+  stopHook: (ctx: StopHookContext) => Promise<StopHookResult> | StopHookResult,
+  sessionKey: string
+): Array<Hook<ControlEvent, unknown>> {
+  const base = {
+    policy: { kind: 'retry_then_degrade', maxRetries: 1, backoffMs: 500, degradeTo: 'skip' } as const,
+    criticality: 'critical' as const,
+    idempotency: 'idempotent' as const,
+    priority: 50,
+    timeoutMs: 90_000,
+  };
+
+  const toTerminationReason = (event: ControlEvent): TerminationReason => {
+    switch (event.type) {
+      case 'goal_state_reached':
+        return 'goal_state_reached';
+      case 'bounds_exceeded':
+        switch (event.boundType) {
+          case 'iterations':
+            return 'max_iterations_exceeded';
+          case 'tool_calls':
+            return 'max_tool_calls_exceeded';
+          case 'duration':
+            return 'max_duration_exceeded';
+          default:
+            return assertNever(event.boundType);
+        }
+      case 'user_input_required':
+        return 'user_input_required';
+      case 'cadence_audit':
+        return 'cadence_audit';
+      case 'agent_error':
+        return event.errorType === 'exception' ? 'agent_error' : event.errorType;
+      case 'handoff_requested':
+        return 'handoff_requested';
+      case 'work_item_completed':
+        return 'goal_state_reached';
+      case 'user_stopped':
+        return 'user_stopped';
+      case 'transient_error':
+        switch (event.errorType) {
+          case 'rate_limit':
+            return 'rate_limit';
+          case 'circuit_open':
+            return 'circuit_open';
+          case 'timeout':
+            return 'timeout';
+        }
+      default:
+        return assertNever(event);
+    }
+  };
+
+  const toWorkItemSpecs = (items?: StopHookResult['deferredWork']): WorkItemSpec[] => {
+    if (!items || items.length === 0) return [];
+    return items.map(item => ({
+      goal: item.goal,
+      objective: item.objective,
+      agent: item.agent,
+      dependencies: item.dependencies,
+      targetPaths: item.targetPaths,
+      bounds: item.bounds,
+    }));
+  };
+
+  const buildStopContext = (event: ControlEvent, ctx: HookContext): StopHookContext => ({
+    workId: event.workId,
+    response: 'response' in event ? event.response : '',
+    terminationReason: toTerminationReason(event),
+    iteration: ctx.iteration,
+    agentType: ctx.agentType,
+    sessionKey: ctx.sessionKey,
+    userPrompt: event.type === 'user_input_required' ? {
+      question: event.prompt.question,
+      options: event.prompt.options?.map(option => ({ label: option.label, description: option.description })),
+      context: event.prompt.context,
+      multiSelect: event.prompt.multiSelect,
+    } : undefined,
+    handoffSpec: event.type === 'handoff_requested' ? event.handoffSpec : undefined,
+  });
+
+  const injectGuidancePatch = (message?: string): StatePatch[] | undefined => {
+    if (!message) return undefined;
+    return [{ op: 'inject_guidance', content: message }];
+  };
+
+  const runStopHook = async <D>(
+    event: ControlEvent,
+    ctx: HookContext,
+    mapResult: (result: StopHookResult) => { decision: D; patches?: StatePatch[] }
+  ): Promise<HookOutcome<D>> => {
+    if (event.sessionKey !== sessionKey) {
+      return { kind: 'skip', reason: 'session_mismatch' };
+    }
+    try {
+      const stopResult = await stopHook(buildStopContext(event, ctx));
+      const mapped = mapResult(stopResult);
+      return success(mapped.decision, mapped.patches);
+    } catch (err) {
+      return failed(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const makeHook = <D>(eventType: ControlEvent['type'], mapResult: (event: ControlEvent, result: StopHookResult) => { decision: D; patches?: StatePatch[] }): Hook<ControlEvent, D> => ({
+    ...base,
+    id: `legacy:${sessionKey}:${eventType}`,
+    event: eventType,
+    run: (event: ControlEvent, ctx: HookContext) => runStopHook(event, ctx, (result) => mapResult(event, result)),
+  });
+
+  return [
+    makeHook<QualityGateDecision>('goal_state_reached', (_event, result) => {
+      if (result.decision === 'block') {
+        return {
+          decision: { verdict: 'failed', issues: [result.reason ?? 'Quality gate blocked'] },
+          patches: injectGuidancePatch(result.systemMessage),
+        };
+      }
+      return { decision: { verdict: 'passed' } };
+    }),
+    makeHook<BoundsDecision>('bounds_exceeded', (_event, result) => {
+      const workItems = toWorkItemSpecs(result.deferredWork);
+      if (workItems.length > 0) {
+        return { decision: { action: 'split', workItems } };
+      }
+      if (result.decision === 'block' && result.reason) {
+        return {
+          decision: { action: 'realign', guidance: result.reason },
+          patches: injectGuidancePatch(result.systemMessage),
+        };
+      }
+      if (result.systemMessage) {
+        return { decision: { action: 'wrap_up', summary: result.systemMessage } };
+      }
+      return { decision: { action: 'abort', reason: 'Allowed termination' } };
+    }),
+    makeHook<PromptAnswerDecision>('user_input_required', (_event, result) => {
+      if (result.decision === 'block' && result.reason) {
+        return {
+          decision: { action: 'answer', text: result.reason, confidence: 0.7, contextAddendum: result.systemMessage },
+        };
+      }
+      return { decision: { action: 'defer', to: 'user' } };
+    }),
+    makeHook<CadenceDecision>('cadence_audit', (_event, result) => {
+      const workItems = toWorkItemSpecs(result.deferredWork);
+      if (workItems.length > 0) {
+        return { decision: { action: 'split', workItems } };
+      }
+      if (result.decision === 'block' && result.reason) {
+        return {
+          decision: { action: 'realign', guidance: result.reason },
+          patches: injectGuidancePatch(result.systemMessage),
+        };
+      }
+      if (result.systemMessage) {
+        return { decision: { action: 'inject_guidance', message: result.systemMessage } };
+      }
+      return { decision: { action: 'continue' } };
+    }),
+    makeHook<AgentErrorDecision>('agent_error', (_event, result) => {
+      if (result.decision === 'block' && result.reason) {
+        return { decision: { action: 'retry', guidance: result.reason } };
+      }
+      return { decision: { action: 'abort', reason: result.systemMessage ?? 'Allowed termination' } };
+    }),
+    makeHook<HandoffDecision>('handoff_requested', (_event, result) => {
+      if (result.decision === 'block' && result.reason) {
+        return { decision: { action: 'reject', feedback: result.reason } };
+      }
+      return { decision: { action: 'approve' } };
+    }),
+  ];
+}
+
 export class BridgeGateway {
   private readonly bus: BusServer;
   private readonly harness: HarnessLike;
@@ -113,6 +328,8 @@ export class BridgeGateway {
   private skillsDir: string;
   private hooksDir: string;
   private connections = new Map<string, ConnectionState>();
+  // Track session ownership: sessionKey -> connectionId (enforces single client per session)
+  private sessionOwners = new Map<string, string>();
 
   constructor(bus: BusServer, harness: HarnessLike, workingDir: string, authService?: AuthService | null, daemon?: any | null) {
     this.bus = bus;
@@ -145,6 +362,10 @@ export class BridgeGateway {
     // Use lastSessionKey as fallback - session_close may have nulled sessionKey but we still need cleanup
     const sessionKeyToClose = state?.sessionKey ?? state?.lastSessionKey;
     if (sessionKeyToClose) {
+      // Release session ownership
+      if (this.sessionOwners.get(sessionKeyToClose) === connectionId) {
+        this.sessionOwners.delete(sessionKeyToClose);
+      }
       // closeSession handles persist + marking inactive
       this.harness.closeSession?.(sessionKeyToClose);
     }
@@ -165,7 +386,7 @@ export class BridgeGateway {
       return;
     }
 
-    const command = payload as BridgeCommand;
+    const command = payload as BridgeCommand | { type: string; data?: Record<string, unknown> };
     const state = this.getOrCreateConnectionState(connectionId);
 
     profiler.begin(`cmd:${command.type}`, 'bridge');
@@ -175,6 +396,10 @@ export class BridgeGateway {
           this.handleInit(connectionId, command.data, state);
           return;
         case 'send_text':
+          this.handleSendText(connectionId, command.data, state);
+          return;
+        case 'send_media':
+          // Currently handled the same as send_text; attachments are ignored by the harness.
           this.handleSendText(connectionId, command.data, state);
           return;
         case 'user_prompt_response':
@@ -366,15 +591,29 @@ export class BridgeGateway {
         ? requestedSessionKey
         : generateSessionKey();
 
+    // Enforce single client per session - reject if session is owned by another connection
+    const existingOwner = this.sessionOwners.get(sessionKey);
+    if (existingOwner && existingOwner !== connectionId) {
+      this.sendError(connectionId, `Session "${sessionKey}" is already in use by another client. Use a different session key or wait for the other client to disconnect.`);
+      return;
+    }
+
     // CRITICAL: Mark old session as inactive BEFORE switching to new one
     // This fixes the bug where switched-from sessions stay "active" forever
     const graphd = this.harness.getGraphD?.();
     if (state.sessionKey && state.sessionKey !== sessionKey) {
+      // Release ownership of old session
+      if (this.sessionOwners.get(state.sessionKey) === connectionId) {
+        this.sessionOwners.delete(state.sessionKey);
+      }
       if (graphd) {
         graphd.sessionUpdateStatus(state.sessionKey, 'inactive');
       }
       this.harness.closeSession?.(state.sessionKey);
     }
+
+    // Take ownership of the new session
+    this.sessionOwners.set(sessionKey, connectionId);
 
     state.sessionKey = sessionKey;
     state.lastSessionKey = sessionKey;  // Track for disconnect cleanup
@@ -508,7 +747,7 @@ export class BridgeGateway {
       ? candidateRequestId
       : generateRequestId();
     const rawTier = typeof data?.tier === 'string' ? data.tier.trim() : '';
-    const tier = rawTier && rawTier !== 'auto' ? rawTier : undefined;
+    const tier = rawTier && rawTier !== 'auto' ? (rawTier as AgentType) : undefined;
 
     // Extract planMode from command data
     const planMode = typeof data?.plan_mode === 'boolean' ? data.plan_mode : state.planMode;
@@ -520,7 +759,7 @@ export class BridgeGateway {
     const handle = this.harness.run({
       requestId: clientRequestId,
       inputText: text,
-      ...(tier ? { tier: tier as 'simple' | 'standard' | 'complex' } : {}),
+      ...(tier ? { tier } : {}),
       sessionKey,
       workingDir,
       planMode,
@@ -548,7 +787,7 @@ export class BridgeGateway {
     const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
 
     const requestId = String(data?.request_id ?? state.activeRequestId ?? '');
-    const answer = data?.answer;
+    const answer = data?.answer ?? data?.response;
     if (!requestId) {
       this.sendError(connectionId, 'Missing request_id');
       return;
@@ -1204,6 +1443,11 @@ export class BridgeGateway {
       return;
     }
 
+    // Release session ownership
+    if (this.sessionOwners.get(sessionKey) === connectionId) {
+      this.sessionOwners.delete(sessionKey);
+    }
+
     // closeSession handles persist + marking inactive
     this.harness.closeSession?.(sessionKey);
 
@@ -1439,7 +1683,6 @@ export class BridgeGateway {
     });
 
     if (returnAll) {
-      const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
       // Return all model selections
       const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
       const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
@@ -1488,8 +1731,9 @@ export class BridgeGateway {
       includeUserPreferences: true,
     });
 
-    // Check if already running a Ralph loop
-    if (state.ralphLoop) {
+    // Check if already running a Ralph loop (check session-level state, not connection-level)
+    const existingRalphLoop = this.harness.getSessionRalphLoop?.(sessionKey);
+    if (existingRalphLoop) {
       this.sendError(connectionId, 'A Ralph Loop is already running. Cancel it first.');
       return;
     }
@@ -1531,22 +1775,28 @@ export class BridgeGateway {
       : null;
     const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
 
-    // Create Ralph loop tracking state
-    state.ralphLoop = {
-      requestId,
-      cancelled: false,
-    };
+    // Track at session level (prevents race condition with multiple connections)
+    const ralphLoopInfo = { requestId, cancelled: false };
+    if (!this.harness.startSessionRalphLoop?.(sessionKey, ralphLoopInfo)) {
+      // Another connection started one between our check and now (rare but possible)
+      this.sendError(connectionId, 'A Ralph Loop was started by another connection. Cancel it first.');
+      return;
+    }
+    // Also track at connection level for backward compat
+    state.ralphLoop = ralphLoopInfo;
     state.activeRequestId = requestId;
 
     // Create Ralph stop hook with callbacks
-    const ralphState = state.ralphLoop;
+    // Use session-level state reference for cancel detection
+    const getSessionRalphLoop = () => this.harness.getSessionRalphLoop?.(sessionKey);
     const stopHook = createRalphStopHook({
       prompt,
       maxIterations,
       completionPromise,
       onIteration: (loopState: RalphLoopState) => {
-        // Check if cancelled
-        if (ralphState.cancelled) {
+        // Check if cancelled (at session level)
+        const currentRalphLoop = getSessionRalphLoop();
+        if (currentRalphLoop?.cancelled) {
           return;
         }
         // Emit progress event with Ralph iteration info
@@ -1568,7 +1818,8 @@ export class BridgeGateway {
         });
       },
       onComplete: (loopState: RalphLoopState, reason: RalphCompletionReason) => {
-        // Clear Ralph loop state
+        // Clear Ralph loop state (both session and connection level)
+        this.harness.clearSessionRalphLoop?.(sessionKey);
         state.ralphLoop = null;
 
         // Emit completion event to the run channel (same as onIteration) so TUI receives it
@@ -1592,31 +1843,41 @@ export class BridgeGateway {
       },
     });
 
-    // Start the harness run with the Ralph stop hook
+    const hookRegistry = createHookRegistryFromStopHook(stopHook, sessionKey);
+
+    // Start the harness run with the Ralph hook registry
     const handle = this.harness.run({
       requestId,
       inputText: prompt,
       sessionKey,
       workingDir,
       planMode: state.planMode,
-      stopHook,
+      hookRegistry,
     });
 
     this.streamRunEvents(requestId, handle);
   }
 
   private handleRalphLoopCancel(connectionId: string, state: ConnectionState): void {
-    if (!state.ralphLoop) {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendError(connectionId, 'Session not initialized. Call init first.');
+      return;
+    }
+
+    // Check session-level state (works across all connections)
+    const sessionRalphLoop = this.harness.getSessionRalphLoop?.(sessionKey);
+    if (!sessionRalphLoop) {
       this.sendError(connectionId, 'No Ralph Loop is currently running.');
       return;
     }
 
-    // Mark as cancelled
-    state.ralphLoop.cancelled = true;
+    // Mark as cancelled at session level
+    this.harness.cancelSessionRalphLoop?.(sessionKey);
 
-    // Clear Ralph loop state
+    // Clear Ralph loop state (both session and connection level)
+    this.harness.clearSessionRalphLoop?.(sessionKey);
     const iterations = 0; // We don't track exact iteration count here
-    const sessionKey = state.sessionKey;
     state.ralphLoop = null;
 
     // Emit cancellation response
@@ -1728,9 +1989,10 @@ export class BridgeGateway {
       return;
     }
 
-    // Prevent concurrent async runs
-    if (state.asyncRun) {
-      this.sendError(connectionId, `An async session is already running (request: ${state.asyncRun.requestId}). Wait for it to finish or close the session.`);
+    // Prevent concurrent async runs (check session-level state, not connection-level)
+    const existingAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
+    if (existingAsyncRun) {
+      this.sendError(connectionId, `An async session is already running (request: ${existingAsyncRun.requestId}). Wait for it to finish or close the session.`);
       return;
     }
 
@@ -1773,36 +2035,61 @@ export class BridgeGateway {
       return;
     }
 
-    // Create watcher stopHook for this session
-    if (!this.harness.createWatcherStopHookForSession) {
+    // Create watcher hook registry for this session
+    if (!this.harness.createWatcherHookRegistryForSession) {
       this.sendError(connectionId, 'Async sessions are not supported by this harness.');
       return;
     }
 
     try {
-      const { stopHook, planningObjective } = await this.harness.createWatcherStopHookForSession(sessionKey, goal, workingDir);
+      this.harness.setSessionAsyncModeEnabled?.(sessionKey, true);
+      // Pass daemon's root as watcherDir for .watcher artifacts, session's workingDir for agent operations
+      const { hookRegistry, planningObjective } = await this.harness.createWatcherHookRegistryForSession(sessionKey, goal, workingDir, this.workingDir);
 
       const requestId = generateRequestId();
       state.activeRequestId = requestId;
-      state.asyncRun = { requestId, goal, cancelled: false, startedAt: Date.now() };
 
-      // Start the harness run with the watcher stopHook and planning objective as input
+      // Track at session level (prevents race condition with multiple connections)
+      const asyncRunInfo = { requestId, goal, cancelled: false, startedAt: Date.now() };
+      if (!this.harness.startSessionAsyncRun?.(sessionKey, asyncRunInfo)) {
+        // Another connection started one between our check and now (rare but possible)
+        this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
+        this.sendError(connectionId, 'An async session was started by another connection. Wait for it to finish or close the session.');
+        return;
+      }
+      // Also track at connection level for backward compat and cleanup on disconnect
+      state.asyncRun = asyncRunInfo;
+
+      // Start the harness run with the watcher hook registry and planning objective as input
       const handle = this.harness.run({
         requestId,
         inputText: planningObjective,
+        tier: 'planner',
         sessionKey,
         workingDir,
-        stopHook,
+        hookRegistry,
       });
 
-      this.streamRunEvents(requestId, handle, () => {
-        // Clean up async state when the run completes (success or failure)
+      this.streamRunEvents(requestId, handle, (result) => {
+        // Only clean up async state when the run actually completes (success or failure),
+        // NOT when it pauses for user input. Paused runs should resume with async mode still on.
+        if (result?.paused) {
+          // Run paused for user input - keep async mode enabled for resume
+          return;
+        }
+        // Clear session-level state
+        const currentAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
+        if (currentAsyncRun?.requestId === requestId) {
+          this.harness.clearSessionAsyncRun?.(sessionKey);
+        }
+        // Clear connection-level state
         if (state.asyncRun?.requestId === requestId) {
           state.asyncRun = null;
         }
         if (state.activeRequestId === requestId) {
           state.activeRequestId = null;
         }
+        this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
       });
 
       // Notify client that async session started
@@ -1814,28 +2101,41 @@ export class BridgeGateway {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      this.harness.clearSessionAsyncRun?.(sessionKey);
       state.asyncRun = null;
+      this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
       this.sendError(connectionId, `Failed to start async session: ${message}`);
     }
   }
 
   private handleAsyncCancel(connectionId: string, state: ConnectionState): void {
-    if (!state.asyncRun) {
+    const sessionKey = state.sessionKey;
+    if (!sessionKey) {
+      this.sendError(connectionId, 'Session not initialized. Call init first.');
+      return;
+    }
+
+    // Check session-level state (works across all connections)
+    const sessionAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
+    if (!sessionAsyncRun) {
       this.sendError(connectionId, 'No async session is currently running.');
       return;
     }
 
-    const { requestId, goal } = state.asyncRun;
-    const sessionKey = state.sessionKey;
+    const { requestId, goal } = sessionAsyncRun;
 
-    // Mark as cancelled so the watcher stopHook can detect it
-    state.asyncRun.cancelled = true;
+    // Mark as cancelled at session level so the watcher hook can detect it
+    this.harness.cancelSessionAsyncRun?.(sessionKey);
 
-    // Clear async state
+    // Clear session-level async state
+    this.harness.clearSessionAsyncRun?.(sessionKey);
+
+    // Also clear connection-level state for backward compat
     state.asyncRun = null;
     if (state.activeRequestId === requestId) {
       state.activeRequestId = null;
     }
+    this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
 
     // Emit cancellation response on the session channel
     this.sendEvent(connectionId, {
@@ -1856,7 +2156,10 @@ export class BridgeGateway {
   }
 
   private handleAsyncStatus(connectionId: string, state: ConnectionState): void {
-    if (!state.asyncRun) {
+    const sessionKey = state.sessionKey;
+    // Check session-level state (works across all connections)
+    const sessionAsyncRun = sessionKey ? this.harness.getSessionAsyncRun?.(sessionKey) : null;
+    if (!sessionAsyncRun) {
       this.sendAuthResponse(connectionId, 'async_status', {
         success: true,
         running: false,
@@ -1867,10 +2170,10 @@ export class BridgeGateway {
     this.sendAuthResponse(connectionId, 'async_status', {
       success: true,
       running: true,
-      requestId: state.asyncRun.requestId,
-      goal: state.asyncRun.goal,
-      startedAt: state.asyncRun.startedAt,
-      elapsedMs: Date.now() - state.asyncRun.startedAt,
+      requestId: sessionAsyncRun.requestId,
+      goal: sessionAsyncRun.goal,
+      startedAt: sessionAsyncRun.startedAt,
+      elapsedMs: Date.now() - sessionAsyncRun.startedAt,
     });
   }
 
@@ -1998,12 +2301,13 @@ export class BridgeGateway {
     this.sendAuthResponse(connectionId, 'watcher_summarize', { success: true, ...result });
   }
 
-  private streamRunEvents(requestId: string, handle: AgentRunHandle, onComplete?: () => void): void {
+  private streamRunEvents(requestId: string, handle: AgentRunHandle, onComplete?: (result?: AgentRunResult) => void): void {
     const channel = runChannel(requestId);
     const asyncId = profiler.asyncBegin(`stream:${requestId}`, 'stream');
 
     void (async () => {
       let eventCount = 0;
+      let result: AgentRunResult | undefined;
       try {
         for await (const event of handle.events) {
           eventCount++;
@@ -2017,12 +2321,12 @@ export class BridgeGateway {
         this.bus.publish(channel, createErrorEvent(message, false));
       } finally {
         try {
-          await handle.result;
+          result = await handle.result;
         } catch {
           // Errors are already emitted via events.
         }
         profiler.asyncEnd(`stream:${requestId}`, asyncId, 'stream', { eventCount });
-        onComplete?.();
+        onComplete?.(result);
       }
     })();
   }

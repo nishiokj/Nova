@@ -1557,31 +1557,65 @@ async function cmdDerivedTasksCreate(): Promise<void> {
     return
   }
 
-  const created = await client.derivedTasks.create({
-    name,
-    scriptPath,
-    mode,
-    intervalMs,
-    metadata,
-    triggerConfig,
-  })
+  try {
+    const created = await client.derivedTasks.create({
+      name,
+      scriptPath,
+      mode,
+      intervalMs,
+      metadata,
+      triggerConfig,
+    })
 
-  printSuccess('Derived task created')
-  printDerivedTask(created.task)
+    printSuccess('Derived task created')
+    printDerivedTask(created.task)
 
-  if (created.sandbox) {
-    console.log('\n  Sandbox validation:')
-    console.log(`    Status: ${created.sandbox.status}`)
-    console.log(`    Job ID: ${created.sandbox.job.id.slice(0, 8)}`)
-    if (created.sandbox.lastError) {
-      console.log(`    Error: ${created.sandbox.lastError}`)
+    // Show metadata validation results
+    if (created.metadataValidation) {
+      if (created.metadataValidation.appliedDefaults) {
+        console.log('\n  Metadata validation:')
+        console.log('    Applied defaults from schema:')
+        for (const [key, value] of Object.entries(created.metadataValidation.appliedDefaults)) {
+          console.log(`      ${key}: ${JSON.stringify(value)}`)
+        }
+      }
     }
-    if (created.sandbox.logPath) {
-      console.log(`    Log: ${created.sandbox.logPath}`)
+
+    if (created.sandbox) {
+      console.log('\n  Sandbox validation:')
+      console.log(`    Status: ${created.sandbox.status}`)
+      console.log(`    Job ID: ${created.sandbox.job.id.slice(0, 8)}`)
+      if (created.sandbox.lastError) {
+        console.log(`    Error: ${created.sandbox.lastError}`)
+      }
+      if (created.sandbox.logPath) {
+        console.log(`    Log: ${created.sandbox.logPath}`)
+      }
+    } else if (created.sandboxError) {
+      console.log('\n  Sandbox validation failed to start:')
+      console.log(`    Error: ${created.sandboxError}`)
     }
-  } else if (created.sandboxError) {
-    console.log('\n  Sandbox validation failed to start:')
-    console.log(`    Error: ${created.sandboxError}`)
+  } catch (error) {
+    if (error instanceof SyncClientError && error.data) {
+      const data = error.data as { error?: string; message?: string; details?: { errors?: Array<{ field: string; message: string; received?: unknown; expected?: string }> } }
+      if (data.error === 'metadata_validation_failed') {
+        printError('Metadata validation failed')
+        console.log('\n  Validation errors:')
+        if (data.details?.errors) {
+          for (const err of data.details.errors) {
+            console.log(`    \x1b[31m✗\x1b[0m ${err.field}: ${err.message}`)
+            if (err.received !== undefined) {
+              console.log(`       Received: ${JSON.stringify(err.received)}`)
+            }
+            if (err.expected) {
+              console.log(`       Expected: ${err.expected}`)
+            }
+          }
+        }
+        return
+      }
+    }
+    throw error
   }
 }
 

@@ -10,6 +10,7 @@ import {
   parseAgentOutput,
   isValidOutput,
   getOutputSchema,
+  getOutputSchemaJson,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
 } from './output_schemas.js';
@@ -19,12 +20,14 @@ export {
   parseAgentOutput,
   isValidOutput,
   getOutputSchema,
+  getOutputSchemaJson,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
 };
 
 // Re-export all inferred types
 export type {
+  RoutingOutput,
   AgentAction,
   AgentActionOutput,
   GoalDrivenOutput,
@@ -32,6 +35,8 @@ export type {
   ExplorerOutput,
   WorkItemOutput,
   RuntimeScriptOutput,
+  WatcherActionOutput,
+  PlannerOutput,
 } from './output_schemas.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {

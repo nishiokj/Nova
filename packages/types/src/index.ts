@@ -250,3 +250,29 @@ export {
   normalizeToolName,
   DEFAULT_PERMISSION_SETTINGS,
 } from './permissions.js';
+
+// ============================================
+// AGENT TRACE (cursor/agent-trace spec)
+// ============================================
+export type {
+  ContributorType,
+  Contributor,
+  VCSType,
+  VCSInfo,
+  LineRange,
+  RelatedResource,
+  Conversation,
+  FileAttribution,
+  ToolInfo,
+  TraceRecord,
+  PendingFileModification,
+  ConversationUrlProvider,
+} from './agent_trace.js';
+
+export {
+  AGENT_TRACE_VERSION,
+  dummyUrlProvider,
+  formatModelId,
+  rfc3339Timestamp,
+  generateTraceId,
+} from './agent_trace.js';

@@ -397,7 +397,10 @@ export class TransformExecutor {
       }
     }
 
-    const created = await this.entityRepo.create(output.entityType, output.data as CanonicalEntity, output.displayText)
+    const created = await this.entityRepo.create(output.entityType, output.data as CanonicalEntity, {
+      displayText: output.displayText,
+      sourceTimestamp: output.sourceTimestamp,
+    })
 
     await this.mappingRepo.create({
       canonical_entity_id: created.id,

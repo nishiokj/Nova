@@ -1,0 +1,11 @@
+{
+  "id": "01KG6PQ7B2VPBCAGJJR4V9CDH5",
+  "type": "derived:run",
+  "payload": {
+    "derivedJobId": "01KG6PQ7B0Z0XKFKYX3D3520ES"
+  },
+  "error": "Job 01KG6PQ7B2VPBCAGJJR4V9CDH5 exceeded max runtime of 1800000ms",
+  "attemptCount": 3,
+  "createdAt": "2026-01-30T05:41:22.402Z",
+  "diedAt": "2026-01-30T08:57:12.713Z"
+}

@@ -538,6 +538,8 @@ export function getValidActions(trigger: WatcherTrigger): WatcherActionType[] {
   return VALID_ACTIONS_BY_TRIGGER[trigger];
 }
 
+import type { SemanticOutput } from './semantic/schemas.js';
+
 /**
  * Structured output from the watcher agent.
  * Returned by the LLM-backed watcher after evaluating a trigger.
@@ -545,15 +547,43 @@ export function getValidActions(trigger: WatcherTrigger): WatcherActionType[] {
  * The LLM output schema wraps this in the standard Agent protocol
  * (action: "done"|"continue", goalStateReached, response). The
  * watcher-specific decision lives in `watcherAction`.
+ *
+ * The optional `semantic` field is produced during cadence audits
+ * and written to the semantic.json file asynchronously.
  */
-export interface WatcherAction {
-  watcherAction: WatcherActionType;
-  reason: string;
-  answer?: { text: string; contextAddendum?: string };
-  realign?: { systemMessage: string; newGoal?: string };
-  workItems?: WatcherWorkItem[];
-  qualityGate?: { passed: boolean; issues?: string[] };
-}
+export type WatcherAction =
+  | {
+      watcherAction: 'answer';
+      reason: string;
+      answer: { text: string; contextAddendum?: string };
+    }
+  | {
+      watcherAction: 'realign';
+      reason: string;
+      realign: { systemMessage: string; newGoal?: string };
+      semantic?: SemanticOutput;
+    }
+  | {
+      watcherAction: 'split' | 'create_work_item';
+      reason: string;
+      workItems: WatcherWorkItem[];
+      semantic?: SemanticOutput;
+    }
+  | {
+      watcherAction: 'quality_gate';
+      reason: string;
+      qualityGate: { passed: boolean; issues?: string[] };
+    }
+  | {
+      watcherAction: 'continue';
+      reason: string;
+      semantic?: SemanticOutput;
+    };
+
+export type WatcherActionWithWorkItems = Extract<
+  WatcherAction,
+  { watcherAction: 'split' | 'create_work_item' }
+>;
 
 // ============================================
 // WORK LOG TYPES (Session Level)
@@ -653,6 +683,8 @@ export interface WorkItemInitEntry {
   type: 'init';
   timestamp: string;
   workId: string;
+  /** Working directory - all paths in this workitem log are relative to this */
+  cwd: string;
   objective: string;
   agent: string;
   domain?: string;
@@ -668,8 +700,10 @@ export interface WorkItemMessageEntry {
   type: 'message';
   timestamp: string;
   role: 'system' | 'user' | 'assistant';
-  /** Content - truncated if very long (>3000 chars) */
+  /** Full content - NOT truncated. The watcher needs complete context. */
   content: string;
+  /** Agent's reasoning/thinking for this turn (extended thinking output) */
+  reasoning?: string;
   /** If this was a watcher-injected answer */
   watcherInjected?: boolean;
 }
@@ -677,15 +711,18 @@ export interface WorkItemMessageEntry {
 /**
  * Tool call record (streamed during agent execution).
  * Shows what the agent investigated - critical for watcher context.
+ *
+ * NOTE: For Edit tools, the full old/new strings are included so the watcher
+ * can see exactly what code was written. Paths are relative to cwd in init entry.
  */
 export interface WorkItemToolCallEntry {
   type: 'tool_call';
   timestamp: string;
   tool: string;
-  /** Summarized args (file paths, patterns, not full content) */
+  /** Full args - paths relative to cwd, content included for audit trail */
   args: Record<string, unknown>;
   success: boolean;
-  /** Brief result summary - NOT the full output */
+  /** Result summary - full for Read/Grep, may be truncated for very large outputs */
   resultSummary?: string;
   durationMs: number;
 }

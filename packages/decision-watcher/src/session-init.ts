@@ -2,17 +2,17 @@
  * Session Init
  *
  * Bootstrap an async watcher session: write salience file, create decision log,
- * create the watcher stopHook, and produce the initial planning work item.
+ * create watcher control hooks, and produce the initial planning work item.
  */
 
-import type { StopHookResult, StopHookContext } from 'agent';
-import type { WatcherAction } from './types.js';
+import type { ControlEvent, Hook } from 'protocol';
+import type { WatcherAction, WatcherTrigger, WatcherWorkItem } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
 import { writeSalienceFile, salienceFilePath } from './salience.js';
 import { createDecisionLog } from './decision-log.js';
 import { createWorkLog } from './work-log.js';
-import { createWatcherStopHook } from './watcher-agent.js';
+import { createWatcherControlHooks } from './watcher-agent.js';
 import { getWorkItemLog } from './workitem-log.js';
 
 // ============================================
@@ -23,10 +23,10 @@ export interface AsyncSessionConfig {
   sessionId: string;
   goal: string;
   workingDir: string;
-  /** Runs the watcher agent with an objective string. */
-  runAgent: (objective: string) => Promise<WatcherAction>;
+  /** Runs the watcher agent with a trigger-specific objective string. */
+  runAgent: (objective: string, trigger: WatcherTrigger) => Promise<WatcherAction>;
   /** Called when watcher produces work items via split/create. */
-  onCreateWorkItems?: (items: WatcherAction['workItems']) => void;
+  onCreateWorkItems?: (items: WatcherWorkItem[]) => void;
   /** Operating principles to include in the salience file. */
   principles?: string[];
 }
@@ -37,7 +37,7 @@ export interface AsyncSessionResult {
   workLogPath: string;
   decisionLog: DecisionLog;
   workLog: WorkLog;
-  stopHook: (ctx: StopHookContext) => Promise<StopHookResult>;
+  hooks: Array<Hook<ControlEvent, unknown>>;
   planningObjective: string;
 }
 
@@ -51,10 +51,10 @@ export interface AsyncSessionResult {
  * Flow:
  * 1. Write salience file (goal, mode=async, principles)
  * 2. Create empty decision log
- * 3. Create watcher stopHook
+ * 3. Create watcher control hooks
  * 4. Produce the planning objective string
  *
- * The caller (harness) uses the returned stopHook in `OrchestratorRuntime`
+ * The caller (harness) registers the returned hooks in the orchestrator registry
  * and enqueues a work item with the planning objective.
  */
 export async function initAsyncSession(config: AsyncSessionConfig): Promise<AsyncSessionResult> {
@@ -82,8 +82,8 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
     console.warn('[WATCHER] Work log write failed (session_start):', err instanceof Error ? err.message : String(err));
   });
 
-  // 4. Create watcher stopHook
-  const stopHook = createWatcherStopHook({
+  // 4. Create watcher control hooks
+  const hooks = createWatcherControlHooks({
     sessionId: config.sessionId,
     salienceFilePath: salience,
     decisionLog,
@@ -92,7 +92,7 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
     workingDir: config.workingDir,
     runAgent: config.runAgent,
     onCreateWorkItems: config.onCreateWorkItems,
-  });
+  }, config.sessionId);
 
   // 5. Build planning objective
   const planningObjective = buildPlanningObjective(config.goal, salience, decisionLog.filePath(), workLog.filePath());
@@ -103,7 +103,7 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
     workLogPath: workLog.filePath(),
     decisionLog,
     workLog,
-    stopHook,
+    hooks,
     planningObjective,
   };
 }
@@ -148,24 +148,17 @@ ${goal}
 
 ## handoffSpec Format
 
-Your handoffSpec MUST be valid JSON:
-\`\`\`json
-{
-  "goal": "the overall goal",
-  "context": "key context discovered during planning",
-  "workItems": [
-    {
-      "id": "work-1",
-      "objective": "specific objective with file paths",
-      "delta": "what changes (one commit)",
-      "agent": "standard",
-      "domain": "backend",
-      "dependencies": [],
-      "targetPaths": ["path/to/file.ts"]
-    }
-  ]
-}
-\`\`\`
+Your handoffSpec MUST be a valid JSON object and include:
+- \`goal\` (string)
+- \`context\` (string)
+- \`workItems\` (array), each item with:
+  - \`id\` (string)
+  - \`objective\` (string, include file paths)
+  - \`delta\` (string; one commit)
+  - \`agent\` (string)
+  - \`domain\` (string, optional)
+  - \`dependencies\` (string[], optional)
+  - \`targetPaths\` (string[], optional)
 
 ## Principles
 

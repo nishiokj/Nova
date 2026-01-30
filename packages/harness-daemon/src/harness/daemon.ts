@@ -154,17 +154,11 @@ export class HarnessDaemon {
   }
 
   /**
-   * Set dangerous mode dynamically without restarting the daemon.
-   * This allows a new TUI connection to request dangerous mode without
-   * disconnecting existing TUIs.
+   * @deprecated Dangerous mode is now per-session. Use the set_dangerous_mode command via bridge instead.
+   * This method is a no-op and will be removed in a future version.
    */
-  setDangerousMode(enabled: boolean): void {
-    const permissionChecker = this.harness?.getPermissionChecker?.();
-    if (permissionChecker) {
-      permissionChecker.setDangerousMode(enabled);
-      const status = enabled ? 'enabled' : 'disabled';
-      console.log(`[harness-daemon] Dangerous mode ${status} (dynamic)`);
-    }
+  setDangerousMode(_enabled: boolean): void {
+    console.warn('[harness-daemon] setDangerousMode() is deprecated - dangerous mode is now per-session. Use set_dangerous_mode command via bridge.');
   }
 
   /**

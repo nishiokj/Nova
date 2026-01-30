@@ -316,10 +316,22 @@ export interface DerivedTaskSandboxResult {
   logPath?: string
 }
 
+export interface MetadataValidationError {
+  field: string
+  message: string
+  received?: unknown
+  expected?: string
+}
+
 export interface DerivedTaskCreateResponse {
   task: DerivedTask
   sandbox?: DerivedTaskSandboxResult
   sandboxError?: string
+  metadataValidation?: {
+    valid: boolean
+    errors?: MetadataValidationError[]
+    appliedDefaults?: Record<string, unknown>
+  }
 }
 
 // ============ Jobs ============
@@ -510,6 +522,40 @@ export interface DecisionsSearchResponse {
   filters?: {
     category?: string
     confidence?: string
+  }
+}
+
+// ============ Evidence Retrieval ============
+
+export interface EvidenceRetrieveRequest {
+  task: {
+    objective: string
+    recentMessages: string[]
+    touchedFiles?: string[]
+    iteration: number
+    sessionId: string
+    workItemId?: string
+  }
+  budget: {
+    maxTokens: number
+    maxItems?: number
+    minCoverage?: Partial<Record<string, number>>
+  }
+  options?: {
+    forceV1Fallback?: boolean
+    trace?: boolean
+  }
+}
+
+export interface EvidenceRetrieveResponse {
+  content: string
+  atoms: unknown[]
+  metrics: {
+    totalTokens: number
+    attentionTax: number
+    coverage: Record<string, number>
+    discriminatorsIncluded: number
+    latencyMs: number
   }
 }
 

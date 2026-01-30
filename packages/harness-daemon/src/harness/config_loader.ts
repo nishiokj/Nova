@@ -40,10 +40,10 @@ import {
   getProviderForModel,
   type ModelRole,
 } from 'types';
+import { getOutputSchemaJson, type OutputSchemaName } from 'shared';
 
 const DEFAULT_CONFIG_PATH = 'config/defaults.json';
 const USER_CONFIG_PATH = '~/.rex/config.json';
-const OUTPUT_SCHEMAS_PATH = 'config/output_schemas.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
 
 
@@ -59,22 +59,6 @@ function getPackageRoot(): string {
   const __dirname = dirname(__filename);
   // Always 4 levels up: harness/ -> (src|dist)/ -> harness-daemon/ -> apps/ -> root
   return resolve(__dirname, '..', '..', '..', '..');
-}
-
-/** Cached output schemas (loaded once) */
-let cachedOutputSchemas: OutputSchemasFile | null = null;
-
-/**
- * Structure of output_schemas.json
- */
-interface OutputSchemaDefinition {
-  name: string;
-  strict: boolean;
-  schema: Record<string, unknown>;
-}
-
-interface OutputSchemasFile {
-  schemas: Record<string, OutputSchemaDefinition>;
 }
 
 // ============================================
@@ -218,58 +202,13 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
   return null;
 }
 
-// ============================================
-// OUTPUT SCHEMA LOADING
-// ============================================
-
-/**
- * Load output schemas from config/output_schemas.json.
- * Schemas are cached after first load.
- */
-function loadOutputSchemas(): OutputSchemasFile | null {
-  if (cachedOutputSchemas) {
-    return cachedOutputSchemas;
-  }
-
-  // Check cwd first
-  const cwdPath = resolve(process.cwd(), OUTPUT_SCHEMAS_PATH);
-  if (existsSync(cwdPath)) {
-    try {
-      const content = readFileSync(cwdPath, 'utf-8');
-      const parsed = JSON.parse(content) as OutputSchemasFile;
-      console.log(`[config] Loaded output schemas from ${cwdPath}`);
-      cachedOutputSchemas = parsed;
-      return parsed;
-    } catch (e) {
-      console.warn(`[config] Failed to parse output schemas ${cwdPath}:`, e);
-    }
-  }
-
-  // Check package location (fallback for global installs)
-  const packagePath = resolve(getPackageRoot(), OUTPUT_SCHEMAS_PATH);
-  if (existsSync(packagePath)) {
-    try {
-      const content = readFileSync(packagePath, 'utf-8');
-      const parsed = JSON.parse(content) as OutputSchemasFile;
-      console.log(`[config] Loaded output schemas from package: ${packagePath}`);
-      cachedOutputSchemas = parsed;
-      return parsed;
-    } catch (e) {
-      console.warn(`[config] Failed to parse package output schemas ${packagePath}:`, e);
-    }
-  }
-
-  console.warn('[config] No output_schemas.json found');
-  return null;
-}
-
 /**
  * Resolve a schema reference (string) to the full schema definition.
  * If already a full schema object, returns it as-is.
  */
 function resolveOutputSchema(
-  schemaRef: string | { name: string; schema: Record<string, unknown>; strict?: boolean } | undefined
-): { name: string; schema: Record<string, unknown>; strict?: boolean } | undefined {
+  schemaRef: string | { name: string; schema: Record<string, unknown>; strict?: boolean; schemaId?: string } | undefined
+): { name: string; schema: Record<string, unknown>; strict?: boolean; schemaId?: string } | undefined {
   if (!schemaRef) {
     return undefined;
   }
@@ -279,24 +218,14 @@ function resolveOutputSchema(
     return schemaRef;
   }
 
-  // String reference - look up in output_schemas.json
-  const schemas = loadOutputSchemas();
-  if (!schemas) {
-    console.warn(`[config] Cannot resolve schema '${schemaRef}' - no output_schemas.json loaded`);
-    return undefined;
-  }
-
-  const definition = schemas.schemas[schemaRef];
+  // String reference - look up in Zod registry (source of truth)
+  const definition = getOutputSchemaJson(schemaRef as OutputSchemaName);
   if (!definition) {
-    console.warn(`[config] Schema '${schemaRef}' not found in output_schemas.json`);
+    console.warn(`[config] Schema '${schemaRef}' not found in output schema registry`);
     return undefined;
   }
 
-  return {
-    name: definition.name,
-    schema: definition.schema,
-    strict: definition.strict,
-  };
+  return definition;
 }
 
 /**

@@ -8,6 +8,7 @@
  */
 
 import fs from 'fs/promises';
+import type { HandoffSpec } from 'protocol';
 import { planContextPath, sessionDir } from './session-paths.js';
 
 // ============================================
@@ -205,20 +206,12 @@ export async function hasPlanContext(
 export function buildPlanContextFromHandoff(
   sessionId: string,
   goal: string,
-  handoffSpec: string
+  handoffSpec: HandoffSpec
 ): PlanContextData {
-  // Parse the handoff spec if it's JSON
-  let parsedSpec: Record<string, unknown> | null = null;
-  try {
-    parsedSpec = JSON.parse(handoffSpec);
-  } catch {
-    // Not JSON, treat as freeform text
-  }
-
   const planId = `plan-${Date.now().toString(36)}`;
 
   // Extract work items from spec if available
-  const workItems = (parsedSpec?.workItems as Array<{ targetPaths?: string[]; objective?: string }>) ?? [];
+  const workItems = handoffSpec.workItems ?? [];
 
   // Build key files from targetPaths
   const keyFiles: KeyFile[] = [];
@@ -238,11 +231,11 @@ export function buildPlanContextFromHandoff(
   return {
     planId,
     sessionId,
-    goal: (parsedSpec?.goal as string) ?? goal,
+    goal: handoffSpec.goal ?? goal,
     keyFiles,
     constraints: [],
     qaDecisions: [],
-    notes: parsedSpec ? undefined : handoffSpec, // Include raw spec as notes if not JSON
+    notes: handoffSpec.context || undefined,
     createdAt: new Date().toISOString(),
   };
 }

@@ -39,6 +39,27 @@ export interface ToolCall {
 }
 
 // ============================================
+// MEMORY INJECTION
+// ============================================
+
+export interface MemoryInjection {
+  id: string;
+  workItemId?: string;
+  query: string;
+  resultPreview?: string;
+  itemCount: number;
+  success: boolean;
+  iteration: number;
+  version?: 'v1' | 'v2';
+  latencyMs?: number;
+  coverage?: Record<string, number>;
+  discriminatorsIncluded?: number;
+  totalTokens?: number;
+  fallbackToV1?: boolean;
+  timestamp: ISODateTime;
+}
+
+// ============================================
 // LLM CALL TRACKING
 // ============================================
 
@@ -165,6 +186,7 @@ export interface AgentRequest {
   reflection?: Reflection;
   llmCalls: LLMCall[];
   userPrompts: UserPrompt[];
+  memoryInjections: MemoryInjection[];
   contextWindow?: ContextWindowMetrics;
 
   // Metrics

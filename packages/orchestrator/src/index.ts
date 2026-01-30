@@ -12,7 +12,6 @@ export {
   type OrchestratorResult,
   type OrchestratorMetrics,
   type OrchestratorLogger,
-  type TerminationReason,
   type PlanModeOptions,
 } from './orchestrator.js';
 
@@ -39,6 +38,21 @@ export {
   type StopHookHandler,
   type StopHookContext,
 } from './hooks.js';
+
+// New protocol hook registry/runner (orchestrator-owned)
+export {
+  createHookRegistry,
+  type HookRegistry,
+  type HookBundle,
+  type HookRegistrationMeta,
+  type RegisteredHook,
+} from './hookRegistry/index.js';
+
+export {
+  runHooksForEvent,
+  type HookExecutionResult,
+  type HookAuditEntry,
+} from './hookRunner/index.js';
 
 // Ralph Loop - iterative self-referential development
 export {

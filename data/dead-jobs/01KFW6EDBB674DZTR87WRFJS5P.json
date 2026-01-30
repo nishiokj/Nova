@@ -1,9 +1,0 @@
-{
-  "id": "01KFW6EDBB674DZTR87WRFJS5P",
-  "type": "sync:collect",
-  "payload": "{\"syncJobId\":\"01KFW6EDB9VC79PHS11T2P8SV9\",\"connector\":\"claude_sessions\",\"accountId\":\"01KFVRYKRN75P0TSY86PTBK22Z\",\"jobType\":\"incremental\"}",
-  "error": "UNDEFINED_VALUE: Undefined values are not allowed",
-  "attemptCount": 3,
-  "createdAt": "2026-01-26T03:44:32.106Z",
-  "diedAt": "2026-01-26T03:44:35.400Z"
-}

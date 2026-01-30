@@ -19,6 +19,7 @@ export interface CanonicalEntityRow {
   search_vector: unknown
   embedding: number[] | null
   deleted_at: Date | null
+  source_timestamp: Date | null
 }
 
 export interface StoredEntity {
@@ -30,6 +31,7 @@ export interface StoredEntity {
   display_text?: string
   embedding?: number[]
   deleted_at?: string
+  source_timestamp?: string
 }
 
 function rowToStoredEntity(row: CanonicalEntityRow): StoredEntity {
@@ -42,6 +44,7 @@ function rowToStoredEntity(row: CanonicalEntityRow): StoredEntity {
     display_text: row.display_text ?? undefined,
     embedding: row.embedding ?? undefined,
     deleted_at: row.deleted_at?.toISOString(),
+    source_timestamp: row.source_timestamp?.toISOString(),
   }
 }
 
@@ -62,7 +65,7 @@ export interface CanonicalEntityRepository {
     embedding: number[],
     options?: { limit?: number; threshold?: number; entityType?: EntityType }
   ): Promise<Array<StoredEntity & { similarity: number }>>
-  create(entityType: EntityType, data: CanonicalEntity, displayText?: string): Promise<StoredEntity>
+  create(entityType: EntityType, data: CanonicalEntity, options?: { displayText?: string; sourceTimestamp?: Date }): Promise<StoredEntity>
   update(id: string, data: Partial<CanonicalEntity>, displayText?: string): Promise<StoredEntity | null>
   updateEmbedding(id: string, embedding: number[]): Promise<boolean>
   softDelete(id: string): Promise<boolean>
@@ -237,24 +240,26 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
       }))
     },
 
-    async create(entityType, data, displayText) {
+    async create(entityType, data, options) {
       const id = generateCanonicalId()
       const now = new Date()
       const table = tableForType(entityType)
       if (!table) {
         throw new Error(`Unknown entity type: ${entityType}`)
       }
+      const { displayText, sourceTimestamp } = options ?? {}
 
       const [row] = await sql<CanonicalEntityRow[]>`
         INSERT INTO ${sql(table)} (
-          id, entity_type, data, created_at, updated_at, display_text
+          id, entity_type, data, created_at, updated_at, display_text, source_timestamp
         ) VALUES (
           ${id},
           ${entityType},
-          ${JSON.stringify(data)}::jsonb,
+          ${sql.json(data as Parameters<typeof sql.json>[0])},
           ${now},
           ${now},
-          ${displayText ?? null}
+          ${displayText ?? null},
+          ${sourceTimestamp ?? null}
         )
         RETURNING *
       `
@@ -274,7 +279,7 @@ export function createCanonicalEntityRepository(ctx: RepositoryContext): Canonic
       // Merge the data with existing data
       const [row] = await sql<CanonicalEntityRow[]>`
         UPDATE ${sql(table)}
-        SET data = data || ${JSON.stringify(data)}::jsonb,
+        SET data = data || ${sql.json(data as Parameters<typeof sql.json>[0])},
             updated_at = ${now}
             ${displayText !== undefined ? sql`, display_text = ${displayText}` : sql``}
         WHERE id = ${id} AND deleted_at IS NULL

@@ -196,7 +196,7 @@ function sendTextAndWait(
           log(`  [auto-respond] ${data.question ?? 'prompt'}`)
           client.send({
             type: 'user_prompt_response',
-            data: { request_id: data.request_id, response: 'yes' },
+            data: { request_id: data.request_id, answer: 'yes' },
           })
         }
         return

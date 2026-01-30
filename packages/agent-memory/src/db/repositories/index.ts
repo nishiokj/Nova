@@ -43,6 +43,7 @@ export {
   type DerivedJobInput,
   type DerivedJobRow,
   type DerivedJobStatus,
+  type FailureClass,
 } from './derived-job.js'
 
 export {
@@ -93,8 +94,10 @@ export {
   type DerivedTaskRepository,
   type DerivedTask,
   type DerivedTaskInput,
+  type DerivedTaskUpdateInput,
   type DerivedTaskRow,
   type DerivedTaskMode,
+  type ReplayPolicy,
 } from './derived-task.js'
 
 export {
@@ -141,6 +144,45 @@ export {
 } from './agent-goals.js'
 
 export {
+  createProjectsRepository,
+  type ProjectsRepository,
+  type ProjectRecord,
+  type ProjectRow,
+  type ProjectInput,
+  type ProjectUpdateInput,
+  type ProjectFilters,
+} from './projects.js'
+
+export {
+  createGoalsRepository,
+  type GoalsRepository,
+  type GoalRecord,
+  type GoalRow,
+  type GoalInput,
+  type GoalUpdateInput,
+  type GoalFilters,
+} from './goals.js'
+
+export {
+  createConversationDigestRepository,
+  type ConversationDigestRepository,
+  type ConversationDigestRecord,
+  type ConversationDigestRow,
+  type ConversationDigestInput,
+  type ConversationDigestUpdateInput,
+} from './conversation-digests.js'
+
+export {
+  createEntityMentionsRepository,
+  type EntityMentionsRepository,
+  type EntityMentionRecord,
+  type EntityMentionRow,
+  type EntityMentionInput,
+  type EntityMentionFilters,
+  type SimilarityOptions as EntityMentionSimilarityOptions,
+} from './entity-mentions.js'
+
+export {
   createAgentActionsRepository,
   type AgentActionsRepository,
   type AgentActionRow,
@@ -148,3 +190,45 @@ export {
   type ActionFilterOptions,
   type OutcomeSignal,
 } from './agent-actions.js'
+
+export {
+  createConfigFactsRepository,
+  type ConfigFactsRepository,
+  type ConfigFactRow,
+  type ConfigFactInput,
+  type ConfigType,
+  type ValueType,
+} from './config-facts.js'
+
+export {
+  createRuntimeFactsRepository,
+  type RuntimeFactsRepository,
+  type RuntimeFactRow,
+  type RuntimeFactInput,
+  type RuntimeFactType,
+} from './runtime-facts.js'
+
+export {
+  createTestSpecsRepository,
+  type TestSpecsRepository,
+  type TestSpecRow,
+  type TestSpecInput,
+  type TestResult,
+} from './test-specs.js'
+
+export {
+  createEvidenceRetrievalLogRepository,
+  type EvidenceRetrievalLogRepository,
+  type EvidenceRetrievalLogRow,
+  type EvidenceRetrievalLogInput,
+  type RetrievalStatus,
+} from './evidence-retrieval-log.js'
+
+export {
+  createResourcePoolRepository,
+  type ResourcePoolRepository,
+  type ResourcePool,
+  type ResourcePoolInput,
+  type ResourcePoolRow,
+  type CanAcquireResult,
+} from './resource-pool.js'

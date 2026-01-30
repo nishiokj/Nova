@@ -2,8 +2,7 @@
  * Decision Watcher Integration
  *
  * Helper functions for decision watcher configuration and seeding.
- * The watcher now integrates via the StopHookHandler mechanism
- * (see watcher-agent.ts), not via orchestrator hook callbacks.
+ * The watcher integrates via control-plane hooks (see watcher-agent.ts).
  */
 
 import type {

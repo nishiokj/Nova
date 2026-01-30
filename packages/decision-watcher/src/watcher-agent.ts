@@ -1,22 +1,55 @@
 /**
- * Watcher Agent - StopHook handler backed by an LLM agent.
+ * Watcher Agent - Control-plane hook implementation backed by an LLM agent.
  *
- * Routes orchestrator terminal conditions to trigger-specific handlers,
+ * Routes orchestrator control events to trigger-specific handlers,
  * runs a watcher agent to evaluate the situation, and returns structured
- * StopHookResult decisions.
+ * decisions via control-plane hooks.
  *
- * Core mechanism: StopHookResult { decision: 'block', reason, systemMessage }
- * causes the orchestrator to create a new work item from `reason`, inject
- * `systemMessage` into context, and continue the loop instead of terminating.
+ * Core mechanism: protocol decisions and patches drive orchestrator behavior.
  */
 
-import type { StopHookResult, StopHookContext, ExecutionSnapshot } from 'agent';
-import type { WatcherAction, WatcherTrigger, DecisionLogEntry } from './types.js';
+import {
+  assertNever,
+  createHook,
+  type AgentErrorDecision,
+  type BoundsDecision,
+  type CadenceDecision,
+  type ControlEvent,
+  type DecisionFor,
+  type DecisionRequiredEvent,
+  type EventFor,
+  type HandoffDecision,
+  type Hook,
+  type HookContext,
+  type HookOutcome,
+  type PromptAnswerDecision,
+  type QualityGateDecision,
+  type StatePatch,
+  type TerminationReason,
+  type WorkItemCompletedDecision,
+  type WorkItemSpec,
+  failed,
+  isAgentError,
+  isBoundsExceeded,
+  isCadenceAudit,
+  isGoalReached,
+  isHandoffRequested,
+  isUserInputRequired,
+  isWorkItemCompleted,
+  success,
+} from 'protocol';
+import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem } from './types.js';
 import { getValidActions } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
 import type { WorkItemLog } from './workitem-log.js';
 import { appendSalienceObservation } from './salience.js';
+import {
+  extractPreProcessedContext,
+  formatPreProcessedContext,
+  writeSemanticFileAsync,
+  type SemanticWriteConfig,
+} from './semantic/index.js';
 
 // ============================================
 // CONFIG
@@ -38,7 +71,118 @@ const TIMEOUT_BY_TRIGGER: Record<WatcherTrigger, number> = {
 };
 
 /** Max retries before giving up */
-const MAX_RETRIES = 2;
+type InFlightWatcher = {
+  runPromise: Promise<WatcherAction>;
+  visiblePromise: Promise<WatcherAction>;
+  startedAt: number;
+};
+
+const IN_FLIGHT_WATCHERS = new Map<string, InFlightWatcher>();
+
+/** Max workitem log content to inject (prevent prompt bloat for very long sessions) */
+const MAX_WORKITEM_LOG_INJECT_LENGTH = 50000;
+
+// ============================================
+// WORKITEM LOG FORMATTING FOR INJECTION
+// ============================================
+
+/**
+ * Format workitem log entries for direct injection into watcher prompt.
+ * This gives the watcher immediate access to the agent's reasoning and actions
+ * without requiring file reads.
+ */
+async function formatWorkItemLogForInjection(workItemLog: WorkItemLog | null): Promise<string> {
+  if (!workItemLog) {
+    return '*WorkItem log not available*';
+  }
+
+  try {
+    const entries = await workItemLog.readAll();
+    if (entries.length === 0) {
+      return '*WorkItem log is empty*';
+    }
+
+    const sections: string[] = [];
+
+    // Init entry - objective and setup
+    const init = entries.find(e => e.type === 'init');
+    if (init && init.type === 'init') {
+      sections.push(`**Objective**: ${init.objective}`);
+      sections.push(`**Agent**: ${init.agent}`);
+      if (init.cwd) sections.push(`**CWD**: ${init.cwd}`);
+    }
+
+    // Messages with reasoning - the core of what the watcher needs
+    const messages = entries.filter(e => e.type === 'message');
+    if (messages.length > 0) {
+      sections.push('\n### Agent Conversation & Reasoning\n');
+      for (const msg of messages) {
+        if (msg.type !== 'message') continue;
+        const roleLabel = msg.role === 'assistant' ? '**Assistant**' : msg.role === 'user' ? '**User**' : '**System**';
+
+        // Include reasoning prominently if present
+        if (msg.reasoning) {
+          sections.push(`${roleLabel} (with reasoning):`);
+          sections.push(`<reasoning>\n${msg.reasoning}\n</reasoning>`);
+          sections.push(`<response>\n${msg.content}\n</response>\n`);
+        } else {
+          sections.push(`${roleLabel}: ${msg.content}\n`);
+        }
+      }
+    }
+
+    // Tool calls - show what the agent did
+    const toolCalls = entries.filter(e => e.type === 'tool_call');
+    if (toolCalls.length > 0) {
+      sections.push('\n### Tool Calls\n');
+      for (const tc of toolCalls) {
+        if (tc.type !== 'tool_call') continue;
+        const status = tc.success ? '✓' : '✗';
+        const argsStr = JSON.stringify(tc.args, null, 2);
+        sections.push(`${status} **${tc.tool}** (${tc.durationMs}ms)`);
+        sections.push(`Args: \`\`\`json\n${argsStr}\n\`\`\``);
+        if (tc.resultSummary) {
+          sections.push(`Result: ${tc.resultSummary}`);
+        }
+        sections.push('');
+      }
+    }
+
+    // Decisions - what the watcher previously decided for this workitem
+    const decisions = entries.filter(e => e.type === 'decision');
+    if (decisions.length > 0) {
+      sections.push('\n### Prior Watcher Decisions\n');
+      for (const dec of decisions) {
+        if (dec.type !== 'decision') continue;
+        sections.push(`- **${dec.trigger}** → ${dec.action}: ${dec.rationale}`);
+        if (dec.question) sections.push(`  Question: "${dec.question}"`);
+        if (dec.answer) sections.push(`  Answer: "${dec.answer}"`);
+      }
+    }
+
+    // Metrics if available
+    const metrics = entries.find(e => e.type === 'metrics');
+    if (metrics && metrics.type === 'metrics') {
+      sections.push('\n### Metrics\n');
+      sections.push(`- Tool calls: ${metrics.toolCalls}`);
+      sections.push(`- LLM calls: ${metrics.llmCalls}`);
+      sections.push(`- Context used: ${(metrics.contextPercentUsed * 100).toFixed(1)}%`);
+      sections.push(`- Duration: ${(metrics.durationMs / 1000).toFixed(1)}s`);
+    }
+
+    let result = sections.join('\n');
+
+    // Truncate if too long (but with a generous limit)
+    if (result.length > MAX_WORKITEM_LOG_INJECT_LENGTH) {
+      result = result.slice(0, MAX_WORKITEM_LOG_INJECT_LENGTH) +
+        `\n\n... [truncated ${result.length - MAX_WORKITEM_LOG_INJECT_LENGTH} chars - see full log at ${workItemLog.filePath()}]`;
+    }
+
+    return result;
+  } catch (err) {
+    return `*Error reading workitem log: ${err instanceof Error ? err.message : String(err)}*`;
+  }
+}
 
 export interface WatcherAgentConfig {
   sessionId: string;
@@ -53,7 +197,7 @@ export interface WatcherAgentConfig {
   /** Runs the watcher agent with a trigger-specific objective and returns structured output. */
   runAgent: (objective: string, trigger: WatcherTrigger) => Promise<WatcherAction>;
   /** Called when the watcher produces split/create_work_item actions. */
-  onCreateWorkItems?: (items: WatcherAction['workItems']) => void;
+  onCreateWorkItems?: (items: WatcherWorkItem[]) => void;
   /** Called after every watcher decision for observability/debugging. */
   onDecision?: (entry: DecisionLogEntry) => void;
   /** Base timeout for watcher agent execution (default: 90000ms). Per-trigger timeouts take precedence. */
@@ -61,52 +205,149 @@ export interface WatcherAgentConfig {
 }
 
 // ============================================
-// STOP HOOK FACTORY
+// CONTROL-PLANE HOOK FACTORY
 // ============================================
 
-/**
- * Create a StopHookHandler backed by the watcher agent.
- * Routes by terminationReason to trigger-specific handlers.
- */
-export function createWatcherStopHook(config: WatcherAgentConfig): (ctx: StopHookContext) => Promise<StopHookResult> {
-  return async (ctx: StopHookContext): Promise<StopHookResult> => {
-    switch (ctx.terminationReason) {
-      case 'user_input_required':
-        return handlePromptUser(config, ctx);
-      case 'max_iterations_exceeded':
-      case 'max_tool_calls_exceeded':
-      case 'max_duration_exceeded':
-        return handleBoundsExceeded(config, ctx);
-      case 'agent_error':
-      case 'exception':
-        return handleAgentError(config, ctx);
-      case 'goal_state_reached':
-        return handleGoalReached(config, ctx);
-      case 'cadence_audit':
-        return handleCadenceAudit(config, ctx);
-      // Planning agent requesting handoff - watcher reviews and approves
-      case 'handoff_requested':
-        return handleHandoffApproval(config, ctx);
-      case 'user_stopped':
-        // User typed "stop" - explicit user command
-        return { decision: 'allow' };
-      // Transient errors - allow termination, let caller decide retry
-      case 'rate_limit':
-      case 'circuit_open':
-      case 'timeout':
-        return { decision: 'allow' };
-      // Agent semantic errors - allow termination
-      case 'refusal':
-        // LLM refused to complete task
-        return { decision: 'allow' };
-      case 'no_action':
-      case 'invalid_action':
-        // Semantic errors handled by Orchestrator, allow termination
-        return { decision: 'allow' };
-      default:
-        return { decision: 'allow' };
+interface WatcherContext<Evt extends ControlEvent = ControlEvent> {
+  event: Evt;
+  hook: HookContext;
+}
+
+function assertEventType<Evt extends ControlEvent>(
+  event: ControlEvent,
+  guard: (evt: ControlEvent) => evt is Evt,
+  expected: Evt['type']
+): asserts event is Evt {
+  if (!guard(event)) {
+    throw new Error(`[WATCHER] Expected ${expected} event, got ${event.type}`);
+  }
+}
+
+function toTerminationReason(event: ControlEvent): TerminationReason {
+  switch (event.type) {
+    case 'goal_state_reached':
+      return 'goal_state_reached';
+    case 'bounds_exceeded':
+      switch (event.boundType) {
+        case 'iterations':
+          return 'max_iterations_exceeded';
+        case 'tool_calls':
+          return 'max_tool_calls_exceeded';
+        case 'duration':
+          return 'max_duration_exceeded';
+        default:
+          return assertNever(event.boundType);
+      }
+    case 'user_input_required':
+      return 'user_input_required';
+    case 'cadence_audit':
+      return 'cadence_audit';
+    case 'agent_error':
+      return event.errorType === 'exception' ? 'agent_error' : event.errorType;
+    case 'handoff_requested':
+      return 'handoff_requested';
+    case 'work_item_completed':
+      return 'goal_state_reached';
+    case 'user_stopped':
+      return 'user_stopped';
+    case 'transient_error':
+      // Cache discriminant so exhaustive switch doesn't narrow event to never.
+      const errorType = event.errorType;
+      switch (errorType) {
+        case 'rate_limit':
+          return 'rate_limit';
+        case 'circuit_open':
+          return 'circuit_open';
+        case 'timeout':
+          return 'timeout';
+        default:
+          return assertNever(errorType);
+      }
+    default:
+      return assertNever(event);
+  }
+}
+
+function toWorkItemSpecs(items: WatcherWorkItem[]): WorkItemSpec[] {
+  if (!items || items.length === 0) return [];
+  return items.map(item => ({
+    goal: item.goal,
+    objective: item.objective,
+    agent: item.agent,
+    dependencies: item.dependencies,
+    targetPaths: item.targetPaths,
+    bounds: item.bounds,
+  }));
+}
+
+function injectGuidancePatch(message?: string): StatePatch[] | undefined {
+  if (!message) return undefined;
+  return [{ op: 'inject_guidance', content: message }];
+}
+
+export function createWatcherControlHooks(
+  config: WatcherAgentConfig,
+  sessionKey: string
+): Array<Hook<ControlEvent, unknown>> {
+  const base = {
+    policy: { kind: 'retry_then_degrade', maxRetries: 1, backoffMs: 500, degradeTo: 'skip' } as const,
+    criticality: 'critical' as const,
+    idempotency: 'idempotent' as const,
+    priority: 50,
+    timeoutMs: 90_000,
+  };
+
+  const runHook = async <E extends DecisionRequiredEvent>(
+    event: EventFor<E>,
+    ctx: HookContext,
+    handler: (wc: WatcherContext<EventFor<E>>) => Promise<{ decision: DecisionFor<E>; patches?: StatePatch[] }>
+  ): Promise<HookOutcome<DecisionFor<E>>> => {
+    if (event.sessionKey !== sessionKey) {
+      return { kind: 'skip', reason: 'session_mismatch' };
+    }
+    try {
+      const result = await handler({ event, hook: ctx });
+      return success(result.decision, result.patches);
+    } catch (err) {
+      return failed(err instanceof Error ? err.message : String(err));
     }
   };
+
+  const makeHook = <E extends DecisionRequiredEvent>(
+    eventType: E,
+    handler: (wc: WatcherContext<EventFor<E>>) => Promise<{ decision: DecisionFor<E>; patches?: StatePatch[] }>
+  ): Hook<EventFor<E>, DecisionFor<E>> => createHook(eventType, {
+    ...base,
+    id: `watcher:${sessionKey}:${eventType}`,
+    run: (event, ctx) => runHook(event, ctx, handler),
+  });
+
+  // Cast for HookRegistry compatibility; makeHook enforces event/decision pairing.
+  const hooks = [
+    makeHook('goal_state_reached', (wc) =>
+      handleGoalReached(config, wc)
+    ),
+    makeHook('bounds_exceeded', (wc) =>
+      handleBoundsExceeded(config, wc)
+    ),
+    makeHook('user_input_required', (wc) =>
+      handlePromptUser(config, wc)
+    ),
+    makeHook('cadence_audit', (wc) =>
+      handleCadenceAudit(config, wc)
+    ),
+    makeHook('agent_error', (wc) =>
+      handleAgentError(config, wc)
+    ),
+    makeHook('handoff_requested', (wc) =>
+      handleHandoffApproval(config, wc)
+    ),
+    makeHook('work_item_completed', (wc) =>
+      handleWorkItemCompleted(config, wc)
+    ),
+  ] as Array<Hook<ControlEvent, unknown>>;
+
+  return hooks;
 }
 
 // ============================================
@@ -117,124 +358,108 @@ export function createWatcherStopHook(config: WatcherAgentConfig): (ctx: StopHoo
  * Format for goal_state_reached: WHAT happened, not HOW.
  * No tool call history — agent finished; tool replay is noise.
  */
-function formatGoalReachedContext(ctx: StopHookContext): string {
-  const snap = ctx.executionSnapshot;
-  if (!snap) {
-    return `\nAgent response (truncated): ${ctx.response.slice(0, 1000)}`;
-  }
+function formatGoalReachedContext(ctx: WatcherContext): string {
+  const { event, hook } = ctx;
+  const metrics = 'metrics' in event ? event.metrics : hook.metrics;
+  const filesModified = 'filesModified' in event ? event.filesModified : hook.filesModified;
+  const response = 'response' in event ? event.response : '';
 
   const sections: string[] = [];
 
-  // Execution summary
-  const m = snap.metrics;
   sections.push(`### Execution Summary
-- Duration: ${(m.durationMs / 1000).toFixed(1)}s | Tool calls: ${m.toolCallsMade} | Context: ${(m.contextPercentUsed * 100).toFixed(0)}% used`);
+- Duration: ${(metrics.durationMs / 1000).toFixed(1)}s | Tool calls: ${metrics.toolCallsMade} | Context: ${(metrics.contextPercentUsed * 100).toFixed(0)}% used`);
 
-  // Files modified (full list — this is the real footprint)
-  if (snap.filesModified.length > 0) {
-    sections.push(`### Files Modified (${snap.filesModified.length})
-${snap.filesModified.map(f => `- ${f}`).join('\n')}`);
+  if (filesModified.length > 0) {
+    sections.push(`### Files Modified (${filesModified.length})
+${filesModified.map(f => `- ${f}`).join('\n')}`);
   }
 
-  // Agent response (up to 3000 chars)
-  const responsePreview = snap.fullResponse.length > 3000
-    ? snap.fullResponse.slice(0, 3000) + '\n... [truncated]'
-    : snap.fullResponse;
-  sections.push(`### Agent Response
+  const responsePreview = response.length > 3000
+    ? response.slice(0, 3000) + '\n... [truncated]'
+    : response;
+  if (responsePreview) {
+    sections.push(`### Agent Response
 ${responsePreview}`);
+  }
+
+  const recentMessages = hook.recentMessages.slice(-2).map(m => `- ${m.role}: ${m.content.slice(0, 200)}`);
+  if (recentMessages.length > 0) {
+    sections.push(`### Recent Messages
+${recentMessages.join('\n')}`);
+  }
 
   return '\n' + sections.join('\n\n');
 }
 
 /**
- * Full context for bounds_exceeded and agent_error — includes everything.
+ * Full context for bounds_exceeded and agent_error — includes everything available.
  */
-function formatFullContext(ctx: StopHookContext): string {
-  const snap = ctx.executionSnapshot;
-  if (!snap) {
-    return `\nAgent response (truncated): ${ctx.response.slice(0, 1000)}`;
-  }
+function formatFullContext(ctx: WatcherContext): string {
+  const { event, hook } = ctx;
+  const metrics = 'metrics' in event ? event.metrics : hook.metrics;
+  const filesModified = 'filesModified' in event ? event.filesModified : hook.filesModified;
+  const response = 'response' in event ? event.response : '';
 
   const sections: string[] = [];
 
-  // Metrics summary
-  const m = snap.metrics;
   sections.push(`### Execution Metrics
-- LLM calls: ${m.llmCallsMade} | Tool calls: ${m.toolCallsMade} (${m.toolCallsSucceeded} ok, ${m.toolCallsFailed} failed)
-- Duration: ${(m.durationMs / 1000).toFixed(1)}s | Context: ${(m.contextPercentUsed * 100).toFixed(0)}% used
-- Tokens: ${m.inputTokens} in / ${m.outputTokens} out`);
+- LLM calls: ${metrics.llmCalls} | Tool calls: ${metrics.toolCallsMade}
+- Duration: ${(metrics.durationMs / 1000).toFixed(1)}s | Context: ${(metrics.contextPercentUsed * 100).toFixed(0)}% used`);
 
-  // Files
-  if (snap.filesModified.length > 0) {
-    sections.push(`### Files Modified (${snap.filesModified.length})
-${snap.filesModified.map(f => `- ${f}`).join('\n')}`);
-  }
-  if (snap.filesRead.length > 0) {
-    const display = snap.filesRead.slice(0, 15);
-    const suffix = snap.filesRead.length > 15 ? `\n... and ${snap.filesRead.length - 15} more` : '';
-    sections.push(`### Files Read (${snap.filesRead.length})
-${display.map(f => `- ${f}`).join('\n')}${suffix}`);
+  if (filesModified.length > 0) {
+    sections.push(`### Files Modified (${filesModified.length})
+${filesModified.map(f => `- ${f}`).join('\n')}`);
   }
 
-  // Tool call history (last 10)
-  if (snap.toolHistory.length > 0) {
-    const recent = snap.toolHistory.slice(-10);
-    const lines = recent.map(t => {
-      const status = t.success ? 'ok' : 'FAIL';
-      const argsPreview = JSON.stringify(t.args).slice(0, 120);
-      return `- [${status}] ${t.name}(${argsPreview}) ${t.durationMs}ms`;
-    });
-    sections.push(`### Recent Tool Calls (last ${recent.length} of ${snap.toolHistory.length})
-${lines.join('\n')}`);
-  }
-
-  // Artifacts
-  if (snap.artifacts && snap.artifacts.length > 0) {
-    const display = snap.artifacts.slice(0, 8);
-    sections.push(`### Artifacts Discovered (${snap.artifacts.length})
-${display.map(a => `- [${a.kind}] ${a.name} (${a.sourcePath})${a.insight ? ': ' + a.insight : ''}`).join('\n')}`);
-  }
-
-  // Full response (up to 3000 chars)
-  const responsePreview = snap.fullResponse.length > 3000
-    ? snap.fullResponse.slice(0, 3000) + '\n... [truncated]'
-    : snap.fullResponse;
-  sections.push(`### Agent Response
+  const responsePreview = response.length > 3000
+    ? response.slice(0, 3000) + '\n... [truncated]'
+    : response;
+  if (responsePreview) {
+    sections.push(`### Agent Response
 ${responsePreview}`);
+  }
+
+  const recentMessages = hook.recentMessages.slice(-4).map(m => `- ${m.role}: ${m.content.slice(0, 200)}`);
+  if (recentMessages.length > 0) {
+    sections.push(`### Recent Messages
+${recentMessages.join('\n')}`);
+  }
 
   return '\n' + sections.join('\n\n');
 }
 
 /**
  * Medium-depth context for cadence audits — metrics + files + brief response.
- * No full tool history, no full response.
  */
-function formatCadenceContext(ctx: StopHookContext): string {
-  const snap = ctx.executionSnapshot;
-  if (!snap) {
-    return `\nAgent response (truncated): ${ctx.response.slice(0, 500)}`;
-  }
+function formatCadenceContext(ctx: WatcherContext): string {
+  const { event, hook } = ctx;
+  const metrics = 'metrics' in event ? event.metrics : hook.metrics;
+  const filesModified = 'filesModified' in event ? event.filesModified : hook.filesModified;
+  const response = 'response' in event ? event.response : '';
 
   const sections: string[] = [];
 
-  // Metrics summary
-  const m = snap.metrics;
   sections.push(`### Execution Metrics
-- LLM calls: ${m.llmCallsMade} | Tool calls: ${m.toolCallsMade} (${m.toolCallsSucceeded} ok, ${m.toolCallsFailed} failed)
-- Duration: ${(m.durationMs / 1000).toFixed(1)}s | Context: ${(m.contextPercentUsed * 100).toFixed(0)}% used`);
+- LLM calls: ${metrics.llmCalls} | Tool calls: ${metrics.toolCallsMade}
+- Duration: ${(metrics.durationMs / 1000).toFixed(1)}s | Context: ${(metrics.contextPercentUsed * 100).toFixed(0)}% used`);
 
-  // Files modified
-  if (snap.filesModified.length > 0) {
-    sections.push(`### Files Modified (${snap.filesModified.length})
-${snap.filesModified.map(f => `- ${f}`).join('\n')}`);
+  if (filesModified.length > 0) {
+    sections.push(`### Files Modified (${filesModified.length})
+${filesModified.map(f => `- ${f}`).join('\n')}`);
   }
 
-  // Brief response preview (500 chars)
-  const responsePreview = snap.fullResponse.length > 500
-    ? snap.fullResponse.slice(0, 500) + '\n... [truncated]'
-    : snap.fullResponse;
-  sections.push(`### Agent Response (preview)
+  if (event.type === 'cadence_audit') {
+    sections.push(`### Recent Activity
+${event.recentActivity}`);
+  }
+
+  const responsePreview = response.length > 500
+    ? response.slice(0, 500) + '\n... [truncated]'
+    : response;
+  if (responsePreview) {
+    sections.push(`### Agent Response (preview)
 ${responsePreview}`);
+  }
 
   return '\n' + sections.join('\n\n');
 }
@@ -242,7 +467,7 @@ ${responsePreview}`);
 /**
  * Dispatcher: select the right formatter based on trigger type.
  */
-function formatSnapshotForTrigger(trigger: string, ctx: StopHookContext): string {
+function formatSnapshotForTrigger(trigger: WatcherTrigger, ctx: WatcherContext): string {
   switch (trigger) {
     case 'work_item_completed':
       return formatGoalReachedContext(ctx);
@@ -250,8 +475,14 @@ function formatSnapshotForTrigger(trigger: string, ctx: StopHookContext): string
       return formatCadenceContext(ctx);
     case 'bounds_exceeded':
     case 'prompt_user':
-    default:
       return formatFullContext(ctx);
+    case 'agent_error':
+    case 'handoff_approval':
+    case 'session_init':
+    case 'scope_collision':
+      return formatFullContext(ctx);
+    default:
+      return assertNever(trigger);
   }
 }
 
@@ -261,9 +492,12 @@ function formatSnapshotForTrigger(trigger: string, ctx: StopHookContext): string
 
 async function handlePromptUser(
   config: WatcherAgentConfig,
-  ctx: StopHookContext
-): Promise<StopHookResult> {
-  const prompt = ctx.userPrompt;
+  ctx: WatcherContext
+): Promise<{ decision: PromptAnswerDecision; patches?: StatePatch[] }> {
+  const { event } = ctx;
+  assertEventType(event, isUserInputRequired, 'user_input_required');
+
+  const prompt = event.prompt;
   const questionText = prompt?.question ?? 'Unknown question';
   const optionsText = prompt?.options
     ? `\nOptions: ${JSON.stringify(prompt.options)}`
@@ -284,7 +518,7 @@ async function handlePromptUser(
     await appendSalienceObservation(config.salienceFilePath, {
       trigger: 'prompt_user',
       action: 'ambiguous_question_detected',
-      workId: ctx.workId,
+      workId: event.workId,
       summary: `Ambiguous prompt_user question detected: "${questionText.slice(0, 80)}". Consider providing specific options.`,
     }).catch(err => {
       console.warn('[WATCHER] Salience update failed:', err instanceof Error ? err.message : String(err));
@@ -292,28 +526,26 @@ async function handlePromptUser(
   }
 
   // Get workitem-level context (full conversation, tool calls, scoped decisions)
-  const workItemLog = ctx.workId ? await config.getWorkItemLog(ctx.workId) : null;
-  const workItemLogPath = workItemLog?.filePath() ?? 'not available';
+  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
+  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
 
   const snapshotContext = formatSnapshotForTrigger('prompt_user', ctx);
 
   const objective = `You are the watcher for session ${config.sessionId}.
 
-## Session Context (read these first for broad awareness)
-- **Salience**: ${config.salienceFilePath}
-  Contains: session goal, operating mode, principles
+## Session Context
+- **Salience**: ${config.salienceFilePath} (read for session goal and principles)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
 
-- **Work Log**: ${config.workLog.filePath()}
-  Contains: all WorkItems in this session, their status, brief summaries
-  Shows: what's running in parallel, what completed, dependencies
+## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
 
-## WorkItem Context (the agent asking this question)
-- **WorkItem Log**: ${workItemLogPath}
-  Contains: FULL conversation history, tool calls, discoveries, prior decisions
-  This tells you WHY the agent is asking and what it found
-  **READ THIS** to understand the agent's reasoning
+The following is the FULL context of the agent asking this question - their reasoning, tool calls, and discoveries:
 
-## Question from Agent (WorkItem: ${ctx.workId ?? 'unknown'})
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
+
+## Question from Agent
 
 **Question**: ${questionText}${optionsText}
 **Agent Context**: ${prompt?.context ?? 'none'}
@@ -325,23 +557,10 @@ ${snapshotContext}
 
 ## Answering Guidelines
 
-1. **Specific options questions**: Pick the option that best aligns with the session goal.
-   - If you're uncertain, pick the first option and explain your reasoning.
-   - Include rationale: why this option fits the goal and principles.
-
-2. **Open-ended questions**: These are usually about goal/scope interpretation.
-   - Reinterpret the question based on the session goal.
-   - If the question asks "what should I do", assume the agent should continue with their best judgment unless you have a clear reason to redirect.
-   - Never return \`watcherAction: "escalate"\` for prompt_user triggers.
-
-3. **Ambiguous requirements**: If the question is genuinely unclear:
-   - Return \`watcherAction: "answer"\` with a clarification question.
-   - Example: "Are you asking about X or Y? Please clarify."
-   - This keeps the loop going while requesting precision.
-
-4. **Default behavior**: If you truly cannot determine a better path:
-   - Return \`watcherAction: "answer"\` with "Continue with your best judgment based on the session goal."
-   - Never return null or empty answers.
+1. **Use the workitem context above** to understand WHY the agent is asking this question.
+2. **Specific options questions**: Pick the option that best aligns with the session goal.
+3. **Open-ended questions**: Reinterpret based on session goal; if asking "what should I do", tell them to continue with best judgment unless you see a problem in their reasoning above.
+4. **Default behavior**: Return \`watcherAction: "answer"\` with "Continue with your best judgment."
 
 ## Format Requirements
 
@@ -352,11 +571,7 @@ Your response MUST include:
 
 **Invalid actions for prompt_user**: \`escalate\`, \`quality_gate\`, \`continue\` (use "answer" for all)
 
-1. Read salience for session goal.
-2. Read work-log for session state (other workitems, completed work).
-3. **Read workitem log for THIS agent's full context** (conversation, tool calls, discoveries).
-4. If needed, use Read/Grep tools to verify agent's findings.
-5. Answer with awareness of both session goal AND agent's specific situation.`;
+Read salience for session goal, then answer based on both the goal AND the agent's situation shown above.`;
 
   const action = await runAndLog(config, 'prompt_user', objective, ctx);
 
@@ -367,25 +582,26 @@ Your response MUST include:
       action.watcherAction,
       action.reason,
       questionText,
-      action.answer?.text
+      action.answer.text
     ).catch(err => {
       console.warn('[WATCHER] WorkItem decision log failed:', err instanceof Error ? err.message : String(err));
     });
   }
 
-  if (action.watcherAction === 'answer' && action.answer) {
+  if (action.watcherAction === 'answer') {
     return {
-      decision: 'block',
-      reason: action.answer.text,
-      systemMessage: action.answer.contextAddendum
-        ? `[Watcher answered]: ${action.answer.contextAddendum}`
-        : `[Watcher answered autonomously]: ${action.reason}`,
+      decision: {
+        action: 'answer',
+        text: action.answer.text,
+        confidence: 0.7,
+        contextAddendum: action.answer.contextAddendum,
+      },
     };
   }
 
   // Watcher failed to provide a proper 'answer' action.
   // Check if the watcher's reason contains useful guidance we can use as an answer.
-  const watcherReason = action.reason ?? '';
+  const watcherReason = action.reason;
   const hasUsefulReason = watcherReason.length > 20 &&
     !watcherReason.includes('timeout') &&
     !watcherReason.includes('error') &&
@@ -395,9 +611,12 @@ Your response MUST include:
   if (hasUsefulReason) {
     console.warn(`[WATCHER] prompt_user: Watcher returned "${action.watcherAction}" instead of "answer", but has useful reason. Using reason as answer.`);
     return {
-      decision: 'block',
-      reason: watcherReason,
-      systemMessage: `[Watcher guidance (action was "${action.watcherAction}", not "answer")]: ${watcherReason}`,
+      decision: {
+        action: 'answer',
+        text: watcherReason,
+        confidence: 0.5,
+        contextAddendum: `Watcher returned action "${action.watcherAction}" but provided usable guidance.`,
+      },
     };
   }
 
@@ -409,50 +628,63 @@ Your response MUST include:
   console.error(`[WATCHER] prompt_user: Watcher failed to answer. Action: "${action.watcherAction}", Reason: "${watcherReason.slice(0, 100)}". Using default: "${defaultAnswer}"`);
 
   return {
-    decision: 'block',
-    reason: defaultAnswer,
-    systemMessage: `[Watcher auto-answer (FALLBACK)]: Watcher returned action="${action.watcherAction}" with no useful answer. Default: ${defaultAnswer}. Original reason: ${watcherReason.slice(0, 200)}`,
+    decision: {
+      action: 'answer',
+      text: defaultAnswer,
+      confidence: 0.4,
+      contextAddendum: `[Watcher fallback]: action="${action.watcherAction}" reason="${watcherReason.slice(0, 120)}"`,
+    },
   };
 }
 
 async function handleBoundsExceeded(
   config: WatcherAgentConfig,
-  ctx: StopHookContext
-): Promise<StopHookResult> {
-  // Get workitem-level context
-  const workItemLog = ctx.workId ? await config.getWorkItemLog(ctx.workId) : null;
-  const workItemLogPath = workItemLog?.filePath() ?? 'not available';
+  ctx: WatcherContext
+): Promise<{ decision: BoundsDecision; patches?: StatePatch[] }> {
+  const { event } = ctx;
+  assertEventType(event, isBoundsExceeded, 'bounds_exceeded');
+
+  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
+  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
 
   const snapshotContext = formatSnapshotForTrigger('bounds_exceeded', ctx);
 
   const objective = `You are the watcher for session ${config.sessionId}.
 
 ## Session Context
-- **Salience**: ${config.salienceFilePath} — session goal, principles
-- **Work Log**: ${config.workLog.filePath()} — all WorkItems status, what's running/completed
+- **Salience**: ${config.salienceFilePath} (read for session goal)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
 
-## WorkItem Context (the agent that hit bounds)
-- **WorkItem Log**: ${workItemLogPath}
-  Contains: FULL conversation, tool calls, discoveries
-  **READ THIS** to understand what the agent was doing and why it hit bounds
+## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
 
-The agent has hit a resource bound: **${ctx.terminationReason}** (iteration ${ctx.iteration}).
+The agent has hit a resource bound: **${event.boundType}** (current ${event.current} / limit ${event.limit}).
+
+Here is the FULL context of what the agent was doing - their reasoning, tool calls, and progress:
+
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
+
 ${snapshotContext}
 
-Your job:
-1. **Read the workitem log** to understand what the agent was doing and why.
-2. Assess whether meaningful progress was being made (check conversation, tool calls, files modified).
-3. If the agent was on track but needs more room: return action "realign" with a systemMessage refocusing the agent and trimming scope.
-4. If the agent was drifting or wasting cycles: return action "split" with workItems to decompose remaining work.
+## Your Task
 
-### Parallelization
-When creating work items, prefer INDEPENDENT items that run concurrently.
-Only add dependencies for genuine data/ordering constraints.
-Set generous bounds (maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000).`;
+Based on the workitem log above, assess:
+1. Was the agent making meaningful progress?
+2. Is the work too broad to complete within bounds?
+
+### Actions (prefer "split" over "realign")
+
+- **"split"** (PREFERRED): Decompose remaining work into focused work items
+  - Use when: goal is vague, work can be parallelized, agent was exploring aimlessly
+  - Each item: SPECIFIC objective, INDEPENDENT when possible, bounds: {maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000}
+
+- **"realign"** (USE SPARINGLY): Give agent one more chance
+  - Only if agent made real progress and just needs a nudge to finish
+  - Max 3 realigns enforced by orchestrator`;
 
   const action = await runAndLog(config, 'bounds_exceeded', objective, ctx);
 
-  // Log decision to workitem
   if (workItemLog) {
     await workItemLog.appendDecision(
       'bounds_exceeded',
@@ -463,93 +695,68 @@ Set generous bounds (maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000).
     });
   }
 
-  if (action.watcherAction === 'realign' && action.realign) {
-    return {
-      decision: 'block',
-      reason: action.realign.newGoal ?? `Continue: ${action.reason}`,
-      systemMessage: action.realign.systemMessage,
-    };
-  }
+  switch (action.watcherAction) {
+    case 'split':
+    case 'create_work_item':
+      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems) } };
 
-  if ((action.watcherAction === 'split' || action.watcherAction === 'create_work_item') && action.workItems?.length) {
-    try {
-      config.onCreateWorkItems?.(action.workItems);
-    } catch (err) {
-      console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
-    }
-    // Map work items to deferredWork for orchestrator dispatch
-    return {
-      decision: 'allow',
-      deferredWork: action.workItems.map(w => ({
-        goal: w.goal,
-        objective: w.objective,
-        agent: w.agent,
-        background: true,
-        dependencies: w.dependencies,
-        targetPaths: w.targetPaths,
-        bounds: w.bounds,
-      })),
-    };
-  }
+    case 'realign':
+      return {
+        decision: { action: 'realign', guidance: action.realign.systemMessage },
+        patches: injectGuidancePatch(action.realign.systemMessage),
+      };
 
-  // Watcher failed (timeout/error) on bounds_exceeded — provide a realignment
-  // nudge so the agent can wrap up instead of silently terminating.
-  if (action.reason?.includes('Watcher agent error') || action.reason?.includes('Watcher timeout')) {
-    return {
-      decision: 'block',
-      reason: 'Wrap up your current work and report progress.',
-      systemMessage: `[Watcher fallback — bounds exceeded]: Agent hit ${ctx.terminationReason}. Wrap up and summarize what was accomplished.`,
-    };
-  }
+    case 'continue':
+      return { decision: { action: 'wrap_up', summary: action.reason } };
 
-  // Handle invalid watcher actions for bounds_exceeded context
-  // Valid actions: realign, split, create_work_item
-  // Invalid actions (continue, answer, quality_gate, etc.) should block and wrap up
-  if (!['realign', 'split', 'create_work_item'].includes(action.watcherAction)) {
-    return {
-      decision: 'block',
-      reason: 'Wrap up your current work and report progress.',
-      systemMessage: `[Watcher fallback — bounds exceeded]: Watcher returned "${action.watcherAction}" which is not valid for bounds_exceeded. Agent hit ${ctx.terminationReason}. Wrap up and summarize what was accomplished.`,
-    };
-  }
+    case 'answer':
+    case 'quality_gate':
+      return { decision: { action: 'abort', reason: action.reason } };
 
-  // Valid actions but missing required data (e.g., split without workItems)
-  return { decision: 'allow' };
+    default:
+      return assertNever(action);
+  }
 }
 
 async function handleAgentError(
   config: WatcherAgentConfig,
-  ctx: StopHookContext
-): Promise<StopHookResult> {
-  // Get workitem-level context
-  const workItemLog = ctx.workId ? await config.getWorkItemLog(ctx.workId) : null;
-  const workItemLogPath = workItemLog?.filePath() ?? 'not available';
+  ctx: WatcherContext
+): Promise<{ decision: AgentErrorDecision; patches?: StatePatch[] }> {
+  const { event } = ctx;
+  assertEventType(event, isAgentError, 'agent_error');
 
-  const snapshotContext = formatSnapshotForTrigger('bounds_exceeded', ctx);
+  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
+  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+
+  const snapshotContext = formatSnapshotForTrigger('agent_error', ctx);
 
   const objective = `You are the watcher for session ${config.sessionId}.
 
 ## Session Context
-- **Salience**: ${config.salienceFilePath} — session goal, principles
-- **Work Log**: ${config.workLog.filePath()} — all WorkItems status
+- **Salience**: ${config.salienceFilePath} (read for session goal)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
 
-## WorkItem Context (the agent that errored)
-- **WorkItem Log**: ${workItemLogPath}
-  Contains: FULL conversation, tool calls leading up to error
-  **READ THIS** to understand what the agent was doing when it failed
+## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
 
-The agent encountered an error: **${ctx.terminationReason}** (iteration ${ctx.iteration}).
+The agent encountered an error: **${event.errorType}**.
+
+Here is the FULL context of what the agent was doing when it failed - their reasoning and tool calls leading up to the error:
+
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
+
 ${snapshotContext}
 
-Your job:
-1. **Read the workitem log** to understand the agent's actions leading to the error.
-2. Diagnose whether this is recoverable (check tool history for what failed and why).
-3. If recoverable: return action "realign" with a systemMessage containing fix instructions.
-4. If not recoverable: return action "continue" to allow termination.`;
+## Your Task
+
+Based on the workitem log above:
+1. Diagnose what went wrong (check tool calls for failures)
+2. If recoverable: return "realign" with fix instructions in systemMessage
+3. If not recoverable: return "continue" to allow termination`;
 
   const action = await runAndLog(config, 'agent_error', objective, ctx);
 
-  // Log decision to workitem
   if (workItemLog) {
     await workItemLog.appendDecision(
       'agent_error',
@@ -560,46 +767,43 @@ Your job:
     });
   }
 
-  if (action.watcherAction === 'realign' && action.realign) {
-    return {
-      decision: 'block',
-      reason: action.realign.newGoal ?? `Fix: ${action.reason}`,
-      systemMessage: action.realign.systemMessage,
-    };
-  }
+  switch (action.watcherAction) {
+    case 'realign':
+      return {
+        decision: { action: 'retry', guidance: action.realign.systemMessage },
+        patches: injectGuidancePatch(action.realign.systemMessage),
+      };
 
-  if (action.watcherAction === 'continue') {
-    return { decision: 'allow' };
-  }
+    case 'continue':
+    case 'answer':
+    case 'split':
+    case 'create_work_item':
+    case 'quality_gate':
+      return { decision: { action: 'abort', reason: action.reason } };
 
-  // Invalid actions for agent_error context
-  // Valid actions: realign, continue
-  return {
-    decision: 'block',
-    reason: 'Wrap up and report the error.',
-    systemMessage: `[Watcher fallback — agent error]: Watcher returned "${action.watcherAction}" which is not valid for agent_error. Agent encountered ${ctx.terminationReason}. Wrap up and summarize the error.`,
-  };
+    default:
+      return assertNever(action);
+  }
 }
 
 async function handleGoalReached(
   config: WatcherAgentConfig,
-  ctx: StopHookContext
-): Promise<StopHookResult> {
-  // Get workitem-level context
-  const workItemLog = ctx.workId ? await config.getWorkItemLog(ctx.workId) : null;
-  const workItemLogPath = workItemLog?.filePath() ?? 'not available';
+  ctx: WatcherContext
+): Promise<{ decision: QualityGateDecision; patches?: StatePatch[] }> {
+  const { event } = ctx;
+  assertEventType(event, isGoalReached, 'goal_state_reached');
 
-  // Write status to session-level work log (WorkItem completed)
-  const snap = ctx.executionSnapshot;
-  const agentSummary = snap?.fullResponse ?? ctx.response;
+  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
+  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+
   await config.workLog.append({
     type: 'workitem_status',
     timestamp: new Date().toISOString(),
-    workId: ctx.workId ?? 'unknown',
+    workId: event.workId ?? 'unknown',
     status: 'completed',
-    summary: agentSummary.slice(0, 200),
-    durationMs: snap?.metrics.durationMs,
-    filesModified: snap?.filesModified,
+    summary: event.response.slice(0, 200),
+    durationMs: event.metrics.durationMs,
+    filesModified: event.filesModified,
   }).catch(err => {
     console.warn('[WATCHER] Work log write failed (workitem_status):', err instanceof Error ? err.message : String(err));
   });
@@ -609,33 +813,34 @@ async function handleGoalReached(
   const objective = `You are the watcher for session ${config.sessionId}.
 
 ## Session Context
-- **Salience**: ${config.salienceFilePath} — session goal, principles
-- **Work Log**: ${config.workLog.filePath()} — all WorkItems status
+- **Salience**: ${config.salienceFilePath} (read for session goal)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
 
-## WorkItem Context (the agent that completed)
-- **WorkItem Log**: ${workItemLogPath}
-  Contains: FULL conversation, tool calls, what the agent did
-  **READ THIS** to understand the agent's complete journey and output
+## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
 
-The agent reports goal_state_reached (iteration ${ctx.iteration}).
+The agent reports goal_state_reached.
+
+Here is the FULL context of what the agent did - their reasoning, tool calls, and output:
+
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
+
 ${snapshotContext}
 
-Your job — quality gate:
-1. Read the salience file for the session goal.
-2. **Read the workitem log** to see the agent's full conversation and discoveries.
-3. Verify the response actually addresses the goal (check files modified and the full response).
-4. Check for obvious omissions, untested changes, or incomplete work.
-5. If quality gate passes: return action "quality_gate" with passed=true.
-6. If quality gate fails: return action "quality_gate" with passed=false and issues list.
+## Your Task — Quality Gate
 
-### Parallelization
-When creating follow-up work items, prefer INDEPENDENT items that run concurrently.
-Only add dependencies for genuine data/ordering constraints.
-Set generous bounds (maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000).`;
+Based on the workitem log above:
+1. Does the work address the session goal? (read salience)
+2. Check for obvious omissions, untested changes, or incomplete work
+3. If quality gate passes: return "quality_gate" with passed=true
+4. If quality gate fails: return "quality_gate" with passed=false and issues list
+
+For follow-up work items, prefer INDEPENDENT items (parallelization).
+Set bounds: {maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000}`;
 
   const action = await runAndLog(config, 'work_item_completed', objective, ctx);
 
-  // Log decision to workitem
   if (workItemLog) {
     await workItemLog.appendDecision(
       'work_item_completed',
@@ -646,94 +851,243 @@ Set generous bounds (maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000).
     });
   }
 
-  if (action.watcherAction === 'quality_gate' && action.qualityGate && !action.qualityGate.passed) {
-    const issues = action.qualityGate.issues?.join('; ') ?? action.reason;
-    return {
-      decision: 'block',
-      reason: `Quality gate failed. Fix these issues: ${issues}`,
-      systemMessage: `[Watcher quality gate]: The following issues were found:\n${action.qualityGate.issues?.map(i => `- ${i}`).join('\n') ?? action.reason}`,
-    };
+  switch (action.watcherAction) {
+    case 'quality_gate':
+      if (action.qualityGate.passed) {
+        return { decision: { verdict: 'passed' } };
+      }
+      return {
+        decision: {
+          verdict: 'failed',
+          issues: action.qualityGate.issues ?? [action.reason],
+        },
+      };
+
+    case 'continue':
+    case 'answer':
+    case 'realign':
+    case 'split':
+    case 'create_work_item':
+      return {
+        decision: {
+          verdict: 'failed',
+          issues: [action.reason],
+        },
+      };
+
+    default:
+      return assertNever(action);
+  }
+}
+
+async function handleWorkItemCompleted(
+  config: WatcherAgentConfig,
+  ctx: WatcherContext
+): Promise<{ decision: WorkItemCompletedDecision; patches?: StatePatch[] }> {
+  const { event } = ctx;
+  assertEventType(event, isWorkItemCompleted, 'work_item_completed');
+
+  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
+  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+
+  await config.workLog.append({
+    type: 'workitem_status',
+    timestamp: new Date().toISOString(),
+    workId: event.workId ?? 'unknown',
+    status: event.success ? 'completed' : 'failed',
+    summary: event.response.slice(0, 200),
+    durationMs: event.metrics.durationMs,
+    filesModified: event.filesModified,
+  }).catch(err => {
+    console.warn('[WATCHER] Work log write failed (workitem_status):', err instanceof Error ? err.message : String(err));
+  });
+
+  const snapshotContext = formatSnapshotForTrigger('work_item_completed', ctx);
+
+  const objective = `You are the watcher for session ${config.sessionId}.
+
+## Session Context
+- **Salience**: ${config.salienceFilePath} (read for session goal)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
+
+## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
+
+The agent completed a work item (success=${event.success}).
+
+Here is the FULL context of what the agent did - their reasoning, tool calls, and output:
+
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
+
+${snapshotContext}
+
+## Your Task — Work Item Review
+
+Based on the workitem log above:
+1. Should the work item be accepted?
+2. If issues remain, prefer split/create work items with bounded scope.
+3. If recoverable: return "realign" with guidance`;
+
+  const action = await runAndLog(config, 'work_item_completed', objective, ctx);
+
+  if (workItemLog) {
+    await workItemLog.appendDecision(
+      'work_item_completed',
+      action.watcherAction,
+      action.reason
+    ).catch(err => {
+      console.warn('[WATCHER] WorkItem decision log failed:', err instanceof Error ? err.message : String(err));
+    });
   }
 
-  // quality_gate with passed=true - allow termination
-  if (action.watcherAction === 'quality_gate' && action.qualityGate && action.qualityGate.passed) {
-    return { decision: 'allow' };
-  }
-
-  // If the watcher identified follow-up work items, dispatch them as deferred work
-  if ((action.watcherAction === 'split' || action.watcherAction === 'create_work_item') && action.workItems?.length) {
-    try {
-      config.onCreateWorkItems?.(action.workItems);
-    } catch (err) {
-      console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
+  switch (action.watcherAction) {
+    case 'split':
+    case 'create_work_item': {
+      try {
+        config.onCreateWorkItems?.(action.workItems);
+      } catch (err) {
+        console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
+      }
+      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems) } };
     }
-    return {
-      decision: 'allow',
-      deferredWork: action.workItems.map(w => ({
-        goal: w.goal,
-        objective: w.objective,
-        agent: w.agent,
-        background: true,
-        dependencies: w.dependencies,
-        targetPaths: w.targetPaths,
-        bounds: w.bounds,
-      })),
-    };
-  }
 
-  // Invalid actions for work_item_completed context
-  // Valid actions: quality_gate, split, create_work_item
-  // If we can't verify quality, allow termination (safer than blocking)
-  return { decision: 'allow' };
+    case 'realign':
+      return {
+        decision: { action: 'retry', guidance: action.realign.systemMessage },
+        patches: injectGuidancePatch(action.realign.systemMessage),
+      };
+
+    case 'quality_gate':
+      if (action.qualityGate.passed) {
+        return { decision: { action: 'accept', summary: action.reason } };
+      }
+      return {
+        decision: { action: 'retry', guidance: action.qualityGate.issues?.join('\n') ?? action.reason },
+      };
+
+    case 'continue':
+    case 'answer':
+      return { decision: { action: 'accept', summary: action.reason } };
+
+    default:
+      return assertNever(action);
+  }
 }
 
 async function handleCadenceAudit(
   config: WatcherAgentConfig,
-  ctx: StopHookContext
-): Promise<StopHookResult> {
-  // Get workitem-level context
-  const workItemLog = ctx.workId ? await config.getWorkItemLog(ctx.workId) : null;
-  const workItemLogPath = workItemLog?.filePath() ?? 'not available';
+  ctx: WatcherContext
+): Promise<{ decision: CadenceDecision; patches?: StatePatch[] }> {
+  const { event } = ctx;
+  assertEventType(event, isCadenceAudit, 'cadence_audit');
+
+  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
+  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+
+  // Pre-process deterministic facts from workitem log
+  let preprocessedContext = '';
+  let workItemCreated = new Date().toISOString();
+  if (workItemLog) {
+    try {
+      const preprocessed = await extractPreProcessedContext(workItemLog);
+      preprocessedContext = formatPreProcessedContext(preprocessed);
+      // Extract created timestamp from init entry if available
+      const entries = await workItemLog.readAll();
+      const initEntry = entries.find(e => e.type === 'init');
+      if (initEntry?.type === 'init') {
+        workItemCreated = initEntry.timestamp;
+      }
+    } catch (err) {
+      console.warn('[WATCHER] Pre-processing failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
 
   const snapshotContext = formatSnapshotForTrigger('cadence_audit', ctx);
 
   const objective = `You are the watcher for session ${config.sessionId}.
 
 ## Session Context
-- **Salience**: ${config.salienceFilePath} — session goal, principles
-- **Work Log**: ${config.workLog.filePath()} — all WorkItems status
+- **Salience**: ${config.salienceFilePath} (read for session goal)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
 
-## WorkItem Context (the agent being audited)
-- **WorkItem Log**: ${workItemLogPath}
-  Contains: FULL conversation, tool calls, what the agent has been doing
-  **READ THIS** to understand the agent's progress and detect drift/thrashing
+## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
 
 This is a periodic cadence audit (every 3 minutes). The agent is still executing.
+
+${preprocessedContext ? `<preprocessed-facts>\n${preprocessedContext}\n</preprocessed-facts>\n` : ''}
+Here is the FULL context of what the agent has been doing - their reasoning, tool calls, and progress:
+
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
+
 ${snapshotContext}
 
-Your job — progress check:
-1. **Read the workitem log** to see what the agent has been doing.
-2. Read the salience file for the session goal.
-3. Check for drift: is the agent still working toward the session goal, or has it gone off-track?
-4. Check for thrashing: is the agent repeating failed approaches or stuck in a loop?
-5. If on track: return action "continue" with a brief assessment.
-6. If drifting or thrashing: return action "realign" with a systemMessage refocusing the agent.
-7. If work should be split: return action "split" with workItems to decompose the remaining work.`;
+## Your Task — Progress Check AND Semantic Generation
+
+Based on the workitem log above:
+1. Is the agent making progress toward the session goal? (read salience)
+2. Check for drift (off-topic work), thrashing (repeating failed approaches), or stalling
+
+### Actions (in order of preference)
+
+1. **"split"** — PREFERRED when goal is too broad or agent is stalling
+   - Create 2-4 SPECIFIC, SCOPED work items that can run in parallel
+   - bounds: {maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000}
+
+2. **"realign"** — Use when agent made progress but drifted
+
+3. **"continue"** — Use when agent is clearly on track with productive progress
+
+### Semantic Output (REQUIRED)
+
+In addition to your decision, you MUST produce a \`semantic\` field with your understanding of:
+
+1. **stateAndProgress**: Current state of work
+   - objective: The workItem objective
+   - currentState: Array of {component, status: complete|partial|not_started|blocked, location?}
+   - changesMade: Array of {file, summary, rationale}
+   - gapAnalysis: Array of {required, current, blocker?}
+   - reasoningTrace: Numbered steps of agent decision-making
+   - blockers: Array of blockers preventing progress
+
+2. **decisionContext**: Context for future decisions
+   - pendingQuestions: Questions awaiting response
+   - tradeoffs: Array of trade-off analyses with options and considerations
+
+3. **crossReferences**: Links to related context
+   - preferences: Relevant preference keys
+   - siblingWorkItems: Related workItem IDs
+   - decisions: Related decision keys
+
+4. **meta**: Metadata
+   - auditSequence: (use 0 for first audit, increment for subsequent)
+   - logPosition: Number of events processed
+   - totalEvents: Total events in log`;
 
   const action = await runAndLog(config, 'cadence_audit', objective, ctx);
 
-  // Write watcher assessment to session-level work log
+  // Fire-and-forget semantic write (non-blocking)
+  if (event.workId && 'semantic' in action && action.semantic) {
+    const writeConfig: SemanticWriteConfig = {
+      workingDir: config.workingDir,
+      sessionId: config.sessionId,
+      workId: event.workId,
+    };
+    writeSemanticFileAsync(writeConfig, action.semantic, workItemCreated);
+  }
+
   await config.workLog.append({
     type: 'note',
     timestamp: new Date().toISOString(),
-    workId: ctx.workId,
+    workId: event.workId,
     note: `[cadence audit] ${action.watcherAction}: ${action.reason}`,
     source: 'watcher',
   }).catch(err => {
     console.warn('[WATCHER] Work log write failed (cadence audit):', err instanceof Error ? err.message : String(err));
   });
 
-  // Log decision to workitem
   if (workItemLog) {
     await workItemLog.appendDecision(
       'cadence_audit',
@@ -744,99 +1098,88 @@ Your job — progress check:
     });
   }
 
-  if (action.watcherAction === 'continue') {
-    // Even when continuing, inject the watcher's assessment as guidance
-    // This makes the cadence audit actually DO something instead of being silent
-    const hasUsefulGuidance = action.reason && action.reason.length > 20;
-    if (hasUsefulGuidance) {
+  switch (action.watcherAction) {
+    case 'continue': {
+      const hasUsefulGuidance = action.reason.length > 20;
+      if (hasUsefulGuidance) {
+        return { decision: { action: 'inject_guidance', message: action.reason } };
+      }
+      return { decision: { action: 'continue' } };
+    }
+
+    case 'realign':
       return {
-        decision: 'allow',
-        systemMessage: `[Watcher checkpoint (iteration ${ctx.iteration})]: ${action.reason}`,
+        decision: { action: 'realign', guidance: action.realign.systemMessage },
+        patches: injectGuidancePatch(action.realign.systemMessage),
       };
+
+    case 'split':
+    case 'create_work_item': {
+      try {
+        config.onCreateWorkItems?.(action.workItems);
+      } catch (err) {
+        console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
+      }
+      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems) } };
     }
-    return { decision: 'allow' };
-  }
 
-  if (action.watcherAction === 'realign' && action.realign) {
-    return {
-      decision: 'block',
-      reason: action.realign.newGoal ?? `Realign: ${action.reason}`,
-      systemMessage: action.realign.systemMessage,
-    };
-  }
+    case 'answer':
+    case 'quality_gate':
+      return { decision: { action: 'continue' } };
 
-  if ((action.watcherAction === 'split' || action.watcherAction === 'create_work_item') && action.workItems?.length) {
-    try {
-      config.onCreateWorkItems?.(action.workItems);
-    } catch (err) {
-      console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
-    }
-    return {
-      decision: 'allow',
-      deferredWork: action.workItems.map(w => ({
-        goal: w.goal,
-        objective: w.objective,
-        agent: w.agent,
-        background: true,
-        dependencies: w.dependencies,
-        targetPaths: w.targetPaths,
-        bounds: w.bounds,
-      })),
-    };
+    default:
+      return assertNever(action);
   }
-
-  // Invalid actions for cadence_audit context
-  // Valid actions: continue, realign, split, create_work_item
-  return {
-    decision: 'allow',
-  };
 }
 
 async function handleHandoffApproval(
   config: WatcherAgentConfig,
-  ctx: StopHookContext
-): Promise<StopHookResult> {
-  // Get the handoffSpec from the stop hook context
-  const handoffSpec = ctx.handoffSpec;
-  if (!handoffSpec) {
-    // No spec to review - allow (orchestrator will handle)
-    return { decision: 'allow' };
-  }
+  ctx: WatcherContext
+): Promise<{ decision: HandoffDecision; patches?: StatePatch[] }> {
+  const { event } = ctx;
+  assertEventType(event, isHandoffRequested, 'handoff_requested');
 
-  // Get workitem-level context (the planning agent's work)
-  const workItemLog = ctx.workId ? await config.getWorkItemLog(ctx.workId) : null;
-  const workItemLogPath = workItemLog?.filePath() ?? 'not available';
+  const handoffSpec = event.handoffSpec;
+  if (!handoffSpec) {
+    return { decision: { action: 'approve' } };
+  }
+  const handoffSpecText = JSON.stringify(handoffSpec, null, 2);
+
+  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
+  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
 
   const objective = `You are the watcher for session ${config.sessionId}.
 
 ## Session Context
-- **Salience**: ${config.salienceFilePath} — session goal, principles
-- **Work Log**: ${config.workLog.filePath()} — all WorkItems status
+- **Salience**: ${config.salienceFilePath} (read for session goal)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
 
-## WorkItem Context (the planning agent's work)
-- **WorkItem Log**: ${workItemLogPath}
-  Contains: FULL conversation, tool calls, what the planner discovered
-  **READ THIS** to understand the planning agent's reasoning and discoveries
+## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
 
 The planning agent has produced a work breakdown and is requesting handoff to execution.
+
+Here is the FULL context of what the planner discovered and why they proposed this plan:
+
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
 
 ## Proposed Plan
 
 \`\`\`json
-${handoffSpec}
+${handoffSpecText}
 \`\`\`
 
 ## Your Task — Plan Review
 
-1. Read the salience file to understand the session goal.
-2. **Read the workitem log** to see what the planner discovered and why it proposed this plan.
-3. Review the proposed work items:
-   - Do they address the session goal?
-   - Are the objectives specific and actionable?
-   - Are dependencies correctly identified?
-   - Is the scope reasonable (not too large)?
-4. If the plan is acceptable: return action "continue" with your assessment.
-5. If the plan needs revision: return action "realign" with specific feedback for the planner.
+Based on the planner's reasoning above and the proposed plan:
+1. Do the work items address the session goal? (read salience)
+2. Are objectives specific and actionable?
+3. Are dependencies correctly identified?
+4. Is the scope reasonable?
+
+If acceptable: return "continue"
+If needs revision: return "realign" with specific feedback
 
 Guidelines:
 - Approve plans that are reasonable, even if not perfect.
@@ -845,18 +1188,16 @@ Guidelines:
 
   const action = await runAndLog(config, 'handoff_approval', objective, ctx);
 
-  // Log the handoff review to session-level work log
   await config.workLog.append({
     type: 'note',
     timestamp: new Date().toISOString(),
-    workId: ctx.workId,
+    workId: event.workId,
     note: `[handoff review] ${action.watcherAction}: ${action.reason}`,
     source: 'watcher',
   }).catch(err => {
     console.warn('[WATCHER] Work log write failed (handoff review):', err instanceof Error ? err.message : String(err));
   });
 
-  // Log decision to workitem
   if (workItemLog) {
     await workItemLog.appendDecision(
       'handoff_approval',
@@ -867,22 +1208,25 @@ Guidelines:
     });
   }
 
-  // Watcher approved the plan
-  if (action.watcherAction === 'continue') {
-    return { decision: 'allow' };
-  }
+  switch (action.watcherAction) {
+    case 'continue':
+      return { decision: { action: 'approve' } };
 
-  // Watcher rejected with feedback - block so planner can revise
-  if (action.watcherAction === 'realign' && action.realign) {
-    return {
-      decision: 'block',
-      reason: action.realign.newGoal ?? `Revise plan: ${action.reason}`,
-      systemMessage: action.realign.systemMessage,
-    };
-  }
+    case 'realign':
+      return {
+        decision: { action: 'modify', changes: action.realign.systemMessage },
+        patches: injectGuidancePatch(action.realign.systemMessage),
+      };
 
-  // Unexpected action - approve by default (safer to proceed than block indefinitely)
-  return { decision: 'allow' };
+    case 'answer':
+    case 'split':
+    case 'create_work_item':
+    case 'quality_gate':
+      return { decision: { action: 'approve' } };
+
+    default:
+      return assertNever(action);
+  }
 }
 
 // ============================================
@@ -893,8 +1237,9 @@ Guidelines:
  * Determine the appropriate fallback action when the watcher fails or times out.
  * Different triggers have different safety requirements.
  */
-function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: StopHookContext): WatcherAction {
+function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherContext): WatcherAction {
   const errorMsg = error.message;
+  const terminationReason = toTerminationReason(ctx.event);
 
   switch (trigger) {
     case 'prompt_user':
@@ -917,7 +1262,7 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: StopHookC
       return {
         watcherAction: 'realign',
         realign: {
-          systemMessage: `[Watcher unavailable] Resource bounds hit (${ctx.terminationReason}). Wrap up your current work and report what was accomplished.`,
+          systemMessage: `[Watcher unavailable] Resource bounds hit (${terminationReason}). Wrap up your current work and report what was accomplished.`,
         },
         reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Requesting wrap-up`,
       };
@@ -926,7 +1271,7 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: StopHookC
       // Can't diagnose - allow termination but log
       return {
         watcherAction: 'continue',
-        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Cannot diagnose error, allowing termination`,
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Cannot diagnose ${terminationReason}, allowing termination`,
       };
 
     case 'work_item_completed':
@@ -953,10 +1298,7 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: StopHookC
       };
 
     default:
-      return {
-        watcherAction: 'continue',
-        reason: `Watcher fallback (${errorMsg.slice(0, 50)})`,
-      };
+      return assertNever(trigger);
   }
 }
 
@@ -966,74 +1308,83 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: StopHookC
 
 /**
  * Run the watcher agent with retry logic and append the result to the decision log.
- * Wraps execution with per-trigger timeout and exponential backoff on failure.
+ * Wraps execution with per-trigger timeout and a single in-flight guard to
+ * prevent concurrent watcher runs for the same trigger/work item.
  */
 async function runAndLog(
   config: WatcherAgentConfig,
   trigger: WatcherTrigger,
   objective: string,
-  ctx: StopHookContext
+  ctx: WatcherContext
 ): Promise<WatcherAction> {
   const baseTimeout = TIMEOUT_BY_TRIGGER[trigger] ?? config.watcherTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-  let action: WatcherAction | null = null;
-  let lastError: Error | null = null;
-
-  // Retry loop with exponential backoff on timeout
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    // Increase timeout on each retry: base * (1, 1.5, 2)
-    const timeout = Math.round(baseTimeout * (1 + attempt * 0.5));
-
-    try {
-      const agentPromise = config.runAgent(objective, trigger);
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Watcher timeout after ${timeout}ms`)), timeout)
-      );
-
-      action = await Promise.race([agentPromise, timeoutPromise]);
-      break; // Success - exit retry loop
-
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-
-      if (attempt < MAX_RETRIES) {
-        console.warn(`[WATCHER] Attempt ${attempt + 1}/${MAX_RETRIES + 1} failed for ${trigger}: ${lastError.message}. Retrying...`);
-      } else {
-        console.error(`[WATCHER] All ${MAX_RETRIES + 1} attempts failed for ${trigger}: ${lastError.message}`);
-      }
-    }
+  const inFlightKey = `${ctx.event.sessionKey}:${ctx.event.workId}:${trigger}`;
+  const existing = IN_FLIGHT_WATCHERS.get(inFlightKey);
+  if (existing) {
+    return existing.visiblePromise;
   }
 
-  // If all retries failed, use trigger-specific fallback
-  if (!action) {
-    action = getFallbackAction(trigger, lastError ?? new Error('Unknown error'), ctx);
-    console.warn(`[WATCHER] Using fallback for ${trigger}: ${action.watcherAction} - ${action.reason}`);
-  } else {
+  const timeout = baseTimeout;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  const runPromise = (async () => {
+    try {
+      return await config.runAgent(objective, trigger);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      console.error(`[WATCHER] Agent run failed for ${trigger}: ${error.message}`);
+      return getFallbackAction(trigger, error, ctx);
+    }
+  })();
+
+  const visiblePromise = Promise.race([
+    runPromise,
+    new Promise<WatcherAction>((resolve) => {
+      timeoutId = setTimeout(() => {
+        resolve(getFallbackAction(trigger, new Error(`Watcher timeout after ${timeout}ms`), ctx));
+      }, timeout);
+    }),
+  ]).then((action) => {
     // Validate the action is valid for this trigger
     const validActions = getValidActions(trigger);
     if (validActions.length > 0 && !validActions.includes(action.watcherAction)) {
       console.warn(`[WATCHER] Invalid action "${action.watcherAction}" for trigger "${trigger}". Valid: [${validActions.join(', ')}]. Using fallback.`);
-      action = getFallbackAction(trigger, new Error(`Invalid action: ${action.watcherAction}`), ctx);
+      return getFallbackAction(trigger, new Error(`Invalid action: ${action.watcherAction}`), ctx);
     }
-  }
+    return action;
+  }).finally(() => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  });
 
-  // Build execution metrics from snapshot for audit trail
-  const snap = ctx.executionSnapshot;
-  const executionMetrics = snap ? {
-    toolCallsMade: snap.metrics.toolCallsMade,
-    filesModified: snap.filesModified,
-    durationMs: snap.metrics.durationMs,
-    contextPercentUsed: snap.metrics.contextPercentUsed,
-  } : undefined;
+  IN_FLIGHT_WATCHERS.set(inFlightKey, { runPromise, visiblePromise, startedAt: Date.now() });
+  void runPromise.finally(() => {
+    const entry = IN_FLIGHT_WATCHERS.get(inFlightKey);
+    if (entry?.runPromise === runPromise) {
+      IN_FLIGHT_WATCHERS.delete(inFlightKey);
+    }
+  });
+
+  const action = await visiblePromise;
+
+  // Build execution metrics from hook context for audit trail
+  const executionMetrics = {
+    toolCallsMade: ctx.hook.metrics.toolCallsMade,
+    filesModified: [...ctx.hook.filesModified],
+    durationMs: ctx.hook.metrics.durationMs,
+    contextPercentUsed: ctx.hook.metrics.contextPercentUsed,
+  };
 
   const entry: DecisionLogEntry = {
     timestamp: new Date().toISOString(),
     trigger,
     watcherAction: action.watcherAction,
-    question: ctx.userPrompt?.question,
-    answer: action.answer?.text,
+    question: ctx.event.type === 'user_input_required' ? ctx.event.prompt.question : undefined,
+    answer: action.watcherAction === 'answer' ? action.answer.text : undefined,
     rationale: action.reason,
-    workItemId: ctx.workId,
-    qualityGate: action.qualityGate,
+    workItemId: ctx.event.workId,
+    qualityGate: action.watcherAction === 'quality_gate' ? action.qualityGate : undefined,
     executionMetrics,
   };
 
@@ -1054,7 +1405,7 @@ async function runAndLog(
     await appendSalienceObservation(config.salienceFilePath, {
       trigger,
       action: action.watcherAction,
-      workId: ctx.workId,
+      workId: ctx.event.workId,
       summary,
     }).catch(err => {
       console.warn('[WATCHER] Salience update failed:', err instanceof Error ? err.message : String(err));
@@ -1076,52 +1427,64 @@ async function runAndLog(
 function buildObservationSummary(
   trigger: WatcherTrigger,
   action: WatcherAction,
-  ctx: StopHookContext
+  ctx: WatcherContext
 ): string {
   const parts: string[] = [];
 
   switch (trigger) {
     case 'prompt_user':
-      parts.push(`Agent asked: "${ctx.userPrompt?.question?.slice(0, 100) ?? 'unknown'}"`);
-      if (action.answer?.text) {
+      if (ctx.event.type === 'user_input_required') {
+        parts.push(`Agent asked: "${ctx.event.prompt.question.slice(0, 100)}"`);
+      }
+      if (action.watcherAction === 'answer') {
         parts.push(`Answered: "${action.answer.text.slice(0, 150)}"`);
       }
       break;
 
     case 'work_item_completed':
-      if (action.qualityGate?.passed) {
-        parts.push('Quality gate passed.');
-      } else if (action.qualityGate?.issues?.length) {
-        parts.push(`Quality issues: ${action.qualityGate.issues.slice(0, 3).join('; ')}`);
+      if (action.watcherAction === 'quality_gate') {
+        if (action.qualityGate.passed) {
+          parts.push('Quality gate passed.');
+        } else if (action.qualityGate.issues?.length) {
+          parts.push(`Quality issues: ${action.qualityGate.issues.slice(0, 3).join('; ')}`);
+        }
       }
-      if (ctx.executionSnapshot?.filesModified.length) {
-        parts.push(`Modified: ${ctx.executionSnapshot.filesModified.slice(0, 3).join(', ')}`);
+      if (ctx.hook.filesModified.length) {
+        parts.push(`Modified: ${ctx.hook.filesModified.slice(0, 3).join(', ')}`);
       }
       break;
 
     case 'bounds_exceeded':
-      parts.push(`Hit ${ctx.terminationReason} at iteration ${ctx.iteration}.`);
-      if (action.workItems?.length) {
+      if (ctx.event.type === 'bounds_exceeded') {
+        parts.push(`Hit ${ctx.event.boundType} at ${ctx.event.current}/${ctx.event.limit}.`);
+      }
+      if (action.watcherAction === 'split' || action.watcherAction === 'create_work_item') {
         parts.push(`Split into ${action.workItems.length} work items.`);
-      } else if (action.realign?.systemMessage) {
+      } else if (action.watcherAction === 'realign') {
         parts.push('Realigned with guidance.');
       }
       break;
 
     case 'cadence_audit':
-      parts.push(`Progress check at iteration ${ctx.iteration}.`);
+      parts.push(`Progress check at iteration ${ctx.hook.iteration}.`);
       break;
 
     case 'agent_error':
-      parts.push(`Error: ${ctx.terminationReason}`);
+      if (ctx.event.type === 'agent_error') {
+        parts.push(`Error: ${ctx.event.errorType}`);
+      }
       break;
 
     case 'handoff_approval':
       parts.push(action.watcherAction === 'continue' ? 'Plan approved.' : 'Plan needs revision.');
       break;
 
-    default:
+    case 'session_init':
+    case 'scope_collision':
       break;
+
+    default:
+      return assertNever(trigger);
   }
 
   if (action.reason && action.reason.length < 200) {

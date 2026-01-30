@@ -52,7 +52,7 @@ function validateBridgeEvent(payload: unknown): BridgeEvent | null {
     return null;
   }
 
-  return { type: p.type as BridgeEventType, data: p.data as Record<string, unknown> | undefined };
+  return { type: p.type as BridgeEventType, data: p.data as Record<string, unknown> | undefined } as BridgeEvent;
 }
 
 export interface HarnessClientOptions {
@@ -142,7 +142,7 @@ export class HarnessClient extends EventEmitter {
       return false;
     }
 
-    if (command.type === 'send_text') {
+    if (command.type === 'send_text' || command.type === 'send_media') {
       const data = { ...(command.data ?? {}) } as Record<string, unknown>;
       const requestId =
         typeof data.client_request_id === 'string' && data.client_request_id.length > 0

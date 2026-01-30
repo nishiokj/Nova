@@ -31,7 +31,7 @@ import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError,
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind } from 'types';
 import { ContextWindow } from 'context';
-import { profiler, buildLLMRequestConfig } from 'shared';
+import { profiler, buildLLMRequestConfig, type WatcherActionOutput } from 'shared';
 import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
@@ -55,7 +55,7 @@ import { loadConfig, getAgentConfig } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config.js';
 import { LocalProviderManager } from './local_providers.js';
 import { HookExecutor } from './hook_executor.js';
-import { loadSkillDefinitions, getSkillDefinition, type HookContext } from './skills_loader.js';
+import { loadSkillDefinitions, getSkillDefinition, type HookContext as SkillHookContext } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
 import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 import { PermissionChecker } from './permissions.js';
@@ -68,7 +68,7 @@ import {
   createDecisionEngine,
   createWatcherConfig,
   DEFAULT_DECISIONS,
-  createWatcherStopHook,
+  createWatcherControlHooks,
   buildPlanningObjective,
   writeSalienceFile,
   createDecisionLog,
@@ -83,9 +83,10 @@ import {
   type WorkLog,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
-import { registerHook } from 'orchestrator';
+import { createHookRegistry, registerHook, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
 import { createWorkItem } from 'work';
 import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
+import { getProtocolId } from 'protocol';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -325,15 +326,20 @@ export class AgentHarness {
   private llmAdapter: ReturnType<typeof createAdapter>;
   private hookExecutor: HookExecutor | null = null;
   private providerKeyService: HarnessProviderKeyService;
-  private permissionChecker: PermissionChecker;
   private orchestratorRunner: OrchestratorRunner;
   private decisionDatabases = new Map<string, DecisionDatabase>();
   private watcherEngines = new Map<string, DecisionEngine>();
   private sessionWorkLogs = new Map<string, WorkLog>();
   /** Track workitem logs by composite key: `${sessionKey}:${workId}` */
   private workItemLogs = new Map<string, WorkItemLog>();
+  /** Track which workitems have been created/logged per session */
+  private workItemCreated = new Set<string>();
   private entityGraph: EntityGraph | null = null;
   private memoryInjector: MemoryInjector | null = null;
+  /** Session-scoped watcher contexts - persists across watcher invocations */
+  private watcherContexts = new Map<string, ContextWindow>();
+  /** Cache of created watcher stop hooks by session */
+  private watcherHookRegistries = new Map<string, import('orchestrator').HookRegistry>();
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
@@ -483,12 +489,8 @@ export class AgentHarness {
       this.logger.info('HookExecutor initialized', { hooksDir });
     }
 
-    // Initialize PermissionChecker - handles permission prompts for Bash/Write/Edit
-    this.permissionChecker = new PermissionChecker(workingDir, config.dangerousMode);
     if (config.dangerousMode) {
       this.logger.warning('Permission checks DISABLED - running in dangerous mode');
-    } else {
-      this.logger.info('PermissionChecker initialized', { workingDir });
     }
 
     this.orchestratorRunner = orchestratorRunner ?? new DefaultOrchestratorRunner();
@@ -602,6 +604,19 @@ export class AgentHarness {
     this.decisionDatabases.delete(sessionKey);
     this.watcherEngines.delete(sessionKey);
     this.sessionWorkLogs.delete(sessionKey);
+    this.watcherContexts.delete(sessionKey);
+    this.watcherHookRegistries.delete(sessionKey);
+    // Clean up workitem logs for this session
+    for (const key of this.workItemLogs.keys()) {
+      if (key.startsWith(`${sessionKey}:`)) {
+        this.workItemLogs.delete(key);
+      }
+    }
+    for (const key of this.workItemCreated.values()) {
+      if (key.startsWith(`${sessionKey}:`)) {
+        this.workItemCreated.delete(key);
+      }
+    }
   }
 
   /**
@@ -772,6 +787,82 @@ export class AgentHarness {
     return entry?.store.getAllModelSelections() ?? new Map();
   }
 
+  setSessionAsyncModeEnabled(sessionKey: string, enabled: boolean): void {
+    const store = this.getOrCreateSessionStore(sessionKey);
+    store.setAsyncModeEnabled(enabled);
+  }
+
+  isSessionAsyncModeEnabled(sessionKey: string): boolean {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.isAsyncModeEnabled() ?? false;
+  }
+
+  // --- Session-level exclusive operation management (async runs, ralph loops) ---
+
+  /**
+   * Start an async run for a session. Returns false if one is already active.
+   */
+  startSessionAsyncRun(sessionKey: string, info: { requestId: string; goal: string; cancelled: boolean; startedAt: number }): boolean {
+    const store = this.getOrCreateSessionStore(sessionKey);
+    return store.startAsyncRun(info);
+  }
+
+  /**
+   * Get the current async run info for a session.
+   */
+  getSessionAsyncRun(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.getAsyncRun() ?? null;
+  }
+
+  /**
+   * Mark the async run as cancelled for a session.
+   */
+  cancelSessionAsyncRun(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.cancelAsyncRun();
+  }
+
+  /**
+   * Clear the async run state for a session.
+   */
+  clearSessionAsyncRun(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.clearAsyncRun();
+  }
+
+  /**
+   * Start a Ralph Loop for a session. Returns false if one is already active.
+   */
+  startSessionRalphLoop(sessionKey: string, info: { requestId: string; cancelled: boolean }): boolean {
+    const store = this.getOrCreateSessionStore(sessionKey);
+    return store.startRalphLoop(info);
+  }
+
+  /**
+   * Get the current Ralph Loop info for a session.
+   */
+  getSessionRalphLoop(sessionKey: string): { requestId: string; cancelled: boolean } | null {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.getRalphLoop() ?? null;
+  }
+
+  /**
+   * Mark the Ralph Loop as cancelled for a session.
+   */
+  cancelSessionRalphLoop(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.cancelRalphLoop();
+  }
+
+  /**
+   * Clear the Ralph Loop state for a session.
+   */
+  clearSessionRalphLoop(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.clearRalphLoop();
+  }
+
   private pruneSessionStores(reason: string): void {
     if (this.sessionTtlMs <= 0) return;
     const now = Date.now();
@@ -821,7 +912,7 @@ export class AgentHarness {
    * Also handles resuming paused sessions - if a session is paused, inputText is treated as the answer.
    */
   run(params: AgentRunParams): AgentRunHandle {
-    const { requestId, inputText, tier: requestedTier, sessionKey, workingDir, planMode, stopHook } = params;
+    const { requestId, inputText, tier: requestedTier, sessionKey, workingDir, planMode, hookRegistry } = params;
     profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier, planMode });
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
@@ -894,14 +985,15 @@ export class AgentHarness {
 
       // Handle handoff from plan mode - user says "handoff" to approve spec
       if (paused.handoffSpec && userHandoff) {
+        const handoffSpecText = JSON.stringify(paused.handoffSpec, null, 2);
         // User approved spec - clear context and execute with handoffSpec
         this.logger.info('User approved spec review, executing with spec', {
           sessionKey,
-          specLength: paused.handoffSpec.length,
+          specLength: handoffSpecText.length,
         });
         contextWindow = store.clearContext();
         store.clearPausedState();
-        goal = paused.handoffSpec;
+        goal = handoffSpecText;
         effectiveAgentType = 'standard';
         effectivePlanMode = false;
         effectiveWorkingDir = workingDir ?? paused.workingDir;
@@ -909,14 +1001,15 @@ export class AgentHarness {
       }
       // Handle legacy handoff_approval (orchestrator-level approval)
       else if (isHandoffApproval && paused.handoffSpec && userApproved) {
+        const handoffSpecText = JSON.stringify(paused.handoffSpec, null, 2);
         // User approved handoff - clear context and execute with handoffSpec
         this.logger.info('User approved handoff, executing with spec', {
           sessionKey,
-          specLength: paused.handoffSpec.length,
+          specLength: handoffSpecText.length,
         });
         contextWindow = store.clearContext();
         store.clearPausedState();
-        goal = paused.handoffSpec;
+        goal = handoffSpecText;
         effectiveAgentType = 'standard';
         effectivePlanMode = false;
         effectiveWorkingDir = workingDir ?? paused.workingDir;
@@ -934,7 +1027,7 @@ export class AgentHarness {
           if (userApproved) {
             contextWindow.addMessage(
               'system',
-              'User approved handoff. Set action: "handoff" with your complete implementation spec in handoffSpec. The system will automatically clear context and start execution with your spec.'
+              'User approved handoff. Set action: "handoff" with your complete implementation spec in handoffSpec (structured object). The system will automatically clear context and start execution with your spec.'
             );
           } else {
             contextWindow.addMessage(
@@ -982,7 +1075,7 @@ export class AgentHarness {
       try {
         // Run UserPromptSubmit hooks before processing
         if (this.hookExecutor) {
-          const hookContext: HookContext = {
+          const hookContext: SkillHookContext = {
             event: 'UserPromptSubmit',
             sessionKey,
             requestId,
@@ -1032,8 +1125,19 @@ export class AgentHarness {
 
         // All requests go through orchestrator (loop-until-goal architecture)
         // Orchestrator handles interruptions internally via checkInterruption() callback
-        // Note: stopHook only applies to fresh runs, not resumes
-        const result = await this.runOrchestrator(contextWindow, goal, requestId, emit, llmAdapter, effectiveAgentType, effectiveWorkingDir, effectivePlanMode, store, isResume ? undefined : stopHook);
+        // Note: hookRegistry only applies to fresh runs, not resumes
+        const result = await this.runOrchestrator(
+          contextWindow,
+          goal,
+          requestId,
+          emit,
+          llmAdapter,
+          effectiveAgentType,
+          effectiveWorkingDir,
+          effectivePlanMode,
+          store,
+          isResume ? undefined : hookRegistry
+        );
 
         if (result.paused && result.userPrompt) {
           // Pausing for user input - emit response first (if any), then user prompt
@@ -1228,7 +1332,7 @@ export class AgentHarness {
 
         // Run Stop hooks
         if (this.hookExecutor) {
-          const hookContext: HookContext = {
+          const hookContext: SkillHookContext = {
             event: 'Stop',
             sessionKey,
             requestId,
@@ -1384,7 +1488,7 @@ export class AgentHarness {
 
         // Run hook executor if available
         if (executor) {
-          const context: HookContext = {
+          const context: SkillHookContext = {
             event: 'PreToolUse',
             toolName,
             toolParams: args,
@@ -1424,7 +1528,7 @@ export class AgentHarness {
             : { action: 'allow' };
         }
 
-        const context: HookContext = {
+        const context: SkillHookContext = {
           event: 'PostToolUse',
           toolName,
           toolParams: args,
@@ -1480,14 +1584,6 @@ export class AgentHarness {
   }
 
   /**
-   * @deprecated Use getSessionPermissionChecker(sessionKey) instead.
-   * Returns the global permission checker (legacy behavior).
-   */
-  getPermissionChecker(): PermissionChecker {
-    return this.permissionChecker;
-  }
-
-  /**
    * Run via Orchestrator with specified agent type.
    */
   private async runOrchestrator(
@@ -1500,7 +1596,7 @@ export class AgentHarness {
     workingDir?: string,
     planMode?: boolean,
     store?: SessionStore,
-    stopHook?: import('orchestrator').StopHookHandler
+    hookRegistry?: HookRegistry
   ): Promise<AgentRunResult> {
     const hooks = this.createAgentHooks(context.sessionKey, requestId, emit);
 
@@ -1531,10 +1627,36 @@ export class AgentHarness {
     // Build orchestrator runtime with optional hooks
     const sessionKey = context.sessionKey;
     let lastWatcherIteration = 0;
-    const MIN_WATCHER_GAP = 5;
+    const minWatcherGap = DEFAULT_ORCHESTRATOR_CONFIG.minWatcherIterationGap;
+    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+
+    const asyncEnabledForRun = (store?.isAsyncModeEnabled() ?? false) || !!hookRegistry;
+
+    // Only create/use watcher hooks when async mode is enabled for this session/run
+    let effectiveHookRegistry = hookRegistry;
+    if (asyncEnabledForRun && !hookRegistry) {
+      // Check if we already have a cached hook registry for this session
+      const cachedRegistry = this.watcherHookRegistries.get(sessionKey);
+      if (cachedRegistry) {
+        effectiveHookRegistry = cachedRegistry;
+        this.logger.debug('Using cached watcher hook registry', { sessionKey });
+      } else {
+        // Create the watcher hook registry - registers logging hooks and sets up watcher
+        // Pass daemon's config working dir as watcherDir for .watcher artifacts (project root)
+        this.logger.info('Creating watcher hook registry for async mode', { sessionKey, goal });
+        const { hookRegistry: watcherRegistry } = await this.createWatcherHookRegistryForSession(
+          sessionKey,
+          goal,
+          effectiveWorkingDir,
+          this.config.tools.workingDir  // Watcher artifacts at project root
+        );
+        effectiveHookRegistry = watcherRegistry;
+        this.watcherHookRegistries.set(sessionKey, watcherRegistry);
+      }
+    }
 
     const runtime = {
-      stopHook,
+      hookRegistry: asyncEnabledForRun ? effectiveHookRegistry : undefined,
       onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
       // Pass interruption check callback so orchestrator can avoid premature termination
       // when user messages arrived during execution.
@@ -1545,9 +1667,9 @@ export class AgentHarness {
       } : undefined,
       // Pass stop request check so agent can exit loop early on explicit "stop" from user
       checkStopRequest: store ? () => store.hasPendingStopRequest() : undefined,
-      // Watcher evaluation — rule-based, fires every MIN_WATCHER_GAP iterations
-      onIteration: (state: { iteration: number; context: ContextWindow; totalToolCalls: number; totalLlmCalls: number; elapsedMs: number }) => {
-        if (state.iteration - lastWatcherIteration < MIN_WATCHER_GAP) return;
+      // Watcher evaluation — rule-based, fires every minWatcherIterationGap iterations
+      onIteration: asyncEnabledForRun ? (state: { iteration: number; context: ContextWindow; totalToolCalls: number; totalLlmCalls: number; elapsedMs: number }) => {
+        if (state.iteration - lastWatcherIteration < minWatcherGap) return;
         lastWatcherIteration = state.iteration;
 
         const pct = state.context.metrics.percentageUsed;
@@ -1568,19 +1690,20 @@ export class AgentHarness {
           this.watcherSummarize(sessionKey);
           return;
         }
-      },
+      } : undefined,
     };
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
-    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-    const sessionDb = this.getOrCreateDecisionDatabase(context.sessionKey);
+    const sessionDb = asyncEnabledForRun ? this.getOrCreateDecisionDatabase(context.sessionKey) : undefined;
     const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
     const result = await this.orchestratorRunner.execute({
       config: {
-        asyncMode: {
-          enabled: true,
-          database: sessionDb,
-        },
+        ...(asyncEnabledForRun ? {
+          asyncMode: {
+            enabled: true,
+            database: sessionDb as DecisionDatabase,
+          },
+        } : {}),
         memoryInjector: this.memoryInjector ?? undefined,
       },
       toolRegistry: this.toolRegistry,
@@ -1602,9 +1725,10 @@ export class AgentHarness {
 
     // Handle handoff: store handoffSpec for approval in paused state
     if (result.handoffSpec && store) {
+      const handoffSpecText = JSON.stringify(result.handoffSpec);
       this.logger.info('Handoff requested, pausing for user approval', {
         sessionKey: context.sessionKey,
-        specLength: result.handoffSpec.length,
+        specLength: handoffSpecText.length,
       });
     }
 
@@ -1742,7 +1866,7 @@ export class AgentHarness {
   }
 
   // =========================================================================
-  // Watcher Agent: LLM-backed StopHook
+  // Watcher Agent: LLM-backed control-plane hooks
   // =========================================================================
 
   /**
@@ -1769,101 +1893,21 @@ export class AgentHarness {
     }
 
     const llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
+    const rawSchemaId = agentConfig.outputSchema?.schemaId ?? agentConfig.outputSchema?.name;
+    const normalizedSchemaId = typeof rawSchemaId === 'string'
+      ? rawSchemaId.trim().toLowerCase().replace(/_output$/, '')
+      : null;
+    if (normalizedSchemaId !== 'watcher_action') {
+      throw new Error(`Watcher output schema misconfigured (expected "watcher_action", got "${rawSchemaId ?? 'none'}").`);
+    }
 
     // Import getValidActions to build trigger-specific schema
     const { getValidActions } = await import('decision-watcher');
 
-    // Build trigger-specific output schema
-    // Only present valid action types for this specific trigger
+    // Provide trigger-specific guidance (schema stays canonical)
     const validActions = trigger ? getValidActions(trigger as any) : [];
     const triggerInfo = trigger ? `\n\nValid actions for this trigger: ${validActions.join(', ')}` : '';
-
-    // Build dynamic schema with trigger-specific action enum but full field set
-    const actionEnum = validActions.length > 0 ? {
-      watcherAction: {
-        type: 'string',
-        enum: validActions,
-        description: `The action type to take. Valid actions for trigger "${trigger}": ${validActions.join(', ')}`,
-      },
-    } : {
-      watcherAction: {
-        type: 'string',
-        enum: ['answer', 'realign', 'split', 'create_work_item', 'quality_gate', 'continue'],
-        description: 'The action type to take',
-      },
-    };
-
-    // Full watcher action schema with all optional fields
-    const outputSchema = {
-      name: 'WatcherAction',
-      strict: true,
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ...actionEnum,
-          reason: {
-            type: 'string',
-            description: 'Rationale for this decision',
-          },
-          answer: {
-            type: ['object', 'null'],
-            additionalProperties: false,
-            properties: {
-              text: { type: 'string', description: 'The answer text to inject' },
-              contextAddendum: { type: ['string', 'null'], description: 'Additional context to append' },
-            },
-            required: ['text'],
-          },
-          realign: {
-            type: ['object', 'null'],
-            additionalProperties: false,
-            properties: {
-              systemMessage: { type: 'string', description: 'System message to inject into context' },
-              newGoal: { type: ['string', 'null'], description: 'Replacement goal if drifted' },
-            },
-            required: ['systemMessage'],
-          },
-          workItems: {
-            type: ['array', 'null'],
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                goal: { type: 'string' },
-                objective: { type: 'string' },
-                agent: { type: 'string' },
-                dependencies: { type: ['array', 'null'], items: { type: 'string' } },
-                targetPaths: { type: ['array', 'null'], items: { type: 'string' } },
-                bounds: {
-                  type: ['object', 'null'],
-                  additionalProperties: false,
-                  properties: {
-                    maxToolCalls: { type: ['number', 'null'] },
-                    maxLlmCalls: { type: ['number', 'null'] },
-                    maxDurationMs: { type: ['number', 'null'] },
-                  },
-                },
-              },
-              required: ['goal', 'objective', 'agent'],
-            },
-          },
-          qualityGate: {
-            type: ['object', 'null'],
-            additionalProperties: false,
-            properties: {
-              passed: { type: 'boolean' },
-              issues: { type: ['array', 'null'], items: { type: 'string' } },
-            },
-            required: ['passed'],
-          },
-        },
-        required: ['watcherAction', 'reason', 'answer', 'realign', 'workItems', 'qualityGate'],
-      },
-    };
-
-    // Override the agent config's output schema with the trigger-specific one
-    const watcherConfig = { ...agentConfig, outputSchema };
+    const watcherConfig = agentConfig;
 
     // Create watcher-specific emit callback so watcher appears in dashboard
     const watcherRequestId = `watcher-${trigger ?? 'unknown'}-${Date.now()}`;
@@ -1883,8 +1927,14 @@ export class AgentHarness {
         : undefined,
     });
 
-    // Create a minimal context for the watcher
-    const context = new ContextWindow(sessionKey, 200_000);
+    // Use session-scoped watcher context (persists across invocations)
+    // This prevents re-reading the same files every time
+    let context = this.watcherContexts.get(sessionKey);
+    if (!context) {
+      context = new ContextWindow(`watcher:${sessionKey}`, 200_000);
+      this.watcherContexts.set(sessionKey, context);
+      this.logger.debug('Created new watcher context', { sessionKey });
+    }
     const workingDir = this.config.tools.workingDir;
 
     const workItem = createWorkItem({
@@ -1900,23 +1950,37 @@ export class AgentHarness {
 
     try {
       const result = await agent.run({ globalContext: context, workItem, cwd: workingDir });
-      const structured = result.structuredOutput as Record<string, unknown> | undefined;
+      const structured = result.structuredOutput as WatcherActionOutput | undefined;
 
-      // Runtime validation: ensure structured output is a valid WatcherAction
-      if (
-        structured &&
-        typeof structured === 'object' &&
-        typeof structured.watcherAction === 'string' &&
-        structured.watcherAction.length > 0
-      ) {
-        return {
-          watcherAction: structured.watcherAction as WatcherAction['watcherAction'],
-          reason: typeof structured.reason === 'string' ? structured.reason : '',
-          answer: structured.answer as WatcherAction['answer'],
-          realign: structured.realign as WatcherAction['realign'],
-          workItems: structured.workItems as WatcherAction['workItems'],
-          qualityGate: structured.qualityGate as WatcherAction['qualityGate'],
-        };
+      if (structured && structured.action === 'done' && structured.goalStateReached === true) {
+        switch (structured.watcherAction) {
+          case 'answer':
+            return {
+              watcherAction: 'answer',
+              reason: structured.reason,
+              answer: {
+                text: structured.answer.text,
+                contextAddendum: structured.answer.contextAddendum ?? undefined,
+              },
+            };
+          case 'realign':
+            return {
+              watcherAction: 'realign',
+              reason: structured.reason,
+              realign: {
+                systemMessage: structured.realign.systemMessage,
+                newGoal: structured.realign.newGoal ?? undefined,
+              },
+            };
+          case 'split':
+            return { watcherAction: 'split', reason: structured.reason, workItems: structured.workItems };
+          case 'create_work_item':
+            return { watcherAction: 'create_work_item', reason: structured.reason, workItems: structured.workItems };
+          case 'quality_gate':
+            return { watcherAction: 'quality_gate', reason: structured.reason, qualityGate: structured.qualityGate };
+          case 'continue':
+            return { watcherAction: 'continue', reason: structured.reason };
+        }
       }
 
       // Fallback: structured output missing or malformed
@@ -1936,23 +2000,32 @@ export class AgentHarness {
   }
 
   /**
-   * Create a watcher-backed StopHookHandler for a session.
-   * This is the bridge between the orchestrator's stopHook mechanism and the LLM-backed watcher.
+   * Create a watcher-backed hook registry for a session.
+   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed watcher.
+   *
+   * @param sessionKey - Session identifier
+   * @param goal - The goal for the async session
+   * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
+   * @param watcherDir - Directory for watcher artifacts (.watcher/), defaults to workingDir
    */
-  async createWatcherStopHookForSession(
+  async createWatcherHookRegistryForSession(
     sessionKey: string,
     goal: string,
-    workingDir: string
-  ): Promise<{ stopHook: import('orchestrator').StopHookHandler; planningObjective: string }> {
+    workingDir: string,
+    watcherDir?: string
+  ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
+    // Use watcherDir for watcher artifacts, fallback to workingDir for backwards compatibility
+    const effectiveWatcherDir = watcherDir ?? workingDir;
+
     // NOTE: Skill knowledge is baked into system prompts. No need to discover skill files.
-    const saliencePath = await writeSalienceFile(workingDir, {
+    const saliencePath = await writeSalienceFile(effectiveWatcherDir, {
       sessionId: sessionKey,
       goal,
       mode: 'async',
     });
 
-    const decisionLog = await createDecisionLog(workingDir, sessionKey);
-    const workLog = await createWorkLog(workingDir, sessionKey);
+    const decisionLog = await createDecisionLog(effectiveWatcherDir, sessionKey);
+    const workLog = await createWorkLog(effectiveWatcherDir, sessionKey);
     this.sessionWorkLogs.set(sessionKey, workLog);
 
     // Write session_start entry
@@ -1966,18 +2039,27 @@ export class AgentHarness {
     });
 
     // Helper to get or create workitem log for this session
-    const getOrCreateWorkItemLog = async (workId: string, agentType: string, objective?: string): Promise<WorkItemLog> => {
+    const getOrCreateWorkItemLog = async (
+      workId: string,
+      agentType: string,
+      objective?: string,
+      meta?: { domain?: string; dependencies?: string[]; targetPaths?: string[] }
+    ): Promise<WorkItemLog> => {
       const key = `${sessionKey}:${workId}`;
       let log = this.workItemLogs.get(key);
       if (!log) {
-        // Try to get existing log first
-        log = await getWorkItemLog(workingDir, sessionKey, workId) ?? undefined;
+        // Try to get existing log first (artifacts in watcherDir)
+        log = await getWorkItemLog(effectiveWatcherDir, sessionKey, workId) ?? undefined;
         if (!log) {
-          // Create new log
-          log = await createWorkItemLog(workingDir, sessionKey, {
+          // Create new log: artifact in watcherDir, cwd for path resolution in workingDir
+          log = await createWorkItemLog(effectiveWatcherDir, sessionKey, {
             workId,
             objective: objective ?? 'unknown',
             agent: agentType,
+            cwd: workingDir,  // All paths in this log will be relative to agent's working dir
+            domain: meta?.domain,
+            dependencies: meta?.dependencies,
+            targetPaths: meta?.targetPaths,
           });
         }
         this.workItemLogs.set(key, log);
@@ -1987,6 +2069,42 @@ export class AgentHarness {
 
     // Register auto-logging hooks for workitem activity
     // NOTE: Hooks are global, so we filter by sessionKey to only process this session's events
+    registerHook('workitem_created', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+      if (event.type !== 'workitem_created') return;
+      if (ctx.sessionKey !== sessionKey) return;
+
+      const key = `${sessionKey}:${ctx.workId}`;
+      if (this.workItemCreated.has(key)) return;
+
+      const itemLog = await getOrCreateWorkItemLog(
+        ctx.workId,
+        event.agent ?? ctx.agentType,
+        event.objective ?? ctx.objective,
+        {
+          domain: event.domain,
+          dependencies: event.dependencies,
+          targetPaths: event.targetPaths,
+        }
+      ).catch(err => {
+        console.warn('[HARNESS] WorkItem log creation failed (workitem_created):', err instanceof Error ? err.message : String(err));
+        return null;
+      });
+
+      if (itemLog) {
+        this.workItemCreated.add(key);
+        await workLog.append({
+          type: 'workitem_created',
+          timestamp: new Date().toISOString(),
+          workId: ctx.workId,
+          objective: event.objective ?? ctx.objective ?? 'unknown',
+          agent: event.agent ?? ctx.agentType,
+          domain: event.domain,
+          dependencies: event.dependencies,
+        }).catch(err => {
+          console.warn('[HARNESS] Work log write failed (workitem_created):', err instanceof Error ? err.message : String(err));
+        });
+      }
+    });
     registerHook('turn_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'turn_completed') return;
       if (ctx.sessionKey !== sessionKey) return; // Filter by session
@@ -2007,30 +2125,40 @@ export class AgentHarness {
         // Note: actual message content comes via agent_message hook, not here
       }
 
-      // Also log to session-level work log on first turn
+      // Also log to session-level work log on first turn (fallback if creation hook missed)
       if (event.iteration === 1) {
-        await workLog.append({
-          type: 'workitem_created',
-          timestamp: new Date().toISOString(),
-          workId: ctx.workId,
-          objective: ctx.objective ?? 'unknown',
-          agent: ctx.agentType,
-        }).catch(err => {
-          console.warn('[HARNESS] Work log write failed (workitem_created):', err instanceof Error ? err.message : String(err));
-        });
+        const key = `${sessionKey}:${ctx.workId}`;
+        if (!this.workItemCreated.has(key)) {
+          this.workItemCreated.add(key);
+          await workLog.append({
+            type: 'workitem_created',
+            timestamp: new Date().toISOString(),
+            workId: ctx.workId,
+            objective: ctx.objective ?? 'unknown',
+            agent: ctx.agentType,
+          }).catch(err => {
+            console.warn('[HARNESS] Work log write failed (workitem_created):', err instanceof Error ? err.message : String(err));
+          });
+        }
       }
     });
 
-    // Log actual agent messages (real content, not metadata)
+    // Log actual agent messages (real content + reasoning for audit trail)
+    // NOTE: Uses getOrCreateWorkItemLog because agent_message fires BEFORE turn_completed
     registerHook('agent_message', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'agent_message') return;
       if (ctx.sessionKey !== sessionKey) return;
 
-      const itemLog = this.workItemLogs.get(`${sessionKey}:${ctx.workId}`);
+      const itemLog = await getOrCreateWorkItemLog(ctx.workId, ctx.agentType, ctx.objective).catch(err => {
+        console.warn('[HARNESS] WorkItem log creation failed (agent_message):', err instanceof Error ? err.message : String(err));
+        return null;
+      });
       if (itemLog) {
         await itemLog.appendMessage(
           event.role,
-          event.content
+          event.content,
+          undefined,  // watcherInjected
+          event.reasoning  // Include reasoning for decision audit
         ).catch(err => {
           console.warn('[HARNESS] WorkItem log write failed (agent_message):', err instanceof Error ? err.message : String(err));
         });
@@ -2038,11 +2166,15 @@ export class AgentHarness {
     });
 
     // Log individual tool calls with full details
+    // NOTE: Uses getOrCreateWorkItemLog because tool_call_completed can fire before turn_completed
     registerHook('tool_call_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'tool_call_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
 
-      const itemLog = this.workItemLogs.get(`${sessionKey}:${ctx.workId}`);
+      const itemLog = await getOrCreateWorkItemLog(ctx.workId, ctx.agentType, ctx.objective).catch(err => {
+        console.warn('[HARNESS] WorkItem log creation failed (tool_call_completed):', err instanceof Error ? err.message : String(err));
+        return null;
+      });
       if (itemLog) {
         await itemLog.appendToolCall(
           event.tool,
@@ -2079,7 +2211,10 @@ export class AgentHarness {
       });
 
       // Also log to workitem log
-      const itemLog = this.workItemLogs.get(`${sessionKey}:${ctx.workId}`);
+      const itemLog = await getOrCreateWorkItemLog(ctx.workId, ctx.agentType, ctx.objective).catch(err => {
+        console.warn('[HARNESS] WorkItem log creation failed (files_modified):', err instanceof Error ? err.message : String(err));
+        return null;
+      });
       if (itemLog) {
         await itemLog.appendToolCall(
           'Edit/Write',
@@ -2110,7 +2245,10 @@ export class AgentHarness {
       });
 
       // Mark workitem as completed
-      const itemLog = this.workItemLogs.get(`${sessionKey}:${workId}`);
+      const itemLog = await getOrCreateWorkItemLog(workId, ctx.agentType, ctx.objective).catch(err => {
+        console.warn('[HARNESS] WorkItem log creation failed (agent_completed):', err instanceof Error ? err.message : String(err));
+        return null;
+      });
       if (itemLog) {
         await itemLog.markCompleted(
           event.response ?? 'Agent completed',
@@ -2128,18 +2266,18 @@ export class AgentHarness {
       }
     });
 
-    const stopHook = createWatcherStopHook({
+    const watcherHooks = createWatcherControlHooks({
       sessionId: sessionKey,
       salienceFilePath: saliencePath,
       decisionLog,
       workLog,
       getWorkItemLog: async (workId: string) => {
-        // First check our cache, then try to get from disk
+        // First check our cache, then try to get from disk (artifacts in watcherDir)
         const cached = this.workItemLogs.get(`${sessionKey}:${workId}`);
         if (cached) return cached;
-        return getWorkItemLog(workingDir, sessionKey, workId);
+        return getWorkItemLog(effectiveWatcherDir, sessionKey, workId);
       },
-      workingDir,
+      workingDir: effectiveWatcherDir,
       runAgent: (objective: string, trigger: string) => this.runWatcherAgent(objective, sessionKey, trigger),
       onDecision: (entry) => {
         this.logger.info('Watcher decision', {
@@ -2158,13 +2296,20 @@ export class AgentHarness {
           qualityGate: entry.qualityGate,
         }, entry.workItemId, '', sessionKey));
       },
-    });
+    }, sessionKey);
 
     const planningObjective = buildPlanningObjective(
       goal, saliencePath, decisionLog.filePath(), workLog.filePath()
     );
 
-    return { stopHook, planningObjective };
+    const hookRegistry = createHookRegistry();
+    hookRegistry.registerHooks({
+      source: `watcher:${sessionKey}`,
+      protocolId: getProtocolId(),
+      hooks: watcherHooks,
+    });
+
+    return { hookRegistry, planningObjective };
   }
 
   // =========================================================================

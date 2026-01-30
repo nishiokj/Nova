@@ -1,0 +1,48 @@
+{
+  "name": "protocol",
+  "version": "0.1.0",
+  "description": "Protocol types and schemas for orchestrator state, hooks, and decisions",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./domain": {
+      "import": "./dist/domain/index.js",
+      "types": "./dist/domain/index.d.ts"
+    },
+    "./control": {
+      "import": "./dist/control/index.js",
+      "types": "./dist/control/index.d.ts"
+    },
+    "./effects": {
+      "import": "./dist/effects/index.js",
+      "types": "./dist/effects/index.d.ts"
+    },
+    "./hooks": {
+      "import": "./dist/hooks/index.js",
+      "types": "./dist/hooks/index.d.ts"
+    },
+    "./protocol": {
+      "import": "./dist/protocol/index.js",
+      "types": "./dist/protocol/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

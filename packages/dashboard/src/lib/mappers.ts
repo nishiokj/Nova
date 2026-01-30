@@ -12,6 +12,7 @@ import type {
   UserPrompt,
   ContextWindowMetrics,
   WatcherDecision,
+  MemoryInjection,
 } from '../domain/models'
 import { computeSessionInsights } from '../domain/models'
 import type { GraphDSession, GraphDMessage } from './api'
@@ -148,6 +149,7 @@ function createRequestFromEvents(
   const toolCalls: ToolCall[] = []
   const llmCalls: LLMCall[] = []
   const userPrompts: UserPrompt[] = []
+  const memoryInjections: MemoryInjection[] = []
   let contextWindow: ContextWindowMetrics | undefined
   let userInput = userInputHint ?? `Request ${index + 1}`
   let goalText = ''
@@ -334,6 +336,34 @@ function createRequestFromEvents(
         break
       }
 
+      case 'memory_injected': {
+        const memData = e.data as Record<string, unknown>
+        const memWorkItemId = (e.work_item_id as string)
+          ?? (e.workItemId as string)
+          ?? (memData.work_item_id as string)
+          ?? (memData.workItemId as string)
+          ?? undefined
+        memoryInjections.push({
+          id: `${sessionKey}-${requestId}-memory-${memoryInjections.length}`,
+          workItemId: memWorkItemId,
+          query: (memData.query as string) ?? '',
+          resultPreview: (memData.result_preview as string) ?? (memData.resultPreview as string) ?? undefined,
+          itemCount: (memData.item_count as number) ?? (memData.itemCount as number) ?? 0,
+          success: (memData.success as boolean) ?? false,
+          iteration: (memData.iteration as number) ?? 0,
+          version: (memData.version as 'v1' | 'v2') ?? undefined,
+          latencyMs: (memData.latency_ms as number) ?? (memData.latencyMs as number) ?? undefined,
+          coverage: (memData.coverage as Record<string, number>) ?? undefined,
+          discriminatorsIncluded: (memData.discriminators_included as number)
+            ?? (memData.discriminatorsIncluded as number)
+            ?? undefined,
+          totalTokens: (memData.total_tokens as number) ?? (memData.totalTokens as number) ?? undefined,
+          fallbackToV1: (memData.fallback_to_v1 as boolean) ?? (memData.fallbackToV1 as boolean) ?? undefined,
+          timestamp: eventTimestamp,
+        })
+        break
+      }
+
       case 'goal_achieved':
         state = 'success'
         endedAt = eventTimestamp
@@ -423,6 +453,7 @@ function createRequestFromEvents(
     reflection: undefined,
     llmCalls,
     userPrompts,
+    memoryInjections,
     contextWindow,
     workItemsCompleted,
     workItemsTotal,

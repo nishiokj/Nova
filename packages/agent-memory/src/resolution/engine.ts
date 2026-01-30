@@ -719,7 +719,7 @@ export class EntityResolutionEngine {
       identity_ids: [identity.id],
     }
 
-    return this.entityRepo.create('person', person, person.display_name)
+    return this.entityRepo.create('person', person, { displayText: person.display_name })
   }
 
   private async linkIdentityToPerson(identityId: string, personId: string): Promise<void> {

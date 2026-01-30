@@ -160,6 +160,8 @@ export interface StructuredOutputSchema {
   name: string;
   schema: Record<string, unknown>;
   strict?: boolean;
+  /** Optional schema identifier for runtime validation (e.g., "goal_driven"). */
+  schemaId?: string;
 }
 
 /**

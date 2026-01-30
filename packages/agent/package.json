@@ -22,7 +22,8 @@
     "llm": "workspace:*",
     "tools": "workspace:*",
     "context": "workspace:*",
-    "work": "workspace:*"
+    "work": "workspace:*",
+    "protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

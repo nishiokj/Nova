@@ -3,7 +3,7 @@ import type { WorkItem } from 'work';
 import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMRequestConfig } from 'types';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { AgentTerminationReason } from 'shared';
+import type { HandoffSpec, TerminationReason } from 'protocol';
 
 /**
  * Agent type identifier - any string, defined via config.
@@ -21,12 +21,15 @@ export interface AgentBudget {
   maxToolCalls: number;
   /** Maximum duration in milliseconds */
   maxDurationMs: number;
+  /** Timeout for individual LLM streaming calls in milliseconds (default 240_000 = 4 min) */
+  llmStreamTimeoutMs?: number;
 }
 
 export const DEFAULT_AGENT_BUDGET: AgentBudget = {
   maxIterations: 20,
   maxToolCalls: 150,
   maxDurationMs: 120_000,
+  llmStreamTimeoutMs: 240_000,
 };
 
 /**
@@ -101,7 +104,7 @@ export interface AgentMetrics {
  * Result from Agent.run().
  * Contains all outputs; agent does not mutate input context.
  */
-export interface AgentResult {
+export interface AgentResultBase {
   /** Whether the objective was achieved */
   success: boolean;
   /** Response content (if successful) */
@@ -116,18 +119,6 @@ export interface AgentResult {
   invalidatedPaths: string[];
   /** Tool errors encountered */
   toolErrors: string[];
-  /** Why execution terminated (undefined while still running) */
-  terminationReason?: AgentTerminationReason;
-  /** Whether user input is needed */
-  needsUserInput: boolean;
-  /** User prompt info (if needsUserInput) */
-  userPrompt?: UserPromptInfo;
-  /** Whether handoff is requested (planning → execution transition) */
-  needsHandoff?: boolean;
-  /** Handoff spec (if needsHandoff) */
-  handoffSpec?: string;
-  /** Whether LLM refused to complete */
-  isRefusal: boolean;
   /** Whether result is incomplete (e.g., iterations exhausted but has partial output) */
   isIncomplete?: boolean;
   /** Parsed structured output (if available). Shape defined by config, not TypeScript. */
@@ -136,15 +127,79 @@ export interface AgentResult {
   artifacts?: ArtifactItem[];
   /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
   localContext: ContextWindow;
-  /** Rate limit info (if terminationReason is 'rate_limit') */
-  rateLimitInfo?: {
-    provider: string;
-    model: string;
-    type: string;
-    retryAfterMs?: number;
-    message: string;
-  };
 }
+
+export type AgentRateLimitInfo = {
+  provider: string;
+  model: string;
+  type: string;
+  retryAfterMs?: number;
+  message: string;
+};
+
+export type AgentResult =
+  | (AgentResultBase & {
+      terminationReason: 'user_input_required';
+      needsUserInput: true;
+      userPrompt: UserPromptInfo;
+      needsHandoff?: false;
+      handoffSpec?: undefined;
+      isRefusal: false;
+      rateLimitInfo?: undefined;
+    })
+  | (AgentResultBase & {
+      terminationReason: 'handoff_requested';
+      needsUserInput: false;
+      userPrompt?: undefined;
+      needsHandoff: true;
+      handoffSpec: HandoffSpec;
+      isRefusal: false;
+      rateLimitInfo?: undefined;
+    })
+  | (AgentResultBase & {
+      terminationReason: 'refusal';
+      needsUserInput: false;
+      userPrompt?: undefined;
+      needsHandoff?: false;
+      handoffSpec?: undefined;
+      isRefusal: true;
+      rateLimitInfo?: undefined;
+    })
+  | (AgentResultBase & {
+      terminationReason: 'rate_limit';
+      needsUserInput: false;
+      userPrompt?: undefined;
+      needsHandoff?: false;
+      handoffSpec?: undefined;
+      isRefusal: false;
+      rateLimitInfo: AgentRateLimitInfo;
+    })
+  | (AgentResultBase & {
+      terminationReason: Exclude<TerminationReason, 'user_input_required' | 'handoff_requested' | 'refusal' | 'rate_limit'>;
+      needsUserInput: false;
+      userPrompt?: undefined;
+      needsHandoff?: false;
+      handoffSpec?: undefined;
+      isRefusal: false;
+      rateLimitInfo?: undefined;
+    });
+
+export type MutableAgentResult = AgentResultBase & {
+  /** Why execution terminated (undefined while still running) */
+  terminationReason?: TerminationReason;
+  /** Whether user input is needed */
+  needsUserInput: boolean;
+  /** User prompt info (if needsUserInput) */
+  userPrompt?: UserPromptInfo;
+  /** Whether handoff is requested (planning → execution transition) */
+  needsHandoff?: boolean;
+  /** Handoff spec (if needsHandoff) */
+  handoffSpec?: HandoffSpec;
+  /** Whether LLM refused to complete */
+  isRefusal: boolean;
+  /** Rate limit info (if terminationReason is 'rate_limit') */
+  rateLimitInfo?: AgentRateLimitInfo;
+};
 
 /**
  * Single question in a multi-question prompt.
@@ -265,12 +320,21 @@ export interface AgentHooks {
  */
 export type InternalHookEvent =
   | {
+      /** Fired when a work item is enqueued (before execution). */
+      type: 'workitem_created';
+      objective: string;
+      agent: string;
+      domain?: string;
+      dependencies?: string[];
+      targetPaths?: string[];
+    }
+  | {
       type: 'turn_completed';
       iteration: number;
       toolCallsMade: number;
       llmCallsMade: number;
       hasResponse: boolean;
-      terminationReason?: AgentTerminationReason;
+      terminationReason?: TerminationReason;
     }
   | {
       type: 'tool_batch_completed';
@@ -297,8 +361,10 @@ export type InternalHookEvent =
       /** Fired when agent produces a message - captures actual conversation content */
       type: 'agent_message';
       role: 'assistant';
-      /** Actual message content (truncated to 3000 chars if longer) */
+      /** Actual message content (NOT truncated - full content for audit) */
       content: string;
+      /** Agent's reasoning/thinking for this turn (if extended thinking enabled) */
+      reasoning?: string;
       iteration: number;
     }
   | {
@@ -316,7 +382,7 @@ export type InternalHookEvent =
       type: 'agent_completed';
       workId: string;
       success: boolean;
-      terminationReason: AgentTerminationReason;
+      terminationReason: TerminationReason;
       filesRead: string[];
       invalidatedPaths: string[];
       /** Agent's final response text */
@@ -328,6 +394,32 @@ export type InternalHookEvent =
       };
       /** Context window percentage used */
       contextPercentUsed?: number;
+    }
+  | {
+      /** Fired when memory is injected into agent context */
+      type: 'memory_injected';
+      /** Search query used to retrieve memory */
+      query: string;
+      /** Memory content preview - first 500 chars */
+      resultPreview?: string;
+      /** Number of memory items returned */
+      itemCount: number;
+      /** Whether injection succeeded */
+      success: boolean;
+      /** Which iteration this was (typically 0 - first iteration only) */
+      iteration: number;
+      /** Injection version */
+      version?: 'v1' | 'v2';
+      /** Retrieval latency (ms) */
+      latencyMs?: number;
+      /** Category coverage counts (v2 only) */
+      coverage?: Record<string, number>;
+      /** Discriminators included (v2 only) */
+      discriminatorsIncluded?: number;
+      /** Total tokens injected (v2 only) */
+      totalTokens?: number;
+      /** Whether v2 fell back to v1 */
+      fallbackToV1?: boolean;
     };
 
 /**
@@ -360,24 +452,41 @@ export interface ExecutionSnapshot {
 /**
  * Result from a stop hook - can block termination and re-inject a prompt.
  */
-export interface StopHookResult {
-  /** Whether to block the stop and continue */
-  decision: 'allow' | 'block';
-  /** New prompt to inject (required if decision is 'block') */
-  reason?: string;
-  /** System message to prepend */
-  systemMessage?: string;
-  /** Deferred work items for async dispatch (enqueued after stop hook processing) */
-  deferredWork?: Array<{
-    goal: string;
-    objective: string;
-    agent: string;
-    background: boolean;
-    dependencies?: string[];
-    targetPaths?: string[];
-    bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
-  }>;
-}
+export type StopHookResult =
+  | {
+      /** Whether to block the stop and continue */
+      decision: 'allow';
+      /** System message to prepend */
+      systemMessage?: string;
+      /** Deferred work items for async dispatch (enqueued after stop hook processing) */
+      deferredWork?: Array<{
+        goal: string;
+        objective: string;
+        agent: string;
+        background: boolean;
+        dependencies?: string[];
+        targetPaths?: string[];
+        bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
+      }>;
+    }
+  | {
+      /** Whether to block the stop and continue */
+      decision: 'block';
+      /** New prompt to inject (required if decision is 'block') */
+      reason: string;
+      /** System message to prepend */
+      systemMessage?: string;
+      /** Deferred work items for async dispatch (enqueued after stop hook processing) */
+      deferredWork?: Array<{
+        goal: string;
+        objective: string;
+        agent: string;
+        background: boolean;
+        dependencies?: string[];
+        targetPaths?: string[];
+        bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
+      }>;
+    };
 
 /**
  * Context passed to a stop hook when the orchestrator reaches a terminal condition.
@@ -385,7 +494,7 @@ export interface StopHookResult {
 export interface StopHookContext {
   workId: string;
   response: string;
-  terminationReason: string;
+  terminationReason: TerminationReason;
   iteration: number;
   agentType: string;
   sessionKey: string;
@@ -400,7 +509,7 @@ export interface StopHookContext {
   /** Execution snapshot for enriched stop hook evaluation */
   executionSnapshot?: ExecutionSnapshot;
   /** Handoff spec when terminationReason is 'handoff_requested' */
-  handoffSpec?: string;
+  handoffSpec?: HandoffSpec;
 }
 
 /**

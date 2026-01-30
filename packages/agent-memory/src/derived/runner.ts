@@ -58,9 +58,17 @@ export interface DerivedRunContext {
   }
 }
 
+import type { FailureClass } from '../db/repositories/derived-job.js'
+
 export interface DerivedRunResult {
   outputRef?: string
   metadata?: Record<string, unknown>
+  /** Classification of failure for retry logic */
+  failureClass?: FailureClass
+  /** Unix timestamp (ms) when retry is allowed */
+  retryAfter?: number
+  /** Cost of this execution in cents */
+  cost_cents?: number
 }
 
 export interface MetadataFieldDef {
@@ -72,6 +80,102 @@ export interface MetadataFieldDef {
 
 export interface DerivedMetadataSchema {
   fields: Record<string, MetadataFieldDef>
+}
+
+export interface MetadataValidationError {
+  field: string
+  message: string
+  received?: unknown
+  expected?: string
+}
+
+export interface MetadataValidationResult {
+  valid: boolean
+  errors: MetadataValidationError[]
+  normalized: Record<string, unknown>
+  /** Applied defaults from schema */
+  appliedDefaults?: Record<string, unknown>
+}
+
+/**
+ * Validate and normalize metadata against a schema.
+ * Applies defaults and checks types/required fields.
+ */
+export function validateMetadata(
+  metadata: Record<string, unknown> | undefined,
+  schema: DerivedMetadataSchema
+): MetadataValidationResult {
+  const errors: MetadataValidationError[] = []
+  const normalized: Record<string, unknown> = { ...metadata }
+  const appliedDefaults: Record<string, unknown> = {}
+
+  for (const [fieldName, fieldDef] of Object.entries(schema.fields)) {
+    const value = metadata?.[fieldName]
+
+    // Check required fields
+    if (fieldDef.required && (value === undefined || value === null || value === '')) {
+      errors.push({
+        field: fieldName,
+        message: `Required field missing`,
+        expected: `required ${fieldDef.type}`,
+      })
+      continue
+    }
+
+    // Skip validation for missing optional fields (will use default)
+    if (value === undefined || value === null) {
+      // Apply default if available
+      if (fieldDef.default !== undefined) {
+        normalized[fieldName] = fieldDef.default
+        appliedDefaults[fieldName] = fieldDef.default
+      }
+      continue
+    }
+
+    // Type validation
+    const receivedType = typeof value
+    if (receivedType !== fieldDef.type) {
+      errors.push({
+        field: fieldName,
+        message: `Type mismatch`,
+        received: value,
+        expected: fieldDef.type,
+      })
+      continue
+    }
+
+    // Additional type-specific validation
+    if (fieldDef.type === 'number' && typeof value === 'string') {
+      const num = Number(value)
+      if (!isNaN(num)) {
+        normalized[fieldName] = num
+      } else {
+        errors.push({
+          field: fieldName,
+          message: `Cannot convert string to number`,
+          received: value,
+          expected: 'number',
+        })
+      }
+    }
+  }
+
+  // Check for unknown fields (warn but don't fail)
+  if (metadata) {
+    for (const key of Object.keys(metadata)) {
+      if (!schema.fields[key]) {
+        // Could add this to errors with a warning level, but for now just keep it
+        // normalized[key] = metadata[key] // Preserve unknown fields
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    normalized,
+    appliedDefaults: Object.keys(appliedDefaults).length > 0 ? appliedDefaults : undefined,
+  }
 }
 
 export type DerivedScriptModule = {

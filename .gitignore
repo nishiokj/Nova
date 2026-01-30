@@ -68,3 +68,6 @@ htmlcovrepo-test/
 
 # Regenerate rebuild log
 .regenerate.log
+
+.watcher/
+data/

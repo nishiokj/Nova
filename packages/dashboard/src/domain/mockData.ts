@@ -138,6 +138,7 @@ const runningRequest: AgentRequest = {
   ],
   llmCalls: [],
   userPrompts: [],
+  memoryInjections: [],
   contextWindow: {
     inputTokens: 42000,
     peakInputTokens: 42000,
@@ -272,6 +273,7 @@ const successRequest: AgentRequest = {
   },
   llmCalls: [],
   userPrompts: [],
+  memoryInjections: [],
   contextWindow: {
     inputTokens: 68000,
     peakInputTokens: 68000,
@@ -397,6 +399,7 @@ const errorRequest: AgentRequest = {
   },
   llmCalls: [],
   userPrompts: [],
+  memoryInjections: [],
   contextWindow: {
     inputTokens: 140000,
     peakInputTokens: 145000,
@@ -421,6 +424,7 @@ const queuedRequest: AgentRequest = {
   toolCalls: [],
   llmCalls: [],
   userPrompts: [],
+  memoryInjections: [],
 };
 
 // ============================================

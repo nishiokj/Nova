@@ -88,6 +88,7 @@ export function workitemsDir(workingDir: string, sessionId: string, date?: Date)
 /**
  * Get the path for a specific workitem's log file (JSONL format).
  * Structure: .watcher/{YYYY-MM-DD}/{sessionId}/workitems/{workId}.jsonl
+ * @deprecated Use workitemDir for new directory-based structure
  */
 export function workitemPath(
   workingDir: string,
@@ -96,6 +97,92 @@ export function workitemPath(
   date?: Date
 ): string {
   return path.join(workitemsDir(workingDir, sessionId, date), `${workId}.jsonl`);
+}
+
+// ============================================
+// NEW WORKITEM DIRECTORY STRUCTURE
+// ============================================
+
+/**
+ * Get the directory for a specific workitem.
+ * New structure: .watcher/{YYYY-MM-DD}/{sessionId}/workitems/{workId}/
+ */
+export function workitemDir(
+  workingDir: string,
+  sessionId: string,
+  workId: string,
+  date?: Date
+): string {
+  return path.join(workitemsDir(workingDir, sessionId, date), workId);
+}
+
+/**
+ * Get the semantic file path for a workitem.
+ * Structure: .watcher/{YYYY-MM-DD}/{sessionId}/workitems/{workId}/semantic.json
+ */
+export function semanticPath(
+  workingDir: string,
+  sessionId: string,
+  workId: string,
+  date?: Date
+): string {
+  return path.join(workitemDir(workingDir, sessionId, workId, date), 'semantic.json');
+}
+
+/**
+ * Get the path for a semantic snapshot.
+ * Structure: .watcher/{YYYY-MM-DD}/{sessionId}/workitems/{workId}/semantic_v{NNN}.json
+ */
+export function semanticSnapshotPath(
+  workingDir: string,
+  sessionId: string,
+  workId: string,
+  auditSequence: number,
+  date?: Date
+): string {
+  const versionStr = auditSequence.toString().padStart(3, '0');
+  return path.join(workitemDir(workingDir, sessionId, workId, date), `semantic_v${versionStr}.json`);
+}
+
+/**
+ * Get the log file path within the workitem directory.
+ * Structure: .watcher/{YYYY-MM-DD}/{sessionId}/workitems/{workId}/log.jsonl
+ */
+export function workitemLogPath(
+  workingDir: string,
+  sessionId: string,
+  workId: string,
+  date?: Date
+): string {
+  return path.join(workitemDir(workingDir, sessionId, workId, date), 'log.jsonl');
+}
+
+/**
+ * Get the diffs directory for a workitem.
+ * Structure: .watcher/{YYYY-MM-DD}/{sessionId}/workitems/{workId}/diffs/
+ */
+export function diffsDir(
+  workingDir: string,
+  sessionId: string,
+  workId: string,
+  date?: Date
+): string {
+  return path.join(workitemDir(workingDir, sessionId, workId, date), 'diffs');
+}
+
+/**
+ * Get the path for a specific diff file.
+ * Structure: .watcher/{YYYY-MM-DD}/{sessionId}/workitems/{workId}/diffs/event_{N}.diff
+ */
+export function diffPath(
+  workingDir: string,
+  sessionId: string,
+  workId: string,
+  eventIndex: number,
+  date?: Date
+): string {
+  const indexStr = eventIndex.toString().padStart(3, '0');
+  return path.join(diffsDir(workingDir, sessionId, workId, date), `event_${indexStr}.diff`);
 }
 
 /**

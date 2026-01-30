@@ -160,11 +160,11 @@ export type {
 } from './workitem-log.js';
 
 // ============================================
-// WATCHER AGENT (LLM-backed StopHook)
+// WATCHER AGENT (LLM-backed control-plane hooks)
 // ============================================
 
 export {
-  createWatcherStopHook,
+  createWatcherControlHooks,
 } from './watcher-agent.js';
 export type { WatcherAgentConfig } from './watcher-agent.js';
 export { getValidActions } from './types.js';

@@ -121,7 +121,7 @@ async function testSimpleQuery() {
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'string', nullable: true },
+          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },
@@ -204,7 +204,7 @@ async function testStandardAgentPrompt() {
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'string', nullable: true },
+          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },
@@ -285,7 +285,7 @@ async function testMultiTurnConversation() {
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'string', nullable: true },
+          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },
@@ -359,7 +359,7 @@ async function testExplorerSchema() {
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'string', nullable: true },
+          handoffSpec: { type: 'object', nullable: true },
           packageManagers: { type: 'array', items: { type: 'string' } },
           frameworks: { type: 'array', items: { type: 'string' } },
           languages: { type: 'array', items: { type: 'string' } },
@@ -609,7 +609,7 @@ async function testWithTools() {
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'string', nullable: true },
+          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },

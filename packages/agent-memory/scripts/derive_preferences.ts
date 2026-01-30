@@ -38,6 +38,7 @@ const POLL_INTERVAL_MS = 30_000
 const BATCH_TIMEOUT_MS = 2 * 60 * 60 * 1000 // 2 hours
 const REQUEST_TIMEOUT_MS = 60_000 // 60s per generateContent call
 const DIRECT_CONCURRENCY = 10
+const PERSIST_BATCH_SIZE = 25 // Flush to DB after every N conversations
 
 const CATEGORIES = [
   'architecture',
@@ -773,21 +774,34 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
         allPreferences, allDecisions, convoResults, logger,
       )
     } else {
-      // === DIRECT: parallel requests with per-conversation incremental persistence ===
+      // === DIRECT: batched persistence (process N conversations, flush, repeat) ===
       const chunksByConvo = new Map<string, RequestMeta[]>()
       for (const meta of requestMetas) {
         if (!chunksByConvo.has(meta.conversationId)) chunksByConvo.set(meta.conversationId, [])
         chunksByConvo.get(meta.conversationId)!.push(meta)
       }
 
-      const convoQueue = [...chunksByConvo.entries()]
-      let queueIdx = 0
-      let completed = 0
+      const convoList = [...chunksByConvo.entries()]
+      const totalConvos = convoList.length
+      let processedCount = 0
 
-      const processConversation = async (convoId: string, metas: RequestMeta[]): Promise<void> => {
-        const localPrefs: ExtractedPreference[] = []
-        const localDecs: ExtractedDecision[] = []
-        const localResults = new Map<string, { success: boolean; error?: string }>()
+      // Process a single conversation, returning extracted data
+      const processConversation = async (
+        convoId: string,
+        metas: RequestMeta[],
+      ): Promise<{
+        convoId: string
+        prefs: ExtractedPreference[]
+        decisions: ExtractedDecision[]
+        success: boolean
+        error?: string
+        quotaExhausted: boolean
+      }> => {
+        const prefs: ExtractedPreference[] = []
+        const decisions: ExtractedDecision[] = []
+        let lastError: string | undefined
+        let hasSuccess = false
+        let quotaExhausted = false
 
         for (const meta of metas) {
           const promptText = chunkPrompts.get(meta.key)!
@@ -800,51 +814,99 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
               REQUEST_TIMEOUT_MS,
             )
             const text = response.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
-            if (!processModelResponse(text, meta, localPrefs, localDecs, localResults, logger)) {
+            const localResults = new Map<string, { success: boolean; error?: string }>()
+            if (processModelResponse(text, meta, prefs, decisions, localResults, logger)) {
+              hasSuccess = true
+            } else {
               parseFailures++
             }
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err)
             logger.warn(`Request ${meta.key} failed: ${msg}`)
             parseFailures++
-            localResults.set(meta.conversationId, { success: false, error: msg })
+            lastError = msg
+            // Detect quota exhaustion (429) or resource exhausted errors
+            if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+              quotaExhausted = true
+              break // Stop processing this conversation's remaining chunks
+            }
           }
         }
 
-        // Flush this conversation's results to DB immediately
-        const nPrefs = await flushPreferences(sql, localPrefs)
-        const nDecs = await flushDecisions(sql, localDecs)
+        return {
+          convoId,
+          prefs,
+          decisions,
+          success: hasSuccess || !lastError, // Success if any chunk succeeded or no errors
+          error: lastError,
+          quotaExhausted,
+        }
+      }
+
+      // Process conversations in batches with persistence after each batch
+      for (let batchStart = 0; batchStart < convoList.length; batchStart += PERSIST_BATCH_SIZE) {
+        const batch = convoList.slice(batchStart, batchStart + PERSIST_BATCH_SIZE)
+        const batchNum = Math.floor(batchStart / PERSIST_BATCH_SIZE) + 1
+        const totalBatches = Math.ceil(convoList.length / PERSIST_BATCH_SIZE)
+
+        logger.info(`Processing batch ${batchNum}/${totalBatches} (${batch.length} conversations)`)
+
+        // Process batch in parallel (respecting concurrency limit)
+        const batchResults = await Promise.all(
+          batch.map(([convoId, metas]) => processConversation(convoId, metas))
+        )
+
+        // Collect all prefs/decisions from this batch
+        const batchPrefs: ExtractedPreference[] = []
+        const batchDecisions: ExtractedDecision[] = []
+        const logEntries: Array<{
+          entityId: string
+          entityType: 'conversation'
+          configHash: string
+          status: 'success' | 'failed'
+          error?: string
+          entityUpdatedAt?: Date
+        }> = []
+
+        for (const result of batchResults) {
+          batchPrefs.push(...result.prefs)
+          batchDecisions.push(...result.decisions)
+          logEntries.push({
+            entityId: result.convoId,
+            entityType: 'conversation',
+            configHash: PROMPT_HASH,
+            status: result.success ? 'success' : 'failed',
+            error: result.error,
+            entityUpdatedAt: convoUpdatedAt.get(result.convoId),
+          })
+        }
+
+        // Flush batch results to DB
+        const nPrefs = await flushPreferences(sql, batchPrefs)
+        const nDecs = await flushDecisions(sql, batchDecisions)
         totalPrefsWritten += nPrefs
         totalDecisionsWritten += nDecs
 
-        // Record in processing log
-        const result = localResults.get(convoId)
-        if (result) {
-          await processingLog.markProcessed(
-            convoId,
-            'conversation',
-            PROMPT_HASH,
-            result.success ? 'success' : 'failed',
-            { error: result.error, entityUpdatedAt: convoUpdatedAt.get(convoId) },
-          )
+        // Mark all conversations in batch as processed
+        if (logEntries.length > 0) {
+          await processingLog.markBatch(logEntries)
         }
 
-        completed++
-        logger.info(`[${completed}/${chunksByConvo.size}] ${convoId.slice(0, 8)}: ${nPrefs} prefs, ${nDecs} decisions`)
-      }
+        processedCount += batch.length
+        const successCount = batchResults.filter(r => r.success).length
+        const quotaHit = batchResults.some(r => r.quotaExhausted)
 
-      const worker = async (): Promise<void> => {
-        while (true) {
-          const idx = queueIdx++
-          if (idx >= convoQueue.length) break
-          const [convoId, metas] = convoQueue[idx]
-          await processConversation(convoId, metas)
+        logger.info(
+          `Batch ${batchNum}/${totalBatches} complete: ${successCount}/${batch.length} succeeded, ` +
+          `${nPrefs} prefs, ${nDecs} decisions. Progress: ${processedCount}/${totalConvos}`
+        )
+
+        // Stop early if quota exhausted to avoid burning more API calls
+        if (quotaHit) {
+          logger.warn(`Quota exhausted detected. Stopping early after ${processedCount}/${totalConvos} conversations.`)
+          break
         }
       }
-
-      await Promise.all(
-        Array.from({ length: Math.min(DIRECT_CONCURRENCY, convoQueue.length) }, () => worker())
-      )
     }
   }
 

@@ -21,16 +21,43 @@ import type {
   InternalHookContext,
   InternalHookQueue,
   ModelSelection,
-  ExecutionSnapshot,
   MemoryInjector,
 } from 'agent';
 import { Agent, getAsyncAgentPrompt, getAsyncModeAddendum } from 'agent';
 import type { AgentRegistry } from 'agent';
 import { createWorkItem, type WorkItem } from 'work';
 import { createEvent } from 'types';
-import type { LLMRequestConfig } from 'types';
-import { buildLLMRequestConfig, type OrchestratorTerminationReason, profiler } from 'shared';
-import { executeHooks, type StopHookHandler } from './hooks.js';
+import type { LLMRequestConfig, MessageItem } from 'types';
+import { buildLLMRequestConfig, profiler } from 'shared';
+import {
+  assertNever,
+  createAgentErrorEvent,
+  createBoundsExceededEvent,
+  createCadenceAuditEvent,
+  createGoalReachedEvent,
+  createHandoffRequestedEvent,
+  createUserInputRequiredEvent,
+  type ControlEventType,
+  type DecisionFor,
+  type AgentErrorDecision,
+  type BoundsDecision,
+  type CadenceDecision,
+  type ControlEvent,
+  type EventFor,
+  type ExecutionMetrics,
+  type HandoffSpec,
+  type HandoffDecision,
+  type HookContext,
+  type PromptAnswerDecision,
+  type QualityGateDecision,
+  type StatePatch,
+  type WorkItemCompletedDecision,
+  type TerminationReason,
+} from 'protocol';
+import { executeHooks } from './hooks.js';
+import { applyPatches } from './hookRunner/applyPatches.js';
+import { runHooksForEvent, type HookExecutionResult } from './hookRunner/runHooksForEvent.js';
+import type { HookRegistry } from './hookRegistry/index.js';
 import { BoundsChecker } from './bounds-checker.js';
 import type {
   DecisionDatabase,
@@ -59,6 +86,10 @@ export interface OrchestratorConfig {
   compactMaxFileCount: number;
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
+  /** Minimum iteration gap between watcher evaluations (default 5) */
+  minWatcherIterationGap: number;
+  /** Maximum realign attempts before forcing termination (default 3) */
+  maxRealigns: number;
   /**
    * Async mode configuration for decision watcher.
    * When enabled, the watcher will automatically answer PromptUser questions
@@ -94,8 +125,8 @@ export interface IterationState {
 }
 
 export interface OrchestratorRuntime {
-  /** Per-request stop hook - intercepts goal completion */
-  stopHook?: StopHookHandler;
+  /** Control-plane hook registry (orchestrator-owned) */
+  hookRegistry?: HookRegistry;
   /**
    * Check for pending user interruption that arrived during execution.
    * Called before terminating on goal_state_reached.
@@ -130,13 +161,14 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   compactResetPercent: 0.7,
   compactMaxFileCount: 20,
   compactTruncateTo: 5000,
+  minWatcherIterationGap: 5,
+  maxRealigns: 3,
 };
 
 /**
  * Why orchestration terminated.
  * Re-exported from shared for backwards compatibility.
  */
-export type TerminationReason = OrchestratorTerminationReason;
 
 /**
  * Orchestrator execution metrics.
@@ -158,7 +190,7 @@ export interface OrchestratorResult {
   paused: boolean;
   userPrompt?: UserPromptInfo;
   /** Handoff spec for planning → execution transition */
-  handoffSpec?: string;
+  handoffSpec?: HandoffSpec;
   terminationReason: TerminationReason;
   metrics: OrchestratorMetrics;
 }
@@ -188,9 +220,9 @@ export interface PlanModeOptions {
 type TerminationCheckResult = {
   /** Terminal result to return, or null if execution should continue */
   terminal: OrchestratorResult | null;
-  /** Whether execution should continue (stop hook blocked) */
+  /** Whether execution should continue (hook blocked) */
   shouldContinue: boolean;
-  /** New work item to enqueue (for stop hook blocking) */
+  /** New work item to enqueue (for hook blocking) */
   newItem?: WorkItem;
   /** Work item to re-enqueue (for plan revision) */
   itemToRequeue?: WorkItem;
@@ -214,11 +246,19 @@ export class Orchestrator {
   private getModelSelection?: (agentType: string) => ModelSelection | null;
   private hookQueue: InternalHookQueue;
   private boundsChecker: BoundsChecker;
+  private activeSessionKey?: string;
 
   // Work queue state for DAG-based execution
   private workQueue: WorkItem[] = [];
   private completedWork: Map<string, AgentResult> = new Map();
   private initialWorkId: string = '';
+
+  // Realign counter to prevent infinite loops when bounds are exceeded
+  // After config.maxRealigns, we force termination instead of continuing
+  private realignCount: number = 0;
+  private hookMetadata: Map<string, unknown> = new Map();
+  private hookAuditLog: Array<{ timestamp: number; source: string; event: string; details: Record<string, unknown> }> = [];
+  private hookTerminationReason: TerminationReason | null = null;
 
   constructor(
     config: Partial<OrchestratorConfig>,
@@ -260,6 +300,23 @@ export class Orchestrator {
    */
   enqueue(item: WorkItem): string {
     this.workQueue.push(item);
+    const hookParams = item.params as { isInternalHook?: boolean } | undefined;
+    if (!hookParams?.isInternalHook && this.activeSessionKey) {
+      this.hookQueue.enqueue({
+        type: 'workitem_created',
+        objective: item.objective,
+        agent: item.agent,
+        domain: item.domain,
+        dependencies: [...item.dependencies],
+        targetPaths: [...item.targetPaths],
+      }, {
+        workId: item.workId,
+        agentType: item.agent,
+        sessionKey: this.activeSessionKey,
+        requestId: this.requestId,
+        objective: item.objective,
+      });
+    }
     return item.workId;
   }
 
@@ -420,6 +477,7 @@ export class Orchestrator {
     // Clear work queue state for fresh execution
     this.workQueue = [];
     this.completedWork.clear();
+    this.activeSessionKey = context.sessionKey;
 
     // Enqueue initial work item
     const initialItem = this.createWorkItem(goal, agentType);
@@ -434,7 +492,9 @@ export class Orchestrator {
     // Cadence audit: periodic watcher check every 60 seconds (secondary safety net)
     const CADENCE_AUDIT_INTERVAL_MS = 60 * 1000;
     let lastCadenceAuditMs = Date.now();
+    let lastCadenceAuditToolCalls = 0;
     let lastAgentResult: AgentResult | undefined;
+    let lastAgentWorkId: string | undefined;
 
     // Hysteresis gate for compaction: compact at 80%, don't compact again until below 70%
     let compactedRecently = false;
@@ -458,7 +518,7 @@ export class Orchestrator {
           inProgress.set(item.workId, { item, agent: null });
           continue;
         }
-        const agent = this.createAgent(item.agent, context.sessionKey, runtime);
+        const agent = this.createAgent(item.agent, context, item.workId, item.objective, runtime);
         if (!agent) {
           // Mark as failed with synthetic error
           const errorResult = this.createErrorResult(`Unknown agent type: ${item.agent}`, context);
@@ -539,7 +599,20 @@ export class Orchestrator {
       // BOUND CHECK: Iterations
       if (iteration > this.config.maxIterations) {
         this.log('warning', 'Max iterations exceeded', { iteration, completedWork: this.completedWork.size });
-        const stopResult = await this.callStopHook(context, 'max_iterations_exceeded', '', iteration, agentType, runtime);
+        const stopResult = await this.callStopHook(
+          context,
+          'max_iterations_exceeded',
+          '',
+          iteration,
+          agentType,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          goal,
+          totalLlmCalls,
+          totalToolCalls
+        );
         if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'max_iterations_exceeded')) {
           continue; // Stop hook blocked - keep going
         }
@@ -600,6 +673,7 @@ export class Orchestrator {
                 toolErrors: [],
                 terminationReason: 'goal_state_reached',
                 needsUserInput: false,
+                needsHandoff: false,
                 isRefusal: false,
                 localContext: context,
               } as AgentResult,
@@ -728,14 +802,33 @@ export class Orchestrator {
 
         // Track latest agent result for cadence audit
         lastAgentResult = result;
+        lastAgentWorkId = workId;
       }
 
-      // Cadence audit: every 60 seconds, invoke stop hook for oversight check
+      // Cadence audit: every 60 seconds, invoke control hooks for oversight check
       const cadenceNow = Date.now();
-      if (cadenceNow - lastCadenceAuditMs >= CADENCE_AUDIT_INTERVAL_MS && runtime?.stopHook) {
+      if (cadenceNow - lastCadenceAuditMs >= CADENCE_AUDIT_INTERVAL_MS && runtime?.hookRegistry) {
+        const toolCallsSinceLastAudit = totalToolCalls - lastCadenceAuditToolCalls;
         lastCadenceAuditMs = cadenceNow;
+        lastCadenceAuditToolCalls = totalToolCalls;
         const cadenceResult = await this.callStopHook(
-          context, 'cadence_audit' as TerminationReason, '', iteration, agentType, runtime, undefined, lastAgentResult
+          context,
+          'cadence_audit' as TerminationReason,
+          '',
+          iteration,
+          agentType,
+          runtime,
+          undefined,
+          lastAgentResult,
+          lastAgentWorkId,
+          goal,
+          totalLlmCalls,
+          totalToolCalls,
+          {
+            elapsedMs: cadenceNow - startTime,
+            toolCallsSinceLastAudit,
+            recentActivity: lastAgentResult?.response?.slice(0, 200) ?? '',
+          }
         );
         if (cadenceResult) {
           this.enqueueDeferredWork(cadenceResult);
@@ -776,27 +869,43 @@ export class Orchestrator {
           continue;
         }
 
-        // Execute per-request stop hook before terminating - allows Ralph Loop and similar patterns
-        if (runtime?.stopHook) {
-          const stopContext = {
-            workId: this.initialWorkId,
-            response: initialWorkResponse,
-            terminationReason: 'goal_state_reached' as TerminationReason,
+        // Execute control hooks before terminating - allows orchestrator-level gating
+        if (runtime?.hookRegistry) {
+          const stopResult = await this.callStopHook(
+            context,
+            'goal_state_reached' as TerminationReason,
+            initialWorkResponse,
             iteration,
             agentType,
-            sessionKey: context.sessionKey,
-            executionSnapshot: initialWorkResult ? this.buildExecutionSnapshot(initialWorkResult, context) : undefined,
-          };
+            runtime,
+            undefined,
+            initialWorkResult,
+            this.initialWorkId,
+            goal,
+            totalLlmCalls,
+            totalToolCalls
+          );
 
-          try {
-            const stopResult = await runtime.stopHook(stopContext);
-
+          if (stopResult) {
             // Enqueue any deferred work regardless of decision
             this.enqueueDeferredWork(stopResult);
 
+            // CRITICAL: If deferred work was enqueued, continue the loop to execute it
+            if (this.workQueue.length > 0) {
+              this.log('info', 'Deferred work enqueued, continuing loop', {
+                iteration,
+                queuedItems: this.workQueue.length,
+              });
+              // Reset completion tracking since we have more work
+              initialWorkCompleted = false;
+              initialWorkResponse = '';
+              initialWorkResult = undefined;
+              continue;
+            }
+
             if (stopResult.decision === 'block' && stopResult.reason) {
               // Re-inject prompt and continue the loop
-              this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
+              this.log('info', 'Control hook blocked termination, re-injecting prompt', {
                 iteration,
                 promptPreview: stopResult.reason.slice(0, 100),
               });
@@ -804,7 +913,7 @@ export class Orchestrator {
               // Emit progress event so TUI knows loop is continuing
               this.emit(createEvent('agent_progress', {
                 kind: 'work',
-                message: stopResult.systemMessage || `Stop hook continuing (iteration ${iteration})`,
+                message: stopResult.systemMessage || `Control hook continuing (iteration ${iteration})`,
                 requestId: this.requestId,
               }));
 
@@ -826,12 +935,6 @@ export class Orchestrator {
               // Continue the loop
               continue;
             }
-          } catch (err) {
-            // Stop hook error should NOT crash the orchestrator - log and continue to termination
-            this.log('error', 'Stop hook threw error on goal_state_reached', {
-              error: err instanceof Error ? err.message : String(err),
-              iteration,
-            });
           }
         }
 
@@ -936,7 +1039,13 @@ export class Orchestrator {
     return ready;
   }
 
-  private createAgent(agentType: string, sessionKey: string, runtime?: OrchestratorRuntime): Agent | null {
+  private createAgent(
+    agentType: string,
+    context: ContextWindow,
+    workId: string,
+    objective: string,
+    runtime?: OrchestratorRuntime
+  ): Agent | null {
     // NO FALLBACK: If the requested agent type doesn't exist, fail explicitly
     if (!this.agentRegistry?.has(agentType)) return null;
     let config = this.agentRegistry.getConfig(agentType);
@@ -951,7 +1060,7 @@ export class Orchestrator {
     }
 
     // Apply async mode addendum to worker agents (not the watcher itself)
-    if (this.config.asyncMode?.enabled && agentType !== 'watcher') {
+    if (this.config.asyncMode?.enabled && agentType !== 'watcher' && agentType !== 'planner') {
       config = {
         ...config,
         systemPrompt:  getAsyncAgentPrompt(),
@@ -961,7 +1070,7 @@ export class Orchestrator {
     // Build LLM config from model selection (source of truth) + agent's llmParams
     const llmConfig = this.buildLlmConfig(config.llmParams, agentType);
 
-    // Wire cadence check: invokes watcher stopHook at tool-call thresholds for real oversight.
+    // Wire cadence check: invokes control hooks at tool-call thresholds for real oversight.
     // Fires every 30 tool calls OR every 2 minutes, whichever comes first.
     // This gives the watcher real intervention power during execution.
     let lastCadenceToolCalls = 0;
@@ -977,39 +1086,75 @@ export class Orchestrator {
 
       const toolCallsSinceLast = metrics.toolCallsMade - lastCadenceToolCalls;
       const timeSinceLast = Date.now() - lastCadenceTimeMs;
-      const shouldInvokeWatcher = runtime?.stopHook && (
+      const shouldInvokeWatcher = runtime?.hookRegistry && (
         toolCallsSinceLast >= CADENCE_TOOL_THRESHOLD ||
         timeSinceLast >= CADENCE_TIME_THRESHOLD_MS
       );
 
-      if (shouldInvokeWatcher && runtime?.stopHook) {
+      if (shouldInvokeWatcher && runtime?.hookRegistry) {
         lastCadenceToolCalls = metrics.toolCallsMade;
         lastCadenceTimeMs = Date.now();
 
         try {
-          const stopResult = await runtime.stopHook({
-            workId: this.initialWorkId,
-            response: '',
-            terminationReason: 'cadence_audit',
-            iteration: metrics.llmCallsMade,
+          const executionMetrics: ExecutionMetrics = {
+            toolCallsMade: metrics.toolCallsMade,
+            llmCalls: metrics.llmCallsMade,
+            contextPercentUsed: context.metrics.percentageUsed,
+            durationMs: metrics.durationMs,
+            filesRead: [],
+            filesModified: [],
+            iterationCount: metrics.llmCallsMade,
+          };
+          const hookContext = this.buildHookContext({
+            context,
+            workId,
             agentType,
-            sessionKey,
+            iteration: metrics.llmCallsMade,
+            metrics: executionMetrics,
+            objective,
+            filesModified: [],
           });
-
-          // If watcher says block with reason, stop the agent
-          if (stopResult.decision === 'block' && stopResult.reason) {
-            return {
-              action: 'stop',
-              systemMessage: stopResult.systemMessage ?? `[Watcher intervention]: ${stopResult.reason}`,
-            };
-          }
-
-          // If watcher has guidance, inject it
-          if (stopResult.systemMessage) {
-            return {
-              action: 'inject',
-              systemMessage: stopResult.systemMessage,
-            };
+          const event = createCadenceAuditEvent(
+            context.sessionKey,
+            workId,
+            metrics.durationMs,
+            toolCallsSinceLast,
+            executionMetrics,
+            'cadence_check'
+          );
+          const hookResult = await this.runControlHooks<'cadence_audit'>(event, hookContext, context, runtime);
+          switch (hookResult.status) {
+            case 'decision': {
+              const decision = hookResult.decision;
+              switch (decision.action) {
+                case 'continue':
+                  break;
+                case 'inject_guidance':
+                  return { action: 'inject', systemMessage: decision.message };
+                case 'realign':
+                  return { action: 'stop', systemMessage: decision.guidance };
+                case 'split':
+                  return { action: 'stop', systemMessage: 'Cadence audit requested split.' };
+                case 'stop':
+                  return { action: 'stop', systemMessage: decision.reason };
+                default:
+                  assertNever(decision);
+              }
+              break;
+            }
+            case 'no_decision':
+              this.log('warning', 'Cadence audit hooks produced no decision', {
+                eventType: event.type,
+                failures: hookResult.failures.length,
+                hasCriticalFailure: hookResult.hasCriticalFailure,
+              });
+              break;
+            case 'no_hooks':
+            case 'all_skipped':
+            case 'no_registry':
+              break;
+            default:
+              assertNever(hookResult);
           }
         } catch (err) {
           // Don't crash on watcher failure - log and continue
@@ -1042,7 +1187,7 @@ export class Orchestrator {
       toolRegistry: this.toolRegistry,
       emit: this.emit,
       requestId: this.requestId,
-      sessionKey,
+      sessionKey: context.sessionKey,
       agentRegistry: this.agentRegistry,
       llmConfig,
       hooks: mergedHooks,
@@ -1127,8 +1272,9 @@ export class Orchestrator {
       filesRead: [],
       invalidatedPaths: [],
       toolErrors: [],
-      terminationReason: 'exception',
+      terminationReason: 'agent_error',
       needsUserInput: false,
+      needsHandoff: false,
       isRefusal: false,
       localContext: context,
     };
@@ -1182,67 +1328,398 @@ export class Orchestrator {
     };
   }
 
-  /**
-   * Build an ExecutionSnapshot from an AgentResult and context metrics.
-   * Provides enriched data for stop hook evaluation.
-   */
-  private buildExecutionSnapshot(result: AgentResult, context: ContextWindow): ExecutionSnapshot {
-    // Extract tool history from localContext items (function_call + function_call_output pairs)
-    const toolHistory: ExecutionSnapshot['toolHistory'] = [];
-    const items = result.localContext.items;
-    for (let i = 0; i < items.length && toolHistory.length < 20; i++) {
-      const item = items[i];
-      if (item.type === 'function_call') {
-        const name = item.name;
-        const args = item.arguments;
-        // Look for matching output
-        let success = true;
-        let durationMs = 0;
-        let outputPreview: string | undefined;
-        for (let j = i + 1; j < items.length; j++) {
-          const out = items[j];
-          if (out.type === 'function_call_output' && out.callId === item.callId) {
-            success = !out.isError;
-            durationMs = out.durationMs ?? 0;
-            if (out.output) {
-              outputPreview = out.output.length > 500 ? out.output.slice(0, 500) : out.output;
-            }
-            break;
-          }
-        }
-        toolHistory.push({ name, args, success, durationMs, outputPreview });
-      }
-    }
-
+  private buildExecutionMetrics(params: {
+    result?: AgentResult;
+    context: ContextWindow;
+    iteration: number;
+    totalLlmCalls: number;
+    totalToolCalls: number;
+  }): ExecutionMetrics {
+    const { result, context, iteration, totalLlmCalls, totalToolCalls } = params;
     const contextMetrics = context.metrics;
-
+    const resultMetrics = result?.metrics;
     return {
-      toolHistory,
-      filesModified: result.invalidatedPaths,
-      filesRead: result.filesRead,
-      metrics: {
-        llmCallsMade: result.metrics.llmCallsMade,
-        toolCallsMade: result.metrics.toolCallsMade,
-        toolCallsSucceeded: result.metrics.toolCallsSucceeded,
-        toolCallsFailed: result.metrics.toolCallsFailed,
-        durationMs: result.metrics.durationMs,
-        inputTokens: contextMetrics.inputTokens,
-        outputTokens: contextMetrics.totalOutputTokens,
-        contextPercentUsed: contextMetrics.percentageUsed,
-      },
-      artifacts: result.artifacts?.map(a => ({
-        sourcePath: a.sourcePath,
-        name: a.name,
-        kind: a.kind,
-        insight: a.insight,
-      })),
-      fullResponse: result.response,
+      toolCallsMade: resultMetrics?.toolCallsMade ?? totalToolCalls,
+      llmCalls: resultMetrics?.llmCallsMade ?? totalLlmCalls,
+      contextPercentUsed: contextMetrics.percentageUsed,
+      durationMs: resultMetrics?.durationMs ?? 0,
+      filesRead: result?.filesRead ?? [],
+      filesModified: result?.invalidatedPaths ?? [],
+      iterationCount: iteration,
     };
   }
 
+  private buildHookContext(params: {
+    context: ContextWindow;
+    workId: string;
+    agentType: string;
+    iteration: number;
+    metrics: ExecutionMetrics;
+    objective: string;
+    filesModified: string[];
+  }): HookContext {
+    const recentMessages = params.context
+      .getRecentItems(20)
+      .filter((item): item is MessageItem & { role: 'system' | 'user' | 'assistant' } =>
+        item.type === 'message' &&
+        (item.role === 'system' || item.role === 'user' || item.role === 'assistant')
+      )
+      .map(item => ({
+        role: item.role,
+        content: typeof item.content === 'string' ? item.content : JSON.stringify(item.content),
+        timestamp: item.timestamp,
+      }));
+
+    return {
+      sessionKey: params.context.sessionKey,
+      workId: params.workId,
+      agentType: params.agentType,
+      iteration: params.iteration,
+      metrics: params.metrics,
+      recentMessages,
+      filesModified: params.filesModified,
+      objective: params.objective,
+      realignCount: this.realignCount,
+    };
+  }
+
+  private applyHookPatches(context: ContextWindow, patches: StatePatch[], source: string): void {
+    if (patches.length === 0) return;
+    const { state } = applyPatches({
+      workQueue: this.workQueue,
+      context,
+      realignCount: this.realignCount,
+      terminationReason: this.hookTerminationReason,
+      metadata: this.hookMetadata,
+      auditLog: this.hookAuditLog,
+    }, patches, source);
+    this.workQueue = state.workQueue;
+    this.realignCount = state.realignCount;
+    this.hookTerminationReason = state.terminationReason;
+    this.hookMetadata = state.metadata;
+    this.hookAuditLog = state.auditLog;
+  }
+
+  private async runControlHooks<E extends ControlEventType>(
+    event: EventFor<E>,
+    ctx: HookContext,
+    context: ContextWindow,
+    runtime?: OrchestratorRuntime
+  ): Promise<HookExecutionResult<DecisionFor<E>>> {
+    const registry = runtime?.hookRegistry;
+    if (!registry) {
+      return {
+        status: 'no_registry',
+        decision: null,
+        patches: [],
+        failures: [],
+        hasCriticalFailure: false,
+        audit: [],
+      };
+    }
+    const result = await runHooksForEvent(event, ctx, registry);
+    if (result.patches.length > 0) {
+      this.applyHookPatches(context, result.patches, `hooks:${event.type}`);
+    }
+    return result;
+  }
+
+  private createControlEvent(params: {
+    terminationReason: TerminationReason;
+    context: ContextWindow;
+    workId: string;
+    response: string;
+    metrics: ExecutionMetrics;
+    userPrompt?: UserPromptInfo;
+    agentResult?: AgentResult;
+    cadence?: { elapsedMs: number; toolCallsSinceLastAudit: number; recentActivity: string };
+  }): ControlEvent | null {
+    const { terminationReason, context, workId, response, metrics, userPrompt, agentResult, cadence } = params;
+
+    switch (terminationReason) {
+      case 'goal_state_reached': {
+        const artifacts = agentResult?.artifacts?.map(a => ({
+          type: 'data' as const,
+          path: a.sourcePath,
+          description: a.insight ?? a.name,
+        }));
+        return createGoalReachedEvent(
+          context.sessionKey,
+          workId,
+          response,
+          metrics.filesModified,
+          metrics,
+          artifacts
+        );
+      }
+      case 'max_iterations_exceeded':
+      case 'max_tool_calls_exceeded':
+      case 'max_duration_exceeded': {
+        const boundType = terminationReason === 'max_iterations_exceeded'
+          ? 'iterations'
+          : terminationReason === 'max_tool_calls_exceeded'
+            ? 'tool_calls'
+            : 'duration';
+        const limit = terminationReason === 'max_iterations_exceeded'
+          ? this.config.maxIterations
+          : terminationReason === 'max_tool_calls_exceeded'
+            ? this.config.maxToolCalls
+            : this.config.maxDurationMs;
+        const current = terminationReason === 'max_iterations_exceeded'
+          ? metrics.iterationCount
+          : terminationReason === 'max_tool_calls_exceeded'
+            ? metrics.toolCallsMade
+            : metrics.durationMs;
+        return createBoundsExceededEvent(
+          context.sessionKey,
+          workId,
+          boundType,
+          limit,
+          current,
+          response,
+          metrics
+        );
+      }
+      case 'user_input_required': {
+        if (!userPrompt) return null;
+        const options = userPrompt.options?.map(option => {
+          if (typeof option === 'string') {
+            return { label: option };
+          }
+          return { label: option.label, description: option.description };
+        });
+        return createUserInputRequiredEvent(
+          context.sessionKey,
+          workId,
+          userPrompt.question,
+          options,
+          userPrompt.context,
+          userPrompt.multiSelect ?? false
+        );
+      }
+      case 'cadence_audit': {
+        if (!cadence) return null;
+        return createCadenceAuditEvent(
+          context.sessionKey,
+          workId,
+          cadence.elapsedMs,
+          cadence.toolCallsSinceLastAudit,
+          metrics,
+          cadence.recentActivity
+        );
+      }
+      case 'agent_error':
+      case 'invalid_action':
+      case 'no_action':
+      case 'stagnation': {
+        const errorType = terminationReason === 'agent_error'
+          ? 'exception'
+          : terminationReason;
+        return createAgentErrorEvent(
+          context.sessionKey,
+          workId,
+          errorType,
+          agentResult?.error ?? response ?? terminationReason,
+          metrics,
+          undefined
+        );
+      }
+      case 'handoff_requested': {
+        if (!agentResult?.handoffSpec) return null;
+        return createHandoffRequestedEvent(
+          context.sessionKey,
+          workId,
+          agentResult.handoffSpec,
+          response
+        );
+      }
+      case 'user_stopped':
+      case 'watcher_stopped':
+      case 'rate_limit':
+      case 'circuit_open':
+      case 'timeout':
+      case 'refusal':
+        return null;
+      default:
+        return assertNever(terminationReason);
+    }
+  }
+
+  private mapQualityDecisionToStopResult(
+    decision: QualityGateDecision
+  ): import('agent').StopHookResult {
+    switch (decision.verdict) {
+      case 'passed':
+        return { decision: 'allow' };
+      case 'failed':
+        return { decision: 'block', reason: decision.issues.join('\n') };
+      case 'needs_human':
+        return { decision: 'block', reason: decision.concerns.join('\n') };
+      default:
+        return assertNever(decision);
+    }
+  }
+
+  private mapBoundsDecisionToStopResult(
+    decision: BoundsDecision
+  ): import('agent').StopHookResult {
+    switch (decision.action) {
+      case 'realign':
+        return { decision: 'block', reason: decision.guidance };
+      case 'split':
+        return {
+          decision: 'allow',
+          deferredWork: decision.workItems.map(item => ({
+            goal: item.goal,
+            objective: item.objective,
+            agent: item.agent,
+            background: true,
+            dependencies: item.dependencies,
+            targetPaths: item.targetPaths,
+            bounds: item.bounds,
+          })),
+        };
+      case 'wrap_up':
+        return { decision: 'allow', systemMessage: decision.summary };
+      case 'abort':
+        return { decision: 'allow', systemMessage: decision.reason };
+      default:
+        return assertNever(decision);
+    }
+  }
+
+  private mapPromptDecisionToStopResult(
+    decision: PromptAnswerDecision
+  ): import('agent').StopHookResult {
+    switch (decision.action) {
+      case 'answer':
+        return {
+          decision: 'block',
+          reason: decision.text,
+          systemMessage: decision.contextAddendum,
+        };
+      case 'escalate':
+      case 'defer':
+        return { decision: 'allow' };
+      default:
+        return assertNever(decision);
+    }
+  }
+
+  private mapCadenceDecisionToStopResult(
+    decision: CadenceDecision
+  ): import('agent').StopHookResult {
+    switch (decision.action) {
+      case 'continue':
+        return { decision: 'allow' };
+      case 'inject_guidance':
+        return { decision: 'allow', systemMessage: decision.message };
+      case 'realign':
+        return { decision: 'block', reason: decision.guidance };
+      case 'split':
+        return {
+          decision: 'allow',
+          deferredWork: decision.workItems.map(item => ({
+            goal: item.goal,
+            objective: item.objective,
+            agent: item.agent,
+            background: true,
+            dependencies: item.dependencies,
+            targetPaths: item.targetPaths,
+            bounds: item.bounds,
+          })),
+        };
+      case 'stop':
+        return { decision: 'allow', systemMessage: decision.reason };
+      default:
+        return assertNever(decision);
+    }
+  }
+
+  private mapAgentErrorDecisionToStopResult(
+    decision: AgentErrorDecision
+  ): import('agent').StopHookResult {
+    switch (decision.action) {
+      case 'retry':
+        return { decision: 'block', reason: decision.guidance };
+      case 'abort':
+      case 'escalate':
+        return { decision: 'allow' };
+      default:
+        return assertNever(decision);
+    }
+  }
+
+  private mapHandoffDecisionToStopResult(
+    decision: HandoffDecision
+  ): import('agent').StopHookResult {
+    switch (decision.action) {
+      case 'approve':
+        return { decision: 'allow' };
+      case 'reject':
+        return { decision: 'block', reason: decision.feedback };
+      case 'modify':
+        return { decision: 'block', reason: decision.changes };
+      default:
+        return assertNever(decision);
+    }
+  }
+
+  private mapWorkItemDecisionToStopResult(
+    decision: WorkItemCompletedDecision
+  ): import('agent').StopHookResult {
+    switch (decision.action) {
+      case 'accept':
+        return { decision: 'allow' };
+      case 'retry':
+        return { decision: 'block', reason: decision.guidance };
+      case 'split':
+        return {
+          decision: 'allow',
+          deferredWork: decision.workItems.map(item => ({
+            goal: item.goal,
+            objective: item.objective,
+            agent: item.agent,
+            background: true,
+            dependencies: item.dependencies,
+            targetPaths: item.targetPaths,
+            bounds: item.bounds,
+          })),
+        };
+      case 'escalate':
+        return { decision: 'allow' };
+      default:
+        return assertNever(decision);
+    }
+  }
+
+  private resolveHookDecision<D>(
+    eventType: string,
+    result: HookExecutionResult<D>,
+    map: (decision: D) => import('agent').StopHookResult
+  ): import('agent').StopHookResult | null {
+    switch (result.status) {
+      case 'decision':
+        return map(result.decision);
+      case 'no_decision':
+        this.log('warning', 'Control hook produced no decision', {
+          eventType,
+          failures: result.failures.length,
+          hasCriticalFailure: result.hasCriticalFailure,
+        });
+        return null;
+      case 'no_registry':
+      case 'no_hooks':
+      case 'all_skipped':
+        return null;
+      default:
+        return assertNever(result);
+    }
+  }
+
   /**
-   * Call stop hook and return its decision.
-   * Returns null if no stop hook configured or if hook throws.
+   * Call control-plane hooks and return a stop-style decision.
+   * Returns null if no hook registry configured or if hooks fail.
    */
   private async callStopHook(
     context: ContextWindow,
@@ -1252,40 +1729,109 @@ export class Orchestrator {
     agentType: string,
     runtime?: OrchestratorRuntime,
     userPrompt?: UserPromptInfo,
-    agentResult?: AgentResult
+    agentResult?: AgentResult,
+    workId?: string,
+    objective?: string,
+    totalLlmCalls?: number,
+    totalToolCalls?: number,
+    cadence?: { elapsedMs: number; toolCallsSinceLastAudit: number; recentActivity: string }
   ): Promise<import('agent').StopHookResult | null> {
-    if (!runtime?.stopHook) return null;
+    if (!runtime?.hookRegistry) return null;
+
+    const effectiveWorkId = workId ?? this.initialWorkId;
+    const effectiveObjective = objective ?? response.slice(0, 160) ?? '';
+    const metrics = this.buildExecutionMetrics({
+      result: agentResult,
+      context,
+      iteration,
+      totalLlmCalls: totalLlmCalls ?? agentResult?.metrics.llmCallsMade ?? iteration,
+      totalToolCalls: totalToolCalls ?? agentResult?.metrics.toolCallsMade ?? 0,
+    });
+    const hookContext = this.buildHookContext({
+      context,
+      workId: effectiveWorkId,
+      agentType,
+      iteration,
+      metrics,
+      objective: effectiveObjective,
+      filesModified: metrics.filesModified,
+    });
+
+    const event = this.createControlEvent({
+      terminationReason,
+      context,
+      workId: effectiveWorkId,
+      response,
+      metrics,
+      userPrompt,
+      agentResult,
+      cadence,
+    });
+
+    if (!event) return null;
 
     try {
-      return await runtime.stopHook({
-        workId: this.initialWorkId,
-        response,
-        terminationReason,
-        iteration,
-        agentType,
-        sessionKey: context.sessionKey,
-        userPrompt: userPrompt ? {
-          question: userPrompt.question,
-          options: userPrompt.options,
-          context: userPrompt.context,
-          multiSelect: userPrompt.multiSelect,
-          questionType: userPrompt.questionType,
-        } : undefined,
-        executionSnapshot: agentResult ? this.buildExecutionSnapshot(agentResult, context) : undefined,
-        handoffSpec: agentResult?.handoffSpec,
-      });
+      switch (event.type) {
+        case 'goal_state_reached': {
+          const hookResult = await this.runControlHooks<'goal_state_reached'>(event, hookContext, context, runtime);
+          return this.resolveHookDecision(event.type, hookResult, (decision) =>
+            this.mapQualityDecisionToStopResult(decision)
+          );
+        }
+        case 'bounds_exceeded': {
+          const hookResult = await this.runControlHooks<'bounds_exceeded'>(event, hookContext, context, runtime);
+          return this.resolveHookDecision(event.type, hookResult, (decision) =>
+            this.mapBoundsDecisionToStopResult(decision)
+          );
+        }
+        case 'user_input_required': {
+          const hookResult = await this.runControlHooks<'user_input_required'>(event, hookContext, context, runtime);
+          return this.resolveHookDecision(event.type, hookResult, (decision) =>
+            this.mapPromptDecisionToStopResult(decision)
+          );
+        }
+        case 'cadence_audit': {
+          const hookResult = await this.runControlHooks<'cadence_audit'>(event, hookContext, context, runtime);
+          return this.resolveHookDecision(event.type, hookResult, (decision) =>
+            this.mapCadenceDecisionToStopResult(decision)
+          );
+        }
+        case 'agent_error': {
+          const hookResult = await this.runControlHooks<'agent_error'>(event, hookContext, context, runtime);
+          return this.resolveHookDecision(event.type, hookResult, (decision) =>
+            this.mapAgentErrorDecisionToStopResult(decision)
+          );
+        }
+        case 'handoff_requested': {
+          const hookResult = await this.runControlHooks<'handoff_requested'>(event, hookContext, context, runtime);
+          return this.resolveHookDecision(event.type, hookResult, (decision) =>
+            this.mapHandoffDecisionToStopResult(decision)
+          );
+        }
+        case 'work_item_completed': {
+          const hookResult = await this.runControlHooks<'work_item_completed'>(event, hookContext, context, runtime);
+          return this.resolveHookDecision(event.type, hookResult, (decision) =>
+            this.mapWorkItemDecisionToStopResult(decision)
+          );
+        }
+        case 'user_stopped':
+        case 'transient_error':
+          return null;
+        default:
+          return assertNever(event);
+      }
     } catch (err) {
-      this.log('warning', 'Stop hook error', { error: String(err) });
+      this.log('warning', 'Control hook error', { error: String(err), eventType: event.type });
       return null;
     }
   }
 
   /**
-   * Handle stop hook "block" decision by re-injecting prompt and continuing.
-   * Also enqueues any deferred work items from the stop hook result.
+   * Handle hook "block" decision by re-injecting prompt and continuing.
+   * Also enqueues any deferred work items from the hook result.
    * Returns true if loop should continue, false if termination should proceed.
    *
-   * @param stopResult - The stop hook result
+   * @param stopResult - The hook result (stop-style)
    * @param context - The context window
    * @param agentType - The agent type
    * @param iteration - Current iteration number
@@ -1301,13 +1847,31 @@ export class Orchestrator {
     if (!stopResult) return false;
 
     // Enqueue deferred work regardless of decision (block or allow)
+    const queueSizeBefore = this.workQueue.length;
     this.enqueueDeferredWork(stopResult);
+    const deferredWorkAdded = this.workQueue.length > queueSizeBefore;
+
+    // CRITICAL: If deferred work was enqueued, we must continue even if decision is 'allow'
+    // This ensures work items from watcher are actually executed
+    // Also reset realign counter since splitting work is progress
+    if (deferredWorkAdded) {
+      this.realignCount = 0; // Reset - splitting work is progress
+      this.log('info', 'Deferred work added, resetting realign counter', {
+        iteration,
+        terminationReason,
+        newItems: this.workQueue.length - queueSizeBefore,
+        decision: stopResult.decision,
+      });
+      if (stopResult.decision !== 'block') {
+        return true; // Signal to continue, even though it's not a 'block'
+      }
+    }
 
     if (stopResult.decision !== 'block' || !stopResult.reason) {
       return false;
     }
 
-    this.log('info', 'Stop hook blocked termination, re-injecting prompt', {
+    this.log('info', 'Control hook blocked termination, re-injecting prompt', {
       iteration,
       terminationReason,
       promptPreview: stopResult.reason.slice(0, 100),
@@ -1344,6 +1908,29 @@ export class Orchestrator {
       return true;
     }
 
+    // For bounds_exceeded: track realign count and enforce limit to prevent infinite loops
+    // Check both orchestrator-level and agent-level termination reasons
+    const boundsReasons = ['max_iterations_exceeded', 'max_tool_calls_exceeded', 'max_duration_exceeded'];
+    const isBoundsExceeded = boundsReasons.includes(terminationReason ?? '');
+
+    if (isBoundsExceeded) {
+      this.realignCount++;
+      this.log('info', 'Realign count incremented for bounds exceeded', {
+        realignCount: this.realignCount,
+        maxRealigns: this.config.maxRealigns,
+        terminationReason,
+      });
+
+      if (this.realignCount > this.config.maxRealigns) {
+        this.log('warning', 'Max realigns exceeded, forcing termination', {
+          realignCount: this.realignCount,
+          terminationReason,
+        });
+        // Don't continue - force termination
+        return false;
+      }
+    }
+
     // Default handling for other termination reasons (Ralph Loop, bounds exceeded, etc.)
     // The reason becomes the new work item's goal
     if (stopResult.systemMessage) {
@@ -1359,7 +1946,7 @@ export class Orchestrator {
   }
 
   /**
-   * Enqueue deferred work items from a stop hook result.
+   * Enqueue deferred work items from a hook result.
    * These are fire-and-forget work items that don't block the current decision.
    * When bounds are specified by the watcher, they override agent registry defaults.
    */
@@ -1367,7 +1954,7 @@ export class Orchestrator {
     if (!stopResult.deferredWork?.length) return;
 
     for (const work of stopResult.deferredWork) {
-      this.log('info', 'Enqueueing deferred work from stop hook', {
+      this.log('info', 'Enqueueing deferred work from hook', {
         objective: work.objective.slice(0, 100),
         agent: work.agent,
         hasBounds: !!work.bounds,
@@ -1486,7 +2073,20 @@ export class Orchestrator {
       }
       this.log('info', 'Pausing for user input', { workId, question: result.userPrompt.question, questionType: result.userPrompt.questionType });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, 'user_input_required', result.response ?? '', iteration, agentType, runtime, result.userPrompt, result);
+      const stopResult = await this.callStopHook(
+        context,
+        'user_input_required',
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        result.userPrompt,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'user_input_required')) {
         return { terminal: null, shouldContinue: true };
       }
@@ -1514,11 +2114,25 @@ export class Orchestrator {
         context.addAgentResultContext(result);
         return this.createInterruptionResult(agentType);
       }
-      this.log('info', 'Handoff requested - checking approval', { workId, specLength: result.handoffSpec.length });
+      const specLength = JSON.stringify(result.handoffSpec).length;
+      this.log('info', 'Handoff requested - checking approval', { workId, specLength });
       context.addAgentResultContext(result);
 
       // Call stop hook for approval (watcher in async mode, or no-op in sync mode)
-      const stopResult = await this.callStopHook(context, 'handoff_requested', result.response ?? '', iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        'handoff_requested',
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
 
       // If stop hook blocks, the watcher rejected the plan - planner should revise
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'handoff_requested')) {
@@ -1567,7 +2181,20 @@ export class Orchestrator {
     if (result.isRefusal) {
       this.log('warning', 'Agent refused', { workId, response: result.response });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, 'refusal', result.response, iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        'refusal',
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'refusal')) {
         return { terminal: null, shouldContinue: true };
       }
@@ -1590,7 +2217,20 @@ export class Orchestrator {
     if (result.terminationReason === 'user_stopped') {
       this.log('info', 'User stopped execution', { workId });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, 'user_stopped', result.response || '', iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        'user_stopped',
+        result.response || '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'user_stopped')) {
         return { terminal: null, shouldContinue: true };
       }
@@ -1628,37 +2268,56 @@ export class Orchestrator {
     // ============================================================
     const isContinuableError = result.terminationReason === 'no_action' ||
                                result.terminationReason === 'invalid_action' ||
-                               result.terminationReason === 'stagnation:tool_repeat';
+                               result.terminationReason === 'stagnation';
     if (isContinuableError) {
       const reason = result.terminationReason!;
       this.log('warning', `Agent ${reason}`, { workId, error: result.error });
       context.addAgentResultContext(result);
 
-      // Check stop hook - Ralph Loop can continue on these
-      if (runtime?.stopHook) {
-        try {
-          const stopResult = await runtime.stopHook({
-            workId,
-            response: result.response,
-            terminationReason: reason,
-            iteration,
-            agentType,
-            sessionKey: context.sessionKey,
-            executionSnapshot: this.buildExecutionSnapshot(result, context),
-          });
+      // Check control hooks - Ralph Loop can continue on these
+      if (runtime?.hookRegistry) {
+        const stopResult = await this.callStopHook(
+          context,
+          reason,
+          result.response ?? '',
+          iteration,
+          agentType,
+          runtime,
+          undefined,
+          result,
+          workId,
+          item.objective,
+          totalLlmCalls,
+          totalToolCalls
+        );
 
+        if (stopResult) {
           // Enqueue any deferred work regardless of decision
+          const queueSizeBefore = this.workQueue.length;
           this.enqueueDeferredWork(stopResult);
+          const deferredWorkAdded = this.workQueue.length > queueSizeBefore;
+
+          // CRITICAL: If deferred work was enqueued, continue even on 'allow'
+          if (deferredWorkAdded) {
+            this.log('info', `Deferred work added, continuing loop`, {
+              iteration,
+              newItems: this.workQueue.length - queueSizeBefore,
+            });
+            return {
+              terminal: null,
+              shouldContinue: true,
+            };
+          }
 
           if (stopResult.decision === 'block' && stopResult.reason) {
-            this.log('info', `Stop hook blocked termination on ${reason}, re-injecting prompt`, {
+            this.log('info', `Control hook blocked termination on ${reason}, re-injecting prompt`, {
               iteration,
               promptPreview: stopResult.reason.slice(0, 100),
             });
 
             this.emit(createEvent('agent_progress', {
               kind: 'work',
-              message: stopResult.systemMessage || `Stop hook continuing on ${reason} (iteration ${iteration})`,
+              message: stopResult.systemMessage || `Control hook continuing on ${reason} (iteration ${iteration})`,
               requestId: this.requestId,
             }));
 
@@ -1672,23 +2331,17 @@ export class Orchestrator {
               newItem: this.createWorkItem(stopResult.reason, agentType),
             };
           }
-        } catch (err) {
-          this.log('error', `Stop hook threw error on ${reason}`, {
-            error: err instanceof Error ? err.message : String(err),
-            iteration,
-          });
         }
       }
 
       // No stop hook or hook allowed termination - map to appropriate orchestrator reason
-      const orchReason = reason === 'stagnation:tool_repeat' ? 'agent_error' : reason;
       this.emitGoalNotAchieved(goal, result.error || reason, 1);
       return {
         terminal: this.createResult({
           success: false,
           response: result.response,
           error: result.error || reason,
-          terminationReason: orchReason as TerminationReason,
+          terminationReason: reason,
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         }),
         shouldContinue: false,
@@ -1698,15 +2351,26 @@ export class Orchestrator {
     // ============================================================
     // AGENT BOUNDS EXCEEDED: Map agent-level bounds to orchestrator-level
     // ============================================================
-    if (result.terminationReason === 'iterations_exhausted' ||
-        result.terminationReason === 'bounds:tool_calls' ||
-        result.terminationReason === 'bounds:duration') {
-      const orchReason = result.terminationReason === 'iterations_exhausted' ? 'max_iterations_exceeded'
-        : result.terminationReason === 'bounds:tool_calls' ? 'max_tool_calls_exceeded'
-        : 'max_duration_exceeded';
-      this.log('warning', `Agent bounds exceeded: ${result.terminationReason}`, { workId });
+    if (result.terminationReason === 'max_iterations_exceeded' ||
+        result.terminationReason === 'max_tool_calls_exceeded' ||
+        result.terminationReason === 'max_duration_exceeded') {
+      const orchReason = result.terminationReason;
+      this.log('warning', `Agent bounds exceeded: ${orchReason}`, { workId });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, orchReason, result.response, iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        orchReason,
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, orchReason)) {
         return { terminal: null, shouldContinue: true };
       }
@@ -1727,7 +2391,20 @@ export class Orchestrator {
     if (result.terminationReason === 'rate_limit' || result.terminationReason === 'circuit_open') {
       this.log('warning', `Agent ${result.terminationReason}`, { workId });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, result.terminationReason, result.response, iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        result.terminationReason,
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, result.terminationReason as TerminationReason)) {
         return { terminal: null, shouldContinue: true };
       }
@@ -1744,21 +2421,69 @@ export class Orchestrator {
     }
 
     // ============================================================
-    // TERMINAL: exception - agent caught an unexpected error
+    // TERMINAL: timeout - transient errors that must stop
     // ============================================================
-    if (result.terminationReason === 'exception') {
-      this.log('error', 'Agent exception', { workId, error: result.error });
+    if (result.terminationReason === 'timeout') {
+      this.log('warning', 'Agent timeout', { workId, error: result.error });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, 'agent_error', result.response, iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        'timeout',
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
+      if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'timeout')) {
+        return { terminal: null, shouldContinue: true };
+      }
+      return {
+        terminal: this.createResult({
+          success: false,
+          response: result.response || 'Execution stopped: timeout',
+          error: result.error || 'timeout',
+          terminationReason: 'timeout',
+          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
+        }),
+        shouldContinue: false,
+      };
+    }
+
+    // ============================================================
+    // TERMINAL: agent_error - agent caught an unexpected error
+    // ============================================================
+    if (result.terminationReason === 'agent_error') {
+      this.log('error', 'Agent error', { workId, error: result.error });
+      context.addAgentResultContext(result);
+      const stopResult = await this.callStopHook(
+        context,
+        'agent_error',
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'agent_error')) {
         return { terminal: null, shouldContinue: true };
       }
-      this.emitGoalNotAchieved(goal, result.error || 'exception', 1);
+      this.emitGoalNotAchieved(goal, result.error || 'agent_error', 1);
       return {
         terminal: this.createResult({
           success: false,
           response: result.response,
-          error: result.error || 'Agent encountered an unexpected exception',
+          error: result.error || 'Agent encountered an unexpected error',
           terminationReason: 'agent_error',
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         }),
@@ -1772,7 +2497,20 @@ export class Orchestrator {
     if (result.error && !result.success && !actionIsContinue) {
       this.log('error', 'Agent error', { workId, error: result.error, terminationReason: result.terminationReason });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, 'agent_error', result.response, iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        'agent_error',
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'agent_error')) {
         return { terminal: null, shouldContinue: true };
       }
@@ -1795,7 +2533,20 @@ export class Orchestrator {
     if (totalToolCalls >= this.config.maxToolCalls) {
       this.log('warning', 'Max tool calls exceeded', { totalToolCalls, completedWork: this.completedWork.size });
       context.addAgentResultContext(result);
-      const stopResult = await this.callStopHook(context, 'max_tool_calls_exceeded', result.response, iteration, agentType, runtime, undefined, result);
+      const stopResult = await this.callStopHook(
+        context,
+        'max_tool_calls_exceeded',
+        result.response ?? '',
+        iteration,
+        agentType,
+        runtime,
+        undefined,
+        result,
+        workId,
+        item.objective,
+        totalLlmCalls,
+        totalToolCalls
+      );
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'max_tool_calls_exceeded')) {
         return { terminal: null, shouldContinue: true };
       }
@@ -1818,33 +2569,30 @@ export class Orchestrator {
   }
 
   /**
-   * Parse a handoffSpec JSON string into WorkItems.
+   * Parse a handoffSpec into WorkItems.
    * Returns empty array on parse failure.
    */
-  private parseHandoffSpec(spec: string, sessionGoal: string): WorkItem[] {
+  private parseHandoffSpec(spec: HandoffSpec | string, sessionGoal: string): WorkItem[] {
     try {
-      const parsed = JSON.parse(spec) as {
-        goal?: string;
-        context?: string;
-        workItems?: Array<{
-          id?: string;
-          objective: string;
-          delta?: string;
-          agent?: string;
-          domain?: string;
-          dependencies?: string[];
-          targetPaths?: string[];
-        }>;
-      };
+      const parsed = typeof spec === 'string'
+        ? JSON.parse(spec)
+        : spec;
 
-      if (!parsed.workItems || !Array.isArray(parsed.workItems)) {
-        this.log('warning', 'Handoff spec missing workItems array', { spec: spec.slice(0, 200) });
+      if (!parsed || typeof parsed !== 'object') {
+        this.log('warning', 'Handoff spec is not an object', { specPreview: typeof spec === 'string' ? spec.slice(0, 200) : undefined });
         return [];
       }
 
-      const planGoal = parsed.goal ?? sessionGoal;
+      const cast = parsed as HandoffSpec;
 
-      return parsed.workItems.map((item, index) => createWorkItem({
+      if (!cast.workItems || !Array.isArray(cast.workItems)) {
+        this.log('warning', 'Handoff spec missing workItems array', { specPreview: typeof spec === 'string' ? spec.slice(0, 200) : undefined });
+        return [];
+      }
+
+      const planGoal = cast.goal ?? sessionGoal;
+
+      return cast.workItems.map((item, index) => createWorkItem({
         goal: planGoal,
         objective: item.objective,
         delta: item.delta,
@@ -1857,7 +2605,7 @@ export class Orchestrator {
     } catch (err) {
       this.log('error', 'Failed to parse handoff spec', {
         error: err instanceof Error ? err.message : String(err),
-        specPreview: spec.slice(0, 200),
+        specPreview: typeof spec === 'string' ? spec.slice(0, 200) : JSON.stringify(spec).slice(0, 200),
       });
       return [];
     }

@@ -94,6 +94,11 @@ Commands:
   list                           List all derived tasks
   run <task-id>                  Run a task immediately
   logs <task-id>                 Show recent jobs for a task
+  disable <task-id>              Disable a task
+  enable <task-id>               Enable a disabled task
+  delete <task-id>               Delete a task permanently
+  circuit                        Show tasks with open circuits
+  reset <task-id>                Reset circuit breaker for a task
 
 Options:
   -h, --help                     Show this help message
@@ -102,6 +107,11 @@ Options:
   --interval-ms <ms>             Interval for recurring mode
   --priority <number>            Job priority (default: 0)
   --metadata <json>              Metadata to attach to task/job
+
+Circuit Breaker:
+  Tasks auto-disable after consecutive failures (default: 3).
+  Circuit reopens with exponential backoff (5min, 10min, 20min, ...).
+  Use 'reset' to manually close the circuit and retry.
 
 Examples:
   # Create a once-off task
@@ -115,6 +125,12 @@ Examples:
 
   # List all tasks
   bun run scripts/derived-cli.ts list
+
+  # Show tasks with open circuits
+  bun run scripts/derived-cli.ts circuit
+
+  # Reset a tripped circuit
+  bun run scripts/derived-cli.ts reset 01ABC...
 
 Environment:
   DATABASE_URL    PostgreSQL connection string
@@ -222,7 +238,10 @@ async function listTasks(
 
   for (const task of tasks) {
     const status = task.enabled ? 'enabled' : 'disabled'
-    console.log(`  ${task.id}  ${task.name} [${status}]`)
+    const circuitStatus = task.circuit_open_until && new Date(task.circuit_open_until) > new Date()
+      ? ` ⚡CIRCUIT OPEN until ${task.circuit_open_until}`
+      : ''
+    console.log(`  ${task.id}  ${task.name} [${status}]${circuitStatus}`)
     console.log(`    Script: ${task.script_path}`)
     console.log(`    Mode: ${task.mode}`)
     if (task.interval_ms) {
@@ -233,6 +252,9 @@ async function listTasks(
     }
     if (task.last_job_id) {
       console.log(`    Last job: ${task.last_job_id}`)
+    }
+    if (task.consecutive_failures > 0) {
+      console.log(`    Failures: ${task.consecutive_failures}/${task.max_failures}`)
     }
     console.log('')
   }
@@ -339,6 +361,92 @@ async function showTaskLogs(
   }
 }
 
+async function disableTask(
+  taskId: string,
+  taskRepo: ReturnType<typeof createDerivedTaskRepository>
+): Promise<void> {
+  const task = await taskRepo.findById(taskId)
+  if (!task) {
+    console.error(`Error: Derived task not found: ${taskId}`)
+    process.exit(1)
+  }
+
+  await taskRepo.update(taskId, { enabled: false })
+  console.log(`✓ Disabled task: ${task.name} (${task.id})`)
+}
+
+async function enableTask(
+  taskId: string,
+  taskRepo: ReturnType<typeof createDerivedTaskRepository>
+): Promise<void> {
+  const task = await taskRepo.findById(taskId)
+  if (!task) {
+    console.error(`Error: Derived task not found: ${taskId}`)
+    process.exit(1)
+  }
+
+  await taskRepo.update(taskId, { enabled: true })
+  // Also reset circuit if it was open
+  await taskRepo.resetCircuit(taskId)
+  console.log(`✓ Enabled task: ${task.name} (${task.id})`)
+}
+
+async function showCircuitOpen(
+  taskRepo: ReturnType<typeof createDerivedTaskRepository>
+): Promise<void> {
+  const tasks = await taskRepo.findCircuitOpen()
+
+  if (tasks.length === 0) {
+    console.log('No tasks with open circuits.')
+    return
+  }
+
+  console.log(`Found ${tasks.length} task(s) with open circuits:\n`)
+
+  for (const task of tasks) {
+    console.log(`  ⚡ ${task.id}  ${task.name}`)
+    console.log(`     Consecutive failures: ${task.consecutive_failures}/${task.max_failures}`)
+    console.log(`     Circuit open until: ${task.circuit_open_until}`)
+    if (task.last_error) {
+      console.log(`     Last error: ${task.last_error.slice(0, 80)}${task.last_error.length > 80 ? '...' : ''}`)
+    }
+    console.log('')
+  }
+
+  console.log('Use: bun run scripts/derived-cli.ts reset <task-id> to reset a circuit')
+}
+
+async function resetCircuit(
+  taskId: string,
+  taskRepo: ReturnType<typeof createDerivedTaskRepository>
+): Promise<void> {
+  const task = await taskRepo.findById(taskId)
+  if (!task) {
+    console.error(`Error: Derived task not found: ${taskId}`)
+    process.exit(1)
+  }
+
+  await taskRepo.resetCircuit(taskId)
+  console.log(`✓ Reset circuit for task: ${task.name} (${task.id})`)
+  console.log(`  Consecutive failures: 0`)
+  console.log(`  Circuit: closed`)
+}
+
+async function deleteTask(
+  taskId: string,
+  sql: ReturnType<typeof postgres>,
+  taskRepo: ReturnType<typeof createDerivedTaskRepository>
+): Promise<void> {
+  const task = await taskRepo.findById(taskId)
+  if (!task) {
+    console.error(`Error: Derived task not found: ${taskId}`)
+    process.exit(1)
+  }
+
+  await sql`DELETE FROM derived_tasks WHERE id = ${taskId}`
+  console.log(`✓ Deleted task: ${task.name} (${task.id})`)
+}
+
 // ============ Main ============
 
 async function main(): Promise<void> {
@@ -396,6 +504,45 @@ async function main(): Promise<void> {
         }
         const taskId = args[1]
         await showTaskLogs(taskId, taskRepo, jobRepo)
+        break
+      }
+      case 'disable': {
+        if (args.length < 2) {
+          console.error('Usage: disable <task-id>')
+          process.exit(1)
+        }
+        const taskId = args[1]
+        await disableTask(taskId, taskRepo)
+        break
+      }
+      case 'enable': {
+        if (args.length < 2) {
+          console.error('Usage: enable <task-id>')
+          process.exit(1)
+        }
+        const taskId = args[1]
+        await enableTask(taskId, taskRepo)
+        break
+      }
+      case 'circuit':
+        await showCircuitOpen(taskRepo)
+        break
+      case 'reset': {
+        if (args.length < 2) {
+          console.error('Usage: reset <task-id>')
+          process.exit(1)
+        }
+        const taskId = args[1]
+        await resetCircuit(taskId, taskRepo)
+        break
+      }
+      case 'delete': {
+        if (args.length < 2) {
+          console.error('Usage: delete <task-id>')
+          process.exit(1)
+        }
+        const taskId = args[1]
+        await deleteTask(taskId, sql, taskRepo)
         break
       }
       default:

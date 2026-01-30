@@ -5,6 +5,7 @@
  * Returns AgentResult with all outputs.
  */
 
+import path from 'node:path';
 import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
 import {
   resilientCall,
@@ -15,9 +16,10 @@ import {
   DEFAULT_RESILIENCE_CONFIG,
 } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema } from 'types';
+import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, MessageItem } from 'types';
+import type { HandoffSpec } from 'protocol';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -32,6 +34,7 @@ import type {
   AgentHooks,
   InternalHookQueue,
   InternalHookContext,
+  MutableAgentResult,
 } from './types.js';
 import { noopEmit, noopHookQueue } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
@@ -42,11 +45,7 @@ import {
 } from './circuit-breaker-registry.js';
 import { TOOL_LIMITS, getMaxOutputLength, isRefusal } from './constants.js';
 
-/**
- * Default timeout for LLM streaming calls in milliseconds.
- * Set to 4 minutes - long enough for complex responses but prevents infinite hangs.
- */
-const LLM_STREAM_TIMEOUT_MS = 240_000;
+import { DEFAULT_AGENT_BUDGET } from './types.js';
 
 /**
  * Cadence check interval: every N LLM iterations, invoke the watcher hook.
@@ -102,6 +101,35 @@ export interface ModelSelection {
  */
 export interface MemoryInjector {
   inject(params: { query: string; maxTokens: number }): Promise<string | null>;
+  injectV2?: (params: {
+    task: {
+      objective: string;
+      recentMessages: string[];
+      touchedFiles?: string[];
+      iteration: number;
+      sessionId: string;
+      workItemId?: string;
+    };
+    budget: {
+      maxTokens: number;
+      maxItems?: number;
+      minCoverage?: Partial<Record<string, number>>;
+    };
+    options?: {
+      forceV1Fallback?: boolean;
+      trace?: boolean;
+    };
+  }) => Promise<{
+    content: string;
+    atoms: unknown[];
+    metrics: {
+      totalTokens: number;
+      attentionTax: number;
+      coverage: Record<string, number>;
+      discriminatorsIncluded: number;
+      latencyMs: number;
+    };
+  } | null>;
 }
 
 /**
@@ -184,7 +212,7 @@ export class Agent {
   private finalizeIteration(
     localReadFiles: Set<string>,
     workItem: WorkItem,
-    result: AgentResult,
+    result: MutableAgentResult,
     metrics: AgentMetrics,
     iteration: number,
     hasResponse: boolean
@@ -209,7 +237,7 @@ export class Agent {
     metrics: AgentMetrics,
     workItem: WorkItem,
     elapsedMs: number
-  ): 'bounds:tool_calls' | 'bounds:duration' | null {
+  ): 'max_tool_calls_exceeded' | 'max_duration_exceeded' | null {
     if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
       this.emit(createEvent('agent_bounds_hit', {
         agentType: this.config.type,
@@ -217,7 +245,7 @@ export class Agent {
         current: metrics.toolCallsMade,
         max: workItem.bounds.maxToolCalls,
       }, workItem.workId));
-      return 'bounds:tool_calls';
+      return 'max_tool_calls_exceeded';
     }
 
     if (elapsedMs >= workItem.bounds.maxDurationMs) {
@@ -227,7 +255,7 @@ export class Agent {
         current: elapsedMs,
         max: workItem.bounds.maxDurationMs,
       }, workItem.workId));
-      return 'bounds:duration';
+      return 'max_duration_exceeded';
     }
 
     return null;
@@ -303,14 +331,100 @@ export class Agent {
       ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
       : '';
 
-    // Memory injection (v1) - only on first iteration to avoid redundant API calls
+    // Memory injection (v1/v2)
     let memoryContent: string | null = null;
     if (this.memoryInjector) {
       try {
         const query = this.buildMemoryQuery(workItem, globalContext);
-        memoryContent = await this.memoryInjector.inject({ query, maxTokens: 1000 });
+        const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
+        const recentMessages = recentMessageItems
+          .filter(item => item.role === 'user')
+          .map(item => {
+            if (typeof item.content === 'string') return item.content;
+            if (Array.isArray(item.content)) {
+              return item.content
+                .map(block => (block.type === 'text' ? block.text : ''))
+                .join(' ');
+            }
+            return '';
+          })
+          .filter(text => text && text.trim().length > 0)
+          .slice(-3);
+
+        const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
+          if (path.isAbsolute(filePath)) {
+            return path.relative(cwd, filePath);
+          }
+          return filePath;
+        });
+        const shouldUseV2 = !!this.memoryInjector.injectV2 && this.shouldUseMemoryV2(this.sessionKey, workItem.workId);
+
+        let v2Result: { content: string; atoms: unknown[]; metrics: { totalTokens: number; attentionTax: number; coverage: Record<string, number>; discriminatorsIncluded: number; latencyMs: number } } | null = null;
+        let fallbackToV1 = false;
+
+        if (shouldUseV2 && this.memoryInjector.injectV2) {
+          v2Result = await this.memoryInjector.injectV2({
+            task: {
+              objective: workItem.objective,
+              recentMessages,
+              touchedFiles,
+              iteration,
+              sessionId: this.sessionKey,
+              workItemId: workItem.workId,
+            },
+            budget: {
+              maxTokens: 1000,
+              maxItems: 20,
+              minCoverage: {
+                code_entity: 3,
+                test_spec: 1,
+              },
+            },
+          });
+        }
+
+        if (v2Result?.content) {
+          memoryContent = v2Result.content;
+          this.internalHookQueue.enqueue({
+            type: 'memory_injected',
+            query,
+            resultPreview: memoryContent.slice(0, 500),
+            itemCount: v2Result.atoms?.length ?? 0,
+            success: true,
+            iteration,
+            version: 'v2',
+            latencyMs: v2Result.metrics?.latencyMs,
+            coverage: v2Result.metrics?.coverage,
+            discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
+            totalTokens: v2Result.metrics?.totalTokens,
+            fallbackToV1: false,
+          }, this.buildHookContext(workItem));
+        } else {
+          fallbackToV1 = shouldUseV2;
+          memoryContent = await this.memoryInjector.inject({ query, maxTokens: 1000 });
+          this.internalHookQueue.enqueue({
+            type: 'memory_injected',
+            query,
+            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
+            itemCount: memoryContent ? memoryContent.split('\n\n').filter(line => line.trim().length > 0).length : 0,
+            success: memoryContent !== null,
+            iteration,
+            version: 'v1',
+            fallbackToV1,
+          }, this.buildHookContext(workItem));
+        }
       } catch {
         // Silent fallback - continue without memory
+        // Fire memory_injected hook even on failure for observability
+        this.internalHookQueue.enqueue({
+          type: 'memory_injected',
+          query: this.buildMemoryQuery(workItem, globalContext),
+          resultPreview: undefined,
+          itemCount: 0,
+          success: false,
+          iteration,
+          version: 'v1',
+        }, this.buildHookContext(workItem));
       }
     }
 
@@ -339,13 +453,10 @@ export class Agent {
    */
   private handleHandoff(
     structuredOutput: Record<string, unknown> | null,
-    result: AgentResult
+    result: MutableAgentResult
   ): 'return' | 'continue' | null {
-    const handoffSpec = typeof structuredOutput?.handoffSpec === 'string'
-      ? structuredOutput.handoffSpec
-      : null;
-
-    if (handoffSpec) {
+    const handoffSpec = structuredOutput?.handoffSpec;
+    if (handoffSpec && this.isHandoffSpecCandidate(handoffSpec)) {
       result.needsHandoff = true;
       result.handoffSpec = handoffSpec;
       result.terminationReason = 'handoff_requested';
@@ -366,7 +477,7 @@ export class Agent {
     structuredOutput: Record<string, unknown> | null,
     responseText: string | undefined,
     content: string,
-    result: AgentResult
+    result: MutableAgentResult
   ): 'done' | 'handoff' | 'user_input' | 'continue' | 'no_action' {
     // Check awaitingUserInput first (fallback for conversational questions)
     if (!result.needsUserInput && structuredOutput?.awaitingUserInput === true) {
@@ -492,13 +603,13 @@ export class Agent {
    */
   private parseIterationResponse(
     content: string,
-    result: AgentResult
+    result: MutableAgentResult
   ): {
     structuredOutput: Record<string, unknown> | null;
     action: AgentAction | null;
     responseText: string | undefined;
   } {
-    const structuredOutput = this.parseStructuredOutput(content);
+    const structuredOutput = this.parseStructuredOutput(content, result);
     if (structuredOutput) {
       result.structuredOutput = structuredOutput;
     }
@@ -593,7 +704,7 @@ export class Agent {
       {
         circuitState,
         circuitKey,
-        timeoutMs: LLM_STREAM_TIMEOUT_MS,
+        timeoutMs: this.config.budget.llmStreamTimeoutMs ?? DEFAULT_AGENT_BUDGET.llmStreamTimeoutMs!,
         operationName: `LLM stream (${this.config.type})`,
         config: {
           ...DEFAULT_RESILIENCE_CONFIG,
@@ -631,7 +742,7 @@ export class Agent {
       durationMs: 0,
     };
 
-    const result: AgentResult = {
+    const result: MutableAgentResult = {
       success: false,
       response: '',
       metrics,
@@ -685,12 +796,12 @@ export class Agent {
           result.error = `LLM call timed out after ${cause.timeoutMs}ms (retries exhausted)`;
           console.error(`[AGENT] LLM timeout after ${error.attempts} retries: ${cause.timeoutMs}ms`);
         } else {
-          result.terminationReason = 'exception';
+          result.terminationReason = 'agent_error';
           result.error = `Retries exhausted after ${error.attempts} attempts: ${message}`;
           console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
         }
       } else {
-        result.terminationReason = 'exception';
+        result.terminationReason = 'agent_error';
         // Include stack trace in error message for debugging (truncated to first 5 lines)
         const stackPreview = stack?.split('\n').slice(0, 5).join('\n');
         result.error = stackPreview ? `${message}\n\nStack:\n${stackPreview}` : message;
@@ -757,7 +868,7 @@ export class Agent {
       type: 'agent_completed',
       workId: workItem.workId,
       success: result.success,
-      terminationReason: result.terminationReason ?? 'exception',
+      terminationReason: result.terminationReason ?? 'agent_error',
       filesRead: result.filesRead,
       invalidatedPaths: result.invalidatedPaths,
       // Include response and metrics for workitem log tracking
@@ -776,7 +887,7 @@ export class Agent {
       toolCalls: metrics.toolCallsMade,
     });
 
-    return result;
+    return this.finalizeResult(result);
   }
 
   /**
@@ -786,7 +897,7 @@ export class Agent {
     globalContext: ContextWindow,
     localContext: ContextWindow,
     workItem: WorkItem,
-    result: AgentResult,
+    result: MutableAgentResult,
     metrics: AgentMetrics,
     startTime: number,
     cwd: string
@@ -863,6 +974,8 @@ export class Agent {
       const jsonExtractor = hasStructuredOutput ? new StreamingJsonExtractor() : null;
       // Track what content was streamed to TUI (to avoid re-emitting in result.response)
       let streamedResponseContent = '';
+      // Track streamed reasoning content (some providers only stream reasoning)
+      let streamedReasoningContent = '';
 
       // Use resilient streaming with retry + circuit breaker
       const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
@@ -889,6 +1002,11 @@ export class Agent {
                 agentType: this.config.type,
                 message: chunk,
               }, workItem.workId));
+            }
+          },
+          onReasoningChunk: (chunk) => {
+            if (chunk) {
+              streamedReasoningContent += chunk;
             }
           },
 
@@ -918,9 +1036,11 @@ export class Agent {
       const content = (response.content ?? '') as string;
       const toolCalls = response.toolCalls ?? [];
 
+      const reasoningContent = response.reasoningContent || (streamedReasoningContent ? streamedReasoningContent : undefined);
+
       // Add reasoning content to context for multi-turn salience
-      if (response.reasoningContent) {
-        localContext.addReasoning(response.reasoningContent);
+      if (reasoningContent) {
+        localContext.addReasoning(reasoningContent);
       }
 
       // 3. Parse response content
@@ -928,15 +1048,15 @@ export class Agent {
       this.extractArtifactsFromOutput(structuredOutput, localContext);
       this.addAssistantMessage(localContext, content, toolCalls);
 
-      // Fire agent_message hook for workitem logging (captures actual content)
-      if (content && content.length > 0) {
-        this.internalHookQueue.enqueue({
-          type: 'agent_message',
-          role: 'assistant',
-          content: content.length > 3000 ? content.slice(0, 3000) + '... [truncated]' : content,
-          iteration,
-        }, this.buildHookContext(workItem));
-      }
+      // Fire agent_message hook for workitem logging (captures actual content + reasoning)
+      // Always emit per turn (even if content is empty) to keep async logs in sync.
+      this.internalHookQueue.enqueue({
+        type: 'agent_message',
+        role: 'assistant',
+        content,  // Full content - no truncation for proper audit trail
+        reasoning: reasoningContent,  // Include reasoning for decision audit
+        iteration,
+      }, this.buildHookContext(workItem));
 
       // If we streamed the response field, don't include it again in result.response
       // Only use pre-JSON text (if any) to avoid duplicate TUI output
@@ -948,6 +1068,20 @@ export class Agent {
       // Fallback: if structured output was expected but streaming didn't capture anything
       if (hasStructuredOutput) {
         this.emitFallbackResponse(content, jsonExtractor?.getContent() ?? '', workItem.workId);
+      }
+
+      // Hard stop on invalid structured output
+      if (result.terminationReason === 'invalid_action') {
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+        return;
+      }
+
+      // Routing agents return non-action structured output; treat as complete
+      if (this.resolveOutputSchemaId() === 'routing' && structuredOutput) {
+        result.success = true;
+        result.terminationReason = 'goal_state_reached';
+        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+        return;
       }
 
       // 4. Process tools (if any)
@@ -991,9 +1125,6 @@ export class Agent {
         case 'done':
         case 'user_input':
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          if (result.terminationReason === 'invalid_action') {
-            return; // Break out of loop via return (terminationReason already set)
-          }
           return;
 
         case 'handoff': {
@@ -1014,6 +1145,14 @@ export class Agent {
             result.response = responseCandidate;
           }
 
+          // If structured output was produced but action is missing, hard fail.
+          if (this.config.outputSchema && structuredOutput) {
+            result.terminationReason = 'invalid_action';
+            result.error = 'Structured output missing required "action" field.';
+            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+            return;
+          }
+
           // Tool calls made = progress, allow implicit continue
           if (toolCalls.length > 0) {
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
@@ -1022,7 +1161,7 @@ export class Agent {
 
           // No tool calls AND no action = inject schema reminder for structured output agents
           if (this.config.outputSchema) {
-            const schemaReminder = `[SCHEMA REMINDER] You must set "action" every turn. Valid values: "done" (with goalStateReached: true) or "continue" (with specific next steps). If you need user input, use PromptUser tool then action: "done".`;
+            const schemaReminder = `[SCHEMA REMINDER] You must set action, goalStateReached, awaitingUserInput, and handoffSpec every turn. Valid actions: "done", "continue", "handoff". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true, handoffSpec=null. For handoff, handoffSpec must be a structured object.`;
             localContext.addMessage('user', schemaReminder);
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
             continue;
@@ -1078,14 +1217,14 @@ export class Agent {
     // Handle exhausted resources - treat as partial success if we have content
     // If terminationReason is unset, we exhausted iterations without a specific termination
     if (!result.terminationReason) {
-      result.terminationReason = 'iterations_exhausted';
+      result.terminationReason = 'max_iterations_exceeded';
     }
 
     // For any bounds-related termination, mark as partial success if we have content
     const isBoundsTermination =
-      result.terminationReason === 'iterations_exhausted' ||
-      result.terminationReason === 'bounds:tool_calls' ||
-      result.terminationReason === 'bounds:duration';
+      result.terminationReason === 'max_iterations_exceeded' ||
+      result.terminationReason === 'max_tool_calls_exceeded' ||
+      result.terminationReason === 'max_duration_exceeded';
 
     if (isBoundsTermination) {
       if (result.response) {
@@ -1098,6 +1237,93 @@ export class Agent {
     }
 
     result.filesRead = Array.from(localReadFiles);
+  }
+
+  private finalizeResult(result: MutableAgentResult): AgentResult {
+    const terminationReason = result.terminationReason ?? 'agent_error';
+    const base = {
+      success: result.success,
+      response: result.response,
+      error: result.error,
+      metrics: result.metrics,
+      filesRead: result.filesRead,
+      invalidatedPaths: result.invalidatedPaths,
+      toolErrors: result.toolErrors,
+      isIncomplete: result.isIncomplete,
+      structuredOutput: result.structuredOutput,
+      artifacts: result.artifacts,
+      localContext: result.localContext,
+    };
+
+    if (terminationReason !== 'user_input_required' && result.needsUserInput) {
+      throw new Error(`AgentResult invariant violation: needsUserInput=true with terminationReason=${terminationReason}`);
+    }
+    if (terminationReason !== 'handoff_requested' && result.needsHandoff) {
+      throw new Error(`AgentResult invariant violation: needsHandoff=true with terminationReason=${terminationReason}`);
+    }
+    if (terminationReason !== 'refusal' && result.isRefusal) {
+      throw new Error(`AgentResult invariant violation: isRefusal=true with terminationReason=${terminationReason}`);
+    }
+
+    switch (terminationReason) {
+      case 'user_input_required': {
+        if (!result.userPrompt) {
+          throw new Error('AgentResult invariant violation: user_input_required without userPrompt');
+        }
+        return {
+          ...base,
+          terminationReason,
+          needsUserInput: true,
+          userPrompt: result.userPrompt,
+          needsHandoff: false,
+          isRefusal: false,
+        };
+      }
+      case 'handoff_requested': {
+        if (!result.handoffSpec) {
+          throw new Error('AgentResult invariant violation: handoff_requested without handoffSpec');
+        }
+        return {
+          ...base,
+          terminationReason,
+          needsUserInput: false,
+          needsHandoff: true,
+          handoffSpec: result.handoffSpec,
+          isRefusal: false,
+        };
+      }
+      case 'refusal': {
+        return {
+          ...base,
+          terminationReason,
+          needsUserInput: false,
+          needsHandoff: false,
+          isRefusal: true,
+        };
+      }
+      case 'rate_limit': {
+        if (!result.rateLimitInfo) {
+          throw new Error('AgentResult invariant violation: rate_limit without rateLimitInfo');
+        }
+        return {
+          ...base,
+          terminationReason,
+          needsUserInput: false,
+          needsHandoff: false,
+          isRefusal: false,
+          rateLimitInfo: result.rateLimitInfo,
+        };
+      }
+      default: {
+        return {
+          ...base,
+          terminationReason,
+          needsUserInput: false,
+          needsHandoff: false,
+          isRefusal: false,
+        };
+      }
+    }
   }
 
   /**
@@ -1123,6 +1349,20 @@ export class Agent {
 
     // Cap query length at 500 chars
     return parts.join(' ').slice(0, 500);
+  }
+
+  private shouldUseMemoryV2(sessionId: string, workId?: string): boolean {
+    const rawPercent = process.env.MEMORY_INJECTOR_V2_PERCENT;
+    const percent = rawPercent ? Number(rawPercent) : 100;
+    if (!Number.isFinite(percent) || percent <= 0) return false;
+    if (percent >= 100) return true;
+
+    const seed = `${sessionId}:${workId ?? ''}`;
+    let hash = 0;
+    for (let i = 0; i < seed.length; i++) {
+      hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+    }
+    return (hash % 100) < percent;
   }
 
   /**
@@ -1269,7 +1509,7 @@ export class Agent {
     globalContext: ContextWindow,
     localContext: ContextWindow,
     localReadFiles: Set<string>,
-    result: AgentResult,
+    result: MutableAgentResult,
     metrics: AgentMetrics,
     workItem: WorkItem,
     cwd: string,
@@ -1343,9 +1583,10 @@ export class Agent {
       }
 
       // For event emission, include error message for failed tools (output is empty in errorResult)
+      const failureMessage = toolResult.isSuccess ? '' : (toolResult.error || 'Unknown error');
       const eventResult = toolResult.isSuccess
-        ? toolResult.output?.slice(0, 10000)
-        : (toolResult.error ?? toolResult.output ?? 'Unknown error').slice(0, 10000);
+        ? toolResult.output.slice(0, 10000)
+        : failureMessage.slice(0, 10000);
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
@@ -1369,8 +1610,8 @@ export class Agent {
       // File reads get higher limit (30KB) vs general tools (8KB)
       // For failed tools, include the error message so the LLM knows what went wrong
       const rawOutput = toolResult.isSuccess
-        ? (toolResult.output ?? '')
-        : (toolResult.error ?? toolResult.output ?? 'Unknown error');
+        ? toolResult.output
+        : failureMessage;
       const maxLen = getMaxOutputLength(call.name);
       const truncatedOutput = rawOutput.length > maxLen
         ? rawOutput.slice(0, maxLen) + `\n... [truncated ${rawOutput.length - maxLen} chars]`
@@ -1402,7 +1643,7 @@ export class Agent {
         }
 
         if (toolRepeatState.repeats >= TOOL_LIMITS.MAX_IDENTICAL_CALLS) {
-          result.terminationReason = 'stagnation:tool_repeat';
+          result.terminationReason = 'stagnation';
           result.error = `Repeated identical tool call without progress: ${call.name}`;
           return true;
         }
@@ -2052,7 +2293,7 @@ export class Agent {
     // Include error details - if missing, note that
     if (subResult.error) {
       errorParts.push(`: ${subResult.error}`);
-    } else if (subResult.terminationReason === 'exception') {
+    } else if (subResult.terminationReason === 'agent_error') {
       errorParts.push(` - no error message captured, check agent logs`);
     }
     const toolsUsed = subResult.metrics?.toolCallsMade ?? 0;
@@ -2121,11 +2362,115 @@ export class Agent {
   /**
    * Parse structured output if configured.
    */
-  private parseStructuredOutput(content: string): Record<string, unknown> | null {
+  private resolveOutputSchemaId(): string | null {
+    const outputSchema = this.config.outputSchema;
+    if (!outputSchema) return null;
+
+    const raw = outputSchema.schemaId ?? outputSchema.name;
+    if (!raw || typeof raw !== 'string') return null;
+
+    const normalized = raw.trim().toLowerCase();
+    const candidate = normalized.endsWith('_output')
+      ? normalized.slice(0, -7)
+      : normalized;
+
+    if (Object.prototype.hasOwnProperty.call(OUTPUT_SCHEMAS, candidate)) {
+      return candidate;
+    }
+
+    return null;
+  }
+
+  private parseStructuredOutput(content: string, result: MutableAgentResult): Record<string, unknown> | null {
     const parsed = coerceStructuredOutput(content);
-    // Return whatever was parsed - let callers decide what fields they need
-    // (artifacts, action, response, etc.)
-    return parsed;
+    if (!parsed) return null;
+
+    if (!this.config.outputSchema) {
+      return parsed;
+    }
+
+    const schemaId = this.resolveOutputSchemaId();
+    if (!schemaId) {
+      result.terminationReason = 'invalid_action';
+      result.error = `Unknown output schema for ${this.config.type} (schemaId missing or unrecognized).`;
+      return null;
+    }
+
+    const schema = getOutputSchema(schemaId as keyof typeof OUTPUT_SCHEMAS);
+    if (!schema) {
+      result.terminationReason = 'invalid_action';
+      result.error = `Unknown output schema: ${schemaId}`;
+      return null;
+    }
+
+    const validated = schema.safeParse(parsed);
+    if (!validated.success) {
+      if (schemaId === 'planner_output') {
+        const fallback = this.coercePlannerOutputFromSpec(parsed);
+        if (fallback) {
+          console.warn('[agent] Coerced planner output from raw handoffSpec object (missing action).');
+          return fallback;
+        }
+      }
+
+      const issues = validated.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+      result.terminationReason = 'invalid_action';
+      result.error = `Structured output failed ${schemaId} validation: ${issues}`;
+      return null;
+    }
+
+    return validated.data as Record<string, unknown>;
+  }
+
+  private coercePlannerOutputFromSpec(parsed: Record<string, unknown>): Record<string, unknown> | null {
+    if (!this.isHandoffSpecCandidate(parsed)) return null;
+
+    const workItems = parsed.workItems.length;
+    const response = workItems > 0
+      ? `Planner produced ${workItems} work items.`
+      : 'Planner produced handoffSpec.';
+
+    return {
+      action: 'handoff',
+      response,
+      goalStateReached: true,
+      awaitingUserInput: false,
+      handoffSpec: parsed,
+    };
+  }
+
+  private isHandoffSpecCandidate(parsed: unknown): parsed is HandoffSpec {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    const spec = parsed as Record<string, unknown>;
+
+    if ('action' in spec) return false;
+    if (typeof spec.goal !== 'string' || spec.goal.trim().length === 0) return false;
+    if (typeof spec.context !== 'string') return false;
+    if (!Array.isArray(spec.workItems) || spec.workItems.length === 0) return false;
+
+    for (const item of spec.workItems) {
+      if (!item || typeof item !== 'object') return false;
+      const entry = item as Record<string, unknown>;
+
+      if (typeof entry.id !== 'string' || entry.id.trim().length === 0) return false;
+      if (typeof entry.objective !== 'string' || entry.objective.trim().length === 0) return false;
+      if (typeof entry.delta !== 'string' || entry.delta.trim().length === 0) return false;
+      if (typeof entry.agent !== 'string' || entry.agent.trim().length === 0) return false;
+
+      if (entry.targetPaths !== undefined) {
+        if (!Array.isArray(entry.targetPaths) || !entry.targetPaths.every(p => typeof p === 'string')) {
+          return false;
+        }
+      }
+
+      if (entry.dependencies !== undefined) {
+        if (!Array.isArray(entry.dependencies) || !entry.dependencies.every(d => typeof d === 'string')) {
+          return false;
+        }
+      }
+    }
+
+    return true;
   }
 
   /**

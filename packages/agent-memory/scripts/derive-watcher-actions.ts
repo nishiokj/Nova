@@ -17,8 +17,12 @@
  */
 
 import { readdir, stat, readFile } from 'fs/promises'
-import { join, basename } from 'path'
+import { join, basename, resolve, dirname, isAbsolute } from 'path'
 import { existsSync } from 'fs'
+import { fileURLToPath } from 'url'
+
+// Project root: 3 levels up from this script (scripts/ -> agent-memory/ -> packages/ -> root)
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 import type {
   DerivedRunContext,
   DerivedRunResult,
@@ -76,9 +80,13 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
   const { sql, task, job, logger } = ctx
 
   logger.info(`Starting watcher actions derivation (job: ${job.id})`)
+  logger.debug(`Project root: ${PROJECT_ROOT}`)
 
   const config = task.metadata as Record<string, unknown> | undefined
-  const watcherPath = (config?.watcherPath as string) ?? '.watcher'
+  const rawWatcherPath = (config?.watcherPath as string) ?? '.watcher'
+  // Resolve relative paths against project root, not cwd
+  const watcherPath = isAbsolute(rawWatcherPath) ? rawWatcherPath : resolve(PROJECT_ROOT, rawWatcherPath)
+  logger.debug(`Resolved watcher path: ${watcherPath} (from: ${rawWatcherPath})`)
   const limit = (config?.limit as number) ?? 500
   const processWorkLogs = (config?.processWorkLogs as boolean) ?? true
 

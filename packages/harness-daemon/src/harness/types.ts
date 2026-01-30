@@ -18,7 +18,7 @@ export interface AgentRunParams {
   workingDir: string;
   context?: string;
   planMode?: boolean;
-  stopHook?: import('orchestrator').StopHookHandler;
+  hookRegistry?: import('orchestrator').HookRegistry;
 }
 
 /**

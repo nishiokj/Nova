@@ -31,6 +31,8 @@ import type {
   ConnectorSanityResponse,
   ConnectorUnregisterResponse,
   DecisionsSearchResponse,
+  EvidenceRetrieveRequest,
+  EvidenceRetrieveResponse,
   DerivedJob,
   DerivedJobListResponse,
   DerivedJobResponse,
@@ -893,6 +895,20 @@ export class SyncClient {
       if (opts.offset !== undefined) params.set('offset', String(opts.offset))
       const query = params.toString()
       return this.get<DecisionsSearchResponse>(`/decisions/search?${query}`)
+    },
+  }
+
+  // ============ Evidence ============
+
+  /**
+   * Evidence retrieval (v2).
+   */
+  evidence = {
+    /**
+     * Retrieve evidence for memory injection.
+     */
+    retrieve: async (opts: EvidenceRetrieveRequest): Promise<EvidenceRetrieveResponse> => {
+      return this.post<EvidenceRetrieveResponse>('/evidence/retrieve', opts)
     },
   }
 
