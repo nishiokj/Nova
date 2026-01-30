@@ -33,6 +33,7 @@ function createThemeColorFunctions(colors: ThemeColors) {
     literal: chalk.hex(colors.number),
     variable: chalk.hex(colors.text),
     parameter: chalk.hex(colors.text),
+    text: chalk.hex(colors.text),
   }
 }
 
@@ -124,126 +125,72 @@ function getNodeColorMapping(): Record<string, (text: string) => string> {
     'integer': colors.number,
     'float': colors.number,
 
-    // Functions - use func color
-    'function_declaration': colors.function,
-    'function_definition': colors.function,
-    'method_definition': colors.function,
-    'arrow_function': colors.function,
-    'generator_function': colors.function,
-
-    // Identifiers - use text color
+    // Identifiers (leaf nodes)
     'identifier': colors.identifier,
     'property_identifier': colors.property,
     'shorthand_property_identifier': colors.property,
+    'shorthand_property_identifier_pattern': colors.property,
     'type_identifier': colors.type,
-    'named_imports': colors.identifier,
-    'import_specifier': colors.identifier,
-    'namespace_import': colors.identifier,
-    'import_clause': colors.identifier,
 
     // Keywords as identifiers
     'this': colors.variable,
     'super': colors.variable,
 
-    // Types - use url color for types
-    'type_annotation': colors.type,
+    // Built-in types (leaf nodes)
     'predefined_type': colors.type,
-    'generic_type': colors.type,
 
-    // JSX/TSX
-    'jsx_identifier': colors.identifier,
-    'jsx_attribute': colors.property,
-    'jsx_attribute_name': colors.property,
-    'jsx_attribute_value': colors.string,
+    // JSX leaf nodes
     'jsx_text': colors.text,
 
-    // Decorators and modifiers - use header color
-    'decorator': colors.decorator,
+    // Decorator @ symbol
+    '@': colors.decorator,
+
+    // Modifiers (leaf keyword tokens)
     'public': colors.keyword,
     'private': colors.keyword,
     'protected': colors.keyword,
     'readonly': colors.keyword,
     'static': colors.keyword,
     'abstract': colors.keyword,
+    'declare': colors.keyword,
+    'override': colors.keyword,
 
-    // Operators - use accent color
-    'spread': colors.operator,
-    'rest_pattern': colors.operator,
-
-    // Additional type-related nodes
-    'tuple_type': colors.type,
-    'union_type': colors.type,
-    'intersection_type': colors.type,
-    'array_type': colors.type,
-    'object_type': colors.type,
-    'optional_parameter': colors.parameter,
-    'required_parameter': colors.parameter,
-    'type_parameters': colors.type,
-    'type_parameter': colors.type,
-
-    // Call expressions
-    'call_expression': colors.function,
-    'new_expression': colors.keyword,
-    'member_expression': colors.property,
-    'subscript_expression': colors.property,
-
-    // Statements
-    'expression_statement': colors.text,
-    'block': colors.text,
-    'parenthesized_expression': colors.text,
-
-    // Pattern matching
-    'pattern': colors.identifier,
-    'object_pattern': colors.identifier,
-    'array_pattern': colors.identifier,
-    'assignment_pattern': colors.operator,
+    // Type operators (leaf tokens)
+    '|': colors.operator,
+    '&': colors.operator,
+    '?': colors.operator,
 
     // Additional literals
     'regex': colors.string,
+    'regex_pattern': colors.string,
 
-    // JSX specific
-    'jsx_opening_element': colors.function,
-    'jsx_closing_element': colors.function,
-    'jsx_self_closing_element': colors.function,
-    'jsx_fragment': colors.function,
-    'jsx_element': colors.function,
+    // JSX tag names (leaf nodes)
+    'jsx_identifier': colors.function,
 
-    // Template literals
-    'template_substitution': colors.variable,
+    // Operators (leaf punctuation tokens)
+    '=>': colors.operator,
+    '...': colors.operator,
+    '?.': colors.operator,
+    '??': colors.operator,
+    '++': colors.operator,
+    '--': colors.operator,
+    '&&': colors.operator,
+    '||': colors.operator,
 
-    // Unary/binary expressions
-    'unary_expression': colors.operator,
-    'binary_expression': colors.operator,
-    'ternary_expression': colors.operator,
-
-    // Import/Export
-    'import_statement': colors.keyword,
-    'export_statement': colors.keyword,
-    'named_exports': colors.identifier,
-
-    // Class body
-    'class_body': colors.text,
-    'class_name': colors.type,
-
-    // Parameter
-    'formal_parameters': colors.parameter,
-    'parameter': colors.parameter,
-
-    // Punctuators
-    'property_access_expression': colors.property,
-
-    // Variable declarations
-    'variable_declaration': colors.keyword,
-    'variable_declarator': colors.identifier,
-
-    // Assignment
-    'assignment_expression': colors.operator,
-
-    // Logical operators
-    'logical_expression': colors.operator,
-
-    // Update expressions
-    'update_expression': colors.operator,
+    // Punctuation that provides structure (intentionally light)
+    '{': colors.text,
+    '}': colors.text,
+    '(': colors.text,
+    ')': colors.text,
+    '[': colors.text,
+    ']': colors.text,
+    ';': colors.text,
+    ',': colors.text,
+    '.': colors.text,
+    ':': colors.text,
+    '=': colors.operator,
+    '<': colors.operator,
+    '>': colors.operator,
   }
 }
 
@@ -317,9 +264,11 @@ export function highlightCode(code: string | null, lang: string | undefined): st
   // Detect language
   const supportedLang = detectLanguage(lang)
 
-  // Fall back to plain code for unsupported languages or no language specified
+  // For unsupported languages, still apply code styling (muted text on black bg)
+  // This makes code blocks visually distinct from regular text
   if (!supportedLang) {
-    return code
+    const colors = getColors()
+    return chalk.bgBlack.hex(colors.muted)(code)
   }
 
   try {
@@ -333,9 +282,9 @@ export function highlightCode(code: string | null, lang: string | undefined): st
     // Add subtle background to make it stand out as code
     return chalk.bgBlack(highlighted)
   } catch (error) {
-    // If parsing fails, return plain code
-    // This can happen with incomplete/malformed code snippets
-    return code
+    // If parsing fails, apply basic code styling
+    const colors = getColors()
+    return chalk.bgBlack.hex(colors.muted)(code)
   }
 }
 
@@ -348,7 +297,8 @@ function highlightTree(tree: Parser.Tree, source: string): string {
   const root = tree.rootNode
 
   // Check for parse errors (still try to highlight what we can)
-  const hasError = root.hasError()
+  // Note: hasError is a property in entity-graph's tree-sitter binding, not a method
+  const hasError = root.hasError
 
   // Collect all highlightable nodes with their ranges
   const highlights: Array<{ start: number; end: number; color: (text: string) => string }> = []

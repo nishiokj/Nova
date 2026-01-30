@@ -45,11 +45,7 @@ import {
 } from './circuit-breaker-registry.js';
 import { TOOL_LIMITS, getMaxOutputLength, isRefusal } from './constants.js';
 
-/**
- * Default timeout for LLM streaming calls in milliseconds.
- * Set to 4 minutes - long enough for complex responses but prevents infinite hangs.
- */
-const LLM_STREAM_TIMEOUT_MS = 240_000;
+import { DEFAULT_AGENT_BUDGET } from './types.js';
 
 /**
  * Cadence check interval: every N LLM iterations, invoke the watcher hook.
@@ -708,7 +704,7 @@ export class Agent {
       {
         circuitState,
         circuitKey,
-        timeoutMs: LLM_STREAM_TIMEOUT_MS,
+        timeoutMs: this.config.budget.llmStreamTimeoutMs ?? DEFAULT_AGENT_BUDGET.llmStreamTimeoutMs!,
         operationName: `LLM stream (${this.config.type})`,
         config: {
           ...DEFAULT_RESILIENCE_CONFIG,

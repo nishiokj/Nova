@@ -21,12 +21,15 @@ export interface AgentBudget {
   maxToolCalls: number;
   /** Maximum duration in milliseconds */
   maxDurationMs: number;
+  /** Timeout for individual LLM streaming calls in milliseconds (default 240_000 = 4 min) */
+  llmStreamTimeoutMs?: number;
 }
 
 export const DEFAULT_AGENT_BUDGET: AgentBudget = {
   maxIterations: 20,
   maxToolCalls: 150,
   maxDurationMs: 120_000,
+  llmStreamTimeoutMs: 240_000,
 };
 
 /**

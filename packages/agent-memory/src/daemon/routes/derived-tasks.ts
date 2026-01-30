@@ -9,6 +9,7 @@ import type { SyncDaemon } from '../index.js'
 import { badRequest, notFound } from '../server.js'
 import { TaskSandbox, type DerivedTaskSandboxResult } from '../../derived/sandbox.js'
 import { DerivedTaskIntegration } from '../../derived/integration.js'
+import { loadScriptMetadata, validateMetadata } from '../../derived/runner.js'
 import type { ReplayPolicy } from '../../db/repositories/derived-task.js'
 
 export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon): void {
@@ -97,12 +98,57 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       throw badRequest('rateLimitWindowMs is required when rateLimitMax is set')
     }
 
+    // Validate metadata against script schema if available
+    let normalizedMetadata = body.metadata
+    let metadataValidation: {
+      valid: boolean
+      errors?: { field: string; message: string; received?: unknown; expected?: string }[]
+      appliedDefaults?: Record<string, unknown>
+    } | undefined
+
+    try {
+      const scriptSchema = await loadScriptMetadata(body.scriptPath)
+      if (scriptSchema) {
+        const validationResult = validateMetadata(body.metadata, scriptSchema)
+        if (!validationResult.valid) {
+          // Format errors for API response
+          const errorDetails = {
+            valid: false,
+            errors: validationResult.errors.map(e => ({
+              field: e.field,
+              message: e.message,
+              received: e.received,
+              expected: e.expected,
+            })),
+          }
+          throw badRequest(
+            'Metadata validation failed',
+            'METADATA_VALIDATION_FAILED',
+            errorDetails
+          )
+        }
+        // Use normalized metadata with defaults applied
+        normalizedMetadata = validationResult.normalized
+        metadataValidation = {
+          valid: true,
+          appliedDefaults: validationResult.appliedDefaults,
+        }
+      }
+    } catch (error) {
+      if (error && typeof error === 'object' && 'error' in error) {
+        // Re-throw badRequest errors
+        throw error
+      }
+      // Log but don't fail on schema loading errors - it's a soft validation
+      console.warn(`[DerivedTaskRoutes] Could not load script metadata for validation: ${error}`)
+    }
+
     let task = await derivedTaskRepo.create({
       name: body.name,
       scriptPath: body.scriptPath,
       mode: body.mode,
       intervalMs: body.intervalMs,
-      metadata: body.metadata,
+      metadata: normalizedMetadata,
       triggerConfig: body.triggerConfig,
       replayPolicy: body.replayPolicy,
       idempotent: body.idempotent,
@@ -145,7 +191,7 @@ export function registerDerivedTaskRoutes(server: HttpServer, daemon: SyncDaemon
       sandboxError = error instanceof Error ? error.message : String(error)
     }
 
-    return { status: 201, body: { task, sandbox, sandboxError } }
+    return { status: 201, body: { task, sandbox, sandboxError, metadataValidation } }
   })
 
   // Run derived task immediately

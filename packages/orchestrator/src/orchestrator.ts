@@ -86,6 +86,10 @@ export interface OrchestratorConfig {
   compactMaxFileCount: number;
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
+  /** Minimum iteration gap between watcher evaluations (default 5) */
+  minWatcherIterationGap: number;
+  /** Maximum realign attempts before forcing termination (default 3) */
+  maxRealigns: number;
   /**
    * Async mode configuration for decision watcher.
    * When enabled, the watcher will automatically answer PromptUser questions
@@ -157,6 +161,8 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   compactResetPercent: 0.7,
   compactMaxFileCount: 20,
   compactTruncateTo: 5000,
+  minWatcherIterationGap: 5,
+  maxRealigns: 3,
 };
 
 /**
@@ -248,9 +254,8 @@ export class Orchestrator {
   private initialWorkId: string = '';
 
   // Realign counter to prevent infinite loops when bounds are exceeded
-  // After MAX_REALIGNS, we force termination instead of continuing
+  // After config.maxRealigns, we force termination instead of continuing
   private realignCount: number = 0;
-  private static readonly MAX_REALIGNS = 3;
   private hookMetadata: Map<string, unknown> = new Map();
   private hookAuditLog: Array<{ timestamp: number; source: string; event: string; details: Record<string, unknown> }> = [];
   private hookTerminationReason: TerminationReason | null = null;
@@ -1912,11 +1917,11 @@ export class Orchestrator {
       this.realignCount++;
       this.log('info', 'Realign count incremented for bounds exceeded', {
         realignCount: this.realignCount,
-        maxRealigns: Orchestrator.MAX_REALIGNS,
+        maxRealigns: this.config.maxRealigns,
         terminationReason,
       });
 
-      if (this.realignCount > Orchestrator.MAX_REALIGNS) {
+      if (this.realignCount > this.config.maxRealigns) {
         this.log('warning', 'Max realigns exceeded, forcing termination', {
           realignCount: this.realignCount,
           terminationReason,

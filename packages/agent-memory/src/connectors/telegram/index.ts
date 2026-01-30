@@ -5,14 +5,14 @@
  * Handles message routing, session management, and user prompts.
  */
 
-import { HarnessClient, type BridgeEvent, type Attachment } from 'harness-client'
+import { HarnessClient, type BridgeEvent, type Attachment, type ConnectionState } from 'harness-client'
 import type {
   TelegramConnectorConfig,
   TelegramUpdate,
   TelegramMessage,
   TelegramFile,
   PhotoSize,
-  PendingRequest,
+  RequestState,
   ChatSession,
 } from './types.js'
 
@@ -33,21 +33,17 @@ export class TelegramConnector {
   private readonly fetchTimeoutMs: number = 30000 // 30s timeout for API calls
 
   private client: HarnessClient
-  private connected = false
+  private connectionState: ConnectionState = 'disconnected'
 
   /** chatId → session state */
   private sessions = new Map<number, ChatSession>()
-  /** requestId → pending request info */
-  private pendingRequests = new Map<string, PendingRequest>()
-  /** requestId → accumulated response text */
-  private responseBuffers = new Map<string, string>()
+  /** requestId → request state */
+  private requests = new Map<string, RequestState>()
 
   /** Background cleanup interval */
   private reaperInterval: NodeJS.Timeout | null = null
   /** Reconnection queue for messages sent while disconnected */
   private messageQueue: Array<{ update: TelegramUpdate; retryCount: number }> = []
-  /** Whether reconnection is in progress */
-  private reconnecting = false
 
   constructor(config: TelegramConnectorConfig) {
     this.botToken = config.botToken
@@ -70,7 +66,13 @@ export class TelegramConnector {
 
     this.client.on('close', () => {
       console.log('[TelegramConnector] Disconnected from harness')
-      this.connected = false
+    })
+
+    this.client.on('connection_state', (state: ConnectionState) => {
+      this.connectionState = state
+      if (state === 'connected') {
+        void this.flushQueuedMessages()
+      }
     })
 
     this.client.on('error', (err) => {
@@ -87,10 +89,9 @@ export class TelegramConnector {
   // ===========================================================================
 
   async connect(): Promise<void> {
-    if (this.connected) return
+    if (this.connectionState === 'connected') return
 
     await this.client.connect()
-    this.connected = true
     console.log('[TelegramConnector] Connected to harness')
 
     // Start background cleanup interval
@@ -105,10 +106,9 @@ export class TelegramConnector {
     }
 
     this.client.close()
-    this.connected = false
+    this.connectionState = 'disconnected'
     this.sessions.clear()
-    this.pendingRequests.clear()
-    this.responseBuffers.clear()
+    this.requests.clear()
     this.messageQueue = []
   }
 
@@ -125,7 +125,7 @@ export class TelegramConnector {
   }
 
   isConnected(): boolean {
-    return this.connected
+    return this.connectionState === 'connected'
   }
 
   // ===========================================================================
@@ -233,12 +233,11 @@ export class TelegramConnector {
           return true
         }
 
-        if (!this.connected) {
+        if (!this.isConnected()) {
           await this.sendMessage(chatId, '🔄 Reconnecting... Please try /async again in a moment.')
-          if (!this.reconnecting) {
-            this.reconnecting = true
-            void this.attemptReconnect()
-          }
+          void this.client.connect().catch(err => {
+            console.error('[TelegramConnector] Reconnect failed:', err)
+          })
           return true
         }
 
@@ -261,14 +260,15 @@ export class TelegramConnector {
         }
 
         if (result.requestId) {
-          this.pendingRequests.set(result.requestId, {
+          this.requests.set(result.requestId, {
+            status: 'streaming',
+            requestId: result.requestId,
             chatId,
             messageId: message.message_id,
             text: goal,
             startedAt: Date.now(),
-            settled: false,
+            buffer: '',
           })
-          this.responseBuffers.set(result.requestId, '')
           this.client.subscribeRun(result.requestId)
         }
 
@@ -296,15 +296,14 @@ export class TelegramConnector {
     attachments?: { photo?: { file_id: string }, document?: { file_id: string } }
   ): Promise<boolean> {
     // Handle disconnection with reconnection queue
-    if (!this.connected) {
+    if (!this.isConnected()) {
       // Queue the message for retry and inform user
       this.messageQueue.push({ update, retryCount: 0 })
 
       // Try to reconnect in background
-      if (!this.reconnecting) {
-        this.reconnecting = true
-        void this.attemptReconnect()
-      }
+      void this.client.connect().catch(err => {
+        console.error('[TelegramConnector] Reconnect failed:', err)
+      })
 
       await this.sendMessage(message.chat.id, '🔄 Reconnecting... Your message is queued.')
       return true
@@ -376,21 +375,37 @@ export class TelegramConnector {
     }
 
     // Track this request
-    this.pendingRequests.set(requestId, {
+    this.requests.set(requestId, {
+      status: 'streaming',
+      requestId,
       chatId,
       messageId: message.message_id,
       text,
       startedAt: Date.now(),
-      settled: false,
+      buffer: '',
       attachments: attachmentList.length > 0 ? attachmentList : undefined,
     })
-    this.responseBuffers.set(requestId, '')
+
+    if (!text.trim() && attachmentList.length > 0) {
+      await this.sendMessage(
+        chatId,
+        '⚠️ Attachments require a caption for now. Please resend with text.'
+      )
+      this.requests.delete(requestId)
+      return true
+    }
 
     // Subscribe to run events and send message
     this.client.subscribeRun(requestId)
 
-    // Determine command type based on attachments
-    const commandType = attachmentList.length > 0 ? 'send_media' : 'send_text'
+    // Harness bridge doesn't support send_media yet; always use send_text
+    if (attachmentList.length > 0) {
+      await this.sendMessage(
+        chatId,
+        '⚠️ Attachments are not yet supported by the service. Sending text only.'
+      )
+    }
+    const commandType = 'send_text'
     const sent = this.client.send({
       type: commandType,
       data: {
@@ -403,8 +418,7 @@ export class TelegramConnector {
     if (!sent) {
       console.error('[TelegramConnector] Failed to send message to harness')
       await this.sendMessage(chatId, '⚠️ Failed to send message to service. Please try again.')
-      this.pendingRequests.delete(requestId)
-      this.responseBuffers.delete(requestId)
+      this.requests.delete(requestId)
       return false
     }
 
@@ -417,40 +431,19 @@ export class TelegramConnector {
   /**
    * Attempt to reconnect to harness and process queued messages.
    */
-  private async attemptReconnect(): Promise<void> {
-    const MAX_RETRIES = 3
-    const RETRY_DELAY_MS = 2000
+  private async flushQueuedMessages(): Promise<void> {
+    if (this.messageQueue.length === 0) return
 
-    for (let i = 0; i < MAX_RETRIES; i++) {
+    const queue = [...this.messageQueue]
+    this.messageQueue = []
+
+    for (const item of queue) {
       try {
-        console.log(`[TelegramConnector] Reconnection attempt ${i + 1}/${MAX_RETRIES}`)
-        await this.client.connect()
-        this.connected = true
-        console.log('[TelegramConnector] Reconnected successfully')
-
-        // Process queued messages
-        const queue = [...this.messageQueue]
-        this.messageQueue = []
-
-        for (const item of queue) {
-          try {
-            await this.handleUpdate(item.update)
-          } catch (err) {
-            console.error('[TelegramConnector] Failed to process queued message:', err)
-          }
-        }
-
-        return
+        await this.handleUpdate(item.update)
       } catch (err) {
-        console.error(`[TelegramConnector] Reconnection attempt ${i + 1} failed:`, err)
-        if (i < MAX_RETRIES - 1) {
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
-        }
+        console.error('[TelegramConnector] Failed to process queued message:', err)
       }
     }
-
-    console.error('[TelegramConnector] All reconnection attempts failed')
-    this.reconnecting = false
   }
 
   private async handleUserPromptResponse(
@@ -475,13 +468,24 @@ export class TelegramConnector {
     }
 
     // Send response to harness
-    this.client.send({
+    const sent = this.client.send({
       type: 'user_prompt_response',
       data: {
         request_id: requestId,
-        response,
+        answer: response,
       },
     })
+
+    if (!sent) {
+      await this.sendMessage(chatId, '⚠️ Failed to send your response. Please try again.')
+      return true
+    }
+
+    const request = this.requests.get(requestId)
+    if (request) {
+      request.status = 'streaming'
+      request.prompt = undefined
+    }
 
     await this.sendChatAction(chatId, 'typing')
     return true
@@ -529,40 +533,40 @@ export class TelegramConnector {
       const requestId = channel.startsWith('run:') ? channel.slice(4) : null
       if (!requestId) return
 
-      const pending = this.pendingRequests.get(requestId)
-      if (!pending) return
+      const request = this.requests.get(requestId)
+      if (!request) return
 
       switch (event.type) {
         case 'stream':
-          this.handleStreamEvent(requestId, event, pending)
+          this.handleStreamEvent(requestId, event, request)
           break
 
         case 'response':
-          void this.handleResponseEvent(requestId, pending)
+          void this.handleResponseEvent(requestId, event, request)
           break
 
         case 'error':
-          void this.handleErrorEvent(requestId, event, pending)
+          void this.handleErrorEvent(requestId, event, request)
           break
 
         case 'user_prompt':
-          this.handleUserPromptEvent(requestId, event, pending)
+          this.handleUserPromptEvent(requestId, event, request)
           break
 
         case 'status':
-          void this.sendChatAction(pending.chatId, 'typing')
+          void this.sendChatAction(request.chatId, 'typing')
           break
 
         case 'progress': {
-          const progData = event.data as { message?: string; kind?: string } | undefined
-          void this.sendChatAction(pending.chatId, 'typing')
+          const progData = event.data
+          void this.sendChatAction(request.chatId, 'typing')
 
           // Send progress text for tool/work events, throttled to 1 per 10s
           if (progData?.message && (progData.kind === 'tool' || progData.kind === 'work')) {
             const now = Date.now()
-            if (!pending.lastProgressAt || now - pending.lastProgressAt > 10_000) {
-              pending.lastProgressAt = now
-              void this.sendMessage(pending.chatId, progData.message)
+            if (!request.lastProgressAt || now - request.lastProgressAt > 10_000) {
+              request.lastProgressAt = now
+              void this.sendMessage(request.chatId, progData.message)
             }
           }
           break
@@ -575,11 +579,9 @@ export class TelegramConnector {
 
   private handleDirectEvent(event: BridgeEvent): void {
     try {
-      const data = event.data as Record<string, unknown> | undefined
-
       switch (event.type) {
         case 'error': {
-          const message = typeof data?.message === 'string' ? data.message : 'Unknown error'
+          const message = event.data?.message ?? 'Unknown error'
           console.error('[TelegramConnector] Direct error:', message)
           // Send to all active sessions - we don't know which chat triggered this
           for (const [chatId] of this.sessions) {
@@ -589,8 +591,8 @@ export class TelegramConnector {
         }
 
         case 'provider_key_required': {
-          const provider = typeof data?.provider === 'string' ? data.provider : 'unknown'
-          const model = typeof data?.model === 'string' ? data.model : 'unknown'
+          const provider = event.data?.provider ?? 'unknown'
+          const model = event.data?.model ?? 'unknown'
           console.warn(`[TelegramConnector] Provider key required: ${provider} for ${model}`)
           for (const [chatId] of this.sessions) {
             void this.sendMessage(chatId, `⚠️ API key required for ${provider} (${model}). Please configure in your settings.`)
@@ -599,8 +601,8 @@ export class TelegramConnector {
         }
 
         case 'model_changed': {
-          const model = typeof data?.model === 'string' ? data.model : null
-          const provider = typeof data?.provider === 'string' ? data.provider : null
+          const model = event.data?.model ?? null
+          const provider = event.data?.provider ?? null
           if (model && provider) {
             console.log(`[TelegramConnector] Model changed: ${provider}/${model}`)
           }
@@ -618,59 +620,59 @@ export class TelegramConnector {
 
   private handleStreamEvent(
     requestId: string,
-    event: BridgeEvent,
-    pending: PendingRequest
+    event: Extract<BridgeEvent, { type: 'stream' }>,
+    request: RequestState
   ): void {
     try {
-      const data = event.data as { chunk?: string; is_reasoning?: boolean } | undefined
+      const data = event.data
       if (data?.chunk && !data.is_reasoning) {
-        const buffer = this.responseBuffers.get(requestId) ?? ''
-        this.responseBuffers.set(requestId, buffer + data.chunk)
+        request.status = 'streaming'
+        request.buffer += data.chunk
       }
-      void this.sendChatAction(pending.chatId, 'typing')
+      void this.sendChatAction(request.chatId, 'typing')
     } catch (err) {
       console.error('[TelegramConnector] Error in handleStreamEvent:', err)
     }
   }
 
-  private async handleResponseEvent(requestId: string, pending: PendingRequest): Promise<void> {
+  private async handleResponseEvent(
+    requestId: string,
+    event: Extract<BridgeEvent, { type: 'response' }>,
+    request: RequestState
+  ): Promise<void> {
     try {
-      if (!pending.settled) {
-        pending.settled = true
-        const text = this.responseBuffers.get(requestId) ?? ''
-        if (text.trim()) {
-          await this.sendLongMessage(pending.chatId, text, pending.messageId)
-        } else {
-          await this.sendMessage(pending.chatId, '(No response)', undefined, pending.messageId)
+      let text = request.buffer
+      if (!text.trim()) {
+        if (typeof event.data?.content === 'string') {
+          text = event.data.content
         }
+      }
+      if (text.trim()) {
+        await this.sendLongMessage(request.chatId, text, request.messageId)
+      } else {
+        await this.sendMessage(request.chatId, '(No response)', undefined, request.messageId)
       }
     } catch (err) {
       console.error('[TelegramConnector] Error in handleResponseEvent:', err)
-      await this.sendMessage(pending.chatId, '⚠️ Failed to send response. Please try again.', undefined, pending.messageId)
+      await this.sendMessage(request.chatId, '⚠️ Failed to send response. Please try again.', undefined, request.messageId)
     } finally {
       // Always clean up
-      this.pendingRequests.delete(requestId)
-      this.responseBuffers.delete(requestId)
+      this.requests.delete(requestId)
     }
   }
 
   private async handleErrorEvent(
     requestId: string,
-    event: BridgeEvent,
-    pending: PendingRequest
+    event: Extract<BridgeEvent, { type: 'error' }>,
+    request: RequestState
   ): Promise<void> {
     try {
-      if (pending.settled) return // Already handled by another path
-      pending.settled = true
-
       // Flush accumulated buffer first
-      const buffer = this.responseBuffers.get(requestId) ?? ''
-      if (buffer.trim()) {
-        await this.sendLongMessage(pending.chatId, buffer, pending.messageId)
+      if (request.buffer.trim()) {
+        await this.sendLongMessage(request.chatId, request.buffer, request.messageId)
       }
 
-      const data = event.data as { message?: string } | undefined
-      const errorMsg = data?.message ?? 'Unknown error'
+      const errorMsg = event.data?.message ?? 'Unknown error'
 
       // Provide more actionable error messages
       let userMessage = `Error: ${errorMsg}`
@@ -680,32 +682,26 @@ export class TelegramConnector {
         userMessage += '\n\n💡 Tip: Please wait a moment before trying again.'
       }
 
-      await this.sendMessage(pending.chatId, userMessage, undefined, pending.messageId)
+      await this.sendMessage(request.chatId, userMessage, undefined, request.messageId)
     } catch (err) {
       console.error('[TelegramConnector] Error in handleErrorEvent:', err)
     } finally {
       // Always clean up to prevent memory leaks
-      this.pendingRequests.delete(requestId)
-      this.responseBuffers.delete(requestId)
+      this.requests.delete(requestId)
     }
   }
 
   private handleUserPromptEvent(
     requestId: string,
-    event: BridgeEvent,
-    pending: PendingRequest
+    event: Extract<BridgeEvent, { type: 'user_prompt' }>,
+    request: RequestState
   ): void {
     try {
-      const data = event.data as {
-        question?: string
-        options?: Array<string | { label: string; description?: string }>
-      } | undefined
-
-      const question = data?.question ?? 'The assistant has a question:'
-      const options = data?.options
+      const question = event.data?.question ?? 'The assistant has a question:'
+      const options = event.data?.options
 
       // Mark session as waiting for user prompt response
-      const session = this.sessions.get(pending.chatId)
+      const session = this.sessions.get(request.chatId)
       if (session) {
         session.pendingUserPrompt = requestId
       }
@@ -721,7 +717,10 @@ export class TelegramConnector {
         formattedQuestion += '\n_Reply with a number or type your answer._'
       }
 
-      void this.sendMessage(pending.chatId, formattedQuestion, 'Markdown')
+      request.status = 'awaiting_prompt'
+      request.prompt = { question, options }
+
+      void this.sendMessage(request.chatId, formattedQuestion, 'Markdown')
     } catch (err) {
       console.error('[TelegramConnector] Error in handleUserPromptEvent:', err)
     }
@@ -955,27 +954,24 @@ export class TelegramConnector {
   private reapStaleRequests(): void {
     const now = Date.now()
     const TIMEOUT_MS = 3 * 60 * 1000 // Reduced to 3 minutes for better UX
+    const PROMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000
 
-    for (const [requestId, pending] of this.pendingRequests) {
-      if (now - pending.startedAt <= TIMEOUT_MS) continue
+    for (const [requestId, request] of this.requests) {
+      const timeout = request.status === 'awaiting_prompt' ? PROMPT_TIMEOUT_MS : TIMEOUT_MS
+      if (now - request.startedAt <= timeout) continue
 
-      if (!pending.settled) {
-        // Unsettled + stale: flush buffer, notify user, clean up
-        pending.settled = true
-        const buffer = this.responseBuffers.get(requestId) ?? ''
-        if (buffer.trim()) {
-          void this.sendLongMessage(pending.chatId, buffer, pending.messageId)
-        }
-        void this.sendMessage(
-          pending.chatId,
-          '⏰ Request timed out. The service may be overloaded. Please try again.',
-          undefined,
-          pending.messageId
-        )
+      // Stale: flush buffer, notify user, clean up
+      if (request.buffer.trim()) {
+        void this.sendLongMessage(request.chatId, request.buffer, request.messageId)
       }
-      // Settled or not, stale entries get cleaned up
-      this.pendingRequests.delete(requestId)
-      this.responseBuffers.delete(requestId)
+      void this.sendMessage(
+        request.chatId,
+        '⏰ Request timed out. The service may be overloaded. Please try again.',
+        undefined,
+        request.messageId
+      )
+
+      this.requests.delete(requestId)
     }
 
     // Clean up old sessions (inactive for > 24 hours and not pending)

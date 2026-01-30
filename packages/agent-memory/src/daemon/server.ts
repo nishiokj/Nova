@@ -304,7 +304,14 @@ export class HttpServer {
       console.error('[HttpServer] Request error:', error)
 
       if (error instanceof HttpError) {
-        this.sendJson(res, error.status, { error: error.message, code: error.code })
+        const responseBody: Record<string, unknown> = {
+          error: error.message,
+          code: error.code,
+        }
+        if (error.data && typeof error.data === 'object') {
+          responseBody.details = error.data
+        }
+        this.sendJson(res, error.status, responseBody)
       } else {
         // Surface the actual error message to the client
         const message = error instanceof Error ? error.message : 'Unknown error'
@@ -408,7 +415,8 @@ export class HttpError extends Error {
   constructor(
     public readonly status: number,
     message: string,
-    public readonly code?: string
+    public readonly code?: string,
+    public readonly data?: unknown
   ) {
     super(message)
     this.name = 'HttpError'
@@ -418,8 +426,8 @@ export class HttpError extends Error {
 /**
  * Create a 400 Bad Request error.
  */
-export function badRequest(message: string, code = 'BAD_REQUEST'): HttpError {
-  return new HttpError(400, message, code)
+export function badRequest(message: string, code = 'BAD_REQUEST', data?: unknown): HttpError {
+  return new HttpError(400, message, code, data)
 }
 
 /**

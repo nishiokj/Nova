@@ -83,7 +83,7 @@ import {
   type WorkLog,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
-import { createHookRegistry, registerHook, type HookRegistry } from 'orchestrator';
+import { createHookRegistry, registerHook, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
 import { createWorkItem } from 'work';
 import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 import { getProtocolId } from 'protocol';
@@ -326,7 +326,6 @@ export class AgentHarness {
   private llmAdapter: ReturnType<typeof createAdapter>;
   private hookExecutor: HookExecutor | null = null;
   private providerKeyService: HarnessProviderKeyService;
-  private permissionChecker: PermissionChecker;
   private orchestratorRunner: OrchestratorRunner;
   private decisionDatabases = new Map<string, DecisionDatabase>();
   private watcherEngines = new Map<string, DecisionEngine>();
@@ -490,12 +489,8 @@ export class AgentHarness {
       this.logger.info('HookExecutor initialized', { hooksDir });
     }
 
-    // Initialize PermissionChecker - handles permission prompts for Bash/Write/Edit
-    this.permissionChecker = new PermissionChecker(workingDir, config.dangerousMode);
     if (config.dangerousMode) {
       this.logger.warning('Permission checks DISABLED - running in dangerous mode');
-    } else {
-      this.logger.info('PermissionChecker initialized', { workingDir });
     }
 
     this.orchestratorRunner = orchestratorRunner ?? new DefaultOrchestratorRunner();
@@ -800,6 +795,72 @@ export class AgentHarness {
   isSessionAsyncModeEnabled(sessionKey: string): boolean {
     const entry = this.sessionStores.get(sessionKey);
     return entry?.store.isAsyncModeEnabled() ?? false;
+  }
+
+  // --- Session-level exclusive operation management (async runs, ralph loops) ---
+
+  /**
+   * Start an async run for a session. Returns false if one is already active.
+   */
+  startSessionAsyncRun(sessionKey: string, info: { requestId: string; goal: string; cancelled: boolean; startedAt: number }): boolean {
+    const store = this.getOrCreateSessionStore(sessionKey);
+    return store.startAsyncRun(info);
+  }
+
+  /**
+   * Get the current async run info for a session.
+   */
+  getSessionAsyncRun(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.getAsyncRun() ?? null;
+  }
+
+  /**
+   * Mark the async run as cancelled for a session.
+   */
+  cancelSessionAsyncRun(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.cancelAsyncRun();
+  }
+
+  /**
+   * Clear the async run state for a session.
+   */
+  clearSessionAsyncRun(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.clearAsyncRun();
+  }
+
+  /**
+   * Start a Ralph Loop for a session. Returns false if one is already active.
+   */
+  startSessionRalphLoop(sessionKey: string, info: { requestId: string; cancelled: boolean }): boolean {
+    const store = this.getOrCreateSessionStore(sessionKey);
+    return store.startRalphLoop(info);
+  }
+
+  /**
+   * Get the current Ralph Loop info for a session.
+   */
+  getSessionRalphLoop(sessionKey: string): { requestId: string; cancelled: boolean } | null {
+    const entry = this.sessionStores.get(sessionKey);
+    return entry?.store.getRalphLoop() ?? null;
+  }
+
+  /**
+   * Mark the Ralph Loop as cancelled for a session.
+   */
+  cancelSessionRalphLoop(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.cancelRalphLoop();
+  }
+
+  /**
+   * Clear the Ralph Loop state for a session.
+   */
+  clearSessionRalphLoop(sessionKey: string): void {
+    const entry = this.sessionStores.get(sessionKey);
+    entry?.store.clearRalphLoop();
   }
 
   private pruneSessionStores(reason: string): void {
@@ -1523,14 +1584,6 @@ export class AgentHarness {
   }
 
   /**
-   * @deprecated Use getSessionPermissionChecker(sessionKey) instead.
-   * Returns the global permission checker (legacy behavior).
-   */
-  getPermissionChecker(): PermissionChecker {
-    return this.permissionChecker;
-  }
-
-  /**
    * Run via Orchestrator with specified agent type.
    */
   private async runOrchestrator(
@@ -1574,7 +1627,7 @@ export class AgentHarness {
     // Build orchestrator runtime with optional hooks
     const sessionKey = context.sessionKey;
     let lastWatcherIteration = 0;
-    const MIN_WATCHER_GAP = 5;
+    const minWatcherGap = DEFAULT_ORCHESTRATOR_CONFIG.minWatcherIterationGap;
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
 
     const asyncEnabledForRun = (store?.isAsyncModeEnabled() ?? false) || !!hookRegistry;
@@ -1614,9 +1667,9 @@ export class AgentHarness {
       } : undefined,
       // Pass stop request check so agent can exit loop early on explicit "stop" from user
       checkStopRequest: store ? () => store.hasPendingStopRequest() : undefined,
-      // Watcher evaluation — rule-based, fires every MIN_WATCHER_GAP iterations
+      // Watcher evaluation — rule-based, fires every minWatcherIterationGap iterations
       onIteration: asyncEnabledForRun ? (state: { iteration: number; context: ContextWindow; totalToolCalls: number; totalLlmCalls: number; elapsedMs: number }) => {
-        if (state.iteration - lastWatcherIteration < MIN_WATCHER_GAP) return;
+        if (state.iteration - lastWatcherIteration < minWatcherGap) return;
         lastWatcherIteration = state.iteration;
 
         const pct = state.context.metrics.percentageUsed;

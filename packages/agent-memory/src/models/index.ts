@@ -54,6 +54,24 @@ export {
   validateEntity,
 } from './canonical.js'
 
+// Conversational Memory
+export {
+  MemoryEntityTypeSchema,
+  type MemoryEntityType,
+  MemoryStateSchema,
+  type MemoryState,
+  ProjectSchema,
+  type Project,
+  GoalSchema,
+  type Goal,
+  ConversationDigestDecisionSchema,
+  type ConversationDigestDecision,
+  ConversationDigestSchema,
+  type ConversationDigest,
+  EntityMentionSchema,
+  type EntityMention,
+} from './conversation-memory.js'
+
 // Raw Envelope & Lineage
 export {
   CollectionMethodSchema,

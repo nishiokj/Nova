@@ -33,14 +33,6 @@ export interface PausedState {
   pausedAt: number; // Timestamp when session entered paused state
 }
 
-interface SessionStoreOptions {
-  sessionKey: string;
-  maxTokens: number;
-  graphd: GraphDManager | null;
-  isGraphDReady: () => boolean;
-  logger: HarnessLogger;
-}
-
 function normalizeHandoffSpec(value: unknown): HandoffSpec | undefined {
   if (!value) return undefined;
   let candidate = value;
@@ -75,6 +67,20 @@ Consider if the user is:
 Acknowledge the interruption and adjust your approach accordingly.`;
 }
 
+/** Info about an active async run for a session */
+export interface AsyncRunInfo {
+  requestId: string;
+  goal: string;
+  cancelled: boolean;
+  startedAt: number;
+}
+
+/** Info about an active Ralph Loop for a session */
+export interface RalphLoopInfo {
+  requestId: string;
+  cancelled: boolean;
+}
+
 export class SessionStore {
   private readonly sessionKey: string;
   private readonly maxTokens: number;
@@ -91,6 +97,10 @@ export class SessionStore {
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
   private queuedUserMessages: Array<{ requestId: string; message: string }> = [];
+
+  // Session-level exclusive operation tracking (prevents multiple connections from starting concurrent ops)
+  private asyncRun: AsyncRunInfo | null = null;
+  private ralphLoop: RalphLoopInfo | null = null;
 
   constructor(options: SessionStoreOptions) {
     this.sessionKey = options.sessionKey;
@@ -113,6 +123,78 @@ export class SessionStore {
 
   isAsyncModeEnabled(): boolean {
     return this.asyncModeEnabled;
+  }
+
+  // --- Session-level exclusive operation management ---
+
+  /**
+   * Start an async run for this session.
+   * Returns false if an async run is already active (caller should reject the request).
+   */
+  startAsyncRun(info: AsyncRunInfo): boolean {
+    if (this.asyncRun !== null) {
+      return false;
+    }
+    this.asyncRun = info;
+    return true;
+  }
+
+  /**
+   * Get the current async run info, if any.
+   */
+  getAsyncRun(): AsyncRunInfo | null {
+    return this.asyncRun;
+  }
+
+  /**
+   * Mark the async run as cancelled.
+   */
+  cancelAsyncRun(): void {
+    if (this.asyncRun) {
+      this.asyncRun.cancelled = true;
+    }
+  }
+
+  /**
+   * Clear the async run state.
+   */
+  clearAsyncRun(): void {
+    this.asyncRun = null;
+  }
+
+  /**
+   * Start a Ralph Loop for this session.
+   * Returns false if a Ralph Loop is already active (caller should reject the request).
+   */
+  startRalphLoop(info: RalphLoopInfo): boolean {
+    if (this.ralphLoop !== null) {
+      return false;
+    }
+    this.ralphLoop = info;
+    return true;
+  }
+
+  /**
+   * Get the current Ralph Loop info, if any.
+   */
+  getRalphLoop(): RalphLoopInfo | null {
+    return this.ralphLoop;
+  }
+
+  /**
+   * Mark the Ralph Loop as cancelled.
+   */
+  cancelRalphLoop(): void {
+    if (this.ralphLoop) {
+      this.ralphLoop.cancelled = true;
+    }
+  }
+
+  /**
+   * Clear the Ralph Loop state.
+   */
+  clearRalphLoop(): void {
+    this.ralphLoop = null;
   }
 
   getContext(): ContextWindow {
@@ -325,10 +407,6 @@ export class SessionStore {
     return this.pausedState;
   }
 
-  hasPausedState(): boolean {
-    return this.pausedState !== null;
-  }
-
   clearPausedState(): void {
     this.pausedState = null;
     // Clear paused state from GraphD session metadata
@@ -350,6 +428,8 @@ export class SessionStore {
     this.context = null;
     this.pausedState = null;
     this.modelSelections.clear();
+    this.asyncRun = null;
+    this.ralphLoop = null;
   }
 
   /**
@@ -441,18 +521,6 @@ export class SessionStore {
     const queued = this.queuedUserMessages;
     this.queuedUserMessages = [];
     return queued;
-  }
-
-  /**
-   * Attempt to end execution only if no queued messages are waiting.
-   * Returns true if execution ended; false if messages are still queued.
-   */
-  endExecutionIfIdle(): boolean {
-    if (this.queuedUserMessages.length > 0) {
-      return false;
-    }
-    this.executingRequestId = null;
-    return true;
   }
 
   /**

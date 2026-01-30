@@ -20,7 +20,12 @@ const chalk = new Chalk({ level: 3 });
 const renderer = new marked.Renderer();
 
 // Override the code block renderer
-renderer.code = function(code: string, language: string | undefined) {
+// Note: marked v5+ passes a token object, not separate strings
+renderer.code = function(token: string | { text: string; lang?: string }) {
+  // Handle both old API (string) and new API (token object)
+  const code = typeof token === 'string' ? token : token.text;
+  const language = typeof token === 'string' ? undefined : token.lang;
+
   // Try Tree-sitter syntax highlighting
   const highlighted = highlightCode(code, language);
 

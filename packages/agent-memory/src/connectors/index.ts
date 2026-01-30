@@ -101,7 +101,7 @@ export {
   type TelegramMessage,
   type TelegramUser,
   type TelegramChat,
-  type PendingRequest,
+  type RequestState,
   type ChatSession,
 } from './telegram/index.js'
 

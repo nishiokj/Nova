@@ -316,10 +316,22 @@ export interface DerivedTaskSandboxResult {
   logPath?: string
 }
 
+export interface MetadataValidationError {
+  field: string
+  message: string
+  received?: unknown
+  expected?: string
+}
+
 export interface DerivedTaskCreateResponse {
   task: DerivedTask
   sandbox?: DerivedTaskSandboxResult
   sandboxError?: string
+  metadataValidation?: {
+    valid: boolean
+    errors?: MetadataValidationError[]
+    appliedDefaults?: Record<string, unknown>
+  }
 }
 
 // ============ Jobs ============

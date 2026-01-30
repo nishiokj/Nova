@@ -86,18 +86,32 @@ export interface TelegramConnectorConfig {
   dangerousMode?: boolean
 }
 
-export interface PendingRequest {
+export interface RequestBase {
+  requestId: string
   chatId: number
   messageId: number
   text: string
   startedAt: number
-  /** true once response or error has been sent to the user */
-  settled: boolean
+  buffer: string
   /** timestamp of last progress message sent (throttle) */
   lastProgressAt?: number
   /** attachments sent with this request */
   attachments?: Attachment[]
+  prompt?: {
+    question?: string
+    options?: Array<string | { label: string; description?: string }>
+  }
 }
+
+export interface StreamingRequestState extends RequestBase {
+  status: 'streaming'
+}
+
+export interface AwaitingPromptRequestState extends RequestBase {
+  status: 'awaiting_prompt'
+}
+
+export type RequestState = StreamingRequestState | AwaitingPromptRequestState
 
 export interface ChatSession {
   initialized: boolean

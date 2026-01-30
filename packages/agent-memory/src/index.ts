@@ -84,6 +84,21 @@ export {
   // Schema Registry
   EntitySchemas,
   validateEntity,
+  // Conversational Memory
+  MemoryEntityTypeSchema,
+  type MemoryEntityType,
+  MemoryStateSchema,
+  type MemoryState,
+  ProjectSchema,
+  type Project,
+  GoalSchema,
+  type Goal,
+  ConversationDigestDecisionSchema,
+  type ConversationDigestDecision,
+  ConversationDigestSchema,
+  type ConversationDigest,
+  EntityMentionSchema,
+  type EntityMention,
   // Raw Envelope & Lineage
   CollectionMethodSchema,
   type CollectionMethod,
@@ -94,6 +109,12 @@ export {
   type EntitySourceMapping,
   type EntitySourceMappingInput,
 } from './models/index.js'
+
+// Memory Helpers
+export {
+  computeMemoryState,
+  type MemoryStateInput,
+} from './memory/state.js'
 
 // Database Layer
 export {

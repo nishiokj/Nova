@@ -134,7 +134,7 @@ export class DerivedTaskIntegration {
       if (oldest) {
         const oldestTime = new Date(oldest.created_at).getTime()
         retryAfter = (oldestTime + rate_limit_window_ms) - Date.now()
-        if (retryAfter < 0) retryAfter = 1000 // Minimum 1 second
+        if (retryAfter < 1000) retryAfter = 1000 // Minimum 1 second
       }
 
       return {

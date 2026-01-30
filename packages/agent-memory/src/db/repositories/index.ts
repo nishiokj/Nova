@@ -144,6 +144,45 @@ export {
 } from './agent-goals.js'
 
 export {
+  createProjectsRepository,
+  type ProjectsRepository,
+  type ProjectRecord,
+  type ProjectRow,
+  type ProjectInput,
+  type ProjectUpdateInput,
+  type ProjectFilters,
+} from './projects.js'
+
+export {
+  createGoalsRepository,
+  type GoalsRepository,
+  type GoalRecord,
+  type GoalRow,
+  type GoalInput,
+  type GoalUpdateInput,
+  type GoalFilters,
+} from './goals.js'
+
+export {
+  createConversationDigestRepository,
+  type ConversationDigestRepository,
+  type ConversationDigestRecord,
+  type ConversationDigestRow,
+  type ConversationDigestInput,
+  type ConversationDigestUpdateInput,
+} from './conversation-digests.js'
+
+export {
+  createEntityMentionsRepository,
+  type EntityMentionsRepository,
+  type EntityMentionRecord,
+  type EntityMentionRow,
+  type EntityMentionInput,
+  type EntityMentionFilters,
+  type SimilarityOptions as EntityMentionSimilarityOptions,
+} from './entity-mentions.js'
+
+export {
   createAgentActionsRepository,
   type AgentActionsRepository,
   type AgentActionRow,

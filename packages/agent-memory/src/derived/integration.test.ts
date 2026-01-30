@@ -383,13 +383,15 @@ describeWithDb('DerivedTaskIntegration', () => {
     })
 
     test('ensures minimum 1 second retryAfter', async () => {
-      const task = await createTaskWithPolicy({ rateLimitMax: 1, rateLimitWindowMs: 100 })
-      // Create job almost at window boundary
+      // Use a longer window to avoid timing flakiness
+      const task = await createTaskWithPolicy({ rateLimitMax: 1, rateLimitWindowMs: 60000 })
+      // Create job 59.5 seconds ago (within 60 second window but near end)
       const job = await createPendingJob(task.id)
-      await db.sql`UPDATE derived_jobs SET created_at = NOW() - INTERVAL '99 milliseconds' WHERE id = ${job.id}`
+      await db.sql`UPDATE derived_jobs SET created_at = NOW() - INTERVAL '59500 milliseconds' WHERE id = ${job.id}`
 
       const result = await integration.checkRateLimit(task)
       expect(result.allowed).toBe(false)
+      // retryAfter should be close to 500ms (when job leaves window), but minimum is 1000ms
       expect(result.retryAfter).toBeGreaterThanOrEqual(1000)
     })
 
@@ -1465,9 +1467,9 @@ describeWithDb('Edge Cases and Error States', () => {
         rateLimitWindowMs: 10000,
       })
 
-      // One job exactly at window boundary
+      // One job clearly outside window boundary (10.5 seconds ago with 10 second window)
       const job = await jobRepo.create({ task_id: task.id })
-      await db.sql`UPDATE derived_jobs SET created_at = NOW() - INTERVAL '10 seconds' WHERE id = ${job.id}`
+      await db.sql`UPDATE derived_jobs SET created_at = NOW() - INTERVAL '10500 milliseconds' WHERE id = ${job.id}`
 
       // Should be allowed (job is outside window)
       const result = await integration.checkRateLimit(task)
