@@ -1,6 +1,0 @@
-{"type":"init","timestamp":"2026-01-29T01:03:13.811Z","workId":"5fe2d6c9","objective":"unknown","agent":"standard"}
-{"type":"message","timestamp":"2026-01-29T01:03:13.812Z","role":"assistant","content":"Turn 2: 11 tool calls, hasResponse=false"}
-{"type":"status","timestamp":"2026-01-29T01:03:13.812Z","status":"in_progress"}
-{"type":"message","timestamp":"2026-01-29T01:03:13.812Z","role":"assistant","content":"Turn 0: 3 tool calls, hasResponse=false"}
-{"type":"message","timestamp":"2026-01-29T01:03:13.812Z","role":"assistant","content":"Turn 3: 12 tool calls, hasResponse=false"}
-{"type":"message","timestamp":"2026-01-29T01:03:13.812Z","role":"assistant","content":"Turn 1: 6 tool calls, hasResponse=false"}
