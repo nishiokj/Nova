@@ -91,6 +91,15 @@ export interface PreProcessedContext {
     watcherInjected?: boolean;
   }>;
 
+  /** Message-level evidence for progress */
+  messageStats: {
+    assistantTotal: number;
+    assistantNonEmpty: number;
+    assistantEmpty: number;
+    lastAssistantLength: number;
+    lastAssistantPreview?: string;
+  };
+
   /** Position in log (events processed) */
   logPosition: number;
 
@@ -145,6 +154,11 @@ export function extractFromEntries(entries: WorkItemEntry[]): PreProcessedContex
 
   // Extract messages
   const messages = entries.filter((e): e is WorkItemMessageEntry => e.type === 'message');
+  const assistantMessages = messages.filter(m => m.role === 'assistant');
+  const assistantNonEmpty = assistantMessages.filter(m => m.content.trim().length > 0);
+  const assistantEmpty = assistantMessages.length - assistantNonEmpty.length;
+  const lastAssistant = assistantMessages[assistantMessages.length - 1];
+  const lastAssistantContent = lastAssistant?.content ?? '';
 
   // Find final status
   const statusEntries = entries.filter(e => e.type === 'status');
@@ -178,6 +192,13 @@ export function extractFromEntries(entries: WorkItemEntry[]): PreProcessedContex
       reasoning: m.reasoning,
       watcherInjected: m.watcherInjected,
     })),
+    messageStats: {
+      assistantTotal: assistantMessages.length,
+      assistantNonEmpty: assistantNonEmpty.length,
+      assistantEmpty,
+      lastAssistantLength: lastAssistantContent.length,
+      lastAssistantPreview: lastAssistantContent.slice(0, 200),
+    },
     logPosition: entries.length,
     totalEvents: entries.length,
     metrics,
@@ -435,6 +456,18 @@ export function formatPreProcessedContext(ctx: PreProcessedContext): string {
     }
     sections.push('');
   }
+
+  // Message evidence
+  sections.push('### Message Evidence');
+  sections.push('');
+  sections.push(`- Assistant messages: ${ctx.messageStats.assistantTotal}`);
+  sections.push(`- Non-empty assistant outputs: ${ctx.messageStats.assistantNonEmpty}`);
+  sections.push(`- Empty assistant outputs: ${ctx.messageStats.assistantEmpty}`);
+  sections.push(`- Last assistant length: ${ctx.messageStats.lastAssistantLength}`);
+  if (ctx.messageStats.lastAssistantPreview) {
+    sections.push(`- Last assistant preview: ${ctx.messageStats.lastAssistantPreview.replace(/\n/g, ' ').slice(0, 160)}`);
+  }
+  sections.push('');
 
   // Metrics
   if (ctx.metrics) {

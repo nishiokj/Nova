@@ -136,6 +136,70 @@ export type ContextItem =
   | ArtifactItem;
 
 // ============================================
+// LLM API FORMAT (snake_case for OpenAI compat)
+// ============================================
+
+/** Message item in LLM API format */
+export interface LLMMessageItem {
+  [key: string]: unknown; // Index signature for Record<string, unknown> compat
+  type: 'message';
+  role: 'user' | 'assistant' | 'system' | 'developer';
+  content: string | ContentBlock[];
+}
+
+/** Function call item in LLM API format (snake_case for OpenAI) */
+export interface LLMFunctionCallItem {
+  [key: string]: unknown; // Index signature for Record<string, unknown> compat
+  type: 'function_call';
+  call_id: string;
+  name: string;
+  arguments: string; // JSON stringified
+}
+
+/** Function call output item in LLM API format (snake_case for OpenAI) */
+export interface LLMFunctionCallOutputItem {
+  [key: string]: unknown; // Index signature for Record<string, unknown> compat
+  type: 'function_call_output';
+  call_id: string;
+  output: string;
+  isError?: boolean;
+}
+
+/** Reasoning item in LLM API format */
+export interface LLMReasoningItem {
+  [key: string]: unknown; // Index signature for Record<string, unknown> compat
+  type: 'reasoning';
+  content: string;
+}
+
+/** Union of all LLM API item types */
+export type LLMItem =
+  | LLMMessageItem
+  | LLMFunctionCallItem
+  | LLMFunctionCallOutputItem
+  | LLMReasoningItem;
+
+// ============================================
+// TYPE GUARDS
+// ============================================
+
+export function isLLMMessageItem(item: LLMItem): item is LLMMessageItem {
+  return item.type === 'message';
+}
+
+export function isLLMFunctionCallItem(item: LLMItem): item is LLMFunctionCallItem {
+  return item.type === 'function_call';
+}
+
+export function isLLMFunctionCallOutputItem(item: LLMItem): item is LLMFunctionCallOutputItem {
+  return item.type === 'function_call_output';
+}
+
+export function isLLMReasoningItem(item: LLMItem): item is LLMReasoningItem {
+  return item.type === 'reasoning';
+}
+
+// ============================================
 // CONTEXT WINDOW SNAPSHOT (for persistence)
 // ============================================
 

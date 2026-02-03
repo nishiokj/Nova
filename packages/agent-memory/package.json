@@ -20,7 +20,9 @@
     "kill": "lsof -ti:3001 | xargs kill -9 2>/dev/null || true",
     "db:migrate": "bun run scripts/migrate.ts",
     "register": "bun run scripts/register-connector.ts",
-    "setup": "bun run scripts/setup.ts"
+    "setup": "bun run scripts/setup.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@google/genai": "^1.38.0",
@@ -36,6 +38,7 @@
   "devDependencies": {
     "@types/bun": "^1.0.0",
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
   }
 }

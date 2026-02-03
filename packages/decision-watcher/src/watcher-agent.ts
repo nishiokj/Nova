@@ -8,6 +8,7 @@
  * Core mechanism: protocol decisions and patches drive orchestrator behavior.
  */
 
+import fs from 'fs/promises';
 import {
   assertNever,
   createHook,
@@ -38,7 +39,7 @@ import {
   isWorkItemCompleted,
   success,
 } from 'protocol';
-import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem, WatcherActionType } from './types.js';
+import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem, WatcherActionType, WorkLogEntry } from './types.js';
 import { getValidActions } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
@@ -48,6 +49,7 @@ import {
   extractPreProcessedContext,
   formatPreProcessedContext,
   writeSemanticFileAsync,
+  type PreProcessedContext,
   type SemanticWriteConfig,
 } from './semantic/index.js';
 
@@ -92,6 +94,119 @@ function isNoInterventionAction(action: WatcherActionType): boolean {
 /** Max workitem log content to inject (prevent prompt bloat for very long sessions) */
 const MAX_WORKITEM_LOG_INJECT_LENGTH = 50000;
 const WORK_ITEM_ID_GUIDANCE = 'When returning workItems, include a stable "id" for each item and use those ids in "dependencies" when sequencing is required.';
+const MAX_WORK_LOG_ENTRIES = 40;
+const MAX_WORK_LOG_CHARS = 12000;
+const MAX_SALIENCE_CHARS = 12000;
+const MAX_SALIENCE_HEAD_CHARS = 4000;
+const MAX_SALIENCE_TAIL_CHARS = 4000;
+
+const EVIDENCE_STALL_DURATION_MS = 120_000;
+const EVIDENCE_EMPTY_OUTPUT_ESCALATION = 2;
+
+type EvidenceSummary = {
+  hasWorkItemLog: boolean;
+  filesModifiedCount: number;
+  assistantNonEmpty: number;
+  assistantEmpty: number;
+  lastAssistantLength: number;
+  toolCalls: number;
+  durationMs: number;
+  logPosition: number;
+};
+
+function summarizeEvidence(preprocessed?: PreProcessedContext | null): EvidenceSummary {
+  if (!preprocessed) {
+    return {
+      hasWorkItemLog: false,
+      filesModifiedCount: 0,
+      assistantNonEmpty: 0,
+      assistantEmpty: 0,
+      lastAssistantLength: 0,
+      toolCalls: 0,
+      durationMs: 0,
+      logPosition: 0,
+    };
+  }
+
+  const filesModifiedCount = preprocessed.metrics?.filesModified?.length ?? 0;
+  const toolCalls = preprocessed.metrics?.toolCalls ?? 0;
+  const durationMs = preprocessed.metrics?.durationMs ?? 0;
+  const logPosition = preprocessed.logPosition ?? 0;
+  const assistantNonEmpty = preprocessed.messageStats?.assistantNonEmpty ?? 0;
+  const assistantEmpty = preprocessed.messageStats?.assistantEmpty ?? 0;
+  const lastAssistantLength = preprocessed.messageStats?.lastAssistantLength ?? 0;
+
+  return {
+    hasWorkItemLog: true,
+    filesModifiedCount,
+    assistantNonEmpty,
+    assistantEmpty,
+    lastAssistantLength,
+    toolCalls,
+    durationMs,
+    logPosition,
+  };
+}
+
+function isEvidenceInsufficient(summary: EvidenceSummary): boolean {
+  if (!summary.hasWorkItemLog) return true;
+  return summary.filesModifiedCount === 0 && summary.assistantNonEmpty === 0;
+}
+
+function buildEvidenceReason(summary: EvidenceSummary): string {
+  if (!summary.hasWorkItemLog) {
+    return 'Insufficient evidence: work item log unavailable for review.';
+  }
+  const parts = [
+    `filesModified=${summary.filesModifiedCount}`,
+    `assistantNonEmpty=${summary.assistantNonEmpty}`,
+    `assistantEmpty=${summary.assistantEmpty}`,
+    `toolCalls=${summary.toolCalls}`,
+    `duration=${(summary.durationMs / 1000).toFixed(1)}s`,
+  ];
+  return `Insufficient evidence to justify allow: ${parts.join(', ')}.`;
+}
+
+function buildEvidenceGuidance(summary: EvidenceSummary): string {
+  const base = buildEvidenceReason(summary);
+  if (summary.durationMs >= EVIDENCE_STALL_DURATION_MS || summary.assistantEmpty >= EVIDENCE_EMPTY_OUTPUT_ESCALATION) {
+    return `${base} You must produce concrete output (files modified or non-empty response) or split into smaller, testable work items before next audit.`;
+  }
+  return `${base} Provide concrete output (files modified or non-empty response) before the next audit.`;
+}
+
+function enforceEvidence(
+  action: WatcherAction,
+  summary: EvidenceSummary,
+  trigger: WatcherTrigger
+): WatcherAction {
+  if (!isEvidenceInsufficient(summary)) return action;
+
+  const reason = buildEvidenceReason(summary);
+  const guidance = buildEvidenceGuidance(summary);
+
+  if (trigger === 'cadence_audit') {
+    if (action.watcherAction === 'allow' || action.watcherAction === 'continue') {
+      return {
+        watcherAction: 'realign',
+        realign: { systemMessage: guidance },
+        reason,
+      };
+    }
+  }
+
+  if (trigger === 'work_item_completed' || trigger === 'goal_state_reached') {
+    if (action.watcherAction === 'quality_gate' && action.qualityGate.passed) {
+      return {
+        watcherAction: 'quality_gate',
+        qualityGate: { passed: false, issues: [reason] },
+        reason,
+      };
+    }
+  }
+
+  return action;
+}
 
 // ============================================
 // WORKITEM LOG FORMATTING FOR INJECTION
@@ -195,6 +310,80 @@ async function formatWorkItemLogForInjection(workItemLog: WorkItemLog | null): P
   }
 }
 
+// ============================================
+// SESSION CONTEXT (INLINE) HELPERS
+// ============================================
+
+async function readSalienceForInjection(path: string): Promise<string> {
+  try {
+    const content = await fs.readFile(path, 'utf-8');
+    const trimmed = content.trim();
+    if (!trimmed) return '*Salience file is empty*';
+    if (trimmed.length <= MAX_SALIENCE_CHARS) {
+      return trimmed;
+    }
+    const head = trimmed.slice(0, MAX_SALIENCE_HEAD_CHARS);
+    const tail = trimmed.slice(-MAX_SALIENCE_TAIL_CHARS);
+    return `${head}\n\n... [salience truncated ${trimmed.length - (MAX_SALIENCE_HEAD_CHARS + MAX_SALIENCE_TAIL_CHARS)} chars] ...\n\n${tail}`;
+  } catch (err) {
+    return `*Error reading salience: ${err instanceof Error ? err.message : String(err)}*`;
+  }
+}
+
+function formatWorkLogEntry(entry: WorkLogEntry): string {
+  switch (entry.type) {
+    case 'session_start':
+      return `- [${entry.timestamp}] session_start: mode=${entry.mode} goal="${entry.goal.slice(0, 120)}"`;
+    case 'workitem_created':
+      return `- [${entry.timestamp}] workitem_created: ${entry.workId} agent=${entry.agent} objective="${entry.objective.slice(0, 140)}"`;
+    case 'workitem_status': {
+      const summary = entry.summary ? ` summary="${entry.summary.slice(0, 140)}"` : '';
+      const files = entry.filesModified && entry.filesModified.length > 0
+        ? ` files=${entry.filesModified.slice(0, 5).join(', ')}${entry.filesModified.length > 5 ? '…' : ''}`
+        : '';
+      return `- [${entry.timestamp}] workitem_status: ${entry.workId} status=${entry.status}${summary}${files}`;
+    }
+    case 'note':
+      return `- [${entry.timestamp}] note${entry.workId ? ` (${entry.workId})` : ''}: ${entry.note.slice(0, 180)}`;
+    default:
+      return assertNever(entry);
+  }
+}
+
+async function formatWorkLogForInjection(workLog: WorkLog, workId?: string): Promise<string> {
+  try {
+    const entries = await workLog.readRecent(MAX_WORK_LOG_ENTRIES);
+    const filtered = workId
+      ? entries.filter(entry => entry.type === 'session_start' || ('workId' in entry && entry.workId === workId))
+      : entries;
+    if (filtered.length === 0) {
+      return '*Work log is empty*';
+    }
+    let content = filtered.map(formatWorkLogEntry).join('\n');
+    if (content.length > MAX_WORK_LOG_CHARS) {
+      content = content.slice(0, MAX_WORK_LOG_CHARS) +
+        `\n... [work log truncated ${content.length - MAX_WORK_LOG_CHARS} chars]`;
+    }
+    return content;
+  } catch (err) {
+    return `*Error reading work log: ${err instanceof Error ? err.message : String(err)}*`;
+  }
+}
+
+async function getInlineSessionContext(
+  config: WatcherAgentConfig,
+  workId?: string
+): Promise<{
+  salienceContent: string;
+  workLogContent: string;
+}> {
+  const [salienceContent, workLogContent] = await Promise.all([
+    readSalienceForInjection(config.salienceFilePath),
+    formatWorkLogForInjection(config.workLog, workId),
+  ]);
+  return { salienceContent, workLogContent };
+}
+
 export interface WatcherAgentConfig {
   sessionId: string;
   salienceFilePath: string;
@@ -222,6 +411,10 @@ export interface WatcherAgentConfig {
 interface WatcherContext<Evt extends ControlEvent = ControlEvent> {
   event: Evt;
   hook: HookContext;
+}
+
+function getEventWorkId(event: ControlEvent): string | undefined {
+  return 'workId' in event ? event.workId : undefined;
 }
 
 function assertEventType<Evt extends ControlEvent>(
@@ -505,17 +698,30 @@ function buildWatcherObjective(params: {
   workItemLogContent: string;
   snapshotContext: string;
   taskText: string;
+  salienceContent: string;
+  workLogContent: string;
   headerLines?: string[];
+  workIdOverride?: string;
 }): string {
-  const { config, ctx, workItemLogContent, snapshotContext, taskText, headerLines } = params;
-  const workId = ctx.event.workId ?? 'unknown';
+  const { config, ctx, workItemLogContent, snapshotContext, taskText, headerLines, salienceContent, workLogContent } = params;
+  const workId = params.workIdOverride ?? ctx.event.workId ?? 'unknown';
   const headerBlock = headerLines && headerLines.length > 0 ? `${headerLines.join('\n')}\n\n` : '';
 
   return `You are the watcher for session ${config.sessionId}.
 
-${headerBlock}## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal and principles)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
+${headerBlock}## Session Context (Inline)
+
+### Salience
+<salience>
+${salienceContent}
+</salience>
+
+### Work Log (recent, session-level)
+The work log is global for the session and may include entries for other work items or external systems.
+If anything conflicts with the workitem log below, ignore the work log and trust the workitem log.
+<work-log>
+${workLogContent}
+</work-log>
 
 ## WorkItem Context (WorkItem: ${workId})
 
@@ -572,7 +778,6 @@ async function handlePromptUser(
   // Get workitem-level context (full conversation, tool calls, scoped decisions)
   const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
   const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
-
   const snapshotContext = formatSnapshotForTrigger('prompt_user', ctx);
 
   const taskText = `## Question from Agent
@@ -600,7 +805,7 @@ Your response MUST include:
 
 **Invalid actions for prompt_user**: \`escalate\`, \`quality_gate\`, \`allow\` (use "answer" for all)
 
-Read salience for session goal, then answer based on both the goal AND the agent's situation shown above.`;
+Use the inline salience above for session goal, then answer based on both the goal AND the agent's situation shown above.`;
 
   const objective = buildWatcherObjective({
     config,
@@ -608,6 +813,7 @@ Read salience for session goal, then answer based on both the goal AND the agent
     workItemLogContent,
     snapshotContext,
     taskText,
+    ...(await getInlineSessionContext(config, getEventWorkId(ctx.event))),
   });
 
   const action = await runAndLog(config, 'prompt_user', objective, ctx);
@@ -712,6 +918,7 @@ ${WORK_ITEM_ID_GUIDANCE}`;
     workItemLogContent,
     snapshotContext,
     taskText,
+    ...(await getInlineSessionContext(config, getEventWorkId(ctx.event))),
   });
 
   const action = await runAndLog(config, 'bounds_exceeded', objective, ctx);
@@ -777,6 +984,7 @@ Based on the workitem log above:
     workItemLogContent,
     snapshotContext,
     taskText,
+    ...(await getInlineSessionContext(config, getEventWorkId(ctx.event))),
   });
 
   const action = await runAndLog(config, 'agent_error', objective, ctx);
@@ -820,6 +1028,16 @@ async function handleGoalReached(
 
   const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
   const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+  let preprocessed: PreProcessedContext | null = null;
+  let preprocessedContext = '';
+  if (workItemLog) {
+    try {
+      preprocessed = await extractPreProcessedContext(workItemLog);
+      preprocessedContext = formatPreProcessedContext(preprocessed);
+    } catch (err) {
+      console.warn('[WATCHER] Pre-processing failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
 
   await config.workLog.append({
     type: 'workitem_status',
@@ -837,13 +1055,14 @@ async function handleGoalReached(
 
   const taskText = `The agent reports goal_state_reached.
 
-## Your Task — Quality Gate
+${preprocessedContext ? `<preprocessed-facts>\n${preprocessedContext}\n</preprocessed-facts>\n` : ''}## Your Task — Quality Gate
 
 Based on the workitem log above:
-1. Does the work address the session goal? (read salience)
+1. Does the work address the session goal? (use inline salience)
 2. Check for obvious omissions, untested changes, or incomplete work
 3. If quality gate passes: return "quality_gate" with passed=true
 4. If quality gate fails: return "quality_gate" with passed=false and issues list
+5. If evidence is insufficient (no files modified, empty outputs, no non-empty response), FAIL the quality gate and list missing evidence.
 
 For follow-up work items, prefer INDEPENDENT items (parallelization).
 Set bounds: {maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000}
@@ -856,9 +1075,17 @@ ${WORK_ITEM_ID_GUIDANCE}`;
     workItemLogContent,
     snapshotContext,
     taskText,
+    ...(await getInlineSessionContext(config, getEventWorkId(ctx.event))),
   });
 
-  const action = await runAndLog(config, 'goal_state_reached', objective, ctx);
+  const evidenceSummary = summarizeEvidence(preprocessed);
+  const action = await runAndLog(
+    config,
+    'goal_state_reached',
+    objective,
+    ctx,
+    (candidate) => enforceEvidence(candidate, evidenceSummary, 'goal_state_reached')
+  );
 
   if (workItemLog) {
     await workItemLog.appendDecision(
@@ -909,6 +1136,16 @@ async function handleWorkItemCompleted(
 
   const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
   const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+  let preprocessed: PreProcessedContext | null = null;
+  let preprocessedContext = '';
+  if (workItemLog) {
+    try {
+      preprocessed = await extractPreProcessedContext(workItemLog);
+      preprocessedContext = formatPreProcessedContext(preprocessed);
+    } catch (err) {
+      console.warn('[WATCHER] Pre-processing failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
 
   await config.workLog.append({
     type: 'workitem_status',
@@ -926,12 +1163,13 @@ async function handleWorkItemCompleted(
 
   const taskText = `The agent completed a work item (success=${event.success}).
 
-## Your Task — Work Item Review
+${preprocessedContext ? `<preprocessed-facts>\n${preprocessedContext}\n</preprocessed-facts>\n` : ''}## Your Task — Work Item Review
 
 Based on the workitem log above:
 1. Should the work item be accepted?
 2. If issues remain, prefer split/create work items with bounded scope.
 3. If recoverable: return "realign" with guidance
+4. If evidence is insufficient (no files modified, empty outputs, no non-empty response), do NOT accept — split or realign with explicit missing evidence.
 
 ${WORK_ITEM_ID_GUIDANCE}`;
 
@@ -941,9 +1179,17 @@ ${WORK_ITEM_ID_GUIDANCE}`;
     workItemLogContent,
     snapshotContext,
     taskText,
+    ...(await getInlineSessionContext(config, getEventWorkId(ctx.event))),
   });
 
-  const action = await runAndLog(config, 'work_item_completed', objective, ctx);
+  const evidenceSummary = summarizeEvidence(preprocessed);
+  const action = await runAndLog(
+    config,
+    'work_item_completed',
+    objective,
+    ctx,
+    (candidate) => enforceEvidence(candidate, evidenceSummary, 'work_item_completed')
+  );
 
   if (workItemLog) {
     await workItemLog.appendDecision(
@@ -997,36 +1243,68 @@ async function handleCadenceAudit(
   const { event } = ctx;
   assertEventType(event, isCadenceAudit, 'cadence_audit');
 
-  const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
-  const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+  const workIdList = Array.from(new Set(
+    (event.workIds && event.workIds.length > 0 ? event.workIds : [event.workId]).filter(Boolean) as string[]
+  ));
+  const auditTargets = workIdList.length > 0 ? workIdList : ['unknown'];
 
-  // Pre-process deterministic facts from workitem log
-  let preprocessedContext = '';
-  let workItemCreated = new Date().toISOString();
-  if (workItemLog) {
-    try {
-      const preprocessed = await extractPreProcessedContext(workItemLog);
-      preprocessedContext = formatPreProcessedContext(preprocessed);
-      // Extract created timestamp from init entry if available
-      const entries = await workItemLog.readAll();
-      const initEntry = entries.find(e => e.type === 'init');
-      if (initEntry?.type === 'init') {
-        workItemCreated = initEntry.timestamp;
+  const auditItems = await Promise.all(auditTargets.map(async (workId) => {
+    const workItemLog = workId ? await config.getWorkItemLog(workId) : null;
+    const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
+
+    let preprocessedContext = '';
+    let preprocessed: PreProcessedContext | null = null;
+    let workItemCreated = new Date().toISOString();
+    if (workItemLog) {
+      try {
+        preprocessed = await extractPreProcessedContext(workItemLog);
+        preprocessedContext = formatPreProcessedContext(preprocessed);
+        const entries = await workItemLog.readAll();
+        const initEntry = entries.find(e => e.type === 'init');
+        if (initEntry?.type === 'init') {
+          workItemCreated = initEntry.timestamp;
+        }
+      } catch (err) {
+        console.warn('[WATCHER] Pre-processing failed:', err instanceof Error ? err.message : String(err));
       }
-    } catch (err) {
-      console.warn('[WATCHER] Pre-processing failed:', err instanceof Error ? err.message : String(err));
     }
-  }
+
+    return {
+      workId,
+      workItemLog,
+      workItemLogContent,
+      preprocessed,
+      preprocessedContext,
+      workItemCreated,
+    };
+  }));
+
+  const workItemLogContent = auditItems.map((item) => {
+    const header = `### WorkItem ${item.workId}`;
+    const preprocessedBlock = item.preprocessedContext
+      ? `\n<preprocessed-facts>\n${item.preprocessedContext}\n</preprocessed-facts>\n`
+      : '';
+    return `${header}\n${item.workItemLogContent}${preprocessedBlock}`;
+  }).join('\n\n');
 
   const snapshotContext = formatSnapshotForTrigger('cadence_audit', ctx);
 
+  const isMulti = auditItems.length > 1;
+  const headerLines = isMulti
+    ? [
+        '## Active WorkItems',
+        ...auditItems.map(item => `- ${item.workId}`),
+      ]
+    : undefined;
+
   const taskText = `This is a periodic cadence audit. The agent is still executing.
 
-${preprocessedContext ? `<preprocessed-facts>\n${preprocessedContext}\n</preprocessed-facts>\n` : ''}## Your Task — Progress Check AND Semantic Generation
+${isMulti ? `Active workItems: ${auditItems.map(item => item.workId).join(', ')}\n` : ''}## Your Task — Progress Check AND Semantic Generation
 
 Based on the workitem log above:
-1. Is the agent making progress toward the session goal? (read salience)
+1. Is the agent making progress toward the session goal? (use inline salience)
 2. Check for drift (off-topic work), thrashing (repeating failed approaches), or stalling
+3. If evidence is insufficient (no files modified, empty outputs, no non-empty response), you MUST report what is missing and intervene — do NOT allow.
 
 ### Actions (in order of preference)
 
@@ -1042,7 +1320,12 @@ ${WORK_ITEM_ID_GUIDANCE}
 
 ### Semantic Output (REQUIRED)
 
-In addition to your decision, you MUST produce a \`semantic\` field with your understanding of:
+If multiple workItems are present, you MUST produce a \`semantics\` array with one entry per workItem:
+- \`{ workId, semantic }\`
+
+If only one workItem is present, you MAY use a single \`semantic\` field instead.
+
+Each semantic entry must contain:
 
 1. **stateAndProgress**: Current state of work
    - objective: The workItem objective
@@ -1072,32 +1355,76 @@ In addition to your decision, you MUST produce a \`semantic\` field with your un
     workItemLogContent,
     snapshotContext,
     taskText,
+    headerLines,
+    workIdOverride: isMulti ? 'multiple' : auditItems[0]?.workId,
+    ...(await getInlineSessionContext(config, isMulti ? undefined : getEventWorkId(ctx.event))),
   });
 
-  const action = await runAndLog(config, 'cadence_audit', objective, ctx);
+  const evidenceSummary = auditItems.length === 0
+    ? summarizeEvidence(null)
+    : auditItems.map(item => summarizeEvidence(item.preprocessed)).reduce((acc, summary) => ({
+        hasWorkItemLog: acc.hasWorkItemLog && summary.hasWorkItemLog,
+        filesModifiedCount: Math.min(acc.filesModifiedCount, summary.filesModifiedCount),
+        assistantNonEmpty: Math.min(acc.assistantNonEmpty, summary.assistantNonEmpty),
+        assistantEmpty: Math.max(acc.assistantEmpty, summary.assistantEmpty),
+        lastAssistantLength: Math.min(acc.lastAssistantLength, summary.lastAssistantLength),
+        toolCalls: Math.max(acc.toolCalls, summary.toolCalls),
+        durationMs: Math.max(acc.durationMs, summary.durationMs),
+        logPosition: Math.max(acc.logPosition, summary.logPosition),
+      }), {
+        hasWorkItemLog: true,
+        filesModifiedCount: Number.POSITIVE_INFINITY,
+        assistantNonEmpty: Number.POSITIVE_INFINITY,
+        assistantEmpty: 0,
+        lastAssistantLength: Number.POSITIVE_INFINITY,
+        toolCalls: 0,
+        durationMs: 0,
+        logPosition: 0,
+      });
+  const action = await runAndLog(
+    config,
+    'cadence_audit',
+    objective,
+    ctx,
+    (candidate) => enforceEvidence(candidate, evidenceSummary, 'cadence_audit')
+  );
 
   // Fire-and-forget semantic write (non-blocking)
-  if (event.workId && 'semantic' in action && action.semantic) {
+  if ('semantics' in action && Array.isArray(action.semantics) && action.semantics.length > 0) {
+    for (const entry of action.semantics) {
+      const target = auditItems.find(item => item.workId === entry.workId);
+      if (!target) continue;
+      const writeConfig: SemanticWriteConfig = {
+        workingDir: config.workingDir,
+        sessionId: config.sessionId,
+        workId: entry.workId,
+      };
+      writeSemanticFileAsync(writeConfig, entry.semantic, target.workItemCreated);
+    }
+  } else if (event.workId && 'semantic' in action && action.semantic) {
+    const target = auditItems.find(item => item.workId === event.workId);
     const writeConfig: SemanticWriteConfig = {
       workingDir: config.workingDir,
       sessionId: config.sessionId,
       workId: event.workId,
     };
-    writeSemanticFileAsync(writeConfig, action.semantic, workItemCreated);
+    writeSemanticFileAsync(writeConfig, action.semantic, target?.workItemCreated ?? new Date().toISOString());
   }
 
+  const noteWorkId = auditItems.length === 1 ? auditItems[0]?.workId : undefined;
   await config.workLog.append({
     type: 'note',
     timestamp: new Date().toISOString(),
-    workId: event.workId,
+    workId: noteWorkId,
     note: `[cadence audit] ${action.watcherAction}: ${action.reason}`,
     source: 'watcher',
   }).catch(err => {
     console.warn('[WATCHER] Work log write failed (cadence audit):', err instanceof Error ? err.message : String(err));
   });
 
-  if (workItemLog) {
-    await workItemLog.appendDecision(
+  for (const item of auditItems) {
+    if (!item.workItemLog) continue;
+    await item.workItemLog.appendDecision(
       'cadence_audit',
       action.watcherAction,
       action.reason
@@ -1170,7 +1497,7 @@ ${handoffSpecText}
 ## Your Task — Plan Review
 
 Based on the planner's reasoning above and the proposed plan:
-1. Do the work items address the session goal? (read salience)
+1. Do the work items address the session goal? (use inline salience)
 2. Are objectives specific and actionable?
 3. Are dependencies correctly identified?
 4. Is the scope reasonable?
@@ -1189,6 +1516,7 @@ Guidelines:
     workItemLogContent,
     snapshotContext,
     taskText,
+    ...(await getInlineSessionContext(config, getEventWorkId(ctx.event))),
   });
 
   const action = await runAndLog(config, 'handoff_approval', objective, ctx);
@@ -1269,10 +1597,13 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
       };
 
     case 'cadence_audit':
-      // Don't terminate on oversight failure - let agent continue working
+      // Oversight failure should surface, not silently allow
       return {
-        watcherAction: 'allow',
-        reason: `Oversight unavailable (${errorMsg.slice(0, 50)}): Agent continues`,
+        watcherAction: 'realign',
+        realign: {
+          systemMessage: `[Watcher unavailable] Oversight failed (${errorMsg.slice(0, 50)}). Provide concrete evidence of progress (files modified or non-empty output) before continuing.`,
+        },
+        reason: `Oversight unavailable (${errorMsg.slice(0, 50)}): Insufficient evidence to allow`,
       };
 
     case 'bounds_exceeded':
@@ -1286,26 +1617,32 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
       };
 
     case 'agent_error':
-      // Can't diagnose - allow termination but log
+      // Can't diagnose - request explicit recovery plan
       return {
-        watcherAction: 'allow',
-        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Cannot diagnose ${terminationReason}, allowing termination`,
+        watcherAction: 'realign',
+        realign: {
+          systemMessage: `[Watcher unavailable] Cannot diagnose ${terminationReason}. Provide error details, attempted fixes, and a concrete next step.`,
+        },
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Cannot diagnose ${terminationReason}, requesting recovery plan`,
       };
 
     case 'goal_state_reached':
     case 'work_item_completed':
-      // Can't verify quality - pass quality gate to allow termination
+      // Can't verify quality - fail closed
       return {
         watcherAction: 'quality_gate',
-        qualityGate: { passed: true },
-        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Quality gate skipped - allowing termination`,
+        qualityGate: { passed: false, issues: ['Watcher unavailable; insufficient evidence to accept completion.'] },
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Quality gate failed - insufficient evidence`,
       };
 
     case 'handoff_approval':
-      // Can't review plan - approve by default (safer to proceed than block)
+      // Can't review plan - request resubmission
       return {
-        watcherAction: 'allow',
-        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Plan approved by default`,
+        watcherAction: 'realign',
+        realign: {
+          systemMessage: `[Watcher unavailable] Plan review failed (${errorMsg.slice(0, 50)}). Resubmit the handoff spec with explicit goals, context, and work items.`,
+        },
+        reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Plan review failed - resubmit`,
       };
 
     case 'session_init':
@@ -1334,7 +1671,8 @@ async function runAndLog(
   config: WatcherAgentConfig,
   trigger: WatcherTrigger,
   objective: string,
-  ctx: WatcherContext
+  ctx: WatcherContext,
+  postProcess?: (action: WatcherAction) => WatcherAction
 ): Promise<WatcherAction> {
   const baseTimeout = TIMEOUT_BY_TRIGGER[trigger] ?? config.watcherTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const inFlightKey = `${ctx.event.sessionKey}:${ctx.event.workId}:${trigger}`;
@@ -1394,7 +1732,15 @@ async function runAndLog(
     cleanupInFlight();
   });
 
-  const action = await visiblePromise;
+  let action = await visiblePromise;
+  if (postProcess) {
+    action = postProcess(action);
+    const validActions = getValidActions(trigger);
+    if (validActions.length > 0 && !validActions.includes(action.watcherAction)) {
+      console.warn(`[WATCHER] Invalid action "${action.watcherAction}" after post-process for trigger "${trigger}". Valid: [${validActions.join(', ')}]. Using fallback.`);
+      action = getFallbackAction(trigger, new Error(`Invalid action after post-process: ${action.watcherAction}`), ctx);
+    }
+  }
 
   // Build execution metrics from hook context for audit trail
   const executionMetrics = {

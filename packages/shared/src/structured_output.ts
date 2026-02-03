@@ -54,6 +54,162 @@ function tryParseJson(value: string): Record<string, unknown> | null {
   }
 }
 
+function parseBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+  }
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  return fallback;
+}
+
+function inferBooleanFromText(text?: string): boolean | null {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const failurePattern = /(not\s+pass|did\s+not|not\s+achiev|not\s+complete|fail|failed|failure)/;
+  if (failurePattern.test(lower)) return false;
+  const successPattern = /(pass|passed|approve|approved|success|achiev|complete)/;
+  if (successPattern.test(lower)) return true;
+  return null;
+}
+
+function readNestedString(value: Record<string, unknown>, path: string[]): string | null {
+  let current: unknown = value;
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === 'string' ? current : null;
+}
+
+function normalizeWatcherActionCandidate(
+  candidate: Record<string, unknown>
+): Record<string, unknown> | null {
+  const actionRaw = typeof candidate.action === 'string'
+    ? candidate.action.trim().toLowerCase()
+    : '';
+  const action = actionRaw === 'done' || actionRaw === 'continue' ? actionRaw : 'done';
+
+  const watcherActionValue = candidate.watcherAction ?? candidate.watcher_action;
+  const watcherActionRaw = typeof watcherActionValue === 'string'
+    ? watcherActionValue.trim().toLowerCase()
+    : '';
+  const validWatcherActions = new Set([
+    'answer',
+    'realign',
+    'split',
+    'create_work_item',
+    'quality_gate',
+    'allow',
+    'continue',
+  ]);
+  if (!validWatcherActions.has(watcherActionRaw)) return null;
+
+  const response = typeof candidate.response === 'string' ? candidate.response : '';
+  const reason = typeof candidate.reason === 'string' ? candidate.reason : response || 'Watcher decision';
+
+  const awaitingUserInputValue = candidate.awaitingUserInput ?? candidate.awaiting_user_input;
+  const goalStateReachedValue = candidate.goalStateReached ?? candidate.goal_state_reached;
+
+  const awaitingUserInput = parseBoolean(awaitingUserInputValue, false);
+  const goalStateReachedDefault = action === 'done';
+  const goalStateReached = action === 'continue'
+    ? false
+    : parseBoolean(goalStateReachedValue, goalStateReachedDefault);
+
+  const base: Record<string, unknown> = {
+    action,
+    response,
+    goalStateReached,
+    awaitingUserInput,
+    watcherAction: watcherActionRaw,
+    reason,
+  };
+
+  if (candidate.semantic && typeof candidate.semantic === 'object' && !Array.isArray(candidate.semantic)) {
+    base.semantic = candidate.semantic;
+  }
+
+  switch (watcherActionRaw) {
+    case 'answer': {
+      const answer = candidate.answer;
+      if (typeof answer === 'string') {
+        base.answer = { text: answer };
+        return base;
+      }
+      if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return null;
+      const answerText = (answer as Record<string, unknown>).text;
+      if (typeof answerText !== 'string' || answerText.length === 0) return null;
+      const contextAddendum = (answer as Record<string, unknown>).contextAddendum;
+      base.answer = {
+        text: answerText,
+        ...(typeof contextAddendum === 'string' ? { contextAddendum } : {}),
+      };
+      return base;
+    }
+    case 'realign': {
+      const realign = candidate.realign;
+      if (typeof realign === 'string') {
+        base.realign = { systemMessage: realign };
+        return base;
+      }
+      if (!realign || typeof realign !== 'object' || Array.isArray(realign)) return null;
+      const systemMessage = (realign as Record<string, unknown>).systemMessage;
+      if (typeof systemMessage !== 'string' || systemMessage.length === 0) return null;
+      const newGoal = (realign as Record<string, unknown>).newGoal;
+      base.realign = {
+        systemMessage,
+        ...(typeof newGoal === 'string' ? { newGoal } : {}),
+      };
+      return base;
+    }
+    case 'split':
+    case 'create_work_item': {
+      const workItemsValue = candidate.workItems ?? candidate.work_items;
+      if (!Array.isArray(workItemsValue) || workItemsValue.length === 0) return null;
+      base.workItems = workItemsValue;
+      return base;
+    }
+    case 'quality_gate': {
+      const qualityGateValue = candidate.qualityGate ?? candidate.quality_gate;
+      if (qualityGateValue && typeof qualityGateValue === 'object' && !Array.isArray(qualityGateValue)) {
+        const passed = (qualityGateValue as Record<string, unknown>).passed;
+        const passedBool = parseBoolean(passed, false);
+        base.qualityGate = {
+          passed: passedBool,
+          ...(Array.isArray((qualityGateValue as Record<string, unknown>).issues)
+            ? { issues: (qualityGateValue as Record<string, unknown>).issues }
+            : {}),
+        };
+        return base;
+      }
+
+      const statusText = readNestedString(candidate, ['semantic', 'salienceUpdates', 'workItemStatus']);
+      const inferredStatus = inferBooleanFromText(statusText ?? undefined);
+      const inferredText = inferBooleanFromText(`${reason} ${response}`);
+      const passed = inferredStatus ?? inferredText ?? false;
+      base.qualityGate = { passed };
+      return base;
+    }
+    case 'allow':
+    case 'continue':
+      return base;
+    default:
+      return null;
+  }
+}
+
+function parseWatcherActionLenient(
+  parsed: Record<string, unknown>
+): Record<string, unknown> | null {
+  return normalizeWatcherActionCandidate(parsed);
+}
+
 function extractJsonFromFence(value: string): Record<string, unknown> | null {
   const fenceMatch = value.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (!fenceMatch) return null;
@@ -230,6 +386,13 @@ export function parseAndValidateOutput<T extends OutputSchemaName>(
   // First coerce to JSON object
   const coerced = coerceStructuredOutput(rawValue);
   if (!coerced) return null;
+
+  if (schemaName === 'watcher_action') {
+    const lenient = parseWatcherActionLenient(coerced);
+    if (lenient) {
+      return lenient as z.output<(typeof OUTPUT_SCHEMAS)[T]>;
+    }
+  }
 
   // Then validate against schema
   return parseAgentOutput(schemaName, coerced);

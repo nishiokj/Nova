@@ -545,6 +545,11 @@ export function getValidActions(trigger: WatcherTrigger): WatcherActionType[] {
 
 import type { SemanticOutput } from './semantic/schemas.js';
 
+export interface WatcherSemanticBatchEntry {
+  workId: string;
+  semantic: SemanticOutput;
+}
+
 /**
  * Structured output from the watcher agent.
  * Returned by the LLM-backed watcher after evaluating a trigger.
@@ -561,28 +566,35 @@ export type WatcherAction =
       watcherAction: 'answer';
       reason: string;
       answer: { text: string; contextAddendum?: string };
+      semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
       watcherAction: 'realign';
       reason: string;
       realign: { systemMessage: string; newGoal?: string };
       semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
       watcherAction: 'split' | 'create_work_item';
       reason: string;
       workItems: WatcherWorkItem[];
       semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
       watcherAction: 'quality_gate';
       reason: string;
       qualityGate: { passed: boolean; issues?: string[] };
+      semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
       watcherAction: WatcherNoInterventionAction;
       reason: string;
       semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     };
 
 export type WatcherActionWithWorkItems = Extract<
@@ -677,6 +689,7 @@ export type WorkItemEntry =
   | WorkItemInitEntry
   | WorkItemMessageEntry
   | WorkItemToolCallEntry
+  | WorkItemMemoryInjectionEntry
   | WorkItemDecisionEntry
   | WorkItemStatusEntry
   | WorkItemMetricsEntry;
@@ -730,6 +743,40 @@ export interface WorkItemToolCallEntry {
   /** Result summary - full for Read/Grep, may be truncated for very large outputs */
   resultSummary?: string;
   durationMs: number;
+}
+
+/**
+ * Memory injection record (streamed during agent execution).
+ * Captures what memory was injected and the query that retrieved it.
+ */
+export interface WorkItemMemoryInjectionEntry {
+  type: 'memory_injection';
+  timestamp: string;
+  query: string;
+  /** Full injected memory content (if available) */
+  memoryContent?: string;
+  /** Full task context with memory appended (if available) */
+  contextWithMemory?: string;
+  /** Memory content preview - first 500 chars */
+  resultPreview?: string;
+  /** Number of memory items returned */
+  itemCount: number;
+  /** Whether injection succeeded */
+  success: boolean;
+  /** Which iteration this was */
+  iteration: number;
+  /** Injection version */
+  version?: 'v1' | 'v2';
+  /** Retrieval latency (ms) */
+  latencyMs?: number;
+  /** Category coverage counts (v2 only) */
+  coverage?: Record<string, number>;
+  /** Discriminators included (v2 only) */
+  discriminatorsIncluded?: number;
+  /** Total tokens injected (v2 only) */
+  totalTokens?: number;
+  /** Whether v2 fell back to v1 */
+  fallbackToV1?: boolean;
 }
 
 /**

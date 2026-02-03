@@ -51,6 +51,26 @@ const AGENT_TOOL_PARAMETER_SCHEMA: ToolDefinition['parameters'] = {
   additionalProperties: false,
 };
 
+function deepCloneJson<T>(value: T): T {
+  if (value === null || value === undefined) return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function cloneAgentConfig(config: AgentConfig): AgentConfig {
+  return {
+    ...config,
+    tools: [...config.tools],
+    budget: { ...config.budget },
+    llmParams: { ...config.llmParams },
+    outputSchema: config.outputSchema
+      ? {
+          ...config.outputSchema,
+          schema: deepCloneJson(config.outputSchema.schema),
+        }
+      : undefined,
+  };
+}
+
 function buildAgentToolDefinition(agentType: string): ToolDefinition {
   const description =
     DEFAULT_AGENT_TOOL_DESCRIPTIONS[agentType] ??
@@ -89,7 +109,7 @@ export class AgentRegistry {
     if (!config) {
       throw new Error(`Unknown agent type: ${type}`);
     }
-    return config;
+    return cloneAgentConfig(config);
   }
 
   listConfigs(): AgentConfig[] {

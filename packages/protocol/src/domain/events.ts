@@ -87,6 +87,8 @@ export interface CadenceAuditEvent extends ControlEventBase {
   toolCallsSinceLastAudit: number;
   metrics: ExecutionMetrics;
   recentActivity: string;
+  /** Optional list of active workItem IDs included in this audit. */
+  workIds?: string[];
 }
 
 export interface AgentErrorEvent extends ControlEventBase {
@@ -281,7 +283,8 @@ export function createCadenceAuditEvent(
   elapsedMs: number,
   toolCallsSinceLastAudit: number,
   metrics: ExecutionMetrics,
-  recentActivity: string
+  recentActivity: string,
+  workIds?: string[]
 ): CadenceAuditEvent {
   return {
     type: 'cadence_audit',
@@ -292,6 +295,7 @@ export function createCadenceAuditEvent(
     toolCallsSinceLastAudit,
     metrics,
     recentActivity,
+    ...(workIds && workIds.length > 0 ? { workIds } : {}),
   };
 }
 

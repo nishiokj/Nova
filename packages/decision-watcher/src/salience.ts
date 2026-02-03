@@ -46,7 +46,8 @@ const DEFAULT_PRINCIPLES = [
   'Surface ambiguity aggressively — implicit boundaries and shared ownership are questions, not silent choices.',
   'Establish invariants — record what decisions imply. Make boundaries and contracts explicit.',
   'Separation of concerns is non-negotiable — detect and address concern-mixing.',
-  'Minimal intervention — only act with clear benefit.',
+  'Evidence-first oversight — never allow without concrete evidence. If evidence is missing, report it and intervene.',
+  'Accountability — the watcher is responsible for goal completion and system integrity. Create infra-fix work when the system fails you.',
   'One work item = one git commit. Keep units of work atomic and reviewable.',
 ];
 

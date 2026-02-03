@@ -25,6 +25,7 @@ export type AgentCoreEventType =
   | 'agent_reasoning'
   | 'artifact_discovered'
   | 'agent_progress'
+  | 'memory_injected'
   | 'permission_request'
   | 'git_commit';
 
@@ -313,6 +314,39 @@ export interface AgentReasoningData {
   agentType: string;
   /** Whether this is a final chunk or streaming */
   isFinal?: boolean;
+}
+
+/**
+ * Data for memory_injected event.
+ * Emitted when memory is injected into the agent context.
+ */
+export interface MemoryInjectedData {
+  /** Search query used to retrieve memory */
+  query: string;
+  /** Memory content preview - first 500 chars */
+  resultPreview?: string;
+  /** Full injected memory content (if available) */
+  memoryContent?: string;
+  /** Final task context string with memory appended (if available) */
+  contextWithMemory?: string;
+  /** Number of memory items returned */
+  itemCount: number;
+  /** Whether injection succeeded */
+  success: boolean;
+  /** Which iteration this was */
+  iteration: number;
+  /** Injection version */
+  version?: 'v1' | 'v2';
+  /** Retrieval latency (ms) */
+  latencyMs?: number;
+  /** Category coverage counts (v2 only) */
+  coverage?: Record<string, number>;
+  /** Discriminators included (v2 only) */
+  discriminatorsIncluded?: number;
+  /** Total tokens injected (v2 only) */
+  totalTokens?: number;
+  /** Whether v2 fell back to v1 */
+  fallbackToV1?: boolean;
 }
 
 /**

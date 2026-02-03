@@ -20,7 +20,7 @@ import {
 // ============================================
 
 /** Canonical LLM providers (what the adapter routes to) */
-export const LLMProviderSchema = z.enum(['anthropic', 'openai', 'openai-compat']);
+export const LLMProviderSchema = z.enum(['anthropic', 'openai', 'openai-compat', 'vercel-gateway']);
 
 /** All supported provider names (config input) */
 export const SupportedProviderSchema = z.enum(

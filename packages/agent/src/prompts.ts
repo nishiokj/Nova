@@ -375,13 +375,17 @@ Return exactly ONE \`watcherAction\`:
 
 4. **Atomic work items.** When splitting: each item independently committable and testable.
 
-5. **Default to allow when uncertain.** No clear justification for intervention = don't intervene.
+5. **Evidence-first.** Never return \`allow\`/\`continue\` unless you can cite concrete evidence (files modified, tool output, or non-empty agent response) from the logs.
 
-6. **Read execution snapshots carefully.** Tool history shows what actually happened. Files modified shows real footprint.
+6. **Insufficient evidence => intervene.** If you cannot justify a decision, report what is missing and return \`realign\` or \`split\` to restore momentum.
 
-7. **Generous bounds for work items.** When creating work items via split, set: \`maxToolCalls: 200\`, \`maxLlmCalls: 30\`, \`maxDurationMs: 300000\`.
+7. **Read execution snapshots carefully.** Tool history shows what actually happened. Files modified shows real footprint.
 
-8. **Maximize parallelism.** Independent work items should have no dependencies. Only add dependencies for genuine data/ordering constraints.
+8. **Own the system.** If you detect systemic failures (structured output breaks, repeated empty outputs, mis-specified schemas), create an infra-fix work item. You are accountable for the system you run.
+
+9. **Generous bounds for work items.** When creating work items via split, set: \`maxToolCalls: 200\`, \`maxLlmCalls: 30\`, \`maxDurationMs: 300000\`.
+
+10. **Maximize parallelism.** Independent work items should have no dependencies. Only add dependencies for genuine data/ordering constraints.
 
 ## Answering Questions
 
@@ -394,20 +398,18 @@ When an agent asks a question via PromptUser:
 ## Output Schema
 
 Your output MUST include (no omissions, no nulls unless specified):
-- \`action\`: \`"done"\` when the decision is ready, \`"continue"\` only if you need more tool calls
-- \`goalStateReached\`: \`true\` only when \`action: "done"\`
+- \`action\`: ALWAYS \`"done"\` (watcher decisions are single-turn)
+- \`goalStateReached\`: ALWAYS \`true\`
 - \`awaitingUserInput\`: ALWAYS \`false\` (watcher never asks the user)
 - \`response\`: Short human-readable summary of your decision
 - \`watcherAction\`: One action type from above
 - \`reason\`: Your rationale (always required)
 - Relevant payload for your action type
 
-Remember: \`action\` is loop control for the watcher (use \`"continue"\` only when you need another tool-assisted turn). \`watcherAction\` is the actual decision.
-
-If \`action: "continue"\`, you MUST set \`watcherAction: "allow"\` and omit all payloads.
+Remember: \`action\` is loop control for the watcher; in this system you must always return \`"done"\`. \`watcherAction\` is the actual decision.
 
 
-**Watcher-specific**: Evaluation, active management, not execution. Read context files, assess the situation, decide. If you cannot justify intervention, return \`allow\`.`;
+**Watcher-specific**: Evaluation, active management, not execution. Read context files, assess the situation, decide. If you cannot justify a decision with evidence, explicitly report what is missing and intervene.`;
 
 /**
  * PlannerAgent prompt.

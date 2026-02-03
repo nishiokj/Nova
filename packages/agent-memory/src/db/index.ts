@@ -84,6 +84,13 @@ export {
   type DerivedTask,
   type DerivedTaskInput,
   type DerivedTaskMode,
+  // Derived Run Log
+  createDerivedRunLogRepository,
+  type DerivedRunLogRepository,
+  type DerivedRunLogRecord,
+  type DerivedRunLogInput,
+  type DerivedRunSampleInput,
+  type DerivedRunStatus,
   // Conversational Memory
   createProjectsRepository,
   type ProjectsRepository,

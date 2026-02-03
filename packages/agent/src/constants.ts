@@ -26,6 +26,16 @@ export function getMaxOutputLength(toolName: string): number {
 }
 
 /**
+ * Truncate tool output to max length for the given tool.
+ * Appends a truncation notice if content was trimmed.
+ */
+export function truncateToolOutput(output: string, toolName: string): string {
+  const maxLen = getMaxOutputLength(toolName);
+  if (output.length <= maxLen) return output;
+  return `${output.slice(0, maxLen)}\n... [truncated ${output.length - maxLen} chars]`;
+}
+
+/**
  * Patterns that indicate LLM refusal to complete a task.
  */
 export const REFUSAL_PATTERNS = [

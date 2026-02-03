@@ -6,12 +6,14 @@
 import { OpenAIProvider } from './openai.js';
 import { AnthropicProvider } from './anthropic.js';
 import { OpenAICompatProvider } from './openai-compat.js';
+import { VercelGatewayProvider } from './vercel-gateway.js';
 import type { LLMProviderAdapter } from './types.js';
 
 const PROVIDERS: Record<string, LLMProviderAdapter> = {
   openai: new OpenAIProvider(),
   anthropic: new AnthropicProvider(),
   'openai-compat': new OpenAICompatProvider(),
+  'vercel-gateway': new VercelGatewayProvider(),
 };
 
 export function getProvider(name: string): LLMProviderAdapter {

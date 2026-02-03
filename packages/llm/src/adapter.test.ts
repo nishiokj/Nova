@@ -1146,6 +1146,104 @@ describe('OpenAICompatAdapter', () => {
   });
 });
 
+describe('VercelGatewayAdapter', () => {
+  let adapter: ReturnType<typeof createAdapter>;
+  const clientConfig: LLMClientConfig = {
+    apiKeys: { 'vercel-gateway': 'gateway-key' },
+  };
+  const baseRequest: LLMRequestConfig = {
+    model: 'anthropic/claude-3.5-sonnet',
+  };
+
+  beforeEach(() => {
+    adapter = createAdapter(clientConfig);
+    const baseRespond = adapter.respond.bind(adapter);
+    (adapter as any).respond = (params: Record<string, unknown>) =>
+      baseRespond({
+        ...params,
+        llm: { ...baseRequest, ...((params as { llm?: LLMRequestConfig }).llm ?? {}) },
+      });
+  });
+
+  afterEach(() => {
+    restoreFetch();
+  });
+
+  it('should infer vercel-gateway provider when model includes slash', async () => {
+    mockFetch(async (url, options) => {
+      expect(url).toBe('https://ai-gateway.vercel.sh/v1/responses');
+      expect(options?.headers).toEqual(expect.objectContaining({
+        Authorization: 'Bearer gateway-key',
+      }));
+      const body = JSON.parse(options?.body as string);
+      expect(body.model).toBe('anthropic/claude-3.5-sonnet');
+      return new Response(JSON.stringify({
+        id: 'resp_123',
+        status: 'completed',
+        output_text: 'OK',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }), { status: 200 });
+    });
+
+    await adapter.respond({
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+  });
+
+  it('should convert bare model to gateway format using displayProvider hint', async () => {
+    mockFetch(async (url, options) => {
+      expect(url).toBe('https://ai-gateway.vercel.sh/v1/responses');
+      const body = JSON.parse(options?.body as string);
+      expect(body.model).toBe('anthropic/claude-sonnet-4.5');
+      return new Response(JSON.stringify({
+        id: 'resp_123',
+        status: 'completed',
+        output_text: 'OK',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }), { status: 200 });
+    });
+
+    await adapter.respond({
+      messages: [{ role: 'user', content: 'Hello' }],
+      llm: {
+        provider: 'vercel-gateway',
+        model: 'claude-sonnet-4.5',
+        displayProvider: 'anthropic',
+      },
+    });
+  });
+
+  it('should use chat completions endpoint when responseSchema is provided', async () => {
+    mockFetch(async (url, options) => {
+      expect(url).toBe('https://ai-gateway.vercel.sh/v1/chat/completions');
+      const body = JSON.parse(options?.body as string);
+      expect(body.response_format).toEqual({
+        type: 'json_schema',
+        json_schema: {
+          name: 'test_schema',
+          schema: { type: 'object' },
+          strict: true,
+        },
+      });
+      return new Response(JSON.stringify({
+        id: 'chatcmpl_123',
+        model: 'anthropic/claude-3.5-sonnet',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: '{"ok":true}' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), { status: 200 });
+    });
+
+    await adapter.respond({
+      messages: [{ role: 'user', content: 'Hello' }],
+      responseSchema: { name: 'test_schema', schema: { type: 'object' } },
+    });
+  });
+});
+
 describe('createAdapter factory', () => {
   it('should create adapter with api key map', () => {
     const adapter = createAdapter({

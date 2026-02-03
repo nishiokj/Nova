@@ -23,6 +23,7 @@ interface MemoryInjectionRowProps {
 
 function MemoryInjectionRow({ injection, expanded: defaultExpanded = false }: MemoryInjectionRowProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
+  const injectedMemory = injection.memoryContent ?? injection.resultPreview ?? ''
 
   return (
     <div
@@ -82,7 +83,7 @@ function MemoryInjectionRow({ injection, expanded: defaultExpanded = false }: Me
 
       {expanded && (
         <div className="px-2.5 pb-2.5 pt-0 space-y-2 animate-fade-in">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-2">
             <div>
               <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Query</span>
               <pre className="mt-1 p-2 rounded bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] overflow-x-auto max-h-32">
@@ -90,11 +91,21 @@ function MemoryInjectionRow({ injection, expanded: defaultExpanded = false }: Me
               </pre>
             </div>
             <div>
-              <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Preview</span>
-              <pre className="mt-1 p-2 rounded bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] overflow-x-auto max-h-32">
-                {injection.resultPreview || '(no preview)'}
+              <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
+                {injection.memoryContent ? 'Injected Memory' : 'Preview'}
+              </span>
+              <pre className="mt-1 p-2 rounded bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] overflow-x-auto max-h-48">
+                {injectedMemory || '(no memory)'}
               </pre>
             </div>
+            {injection.contextWithMemory && (
+              <div>
+                <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Context (Task + Memory)</span>
+                <pre className="mt-1 p-2 rounded bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] overflow-x-auto max-h-48">
+                  {injection.contextWithMemory}
+                </pre>
+              </div>
+            )}
           </div>
 
           {(injection.coverage || injection.discriminatorsIncluded !== undefined) && (

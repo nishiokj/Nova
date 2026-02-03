@@ -28,6 +28,7 @@ import type {
   EjectResult,
   CompactOptions,
   CompactResult,
+  LLMItem,
 } from 'types';
 
 // =========================================================================
@@ -1005,6 +1006,21 @@ export class ContextWindow {
   }
 
   /**
+   * Rebuild readFiles from current file_content items.
+   * Useful when creating filtered context views.
+   */
+  rebuildReadFilesFromItems(): void {
+    const next = new Set<string>();
+    for (const item of this._items) {
+      if (item.type === 'file_content') {
+        next.add(item.path);
+      }
+    }
+    this._readFiles = next;
+    this._version++;
+  }
+
+  /**
    * Check if a file has been read in this session.
    */
   hasReadFile(path: string): boolean {
@@ -1064,8 +1080,8 @@ export class ContextWindow {
    * Handles provider-specific conversions.
    * Batches artifacts into a single message to reduce token overhead.
    */
-  getItemsForLLM(): Array<Record<string, unknown>> {
-    const result: Array<Record<string, unknown>> = [];
+  getItemsForLLM(): LLMItem[] {
+    const result: LLMItem[] = [];
     const artifactItems: ArtifactItem[] = [];
 
     for (const item of this._items) {

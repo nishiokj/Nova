@@ -384,7 +384,7 @@ export class AuthService {
 
     const credentials = this.store.listProviderCredentials(session.userId);
     const allProviders = [
-      'anthropic', 'openai', 'openai-compat', 'gemini',
+      'anthropic', 'openai', 'openai-compat', 'vercel-gateway', 'gemini',
       'cerebras', 'together', 'groq', 'fireworks',
     ];
 

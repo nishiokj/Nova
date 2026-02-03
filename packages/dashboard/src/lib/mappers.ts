@@ -348,6 +348,8 @@ function createRequestFromEvents(
           workItemId: memWorkItemId,
           query: (memData.query as string) ?? '',
           resultPreview: (memData.result_preview as string) ?? (memData.resultPreview as string) ?? undefined,
+          memoryContent: (memData.memory_content as string) ?? (memData.memoryContent as string) ?? undefined,
+          contextWithMemory: (memData.context_with_memory as string) ?? (memData.contextWithMemory as string) ?? undefined,
           itemCount: (memData.item_count as number) ?? (memData.itemCount as number) ?? 0,
           success: (memData.success as boolean) ?? false,
           iteration: (memData.iteration as number) ?? 0,

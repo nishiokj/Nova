@@ -22,6 +22,19 @@ export type {
   EjectResult,
   CompactOptions,
   CompactResult,
+  // LLM API format types
+  LLMMessageItem,
+  LLMFunctionCallItem,
+  LLMFunctionCallOutputItem,
+  LLMReasoningItem,
+  LLMItem,
+} from './context.js';
+
+export {
+  isLLMMessageItem,
+  isLLMFunctionCallItem,
+  isLLMFunctionCallOutputItem,
+  isLLMReasoningItem,
 } from './context.js';
 
 // ============================================
@@ -49,6 +62,7 @@ export type {
   ArtifactDiscoveredData,
   AgentProgressData,
   AgentReasoningData,
+  MemoryInjectedData,
   EventCallback,
   PermissionRequestEventData,
   GitCommitData,
@@ -66,12 +80,14 @@ export {
   HookCallEventSchema,
   LLMCallEventSchema,
   LLMErrorEventSchema,
+  MemoryInjectedEventSchema,
   WorkItemStatusEventSchema,
   WorkItemStatusDataSchema,
   ToolCallDataSchema,
   HookCallDataSchema,
   LLMCallDataSchema,
   LLMErrorDataSchema,
+  MemoryInjectedDataSchema,
   parseEvent,
   isValidEvent,
 } from './event_schemas.js';
@@ -227,6 +243,7 @@ export {
   getModelReasoningOptions,
   modelSupportsReasoning,
   getModelContextWindow,
+  toGatewayModel,
 } from './providers.js';
 
 // ============================================

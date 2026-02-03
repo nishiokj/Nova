@@ -242,7 +242,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const responseFormat = params.responseSchema
       ? getProviderResponseFormat(resolved.displayProvider)
       : null;
-    if (params.responseSchema && responseFormat === 'json_object') {
+    if (params.responseSchema && (responseFormat === 'json_object' || responseFormat === 'none')) {
       const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }
@@ -451,7 +451,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const responseFormat = params.responseSchema
       ? getProviderResponseFormat(resolved.displayProvider)
       : null;
-    if (params.responseSchema && responseFormat === 'json_object') {
+    if (params.responseSchema && (responseFormat === 'json_object' || responseFormat === 'none')) {
       const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }

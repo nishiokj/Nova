@@ -19,7 +19,7 @@ import type {
   LLMProvider,
   LLMRequestConfig,
 } from 'types';
-import { getProviderBaseUrl, isSupportedProvider, providerRequiresAuth } from 'types';
+import { getProviderBaseUrl, isSupportedProvider, providerRequiresAuth, toGatewayModel } from 'types';
 import { profiler } from 'shared';
 import { getProvider } from './providers/registry.js';
 import type { ResolvedRequestConfig, ProviderContext, AdapterLogger } from './providers/types.js';
@@ -60,6 +60,7 @@ export interface ProviderKeyService {
 const DEFAULT_PROVIDER_BASE_URLS: Partial<Record<LLMProvider, string>> = {
   openai: 'https://api.openai.com',
   anthropic: 'https://api.anthropic.com',
+  'vercel-gateway': 'https://ai-gateway.vercel.sh/v1',
 };
 
 /**
@@ -126,14 +127,28 @@ class LLMRouterAdapter implements LLMAdapter {
       throw new Error('LLM request missing model');
     }
 
-    if (!llm.provider) {
+    let provider = llm.provider;
+    if (!provider && llm.model.includes('/')) {
+      provider = 'vercel-gateway';
+    }
+
+    if (!provider) {
       throw new Error(`Provider must be specified for model '${llm.model}'`);
     }
 
-    const provider = llm.provider;
     // displayProvider is the user-facing name (e.g., 'z.ai-coder') for error messages
     // Falls back to canonical provider if not specified
     const displayProvider = (llm as { displayProvider?: string }).displayProvider ?? provider;
+    const keyProvider = provider === 'openai-compat' ? displayProvider : provider;
+
+    let model = llm.model;
+    if (provider === 'vercel-gateway' && !model.includes('/')) {
+      const gatewayHint =
+        displayProvider !== 'vercel-gateway' && displayProvider !== 'openai-compat'
+          ? displayProvider
+          : undefined;
+      model = toGatewayModel(model, gatewayHint);
+    }
 
     let baseUrl = llm.baseUrl;
     if (!baseUrl && provider === 'openai-compat' && displayProvider !== 'openai-compat') {
@@ -163,7 +178,7 @@ class LLMRouterAdapter implements LLMAdapter {
     let keySource = 'per-request';
 
     if (!apiKey && this.providerKeyService) {
-      apiKey = this.providerKeyService.getApiKey(displayProvider) ?? undefined;
+      apiKey = this.providerKeyService.getApiKey(keyProvider) ?? undefined;
       if (apiKey) keySource = 'provider-service';
     }
 
@@ -175,9 +190,10 @@ class LLMRouterAdapter implements LLMAdapter {
     // Debug logging for API key resolution
     const keyPreview = apiKey ? `${apiKey.slice(0, 8)}...` : 'MISSING';
     this.logger.debug('Resolving request config', {
-      model: llm.model,
+      model,
       provider,
       displayProvider,
+      keyProvider,
       baseUrl,
       keySource,
       keyPreview,
@@ -185,16 +201,16 @@ class LLMRouterAdapter implements LLMAdapter {
       hasStoredKey: !!this.apiKeys[provider],
     });
 
-    if (!apiKey && providerRequiresAuth(displayProvider)) {
+    if (!apiKey && providerRequiresAuth(keyProvider)) {
       throw new Error(
-        `API key not configured for provider '${displayProvider}'. Use /providers to add your API key.`
+        `API key not configured for provider '${keyProvider}'. Use /providers to add your API key.`
       );
     }
 
     return {
       provider,
       displayProvider,
-      model: llm.model,
+      model,
       apiKey,
       baseUrl,
       maxTokens: llm.maxTokens,

@@ -5,6 +5,16 @@ import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { HandoffSpec, TerminationReason } from 'protocol';
 
+// Re-export stop hook types from protocol (moved there to avoid circular deps)
+export type {
+  DeferredWorkItem,
+  ExecutionSnapshot,
+  StopHookResult,
+  StopHookContext,
+  StopHookUserPrompt,
+  StopHookHandler,
+} from 'protocol';
+
 /**
  * Agent type identifier - any string, defined via config.
  * Common types: 'routing', 'explorer', 'standard', 'complex'
@@ -404,6 +414,10 @@ export type InternalHookEvent =
       query: string;
       /** Memory content preview - first 500 chars */
       resultPreview?: string;
+      /** Full memory content injected (if available) */
+      memoryContent?: string;
+      /** Final task context string with memory appended (if available) */
+      contextWithMemory?: string;
       /** Number of memory items returned */
       itemCount: number;
       /** Whether injection succeeded */
@@ -435,103 +449,6 @@ export type InternalHookEvent =
       /** Branch name if detectable */
       branch?: string;
     };
-
-/**
- * Snapshot of agent execution state, provided to stop hooks for informed decisions.
- */
-export interface ExecutionSnapshot {
-  toolHistory: Array<{
-    name: string;
-    args: Record<string, unknown>;
-    success: boolean;
-    durationMs: number;
-    outputPreview?: string; // first ~500 chars
-  }>;
-  filesModified: string[];
-  filesRead: string[];
-  metrics: {
-    llmCallsMade: number;
-    toolCallsMade: number;
-    toolCallsSucceeded: number;
-    toolCallsFailed: number;
-    durationMs: number;
-    inputTokens: number;
-    outputTokens: number;
-    contextPercentUsed: number;
-  };
-  artifacts?: Array<{ sourcePath: string; name: string; kind: string; insight?: string }>;
-  fullResponse: string;
-}
-
-/**
- * Result from a stop hook - can block termination and re-inject a prompt.
- */
-export type StopHookResult =
-  | {
-      /** Whether to block the stop and continue */
-      decision: 'allow';
-      /** System message to prepend */
-      systemMessage?: string;
-      /** Deferred work items for async dispatch (enqueued after stop hook processing) */
-      deferredWork?: Array<{
-        id?: string;
-        goal: string;
-        objective: string;
-        agent: string;
-        background: boolean;
-        dependencies?: string[];
-        targetPaths?: string[];
-        bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
-      }>;
-    }
-  | {
-      /** Whether to block the stop and continue */
-      decision: 'block';
-      /** New prompt to inject (required if decision is 'block') */
-      reason: string;
-      /** System message to prepend */
-      systemMessage?: string;
-      /** Deferred work items for async dispatch (enqueued after stop hook processing) */
-      deferredWork?: Array<{
-        id?: string;
-        goal: string;
-        objective: string;
-        agent: string;
-        background: boolean;
-        dependencies?: string[];
-        targetPaths?: string[];
-        bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
-      }>;
-    };
-
-/**
- * Context passed to a stop hook when the orchestrator reaches a terminal condition.
- */
-export interface StopHookContext {
-  workId: string;
-  response: string;
-  terminationReason: TerminationReason;
-  iteration: number;
-  agentType: string;
-  sessionKey: string;
-  /** The actual PromptUser question/options when terminationReason is 'user_input_required' */
-  userPrompt?: {
-    question: string;
-    options?: Array<string | { label: string; description?: string }>;
-    context?: string;
-    multiSelect?: boolean;
-    questionType?: string;
-  };
-  /** Execution snapshot for enriched stop hook evaluation */
-  executionSnapshot?: ExecutionSnapshot;
-  /** Handoff spec when terminationReason is 'handoff_requested' */
-  handoffSpec?: HandoffSpec;
-}
-
-/**
- * A stop hook handler that can block orchestrator termination.
- */
-export type StopHookHandler = (context: StopHookContext) => StopHookResult | Promise<StopHookResult>;
 
 /**
  * Context passed to internal hook handlers.

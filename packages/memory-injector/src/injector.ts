@@ -23,6 +23,7 @@ import type {
 interface ScoredItem {
   content: string;
   score: number;
+  source: 'memory' | 'preference' | 'decision';
 }
 
 /**
@@ -41,6 +42,10 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
     async inject({ query, maxTokens }: InjectParams): Promise<string | null> {
       // Validate query - return null early if empty or whitespace-only
       if (!query || !query.trim()) {
+        return null;
+      }
+      const tokenBudget = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 0;
+      if (tokenBudget <= 0) {
         return null;
       }
 
@@ -71,42 +76,64 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
       const prefs = prefsResult?.preferences ?? [];
       const decisions = decisionsResult?.decisions ?? [];
 
-      // Combine and filter out null/undefined/empty content, then sort by score
-      const items: ScoredItem[] = [
-        ...memoryItems
-          .map((m, index) => {
-            const when = m.source_timestamp ?? m.updated_at;
-            const suffix = when ? ` (${new Date(when).toISOString().slice(0, 10)})` : '';
-            return {
-              content: `${m.summary}${suffix}`,
-              score: 1 - index * 0.01,
-            };
-          })
-          .filter((item) => item.content && item.content.trim().length > 0),
-        ...prefs
-          .map((p) => ({
-            content: p.preference,
-            score: p.rank ?? 0,
-          }))
-          .filter((item) => item.content && item.content.trim().length > 0),
-        ...decisions
-          .map((d) => ({
-            content: d.decision,
-            score: d.rank ?? d.similarity ?? 0,
-          }))
-          .filter((item) => item.content && item.content.trim().length > 0),
-      ].sort((a, b) => b.score - a.score);
+      const sourceCaps = {
+        memory: 6,
+        preference: 6,
+        decision: 6,
+      } as const;
+
+      const formatDateSuffix = (value?: string): string => {
+        if (!value) return '';
+        const parsed = Date.parse(value);
+        if (!Number.isFinite(parsed)) return '';
+        return ` (${new Date(parsed).toISOString().slice(0, 10)})`;
+      };
+
+      const memoryScored: ScoredItem[] = memoryItems
+        .map((m, index) => ({
+          content: `${m.summary}${formatDateSuffix(m.source_timestamp ?? m.updated_at)}`,
+          score: 1 - index * 0.01,
+          source: 'memory' as const,
+        }))
+        .filter((item) => item.content && item.content.trim().length > 0)
+        .slice(0, sourceCaps.memory);
+
+      const prefScored: ScoredItem[] = prefs
+        .map((p) => ({
+          content: p.preference,
+          score: p.rank ?? 0,
+          source: 'preference' as const,
+        }))
+        .filter((item) => item.content && item.content.trim().length > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, sourceCaps.preference);
+
+      const decisionScored: ScoredItem[] = decisions
+        .map((d) => ({
+          content: d.decision,
+          score: d.rank ?? d.similarity ?? 0,
+          source: 'decision' as const,
+        }))
+        .filter((item) => item.content && item.content.trim().length > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, sourceCaps.decision);
+
+      const items: ScoredItem[] = [...memoryScored, ...prefScored, ...decisionScored]
+        .sort((a, b) => b.score - a.score);
 
       if (items.length === 0) {
         return null;
       }
 
-      // Deduplicate by content (BUG #13)
+      // Deduplicate by normalized content (BUG #13)
+      const normalizeForDedup = (text: string): string =>
+        text.trim().replace(/\s+/g, ' ').toLowerCase();
       const seen = new Set<string>();
       const dedupedItems: ScoredItem[] = [];
       for (const item of items) {
-        if (!seen.has(item.content)) {
-          seen.add(item.content);
+        const key = normalizeForDedup(item.content);
+        if (!seen.has(key)) {
+          seen.add(key);
           dedupedItems.push(item);
         }
       }
@@ -130,20 +157,30 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         return Math.ceil(tokens);
       }
 
+      const renderItem = (item: ScoredItem): string => {
+        const label = item.source === 'memory'
+          ? 'Memory'
+          : item.source === 'preference'
+            ? 'Preference'
+            : 'Decision';
+        return `**[${label}]** ${item.content}`;
+      };
+
       // Build output, respecting token limit (BUG #6: continue instead of break for large items)
       const result: string[] = [];
       let tokens = 0;
 
       for (const item of dedupedItems) {
-        const itemTokens = estimateTokens(item.content);
+        const rendered = renderItem(item);
+        const itemTokens = estimateTokens(rendered);
         // Skip items that individually exceed maxTokens, but continue checking others
-        if (itemTokens > maxTokens) {
+        if (itemTokens > tokenBudget) {
           continue;
         }
-        if (tokens + itemTokens > maxTokens) {
-          break;
+        if (tokens + itemTokens > tokenBudget) {
+          continue;
         }
-        result.push(item.content);
+        result.push(rendered);
         tokens += itemTokens;
       }
 

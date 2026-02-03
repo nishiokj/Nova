@@ -40,7 +40,7 @@ console.log(`   Client ID: ${process.env.GOOGLE_CLIENT_ID || 'NOT SET'}`)
 console.log(`   Client Secret: ${process.env.GOOGLE_CLIENT_SECRET ? '*** SET ***' : 'NOT SET'}`)
 console.log('')
 
-async function loadEnvFile(path: string): Promise<void> {
+export async function loadEnvFile(path: string): Promise<void> {
   try {
     const content = await readFile(path, 'utf-8')
     for (const line of content.split('\n')) {
@@ -73,10 +73,10 @@ const telegramChatIds: number[] = (process.env.TELEGRAM_ALLOWED_USERS ?? '')
   .map(id => parseInt(id.trim(), 10))
   .filter(id => !isNaN(id))
 
-let lastCrashNotificationMs = 0
-const CRASH_NOTIFY_COOLDOWN_MS = 30_000
+export let lastCrashNotificationMs = 0
+export const CRASH_NOTIFY_COOLDOWN_MS = 30_000
 
-async function notifyCrash(label: string, error: unknown): Promise<void> {
+export async function notifyCrash(label: string, error: unknown): Promise<void> {
   if (!telegramBotToken || telegramChatIds.length === 0) return
 
   const now = Date.now()
@@ -95,7 +95,7 @@ async function notifyCrash(label: string, error: unknown): Promise<void> {
   ).catch(() => {}) // swallow — we're already in an error handler
 }
 
-interface DaemonConfig {
+export interface DaemonConfig {
   databaseUrl: string
   encryptionKey: string
   webhookBaseUrl?: string
@@ -109,7 +109,7 @@ interface DaemonConfig {
   workingDir: string
 }
 
-function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+export function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
   if (value == null || value.trim() === '') return defaultValue
   const normalized = value.trim().toLowerCase()
   if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true
@@ -117,7 +117,7 @@ function parseBooleanEnv(value: string | undefined, defaultValue: boolean): bool
   return defaultValue
 }
 
-function loadConfig(): DaemonConfig {
+export function loadConfig(): DaemonConfig {
   const required: (keyof DaemonConfig)[] = [
     'databaseUrl',
     'encryptionKey',
@@ -165,7 +165,7 @@ function loadConfig(): DaemonConfig {
   return config
 }
 
-async function main() {
+export async function main() {
   console.log('╔═══════════════════════════════════════╗')
   console.log('║       Agent Memory Sync Daemon        ║')
   console.log('╚═══════════════════════════════════════╝\n')
@@ -340,7 +340,7 @@ process.on('unhandledRejection', (reason) => {
 })
 
 // Start with restart capability
-async function startWithRetry(maxRetries = 3) {
+export async function startWithRetry(maxRetries = 3) {
   let retries = 0
 
   while (retries < maxRetries) {

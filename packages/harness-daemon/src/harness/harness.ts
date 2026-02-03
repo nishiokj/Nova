@@ -27,7 +27,8 @@ import {
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
-import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
+import { createAdapter, type ProviderKeyService } from 'llm';
+import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import { ContextWindow } from 'context';
@@ -1245,118 +1246,36 @@ export class AgentHarness {
 
         return result;
       } catch (error) {
-        // Handle RateLimitError specially - persist context and notify user gracefully
-        if (RateLimitError.isRateLimitError(error)) {
-          const rateLimitInfo = error.info;
-          this.logger.warning('Rate limit hit during agent run', {
-            requestId,
-            provider: error.provider,
-            model: error.model,
-            type: rateLimitInfo.type,
-            retryAfterMs: rateLimitInfo.retryAfterMs,
-            limitType: rateLimitInfo.limitType,
-          });
+        // Handle recoverable errors (rate limit, circuit open, retries exhausted)
+        const recoverable = classifyRecoverableError(error, requestId);
+        if (recoverable) {
+          this.logger[recoverable.logLevel]('Recoverable error during agent run', recoverable.logMeta);
 
-          // Emit rate_limit event for monitoring/dashboards
-          emit(createEvent('rate_limit', {
-            provider: error.provider,
-            model: error.model,
-            type: rateLimitInfo.type,
-            retryAfterMs: rateLimitInfo.retryAfterMs,
-            limitType: rateLimitInfo.limitType,
-            message: rateLimitInfo.message,
-            contextPreserved: true,
-          } as RateLimitData));
-
-          // Persist context so user doesn't lose work
-          store.persistContext();
-
-          // Create a user-friendly error message based on rate limit type
-          let userMessage: string;
-          if (rateLimitInfo.type === 'billing') {
-            userMessage = `⚠️ Billing limit reached for ${error.provider}. Please check your account billing status. Your conversation has been saved.`;
-          } else if (rateLimitInfo.type === 'quota') {
-            userMessage = `⚠️ API quota exceeded for ${error.provider} (${rateLimitInfo.limitType ?? 'requests'}). This may be a daily or monthly limit. Your conversation has been saved.`;
-          } else {
-            const waitTime = rateLimitInfo.retryAfterMs
-              ? ` Please wait ${Math.ceil(rateLimitInfo.retryAfterMs / 1000)} seconds and try again.`
-              : ' Please wait a moment and try again.';
-            userMessage = `⚠️ Rate limit reached for ${error.provider}.${waitTime} Your conversation has been saved.`;
+          // Emit rate_limit event for monitoring/dashboards (if applicable)
+          if (recoverable.rateLimitData) {
+            emit(createEvent('rate_limit', recoverable.rateLimitData));
           }
 
-          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
-          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
-
-          return {
-            requestId,
-            sessionKey,
-            success: false,
-            finalText: userMessage,
-            errorMessage: error.message,
-            paused: false,
-            toolsUsed: [],
-            durationMs: 0,
-          };
-        }
-
-        // Handle CircuitOpenError - circuit breaker tripped, need to wait before retrying
-        if (error instanceof CircuitOpenError) {
-          this.logger.warning('Circuit breaker open', {
-            requestId,
-            message: error.message,
-          });
-
           // Persist context so user doesn't lose work
           store.persistContext();
 
-          const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
-
-          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createErrorEvent(recoverable.userMessage, false)); // recoverable, not fatal
           eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
 
           return {
             requestId,
             sessionKey,
             success: false,
-            finalText: userMessage,
-            errorMessage: error.message,
+            finalText: recoverable.userMessage,
+            errorMessage: getErrorMessage(error),
             paused: false,
             toolsUsed: [],
             durationMs: 0,
           };
         }
 
-        // Handle RetriesExhaustedError - all retry attempts failed
-        if (error instanceof RetriesExhaustedError) {
-          const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause ?? '');
-          this.logger.warning('All retries exhausted', {
-            requestId,
-            attempts: error.attempts,
-            cause: causeMessage,
-          });
-
-          // Persist context so user doesn't lose work
-          store.persistContext();
-
-          const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
-
-          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
-          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
-
-          return {
-            requestId,
-            sessionKey,
-            success: false,
-            finalText: userMessage,
-            errorMessage: error.message,
-            paused: false,
-            toolsUsed: [],
-            durationMs: 0,
-          };
-        }
-
-        // Generic error handling for non-rate-limit errors
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        // Generic error handling for non-recoverable errors
+        const errorMessage = getErrorMessage(error);
         this.logger.error('Agent run failed', { error: errorMessage, requestId });
 
         emit(createEvent('goal_not_achieved', {
@@ -2334,6 +2253,49 @@ export class AgentHarness {
           event.durationMs
         ));
       }
+    });
+
+    // Log memory injections with full content for observability
+    registerHook('memory_injected', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+      if (event.type !== 'memory_injected') return;
+      if (ctx.sessionKey !== sessionKey) return;
+
+      const itemLog = await getWorkItemLogSafe('memory_injected', ctx.workId, ctx.agentType, ctx.objective);
+      if (itemLog) {
+        await safeAppend('WorkItem log write failed (memory_injected)', () => itemLog.append({
+          type: 'memory_injection',
+          timestamp: new Date().toISOString(),
+          query: event.query,
+          memoryContent: event.memoryContent,
+          contextWithMemory: event.contextWithMemory,
+          resultPreview: event.resultPreview,
+          itemCount: event.itemCount,
+          success: event.success,
+          iteration: event.iteration,
+          version: event.version,
+          latencyMs: event.latencyMs,
+          coverage: event.coverage,
+          discriminatorsIncluded: event.discriminatorsIncluded,
+          totalTokens: event.totalTokens,
+          fallbackToV1: event.fallbackToV1,
+        }));
+      }
+
+      this.eventBus.publish(createEvent('memory_injected', {
+        query: event.query,
+        resultPreview: event.resultPreview,
+        memoryContent: event.memoryContent,
+        contextWithMemory: event.contextWithMemory,
+        itemCount: event.itemCount,
+        success: event.success,
+        iteration: event.iteration,
+        version: event.version,
+        latencyMs: event.latencyMs,
+        coverage: event.coverage,
+        discriminatorsIncluded: event.discriminatorsIncluded,
+        totalTokens: event.totalTokens,
+        fallbackToV1: event.fallbackToV1,
+      }, ctx.workId, ctx.requestId, ctx.sessionKey));
     });
 
     // Legacy batch hook - kept for backwards compatibility but tool_call_completed is primary

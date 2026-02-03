@@ -298,6 +298,13 @@ export const WatcherSemanticOutputSchema = z.object({
   salienceUpdates: SemanticSalienceUpdatesSchema.optional(),
 });
 
+const WatcherSemanticBatchEntrySchema = z.object({
+  workId: z.string(),
+  semantic: WatcherSemanticOutputSchema,
+}).strict();
+
+const WatcherSemanticBatchSchema = z.array(WatcherSemanticBatchEntrySchema).min(1);
+
 export type WatcherSemanticOutput = z.infer<typeof WatcherSemanticOutputSchema>;
 
 // --------------------------------------------
@@ -322,6 +329,7 @@ const WatcherAnswerSchema = WatcherBaseSchema.extend({
     contextAddendum: z.string().nullable().optional(),
   }).strict(),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherRealignSchema = WatcherBaseSchema.extend({
@@ -333,6 +341,7 @@ const WatcherRealignSchema = WatcherBaseSchema.extend({
     newGoal: z.string().nullable().optional(),
   }).strict(),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherSplitSchema = WatcherBaseSchema.extend({
@@ -354,6 +363,7 @@ const WatcherSplitSchema = WatcherBaseSchema.extend({
     }).optional(),
   }).strict()).min(1),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherCreateWorkItemSchema = WatcherBaseSchema.extend({
@@ -375,6 +385,7 @@ const WatcherCreateWorkItemSchema = WatcherBaseSchema.extend({
     }).optional(),
   }).strict()).min(1),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherQualityGateSchema = WatcherBaseSchema.extend({
@@ -386,6 +397,7 @@ const WatcherQualityGateSchema = WatcherBaseSchema.extend({
     issues: z.array(z.string()).optional(),
   }).strict(),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherContinueDecisionSchema = WatcherBaseSchema.extend({
@@ -393,13 +405,7 @@ const WatcherContinueDecisionSchema = WatcherBaseSchema.extend({
   goalStateReached: z.literal(true),
   watcherAction: WatcherNoInterventionSchema,
   semantic: WatcherSemanticOutputSchema.optional(),
-}).strict();
-
-const WatcherContinueWorkingSchema = WatcherBaseSchema.extend({
-  action: z.literal('continue'),
-  goalStateReached: z.literal(false),
-  watcherAction: WatcherNoInterventionSchema,
-  semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 export const WatcherActionOutputSchema = z.union([
@@ -409,7 +415,6 @@ export const WatcherActionOutputSchema = z.union([
   WatcherCreateWorkItemSchema,
   WatcherQualityGateSchema,
   WatcherContinueDecisionSchema,
-  WatcherContinueWorkingSchema,
 ]);
 
 // --------------------------------------------
@@ -420,7 +425,7 @@ type WatcherActionType = 'answer' | 'realign' | 'split' | 'create_work_item' | '
 
 /**
  * Map from action type to Zod schema.
- * 'allow' and 'continue' both map to the same schemas (decision + working).
+ * 'allow' and 'continue' both map to the same decision schema.
  */
 const WATCHER_ACTION_SCHEMAS: Record<WatcherActionType, z.ZodType[]> = {
   answer: [WatcherAnswerSchema],
@@ -428,8 +433,8 @@ const WATCHER_ACTION_SCHEMAS: Record<WatcherActionType, z.ZodType[]> = {
   split: [WatcherSplitSchema],
   create_work_item: [WatcherCreateWorkItemSchema],
   quality_gate: [WatcherQualityGateSchema],
-  allow: [WatcherContinueDecisionSchema, WatcherContinueWorkingSchema],
-  continue: [WatcherContinueDecisionSchema, WatcherContinueWorkingSchema],
+  allow: [WatcherContinueDecisionSchema],
+  continue: [WatcherContinueDecisionSchema],
 };
 
 /**
