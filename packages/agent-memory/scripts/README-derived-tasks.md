@@ -58,6 +58,9 @@ bun run scripts/derived-cli.ts create <name> <script-path> [options]
 - `--interval-ms <ms>` - Interval for recurring mode
 - `--priority <number>` - Job priority (default: 0)
 - `--metadata <json>` - Metadata to attach to task/job
+- `--label <text>` - Short human-readable label
+- `--purpose <text>` - One-line task purpose
+- `--sanity-policy <json>` - Sanity policy JSON for this task
 
 ### Examples
 
@@ -99,6 +102,12 @@ bun run scripts/derived-cli.ts run <task-id>
 bun run scripts/derived-cli.ts logs <task-id>
 ```
 
+### View Run Reports (sanity + samples)
+
+```bash
+bun run scripts/derived-cli.ts report <task-id> --report-limit 10
+```
+
 ## Environment Variables
 
 - `DATABASE_URL` - PostgreSQL connection string (required)
@@ -115,9 +124,15 @@ Derived task scripts must export a `run()` function:
 import type { DerivedRunContext, DerivedRunResult } from '../src/derived/runner.js'
 
 export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
-  const { sql, task, logger } = ctx
+  const { sql, task, logger, report } = ctx
   
   // Your logic here
+
+  // Optional: report counts + samples for sanity checks
+  report.setInputCount(10)
+  report.setOutputCount(8)
+  report.setModelVersion('gemini-2.5-flash-lite')
+  report.addSample({ label: 'sample', value: 'Example output' })
   
   return {
     metadata: {
@@ -131,6 +146,7 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
 - `sql` - Database query interface
 - `task` - Task record with metadata
 - `logger` - Logging interface
+- `report` - Run reporter for metrics/samples (used by sanity policy + run logs)
 
 ## Scheduling Recurring Tasks
 

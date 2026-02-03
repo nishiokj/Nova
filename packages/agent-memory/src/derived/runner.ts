@@ -11,6 +11,7 @@ import type { DerivedTask } from '../db/repositories/derived-task.js'
 import type { DerivedJob } from '../db/repositories/derived-job.js'
 import { createDerivedProcessingLogRepository } from '../db/repositories/derived-processing-log.js'
 import { ensureDerivedLogStream, formatDerivedLogLine } from './logging.js'
+import { createDerivedRunReporter, type DerivedRunReporter, type DerivedRunReport } from './reporting.js'
 
 export interface ProcessingLog {
   findProcessedEntityIds(
@@ -43,6 +44,7 @@ export interface DerivedRunContext {
   job: DerivedJob
   processingLog: ProcessingLog
   logPath: string
+  report: DerivedRunReporter
   /**
    * Persist intermediate state to the job's metadata under `_checkpoint`.
    * Survives process crashes — on resume, read from `job.metadata._checkpoint`.
@@ -69,6 +71,8 @@ export interface DerivedRunResult {
   retryAfter?: number
   /** Cost of this execution in cents */
   cost_cents?: number
+  /** Internal run report (used by integration) */
+  _runReport?: DerivedRunReport
 }
 
 export interface MetadataFieldDef {
@@ -219,6 +223,7 @@ export async function runDerivedScript(
 
   const loggerPrefix = `[derived:${task.id}:${job.id}]`
   const { path: logPath, stream } = await ensureDerivedLogStream(job.id)
+  const report = createDerivedRunReporter()
   const ensureLogPath = async () => {
     if (job.metadata && typeof job.metadata._logPath === 'string') return
     await sql`
@@ -312,7 +317,13 @@ export async function runDerivedScript(
       logger.debug('Checkpoint saved')
     }
 
-    return await runner({ sql, task, job, processingLog, logPath, checkpoint, logger })
+    const result = await runner({ sql, task, job, processingLog, logPath, checkpoint, logger, report })
+    const normalized = (result ?? {}) as DerivedRunResult
+    normalized._runReport = report.snapshot()
+    return normalized
+  } catch (error) {
+    ;(error as { runReport?: DerivedRunReport }).runReport = report.snapshot()
+    throw error
   } finally {
     await new Promise<void>((resolve) => {
       stream.end(() => resolve())

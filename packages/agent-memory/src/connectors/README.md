@@ -383,7 +383,7 @@ readonly authConfig: LocalAuthConfig = {
 | `github` | GitHub | user, issue, pull_request, comment, notification | oauth2_provider (github) |
 | `telegram` | Telegram | (real-time bridge) | bot token |
 | `claude_sessions` | Claude Code Sessions | session_message, session_summary, file_history | local |
-| `rex_sessions` | Rex Sessions | session_message, session_summary | local |
+| `rex_sessions` | Rex Sessions (GraphD) | session_message | local |
 
 ---
 

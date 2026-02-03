@@ -75,6 +75,8 @@ interface HarnessLike {
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
   getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
+  isSessionPaused?(sessionKey: string): boolean;
+  getAsyncModeStatus?(): { ok: boolean; issues: string[] };
   ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): void;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): void;
@@ -199,6 +201,7 @@ function buildStopHookAdapterHooks(
   const toWorkItemSpecs = (items?: StopHookResult['deferredWork']): WorkItemSpec[] => {
     if (!items || items.length === 0) return [];
     return items.map(item => ({
+      id: item.id,
       goal: item.goal,
       objective: item.objective,
       agent: item.agent,
@@ -2009,6 +2012,17 @@ export class BridgeGateway {
       includeUserPreferences: true,
     });
 
+    const asyncStatus = this.harness.getAsyncModeStatus?.();
+    if (asyncStatus && !asyncStatus.ok) {
+      this.sendError(connectionId, `Async mode is unavailable: ${asyncStatus.issues.join('; ')}`);
+      return;
+    }
+
+    if (this.harness.isSessionPaused?.(sessionKey)) {
+      this.sendError(connectionId, 'Session is paused awaiting user input. Resume or close the session before starting async mode.');
+      return;
+    }
+
     // Validate model selection
     const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
     if (!activeSelection?.model || !activeSelection?.provider) {
@@ -2026,6 +2040,16 @@ export class BridgeGateway {
       });
       this.sendError(connectionId, `No API key configured for provider: ${activeSelection.provider}`);
       return;
+    }
+
+    // Ensure planner/watcher model selections exist (defaults to standard selection if unset)
+    const plannerSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'planner');
+    if (!plannerSelection?.model || !plannerSelection?.provider) {
+      this.harness.setSessionSelectedModel?.(sessionKey, 'planner', activeSelection);
+    }
+    const watcherSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'watcher');
+    if (!watcherSelection?.model || !watcherSelection?.provider) {
+      this.harness.setSessionSelectedModel?.(sessionKey, 'watcher', activeSelection);
     }
 
     // Extract goal from data

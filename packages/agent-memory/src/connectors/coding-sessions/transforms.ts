@@ -64,11 +64,19 @@ function extractTextContent(content: unknown): string {
   }
 
   if (Array.isArray(content)) {
-    return content
+    const textBlocks = content
       .filter((block): block is { type: 'text'; text: string } =>
         block && typeof block === 'object' && block.type === 'text')
       .map(block => block.text)
-      .join('\n')
+
+    if (textBlocks.length > 0) {
+      return textBlocks.join('\n')
+    }
+
+    const toolsUsed = extractToolUsage(content)
+    if (toolsUsed.length > 0) {
+      return `[Tool calls: ${toolsUsed.join(', ')}]`
+    }
   }
 
   return ''

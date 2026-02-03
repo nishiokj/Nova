@@ -159,7 +159,7 @@ export function createEntityMentionsRepository(
       const { limit = 50, offset = 0 } = options
       const rows = await sql<EntityMentionRow[]>`
         SELECT * FROM entity_mentions
-        WHERE surface_form ILIKE ${'%' + query + '%'}
+        WHERE surface_form ILIKE '%' || ${query} || '%'
         ORDER BY created_at DESC
         LIMIT ${limit}
         OFFSET ${offset}

@@ -723,7 +723,7 @@ export class Agent {
    * GlobalContext is never mutated.
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
-    const { globalContext, workItem, cwd } = params;
+    const { globalContext, workItem, cwd, signal } = params;
     const runAsyncId = profiler.asyncBegin(`agent.run:${this.config.type}`, 'agent');
 
     // Create fresh local context for this agent's work
@@ -756,7 +756,7 @@ export class Agent {
     };
 
     try {
-      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd);
+      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd, signal);
     } catch (error) {
       // Capture error message - ensure we always have SOME diagnostic info
       let message = error instanceof Error ? error.message : String(error);
@@ -900,7 +900,8 @@ export class Agent {
     result: MutableAgentResult,
     metrics: AgentMetrics,
     startTime: number,
-    cwd: string
+    cwd: string,
+    signal?: AbortSignal
   ): Promise<void> {
     const maxIterations = Math.min(
       this.config.budget.maxIterations,
@@ -921,6 +922,10 @@ export class Agent {
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       profiler.instant(`agent.iteration:${iteration}`, 'agent', 'p', { agentType: this.config.type });
+
+      if (signal?.aborted) {
+        throw new Error('aborted');
+      }
 
       // Check for user stop request at the start of each iteration
       if (this.hooks?.shouldStop?.()) {
@@ -1161,7 +1166,7 @@ export class Agent {
 
           // No tool calls AND no action = inject schema reminder for structured output agents
           if (this.config.outputSchema) {
-            const schemaReminder = `[SCHEMA REMINDER] You must set action, goalStateReached, awaitingUserInput, and handoffSpec every turn. Valid actions: "done", "continue", "handoff". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true, handoffSpec=null. For handoff, handoffSpec must be a structured object.`;
+            const schemaReminder = this.buildSchemaReminder(this.resolveOutputSchemaId());
             localContext.addMessage('user', schemaReminder);
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
             continue;
@@ -2370,6 +2375,10 @@ export class Agent {
     if (!raw || typeof raw !== 'string') return null;
 
     const normalized = raw.trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(OUTPUT_SCHEMAS, normalized)) {
+      return normalized;
+    }
+
     const candidate = normalized.endsWith('_output')
       ? normalized.slice(0, -7)
       : normalized;
@@ -2379,6 +2388,14 @@ export class Agent {
     }
 
     return null;
+  }
+
+  private buildSchemaReminder(schemaId: string | null): string {
+    if (schemaId === 'watcher_action') {
+      return `[SCHEMA REMINDER] For watcher_action output, you MUST return JSON with: action ("done" or "continue"), goalStateReached (true only when action="done"), awaitingUserInput (always false), response (short summary), watcherAction (answer|realign|split|create_work_item|quality_gate|allow), reason (always required). Include only the payload for your watcherAction. Do NOT include handoffSpec.`;
+    }
+
+    return `[SCHEMA REMINDER] You must set action, goalStateReached, awaitingUserInput, and handoffSpec every turn. Valid actions: "done", "continue", "handoff". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true, handoffSpec=null. For handoff, handoffSpec must be a structured object.`;
   }
 
   private parseStructuredOutput(content: string, result: MutableAgentResult): Record<string, unknown> | null {
@@ -2545,7 +2562,7 @@ export class Agent {
       agentType: this.config.type,
       provider: this.llmConfig.provider ?? 'unknown',
       promptPreview: this.getPromptPreview(messages),
-      responsePreview: content.slice(0, 4000) || this.buildToolCallPreview(toolCalls),
+      responsePreview: content.slice(0, 16000) || this.buildToolCallPreview(toolCalls),
       totalTokens: response.usage?.totalTokens ?? 0,
       promptTokens: response.usage?.promptTokens ?? 0,
       completionTokens: response.usage?.completionTokens ?? 0,
@@ -2581,7 +2598,7 @@ export class Agent {
     if (!messages.length) return '';
     const first = messages[0] as { role?: string; content?: string };
     if (first.role === 'system' && typeof first.content === 'string') {
-      return first.content.slice(0, 4000);
+      return first.content.slice(0, 16000);
     }
     return '';
   }

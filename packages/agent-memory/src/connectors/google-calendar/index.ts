@@ -37,6 +37,7 @@ import {
 } from './schemas.js'
 import { googleCalendarTransforms } from './transforms.js'
 import type { TransformationRegistry } from '../../transform/registry.js'
+import { SyncError, ErrorCode } from '../../errors/index.js'
 
 // ============ Constants ============
 
@@ -535,12 +536,30 @@ export class GoogleCalendarConnector extends BaseConnector {
     )
 
     if (!response.ok) {
-      return { items: [], hasMore: false }
+      throw new SyncError(
+        `Google Calendar API error: ${response.status}`,
+        ErrorCode.SYNC_COLLECT,
+        {
+          retryable: response.status >= 500,
+          context: {
+            connector: this.type,
+            calendarId,
+            status: response.status,
+          },
+        }
+      )
     }
 
     const parsed = GoogleCalendarEventListSchema.safeParse(response.data)
     if (!parsed.success) {
-      return { items: [], hasMore: false }
+      throw new SyncError(
+        `Failed to parse Google Calendar response: ${parsed.error.message}`,
+        ErrorCode.SYNC_PROCESS,
+        {
+          retryable: false,
+          context: { connector: this.type, calendarId },
+        }
+      )
     }
 
     const eventList = parsed.data
@@ -611,12 +630,45 @@ export class GoogleCalendarConnector extends BaseConnector {
     )
 
     if (!response.ok) {
-      return { items: [], hasMore: false }
+      // HTTP 410 Gone = sync token invalidated, need full resync
+      if (response.status === 410) {
+        throw new SyncError(
+          'Google Calendar sync token invalidated - full resync required',
+          ErrorCode.SYNC_CURSOR,
+          {
+            retryable: true,
+            context: {
+              connector: this.type,
+              calendarId,
+              status: response.status,
+            },
+          }
+        )
+      }
+      throw new SyncError(
+        `Google Calendar API error: ${response.status}`,
+        ErrorCode.SYNC_COLLECT,
+        {
+          retryable: response.status >= 500,
+          context: {
+            connector: this.type,
+            calendarId,
+            status: response.status,
+          },
+        }
+      )
     }
 
     const parsed = GoogleCalendarEventListSchema.safeParse(response.data)
     if (!parsed.success) {
-      return { items: [], hasMore: false }
+      throw new SyncError(
+        `Failed to parse Google Calendar response: ${parsed.error.message}`,
+        ErrorCode.SYNC_PROCESS,
+        {
+          retryable: false,
+          context: { connector: this.type, calendarId },
+        }
+      )
     }
 
     const eventList = parsed.data

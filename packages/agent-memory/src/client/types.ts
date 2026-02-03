@@ -525,6 +525,21 @@ export interface DecisionsSearchResponse {
   }
 }
 
+// ============ Conversational Memory ============
+
+export interface MemorySearchItem {
+  conversation_id: string
+  summary: string
+  topic?: string
+  updated_at: string
+  source_timestamp?: string
+}
+
+export interface MemorySearchResponse {
+  query: string
+  items: MemorySearchItem[]
+}
+
 // ============ Evidence Retrieval ============
 
 export interface EvidenceRetrieveRequest {

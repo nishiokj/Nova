@@ -44,8 +44,14 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         return null;
       }
 
-      // Search both tables in parallel with error logging
-      const [prefsResult, decisionsResult] = await Promise.all([
+      // Search conversational memory + preferences/decisions in parallel with error logging
+      const [memoryResult, prefsResult, decisionsResult] = await Promise.all([
+        client.memory
+          .search({ q: query, limit: 8, connectors: 'claude_sessions,rex_sessions' })
+          .catch((err) => {
+            console.error('[MemoryInjector] Conversational memory search failed:', err);
+            return { items: [] } as { items: { summary: string; source_timestamp?: string; updated_at: string }[] };
+          }),
         client.preferences
           .search({ q: query, limit: 10 })
           .catch((err) => {
@@ -61,11 +67,22 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
       ]);
 
       // Handle null/undefined responses safely
+      const memoryItems = memoryResult?.items ?? [];
       const prefs = prefsResult?.preferences ?? [];
       const decisions = decisionsResult?.decisions ?? [];
 
       // Combine and filter out null/undefined/empty content, then sort by score
       const items: ScoredItem[] = [
+        ...memoryItems
+          .map((m, index) => {
+            const when = m.source_timestamp ?? m.updated_at;
+            const suffix = when ? ` (${new Date(when).toISOString().slice(0, 10)})` : '';
+            return {
+              content: `${m.summary}${suffix}`,
+              score: 1 - index * 0.01,
+            };
+          })
+          .filter((item) => item.content && item.content.trim().length > 0),
         ...prefs
           .map((p) => ({
             content: p.preference,

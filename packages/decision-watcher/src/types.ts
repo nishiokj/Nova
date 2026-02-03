@@ -499,6 +499,7 @@ export type WatcherTrigger =
   | 'prompt_user'
   | 'bounds_exceeded'
   | 'agent_error'
+  | 'goal_state_reached'
   | 'work_item_completed'
   | 'scope_collision'
   | 'cadence_audit'
@@ -514,7 +515,10 @@ export type WatcherActionType =
   | 'split'
   | 'create_work_item'
   | 'quality_gate'
+  | 'allow'
   | 'continue';
+
+export type WatcherNoInterventionAction = 'allow' | 'continue';
 
 /**
  * Valid watcher action types for each trigger.
@@ -523,12 +527,13 @@ export type WatcherActionType =
 export const VALID_ACTIONS_BY_TRIGGER: Record<WatcherTrigger, WatcherActionType[]> = {
   prompt_user: ['answer'],
   bounds_exceeded: ['realign', 'split', 'create_work_item'],
-  agent_error: ['realign', 'continue'],
+  agent_error: ['realign', 'allow'],
+  goal_state_reached: ['quality_gate', 'split', 'create_work_item'],
   work_item_completed: ['quality_gate', 'split', 'create_work_item'],
-  cadence_audit: ['continue', 'realign', 'split', 'create_work_item'],
+  cadence_audit: ['allow', 'realign', 'split', 'create_work_item'],
   session_init: [],  // No action - initialization only
-  scope_collision: ['continue', 'realign'],  // Allow parallel or redirect one agent
-  handoff_approval: ['continue', 'realign'],  // Approve plan or request revision
+  scope_collision: ['allow', 'realign'],  // Allow parallel or redirect one agent
+  handoff_approval: ['allow', 'realign'],  // Approve plan or request revision
 };
 
 /**
@@ -575,7 +580,7 @@ export type WatcherAction =
       qualityGate: { passed: boolean; issues?: string[] };
     }
   | {
-      watcherAction: 'continue';
+      watcherAction: WatcherNoInterventionAction;
       reason: string;
       semantic?: SemanticOutput;
     };
@@ -774,6 +779,7 @@ export interface WorkItemMetricsEntry {
  * A work item created by the watcher with optional budget bounds.
  */
 export interface WatcherWorkItem {
+  id?: string;
   goal: string;
   objective: string;
   agent: string;

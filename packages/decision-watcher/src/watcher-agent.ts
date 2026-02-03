@@ -38,7 +38,7 @@ import {
   isWorkItemCompleted,
   success,
 } from 'protocol';
-import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem } from './types.js';
+import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem, WatcherActionType } from './types.js';
 import { getValidActions } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
@@ -60,13 +60,14 @@ const DEFAULT_TIMEOUT_MS = 90_000;
 
 /** Per-trigger timeout configuration - critical paths get more time */
 const TIMEOUT_BY_TRIGGER: Record<WatcherTrigger, number> = {
-  session_init: 60_000,        // Session bootstrap
+  session_init: 120_000,       // Session bootstrap
   prompt_user: 120_000,        // Most critical - must answer user questions
+  goal_state_reached: 90_000,  // Quality gate evaluation (goal reached)
   work_item_completed: 90_000, // Quality gate evaluation
-  bounds_exceeded: 75_000,     // May need to realign or split work
-  cadence_audit: 60_000,       // Periodic check - can be faster
-  agent_error: 75_000,         // Error diagnosis needs context
-  scope_collision: 60_000,     // Concurrency conflict resolution
+  bounds_exceeded: 150_000,    // May need to realign or split work
+  cadence_audit: 120_000,      // Periodic check
+  agent_error: 150_000,        // Error diagnosis needs context
+  scope_collision: 120_000,    // Concurrency conflict resolution
   handoff_approval: 90_000,    // Plan review - needs time to read spec
 };
 
@@ -79,8 +80,18 @@ type InFlightWatcher = {
 
 const IN_FLIGHT_WATCHERS = new Map<string, InFlightWatcher>();
 
+function normalizeWatcherAction(action: WatcherAction): WatcherAction {
+  if (action.watcherAction !== 'continue') return action;
+  return { ...action, watcherAction: 'allow' } as WatcherAction;
+}
+
+function isNoInterventionAction(action: WatcherActionType): boolean {
+  return action === 'allow' || action === 'continue';
+}
+
 /** Max workitem log content to inject (prevent prompt bloat for very long sessions) */
 const MAX_WORKITEM_LOG_INJECT_LENGTH = 50000;
+const WORK_ITEM_ID_GUIDANCE = 'When returning workItems, include a stable "id" for each item and use those ids in "dependencies" when sequencing is required.';
 
 // ============================================
 // WORKITEM LOG FORMATTING FOR INJECTION
@@ -195,7 +206,7 @@ export interface WatcherAgentConfig {
   getWorkItemLog: (workId: string) => Promise<WorkItemLog | null>;
   workingDir: string;
   /** Runs the watcher agent with a trigger-specific objective and returns structured output. */
-  runAgent: (objective: string, trigger: WatcherTrigger) => Promise<WatcherAction>;
+  runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) => Promise<WatcherAction>;
   /** Called when the watcher produces split/create_work_item actions. */
   onCreateWorkItems?: (items: WatcherWorkItem[]) => void;
   /** Called after every watcher decision for observability/debugging. */
@@ -271,6 +282,7 @@ function toTerminationReason(event: ControlEvent): TerminationReason {
 function toWorkItemSpecs(items: WatcherWorkItem[]): WorkItemSpec[] {
   if (!items || items.length === 0) return [];
   return items.map(item => ({
+    id: item.id,
     goal: item.goal,
     objective: item.objective,
     agent: item.agent,
@@ -469,6 +481,7 @@ ${responsePreview}`);
  */
 function formatSnapshotForTrigger(trigger: WatcherTrigger, ctx: WatcherContext): string {
   switch (trigger) {
+    case 'goal_state_reached':
     case 'work_item_completed':
       return formatGoalReachedContext(ctx);
     case 'cadence_audit':
@@ -484,6 +497,37 @@ function formatSnapshotForTrigger(trigger: WatcherTrigger, ctx: WatcherContext):
     default:
       return assertNever(trigger);
   }
+}
+
+function buildWatcherObjective(params: {
+  config: WatcherAgentConfig;
+  ctx: WatcherContext;
+  workItemLogContent: string;
+  snapshotContext: string;
+  taskText: string;
+  headerLines?: string[];
+}): string {
+  const { config, ctx, workItemLogContent, snapshotContext, taskText, headerLines } = params;
+  const workId = ctx.event.workId ?? 'unknown';
+  const headerBlock = headerLines && headerLines.length > 0 ? `${headerLines.join('\n')}\n\n` : '';
+
+  return `You are the watcher for session ${config.sessionId}.
+
+${headerBlock}## Session Context
+- **Salience**: ${config.salienceFilePath} (read for session goal and principles)
+- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
+
+## WorkItem Context (WorkItem: ${workId})
+
+The following is the FULL context of the agent's activity for this work item:
+
+<workitem-log>
+${workItemLogContent}
+</workitem-log>
+
+${snapshotContext}
+
+${taskText}`;
 }
 
 // ============================================
@@ -531,25 +575,10 @@ async function handlePromptUser(
 
   const snapshotContext = formatSnapshotForTrigger('prompt_user', ctx);
 
-  const objective = `You are the watcher for session ${config.sessionId}.
-
-## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal and principles)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
-
-## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
-
-The following is the FULL context of the agent asking this question - their reasoning, tool calls, and discoveries:
-
-<workitem-log>
-${workItemLogContent}
-</workitem-log>
-
-## Question from Agent
+  const taskText = `## Question from Agent
 
 **Question**: ${questionText}${optionsText}
 **Agent Context**: ${prompt?.context ?? 'none'}
-${snapshotContext}
 
 ## Your Task
 
@@ -567,11 +596,19 @@ ${snapshotContext}
 Your response MUST include:
 - \`watcherAction: "answer"\` (always)
 - \`answer.text: <your answer text>\` (always)
-- \`rationale: <why you chose this>\` (optional but recommended)
+- \`reason: <why you chose this>\` (required)
 
-**Invalid actions for prompt_user**: \`escalate\`, \`quality_gate\`, \`continue\` (use "answer" for all)
+**Invalid actions for prompt_user**: \`escalate\`, \`quality_gate\`, \`allow\` (use "answer" for all)
 
 Read salience for session goal, then answer based on both the goal AND the agent's situation shown above.`;
+
+  const objective = buildWatcherObjective({
+    config,
+    ctx,
+    workItemLogContent,
+    snapshotContext,
+    taskText,
+  });
 
   const action = await runAndLog(config, 'prompt_user', objective, ctx);
 
@@ -649,23 +686,7 @@ async function handleBoundsExceeded(
 
   const snapshotContext = formatSnapshotForTrigger('bounds_exceeded', ctx);
 
-  const objective = `You are the watcher for session ${config.sessionId}.
-
-## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
-
-## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
-
-The agent has hit a resource bound: **${event.boundType}** (current ${event.current} / limit ${event.limit}).
-
-Here is the FULL context of what the agent was doing - their reasoning, tool calls, and progress:
-
-<workitem-log>
-${workItemLogContent}
-</workitem-log>
-
-${snapshotContext}
+  const taskText = `The agent has hit a resource bound: **${event.boundType}** (current ${event.current} / limit ${event.limit}).
 
 ## Your Task
 
@@ -681,7 +702,17 @@ Based on the workitem log above, assess:
 
 - **"realign"** (USE SPARINGLY): Give agent one more chance
   - Only if agent made real progress and just needs a nudge to finish
-  - Max 3 realigns enforced by orchestrator`;
+  - Max 3 realigns enforced by orchestrator
+
+${WORK_ITEM_ID_GUIDANCE}`;
+
+  const objective = buildWatcherObjective({
+    config,
+    ctx,
+    workItemLogContent,
+    snapshotContext,
+    taskText,
+  });
 
   const action = await runAndLog(config, 'bounds_exceeded', objective, ctx);
 
@@ -706,6 +737,7 @@ Based on the workitem log above, assess:
         patches: injectGuidancePatch(action.realign.systemMessage),
       };
 
+    case 'allow':
     case 'continue':
       return { decision: { action: 'wrap_up', summary: action.reason } };
 
@@ -730,30 +762,22 @@ async function handleAgentError(
 
   const snapshotContext = formatSnapshotForTrigger('agent_error', ctx);
 
-  const objective = `You are the watcher for session ${config.sessionId}.
-
-## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
-
-## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
-
-The agent encountered an error: **${event.errorType}**.
-
-Here is the FULL context of what the agent was doing when it failed - their reasoning and tool calls leading up to the error:
-
-<workitem-log>
-${workItemLogContent}
-</workitem-log>
-
-${snapshotContext}
+  const taskText = `The agent encountered an error: **${event.errorType}**.
 
 ## Your Task
 
 Based on the workitem log above:
 1. Diagnose what went wrong (check tool calls for failures)
 2. If recoverable: return "realign" with fix instructions in systemMessage
-3. If not recoverable: return "continue" to allow termination`;
+3. If not recoverable: return "allow" to allow termination`;
+
+  const objective = buildWatcherObjective({
+    config,
+    ctx,
+    workItemLogContent,
+    snapshotContext,
+    taskText,
+  });
 
   const action = await runAndLog(config, 'agent_error', objective, ctx);
 
@@ -774,6 +798,7 @@ Based on the workitem log above:
         patches: injectGuidancePatch(action.realign.systemMessage),
       };
 
+    case 'allow':
     case 'continue':
     case 'answer':
     case 'split':
@@ -808,25 +833,9 @@ async function handleGoalReached(
     console.warn('[WATCHER] Work log write failed (workitem_status):', err instanceof Error ? err.message : String(err));
   });
 
-  const snapshotContext = formatSnapshotForTrigger('work_item_completed', ctx);
+  const snapshotContext = formatSnapshotForTrigger('goal_state_reached', ctx);
 
-  const objective = `You are the watcher for session ${config.sessionId}.
-
-## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
-
-## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
-
-The agent reports goal_state_reached.
-
-Here is the FULL context of what the agent did - their reasoning, tool calls, and output:
-
-<workitem-log>
-${workItemLogContent}
-</workitem-log>
-
-${snapshotContext}
+  const taskText = `The agent reports goal_state_reached.
 
 ## Your Task — Quality Gate
 
@@ -837,13 +846,23 @@ Based on the workitem log above:
 4. If quality gate fails: return "quality_gate" with passed=false and issues list
 
 For follow-up work items, prefer INDEPENDENT items (parallelization).
-Set bounds: {maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000}`;
+Set bounds: {maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000}
 
-  const action = await runAndLog(config, 'work_item_completed', objective, ctx);
+${WORK_ITEM_ID_GUIDANCE}`;
+
+  const objective = buildWatcherObjective({
+    config,
+    ctx,
+    workItemLogContent,
+    snapshotContext,
+    taskText,
+  });
+
+  const action = await runAndLog(config, 'goal_state_reached', objective, ctx);
 
   if (workItemLog) {
     await workItemLog.appendDecision(
-      'work_item_completed',
+      'goal_state_reached',
       action.watcherAction,
       action.reason
     ).catch(err => {
@@ -863,6 +882,7 @@ Set bounds: {maxToolCalls: 200, maxLlmCalls: 30, maxDurationMs: 300000}`;
         },
       };
 
+    case 'allow':
     case 'continue':
     case 'answer':
     case 'realign':
@@ -904,30 +924,24 @@ async function handleWorkItemCompleted(
 
   const snapshotContext = formatSnapshotForTrigger('work_item_completed', ctx);
 
-  const objective = `You are the watcher for session ${config.sessionId}.
-
-## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
-
-## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
-
-The agent completed a work item (success=${event.success}).
-
-Here is the FULL context of what the agent did - their reasoning, tool calls, and output:
-
-<workitem-log>
-${workItemLogContent}
-</workitem-log>
-
-${snapshotContext}
+  const taskText = `The agent completed a work item (success=${event.success}).
 
 ## Your Task — Work Item Review
 
 Based on the workitem log above:
 1. Should the work item be accepted?
 2. If issues remain, prefer split/create work items with bounded scope.
-3. If recoverable: return "realign" with guidance`;
+3. If recoverable: return "realign" with guidance
+
+${WORK_ITEM_ID_GUIDANCE}`;
+
+  const objective = buildWatcherObjective({
+    config,
+    ctx,
+    workItemLogContent,
+    snapshotContext,
+    taskText,
+  });
 
   const action = await runAndLog(config, 'work_item_completed', objective, ctx);
 
@@ -966,6 +980,7 @@ Based on the workitem log above:
         decision: { action: 'retry', guidance: action.qualityGate.issues?.join('\n') ?? action.reason },
       };
 
+    case 'allow':
     case 'continue':
     case 'answer':
       return { decision: { action: 'accept', summary: action.reason } };
@@ -1005,26 +1020,9 @@ async function handleCadenceAudit(
 
   const snapshotContext = formatSnapshotForTrigger('cadence_audit', ctx);
 
-  const objective = `You are the watcher for session ${config.sessionId}.
+  const taskText = `This is a periodic cadence audit. The agent is still executing.
 
-## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
-
-## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
-
-This is a periodic cadence audit (every 3 minutes). The agent is still executing.
-
-${preprocessedContext ? `<preprocessed-facts>\n${preprocessedContext}\n</preprocessed-facts>\n` : ''}
-Here is the FULL context of what the agent has been doing - their reasoning, tool calls, and progress:
-
-<workitem-log>
-${workItemLogContent}
-</workitem-log>
-
-${snapshotContext}
-
-## Your Task — Progress Check AND Semantic Generation
+${preprocessedContext ? `<preprocessed-facts>\n${preprocessedContext}\n</preprocessed-facts>\n` : ''}## Your Task — Progress Check AND Semantic Generation
 
 Based on the workitem log above:
 1. Is the agent making progress toward the session goal? (read salience)
@@ -1038,7 +1036,9 @@ Based on the workitem log above:
 
 2. **"realign"** — Use when agent made progress but drifted
 
-3. **"continue"** — Use when agent is clearly on track with productive progress
+3. **"allow"** — Use when agent is clearly on track with productive progress
+
+${WORK_ITEM_ID_GUIDANCE}
 
 ### Semantic Output (REQUIRED)
 
@@ -1065,6 +1065,14 @@ In addition to your decision, you MUST produce a \`semantic\` field with your un
    - auditSequence: (use 0 for first audit, increment for subsequent)
    - logPosition: Number of events processed
    - totalEvents: Total events in log`;
+
+  const objective = buildWatcherObjective({
+    config,
+    ctx,
+    workItemLogContent,
+    snapshotContext,
+    taskText,
+  });
 
   const action = await runAndLog(config, 'cadence_audit', objective, ctx);
 
@@ -1099,6 +1107,7 @@ In addition to your decision, you MUST produce a \`semantic\` field with your un
   }
 
   switch (action.watcherAction) {
+    case 'allow':
     case 'continue': {
       const hasUsefulGuidance = action.reason.length > 20;
       if (hasUsefulGuidance) {
@@ -1148,21 +1157,9 @@ async function handleHandoffApproval(
   const workItemLog = event.workId ? await config.getWorkItemLog(event.workId) : null;
   const workItemLogContent = await formatWorkItemLogForInjection(workItemLog);
 
-  const objective = `You are the watcher for session ${config.sessionId}.
+  const snapshotContext = formatSnapshotForTrigger('handoff_approval', ctx);
 
-## Session Context
-- **Salience**: ${config.salienceFilePath} (read for session goal)
-- **Work Log**: ${config.workLog.filePath()} (read for other workitems status)
-
-## WorkItem Context (WorkItem: ${event.workId ?? 'unknown'})
-
-The planning agent has produced a work breakdown and is requesting handoff to execution.
-
-Here is the FULL context of what the planner discovered and why they proposed this plan:
-
-<workitem-log>
-${workItemLogContent}
-</workitem-log>
+  const taskText = `The planning agent has produced a work breakdown and is requesting handoff to execution.
 
 ## Proposed Plan
 
@@ -1178,13 +1175,21 @@ Based on the planner's reasoning above and the proposed plan:
 3. Are dependencies correctly identified?
 4. Is the scope reasonable?
 
-If acceptable: return "continue"
+If acceptable: return "allow"
 If needs revision: return "realign" with specific feedback
 
 Guidelines:
 - Approve plans that are reasonable, even if not perfect.
 - Reject plans that are vague, overly complex, or miss the goal.
 - Provide specific, actionable feedback when rejecting.`;
+
+  const objective = buildWatcherObjective({
+    config,
+    ctx,
+    workItemLogContent,
+    snapshotContext,
+    taskText,
+  });
 
   const action = await runAndLog(config, 'handoff_approval', objective, ctx);
 
@@ -1209,6 +1214,7 @@ Guidelines:
   }
 
   switch (action.watcherAction) {
+    case 'allow':
     case 'continue':
       return { decision: { action: 'approve' } };
 
@@ -1243,7 +1249,19 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
 
   switch (trigger) {
     case 'prompt_user':
-      // MUST answer - use first option as fallback
+      // MUST answer - use first option as fallback when available
+      if (ctx.event.type === 'user_input_required') {
+        const options = ctx.event.prompt.options;
+        if (options && options.length > 0) {
+          const first = options[0];
+          const text = typeof first === 'string' ? first : first.label ?? 'Continue';
+          return {
+            watcherAction: 'answer',
+            answer: { text },
+            reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Using first option`,
+          };
+        }
+      }
       return {
         watcherAction: 'answer',
         answer: { text: 'Continue' },
@@ -1253,7 +1271,7 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
     case 'cadence_audit':
       // Don't terminate on oversight failure - let agent continue working
       return {
-        watcherAction: 'continue',
+        watcherAction: 'allow',
         reason: `Oversight unavailable (${errorMsg.slice(0, 50)}): Agent continues`,
       };
 
@@ -1270,10 +1288,11 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
     case 'agent_error':
       // Can't diagnose - allow termination but log
       return {
-        watcherAction: 'continue',
+        watcherAction: 'allow',
         reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Cannot diagnose ${terminationReason}, allowing termination`,
       };
 
+    case 'goal_state_reached':
     case 'work_item_completed':
       // Can't verify quality - pass quality gate to allow termination
       return {
@@ -1285,7 +1304,7 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
     case 'handoff_approval':
       // Can't review plan - approve by default (safer to proceed than block)
       return {
-        watcherAction: 'continue',
+        watcherAction: 'allow',
         reason: `Watcher fallback (${errorMsg.slice(0, 50)}): Plan approved by default`,
       };
 
@@ -1293,7 +1312,7 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
     case 'scope_collision':
       // Non-critical triggers - allow termination
       return {
-        watcherAction: 'continue',
+        watcherAction: 'allow',
         reason: `Watcher fallback (${errorMsg.slice(0, 50)})`,
       };
 
@@ -1326,10 +1345,19 @@ async function runAndLog(
 
   const timeout = baseTimeout;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let runPromise: Promise<WatcherAction>;
+  const controller = new AbortController();
 
-  const runPromise = (async () => {
+  const cleanupInFlight = () => {
+    const entry = IN_FLIGHT_WATCHERS.get(inFlightKey);
+    if (entry?.runPromise === runPromise) {
+      IN_FLIGHT_WATCHERS.delete(inFlightKey);
+    }
+  };
+
+  runPromise = (async () => {
     try {
-      return await config.runAgent(objective, trigger);
+      return await config.runAgent(objective, trigger, controller.signal);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       console.error(`[WATCHER] Agent run failed for ${trigger}: ${error.message}`);
@@ -1341,10 +1369,12 @@ async function runAndLog(
     runPromise,
     new Promise<WatcherAction>((resolve) => {
       timeoutId = setTimeout(() => {
+        controller.abort();
         resolve(getFallbackAction(trigger, new Error(`Watcher timeout after ${timeout}ms`), ctx));
       }, timeout);
     }),
-  ]).then((action) => {
+  ]).then((rawAction) => {
+    const action = normalizeWatcherAction(rawAction);
     // Validate the action is valid for this trigger
     const validActions = getValidActions(trigger);
     if (validActions.length > 0 && !validActions.includes(action.watcherAction)) {
@@ -1356,14 +1386,12 @@ async function runAndLog(
     if (timeoutId) {
       clearTimeout(timeoutId);
     }
+    cleanupInFlight();
   });
 
   IN_FLIGHT_WATCHERS.set(inFlightKey, { runPromise, visiblePromise, startedAt: Date.now() });
   void runPromise.finally(() => {
-    const entry = IN_FLIGHT_WATCHERS.get(inFlightKey);
-    if (entry?.runPromise === runPromise) {
-      IN_FLIGHT_WATCHERS.delete(inFlightKey);
-    }
+    cleanupInFlight();
   });
 
   const action = await visiblePromise;
@@ -1396,9 +1424,10 @@ async function runAndLog(
 
   // Write observation to salience file for memory continuity
   // Only write significant decisions (not routine continues or fallbacks)
-  const shouldWriteToSalience = action.watcherAction !== 'continue' ||
+  const shouldWriteToSalience = !isNoInterventionAction(action.watcherAction) ||
     trigger === 'prompt_user' ||
-    trigger === 'work_item_completed';
+    trigger === 'work_item_completed' ||
+    trigger === 'goal_state_reached';
 
   if (shouldWriteToSalience) {
     const summary = buildObservationSummary(trigger, action, ctx);
@@ -1441,6 +1470,7 @@ function buildObservationSummary(
       }
       break;
 
+    case 'goal_state_reached':
     case 'work_item_completed':
       if (action.watcherAction === 'quality_gate') {
         if (action.qualityGate.passed) {
@@ -1476,7 +1506,7 @@ function buildObservationSummary(
       break;
 
     case 'handoff_approval':
-      parts.push(action.watcherAction === 'continue' ? 'Plan approved.' : 'Plan needs revision.');
+      parts.push(isNoInterventionAction(action.watcherAction) ? 'Plan approved.' : 'Plan needs revision.');
       break;
 
     case 'session_init':

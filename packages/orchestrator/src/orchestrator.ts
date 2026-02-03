@@ -25,7 +25,7 @@ import type {
 } from 'agent';
 import { Agent, getAsyncAgentPrompt, getAsyncModeAddendum } from 'agent';
 import type { AgentRegistry } from 'agent';
-import { createWorkItem, type WorkItem } from 'work';
+import { createWorkItem, cloneWorkItemWithDependencies, type WorkItem } from 'work';
 import { createEvent } from 'types';
 import type { LLMRequestConfig, MessageItem } from 'types';
 import { buildLLMRequestConfig, profiler } from 'shared';
@@ -58,7 +58,6 @@ import { executeHooks } from './hooks.js';
 import { applyPatches } from './hookRunner/applyPatches.js';
 import { runHooksForEvent, type HookExecutionResult } from './hookRunner/runHooksForEvent.js';
 import type { HookRegistry } from './hookRegistry/index.js';
-import { BoundsChecker } from './bounds-checker.js';
 import type {
   DecisionDatabase,
   DecisionWatcherConfig,
@@ -78,9 +77,9 @@ export interface OrchestratorConfig {
   maxDurationMs: number;
   /** Max time for internal hook handler execution */
   hookTimeoutMs: number;
-  /** Percent context usage that triggers compaction (default 0.8) */
+  /** Percent context usage that triggers compaction (default 0.70) */
   compactTriggerPercent: number;
-  /** Percent context usage to reset compaction hysteresis (default 0.7) */
+  /** Percent context usage to reset compaction hysteresis (default 0.70) */
   compactResetPercent: number;
   /** Max file content items to keep during compaction */
   compactMaxFileCount: number;
@@ -245,7 +244,6 @@ export class Orchestrator {
   private planModeOptions?: PlanModeOptions;
   private getModelSelection?: (agentType: string) => ModelSelection | null;
   private hookQueue: InternalHookQueue;
-  private boundsChecker: BoundsChecker;
   private activeSessionKey?: string;
 
   // Work queue state for DAG-based execution
@@ -283,12 +281,6 @@ export class Orchestrator {
     this.planModeOptions = planModeOptions;
     this.getModelSelection = getModelSelection;
     this.hookQueue = this.createHookQueue();
-    this.boundsChecker = new BoundsChecker({
-      maxIterations: this.config.maxIterations,
-      maxDurationMs: this.config.maxDurationMs,
-      maxToolCalls: this.config.maxToolCalls,
-    });
-
   }
 
   /**
@@ -496,7 +488,7 @@ export class Orchestrator {
     let lastAgentResult: AgentResult | undefined;
     let lastAgentWorkId: string | undefined;
 
-    // Hysteresis gate for compaction: compact at 80%, don't compact again until below 70%
+    // Hysteresis gate for compaction: compact at threshold, reset once usage drops below reset threshold
     let compactedRecently = false;
 
     this.log('info', 'Starting orchestration', { goal, agentType });
@@ -518,7 +510,24 @@ export class Orchestrator {
           inProgress.set(item.workId, { item, agent: null });
           continue;
         }
-        const agent = this.createAgent(item.agent, context, item.workId, item.objective, runtime);
+        let agent: Agent | null = null;
+        try {
+          agent = this.createAgent(item.agent, context, item.workId, item.objective, runtime);
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          const errorResult = this.createErrorResult(errorMessage, context);
+          this.completedWork.set(item.workId, errorResult);
+          if (item.workId === this.initialWorkId) {
+            return this.createResult({
+              success: false,
+              response: '',
+              error: errorMessage,
+              terminationReason: 'agent_error',
+              metrics: { iterations: 0, totalLlmCalls: 0, totalToolCalls: 0, durationMs: 0 },
+            });
+          }
+          continue;
+        }
         if (!agent) {
           // Mark as failed with synthetic error
           const errorResult = this.createErrorResult(`Unknown agent type: ${item.agent}`, context);
@@ -971,7 +980,7 @@ export class Orchestrator {
         success: initialResult.success,
         response: initialResult.response,
         error: initialResult.error,
-        terminationReason: 'goal_state_reached',
+        terminationReason: initialResult.terminationReason ?? 'agent_error',
         metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: Date.now() - startTime },
       });
     }
@@ -1059,11 +1068,13 @@ export class Orchestrator {
       };
     }
 
-    // Apply async mode addendum to worker agents (not the watcher itself)
+    // Apply async mode modifications to worker agents (not the watcher itself)
+    // CRITICAL: Must clear outputSchema - structured output is incompatible with async mode
     if (this.config.asyncMode?.enabled && agentType !== 'watcher' && agentType !== 'planner') {
       config = {
         ...config,
-        systemPrompt:  getAsyncAgentPrompt(),
+        systemPrompt: getAsyncAgentPrompt(),
+        outputSchema: undefined,  // Async workers use free-form output, not structured schemas
       };
     }
 
@@ -1211,7 +1222,7 @@ export class Orchestrator {
     return buildLLMRequestConfig(modelSelection, config.llmParams);
   }
 
-  private createWorkItem(goal: string, agentType: string): WorkItem {
+  private resolveAgentBounds(agentType: string): { maxToolCalls: number; maxDurationMs: number; maxLlmCalls: number } {
     // Get agent's budget from registry, fallback to orchestrator config
     let agentBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
     try {
@@ -1220,15 +1231,19 @@ export class Orchestrator {
       // Agent not in registry, use orchestrator defaults
     }
 
+    return {
+      maxToolCalls: agentBudget?.maxToolCalls ?? this.config.maxToolCalls,
+      maxDurationMs: agentBudget?.maxDurationMs ?? this.config.maxDurationMs,
+      maxLlmCalls: agentBudget?.maxIterations ?? this.config.maxIterations,
+    };
+  }
+
+  private createWorkItem(goal: string, agentType: string): WorkItem {
     return createWorkItem({
       goal,
       objective: goal,
       agent: agentType,
-      bounds: {
-        maxToolCalls: agentBudget?.maxToolCalls ?? this.config.maxToolCalls,
-        maxDurationMs: agentBudget?.maxDurationMs ?? this.config.maxDurationMs,
-        maxLlmCalls: agentBudget?.maxIterations ?? this.config.maxIterations,
-      },
+      bounds: this.resolveAgentBounds(agentType),
     });
   }
 
@@ -1249,6 +1264,40 @@ export class Orchestrator {
 
   private log(level: keyof OrchestratorLogger, msg: string, meta?: Record<string, unknown>): void {
     this.logger?.[level](msg, { component: 'orchestrator', requestId: this.requestId, ...meta });
+  }
+
+  private isKnownWorkId(workId: string): boolean {
+    return this.workQueue.some(item => item.workId === workId) || this.completedWork.has(workId);
+  }
+
+  private resolveWorkItemDependencies(
+    dependencies: string[] | undefined,
+    idMap: Map<string, string>,
+    context: string
+  ): string[] {
+    if (!dependencies || dependencies.length === 0) return [];
+
+    const resolved: string[] = [];
+    const unknown: string[] = [];
+
+    for (const dep of dependencies) {
+      const mapped = idMap.get(dep);
+      if (mapped) {
+        resolved.push(mapped);
+        continue;
+      }
+      if (this.isKnownWorkId(dep)) {
+        resolved.push(dep);
+        continue;
+      }
+      unknown.push(dep);
+    }
+
+    if (unknown.length > 0) {
+      this.log('warning', 'Dropping unknown work item dependencies', { context, unknown });
+    }
+
+    return resolved;
   }
 
   /**
@@ -1286,24 +1335,6 @@ export class Orchestrator {
   private resetWorkTracking(newItem: WorkItem): void {
     this.completedWork.delete(this.initialWorkId);
     this.initialWorkId = newItem.workId;
-  }
-
-  /**
-   * Check for and handle user interruption. Returns true if interruption was handled.
-   */
-  private handleInterruption(
-    context: ContextWindow,
-    agentType: string,
-    iteration: number,
-    runtime?: OrchestratorRuntime
-  ): WorkItem | null {
-    if (!runtime?.checkInterruption?.()) {
-      return null;
-    }
-    const newItem = this.createWorkItem('Continue with user input', agentType);
-    this.enqueue(newItem);
-    this.resetWorkTracking(newItem);
-    return newItem;
   }
 
   /**
@@ -1570,6 +1601,7 @@ export class Orchestrator {
         return {
           decision: 'allow',
           deferredWork: decision.workItems.map(item => ({
+            id: item.id,
             goal: item.goal,
             objective: item.objective,
             agent: item.agent,
@@ -1620,6 +1652,7 @@ export class Orchestrator {
         return {
           decision: 'allow',
           deferredWork: decision.workItems.map(item => ({
+            id: item.id,
             goal: item.goal,
             objective: item.objective,
             agent: item.agent,
@@ -1677,6 +1710,7 @@ export class Orchestrator {
         return {
           decision: 'allow',
           deferredWork: decision.workItems.map(item => ({
+            id: item.id,
             goal: item.goal,
             objective: item.objective,
             agent: item.agent,
@@ -1951,33 +1985,58 @@ export class Orchestrator {
    * When bounds are specified by the watcher, they override agent registry defaults.
    */
   private enqueueDeferredWork(stopResult: import('agent').StopHookResult): void {
-    if (!stopResult.deferredWork?.length) return;
+    const deferredWork = stopResult.deferredWork;
+    if (!deferredWork?.length) return;
 
-    for (const work of stopResult.deferredWork) {
+    const idMap = new Map<string, string>();
+    const created: WorkItem[] = [];
+    const specs = deferredWork.map(work => {
+      const defaults = this.resolveAgentBounds(work.agent);
+      const bounds = work.bounds ? {
+        maxToolCalls: work.bounds.maxToolCalls ?? defaults.maxToolCalls,
+        maxLlmCalls: work.bounds.maxLlmCalls ?? defaults.maxLlmCalls,
+        maxDurationMs: work.bounds.maxDurationMs ?? defaults.maxDurationMs,
+      } : defaults;
+
+      return {
+        ...work,
+        goal: work.goal ?? work.objective,
+        bounds,
+        dependencies: work.dependencies ?? [],
+      };
+    });
+
+    for (const work of specs) {
       this.log('info', 'Enqueueing deferred work from hook', {
         objective: work.objective.slice(0, 100),
         agent: work.agent,
         hasBounds: !!work.bounds,
       });
 
-      let item: WorkItem;
-      if (work.bounds) {
-        // Watcher-specified bounds override agent registry defaults
-        item = createWorkItem({
-          goal: work.goal ?? work.objective,
-          objective: work.objective,
-          agent: work.agent,
-          dependencies: work.dependencies,
-          targetPaths: work.targetPaths,
-          bounds: {
-            maxToolCalls: work.bounds.maxToolCalls ?? this.config.maxToolCalls,
-            maxLlmCalls: work.bounds.maxLlmCalls ?? this.config.maxIterations,
-            maxDurationMs: work.bounds.maxDurationMs ?? this.config.maxDurationMs,
-          },
-        });
-      } else {
-        item = this.createWorkItem(work.objective, work.agent);
+      const item = createWorkItem({
+        goal: work.goal,
+        objective: work.objective,
+        agent: work.agent,
+        dependencies: [],
+        targetPaths: work.targetPaths,
+        bounds: work.bounds,
+      });
+
+      if (work.id) {
+        idMap.set(work.id, item.workId);
       }
+
+      created.push(item);
+    }
+
+    for (let i = 0; i < created.length; i++) {
+      const resolvedDeps = this.resolveWorkItemDependencies(specs[i].dependencies, idMap, 'deferred_work');
+      if (resolvedDeps.length > 0) {
+        created[i] = cloneWorkItemWithDependencies(created[i], resolvedDeps);
+      }
+    }
+
+    for (const item of created) {
       this.enqueue(item);
     }
   }
@@ -2151,6 +2210,10 @@ export class Orchestrator {
             itemCount: workItems.length,
             items: workItems.map(w => ({ id: w.workId, objective: w.objective.slice(0, 50) })),
           });
+          if (this.planModeOptions?.enabled) {
+            this.log('info', 'Disabling plan mode after handoff approval', { workId });
+            this.planModeOptions = undefined;
+          }
           for (const item of workItems) {
             this.enqueue(item);
           }
@@ -2571,6 +2634,10 @@ export class Orchestrator {
   /**
    * Parse a handoffSpec into WorkItems.
    * Returns empty array on parse failure.
+   *
+   * Uses two-pass approach to remap planner's semantic IDs to generated workIds:
+   * 1. Create all work items and build ID mapping (planner ID → workId)
+   * 2. Rewrite dependencies using the ID map
    */
   private parseHandoffSpec(spec: HandoffSpec | string, sessionGoal: string): WorkItem[] {
     try {
@@ -2592,16 +2659,48 @@ export class Orchestrator {
 
       const planGoal = cast.goal ?? sessionGoal;
 
-      return cast.workItems.map((item, index) => createWorkItem({
-        goal: planGoal,
-        objective: item.objective,
-        delta: item.delta,
-        agent: item.agent ?? 'standard',
-        domain: item.domain,
-        dependencies: item.dependencies ?? [],
-        targetPaths: item.targetPaths ?? [],
-        stepNum: index + 1,
-      }));
+      // Phase 1: Create work items and build ID mapping
+      const idMap = new Map<string, string>();  // planner ID → generated workId
+      const items: WorkItem[] = [];
+
+      for (let index = 0; index < cast.workItems.length; index++) {
+        const specItem = cast.workItems[index];
+        const workItem = createWorkItem({
+          goal: planGoal,
+          objective: specItem.objective,
+          delta: specItem.delta,
+          agent: specItem.agent ?? 'standard',
+          domain: specItem.domain,
+          dependencies: [],  // Resolved in phase 2
+          targetPaths: specItem.targetPaths ?? [],
+          stepNum: index + 1,
+        });
+
+        // Map planner's semantic ID to generated workId
+        if (specItem.id) {
+          idMap.set(specItem.id, workItem.workId);
+        }
+
+        items.push(workItem);
+      }
+
+      // Phase 2: Resolve dependencies using ID map (WorkItem is immutable, so clone with new deps)
+      for (let i = 0; i < items.length; i++) {
+        const originalDeps = cast.workItems[i].dependencies ?? [];
+        if (originalDeps.length > 0) {
+          const resolvedDeps = this.resolveWorkItemDependencies(originalDeps, idMap, 'handoff_spec');
+          if (resolvedDeps.length > 0) {
+            items[i] = cloneWorkItemWithDependencies(items[i], resolvedDeps);
+          }
+        }
+      }
+
+      this.log('info', 'Parsed handoff spec with ID remapping', {
+        itemCount: items.length,
+        idMappings: Array.from(idMap.entries()).map(([k, v]) => `${k} → ${v}`),
+      });
+
+      return items;
     } catch (err) {
       this.log('error', 'Failed to parse handoff spec', {
         error: err instanceof Error ? err.message : String(err),

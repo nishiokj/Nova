@@ -25,6 +25,7 @@ import type {
   SyncEvent,
 } from './types.js'
 import { CollectError, RateLimitError } from './types.js'
+import { SyncError, ErrorCode } from '../errors/index.js'
 import type { AuthProvider } from '../auth/provider.js'
 import type { AccountRepository } from '../db/repositories/account.js'
 import type { Connector, ConnectorContext } from '../connector/sdk/types.js'
@@ -250,6 +251,24 @@ export class Collector {
             await this.syncJobRepo.fail(job.id, error.message)
             await this.syncJobRepo.scheduleRetry(job.id, retryAt)
             return
+          }
+          // Handle stale sync token (HTTP 410) - clear cursor and restart as backfill
+          if (error instanceof SyncError && error.code === ErrorCode.SYNC_CURSOR) {
+            console.log('[Collector] Sync token invalidated, clearing cursor and restarting as backfill', {
+              connector: job.connector,
+              accountId: job.account_id,
+              jobId: job.id,
+            })
+            // Clear the account's sync cursor
+            if (this.config.accountRepo) {
+              await this.config.accountRepo.updateSyncState(job.account_id, undefined)
+            }
+            // Clear job cursor and restart as backfill
+            await this.syncJobRepo.updateCursor(job.id, undefined as unknown as string)
+            cursor = undefined
+            collectionMethod = 'backfill'
+            pageCount = 0
+            continue
           }
           throw error
         }

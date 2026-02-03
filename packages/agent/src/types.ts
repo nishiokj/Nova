@@ -82,6 +82,8 @@ export interface AgentRunParams {
   workItem: WorkItem;
   /** Working directory for tool execution. Required for concurrent-safe operation. */
   cwd: string;
+  /** Optional abort signal to cancel agent execution. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -420,6 +422,18 @@ export type InternalHookEvent =
       totalTokens?: number;
       /** Whether v2 fell back to v1 */
       fallbackToV1?: boolean;
+    }
+  | {
+      /** Fired when a git commit is detected from Bash tool output */
+      type: 'git_commit';
+      /** Git commit SHA */
+      sha: string;
+      /** The bash command that triggered the commit */
+      command: string;
+      /** Commit message if extractable */
+      message?: string;
+      /** Branch name if detectable */
+      branch?: string;
     };
 
 /**
@@ -460,6 +474,7 @@ export type StopHookResult =
       systemMessage?: string;
       /** Deferred work items for async dispatch (enqueued after stop hook processing) */
       deferredWork?: Array<{
+        id?: string;
         goal: string;
         objective: string;
         agent: string;
@@ -478,6 +493,7 @@ export type StopHookResult =
       systemMessage?: string;
       /** Deferred work items for async dispatch (enqueued after stop hook processing) */
       deferredWork?: Array<{
+        id?: string;
         goal: string;
         objective: string;
         agent: string;

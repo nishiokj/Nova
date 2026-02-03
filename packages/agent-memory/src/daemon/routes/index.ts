@@ -22,7 +22,9 @@ import { registerDecisionsRoutes } from './decisions.js'
 import { registerEventRoutes } from './events.js'
 import { registerGoalsRoutes } from './agent-goals.js'
 import { registerActionsRoutes } from './agent-actions.js'
+import { registerTracesRoutes } from './agent-traces.js'
 import { registerEvidenceRoutes } from './evidence.js'
+import { registerMemoryRoutes } from './memory.js'
 
 /**
  * Register all API routes.
@@ -44,7 +46,9 @@ export function registerRoutes(server: HttpServer, daemon: SyncDaemon): void {
   registerEventRoutes(server, daemon)
   registerGoalsRoutes(server, daemon.goalsRepo)
   registerActionsRoutes(server, daemon.actionsRepo)
+  registerTracesRoutes(server, daemon.tracesRepo)
   registerEvidenceRoutes(server, daemon)
+  registerMemoryRoutes(server, daemon)
 }
 
 export { registerAccountRoutes } from './accounts.js'
@@ -63,4 +67,6 @@ export { registerDecisionsRoutes } from './decisions.js'
 export { registerEventRoutes } from './events.js'
 export { registerGoalsRoutes } from './agent-goals.js'
 export { registerActionsRoutes } from './agent-actions.js'
+export { registerTracesRoutes } from './agent-traces.js'
 export { registerEvidenceRoutes } from './evidence.js'
+export { registerMemoryRoutes } from './memory.js'

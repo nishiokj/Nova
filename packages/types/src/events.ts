@@ -25,7 +25,8 @@ export type AgentCoreEventType =
   | 'agent_reasoning'
   | 'artifact_discovered'
   | 'agent_progress'
-  | 'permission_request';
+  | 'permission_request'
+  | 'git_commit';
 
 /**
  * Orchestrator event types.
@@ -344,6 +345,21 @@ export interface PermissionRequestEventData {
   workingDirectory: string;
   /** Human-readable description of the action */
   description: string;
+}
+
+/**
+ * Data for git_commit event.
+ * Emitted when a git commit is detected from Bash tool output.
+ */
+export interface GitCommitData {
+  /** Git commit SHA (7-40 hex chars) */
+  sha: string;
+  /** The bash command that triggered the commit */
+  command: string;
+  /** Commit message if extractable */
+  message?: string;
+  /** Branch name if detectable */
+  branch?: string;
 }
 
 // ============================================

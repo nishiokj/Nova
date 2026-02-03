@@ -195,6 +195,12 @@ export {
   type TransformationRepository,
   type TransformationRecord,
   type TransformationInput,
+  // Agent Traces (cursor/agent-trace spec)
+  createAgentTracesRepository,
+  type AgentTracesRepository,
+  type AgentTraceRow,
+  type AgentTraceInput,
+  type TraceFilterOptions,
 } from './db/index.js'
 
 // Auth Layer

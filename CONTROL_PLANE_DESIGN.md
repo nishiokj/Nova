@@ -855,7 +855,7 @@ class Orchestrator {
 1. Update `packages/shared/src/termination.ts` to re-export from control-plane
 2. Update `packages/agent/src/types.ts` to re-export from control-plane
 3. Update `packages/decision-watcher/src/types.ts` to use control-plane types
-4. Update `config/output_schemas.json` to use generated schemas
+4. Remove legacy JSON schema artifacts in favor of control-plane exports
 
 ### Phase 3: Migrate Hooks
 1. Convert existing `registerHook` calls to new system
@@ -929,7 +929,6 @@ packages/control-plane/
 | `packages/decision-watcher/src/types.ts` | Use control-plane decisions, remove WatcherAction |
 | `packages/decision-watcher/src/watcher-agent.ts` | Convert to new hook pattern |
 | `packages/harness-daemon/src/harness/harness.ts` | Use new hook registration |
-| `config/output_schemas.json` | Generate from control-plane schemas |
 
 ## Files to Delete
 

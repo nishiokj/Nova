@@ -31,6 +31,7 @@ import type {
   ConnectorSanityResponse,
   ConnectorUnregisterResponse,
   DecisionsSearchResponse,
+  MemorySearchResponse,
   EvidenceRetrieveRequest,
   EvidenceRetrieveResponse,
   DerivedJob,
@@ -909,6 +910,32 @@ export class SyncClient {
      */
     retrieve: async (opts: EvidenceRetrieveRequest): Promise<EvidenceRetrieveResponse> => {
       return this.post<EvidenceRetrieveResponse>('/evidence/retrieve', opts)
+    },
+  }
+
+  // ============ Memory ============
+
+  /**
+   * Conversational memory search.
+   */
+  memory = {
+    /**
+     * Search conversational memory summaries.
+     * @param opts.q - Search query (required)
+     * @param opts.limit - Max results (default: 8)
+     * @param opts.connectors - Comma-separated connector list
+     */
+    search: async (opts: {
+      q: string
+      limit?: number
+      connectors?: string
+    }): Promise<MemorySearchResponse> => {
+      const params = new URLSearchParams()
+      params.set('q', opts.q)
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+      if (opts.connectors) params.set('connectors', opts.connectors)
+      const query = params.toString()
+      return this.get<MemorySearchResponse>(`/memory/search?${query}`)
     },
   }
 

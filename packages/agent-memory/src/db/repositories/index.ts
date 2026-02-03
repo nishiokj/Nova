@@ -126,6 +126,15 @@ export {
 } from './derived-processing-log.js'
 
 export {
+  createDerivedRunLogRepository,
+  type DerivedRunLogRepository,
+  type DerivedRunLogRecord,
+  type DerivedRunLogInput,
+  type DerivedRunSampleInput,
+  type DerivedRunStatus,
+} from './derived-run-log.js'
+
+export {
   createCodingDecisionsRepository,
   type CodingDecisionsRepository,
   type CodingDecisionRow,
@@ -232,3 +241,11 @@ export {
   type ResourcePoolRow,
   type CanAcquireResult,
 } from './resource-pool.js'
+
+export {
+  createAgentTracesRepository,
+  type AgentTracesRepository,
+  type AgentTraceRow,
+  type AgentTraceInput,
+  type TraceFilterOptions,
+} from './agent-traces.js'

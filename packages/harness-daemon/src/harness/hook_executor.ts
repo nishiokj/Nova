@@ -181,6 +181,17 @@ export class HookExecutor {
         : JSON.stringify(context.toolResult);
     }
 
+    // Git commit context (for PostGitCommit hooks)
+    if (context.commitSha) {
+      env.COMMIT_SHA = context.commitSha;
+    }
+    if (context.commitMessage) {
+      env.COMMIT_MESSAGE = context.commitMessage;
+    }
+    if (context.commitBranch) {
+      env.COMMIT_BRANCH = context.commitBranch;
+    }
+
     try {
       const result = await this.execCommand(action.command, env, timeout, this.workingDir);
 
@@ -270,6 +281,17 @@ export class HookExecutor {
       env.TOOL_RESULT = typeof context.toolResult === 'string'
         ? context.toolResult
         : JSON.stringify(context.toolResult);
+    }
+
+    // Git commit context (for PostGitCommit hooks)
+    if (context.commitSha) {
+      env.COMMIT_SHA = context.commitSha;
+    }
+    if (context.commitMessage) {
+      env.COMMIT_MESSAGE = context.commitMessage;
+    }
+    if (context.commitBranch) {
+      env.COMMIT_BRANCH = context.commitBranch;
     }
 
     // Build args with env var substitution

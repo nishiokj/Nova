@@ -9,6 +9,7 @@
  *   bun run scripts/derived-cli.ts list
  *   bun run scripts/derived-cli.ts run <task-id> [options]
  *   bun run scripts/derived-cli.ts logs <task-id>
+ *   bun run scripts/derived-cli.ts report <task-id> [options]
  */
 
 import { parseArgs } from 'node:util'
@@ -22,6 +23,9 @@ import {
 import {
   createDerivedJobRepository,
 } from '../src/db/repositories/derived-job.js'
+import {
+  createDerivedRunLogRepository,
+} from '../src/db/repositories/derived-run-log.js'
 import { generateCanonicalId } from '../src/ids.js'
 import { loadScriptMetadata, type DerivedMetadataSchema } from '../src/derived/runner.js'
 
@@ -31,6 +35,10 @@ interface CliOptions {
   'interval-ms'?: number
   priority?: number
   metadata?: string
+  label?: string
+  purpose?: string
+  'sanity-policy'?: string
+  'report-limit'?: number
   verbose: boolean
 }
 
@@ -42,6 +50,10 @@ function parseCliArgs(): { options: CliOptions; args: string[] } {
       'interval-ms': { type: 'string' },
       priority: { type: 'string' },
       metadata: { type: 'string' },
+      label: { type: 'string' },
+      purpose: { type: 'string' },
+      'sanity-policy': { type: 'string' },
+      'report-limit': { type: 'string' },
       verbose: { type: 'boolean', short: 'v', default: false },
     },
     allowPositionals: true,
@@ -54,6 +66,10 @@ function parseCliArgs(): { options: CliOptions; args: string[] } {
       'interval-ms': values['interval-ms'] ? parseInt(values['interval-ms'], 10) : undefined,
       priority: values.priority ? parseInt(values.priority, 10) : undefined,
       metadata: values.metadata,
+      label: values.label,
+      purpose: values.purpose,
+      'sanity-policy': values['sanity-policy'],
+      'report-limit': values['report-limit'] ? parseInt(values['report-limit'], 10) : undefined,
       verbose: values.verbose ?? false,
     },
     args: positionals,
@@ -94,6 +110,7 @@ Commands:
   list                           List all derived tasks
   run <task-id>                  Run a task immediately
   logs <task-id>                 Show recent jobs for a task
+  report <task-id>               Show recent run logs for a task
   disable <task-id>              Disable a task
   enable <task-id>               Enable a disabled task
   delete <task-id>               Delete a task permanently
@@ -107,6 +124,10 @@ Options:
   --interval-ms <ms>             Interval for recurring mode
   --priority <number>            Job priority (default: 0)
   --metadata <json>              Metadata to attach to task/job
+  --label <text>                 Short human-readable label
+  --purpose <text>               One-line task purpose
+  --sanity-policy <json>         Sanity policy JSON for this task
+  --report-limit <number>        Limit rows for report command
 
 Circuit Breaker:
   Tasks auto-disable after consecutive failures (default: 3).
@@ -195,6 +216,16 @@ async function createTask(
     }
   }
 
+  let sanityPolicy: Record<string, unknown> | undefined
+  if (options['sanity-policy']) {
+    try {
+      sanityPolicy = JSON.parse(options['sanity-policy'])
+    } catch {
+      console.error('Error: Invalid JSON in --sanity-policy')
+      process.exit(1)
+    }
+  }
+
   // Validate metadata against script's schema
   const schema = await loadScriptMetadata(scriptPath)
   if (schema) {
@@ -205,10 +236,13 @@ async function createTask(
 
   const task = await taskRepo.create({
     name,
+    label: options.label ?? null,
+    purpose: options.purpose ?? null,
     scriptPath,
     mode,
     intervalMs: options['interval-ms'],
     metadata,
+    sanityPolicy,
   })
 
   console.log(`✓ Created derived task: ${task.id}`)
@@ -242,6 +276,12 @@ async function listTasks(
       ? ` ⚡CIRCUIT OPEN until ${task.circuit_open_until}`
       : ''
     console.log(`  ${task.id}  ${task.name} [${status}]${circuitStatus}`)
+    if (task.label) {
+      console.log(`    Label: ${task.label}`)
+    }
+    if (task.purpose) {
+      console.log(`    Purpose: ${task.purpose}`)
+    }
     console.log(`    Script: ${task.script_path}`)
     console.log(`    Mode: ${task.mode}`)
     if (task.interval_ms) {
@@ -252,6 +292,15 @@ async function listTasks(
     }
     if (task.last_job_id) {
       console.log(`    Last job: ${task.last_job_id}`)
+    }
+    if (task.last_success_at) {
+      console.log(`    Last success: ${task.last_success_at}`)
+    }
+    if (task.last_error_at) {
+      console.log(`    Last error: ${task.last_error_at}`)
+    }
+    if (task.last_error_code) {
+      console.log(`    Error code: ${task.last_error_code}`)
     }
     if (task.consecutive_failures > 0) {
       console.log(`    Failures: ${task.consecutive_failures}/${task.max_failures}`)
@@ -356,6 +405,53 @@ async function showTaskLogs(
     }
     if (job.retry_count > 0) {
       console.log(`     Retries: ${job.retry_count}`)
+    }
+    console.log('')
+  }
+}
+
+async function showRunReport(
+  taskId: string,
+  options: CliOptions,
+  taskRepo: ReturnType<typeof createDerivedTaskRepository>,
+  runLogRepo: ReturnType<typeof createDerivedRunLogRepository>
+): Promise<void> {
+  const task = await taskRepo.findById(taskId)
+  if (!task) {
+    console.error(`Error: Derived task not found: ${taskId}`)
+    process.exit(1)
+  }
+
+  const limit = options['report-limit'] ?? 10
+  const runs = await runLogRepo.findByTask(task.id, limit)
+
+  if (runs.length === 0) {
+    console.log(`No run logs found for task "${task.name}".`)
+    return
+  }
+
+  console.log(`Task: ${task.name} (${task.id})`)
+  console.log(`Script: ${task.script_path}\n`)
+  console.log(`Recent runs (${runs.length}):\n`)
+
+  for (const run of runs) {
+    const icon = run.status === 'ok' ? '✓' : run.status === 'skipped' ? '○' : '✗'
+    console.log(`  ${icon} ${run.id}  ${run.status}`)
+    console.log(`     Created: ${run.created_at}`)
+    if (run.model_version) {
+      console.log(`     Model: ${run.model_version}`)
+    }
+    if (run.duration_ms !== null) {
+      console.log(`     Duration: ${run.duration_ms}ms`)
+    }
+    if (run.input_count !== null || run.output_count !== null) {
+      console.log(`     Counts: in=${run.input_count ?? 0} out=${run.output_count ?? 0} unusable=${run.output_unusable_count ?? 0}`)
+    }
+    if (run.skip_reason) {
+      console.log(`     Skip: ${run.skip_reason}`)
+    }
+    if (run.error_code || run.error_msg) {
+      console.log(`     Error: ${run.error_code ?? 'unknown'} ${run.error_msg ?? ''}`.trimEnd())
     }
     console.log('')
   }
@@ -472,6 +568,7 @@ async function main(): Promise<void> {
 
   const taskRepo = createDerivedTaskRepository({ sql })
   const jobRepo = createDerivedJobRepository({ sql })
+  const runLogRepo = createDerivedRunLogRepository({ sql })
 
   try {
     switch (command) {
@@ -504,6 +601,15 @@ async function main(): Promise<void> {
         }
         const taskId = args[1]
         await showTaskLogs(taskId, taskRepo, jobRepo)
+        break
+      }
+      case 'report': {
+        if (args.length < 2) {
+          console.error('Usage: report <task-id>')
+          process.exit(1)
+        }
+        const taskId = args[1]
+        await showRunReport(taskId, options, taskRepo, runLogRepo)
         break
       }
       case 'disable': {

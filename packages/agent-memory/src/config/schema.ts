@@ -239,12 +239,22 @@ export const ConnectorConfigSchema = z.object({
   rex_sessions: z.object({
     /** Enable this connector */
     enabled: z.boolean().default(false),
-    /** Path to Rex sessions directory (required) */
-    sessionsPath: z.string().optional(),
-    /** Specific projects to sync (empty = all) */
+    /** Path to GraphD SQLite database (default: ~/.graphd/graphd.db) */
+    databasePath: z.string().optional(),
+    /** Filter sessions by working_dir substrings */
     projectFilter: z.array(z.string()).optional(),
-    /** Sessions per page (default: 10) */
-    pageSize: z.number().int().positive().default(10),
+    /** Filter sessions by session_key substrings */
+    sessionFilter: z.array(z.string()).optional(),
+    /** Filter sessions by client_type */
+    clientTypeFilter: z.array(z.string()).optional(),
+    /** Messages per page (default: 100) */
+    pageSize: z.number().int().positive().default(100),
+    /** Debounce window for DB change events (ms) */
+    webhookDebounceMs: z.number().int().positive().default(500),
+    /** When true, webhook ingestion starts at latest row id */
+    webhookStartAtLatest: z.boolean().default(true),
+    /** Max rows to pull per webhook batch */
+    webhookBatchSize: z.number().int().positive().default(500),
   }).default({}),
 })
 

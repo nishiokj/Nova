@@ -51,6 +51,7 @@ export type {
   AgentReasoningData,
   EventCallback,
   PermissionRequestEventData,
+  GitCommitData,
 } from './events.js';
 
 export {

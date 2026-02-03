@@ -11,7 +11,7 @@ function getActionConfig(action: string): {
   const iconClass = 'w-3.5 h-3.5'
   const actionLower = action.toLowerCase()
 
-  if (actionLower.includes('continue') || actionLower.includes('proceed')) {
+  if (actionLower.includes('allow') || actionLower.includes('continue') || actionLower.includes('proceed')) {
     return {
       label: action.toUpperCase(),
       color: 'var(--success)',

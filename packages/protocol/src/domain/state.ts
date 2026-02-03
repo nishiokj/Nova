@@ -12,6 +12,7 @@ import type { ExecutionMetrics } from './events.js';
  * Work item specification for creating new work.
  */
 export interface WorkItemSpec {
+  id?: string;
   goal: string;
   objective: string;
   agent: string;

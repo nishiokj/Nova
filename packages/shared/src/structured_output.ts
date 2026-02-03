@@ -11,6 +11,7 @@ import {
   isValidOutput,
   getOutputSchema,
   getOutputSchemaJson,
+  getWatcherSchemaJsonForActions,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
 } from './output_schemas.js';
@@ -21,6 +22,7 @@ export {
   isValidOutput,
   getOutputSchema,
   getOutputSchemaJson,
+  getWatcherSchemaJsonForActions,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
 };

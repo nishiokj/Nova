@@ -227,6 +227,7 @@ function isValidEventType(event: string): event is HookEventType {
     'agent_message',
     'tool_call_completed',
     'memory_injected',
+    'git_commit',
     'stop',
   ];
   return validEvents.includes(event as HookEventType);

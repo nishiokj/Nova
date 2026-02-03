@@ -171,7 +171,7 @@ export class EvidenceRetriever {
   private async searchEntities(keyword: string): Promise<CodeEntity[]> {
     return this.sql<CodeEntity[]>`
       SELECT * FROM entity_graph.entities
-      WHERE name ILIKE ${'%' + keyword + '%'}
+      WHERE name ILIKE '%' || ${keyword} || '%'
       ORDER BY exported DESC, kind DESC
       LIMIT 8
     `

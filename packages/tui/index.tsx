@@ -349,11 +349,12 @@ async function fetchUsageData(): Promise<{
       }
     }
 
-    // Determine status
+    // Determine status - must respect database status field
     let status: "active" | "idle" | "ended" = "idle";
     if (raw.status === "closed" || raw.status === "expired") {
       status = "ended";
-    } else if (now - raw.last_accessed_at <= staleThreshold) {
+    } else if (raw.status === "active" && now - raw.last_accessed_at <= staleThreshold) {
+      // Only show as active if BOTH: database says active AND recently accessed
       status = "active";
     }
 

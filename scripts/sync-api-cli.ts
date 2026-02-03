@@ -33,6 +33,7 @@ import {
   type AgentGoal,
   type AgentAction,
 } from '../packages/agent-memory/src/client/index.js'
+import { createDatabaseFromEnv } from '../packages/agent-memory/src/db/connection.ts'
 import { sendTelegramMessage, notifyAllUsers } from '../packages/agent-memory/src/connectors/telegram/notify.js'
 
 const SYNC_DAEMON_URL = process.env.SYNC_DAEMON_URL || 'http://localhost:3001'
@@ -2011,6 +2012,75 @@ async function cmdDecisionsSearch(query: string, opts?: {
   }
 }
 
+// --- Conversation Digests ---
+
+async function cmdDigestsSample(limit?: number): Promise<void> {
+  const sampleSize = Math.min(50, Math.max(1, limit ?? 10))
+  printHeader(`Conversation Digests (sample ${sampleSize})`)
+
+  const db = createDatabaseFromEnv()
+  try {
+    let rows: Array<{
+      id: string
+      conversation_id: string
+      summary: string
+      updated_at: Date
+      source_timestamp: Date | null
+    }> = []
+
+    try {
+      rows = await db.sql<Array<{
+        id: string
+        conversation_id: string
+        summary: string
+        updated_at: Date
+        source_timestamp: Date | null
+      }>>`
+        SELECT
+          d.id,
+          d.conversation_id,
+          d.summary,
+          d.updated_at,
+          c.source_timestamp
+        FROM conversation_digests d
+        JOIN canonical_conversation c ON c.id = d.conversation_id
+        ORDER BY random()
+        LIMIT ${sampleSize}
+      `
+    } catch (err) {
+      const e = err as { message?: string; code?: string; errno?: number; address?: string; port?: number }
+      const baseMessage = e?.message ?? (err instanceof Error ? err.message : String(err))
+      const details = [
+        e?.code ? `code=${e.code}` : null,
+        e?.errno !== undefined ? `errno=${e.errno}` : null,
+        e?.address ? `address=${e.address}` : null,
+        e?.port ? `port=${e.port}` : null,
+      ].filter(Boolean).join(' ')
+      const combined = [baseMessage, details].filter(Boolean).join(' ')
+      throw new Error(`Database query failed: ${combined || 'unknown error'}`)
+    }
+
+    if (rows.length === 0) {
+      console.log('  No digests found.')
+      return
+    }
+
+    rows.forEach((row, index) => {
+      const shortId = row.id.slice(0, 8)
+      const convoShort = row.conversation_id.slice(0, 8)
+      const when = row.source_timestamp ?? row.updated_at
+      const whenText = when ? new Date(when).toISOString().slice(0, 10) : 'unknown'
+      const summary = row.summary?.trim() ?? ''
+      const clipped = summary.length > 240 ? `${summary.slice(0, 240)}...` : summary
+
+      console.log(`  \x1b[90m#${index + 1}\x1b[0m \x1b[36m${shortId}\x1b[0m conv:${convoShort} ${whenText}`)
+      console.log(`    ${clipped || '(empty summary)'}`)
+    })
+  } finally {
+    await db.close()
+  }
+}
+
 // ============ Goals ============
 
 function printGoal(goal: import('../packages/agent-memory/src/client/types.js').AgentGoal, index?: number): void {
@@ -2415,6 +2485,10 @@ function printHelp(): void {
       --limit <n>                  Results limit (default: 20)
       --offset <n>                 Pagination offset (default: 0)
 
+  \x1b[1mdigests\x1b[0m                         Conversation digest inspection
+    sample                       Random sample of digests
+      --limit <n>                  Sample size (default: 10, max: 50)
+
   \x1b[1mgoals\x1b[0m                            Agent goal management
     list                           List all goals (shows #N indices)
     get <id>                       Get goal details
@@ -2774,6 +2848,17 @@ async function main(): Promise<void> {
             break
           default:
             throw new Error(`Unknown subcommand: decisions ${subcommand || '(none)'}`)
+        }
+        break
+
+      case 'digests':
+        switch (subcommand) {
+          case 'sample':
+          case undefined:
+            await cmdDigestsSample(values.limit ? parseInt(values.limit as string, 10) : undefined)
+            break
+          default:
+            throw new Error(`Unknown subcommand: digests ${subcommand || '(none)'}`)
         }
         break
 

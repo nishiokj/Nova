@@ -37,7 +37,7 @@ export type QualityGate = z.infer<typeof QualityGateSchema>
 export const DecisionEntrySchema = z.object({
   timestamp: z.string(),
   trigger: z.enum(['prompt_user', 'cadence_audit', 'bounds_exceeded', 'work_complete', 'error']),
-  watcherAction: z.enum(['answer', 'continue', 'realign', 'pause', 'escalate']),
+  watcherAction: z.enum(['answer', 'allow', 'continue', 'realign', 'pause', 'escalate']),
   question: z.string().optional(),
   answer: z.string().optional(),
   rationale: z.string(),

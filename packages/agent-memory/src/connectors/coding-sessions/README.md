@@ -4,19 +4,19 @@ Connectors for ingesting session data from coding agents (Claude Code, Rex).
 
 ## Overview
 
-These connectors read JSONL session files from local directories and produce raw envelopes containing session messages. The transformation layer then converts these into canonical `Conversation` and `Message` entities.
+These connectors read local session data and produce raw envelopes containing session messages. The transformation layer then converts these into canonical `Conversation` and `Message` entities.
 
 ## Supported Agents
 
 | Agent | Connector | Default Path | Connector Type |
 |-------|-----------|--------------|----------------|
 | Claude Code | `ClaudeSessionConnector` | `~/.claude/projects/` | `claude_sessions` |
-| Rex | `RexSessionConnector` | (configurable) | `rex_sessions` |
+| Rex | `RexSessionConnector` | `~/.graphd/graphd.db` | `rex_sessions` |
 
 ## Data Flow
 
 ```
-Session JSONL Files
+GraphD SQLite Database
        │
        ▼  Connector.fetchPage()
 ┌──────────────────────┐
@@ -50,15 +50,14 @@ const connector = createClaudeSessionConnector({
 })
 ```
 
-### Rex Sessions
+### Rex Sessions (GraphD)
 
 ```typescript
 import { createRexSessionConnector } from '@agent-memory/connectors'
 
-// Path is required for Rex
 const connector = createRexSessionConnector({
-  sessionsPath: '/path/to/rex/sessions',
-  projectFilter: ['project-a'],
+  databasePath: '/path/to/graphd.db',
+  projectFilter: ['project-a'], // matches working_dir substrings
 })
 ```
 
@@ -80,12 +79,11 @@ Message types:
 - `summary` - Auto-generated conversation summaries
 - `file-history-snapshot` - File state snapshots (optional)
 
-### Rex JSONL
+### Rex GraphD SQLite
 
-```json
-{"type":"user","id":"msg-1","session_id":"session-1","timestamp":"2024-01-01T00:00:00Z","content":"Hello"}
-{"type":"assistant","id":"msg-2","session_id":"session-1","timestamp":"2024-01-01T00:00:01Z","content":"Hi!","model":"gpt-4"}
-```
+The connector reads from the GraphD SQLite database tables:
+- `sessions` (session metadata, `working_dir`, `client_type`)
+- `conversation_messages` (message rows)
 
 ## Transformations
 
@@ -123,9 +121,14 @@ registry.register(claudeMessageTransform)
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `sessionsPath` | `string` | (required) | Base path to Rex sessions |
-| `projectFilter` | `string[]` | `undefined` | Filter to specific project folders |
-| `pageSize` | `number` | `10` | Messages per page during sync |
+| `databasePath` | `string` | `~/.graphd/graphd.db` | GraphD SQLite database path |
+| `projectFilter` | `string[]` | `undefined` | Filter sessions by working_dir substrings |
+| `sessionFilter` | `string[]` | `undefined` | Filter sessions by session_key substrings |
+| `clientTypeFilter` | `string[]` | `undefined` | Filter sessions by client_type values |
+| `pageSize` | `number` | `100` | Messages per page during sync |
+| `webhookDebounceMs` | `number` | `500` | Debounce window for DB change events |
+| `webhookStartAtLatest` | `boolean` | `true` | Start webhook ingestion at latest row |
+| `webhookBatchSize` | `number` | `500` | Max rows to pull per webhook batch |
 
 ## Auth Configuration
 
@@ -141,31 +144,13 @@ connector.authConfig // { type: 'local' }
 connector.capabilities = {
   supportsBackfill: true,      // Full historical sync
   supportsIncrementalSync: true, // File modification-based delta sync
-  supportsWebhook: false,      // No real-time push
+  supportsWebhook: true,       // Event-driven updates via DB watcher
   supportsWrite: false,        // Read-only
-  supportedEntityTypes: ['session_message', 'session_summary'],
+  supportedEntityTypes: ['session_message'],
 }
 ```
 
 ## Directory Structure
 
 ```
-~/.claude/projects/
-├── -Users-alice-myproject/
-│   ├── abc123.jsonl           # Session file
-│   ├── def456.jsonl           # Another session
-│   └── ...
-├── -Users-alice-another-project/
-│   └── ...
-```
-
-The connector iterates through:
-1. Project folders (directories in projectsPath)
-2. Session files (*.jsonl in each project)
-3. Messages (lines in each JSONL file)
-
-## Incremental Sync
-
-For incremental sync (`fetchChanges`), the connector uses file modification times to detect changed sessions. Only sessions modified since the last sync are processed.
-
-Note: This may re-process entire session files if any message is added. For large sessions, consider using backfill mode with proper cursor handling.
+GraphD stores sessions and conversation messages in SQLite, so the connector queries the database directly for incremental and webhook-driven ingestion.
