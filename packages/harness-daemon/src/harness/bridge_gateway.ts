@@ -131,6 +131,26 @@ interface ConnectionState {
   asyncRun: AsyncRunInfo | null;
 }
 
+type CommandData = Record<string, unknown> | undefined;
+
+interface CommandContext {
+  connectionId: string;
+  state: ConnectionState;
+}
+
+type CommandHandler = (data: CommandData, context: CommandContext) => void | Promise<void>;
+
+interface CommandSpec {
+  validate: (data: CommandData) => boolean;
+  handle: CommandHandler;
+}
+
+const acceptAnyCommandData = (_data: CommandData): boolean => true;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function createHookRegistryFromStopHook(
   stopHook: (ctx: StopHookContext) => Promise<StopHookResult> | StopHookResult,
   sessionKey: string
@@ -327,19 +347,18 @@ export class BridgeGateway {
   private readonly workingDir: string;
   private readonly authService: AuthService | null;
   private readonly localProviders: LocalProviderManager | null;
-  private readonly daemon: any | null;  // HarnessDaemon for dynamic mode changes
   private skillsDir: string;
   private hooksDir: string;
   private connections = new Map<string, ConnectionState>();
   // Track session ownership: sessionKey -> connectionId (enforces single client per session)
   private sessionOwners = new Map<string, string>();
+  private readonly commandRegistry = this.createCommandRegistry();
 
-  constructor(bus: BusServer, harness: HarnessLike, workingDir: string, authService?: AuthService | null, daemon?: any | null) {
+  constructor(bus: BusServer, harness: HarnessLike, workingDir: string, authService?: AuthService | null) {
     this.bus = bus;
     this.harness = harness;
     this.workingDir = workingDir;
     this.authService = authService ?? null;
-    this.daemon = daemon ?? null;
 
     const config = harness.getConfig();
     this.skillsDir = config.skills.directory
@@ -384,203 +403,130 @@ export class BridgeGateway {
       return;
     }
 
-    if (!payload || typeof payload !== 'object') {
+    const command = this.parseBridgeCommand(payload);
+    if (!command) {
       this.sendError(connectionId, 'Invalid bridge command payload');
       return;
     }
 
-    const command = payload as BridgeCommand | { type: string; data?: Record<string, unknown> };
     const state = this.getOrCreateConnectionState(connectionId);
 
     profiler.begin(`cmd:${command.type}`, 'bridge');
     try {
-      switch (command.type) {
-        case 'init':
-          this.handleInit(connectionId, command.data, state);
-          return;
-        case 'send_text':
-          this.handleSendText(connectionId, command.data, state);
-          return;
-        case 'send_media':
-          // Currently handled the same as send_text; attachments are ignored by the harness.
-          this.handleSendText(connectionId, command.data, state);
-          return;
-        case 'user_prompt_response':
-          this.handleUserPromptResponse(connectionId, command.data, state);
-          return;
-        case 'get_config':
-          this.handleGetConfig(connectionId, state);
-          return;
-        case 'get_status':
-          this.handleGetStatus(connectionId);
-          return;
-        case 'get_models':
-          this.handleGetModels(connectionId);
-          return;
-        case 'models_delete':
-          this.handleModelsDelete(connectionId, command.data, state);
-          return;
-        case 'skills_list':
-          this.handleSkillsList(connectionId);
-          return;
-        case 'skills_get':
-          this.handleSkillsGet(connectionId, command.data);
-          return;
-        case 'skills_create':
-          this.handleSkillsCreate(connectionId, command.data);
-          return;
-        case 'skills_update':
-          this.handleSkillsUpdate(connectionId, command.data);
-          return;
-        case 'skills_delete':
-          this.handleSkillsDelete(connectionId, command.data);
-          return;
-        case 'skills_enable':
-          this.handleSkillsEnable(connectionId, command.data, true);
-          return;
-        case 'skills_disable':
-          this.handleSkillsEnable(connectionId, command.data, false);
-          return;
-        case 'skills_run':
-          // Skills run is deferred - skills are instructions injected into prompts
-          this.handleDeferredResponse(connectionId, command.type);
-          return;
-        case 'voice_start':
-        case 'voice_stop':
-          this.sendEvent(connectionId, {
-            type: 'error',
-            data: { message: 'Voice is not yet supported in TypeScript mode', fatal: false },
-          });
-          return;
-        case 'hooks_list':
-          this.handleHooksList(connectionId);
-          return;
-        case 'hooks_get':
-          this.handleHooksGet(connectionId, command.data);
-          return;
-        case 'hooks_create':
-          this.handleHooksCreate(connectionId, command.data);
-          return;
-        case 'hooks_update':
-          this.handleHooksUpdate(connectionId, command.data);
-          return;
-        case 'hooks_delete':
-          this.handleHooksDelete(connectionId, command.data);
-          return;
-        case 'hooks_enable':
-          this.handleHooksEnable(connectionId, command.data, true);
-          return;
-        case 'hooks_disable':
-          this.handleHooksEnable(connectionId, command.data, false);
-          return;
-        // Auth commands
-        case 'auth_start':
-          this.handleAuthStart(connectionId, command.data);
-          return;
-        case 'auth_poll':
-          this.handleAuthPoll(connectionId, command.data);
-          return;
-        case 'auth_verify':
-          this.handleAuthVerify(connectionId, command.data);
-          return;
-        case 'auth_logout':
-          this.handleAuthLogout(connectionId, command.data);
-          return;
-        case 'providers_list':
-          this.handleProvidersList(connectionId, command.data);
-          return;
-        case 'providers_save':
-          this.handleProvidersSave(connectionId, command.data);
-          return;
-        case 'providers_delete':
-          this.handleProvidersDelete(connectionId, command.data);
-          return;
-        case 'providers_test':
-          void this.handleProvidersTest(connectionId, command.data);
-          return;
-        case 'session_fork':
-          this.handleSessionFork(connectionId, state);
-          return;
-        case 'session_close':
-          this.handleSessionClose(connectionId, state);
-          return;
-        case 'list_sessions':
-          this.handleListSessions(connectionId, command.data, state);
-          return;
-        case 'compact_context':
-          this.handleCompactContext(connectionId, state);
-          return;
-        case 'set_model':
-          this.handleSetModel(connectionId, command.data, state);
-          return;
-        case 'get_model':
-          this.handleGetModel(connectionId, command.data, state);
-          return;
-        case 'ralph_loop_start':
-          this.handleRalphLoopStart(connectionId, command.data, state);
-          return;
-        case 'ralph_loop_cancel':
-          this.handleRalphLoopCancel(connectionId, state);
-          return;
-        case 'permission_response':
-          this.handlePermissionResponse(connectionId, command.data);
-          return;
-        case 'set_dangerous_mode':
-          this.handleSetDangerousMode(connectionId, command.data);
-          return;
-        // Async session commands
-        case 'async_start':
-          void this.handleAsyncStart(connectionId, command.data, state);
-          return;
-        case 'async_cancel':
-          this.handleAsyncCancel(connectionId, state);
-          return;
-        case 'async_status':
-          this.handleAsyncStatus(connectionId, state);
-          return;
-        // Watcher commands
-        case 'watcher_status':
-          this.handleWatcherStatus(connectionId, state);
-          return;
-        case 'watcher_context':
-          this.handleWatcherContext(connectionId, state);
-          return;
-        case 'watcher_search':
-          void this.handleWatcherSearch(connectionId, command.data, state);
-          return;
-        case 'watcher_decisions':
-          void this.handleWatcherDecisions(connectionId, state);
-          return;
-        case 'watcher_inspect':
-          void this.handleWatcherInspect(connectionId, command.data, state);
-          return;
-        case 'watcher_memory':
-          this.handleWatcherMemory(connectionId, state);
-          return;
-        case 'watcher_focus':
-          this.handleWatcherFocus(connectionId, command.data, state);
-          return;
-        case 'watcher_defocus':
-          this.handleWatcherDefocus(connectionId, state);
-          return;
-        case 'watcher_reanchor':
-          this.handleWatcherReanchor(connectionId, command.data, state);
-          return;
-        case 'watcher_summarize':
-          this.handleWatcherSummarize(connectionId, state);
-          return;
-        case 'shutdown':
-          this.sendError(connectionId, 'Shutdown is not supported via bridge');
-          return;
-        default:
-          this.sendError(connectionId, `Unknown command type: ${command.type}`);
+      const spec = this.commandRegistry.get(command.type);
+      if (!spec) {
+        this.sendError(connectionId, `Unknown command type: ${command.type}`);
+        return;
       }
+      if (!spec.validate(command.data)) {
+        this.sendError(connectionId, `Invalid payload for command: ${command.type}`);
+        return;
+      }
+      await spec.handle(command.data, { connectionId, state });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.sendEvent(connectionId, createErrorEvent(message, false));
     } finally {
       profiler.end(`cmd:${command.type}`, 'bridge');
     }
+  }
+
+  private parseBridgeCommand(
+    payload: unknown
+  ): (BridgeCommand | { type: string; data?: Record<string, unknown> }) | null {
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+    const candidate = payload as { type?: unknown; data?: unknown };
+    if (typeof candidate.type !== 'string') {
+      return null;
+    }
+    const data = isRecord(candidate.data) ? candidate.data : undefined;
+    return { type: candidate.type, data };
+  }
+
+  private createCommandRegistry(): Map<string, CommandSpec> {
+    const registry = new Map<string, CommandSpec>();
+    const register = (type: string, handle: CommandHandler, validate: (data: CommandData) => boolean = acceptAnyCommandData) => {
+      registry.set(type, { validate, handle });
+    };
+
+    register('init', (data, ctx) => this.handleInit(ctx.connectionId, data, ctx.state));
+    register('send_text', (data, ctx) => this.handleSendText(ctx.connectionId, data, ctx.state));
+    register('send_media', (data, ctx) => this.handleSendText(ctx.connectionId, data, ctx.state));
+    register('user_prompt_response', (data, ctx) => this.handleUserPromptResponse(ctx.connectionId, data, ctx.state));
+    register('get_config', (_data, ctx) => this.handleGetConfig(ctx.connectionId, ctx.state));
+    register('get_status', (_data, ctx) => this.handleGetStatus(ctx.connectionId));
+    register('get_models', (_data, ctx) => this.handleGetModels(ctx.connectionId));
+    register('models_delete', (data, ctx) => this.handleModelsDelete(ctx.connectionId, data, ctx.state));
+    register('skills_list', (_data, ctx) => this.handleSkillsList(ctx.connectionId));
+    register('skills_get', (data, ctx) => this.handleSkillsGet(ctx.connectionId, data));
+    register('skills_create', (data, ctx) => this.handleSkillsCreate(ctx.connectionId, data));
+    register('skills_update', (data, ctx) => this.handleSkillsUpdate(ctx.connectionId, data));
+    register('skills_delete', (data, ctx) => this.handleSkillsDelete(ctx.connectionId, data));
+    register('skills_enable', (data, ctx) => this.handleSkillsEnable(ctx.connectionId, data, true));
+    register('skills_disable', (data, ctx) => this.handleSkillsEnable(ctx.connectionId, data, false));
+    register('skills_run', (_data, ctx) => this.handleDeferredResponse(ctx.connectionId, 'skills_run'));
+    register('voice_start', (_data, ctx) => this.handleVoiceUnsupported(ctx.connectionId));
+    register('voice_stop', (_data, ctx) => this.handleVoiceUnsupported(ctx.connectionId));
+    register('hooks_list', (_data, ctx) => this.handleHooksList(ctx.connectionId));
+    register('hooks_get', (data, ctx) => this.handleHooksGet(ctx.connectionId, data));
+    register('hooks_create', (data, ctx) => this.handleHooksCreate(ctx.connectionId, data));
+    register('hooks_update', (data, ctx) => this.handleHooksUpdate(ctx.connectionId, data));
+    register('hooks_delete', (data, ctx) => this.handleHooksDelete(ctx.connectionId, data));
+    register('hooks_enable', (data, ctx) => this.handleHooksEnable(ctx.connectionId, data, true));
+    register('hooks_disable', (data, ctx) => this.handleHooksEnable(ctx.connectionId, data, false));
+    register('auth_start', (data, ctx) => this.handleAuthStart(ctx.connectionId, data));
+    register('auth_poll', (data, ctx) => this.handleAuthPoll(ctx.connectionId, data));
+    register('auth_verify', (data, ctx) => this.handleAuthVerify(ctx.connectionId, data));
+    register('auth_logout', (data, ctx) => this.handleAuthLogout(ctx.connectionId, data));
+    register('providers_list', (data, ctx) => this.handleProvidersList(ctx.connectionId, data));
+    register('providers_save', (data, ctx) => this.handleProvidersSave(ctx.connectionId, data));
+    register('providers_delete', (data, ctx) => this.handleProvidersDelete(ctx.connectionId, data));
+    register('providers_test', (data, ctx) => {
+      void this.handleProvidersTest(ctx.connectionId, data);
+    });
+    register('session_fork', (_data, ctx) => this.handleSessionFork(ctx.connectionId, ctx.state));
+    register('session_close', (_data, ctx) => this.handleSessionClose(ctx.connectionId, ctx.state));
+    register('list_sessions', (data, ctx) => this.handleListSessions(ctx.connectionId, data, ctx.state));
+    register('compact_context', (_data, ctx) => this.handleCompactContext(ctx.connectionId, ctx.state));
+    register('set_model', (data, ctx) => this.handleSetModel(ctx.connectionId, data, ctx.state));
+    register('get_model', (data, ctx) => this.handleGetModel(ctx.connectionId, data, ctx.state));
+    register('ralph_loop_start', (data, ctx) => this.handleRalphLoopStart(ctx.connectionId, data, ctx.state));
+    register('ralph_loop_cancel', (_data, ctx) => this.handleRalphLoopCancel(ctx.connectionId, ctx.state));
+    register('permission_response', (data, ctx) => this.handlePermissionResponse(ctx.connectionId, data));
+    register('set_dangerous_mode', (data, ctx) => this.handleSetDangerousMode(ctx.connectionId, data));
+    register('async_start', (data, ctx) => {
+      void this.handleAsyncStart(ctx.connectionId, data, ctx.state);
+    });
+    register('async_cancel', (_data, ctx) => this.handleAsyncCancel(ctx.connectionId, ctx.state));
+    register('async_status', (_data, ctx) => this.handleAsyncStatus(ctx.connectionId, ctx.state));
+    register('watcher_status', (_data, ctx) => this.handleWatcherStatus(ctx.connectionId, ctx.state));
+    register('watcher_context', (_data, ctx) => this.handleWatcherContext(ctx.connectionId, ctx.state));
+    register('watcher_search', (data, ctx) => {
+      void this.handleWatcherSearch(ctx.connectionId, data, ctx.state);
+    });
+    register('watcher_decisions', (_data, ctx) => {
+      void this.handleWatcherDecisions(ctx.connectionId, ctx.state);
+    });
+    register('watcher_inspect', (data, ctx) => {
+      void this.handleWatcherInspect(ctx.connectionId, data, ctx.state);
+    });
+    register('watcher_memory', (_data, ctx) => this.handleWatcherMemory(ctx.connectionId, ctx.state));
+    register('watcher_focus', (data, ctx) => this.handleWatcherFocus(ctx.connectionId, data, ctx.state));
+    register('watcher_defocus', (_data, ctx) => this.handleWatcherDefocus(ctx.connectionId, ctx.state));
+    register('watcher_reanchor', (data, ctx) => this.handleWatcherReanchor(ctx.connectionId, data, ctx.state));
+    register('watcher_summarize', (_data, ctx) => this.handleWatcherSummarize(ctx.connectionId, ctx.state));
+    register('shutdown', (_data, ctx) => this.sendError(ctx.connectionId, 'Shutdown is not supported via bridge'));
+
+    return registry;
+  }
+
+  private handleVoiceUnsupported(connectionId: string): void {
+    this.sendEvent(connectionId, {
+      type: 'error',
+      data: { message: 'Voice is not yet supported in TypeScript mode', fatal: false },
+    });
   }
 
   private handleInit(
@@ -768,7 +714,7 @@ export class BridgeGateway {
       planMode,
     });
 
-    this.streamRunEvents(clientRequestId, handle);
+    this.streamRunEvents(clientRequestId, handle, undefined, sessionKey);
     profiler.end('handleSendText', 'handler');
   }
 
@@ -808,7 +754,7 @@ export class BridgeGateway {
       sessionKey,
       workingDir,
     });
-    this.streamRunEvents(requestId, handle);
+    this.streamRunEvents(requestId, handle, undefined, sessionKey);
   }
 
   private handleGetConfig(connectionId: string, state: ConnectionState): void {
@@ -1858,7 +1804,7 @@ export class BridgeGateway {
       hookRegistry,
     });
 
-    this.streamRunEvents(requestId, handle);
+    this.streamRunEvents(requestId, handle, undefined, sessionKey);
   }
 
   private handleRalphLoopCancel(connectionId: string, state: ConnectionState): void {
@@ -2114,7 +2060,7 @@ export class BridgeGateway {
           state.activeRequestId = null;
         }
         this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
-      });
+      }, sessionKey);
 
       // Notify client that async session started
       this.sendAuthResponse(connectionId, 'async_start', {
@@ -2325,16 +2271,42 @@ export class BridgeGateway {
     this.sendAuthResponse(connectionId, 'watcher_summarize', { success: true, ...result });
   }
 
-  private streamRunEvents(requestId: string, handle: AgentRunHandle, onComplete?: (result?: AgentRunResult) => void): void {
+  private streamRunEvents(
+    requestId: string,
+    handle: AgentRunHandle,
+    onComplete?: (result?: AgentRunResult) => void,
+    sessionKey?: string
+  ): void {
     const channel = runChannel(requestId);
     const asyncId = profiler.asyncBegin(`stream:${requestId}`, 'stream');
+
+    // Touch session every 60s during long-running streams to prevent stale session cleanup
+    const SESSION_TOUCH_INTERVAL_MS = 60_000;
 
     void (async () => {
       let eventCount = 0;
       let result: AgentRunResult | undefined;
+      let lastTouchMs = Date.now();
       try {
         for await (const event of handle.events) {
           eventCount++;
+
+          // Periodically touch session to keep it active during long runs
+          if (sessionKey) {
+            const now = Date.now();
+            if (now - lastTouchMs >= SESSION_TOUCH_INTERVAL_MS) {
+              lastTouchMs = now;
+              const graphd = this.harness.getGraphD?.();
+              if (graphd) {
+                try {
+                  graphd.sessionTouch(sessionKey);
+                } catch {
+                  // Ignore touch failures - non-critical
+                }
+              }
+            }
+          }
+
           const eventType = (event as BridgeEvent).type ?? 'unknown';
           profiler.begin(`stream.publish:${eventType}`, 'stream');
           this.bus.publish(channel, event);

@@ -339,6 +339,8 @@ export type InternalHookEvent =
       domain?: string;
       dependencies?: string[];
       targetPaths?: string[];
+      /** Semantic state attached during watcher split/create (to be written to semantic.json) */
+      semantic?: unknown;
     }
   | {
       type: 'turn_completed';

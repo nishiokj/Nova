@@ -178,6 +178,7 @@ type ExtractedPreference = {
   source?: {
     conversation_id: string
     connector: string
+    source_timestamp?: string
   }
 }
 
@@ -196,6 +197,7 @@ type ExtractedDecision = {
   source?: {
     conversation_id: string
     connector: string
+    source_timestamp?: string
   }
 }
 
@@ -329,7 +331,7 @@ export function roleFromMessage(data: Record<string, unknown>): string {
 // MAIN RUNNER
 // ============================================
 
-type RequestMeta = { key: string; conversationId: string; sourceRefKey: string }
+type RequestMeta = { key: string; conversationId: string; sourceRefKey: string; sourceTimestamp?: string }
 
 const TERMINAL_STATES = new Set([
   'JOB_STATE_SUCCEEDED',
@@ -391,7 +393,7 @@ function processModelResponse(
       ? 'rex_sessions'
       : 'unknown'
 
-  const source = { conversation_id: meta.conversationId, connector }
+  const source = { conversation_id: meta.conversationId, connector, source_timestamp: meta.sourceTimestamp }
   for (const pref of parsed.preferences) pref.source = source
   for (const dec of parsed.decisions) dec.source = source
   allPreferences.push(...parsed.preferences)
@@ -516,6 +518,7 @@ async function flushPreferences(sql: DerivedRunContext['sql'], prefs: ExtractedP
     evidence_notes: JSON.stringify(pref.evidence_notes ?? []),
     counterexample: pref.counterexample ?? '',
     confidence: pref.confidence ?? 'low',
+    source_timestamp: pref.source?.source_timestamp ?? null,
   }))
 
   await sql`
@@ -528,7 +531,8 @@ async function flushPreferences(sql: DerivedRunContext['sql'], prefs: ExtractedP
       evidence_count = EXCLUDED.evidence_count,
       evidence_notes = EXCLUDED.evidence_notes,
       counterexample = EXCLUDED.counterexample,
-      confidence = EXCLUDED.confidence
+      confidence = EXCLUDED.confidence,
+      source_timestamp = COALESCE(EXCLUDED.source_timestamp, coding_preferences.source_timestamp)
   `
   return deduped.length
 }
@@ -550,6 +554,7 @@ async function flushDecisions(sql: DerivedRunContext['sql'], decisions: Extracte
     confidence: d.confidence ?? 'low',
     signal_strength: d.signal_strength ?? 'implicit',
     reversibility: d.reversibility ?? 'moderate',
+    source_timestamp: d.source?.source_timestamp ?? null,
   }))
 
   await sql`
@@ -563,7 +568,8 @@ async function flushDecisions(sql: DerivedRunContext['sql'], decisions: Extracte
       task_context = EXCLUDED.task_context,
       confidence = EXCLUDED.confidence,
       signal_strength = EXCLUDED.signal_strength,
-      reversibility = EXCLUDED.reversibility
+      reversibility = EXCLUDED.reversibility,
+      source_timestamp = COALESCE(EXCLUDED.source_timestamp, coding_decisions.source_timestamp)
   `
   return deduped.length
 }
@@ -627,9 +633,9 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
     logger.info(`Extracting preferences via ${useBatch ? 'batch' : 'direct'} API (limit=${limit})`)
 
     // --- Phase 1: Fetch conversations ---
-    const allConversations = await sql<{ id: string; data: Record<string, unknown>; source_ref_key: string; updated_at: Date }[]>`
-      SELECT id, data, source_ref_key, updated_at FROM (
-        SELECT DISTINCT ON (c.id) c.id, c.data, c.updated_at, m.source_ref_key
+    const allConversations = await sql<{ id: string; data: Record<string, unknown>; source_ref_key: string; updated_at: Date; source_timestamp: Date | null }[]>`
+      SELECT id, data, source_ref_key, updated_at, source_timestamp FROM (
+        SELECT DISTINCT ON (c.id) c.id, c.data, c.updated_at, c.source_timestamp, m.source_ref_key
         FROM canonical_conversation c
         JOIN entity_source_mappings m
           ON m.canonical_entity_id = c.id
@@ -699,7 +705,12 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
 
       for (let i = 0; i < chunks.length; i++) {
         const key = `${convo.id}_chunk_${i}`
-        requestMetas.push({ key, conversationId: convo.id, sourceRefKey: convo.source_ref_key })
+        requestMetas.push({
+          key,
+          conversationId: convo.id,
+          sourceRefKey: convo.source_ref_key,
+          sourceTimestamp: convo.source_timestamp?.toISOString(),
+        })
         chunkPrompts.set(key, `${EXTRACTION_PROMPT}\n\nTRANSCRIPT (chunk):\n${chunks[i]}\n`)
       }
     }

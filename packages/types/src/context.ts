@@ -36,6 +36,7 @@ export interface MessageItem {
   role: 'user' | 'assistant' | 'system' | 'developer';
   content: string | ContentBlock[];
   timestamp: number;
+  workItemId?: string;
 }
 
 /** Function call item - model wants to call a tool */
@@ -45,6 +46,7 @@ export interface FunctionCallItem {
   name: string;
   arguments: Record<string, unknown>;
   timestamp: number;
+  workItemId?: string;
 }
 
 /** Function call output - result from tool execution */
@@ -55,6 +57,7 @@ export interface FunctionCallOutputItem {
   isError?: boolean;
   durationMs?: number;
   timestamp: number;
+  workItemId?: string;
 }
 
 /** Reasoning item - chain of thought */
@@ -62,6 +65,7 @@ export interface ReasoningItem {
   type: 'reasoning';
   content: string;
   timestamp: number;
+  workItemId?: string;
 }
 
 /** File content item - file loaded into context */
@@ -72,6 +76,7 @@ export interface FileContentItem {
   content: string;
   language?: string;
   timestamp: number;
+  workItemId?: string;
 }
 
 /** Artifact kind - what type of code construct this represents */
@@ -124,6 +129,7 @@ export interface ArtifactItem extends ArtifactPayload {
   /** Which agent/tool discovered this */
   discoveredBy: string;
   timestamp: number;
+  workItemId?: string;
 }
 
 /** Union of all context item types */

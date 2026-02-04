@@ -65,9 +65,16 @@ export class BusClient extends EventEmitter {
     if (!this.socket) return;
     this.connected = false;
     this.subscriptions.clear();
-    this.socket.end();
-    this.socket.destroy();
+    const socket = this.socket;
     this.socket = null;
+    // Graceful close: end() flushes pending writes and sends FIN
+    // Only destroy after a timeout to ensure data is flushed
+    socket.end();
+    setTimeout(() => {
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+    }, 500);
   }
 
   private handleClose(): void {

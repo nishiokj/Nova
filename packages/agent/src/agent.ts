@@ -16,7 +16,7 @@ import {
   DEFAULT_RESILIENCE_CONFIG,
 } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, MessageItem, ContextItem, ArtifactItem, LLMItem } from 'types';
+import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, MessageItem, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
 import type { HandoffSpec } from 'protocol';
 import { createEvent, errorResult, successResult } from 'types';
@@ -102,6 +102,7 @@ export interface ModelSelection {
  */
 export interface MemoryInjector {
   inject(params: { query: string; maxTokens: number }): Promise<string | null>;
+  summarizeQueryPlan?: (query: string) => string;
   injectV2?: (params: {
     task: {
       objective: string;
@@ -337,6 +338,8 @@ export class Agent {
     if (this.memoryInjector) {
       try {
         const query = this.buildMemoryQuery(workItem, globalContext);
+        const querySummary = this.memoryInjector.summarizeQueryPlan?.(query);
+        const eventQuery = querySummary || query;
         const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
         const recentMessages = recentMessageItems
           .filter(item => item.role === 'user')
@@ -389,7 +392,7 @@ export class Agent {
           const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
           this.internalHookQueue.enqueue({
             type: 'memory_injected',
-            query,
+            query: eventQuery,
             resultPreview: memoryContent.slice(0, 500),
             memoryContent,
             contextWithMemory,
@@ -403,13 +406,28 @@ export class Agent {
             totalTokens: v2Result.metrics?.totalTokens,
             fallbackToV1: false,
           }, this.buildHookContext(workItem));
+          this.emit(createEvent('memory_injected', {
+            query: eventQuery,
+            resultPreview: memoryContent.slice(0, 500),
+            memoryContent,
+            contextWithMemory,
+            itemCount: v2Result.atoms?.length ?? 0,
+            success: true,
+            iteration,
+            version: 'v2',
+            latencyMs: v2Result.metrics?.latencyMs,
+            coverage: v2Result.metrics?.coverage,
+            discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
+            totalTokens: v2Result.metrics?.totalTokens,
+            fallbackToV1: false,
+          }, workItem.workId));
         } else {
           fallbackToV1 = shouldUseV2;
           memoryContent = await this.memoryInjector.inject({ query, maxTokens: 1000 });
           const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
           this.internalHookQueue.enqueue({
             type: 'memory_injected',
-            query,
+            query: eventQuery,
             resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
             memoryContent: memoryContent ?? undefined,
             contextWithMemory,
@@ -419,19 +437,40 @@ export class Agent {
             version: 'v1',
             fallbackToV1,
           }, this.buildHookContext(workItem));
+          this.emit(createEvent('memory_injected', {
+            query: eventQuery,
+            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
+            memoryContent: memoryContent ?? undefined,
+            contextWithMemory,
+            itemCount: memoryContent ? memoryContent.split('\n\n').filter(line => line.trim().length > 0).length : 0,
+            success: memoryContent !== null,
+            iteration,
+            version: 'v1',
+            fallbackToV1,
+          }, workItem.workId));
         }
       } catch {
         // Silent fallback - continue without memory
         // Fire memory_injected hook even on failure for observability
         this.internalHookQueue.enqueue({
           type: 'memory_injected',
-          query: this.buildMemoryQuery(workItem, globalContext),
+          query: this.memoryInjector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
+            || this.buildMemoryQuery(workItem, globalContext),
           resultPreview: undefined,
           itemCount: 0,
           success: false,
           iteration,
           version: 'v1',
         }, this.buildHookContext(workItem));
+        this.emit(createEvent('memory_injected', {
+          query: this.memoryInjector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
+            || this.buildMemoryQuery(workItem, globalContext),
+          resultPreview: undefined,
+          itemCount: 0,
+          success: false,
+          iteration,
+          version: 'v1',
+        }, workItem.workId));
       }
     }
 
@@ -561,7 +600,8 @@ export class Agent {
    */
   private extractArtifactsFromOutput(
     structuredOutput: Record<string, unknown> | null,
-    localContext: ContextWindow
+    localContext: ContextWindow,
+    workItemId?: string
   ): number {
     if (!structuredOutput?.artifacts || !Array.isArray(structuredOutput.artifacts)) {
       return 0;
@@ -598,7 +638,8 @@ export class Agent {
         reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
         relevance: 1.0,
         discoveredBy: this.config.type,
-      });
+        workItemId,
+      }, workItemId);
     }
 
     return validArtifacts.length;
@@ -924,7 +965,7 @@ export class Agent {
 
     // Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
-      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics, cwd);
+      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics, cwd, workItem.workId);
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -948,10 +989,10 @@ export class Agent {
           durationMs: Date.now() - startTime,
         });
         if (cadenceResult.action === 'inject' && cadenceResult.systemMessage) {
-          localContext.addMessage('system', cadenceResult.systemMessage);
+          localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
         } else if (cadenceResult.action === 'stop') {
           if (cadenceResult.systemMessage) {
-            localContext.addMessage('system', cadenceResult.systemMessage);
+            localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
           }
           result.terminationReason = 'watcher_stopped';
           break;
@@ -1052,13 +1093,13 @@ export class Agent {
 
       // Add reasoning content to context for multi-turn salience
       if (reasoningContent) {
-        localContext.addReasoning(reasoningContent);
+        localContext.addReasoning(reasoningContent, workItem.workId);
       }
 
       // 3. Parse response content
       const { structuredOutput, action, responseText: rawResponseText } = this.parseIterationResponse(content, result);
-      this.extractArtifactsFromOutput(structuredOutput, localContext);
-      this.addAssistantMessage(localContext, content, toolCalls);
+      this.extractArtifactsFromOutput(structuredOutput, localContext, workItem.workId);
+      this.addAssistantMessage(localContext, content, toolCalls, workItem.workId);
 
       // Fire agent_message hook for workitem logging (captures actual content + reasoning)
       // Always emit per turn (even if content is empty) to keep async logs in sync.
@@ -1174,7 +1215,7 @@ export class Agent {
           // No tool calls AND no action = inject schema reminder for structured output agents
           if (this.config.outputSchema) {
             const schemaReminder = this.buildSchemaReminder(this.resolveOutputSchemaId());
-            localContext.addMessage('user', schemaReminder);
+            localContext.addMessage('user', schemaReminder, workItem.workId);
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
             continue;
           }
@@ -1561,36 +1602,55 @@ export class Agent {
     const localSummary = localContext.buildContextSummary();
     const combinedSummary = [globalSummary, localSummary].filter(Boolean).join('\n');
 
-    const hasUserInput = globalItems.some(
-      (item) => isLLMMessageItem(item) && item.role === 'user'
+    const contextParts = [taskContext];
+    if (combinedSummary) contextParts.push(combinedSummary);
+    const contextPrelude = contextParts.join('\n\n');
+
+    const hasUserInput = [...globalContext.items, ...localContext.items].some(
+      (item) => item.type === 'message' && item.role === 'user'
     );
+
+    const prependContextToUserContent = (
+      content: string | ContentBlock[],
+      prefix: string
+    ): string | ContentBlock[] => {
+      if (!prefix.trim()) return content;
+      const prefixText = `${prefix}\n\n`;
+      if (typeof content === 'string') {
+        return `${prefixText}${content}`;
+      }
+      if (Array.isArray(content)) {
+        return [{ type: 'text', text: prefixText }, ...content];
+      }
+      return content;
+    };
 
     // Task context (goal/objective/workspace) goes in first user message - NOT in system prompt
     // This enables caching of the static system prompt across different tasks
     if (!hasUserInput) {
-      const contextParts = [taskContext];
-      if (combinedSummary) contextParts.push(combinedSummary);
       messages.push({
         type: 'message',
         role: 'user',
-        content: contextParts.join('\n\n'),
-      });
-    } else {
-      // Inject task context + summary even if there's user input
-      const contextParts = [taskContext];
-      if (combinedSummary) contextParts.push(combinedSummary);
-      messages.push({
-        type: 'message',
-        role: 'user',
-        content: contextParts.join('\n\n'),
+        content: contextPrelude,
       });
     }
 
     let functionCallCount = 0;
     let functionOutputCount = 0;
+    let injectedContext = !hasUserInput;
 
     for (const item of allItems) {
       if (isLLMMessageItem(item)) {
+        const isFileContentMessage = typeof item.content === 'string' && item.content.startsWith('[File: ');
+        if (!injectedContext && item.role === 'user' && !isFileContentMessage) {
+          messages.push({
+            type: 'message',
+            role: 'user',
+            content: prependContextToUserContent(item.content, contextPrelude),
+          });
+          injectedContext = true;
+          continue;
+        }
         messages.push({
           type: 'message',
           role: item.role,
@@ -1620,11 +1680,12 @@ export class Agent {
   private addAssistantMessage(
     context: ContextWindow,
     content: string,
-    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
+    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+    workItemId?: string
   ): void {
     if (toolCalls.length > 0) {
       if (content) {
-        context.addMessage('assistant', content);
+        context.addMessage('assistant', content, workItemId);
       }
       for (const tc of toolCalls) {
         context.appendItem({
@@ -1633,10 +1694,11 @@ export class Agent {
           name: tc.name,
           arguments: tc.arguments,
           timestamp: Date.now(),
+          workItemId,
         });
       }
     } else {
-      context.addMessage('assistant', content);
+      context.addMessage('assistant', content, workItemId);
     }
   }
 
@@ -1657,6 +1719,7 @@ export class Agent {
   ): Promise<void> {
     const mq = createMicroQueue();
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+    const itemWorkId = workItemId ?? workItem.workId;
 
     // Build a map from lowercase names to canonical names for case-insensitive lookup
     const canonicalNames = new Map<string, string>();
@@ -1693,7 +1756,7 @@ export class Agent {
             localReadFiles.add(readPath);
             if (!localContext.hasReadFile(readPath)) {
               const rawOutput = toolResult.output ?? '';
-              localContext.addFileContent(readPath, truncateToolOutput(rawOutput, call.name));
+              localContext.addFileContent(readPath, truncateToolOutput(rawOutput, call.name), undefined, workItem.workId);
             }
           }
         }
@@ -1755,6 +1818,7 @@ export class Agent {
         isError: !toolResult.isSuccess,
         durationMs: toolDurationMs,
         timestamp: Date.now(),
+        workItemId: itemWorkId,
       });
 
       if (toolRepeatState) {
@@ -1822,6 +1886,7 @@ export class Agent {
           output: errorMsg,
           isError: true,
           timestamp: Date.now(),
+          workItemId: itemWorkId,
         });
         continue;
       }
@@ -1841,6 +1906,7 @@ export class Agent {
             output: 'PromptUser requires a question',
             isError: true,
             timestamp: Date.now(),
+            workItemId: itemWorkId,
           });
           continue;
         }
@@ -1863,6 +1929,7 @@ export class Agent {
           output: 'Waiting for user input...',
           isError: false,
           timestamp: Date.now(),
+          workItemId: itemWorkId,
         });
 
         return;
@@ -1985,6 +2052,7 @@ export class Agent {
           output: `Error: ${message}`,
           isError: true,
           timestamp: Date.now(),
+          workItemId: itemWorkId,
         });
       }
     }
@@ -2030,9 +2098,11 @@ export class Agent {
           modifies: artifact.modifies,
           calls: artifact.calls,
           insight: artifact.insight,
+          reduces: artifact.reduces,
           relevance: artifact.relevance,
           discoveredBy: artifact.discoveredBy,
-        });
+          workItemId: artifact.workItemId,
+        }, artifact.workItemId);
       }
     }
 
@@ -2041,7 +2111,7 @@ export class Agent {
       const fileItems = parentLocalContext.getItemsByType<FileContentItem>('file_content');
       for (const fileItem of fileItems) {
         if (!merged.hasReadFile(fileItem.path)) {
-          merged.addFileContent(fileItem.path, fileItem.content, fileItem.language);
+          merged.addFileContent(fileItem.path, fileItem.content, fileItem.language, fileItem.workItemId);
         }
       }
     }
@@ -2088,22 +2158,23 @@ export class Agent {
       const isDuplicate = existing.some(e =>
         e.name === artifact.name && e.line === artifact.line
       );
-      if (!isDuplicate) {
-        parentLocalContext.addArtifact({
-          sourcePath: artifact.sourcePath,
-          line: artifact.line,
-          kind: artifact.kind,
-          name: artifact.name,
-          signature: artifact.signature,
-          modifies: artifact.modifies,
-          calls: artifact.calls,
-          insight: artifact.insight,
-          reduces: artifact.reduces,
-          relevance: artifact.relevance,
-          discoveredBy: artifact.discoveredBy,
-        });
+        if (!isDuplicate) {
+          parentLocalContext.addArtifact({
+            sourcePath: artifact.sourcePath,
+            line: artifact.line,
+            kind: artifact.kind,
+            name: artifact.name,
+            signature: artifact.signature,
+            modifies: artifact.modifies,
+            calls: artifact.calls,
+            insight: artifact.insight,
+            reduces: artifact.reduces,
+            relevance: artifact.relevance,
+            discoveredBy: artifact.discoveredBy,
+            workItemId: artifact.workItemId,
+          }, artifact.workItemId);
+        }
       }
-    }
 
     // 3. Merge file content (if sub-agent read files parent hasn't)
     if (subResult.localContext) {
@@ -2114,7 +2185,7 @@ export class Agent {
           continue;
         }
         if (!parentLocalContext.hasReadFile(fileItem.path)) {
-          parentLocalContext.addFileContent(fileItem.path, fileItem.content, fileItem.language);
+          parentLocalContext.addFileContent(fileItem.path, fileItem.content, fileItem.language, fileItem.workItemId);
         }
       }
     }
@@ -2353,7 +2424,8 @@ export class Agent {
           reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
           relevance: 1.0, // Default: explorer returns what's relevant
           discoveredBy: agentConfig.type,
-        })));
+          workItemId: (a as { workItemId?: string }).workItemId ?? subWorkItem.workId,
+        })), subWorkItem.workId);
       }
 
       // Merge sub-agent's discoveries back into parent's local context
@@ -2457,7 +2529,8 @@ export class Agent {
     localContext: ContextWindow,
     localReadFiles: Set<string>,
     metrics: AgentMetrics,
-    cwd: string
+    cwd: string,
+    workItemId?: string
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
     if (!allowedTools.has('read')) {
@@ -2477,7 +2550,7 @@ export class Agent {
             : JSON.stringify(result.output);
 
           // Truncate file content at context storage (50KB limit for reads)
-          localContext.addFileContent(targetPath, truncateToolOutput(fileContent, 'Read'));
+          localContext.addFileContent(targetPath, truncateToolOutput(fileContent, 'Read'), undefined, workItemId);
         } else {
           metrics.toolCallsFailed++;
         }

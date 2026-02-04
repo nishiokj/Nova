@@ -31,24 +31,30 @@ export function registerMemoryRoutes(server: HttpServer, daemon: SyncDaemon): vo
     const parsedLimit = Math.min(50, Math.max(1, parseInt(String(limit), 10) || 8))
     const connectorList = parseConnectors(connectors)
 
+    // Use full-text search with ts_rank for relevance ordering
     const rows = await sql<{
       conversation_id: string
       summary: string
       updated_at: Date
       source_timestamp: Date | null
       topic: string | null
+      rank: number
     }[]>`
       SELECT
         d.conversation_id,
         d.summary,
         d.updated_at,
         c.source_timestamp,
-        c.data->>'topic' as topic
+        c.data->>'topic' as topic,
+        GREATEST(
+          COALESCE(ts_rank(d.search_vector, plainto_tsquery('english', ${q})), 0),
+          COALESCE(ts_rank(c.search_vector, plainto_tsquery('english', ${q})), 0)
+        ) as rank
       FROM conversation_digests d
       JOIN canonical_conversation c ON c.id = d.conversation_id
       WHERE (
-        d.summary ILIKE '%' || ${q} || '%'
-        OR c.data->>'topic' ILIKE '%' || ${q} || '%'
+        d.search_vector @@ plainto_tsquery('english', ${q})
+        OR c.search_vector @@ plainto_tsquery('english', ${q})
       )
       AND (
         ${connectorList.length} = 0
@@ -58,7 +64,7 @@ export function registerMemoryRoutes(server: HttpServer, daemon: SyncDaemon): vo
           WHERE ref->>'connector' = ANY(${connectorList})
         )
       )
-      ORDER BY COALESCE(c.source_timestamp, d.updated_at) DESC
+      ORDER BY rank DESC, COALESCE(c.source_timestamp, d.updated_at) DESC
       LIMIT ${parsedLimit}
     `
 

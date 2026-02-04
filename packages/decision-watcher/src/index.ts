@@ -195,3 +195,12 @@ export type {
   KeyFile,
   QADecision,
 } from './plan-context.js';
+
+// ============================================
+// SEMANTIC (Semantic memory layer for workItems)
+// ============================================
+
+export {
+  writeSemanticFileAsync,
+} from './semantic/index.js';
+export type { SemanticOutput } from './semantic/index.js';

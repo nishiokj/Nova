@@ -120,7 +120,7 @@ export class HarnessDaemon {
         eventBus: this.harness.getEventBus(),
         eventTranslator: translateAgentEvent,
       });
-      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService, this);
+      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
     }
 
     return this.bus.start();

@@ -1,44 +1,10 @@
 {
   "name": "agent-memory",
-  "version": "0.1.0",
-  "description": "Agent memory system with connector SDK, sync engine, and entity resolution",
+  "version": "0.0.0-test",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": "./dist/index.js"
     }
-  },
-  "scripts": {
-    "build": "tsc",
-    "lint": "tsc --noEmit",
-    "clean": "rm -rf dist",
-    "daemon": "./scripts/start.sh",
-    "daemon:only": "bun run scripts/sync-daemon.ts",
-    "kill": "lsof -ti:3001 | xargs kill -9 2>/dev/null || true",
-    "db:migrate": "bun run scripts/migrate.ts",
-    "register": "bun run scripts/register-connector.ts",
-    "setup": "bun run scripts/setup.ts",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@google/genai": "^1.38.0",
-    "harness-client": "workspace:*",
-    "ngrok": "^5.0.0-beta.2",
-    "open": "^10.1.0",
-    "pgvector": "^0.2.1",
-    "postgres": "^3.4.8",
-    "types": "workspace:*",
-    "ulid": "^2.3.0",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
-    "@types/bun": "^1.0.0",
-    "@types/node": "^20.10.0",
-    "typescript": "^5.3.3",
-    "vitest": "^4.0.18"
   }
 }

@@ -39,7 +39,7 @@ import {
   isWorkItemCompleted,
   success,
 } from 'protocol';
-import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem, WatcherActionType, WorkLogEntry } from './types.js';
+import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem, WatcherActionType, WorkLogEntry, WatcherSemanticBatchEntry } from './types.js';
 import { getValidActions } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
@@ -472,8 +472,14 @@ function toTerminationReason(event: ControlEvent): TerminationReason {
   }
 }
 
-function toWorkItemSpecs(items: WatcherWorkItem[]): WorkItemSpec[] {
+function toWorkItemSpecs(
+  items: WatcherWorkItem[],
+  semantics?: WatcherSemanticBatchEntry[]
+): WorkItemSpec[] {
   if (!items || items.length === 0) return [];
+  const semanticMap = new Map(
+    (semantics ?? []).map(entry => [entry.workId, entry.semantic])
+  );
   return items.map(item => ({
     id: item.id,
     goal: item.goal,
@@ -482,6 +488,7 @@ function toWorkItemSpecs(items: WatcherWorkItem[]): WorkItemSpec[] {
     dependencies: item.dependencies,
     targetPaths: item.targetPaths,
     bounds: item.bounds,
+    semantic: item.id ? semanticMap.get(item.id) : undefined,
   }));
 }
 
@@ -936,7 +943,7 @@ ${WORK_ITEM_ID_GUIDANCE}`;
   switch (action.watcherAction) {
     case 'split':
     case 'create_work_item':
-      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems) } };
+      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems, action.semantics) } };
 
     case 'realign':
       return {
@@ -1209,7 +1216,7 @@ ${WORK_ITEM_ID_GUIDANCE}`;
       } catch (err) {
         console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
       }
-      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems) } };
+      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems, action.semantics) } };
     }
 
     case 'realign':
@@ -1456,7 +1463,7 @@ Each semantic entry must contain:
       } catch (err) {
         console.warn('[WATCHER] onCreateWorkItems callback failed:', err instanceof Error ? err.message : String(err));
       }
-      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems) } };
+      return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems, action.semantics) } };
     }
 
     case 'answer':

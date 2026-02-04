@@ -30,6 +30,7 @@ function mapWorkItemsToDeferredWork(
     dependencies?: string[];
     targetPaths?: string[];
     bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
+    semantic?: unknown;
   }>
 ): DeferredWorkItem[] {
   return workItems.map(item => ({
@@ -41,6 +42,7 @@ function mapWorkItemsToDeferredWork(
     dependencies: item.dependencies,
     targetPaths: item.targetPaths,
     bounds: item.bounds,
+    semantic: item.semantic,
   }));
 }
 

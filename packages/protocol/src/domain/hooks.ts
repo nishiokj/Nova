@@ -21,6 +21,8 @@ export interface DeferredWorkItem {
   dependencies?: string[];
   targetPaths?: string[];
   bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
+  /** Semantic state for this work item (flows through from watcher split/create) */
+  semantic?: unknown;
 }
 
 /**
