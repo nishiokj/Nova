@@ -25,7 +25,8 @@ const MINIMAL_USER_CONFIG = {
   $comment: "User preferences. API keys are stored securely in GraphD - use 'rex providers set <provider> <key>' to configure them.",
   models: {
     default: ""
-  }
+  },
+  agents: {}
 };
 
 const __filename = fileURLToPath(import.meta.url);

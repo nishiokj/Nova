@@ -65,8 +65,8 @@ export type GoogleCalendarDateTime = z.infer<typeof GoogleCalendarDateTimeSchema
  * Google Calendar event extended property.
  */
 export const GoogleCalendarExtendedPropertySchema = z.object({
-  private: z.record(z.string()).optional(),
-  shared: z.record(z.string()).optional(),
+  private: z.record(z.string(), z.string()).optional(),
+  shared: z.record(z.string(), z.string()).optional(),
 })
 
 export type GoogleCalendarExtendedProperty = z.infer<typeof GoogleCalendarExtendedPropertySchema>
@@ -141,7 +141,7 @@ export const GoogleCalendarEventSchema = z.object({
     width: z.number().optional(),
     height: z.number().optional(),
     display: z.enum(['icon', 'chip']).optional(),
-    preferences: z.record(z.string()).optional(),
+    preferences: z.record(z.string(), z.string()).optional(),
   }).optional(),
   anyoneCanAddSelf: z.boolean().optional(),
   guestsCanInviteOthers: z.boolean().optional(),

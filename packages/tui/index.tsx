@@ -41,7 +41,6 @@ import { UILogger } from "./logger.js";
 import { computeInputLayout } from "./buffer.js";
 import { useMouse } from "./useMouse.js";
 import { useBracketedPaste } from "./hooks/useBracketedPaste.js";
-import { QuestionPrompt } from "./components/QuestionPrompt.js";
 import { PermissionPrompt } from "./components/PermissionPrompt.js";
 import { ProvidersView } from "./components/ProvidersView.js";
 import { ResponsePane, parseDiffToResponseContent } from "./components/ResponsePane.js";
@@ -49,8 +48,10 @@ import { SessionsView } from "./components/SessionsView.js";
 import { UsageView } from "./components/UsageView.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from "./theme.js";
+import { applyVisualSpacing, hasAnsiCodes, parseTextSegments, visibleLength } from "./formatting.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
 import { formatDiffAsText } from "./diff.js";
+import { wrapText, truncateText } from "./utils/index.js";
 import {
   DEFAULT_MAX_INPUT_LINES,
   STREAM_CURSOR_FRAMES,
@@ -80,8 +81,6 @@ import {
   REQUEST_ID_SLICE_START,
   REQUEST_ID_SLICE_END,
   ISO_DATE_SLICE,
-  MIN_PROMPT_WIDTH,
-  MIN_PROMPT_HEIGHT,
   MIN_PERMISSION_WIDTH,
   MIN_PERMISSION_HEIGHT,
   PROMPT_MAX_CONTENT_HEIGHT,
@@ -523,6 +522,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const width = Math.max(MIN_TERMINAL_WIDTH, size.columns || DEFAULT_TERMINAL_WIDTH);
   const height = Math.max(MIN_TERMINAL_HEIGHT, size.rows || DEFAULT_TERMINAL_HEIGHT);
   const contentWidth = width - HORIZONTAL_PADDING * 2;
+  const MESSAGE_GUTTER = 2;
+  const messageWidth = Math.max(10, contentWidth - MESSAGE_GUTTER * 2);
   const prompt = "> ";
   const widthRef = useRef(width);
   const voiceStateRef = useRef({
@@ -3061,41 +3062,152 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const colors = getColors();
+  const activeQuestion = snapshot.activeQuestion ?? null;
+  const isQuestionMode = snapshot.uiMode === "question" && !!activeQuestion;
   const statusLine = snapshot.progressMessage || snapshot.statusMessage;
   const statusSpinner = isBusy
     ? STATUS_SPINNER_FRAMES[statusTick % STATUS_SPINNER_FRAMES.length]
     : "";
-  const statusText = statusSpinner ? `${statusSpinner} ${statusLine}` : statusLine;
+  const statusBase = statusLine || "Ready";
+  const statusText = statusSpinner ? `${statusSpinner} ${statusBase}` : statusBase;
   // Use progress level for coloring when available
   const statusColor = snapshot.progressMessage
     ? levelColor(snapshot.progressLevel)
     : colors.muted;
-  const scrollInfo = snapshot.scrollOffset > 0
-    ? `Scroll: ${snapshot.scrollOffset} lines up`
-    : "";
+  const scrollInfo = snapshot.scrollOffset > 0 ? `Scroll ${snapshot.scrollOffset}` : "";
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
+  const rightStatus = [scrollInfo, newMessageInfo].filter(Boolean).join(" | ");
 
-  // Header lines with theme colors
-  const headerConfig: Array<{ text: string; color?: string; bold?: boolean }> = [
-    { text: "Bloom", color: colors.accent, bold: true },
-    { text: `Session: ${snapshot.sessionKey ?? "-"} | State: ${snapshot.state} | Voice: ${snapshot.voiceMode ? "on" : "off"} | Mode: ${snapshot.uiMode}${snapshot.planMode ? " | [PLAN]" : ""}`, color: colors.muted },
-    { text: `Status: ${statusText}`, color: statusColor },
-    { text: `${scrollInfo}${newMessageInfo ? " | " + newMessageInfo : ""}`, color: colors.muted },
-    { text: "─".repeat(contentWidth), color: colors.border },
+  const headerRows: Array<{
+    left: string;
+    right?: string;
+    leftColor?: string;
+    rightColor?: string;
+    boldLeft?: boolean;
+    boldRight?: boolean;
+  }> = [
+    {
+      left: "Bloom",
+      right: `Session ${snapshot.sessionKey ?? "-"}`,
+      leftColor: colors.accent,
+      rightColor: colors.muted,
+      boldLeft: true,
+    },
+    {
+      left: `State: ${snapshot.state}${snapshot.planMode ? " | PLAN" : ""}`,
+      right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}`,
+      leftColor: colors.muted,
+      rightColor: colors.muted,
+    },
+    {
+      left: `Status: ${statusText}`,
+      right: rightStatus,
+      leftColor: statusColor,
+      rightColor: colors.muted,
+    },
+    {
+      left: "─".repeat(contentWidth),
+      leftColor: colors.border,
+    },
   ];
-  const headerLines = headerConfig.map((h) => h.text);
+  const headerHeight = headerRows.length;
+
+  const buildQuestionRender = () => {
+    if (!activeQuestion) return null;
+    const textWidth = Math.max(20, contentWidth - MESSAGE_GUTTER * 2);
+    const questionLines = wrapText(activeQuestion.question, textWidth);
+    const contextLines = activeQuestion.context ? wrapText(activeQuestion.context, textWidth) : [];
+    const hasOptions = !!activeQuestion.options && activeQuestion.options.length > 0;
+    const isTextInput = activeQuestion.type === "fill_in_blank" || activeQuestion.type === "free_text";
+    const isMulti = activeQuestion.type === "multi_select";
+    const optionsLines: Array<{ text: string; muted?: boolean; strong?: boolean }> = [];
+
+    if (hasOptions) {
+      activeQuestion.options!.forEach((opt, idx) => {
+        const isCursor = idx === snapshot.questionCursor;
+        const isSelected = snapshot.questionSelection.includes(idx);
+        const cursorMarker = isCursor ? ">" : " ";
+        const selectMark = isMulti ? (isSelected ? "[x]" : "[ ]") : (isSelected ? "(x)" : "( )");
+        const indexLabel = `${idx + 1}.`.padStart(3, " ");
+        const prefix = `${cursorMarker} ${indexLabel} ${selectMark} `;
+        const labelWidth = Math.max(8, textWidth - prefix.length);
+        const labelLines = wrapText(opt.label, labelWidth);
+        labelLines.forEach((line, lineIdx) => {
+          const linePrefix = lineIdx === 0 ? prefix : " ".repeat(prefix.length);
+          optionsLines.push({
+            text: `${linePrefix}${line}`,
+            strong: isCursor || isSelected,
+          });
+        });
+        if (opt.description) {
+          const descPrefix = " ".repeat(prefix.length);
+          const descLines = wrapText(opt.description, Math.max(8, textWidth - descPrefix.length));
+          descLines.forEach((line) => {
+            optionsLines.push({
+              text: `${descPrefix}${line}`,
+              muted: true,
+            });
+          });
+        }
+      });
+    }
+
+    const queueInfo = store.getQuestionQueueInfo();
+    const showProgress = queueInfo && queueInfo.total > 1;
+    const progressText = showProgress ? `[${queueInfo.current}/${queueInfo.total}]` : "";
+
+    const needsGap = (hasOptions || isTextInput) && (questionLines.length > 0 || contextLines.length > 0);
+    const inputPrefix = "Answer: ";
+    const inputAvailable = Math.max(4, textWidth - inputPrefix.length - 1);
+    const inputPlaceholder = activeQuestion.placeholder || "Type your answer...";
+    const inputValue = snapshot.questionInput;
+    const inputDisplay = truncateText(inputValue.length > 0 ? inputValue : inputPlaceholder, inputAvailable);
+
+    const actionParts = ["Enter submit", "Esc cancel"];
+    if (isMulti) actionParts.splice(1, 0, "Space toggle");
+    if (activeQuestion.type === "free_text") actionParts.push("Shift+Enter newline");
+    const actionsText = actionParts.join(" | ");
+
+    const totalLines =
+      1 + // header
+      questionLines.length +
+      contextLines.length +
+      (needsGap ? 1 : 0) +
+      optionsLines.length +
+      (isTextInput ? 1 : 0) +
+      1; // actions
+
+    return {
+      questionLines,
+      contextLines,
+      optionsLines,
+      progressText,
+      needsGap,
+      isTextInput,
+      inputPrefix,
+      inputDisplay,
+      inputIsPlaceholder: inputValue.length === 0,
+      actionsText,
+      totalLines,
+    };
+  };
+
+  const questionRender = isQuestionMode ? buildQuestionRender() : null;
+  const questionBlockHeight = questionRender ? questionRender.totalLines : 0;
 
   const inputLayout = computeInputLayout(snapshot.inputText.split(""), snapshot.cursor, contentWidth, prompt);
   const inputVisibleLines = Math.min(DEFAULT_MAX_INPUT_LINES, inputLayout.lines.length);
   // inputBoxHeight = top line (1) + input lines + bottom line (1) + model indicator row (1) + context info row (0 or 1)
-  const hasContextInfo = snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null;
-  const inputBoxHeight = 1 + inputVisibleLines + 1 + 1 + (hasContextInfo ? 1 : 0);
+  const hasContextInfo = !isQuestionMode && (snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null);
+  const inputBoxHeight = isQuestionMode
+    ? questionBlockHeight + 1
+    : 1 + inputVisibleLines + 1 + 1 + (hasContextInfo ? 1 : 0);
   const autocompleteHeight = snapshot.autocomplete.active
     ? snapshot.autocomplete.suggestions.length + 1
     : 0;
   const historyHeight = Math.max(
     3,
-    height - headerLines.length - inputBoxHeight - autocompleteHeight - TOP_PADDING - BOTTOM_PADDING,
+    height - headerHeight - inputBoxHeight - autocompleteHeight - TOP_PADDING - BOTTOM_PADDING,
   );
 
   historyHeightRef.current = historyHeight;
@@ -3140,7 +3252,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const streamCursor = snapshot.state === "streaming"
     ? STREAM_CURSOR_FRAMES[statusTick % STREAM_CURSOR_FRAMES.length]
     : "";
-  let historyLines = store.getHistoryLines(contentWidth, streamCursor);
+  let historyLines = store.getHistoryLines(messageWidth, streamCursor);
   if (snapshot.uiMode === "skills") {
     historyLines = buildListLines("Skills", snapshot.skillsList, snapshot.skillsErrors, true);
   } else if (snapshot.uiMode === "hooks") {
@@ -3243,8 +3355,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     );
   }
 
-  // Question mode: show QuestionPrompt instead of input box
-  const isQuestionMode = snapshot.uiMode === "question" && snapshot.activeQuestion;
+  // Question mode: render inline question text instead of a modal
   const isPermissionMode = snapshot.uiMode === "permission" && snapshot.activePermissionRequest;
   const isThemeMode = snapshot.uiMode === "theme";
   const isModelsMode = snapshot.uiMode === "models";
@@ -3386,30 +3497,46 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const sessionsHeight = historyHeight + inputBoxHeight;
 
   // Full-screen modes that replace both history and input
-  const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode || isQuestionMode || isPermissionMode;
+  const isFullScreenMode = isResponseMode || isProvidersMode || isThemeMode || isModelsMode || isSessionsMode || isUsageMode || isPermissionMode;
 
   return (
     <Box flexDirection="column" width={width} height={height} paddingX={HORIZONTAL_PADDING} paddingTop={TOP_PADDING} paddingBottom={BOTTOM_PADDING}>
-      {headerConfig.map((item, index) => (
-        <Text key={`header-${index}`} color={item.color} bold={item.bold}>{item.text.slice(0, contentWidth)}</Text>
-      ))}
+      {headerRows.map((row, index) => {
+        const left = row.left ?? "";
+        const right = row.right ?? "";
+        if (!right) {
+          return (
+            <Text key={`header-${index}`} color={row.leftColor} bold={row.boldLeft}>
+              {left.slice(0, contentWidth)}
+            </Text>
+          );
+        }
+        const maxLeft = Math.max(0, contentWidth - right.length - 1);
+        const leftText = left.length > maxLeft ? left.slice(0, maxLeft) : left;
+        const gap = Math.max(1, contentWidth - leftText.length - right.length);
+        return (
+          <Text key={`header-${index}`}>
+            <Text color={row.leftColor} bold={row.boldLeft}>{leftText}</Text>
+            <Text>{" ".repeat(gap)}</Text>
+            <Text color={row.rightColor} bold={row.boldRight}>{right}</Text>
+          </Text>
+        );
+      })}
       {!isFullScreenMode && (
         <Box flexDirection="column" height={historyHeight}>
           {visibleHistoryLines.map((line, index) => {
             const isUserLine = line.role === "user";
             const isReasoning = line.role === "reasoning";
             const bgColor = isUserLine ? colors.userBg : undefined;
-            // User messages: 2 chars padding (1 left + 1 right)
-            // Agent messages: 2 chars padding (1 left + 1 right)
-            const leftPad = isUserLine ? 2 : 1;
-            const rightPad = isUserLine ? 2 : 1;
+            const leftPad = MESSAGE_GUTTER;
+            const rightPad = MESSAGE_GUTTER;
             const baseText = line.text ?? "";
-            const paddedLength = leftPad + baseText.length + rightPad;
-            const remainingWidth = contentWidth - paddedLength;
+            const visible = visibleLength(baseText);
+            const remainingWidth = contentWidth - (leftPad + visible + rightPad);
             const rightFill = remainingWidth > 0 ? remainingWidth : 0;
             return (
-              <Box key={line.id ?? `hist-${index}`} marginLeft={isUserLine ? -HORIZONTAL_PADDING : 0} marginRight={isUserLine ? -HORIZONTAL_PADDING : 0}>
-                <Text width={isUserLine ? width : undefined} backgroundColor={bgColor}>
+              <Box key={line.id ?? `hist-${index}`}>
+                <Text width={contentWidth} backgroundColor={bgColor}>
                   <StyledLine
                     text={baseText}
                     baseColor={roleColor(line.role)}
@@ -3467,18 +3594,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           onRefresh={() => void startUsageFlow()}
           onClose={() => store.exitUsageMode()}
         />
-      ) : isQuestionMode ? (
-        <Box flexDirection="column" justifyContent="center" alignItems="center" flexGrow={1}>
-          <QuestionPrompt
-            question={snapshot.activeQuestion!}
-            cursor={snapshot.questionCursor}
-            selection={snapshot.questionSelection}
-            inputText={snapshot.questionInput}
-            width={contentWidth}
-            height={PROMPT_MAX_CONTENT_HEIGHT}
-            queueInfo={store.getQuestionQueueInfo()}
-          />
-        </Box>
       ) : isPermissionMode ? (
         <Box flexDirection="column" justifyContent="center" alignItems="center" flexGrow={1}>
           <PermissionPrompt
@@ -3490,16 +3605,53 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         </Box>
       ) : (
         <>
+          {isQuestionMode && questionRender && (
+            <Box flexDirection="column" paddingX={MESSAGE_GUTTER}>
+              <Text>
+                <Text color={colors.warning} bold>? </Text>
+                <Text color={colors.text} bold>Question</Text>
+                {questionRender.progressText && (
+                  <Text color={colors.muted}> {questionRender.progressText}</Text>
+                )}
+              </Text>
+              {questionRender.questionLines.map((line, i) => (
+                <Text key={`q-inline-${i}`} color={colors.text}>{line}</Text>
+              ))}
+              {questionRender.contextLines.map((line, i) => (
+                <Text key={`q-context-${i}`} color={colors.muted}>{line}</Text>
+              ))}
+              {questionRender.needsGap && <Text> </Text>}
+              {questionRender.optionsLines.map((line, i) => (
+                <Text
+                  key={`q-opt-${i}`}
+                  color={line.muted ? colors.muted : colors.text}
+                  bold={line.strong}
+                >
+                  {line.text}
+                </Text>
+              ))}
+              {questionRender.isTextInput && (
+                <Text>
+                  <Text color={questionRender.inputIsPlaceholder ? colors.muted : colors.text}>
+                    {questionRender.inputPrefix}{questionRender.inputDisplay}
+                  </Text>
+                  <Text color={colors.accent}>|</Text>
+                </Text>
+              )}
+              <Text color={colors.muted}>{questionRender.actionsText}</Text>
+            </Box>
+          )}
+
           {/* Top separator line - runs edge to edge */}
-          <Text color={colors.border}>{horizontalLine}</Text>
+          {!isQuestionMode && <Text color={colors.border}>{horizontalLine}</Text>}
 
           {/* Input lines - no side borders */}
-          {inputLines.map((line, index) => (
+          {!isQuestionMode && inputLines.map((line, index) => (
             <Text key={`input-${index}`} color={colors.text}>{line}</Text>
           ))}
 
           {/* Bottom separator line - runs edge to edge */}
-          <Text color={colors.border}>{horizontalLine}</Text>
+          {!isQuestionMode && <Text color={colors.border}>{horizontalLine}</Text>}
 
           {/* Model indicator row: model (Esc+M) | reasoning (Esc+T) */}
           <Text>
@@ -3543,7 +3695,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           </Text>
 
           {/* Context window info row: tokens / total size, and cached input */}
-          {(snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null) && (
+          {!isQuestionMode && (snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null) && (
             <Text>
               {(() => {
                 const padding = 2;
@@ -3727,207 +3879,6 @@ function levelColor(level?: string | null): string | undefined {
   }
 }
 
-/** Syntax highlight patterns - use color keys, resolved at runtime */
-type ColorKey = "code" | "url" | "path" | "number" | "func" | "header" | "bold" | "italic" | "strikethrough" | "blockquote" | "listBullet" | "link" | "linkText" | "hr" | "border" | "text" | "diffAdd" | "diffRemove" | "diffHeader" | "diffHeaderBg" | "diffContextBg";
-
-type SyntaxPattern = {
-  pattern: RegExp;
-  colorKey?: ColorKey;
-  bgKey?: ColorKey;
-  hardcodedColor?: string;
-  hardcodedBg?: string;
-  bold?: boolean;
-  italic?: boolean;
-  underline?: boolean;
-  transform?: (s: string) => string;
-};
-
-// Hardcoded diff colors for add/remove - bright and consistent for visibility
-const DIFF_ADD_FG = "#ffffff";    // White text for visibility
-const DIFF_ADD_BG = "#166534";    // Solid green background
-const DIFF_REMOVE_FG = "#ffffff"; // White text for visibility
-const DIFF_REMOVE_BG = "#991b1b"; // Solid red background
-// Context uses theme's diffContextBg (same as userBg) - resolved at runtime
-
-// Hardcoded code block background - dark distinct background for visibility
-const CODE_BLOCK_BG = "#1e1e2e";  // Dark blue-gray background for code blocks
-
-const syntaxPatterns: SyntaxPattern[] = [
-  // Diff/Edit tool header - format: "✓ Edit /path/to/file.ts  +3 / -2 (123ms)"
-  { pattern: /^[✓✗] Edit .+$/gm, colorKey: "diffHeader", bgKey: "diffHeaderBg", bold: true },
-  // Diff lines with line numbers - format: "  42 + content" or "  42 - content" or "  42   content"
-  { pattern: /^\s*\d+\s+\+ .*$/gm, hardcodedColor: DIFF_ADD_FG, hardcodedBg: DIFF_ADD_BG },
-  { pattern: /^\s*\d+\s+- .*$/gm, hardcodedColor: DIFF_REMOVE_FG, hardcodedBg: DIFF_REMOVE_BG },
-  { pattern: /^\s*\d+\s{3}.*$/gm, colorKey: "text", bgKey: "diffContextBg" },
-
-  // Horizontal rules (---, ***, ___)
-  { pattern: /^[-*_]{3,}\s*$/gm, colorKey: "hr", transform: (s) => "─".repeat(Math.max(3, s.trim().length)) },
-
-  // Markdown table separator row (|---|---|) - convert to box drawing
-  { pattern: /^\|?[\s:]*-{3,}[\s:]*\|[\s|:\-]+\|?\s*$/gm, colorKey: "border", transform: (s) => {
-    return s.replace(/\|/g, "┼").replace(/-+/g, (m) => "─".repeat(m.length)).replace(/^┼/, "├").replace(/┼$/, "┤").replace(/┼\s*$/, "┤");
-  }},
-
-  // Markdown table rows (| cell | cell |) - style the pipes
-  { pattern: /^\|.+\|\s*$/gm, colorKey: "text", transform: (s) => s.replace(/\|/g, "│") },
-
-  // Markdown headers (### Header text) - strip the hashes and make them stand out
-  { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true, underline: true, transform: (s) => s.replace(/^#{1,6}\s+/, "") },
-
-  // Blockquotes (> text) - preserve the > marker styled
-  { pattern: /^>\s+.+$/gm, colorKey: "blockquote", italic: true, transform: (s) => "│ " + s.slice(2) },
-
-  // Unordered list items (- item, * item, + item)
-  { pattern: /^[\s]*[-*+]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/[-*+]/, "•") },
-
-  // Numbered list items (1. item, 2. item)
-  { pattern: /^[\s]*\d+\.\s+/gm, colorKey: "listBullet" },
-
-  // Task list items (- [ ] or - [x])
-  { pattern: /^[\s]*[-*+]\s+\[[ xX]\]\s+/gm, colorKey: "listBullet", transform: (s) => s.replace(/\[[ ]\]/, "☐").replace(/\[[xX]\]/, "☑").replace(/[-*+]/, "") },
-
-  // Strikethrough (~~text~~) - non-greedy to handle content with tildes
-  { pattern: /~~.+?~~/g, colorKey: "strikethrough", transform: (s) => s.slice(2, -2) },
-
-  // Markdown links [text](url) - render as "text" with link color
-  { pattern: /\[([^\]]+)\]\([^)]+\)/g, colorKey: "linkText", transform: (s) => {
-    const match = s.match(/\[([^\]]+)\]/);
-    return match ? match[1] : s;
-  }},
-
-  // Bold text (**text**) - underscore emphasis disabled to avoid mangling identifiers
-  { pattern: /\*\*.+?\*\*/g, colorKey: "bold", bold: true, transform: (s) => s.slice(2, -2) },
-
-  // Italic text (*text*) - underscore emphasis disabled to avoid mangling identifiers
-  { pattern: /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, colorKey: "italic", italic: true, transform: (s) => s.slice(1, -1) },
-
-  // Inline code - non-greedy
-  { pattern: /`.+?`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
-
-  // Code blocks (multiline ```...```) - must come BEFORE delimiter pattern due to overlap filtering
-  { pattern: /```[\s\S]*?```/g, colorKey: "code", hardcodedBg: CODE_BLOCK_BG, transform: (s) => {
-    // Remove the opening ```lang (with or without language) and closing ```
-    // Handles: ```lang```, ```lang\n, ```\n, and ```
-    const content = s.replace(/^```\w*\n?/, "").replace(/```$/, "");
-    return content;
-  }},
-
-  // Code block delimiters (``` or ```language on their own line) - fallback for unmatched delimiters
-  { pattern: /^```\w*\s*$/gm, colorKey: "border", transform: (s) => {
-    const langMatch = s.match(/```(\w+)/);
-    const lang = langMatch ? ` ${langMatch[1]} ` : "";
-    return "─".repeat(3) + lang + "─".repeat(Math.max(0, 10 - lang.length));
-  }},
-
-  // URLs (standalone, not inside markdown links)
-  { pattern: /(?<!\]\()https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },
-
-  // File paths
-  { pattern: /(?<!\w)\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },
-
-  // Durations
-  { pattern: /\b\d+(?:\.\d+)?\s*(?:ms|s|sec|min|m|h|hr)s?\b/gi, colorKey: "number" },
-
-  // [tool_name] - but not markdown image/link syntax
-  { pattern: /(?<!!)\[[a-z_][a-z0-9_]*\](?!\()/gi, colorKey: "func", bold: true },
-
-  // ClassName.method()
-  { pattern: /\b[A-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)*\(\)/g, colorKey: "func" },
-
-  // function_name()
-  { pattern: /\b[a-z_][a-zA-Z0-9_]*\(\)/g, colorKey: "func" },
-];
-
-interface ParsedSegment {
-  text: string;
-  color?: string;
-  backgroundColor?: string;
-  bold?: boolean;
-  italic?: boolean;
-  underline?: boolean;
-}
-
-const MAX_PARSE_TEXT_LENGTH = 20000;
-const PARSE_CACHE_LIMIT = 200;
-const parseCache = new Map<string, ParsedSegment[]>();
-
-/** Parse text into styled segments for syntax highlighting */
-function parseTextSegments(text: string, baseColor?: string): ParsedSegment[] {
-  if (text.length > MAX_PARSE_TEXT_LENGTH) {
-    return [{ text, color: baseColor }];
-  }
-
-  const cacheKey = `${baseColor ?? ""}::${text}`;
-  const cached = parseCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const colors = getColors();
-  const segments: ParsedSegment[] = [];
-
-  // Find all matches with positions
-  const matches: Array<{ start: number; end: number; text: string; displayText: string; color?: string; backgroundColor?: string; bold?: boolean; italic?: boolean; underline?: boolean }> = [];
-
-  for (const { pattern, colorKey, bgKey, hardcodedColor, hardcodedBg, bold, italic, underline, transform } of syntaxPatterns) {
-    const regex = new RegExp(pattern.source, pattern.flags);
-    let m;
-    while ((m = regex.exec(text)) !== null) {
-      const matchedText = m[0];
-      const displayText = transform ? transform(matchedText) : matchedText;
-      matches.push({
-        start: m.index,
-        end: m.index + matchedText.length,
-        text: matchedText,
-        displayText,
-        color: hardcodedColor ?? (colorKey ? colors[colorKey] : undefined),
-        backgroundColor: hardcodedBg ?? (bgKey ? colors[bgKey] : undefined),
-        bold,
-        italic,
-        underline,
-      });
-    }
-  }
-
-  // Sort by position and filter overlaps
-  matches.sort((a, b) => a.start - b.start);
-  const filtered: typeof matches = [];
-  let lastEnd = 0;
-  for (const m of matches) {
-    if (m.start >= lastEnd) {
-      filtered.push(m);
-      lastEnd = m.end;
-    }
-  }
-
-  // Build segments
-  let pos = 0;
-  for (const m of filtered) {
-    if (m.start > pos) {
-      segments.push({ text: text.slice(pos, m.start), color: baseColor });
-    }
-    segments.push({ text: m.displayText, color: m.color, backgroundColor: m.backgroundColor, bold: m.bold, italic: m.italic, underline: m.underline });
-    pos = m.end;
-  }
-  if (pos < text.length) {
-    segments.push({ text: text.slice(pos), color: baseColor });
-  }
-
-  const result = segments.length > 0 ? segments : [{ text, color: baseColor }];
-  if (parseCache.size >= PARSE_CACHE_LIMIT) {
-    const oldestKey = parseCache.keys().next().value;
-    if (oldestKey) {
-      parseCache.delete(oldestKey);
-    }
-  }
-  parseCache.set(cacheKey, result);
-  return result;
-}
-
-function hasAnsiCodes(text: string): boolean {
-  return /\x1b\[/.test(text);
-}
-
 function resolveSegmentColor(color: HistoryTextSegment["color"], baseColor: string | undefined): string | undefined {
   const colors = getColors();
   switch (color) {
@@ -4093,64 +4044,6 @@ function StyledLine({
       {suffix ? <Text color={baseColor}>{suffix}</Text> : null}
     </>
   );
-}
-
-/** Check if line is a markdown code fence */
-function isMarkdownFenceLine(text: string): boolean {
-  return /^```/.test(text.trim());
-}
-
-/** Check if line is a markdown header */
-function isMarkdownHeaderLine(text: string): boolean {
-  return /^#{1,6}\s+\S/.test(text);
-}
-
-/**
- * Apply visual spacing rules to history lines:
- * - Collapse multiple blank lines (outside code blocks)
- * - Add spacing after markdown headers
- * - Add spacing after reasoning blocks
- */
-function applyVisualSpacing(lines: HistoryLine[]): HistoryLine[] {
-  const out: HistoryLine[] = [];
-  let inCodeBlock = false;
-  let prevWasBlank = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const baseId = line.id ?? `line-${i}`;
-    const text = line.text ?? "";
-    const trimmed = text.trim();
-    const isBlank = trimmed.length === 0;
-
-    const isFence = isMarkdownFenceLine(text);
-    if (isFence) inCodeBlock = !inCodeBlock;
-
-    // Collapse blank-line runs (but never inside code blocks)
-    if (!inCodeBlock && isBlank && prevWasBlank) continue;
-
-    out.push(line);
-    prevWasBlank = isBlank;
-
-    if (inCodeBlock) continue;
-
-    const next = lines[i + 1];
-    const nextIsBlank = (next?.text ?? "").trim().length === 0;
-
-    // Add spacing after markdown headers
-    if (isMarkdownHeaderLine(text) && !nextIsBlank) {
-      out.push({ id: `${baseId}-sp-h`, text: "", role: line.role });
-      prevWasBlank = true;
-    }
-
-    // Add spacing after reasoning blocks
-    if (line.role === "reasoning" && next && next.role !== "reasoning" && !isBlank && !nextIsBlank) {
-      out.push({ id: `${baseId}-sp-r`, text: "", role: "reasoning" });
-      prevWasBlank = true;
-    }
-  }
-
-  return out;
 }
 
 function messageExists(history: MessageEntry[], requestId: string): boolean {

@@ -31,12 +31,6 @@ export const MIN_TERMINAL_HEIGHT = 10;
 // PROMPT MODAL SIZING
 // ============================================
 
-/** Minimum width required for QuestionPrompt to render properly */
-export const MIN_PROMPT_WIDTH = 60;
-
-/** Minimum height required for QuestionPrompt to render properly */
-export const MIN_PROMPT_HEIGHT = 15;
-
 /** Minimum width required for PermissionPrompt to render properly */
 export const MIN_PERMISSION_WIDTH = 60;
 

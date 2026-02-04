@@ -5,6 +5,29 @@
  */
 
 import type { ConnectorType } from '../ids.js'
+import type { TraceRecord } from 'types'
+
+// ============ Agent Traces ============
+
+export interface AgentTrace {
+  id: string
+  revision: string
+  session_key: string | null
+  tool_name: string
+  tool_version: string
+  trace: TraceRecord
+  created_at: string
+  updated_at: string
+}
+
+export interface TracesResponse {
+  traces: AgentTrace[]
+  total: number
+}
+
+export interface TraceResponse {
+  trace: AgentTrace
+}
 
 // ============ Internal Events ============
 
@@ -469,7 +492,8 @@ export interface CodingPreference {
   counterexample: string
   confidence: 'low' | 'medium' | 'high'
   created_at: string
-  rank: number
+  rank?: number
+  similarity?: number
 }
 
 export interface PreferencesSearchResponse {
@@ -480,6 +504,8 @@ export interface PreferencesSearchResponse {
     category?: string
     kind?: string
     confidence?: string
+    mode?: string
+    min_similarity?: string
   }
 }
 
@@ -522,6 +548,8 @@ export interface DecisionsSearchResponse {
   filters?: {
     category?: string
     confidence?: string
+    mode?: string
+    min_similarity?: string
   }
 }
 

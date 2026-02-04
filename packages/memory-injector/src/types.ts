@@ -4,6 +4,36 @@
  * Defines the interface for injecting relevant memory into agent context.
  */
 
+export type QueryIntent =
+  | 'decision'
+  | 'preference'
+  | 'principle'
+  | 'tradeoff'
+  | 'implementation'
+  | 'debug'
+  | 'unknown';
+
+export interface MemoryQueryStrategy {
+  enableIntentQueries?: boolean;
+  enableOverlapBoost?: boolean;
+  enableQualityFilters?: boolean;
+  maxQueries?: number;
+  maxIntentQueries?: number;
+}
+
+export interface QueryPlanSummary {
+  intent: QueryIntent;
+  topic: string | null;
+  hotwords: string[];
+  keywords: string[];
+  phrases: string[];
+  queries: Array<{
+    text: string;
+    weight: number;
+    kind: string;
+  }>;
+}
+
 /**
  * Parameters for memory injection.
  */
@@ -92,6 +122,11 @@ export interface MemoryInjector {
   summarizeQueryPlan?: (query: string) => string;
 
   /**
+   * Return a structured query plan summary for debugging.
+   */
+  explainQueryPlan?: (query: string) => QueryPlanSummary;
+
+  /**
    * Inject relevant evidence using v2 retrieval (optional).
    * @returns Structured result with formatted content, or null if none
    */
@@ -113,4 +148,6 @@ export interface MemoryInjectorConfig {
   baseUrl: string;
   /** Request timeout in ms (default: 5000) */
   timeout?: number;
+  /** Optional strategy flags for query planning and reranking */
+  strategy?: MemoryQueryStrategy;
 }

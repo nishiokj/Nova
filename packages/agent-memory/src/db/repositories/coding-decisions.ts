@@ -14,6 +14,7 @@ export interface CodingDecisionRow {
   signal_strength: string
   reversibility: string
   created_at: Date
+  source_timestamp?: Date | null
   search_vector?: unknown
   embedding?: number[] | null
 }
@@ -31,6 +32,8 @@ export interface DecisionSearchOptions {
   offset?: number
   category?: string
   confidence?: string
+  mode?: 'fts' | 'trgm'
+  minSimilarity?: number
 }
 
 export interface DecisionSimilarityOptions {
@@ -41,7 +44,7 @@ export interface DecisionSimilarityOptions {
 }
 
 export interface CodingDecisionsRepository {
-  search(query: string, options?: DecisionSearchOptions): Promise<CodingDecisionRowWithRank[]>
+  search(query: string, options?: DecisionSearchOptions): Promise<Array<CodingDecisionRowWithRank | CodingDecisionRowWithSimilarity>>
   similarByEmbedding(embedding: number[], options?: DecisionSimilarityOptions): Promise<CodingDecisionRowWithSimilarity[]>
   updateEmbedding(id: string, embedding: number[]): Promise<boolean>
 }
@@ -58,18 +61,37 @@ export function createCodingDecisionsRepository(
         offset = 0,
         category,
         confidence,
+        mode = 'fts',
+        minSimilarity = 0.18,
       } = options
 
+      if (mode === 'trgm') {
+        const searchExpr = sql`concat_ws(' ', decision, rationale, tradeoffs, alternatives_considered, category, scope, project_context, task_context)`
+        const rows = await sql<CodingDecisionRowWithSimilarity[]>`
+          SELECT *, similarity(${searchExpr}, ${query}) as similarity
+          FROM coding_decisions
+          WHERE ${searchExpr} % ${query}
+            AND similarity(${searchExpr}, ${query}) >= ${minSimilarity}
+            ${category ? sql`AND category = ${category}` : sql``}
+            ${confidence ? sql`AND confidence = ${confidence}` : sql``}
+          ORDER BY similarity DESC
+          LIMIT ${limit}
+          OFFSET ${offset}
+        `
+
+        return rows
+      }
+
       const rows = await sql<CodingDecisionRowWithRank[]>`
-        SELECT *, ts_rank(search_vector, plainto_tsquery('english', ${query})) as rank
-        FROM coding_decisions
-        WHERE search_vector @@ plainto_tsquery('english', ${query})
-          ${category ? sql`AND category = ${category}` : sql``}
-          ${confidence ? sql`AND confidence = ${confidence}` : sql``}
-        ORDER BY rank DESC
-        LIMIT ${limit}
-        OFFSET ${offset}
-      `
+          SELECT *, ts_rank(search_vector, plainto_tsquery('english', ${query})) as rank
+          FROM coding_decisions
+          WHERE search_vector @@ plainto_tsquery('english', ${query})
+            ${category ? sql`AND category = ${category}` : sql``}
+            ${confidence ? sql`AND confidence = ${confidence}` : sql``}
+          ORDER BY rank DESC
+          LIMIT ${limit}
+          OFFSET ${offset}
+        `
 
       return rows
     },

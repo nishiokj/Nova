@@ -30,7 +30,7 @@ export const ObsidianNoteRowSchema = z.object({
   /** File size in bytes */
   size: z.number().nonnegative(),
   /** YAML frontmatter if present (parsed as object) */
-  frontmatter: z.record(z.unknown()).optional(),
+  frontmatter: z.record(z.string(), z.unknown()).optional(),
   /** Whether this is a folder (as opposed to a file) */
   isFolder: z.boolean().default(false),
 })
@@ -134,7 +134,7 @@ export const ObsidianNoteSourceSchema = z.object({
     charCount: z.number().int().nonnegative(),
   }),
   /** YAML frontmatter if present */
-  frontmatter: z.record(z.unknown()).optional(),
+  frontmatter: z.record(z.string(), z.unknown()).optional(),
   /** When this was last modified (ISO string) */
   modified_at: z.string().datetime(),
   /** When this was created (ISO string) */

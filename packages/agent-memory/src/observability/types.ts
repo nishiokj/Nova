@@ -68,7 +68,7 @@ export const LogEntrySchema: z.ZodType<LogEntry> = z.object({
   message: z.string(),
   timestamp: z.string().datetime(),
   logger: z.string(),
-  context: z.record(z.unknown()).optional(),
+  context: z.record(z.string(), z.unknown()).optional(),
   error: z
     .object({
       name: z.string(),
@@ -239,7 +239,7 @@ export const ComponentHealthSchema: z.ZodType<ComponentHealth> = z.object({
   status: HealthStatusSchema,
   message: z.string().optional(),
   latencyMs: z.number().optional(),
-  details: z.record(z.unknown()).optional(),
+  details: z.record(z.string(), z.unknown()).optional(),
   lastCheck: z.string().datetime(),
 })
 
@@ -248,7 +248,7 @@ export const HealthCheckResultSchema: z.ZodType<HealthCheckResult> = z.object({
   version: z.string().optional(),
   uptime: z.number(),
   timestamp: z.string().datetime(),
-  components: z.record(ComponentHealthSchema),
+  components: z.record(z.string(), ComponentHealthSchema),
 })
 
 // ============ Alert Types ============
@@ -288,7 +288,7 @@ export const AlertSchema: z.ZodType<Alert> = z.object({
   message: z.string(),
   source: z.string(),
   timestamp: z.string().datetime(),
-  context: z.record(z.unknown()).optional(),
+  context: z.record(z.string(), z.unknown()).optional(),
   resolved: z.boolean().optional(),
   resolvedAt: z.string().datetime().optional(),
 })

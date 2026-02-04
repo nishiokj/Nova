@@ -6,17 +6,20 @@ import { badRequest } from '../server.js'
 export function registerDecisionsRoutes(server: HttpServer, decisionsRepo: CodingDecisionsRepository): void {
   // Full-text keyword search
   server.get('/decisions/search', async (req) => {
-    const { q, category, confidence, limit = '20', offset = '0' } = req.query
+    const { q, category, confidence, mode, min_similarity, limit = '20', offset = '0' } = req.query
 
     if (!q) {
       return { body: { decisions: [], total: 0 } }
     }
 
+    const parsedMinSimilarity = typeof min_similarity === 'string' ? Number(min_similarity) : undefined
     const results = await decisionsRepo.search(q, {
       limit: parseInt(limit, 10),
       offset: parseInt(offset, 10),
       category: category as string | undefined,
       confidence: confidence as string | undefined,
+      mode: typeof mode === 'string' ? (mode as 'fts' | 'trgm') : undefined,
+      minSimilarity: Number.isFinite(parsedMinSimilarity) ? parsedMinSimilarity : undefined,
     })
 
     return {
@@ -24,7 +27,7 @@ export function registerDecisionsRoutes(server: HttpServer, decisionsRepo: Codin
         decisions: results,
         total: results.length,
         query: q,
-        filters: { category, confidence },
+        filters: { category, confidence, mode, min_similarity },
       },
     }
   })

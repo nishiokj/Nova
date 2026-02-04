@@ -203,7 +203,7 @@ export const SerializedErrorSchema: z.ZodType<SerializedError> = z.object({
   category: ErrorCategorySchema,
   severity: ErrorSeveritySchema,
   retryable: z.boolean(),
-  context: z.record(z.unknown()),
+  context: z.record(z.string(), z.unknown()),
   stack: z.string().optional(),
   cause: z.lazy(() => SerializedErrorSchema).optional(),
   timestamp: z.string().datetime(),

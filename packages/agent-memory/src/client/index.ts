@@ -18,6 +18,7 @@ import type {
   ActionsResponse,
   AgentAction,
   AgentGoal,
+  AgentTrace,
   AuthStatusResponse,
   AuthUrlResponse,
   AvailableConnectorsResponse,
@@ -71,11 +72,14 @@ import type {
   TaskMode,
   TaskResponse,
   TaskSanityResponse,
+  TraceResponse,
+  TracesResponse,
   TransformationListResponse,
   TransformationSummary,
   TriggerConfig,
 } from './types.js'
 import { SyncClientError } from './types.js'
+import type { TraceRecord } from 'types'
 
 export interface SyncClientConfig {
   /** Base URL of the sync daemon (e.g., 'http://localhost:3001') */
@@ -852,6 +856,8 @@ export class SyncClient {
       category?: string
       kind?: string
       confidence?: string
+      mode?: 'fts' | 'trgm'
+      minSimilarity?: number
       limit?: number
       offset?: number
     }): Promise<PreferencesSearchResponse> => {
@@ -860,6 +866,8 @@ export class SyncClient {
       if (opts.category) params.set('category', opts.category)
       if (opts.kind) params.set('kind', opts.kind)
       if (opts.confidence) params.set('confidence', opts.confidence)
+      if (opts.mode) params.set('mode', opts.mode)
+      if (opts.minSimilarity !== undefined) params.set('min_similarity', String(opts.minSimilarity))
       if (opts.limit !== undefined) params.set('limit', String(opts.limit))
       if (opts.offset !== undefined) params.set('offset', String(opts.offset))
       const query = params.toString()
@@ -885,6 +893,8 @@ export class SyncClient {
       q: string
       category?: string
       confidence?: string
+      mode?: 'fts' | 'trgm'
+      minSimilarity?: number
       limit?: number
       offset?: number
     }): Promise<DecisionsSearchResponse> => {
@@ -892,6 +902,8 @@ export class SyncClient {
       params.set('q', opts.q)
       if (opts.category) params.set('category', opts.category)
       if (opts.confidence) params.set('confidence', opts.confidence)
+      if (opts.mode) params.set('mode', opts.mode)
+      if (opts.minSimilarity !== undefined) params.set('min_similarity', String(opts.minSimilarity))
       if (opts.limit !== undefined) params.set('limit', String(opts.limit))
       if (opts.offset !== undefined) params.set('offset', String(opts.offset))
       const query = params.toString()
@@ -1140,6 +1152,120 @@ export class SyncClient {
      */
     delete: async (id: string): Promise<boolean> => {
       await this.delete<{ deleted: boolean }>(`/actions/${id}`)
+      return true
+    },
+  }
+
+  // ============ Traces ============
+
+  /**
+   * Agent traces management methods.
+   */
+  traces = {
+    /**
+     * List traces with optional filters.
+     * @param opts.session_key - Filter by session key
+     * @param opts.tool_name - Filter by tool name
+     * @param opts.limit - Max results (default: 50)
+     * @param opts.offset - Pagination offset (default: 0)
+     */
+    list: async (opts?: {
+      session_key?: string
+      tool_name?: string
+      limit?: number
+      offset?: number
+    }): Promise<{ traces: AgentTrace[]; total: number }> => {
+      const params = new URLSearchParams()
+      if (opts?.session_key) params.set('session_key', opts.session_key)
+      if (opts?.tool_name) params.set('tool_name', opts.tool_name)
+      if (opts?.limit) params.set('limit', String(opts.limit))
+      if (opts?.offset) params.set('offset', String(opts.offset))
+      const query = params.toString()
+      const response = await this.get<TracesResponse>(`/traces${query ? `?${query}` : ''}`)
+      return response
+    },
+
+    /**
+     * Get recent traces.
+     * @param limit - Max results (default: 50)
+     */
+    getRecent: async (limit = 50): Promise<{ traces: AgentTrace[]; total: number }> => {
+      const response = await this.get<TracesResponse>(`/traces/recent?limit=${limit}`)
+      return response
+    },
+
+    /**
+     * Get traces by session key.
+     * @param sessionKey - Session key
+     * @param limit - Max results (default: 50)
+     */
+    getBySession: async (sessionKey: string, limit = 50): Promise<{ traces: AgentTrace[]; total: number }> => {
+      const response = await this.get<TracesResponse>(`/traces/session/${sessionKey}?limit=${limit}`)
+      return response
+    },
+
+    /**
+     * Get traces by model ID.
+     * @param modelId - Model ID (e.g., 'anthropic/claude-opus-4-5-20251101')
+     * @param limit - Max results (default: 50)
+     */
+    getByModel: async (modelId: string, limit = 50): Promise<{ traces: AgentTrace[]; total: number }> => {
+      const response = await this.get<TracesResponse>(`/traces/model/${encodeURIComponent(modelId)}?limit=${limit}`)
+      return response
+    },
+
+    /**
+     * Get a trace by ID.
+     */
+    get: async (id: string): Promise<AgentTrace> => {
+      const response = await this.get<TraceResponse>(`/traces/${id}`)
+      return response.trace
+    },
+
+    /**
+     * Get a trace by git revision (commit SHA).
+     */
+    getByRevision: async (revision: string): Promise<AgentTrace> => {
+      const response = await this.get<TraceResponse>(`/traces/revision/${revision}`)
+      return response.trace
+    },
+
+    /**
+     * Create a new trace record.
+     */
+    create: async (input: {
+      id?: string
+      revision: string
+      session_key?: string | null
+      tool_name?: string
+      tool_version?: string
+      trace: TraceRecord
+    }): Promise<AgentTrace> => {
+      const response = await this.post<TraceResponse>('/traces', input)
+      return response.trace
+    },
+
+    /**
+     * Update an existing trace.
+     */
+    update: async (
+      id: string,
+      updates: Partial<{
+        session_key?: string
+        tool_name?: string
+        tool_version?: string
+        trace: TraceRecord
+      }>
+    ): Promise<AgentTrace> => {
+      const response = await this.patch<TraceResponse>(`/traces/${id}`, updates)
+      return response.trace
+    },
+
+    /**
+     * Delete a trace by ID.
+     */
+    delete: async (id: string): Promise<boolean> => {
+      await this.delete<{ deleted: boolean }>(`/traces/${id}`)
       return true
     },
   }

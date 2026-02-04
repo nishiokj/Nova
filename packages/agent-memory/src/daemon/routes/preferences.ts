@@ -7,18 +7,21 @@ export function registerPreferencesRoutes(server: HttpServer, daemon: SyncDaemon
 
   // Full-text keyword search
   server.get('/preferences/search', async (req) => {
-    const { q, category, kind, confidence, limit = '20', offset = '0' } = req.query
+    const { q, category, kind, confidence, mode, min_similarity, limit = '20', offset = '0' } = req.query
 
     if (!q) {
       return { body: { preferences: [], total: 0 } }
     }
 
+    const parsedMinSimilarity = typeof min_similarity === 'string' ? Number(min_similarity) : undefined
     const results = await preferencesRepo.search(q, {
       limit: parseInt(limit, 10),
       offset: parseInt(offset, 10),
       category: category as string | undefined,
       kind: kind as string | undefined,
       confidence: confidence as string | undefined,
+      mode: typeof mode === 'string' ? (mode as 'fts' | 'trgm') : undefined,
+      minSimilarity: Number.isFinite(parsedMinSimilarity) ? parsedMinSimilarity : undefined,
     })
 
     return {
@@ -26,7 +29,7 @@ export function registerPreferencesRoutes(server: HttpServer, daemon: SyncDaemon
         preferences: results,
         total: results.length,
         query: q,
-        filters: { category, kind, confidence },
+        filters: { category, kind, confidence, mode, min_similarity },
       },
     }
   })

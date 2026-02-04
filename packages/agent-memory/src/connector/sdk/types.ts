@@ -100,7 +100,7 @@ export const OAuth2ConfigSchema = z.object({
   clientId: z.string().min(1),
   clientSecret: z.string().min(1),
   codeChallengeMethod: z.enum(['S256', 'plain']).optional(),
-  authParams: z.record(z.string()).optional(),
+  authParams: z.record(z.string(), z.string()).optional(),
 })
 
 /**
@@ -227,7 +227,7 @@ export const AccountInfoSchema = z.object({
   avatarUrl: z.string().url().optional(),
   username: z.string().optional(),
   isPrimary: z.boolean().optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 })
 
 // ============ Webhook Types ============
@@ -254,7 +254,7 @@ export const WebhookEventSchema = z.object({
   deliveryId: z.string().optional(),
   eventType: z.string().min(1),
   payload: z.unknown(),
-  headers: z.record(z.string()),
+  headers: z.record(z.string(), z.string()),
   signature: z.string().optional(),
   receivedAt: z.date(),
 })

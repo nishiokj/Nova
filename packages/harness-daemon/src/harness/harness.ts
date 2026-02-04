@@ -37,7 +37,8 @@ import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
-import { isGitCommitCommand, extractCommitSha } from '../subscribers/trace_subscriber.js';
+import { createTraceSubscriber, extractCommitSha, isGitCommitCommand, type TraceSubscriber } from '../subscribers/trace_subscriber.js';
+import { SyncClient } from 'agent-memory';
 import path from 'path';
 import fs from 'fs';
 import {
@@ -338,6 +339,8 @@ export class AgentHarness {
   private orchestratorRunner: OrchestratorRunner;
   private entityGraph: EntityGraph | null = null;
   private memoryInjector: MemoryInjector | null = null;
+  private traceSubscriber: TraceSubscriber | null = null;
+  private memoryClient: SyncClient | null = null;
   private asyncModeIssues: string[] = [];
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
@@ -507,6 +510,48 @@ export class AgentHarness {
       });
     }
 
+    // Initialize SyncClient for agent-memory daemon (used by TraceSubscriber)
+    const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || 'http://127.0.0.1:3001';
+    try {
+      this.memoryClient = new SyncClient(memoryDaemonUrl);
+      this.logger.info('Memory client initialized for traces', { url: memoryDaemonUrl });
+    } catch (error) {
+      this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // Initialize TraceSubscriber for collecting Write/Edit tool calls and emitting on git commits
+    this.traceSubscriber = createTraceSubscriber(this.eventBus, {
+      repoRoot: workingDir,
+      toolName: 'agent',
+      toolVersion: '0.1.0',
+    });
+    this.logger.debug('TraceSubscriber initialized', { repoRoot: workingDir });
+
+    // Register callback to persist traces to database when emitted
+    this.traceSubscriber.onTraceEmitted(async (trace) => {
+      try {
+        if (this.memoryClient) {
+          await this.memoryClient.traces.create({
+            revision: trace.vcs.revision,
+            session_key: undefined, // Session key is per-file in trace, top-level is nullable
+            tool_name: trace.tool.name,
+            tool_version: trace.tool.version,
+            trace: trace,
+          });
+          this.logger.info('Trace persisted to database', { revision: trace.vcs.revision });
+        }
+      } catch (error) {
+        // Log warning but don't crash the agent if DB is down
+        this.logger.warning('Failed to persist trace to database (is agent-memory daemon running?)', {
+          error: error instanceof Error ? error.message : String(error),
+          revision: trace.vcs.revision,
+        });
+      }
+    });
+
+
     const defaultAgent = config.agents[config.defaultAgent];
     this.logger.info('AgentHarness initialized', {
       defaultAgent: config.defaultAgent,
@@ -515,6 +560,7 @@ export class AgentHarness {
       agentCount: Object.keys(config.agents).length,
       graphdEnabled: this.graphd !== null,
       memoryEnabled: this.memoryInjector !== null,
+      traceEnabled: this.traceSubscriber !== null,
     });
   }
 
@@ -1666,6 +1712,8 @@ export class AgentHarness {
               provider: selection.provider,
               reasoning: selection.reasoning,
             });
+            // Update TraceSubscriber with current model
+            this.traceSubscriber?.setCurrentModel(selection.provider, selection.model);
           }
           return selection;
         }
@@ -1945,6 +1993,10 @@ export class AgentHarness {
       this.logger.warning('No model selection available for watcher agent');
       return { watcherAction: 'allow', reason: 'No model selection for watcher' };
     }
+
+    // Update TraceSubscriber with current model
+    this.traceSubscriber?.setCurrentModel(modelSelection.provider, modelSelection.model);
+
 
     const llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
     const rawSchemaId = agentConfig.outputSchema?.schemaId ?? agentConfig.outputSchema?.name;
@@ -2627,6 +2679,17 @@ export class AgentHarness {
   async shutdown(): Promise<void> {
     if (this.isShutdown) return;
     this.isShutdown = true;
+
+    if (this.traceSubscriber) {
+      try {
+        this.traceSubscriber.close();
+        this.logger.debug('Closed TraceSubscriber');
+      } catch (error) {
+        this.logger.warning('TraceSubscriber close failed', { error: String(error) });
+      } finally {
+        this.traceSubscriber = null;
+      }
+    }
 
     if (this.graphdSubscriber) {
       try {

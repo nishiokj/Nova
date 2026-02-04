@@ -698,6 +698,11 @@ schema-cli tables describe <table>     # Show table schema
 - Discovery work happens upfront in planning. If you need heavy exploration, the plan failed — report it.
 - Over-exploration signals the WorkItem is scoped too large.
 
+### Formatting
+- Always wrap code in fenced code blocks using triple backticks.
+- Include a language tag on the opening fence (e.g., \`\`\`typescript).
+- Never output a bare language line (like \`typescript\`) without fences.
+
 ### Transparency
 - State exactly which files you modified and what you changed.
 - End with summary: files touched, nature of each change, whether objective is met.

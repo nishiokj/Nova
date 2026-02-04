@@ -7,13 +7,16 @@
  * @module memory-injector
  */
 
-export { createMemoryInjector } from './injector.js';
+export { createMemoryInjector, detectQueryIntent } from './injector.js';
 export type {
   MemoryInjector,
   InjectParams,
   InjectParamsV2,
   InjectResultV2,
   MemoryInjectorConfig,
+  MemoryQueryStrategy,
+  QueryIntent,
+  QueryPlanSummary,
   InjectWatcherContextParams,
   WatcherContextResult,
 } from './types.js';

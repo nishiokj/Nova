@@ -103,7 +103,7 @@ export const MergeDecisionSchema = z.object({
   confidence: z.number().min(0).max(1),
   /** Detailed reason including match scores */
   reason: z.object({
-    scores: z.record(z.number()),
+    scores: z.record(z.string(), z.number()),
     totalScore: z.number(),
     matchedOn: z.array(z.string()),
   }).optional(),

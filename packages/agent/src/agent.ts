@@ -103,6 +103,7 @@ export interface ModelSelection {
 export interface MemoryInjector {
   inject(params: { query: string; maxTokens: number }): Promise<string | null>;
   summarizeQueryPlan?: (query: string) => string;
+  explainQueryPlan?: (query: string) => { intent?: string } | undefined;
   injectV2?: (params: {
     task: {
       objective: string;
@@ -150,6 +151,18 @@ export class Agent {
   private getModelSelection?: (agentType: string) => ModelSelection | null;
   private memoryInjector?: MemoryInjector;
   private sessionKey: string;
+  private memoryInjectionCache = new Map<string, {
+    queryKey: string;
+    query: string;
+    content: string | null;
+    itemCount: number;
+    version: 'v1' | 'v2';
+    fallbackToV1?: boolean;
+    latencyMs?: number;
+    coverage?: Record<string, number>;
+    discriminatorsIncluded?: number;
+    totalTokens?: number;
+  }>();
 
   constructor(config: AgentConfig, runtime: {
     llm: LLMAdapter;
@@ -189,6 +202,14 @@ export class Agent {
       requestId: this.requestId,
       objective: workItem.objective,
     };
+  }
+
+  private normalizeMemoryQueryKey(value: string): string {
+    return value.trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  private getMemoryCacheKey(workItem: WorkItem): string {
+    return workItem.workId || this.sessionKey || 'default';
   }
 
   /**
@@ -339,34 +360,84 @@ export class Agent {
       try {
         const query = this.buildMemoryQuery(workItem, globalContext);
         const querySummary = this.memoryInjector.summarizeQueryPlan?.(query);
+        const plan = this.memoryInjector.explainQueryPlan?.(query);
+        const intent = plan?.intent ?? 'unknown';
+        const isConceptIntent = intent === 'decision'
+          || intent === 'preference'
+          || intent === 'principle'
+          || intent === 'tradeoff';
         const eventQuery = querySummary || query;
+        const queryKey = this.normalizeMemoryQueryKey(eventQuery);
+        const cacheKey = this.getMemoryCacheKey(workItem);
         const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
-        const recentMessages = recentMessageItems
-          .filter(item => item.role === 'user')
-          .map(item => {
-            if (typeof item.content === 'string') return item.content;
-            if (Array.isArray(item.content)) {
-              return item.content
-                .map(block => (block.type === 'text' ? block.text : ''))
-                .join(' ');
-            }
-            return '';
-          })
-          .filter(text => text && text.trim().length > 0)
-          .slice(-3);
-
-        const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
-          if (path.isAbsolute(filePath)) {
-            return path.relative(cwd, filePath);
-          }
-          return filePath;
-        });
-        const shouldUseV2 = !!this.memoryInjector.injectV2 && this.shouldUseMemoryV2(this.sessionKey, workItem.workId);
+        const shouldUseV2 = !!this.memoryInjector.injectV2
+          && !isConceptIntent
+          && this.shouldUseMemoryV2(this.sessionKey, workItem.workId);
+        const cached = this.memoryInjectionCache.get(cacheKey);
+        const canReuseCached = cached && cached.queryKey === queryKey && (
+          cached.version === (shouldUseV2 ? 'v2' : 'v1')
+          || (shouldUseV2 && cached.fallbackToV1 && cached.version === 'v1')
+        );
 
         let v2Result: { content: string; atoms: unknown[]; metrics: { totalTokens: number; attentionTax: number; coverage: Record<string, number>; discriminatorsIncluded: number; latencyMs: number } } | null = null;
         let fallbackToV1 = false;
 
-        if (shouldUseV2 && this.memoryInjector.injectV2) {
+        if (canReuseCached) {
+          memoryContent = cached.content;
+          const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
+          this.internalHookQueue.enqueue({
+            type: 'memory_injected',
+            query: eventQuery,
+            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
+            memoryContent: memoryContent ?? undefined,
+            contextWithMemory,
+            itemCount: cached.itemCount,
+            success: memoryContent !== null,
+            iteration,
+            version: cached.version,
+            latencyMs: cached.latencyMs,
+            coverage: cached.coverage,
+            discriminatorsIncluded: cached.discriminatorsIncluded,
+            totalTokens: cached.totalTokens,
+            fallbackToV1: cached.fallbackToV1,
+          }, this.buildHookContext(workItem));
+          this.emit(createEvent('memory_injected', {
+            query: eventQuery,
+            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
+            memoryContent: memoryContent ?? undefined,
+            contextWithMemory,
+            itemCount: cached.itemCount,
+            success: memoryContent !== null,
+            iteration,
+            version: cached.version,
+            latencyMs: cached.latencyMs,
+            coverage: cached.coverage,
+            discriminatorsIncluded: cached.discriminatorsIncluded,
+            totalTokens: cached.totalTokens,
+            fallbackToV1: cached.fallbackToV1,
+          }, workItem.workId));
+        } else if (shouldUseV2 && this.memoryInjector.injectV2) {
+          const recentMessages = recentMessageItems
+            .filter(item => item.role === 'user')
+            .map(item => {
+              if (typeof item.content === 'string') return item.content;
+              if (Array.isArray(item.content)) {
+                return item.content
+                  .map(block => (block.type === 'text' ? block.text : ''))
+                  .join(' ');
+              }
+              return '';
+            })
+            .filter(text => text && text.trim().length > 0)
+            .slice(-3);
+
+          const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
+            if (path.isAbsolute(filePath)) {
+              return path.relative(cwd, filePath);
+            }
+            return filePath;
+          });
+
           v2Result = await this.memoryInjector.injectV2({
             task: {
               objective: workItem.objective,
@@ -390,6 +461,18 @@ export class Agent {
         if (v2Result?.content) {
           memoryContent = v2Result.content;
           const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
+          this.memoryInjectionCache.set(cacheKey, {
+            queryKey,
+            query,
+            content: memoryContent,
+            itemCount: v2Result.atoms?.length ?? 0,
+            version: 'v2',
+            fallbackToV1: false,
+            latencyMs: v2Result.metrics?.latencyMs,
+            coverage: v2Result.metrics?.coverage,
+            discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
+            totalTokens: v2Result.metrics?.totalTokens,
+          });
           this.internalHookQueue.enqueue({
             type: 'memory_injected',
             query: eventQuery,
@@ -425,13 +508,22 @@ export class Agent {
           fallbackToV1 = shouldUseV2;
           memoryContent = await this.memoryInjector.inject({ query, maxTokens: 1000 });
           const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
+          const itemCount = memoryContent ? memoryContent.split('\n\n').filter(line => line.trim().length > 0).length : 0;
+          this.memoryInjectionCache.set(cacheKey, {
+            queryKey,
+            query,
+            content: memoryContent,
+            itemCount,
+            version: 'v1',
+            fallbackToV1,
+          });
           this.internalHookQueue.enqueue({
             type: 'memory_injected',
             query: eventQuery,
             resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
             memoryContent: memoryContent ?? undefined,
             contextWithMemory,
-            itemCount: memoryContent ? memoryContent.split('\n\n').filter(line => line.trim().length > 0).length : 0,
+            itemCount,
             success: memoryContent !== null,
             iteration,
             version: 'v1',
@@ -442,7 +534,7 @@ export class Agent {
             resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
             memoryContent: memoryContent ?? undefined,
             contextWithMemory,
-            itemCount: memoryContent ? memoryContent.split('\n\n').filter(line => line.trim().length > 0).length : 0,
+            itemCount,
             success: memoryContent !== null,
             iteration,
             version: 'v1',

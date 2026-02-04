@@ -69,3 +69,25 @@ export type {
   ProviderContext,
   LLMProviderAdapter,
 } from './providers/types.js';
+
+// Codex OAuth authentication
+export {
+  getCodexTokenManager,
+  CODEX_OAUTH_CONFIG,
+  generatePKCE,
+  buildAuthUrl,
+  exchangeCodeForTokens,
+  CodexTokenManager,
+} from './auth/codex-auth.js';
+export {
+  runCodexOAuthFlow,
+  isCodexAuthenticated,
+  logoutCodex,
+  type OAuthFlowCallbacks,
+} from './auth/codex-oauth-flow.js';
+export type {
+  CodexTokens,
+  PKCEChallenge,
+  CodexOAuthConfig,
+  TokenManager,
+} from './auth/types.js';

@@ -13,7 +13,7 @@
  * Canonical LLM provider types (what the adapter routes to).
  * These are the actual SDK/API implementations.
  */
-export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat' | 'vercel-gateway';
+export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat' | 'vercel-gateway' | 'codex';
 
 /**
  * All supported provider names that can appear in configuration.
@@ -24,6 +24,7 @@ export type SupportedProvider =
   | 'openai'
   | 'openai-compat'
   | 'vercel-gateway'
+  | 'codex'
   | 'cerebras'
   | 'groq'
   | 'gemini'
@@ -136,6 +137,12 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
     powerful: 'gpt-5.2',
     reasoning: 'gpt-5.2-codex',
   },
+  codex: {
+    fast: 'codex-mini-latest',
+    standard: 'codex-mini-latest',
+    powerful: 'gpt-5.2-codex',
+    reasoning: 'gpt-5.2-codex',
+  },
   cerebras: {
     fast: 'llama-3.3-70b',
     standard: 'llama-3.3-70b',
@@ -218,6 +225,36 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     envVar: 'OPENAI_API_KEY',
     testEndpoint: 'https://api.openai.com/v1/models',
     dashboardUrl: 'https://platform.openai.com/settings/organization/billing/overview',
+  },
+  codex: {
+    id: 'codex',
+    displayName: 'OpenAI Codex (Subscription)',
+    canonicalProvider: 'codex',
+    baseUrl: 'https://api.openai.com',
+    models: [
+      {
+        id: 'codex-mini-latest',
+        name: 'Codex Mini',
+        context_window: 192_000,
+        description: 'Fast coding model for subscription users',
+      },
+      {
+        id: 'gpt-5.2-codex',
+        name: 'GPT-5.2 Codex',
+        context_window: 256_000,
+        reasoning: ['low', 'medium', 'high'],
+      },
+    ],
+    // No envVar - uses OAuth tokens, not API keys
+    authRequired: true,
+    testEndpoint: 'https://api.openai.com/v1/responses',
+    testMethod: 'POST',
+    testBody: {
+      model: 'codex-mini-latest',
+      input: 'test',
+      max_output_tokens: 1,
+    },
+    dashboardUrl: 'https://chatgpt.com/settings',
   },
   'openai-compat': {
     id: 'openai-compat',
