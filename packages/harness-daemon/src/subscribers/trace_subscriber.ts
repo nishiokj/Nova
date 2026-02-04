@@ -13,7 +13,7 @@ import { execSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import type { EventBusProtocol } from 'comms-bus';
-import type { AgentEvent, ToolCallData } from 'types';
+import type { AgentEvent, ToolCallData, GitCommitData } from 'types';
 import {
   AGENT_TRACE_VERSION,
   type ConversationUrlProvider,
@@ -26,6 +26,9 @@ import {
   generateTraceId,
   rfc3339Timestamp,
 } from 'types';
+
+/** Callback invoked when a trace is emitted */
+export type TraceEmittedCallback = (trace: TraceRecord) => void;
 
 // ============================================
 // CONFIGURATION
@@ -52,8 +55,10 @@ export interface TraceSubscriberConfig {
 
 export class TraceSubscriber {
   private config: Required<Omit<TraceSubscriberConfig, 'currentModelId'>> & { currentModelId?: string };
-  private unsubscribe: (() => void) | null = null;
+  private unsubscribeToolCall: (() => void) | null = null;
+  private unsubscribeGitCommit: (() => void) | null = null;
   private pendingModifications: Map<string, PendingFileModification[]> = new Map();
+  private traceEmittedCallbacks: TraceEmittedCallback[] = [];
   private closed = false;
 
   constructor(eventBus: EventBusProtocol, config: TraceSubscriberConfig) {
@@ -66,7 +71,25 @@ export class TraceSubscriber {
       currentModelId: config.currentModelId,
     };
 
-    this.unsubscribe = eventBus.subscribeAll((event) => this.handleEvent(event));
+    // Subscribe to tool_call events for collecting modifications
+    this.unsubscribeToolCall = eventBus.subscribe('tool_call', (event) => this.handleToolCallEvent(event));
+
+    // Subscribe to git_commit events for auto-emitting traces
+    this.unsubscribeGitCommit = eventBus.subscribe('git_commit', (event) => this.handleGitCommitEvent(event as AgentEvent<GitCommitData>));
+  }
+
+  /**
+   * Register a callback to be invoked when a trace is emitted.
+   * Use this for external integrations that need to react to commits.
+   */
+  onTraceEmitted(callback: TraceEmittedCallback): () => void {
+    this.traceEmittedCallbacks.push(callback);
+    return () => {
+      const idx = this.traceEmittedCallbacks.indexOf(callback);
+      if (idx !== -1) {
+        this.traceEmittedCallbacks.splice(idx, 1);
+      }
+    };
   }
 
   /**
@@ -77,18 +100,30 @@ export class TraceSubscriber {
   }
 
   /**
-   * Handle incoming events from EventBus.
+   * Handle tool_call events for collecting modifications.
    */
-  private handleEvent(event: AgentEvent<unknown>): void {
+  private handleToolCallEvent(event: AgentEvent<ToolCallData>): void {
     if (this.closed) return;
-    if (event.type !== 'tool_call') return;
 
-    const data = event.data as ToolCallData;
+    const data = event.data;
     if (data.phase !== 'completed') return;
     if (!data.success) return;
     if (data.toolName !== 'Write' && data.toolName !== 'Edit') return;
 
     this.collectModification(event, data);
+  }
+
+  /**
+   * Handle git_commit events to auto-emit traces.
+   */
+  private handleGitCommitEvent(event: AgentEvent<GitCommitData>): void {
+    if (this.closed) return;
+
+    const { sha } = event.data;
+    if (!sha) return;
+
+    // Emit trace for this commit
+    this.emitTrace(sha);
   }
 
   /**
@@ -181,6 +216,15 @@ export class TraceSubscriber {
 
     // Persist trace record
     this.persistTrace(trace);
+
+    // Notify registered callbacks
+    for (const callback of this.traceEmittedCallbacks) {
+      try {
+        callback(trace);
+      } catch {
+        // Ignore callback errors
+      }
+    }
 
     return trace;
   }
@@ -432,10 +476,15 @@ export class TraceSubscriber {
    * Close the subscriber.
    */
   close(): void {
-    if (this.unsubscribe) {
-      this.unsubscribe();
-      this.unsubscribe = null;
+    if (this.unsubscribeToolCall) {
+      this.unsubscribeToolCall();
+      this.unsubscribeToolCall = null;
     }
+    if (this.unsubscribeGitCommit) {
+      this.unsubscribeGitCommit();
+      this.unsubscribeGitCommit = null;
+    }
+    this.traceEmittedCallbacks = [];
     this.closed = true;
   }
 }

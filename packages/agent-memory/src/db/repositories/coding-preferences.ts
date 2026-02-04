@@ -15,6 +15,7 @@ export interface CodingPreferenceRow {
   counterexample: string
   confidence: string
   created_at: Date
+  source_timestamp?: Date | null
   search_vector?: unknown
   embedding?: number[] | null
 }

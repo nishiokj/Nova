@@ -305,6 +305,7 @@ async function upsertDecisionAction(
   // Infer outcome signal
   let outcomeSignal: 'positive' | 'negative' | 'neutral' | 'unknown' = 'unknown'
   switch (entry.watcherAction) {
+    case 'allow':
     case 'continue':
     case 'answer':
       outcomeSignal = 'positive'

@@ -191,6 +191,7 @@ export class BusServer {
     }
 
     socket.setNoDelay(true);  // Disable Nagle algorithm for low-latency streaming
+    socket.setKeepAlive(true, 30000);  // Enable TCP keepalive, probe every 30s to detect dead connections
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => this.handleData(connection, chunk));
     socket.on('close', () => this.handleClose(connection));

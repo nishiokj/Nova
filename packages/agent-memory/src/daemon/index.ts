@@ -39,6 +39,8 @@ import { createCodingPreferencesRepository } from '../db/repositories/coding-pre
 import { createCodingDecisionsRepository } from '../db/repositories/coding-decisions.js'
 import { createAgentGoalsRepository } from '../db/repositories/agent-goals.js'
 import { createAgentActionsRepository } from '../db/repositories/agent-actions.js'
+import { createAgentTracesRepository } from '../db/repositories/agent-traces.js'
+import type { AgentTracesRepository } from '../db/repositories/agent-traces.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
@@ -140,6 +142,7 @@ export class SyncDaemon {
   readonly decisionsRepo: CodingDecisionsRepository
   readonly goalsRepo: AgentGoalsRepository
   readonly actionsRepo: AgentActionsRepository
+  readonly tracesRepo: AgentTracesRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
@@ -169,7 +172,8 @@ export class SyncDaemon {
     preferencesRepo: CodingPreferencesRepository,
     decisionsRepo: CodingDecisionsRepository,
     goalsRepo: AgentGoalsRepository,
-    actionsRepo: AgentActionsRepository
+    actionsRepo: AgentActionsRepository,
+    tracesRepo: AgentTracesRepository
   ) {
     this.config = config
     this.sql = config.sql
@@ -193,6 +197,7 @@ export class SyncDaemon {
     this.decisionsRepo = decisionsRepo
     this.goalsRepo = goalsRepo
     this.actionsRepo = actionsRepo
+    this.tracesRepo = tracesRepo
   }
 
   /**
@@ -223,6 +228,7 @@ export class SyncDaemon {
     const decisionsRepo = createCodingDecisionsRepository(ctx)
     const goalsRepo = createAgentGoalsRepository(ctx)
     const actionsRepo = createAgentActionsRepository(ctx)
+    const tracesRepo = createAgentTracesRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -296,7 +302,8 @@ export class SyncDaemon {
       preferencesRepo,
       decisionsRepo,
       goalsRepo,
-      actionsRepo
+      actionsRepo,
+      tracesRepo
     )
 
     // Store connectors map reference in daemon for registration

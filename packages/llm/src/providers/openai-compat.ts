@@ -19,6 +19,7 @@ import {
   createRateLimitError,
 } from '../rate-limits.js';
 import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
+import { profiler } from 'shared';
 
 function parseApiError(provider: string, status: number, responseText: string): Error {
   const parsed = parseApiErrorResponse(provider, status, responseText);
@@ -241,7 +242,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const responseFormat = params.responseSchema
       ? getProviderResponseFormat(resolved.displayProvider)
       : null;
-    if (params.responseSchema && responseFormat === 'json_object') {
+    if (params.responseSchema && (responseFormat === 'json_object' || responseFormat === 'none')) {
       const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }
@@ -450,14 +451,19 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const responseFormat = params.responseSchema
       ? getProviderResponseFormat(resolved.displayProvider)
       : null;
-    if (params.responseSchema && responseFormat === 'json_object') {
+    if (params.responseSchema && (responseFormat === 'json_object' || responseFormat === 'none')) {
       const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }
 
+    // Profile message formatting
+    profiler.begin('llm:format:messages', 'llm');
+    const formattedMessages = this.formatMessages(params.messages, systemPrompt);
+    profiler.end('llm:format:messages', 'llm', { messageCount: params.messages.length });
+
     const body: Record<string, unknown> = {
       model: resolved.model,
-      messages: this.formatMessages(params.messages, systemPrompt),
+      messages: formattedMessages,
       max_tokens: params.maxTokens ?? resolved.maxTokens ?? 4096,
       stream: true,
     };
@@ -512,11 +518,19 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       streamHeaders['Authorization'] = `Bearer ${resolved.apiKey}`;
     }
 
+    // Profile request serialization
+    profiler.begin('llm:serialize:body', 'llm');
+    const bodyJson = JSON.stringify(body);
+    profiler.end('llm:serialize:body', 'llm', { bodyBytes: bodyJson.length });
+
+    // Profile fetch (time to first byte - network + server processing + inference start)
+    const fetchAsyncId = profiler.asyncBegin('llm:fetch:ttfb', 'http');
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: streamHeaders,
-      body: JSON.stringify(body),
+      body: bodyJson,
     });
+    profiler.asyncEnd('llm:fetch:ttfb', fetchAsyncId, 'http', { status: response.status });
 
     if (!response.ok || !response.body) {
       const errorText = await response.text();
@@ -552,6 +566,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     let buffer = '';
     let eventCount = 0;
 
+    // Profile stream consumption (reading all SSE events)
+    const streamAsyncId = profiler.asyncBegin('llm:stream:consume', 'http');
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -675,7 +691,12 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
           }
         }
       }
+      // End stream consumption profiling on success
+      profiler.asyncEnd('llm:stream:consume', streamAsyncId, 'http', { eventCount, contentLength: fullContent.length });
     } catch (streamError) {
+      // End stream consumption profiling on error
+      profiler.asyncEnd('llm:stream:consume', streamAsyncId, 'http', { eventCount, contentLength: fullContent.length, error: true });
+
       // Convert partial tool call builders to tool calls for error recovery
       const partialToolCalls: ToolCall[] = [];
       for (const builder of toolCallBuilders.values()) {

@@ -12,9 +12,10 @@ import { z } from 'zod';
 // ============================================
 
 /**
- * Action enum - what the agent wants to do next.
+ * Action enum - what execution agents can do next.
+ * Planners can use "handoff" via the planner-specific schema.
  */
-export const AgentActionSchema = z.enum(['done', 'continue', 'handoff']);
+export const AgentActionSchema = z.enum(['done', 'continue']);
 
 /**
  * Routing output - used by the router agent.
@@ -83,7 +84,6 @@ export const AgentActionOutputSchema = z.union([
   DoneOutputSchema,
   AwaitingUserInputOutputSchema,
   ContinueOutputSchema,
-  HandoffOutputSchema,
 ]);
 
 /**
@@ -93,7 +93,6 @@ export const GoalDrivenOutputSchema = z.union([
   DoneOutputSchema.extend({ work_done: z.string() }).strict(),
   AwaitingUserInputOutputSchema.extend({ work_done: z.string() }).strict(),
   ContinueOutputSchema.extend({ work_done: z.string() }).strict(),
-  HandoffOutputSchema.extend({ work_done: z.string() }).strict(),
 ]);
 
 /**
@@ -211,7 +210,13 @@ const WatcherActionTypeSchema = z.enum([
   'split',
   'create_work_item',
   'quality_gate',
+  'allow',
   'continue',
+]);
+
+const WatcherNoInterventionSchema = z.union([
+  z.literal('allow'),
+  z.literal('continue'),
 ]);
 
 // --------------------------------------------
@@ -293,6 +298,13 @@ export const WatcherSemanticOutputSchema = z.object({
   salienceUpdates: SemanticSalienceUpdatesSchema.optional(),
 });
 
+const WatcherSemanticBatchEntrySchema = z.object({
+  workId: z.string(),
+  semantic: WatcherSemanticOutputSchema,
+}).strict();
+
+const WatcherSemanticBatchSchema = z.array(WatcherSemanticBatchEntrySchema).min(1);
+
 export type WatcherSemanticOutput = z.infer<typeof WatcherSemanticOutputSchema>;
 
 // --------------------------------------------
@@ -316,6 +328,8 @@ const WatcherAnswerSchema = WatcherBaseSchema.extend({
     text: z.string(),
     contextAddendum: z.string().nullable().optional(),
   }).strict(),
+  semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherRealignSchema = WatcherBaseSchema.extend({
@@ -327,6 +341,7 @@ const WatcherRealignSchema = WatcherBaseSchema.extend({
     newGoal: z.string().nullable().optional(),
   }).strict(),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherSplitSchema = WatcherBaseSchema.extend({
@@ -334,6 +349,7 @@ const WatcherSplitSchema = WatcherBaseSchema.extend({
   goalStateReached: z.literal(true),
   watcherAction: z.literal('split'),
   workItems: z.array(z.object({
+    id: z.string().min(1).optional(),
     goal: z.string(),
     objective: z.string(),
     agent: z.string(),
@@ -347,6 +363,7 @@ const WatcherSplitSchema = WatcherBaseSchema.extend({
     }).optional(),
   }).strict()).min(1),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherCreateWorkItemSchema = WatcherBaseSchema.extend({
@@ -354,6 +371,7 @@ const WatcherCreateWorkItemSchema = WatcherBaseSchema.extend({
   goalStateReached: z.literal(true),
   watcherAction: z.literal('create_work_item'),
   workItems: z.array(z.object({
+    id: z.string().min(1).optional(),
     goal: z.string(),
     objective: z.string(),
     agent: z.string(),
@@ -367,6 +385,7 @@ const WatcherCreateWorkItemSchema = WatcherBaseSchema.extend({
     }).optional(),
   }).strict()).min(1),
   semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherQualityGateSchema = WatcherBaseSchema.extend({
@@ -377,20 +396,16 @@ const WatcherQualityGateSchema = WatcherBaseSchema.extend({
     passed: z.boolean(),
     issues: z.array(z.string()).optional(),
   }).strict(),
+  semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 const WatcherContinueDecisionSchema = WatcherBaseSchema.extend({
   action: z.literal('done'),
   goalStateReached: z.literal(true),
-  watcherAction: z.literal('continue'),
+  watcherAction: WatcherNoInterventionSchema,
   semantic: WatcherSemanticOutputSchema.optional(),
-}).strict();
-
-const WatcherContinueWorkingSchema = WatcherBaseSchema.extend({
-  action: z.literal('continue'),
-  goalStateReached: z.literal(false),
-  watcherAction: z.literal('continue'),
-  semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
 export const WatcherActionOutputSchema = z.union([
@@ -400,13 +415,82 @@ export const WatcherActionOutputSchema = z.union([
   WatcherCreateWorkItemSchema,
   WatcherQualityGateSchema,
   WatcherContinueDecisionSchema,
-  WatcherContinueWorkingSchema,
 ]);
 
+// --------------------------------------------
+// Trigger-specific watcher schema generation
+// --------------------------------------------
+
+type WatcherActionType = 'answer' | 'realign' | 'split' | 'create_work_item' | 'quality_gate' | 'allow' | 'continue';
+
 /**
- * Planner output schema (planning agent). Same state model as AgentActionOutput.
+ * Map from action type to Zod schema.
+ * 'allow' and 'continue' both map to the same decision schema.
  */
-export const PlannerOutputSchema = AgentActionOutputSchema;
+const WATCHER_ACTION_SCHEMAS: Record<WatcherActionType, z.ZodType[]> = {
+  answer: [WatcherAnswerSchema],
+  realign: [WatcherRealignSchema],
+  split: [WatcherSplitSchema],
+  create_work_item: [WatcherCreateWorkItemSchema],
+  quality_gate: [WatcherQualityGateSchema],
+  allow: [WatcherContinueDecisionSchema],
+  continue: [WatcherContinueDecisionSchema],
+};
+
+/**
+ * Build a Zod schema containing only the specified watcher actions.
+ * Used to constrain LLM output to valid actions for a given trigger.
+ */
+export function buildWatcherSchemaForActions(actions: string[]): z.ZodType {
+  const schemas: z.ZodType[] = [];
+  const seen = new Set<z.ZodType>();
+
+  for (const action of actions) {
+    const actionSchemas = WATCHER_ACTION_SCHEMAS[action as WatcherActionType];
+    if (actionSchemas) {
+      for (const schema of actionSchemas) {
+        if (!seen.has(schema)) {
+          seen.add(schema);
+          schemas.push(schema);
+        }
+      }
+    }
+  }
+
+  if (schemas.length === 0) {
+    return WatcherActionOutputSchema;
+  }
+  if (schemas.length === 1) {
+    return schemas[0];
+  }
+  return z.union(schemas as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+}
+
+/**
+ * Get JSON schema for watcher output constrained to specific actions.
+ * Returns a StructuredOutputSchema ready to pass to the LLM.
+ */
+export function getWatcherSchemaJsonForActions(
+  actions: string[]
+): { name: string; schema: Record<string, unknown>; strict: boolean; schemaId: string } {
+  const zodSchema = buildWatcherSchemaForActions(actions);
+  return {
+    name: `watcher_action_${actions.join('_')}`,
+    schema: zodToJsonSchema(zodSchema),
+    strict: true,
+    schemaId: 'watcher_action',
+  };
+}
+
+/**
+ * Planner output schema (planning agent). Allows handoff.
+ */
+export const PlannerOutputSchema = z.union([
+  DoneOutputSchema,
+  AwaitingUserInputOutputSchema,
+  ContinueOutputSchema,
+  HandoffOutputSchema,
+]);
 
 // ============================================
 // SCHEMA REGISTRY

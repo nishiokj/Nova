@@ -7,7 +7,7 @@
 import type { AuditLogEntry, TerminationReason } from 'protocol';
 import { assertNever, validatePatch, type StatePatch } from 'protocol';
 import type { ContextWindow } from 'context';
-import { createWorkItem, type WorkItem } from 'work';
+import { createWorkItem, cloneWorkItemWithDependencies, type WorkItem } from 'work';
 
 // ============================================
 // APPLY RESULT
@@ -81,15 +81,47 @@ export function applyPatches(
 function applyPatch(state: HookState, patch: StatePatch): void {
   switch (patch.op) {
     case 'enqueue_work': {
-      const newItems = patch.items.map(spec => createWorkItem({
-        goal: spec.goal,
-        objective: spec.objective,
-        agent: spec.agent,
-        domain: spec.domain,
-        dependencies: spec.dependencies,
-        targetPaths: spec.targetPaths,
-        bounds: spec.bounds,
-      }));
+      const idMap = new Map<string, string>();
+      const newItems: WorkItem[] = [];
+
+      for (const spec of patch.items) {
+        const item = createWorkItem({
+          goal: spec.goal,
+          objective: spec.objective,
+          agent: spec.agent,
+          domain: spec.domain,
+          dependencies: [],
+          targetPaths: spec.targetPaths,
+          bounds: spec.bounds,
+        });
+
+        if (spec.id) {
+          idMap.set(spec.id, item.workId);
+        }
+
+        newItems.push(item);
+      }
+
+      const isKnownWorkId = (workId: string) => state.workQueue.some(w => w.workId === workId);
+
+      for (let i = 0; i < newItems.length; i++) {
+        const originalDeps = patch.items[i].dependencies ?? [];
+        if (originalDeps.length === 0) continue;
+
+        const resolved: string[] = [];
+        for (const dep of originalDeps) {
+          const mapped = idMap.get(dep);
+          if (mapped) {
+            resolved.push(mapped);
+          } else if (isKnownWorkId(dep)) {
+            resolved.push(dep);
+          }
+        }
+
+        if (resolved.length > 0) {
+          newItems[i] = cloneWorkItemWithDependencies(newItems[i], resolved);
+        }
+      }
       if (patch.position === 'front') {
         state.workQueue.unshift(...newItems);
       } else {

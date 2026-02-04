@@ -28,6 +28,7 @@ import type {
   EjectResult,
   CompactOptions,
   CompactResult,
+  LLMItem,
 } from 'types';
 
 // =========================================================================
@@ -411,12 +412,13 @@ export class ContextWindow {
   /**
    * Add a message to the context window.
    */
-  addMessage(role: MessageItem['role'], content: string | ContentBlock[]): void {
+  addMessage(role: MessageItem['role'], content: string | ContentBlock[], workItemId?: string): void {
     this._items.push({
       type: 'message',
       role,
       content,
       timestamp: Date.now(),
+      workItemId,
     });
     this._version++;
     this._metrics = {
@@ -428,13 +430,14 @@ export class ContextWindow {
   /**
    * Add a function call (tool invocation by model).
    */
-  addFunctionCall(callId: string, name: string, args: Record<string, unknown>): void {
+  addFunctionCall(callId: string, name: string, args: Record<string, unknown>, workItemId?: string): void {
     this._items.push({
       type: 'function_call',
       callId,
       name,
       arguments: args,
       timestamp: Date.now(),
+      workItemId,
     });
     this._version++;
   }
@@ -446,7 +449,8 @@ export class ContextWindow {
     callId: string,
     output: string,
     isError?: boolean,
-    durationMs?: number
+    durationMs?: number,
+    workItemId?: string
   ): void {
     this._items.push({
       type: 'function_call_output',
@@ -455,6 +459,7 @@ export class ContextWindow {
       isError,
       durationMs,
       timestamp: Date.now(),
+      workItemId,
     });
     this._version++;
   }
@@ -462,11 +467,12 @@ export class ContextWindow {
   /**
    * Add reasoning content (chain of thought).
    */
-  addReasoning(content: string): void {
+  addReasoning(content: string, workItemId?: string): void {
     this._items.push({
       type: 'reasoning',
       content,
       timestamp: Date.now(),
+      workItemId,
     });
     this._version++;
   }
@@ -474,7 +480,7 @@ export class ContextWindow {
   /**
    * Add file content to context. Returns the generated ID.
    */
-  addFileContent(path: string, content: string, language?: string): string {
+  addFileContent(path: string, content: string, language?: string, workItemId?: string): string {
     const id = `fc_${this.sessionKey.slice(0, 4)}_${++this._fileContentCounter}`;
     this._items.push({
       type: 'file_content',
@@ -483,6 +489,7 @@ export class ContextWindow {
       content,
       language,
       timestamp: Date.now(),
+      workItemId,
     });
     this._readFiles.add(path);
     this._version++;
@@ -494,13 +501,17 @@ export class ContextWindow {
   /**
    * Add a semantic artifact to context. Returns the generated ID.
    */
-  addArtifact(artifact: Omit<import('types').ArtifactItem, 'type' | 'id' | 'timestamp'>): string {
+  addArtifact(
+    artifact: Omit<import('types').ArtifactItem, 'type' | 'id' | 'timestamp'>,
+    workItemId?: string
+  ): string {
     const id = `art_${this.sessionKey.slice(0, 4)}_${++this._artifactCounter}`;
     this._items.push({
       type: 'artifact',
       id,
       ...artifact,
       timestamp: Date.now(),
+      workItemId: artifact.workItemId ?? workItemId,
     });
     this._version++;
     return id;
@@ -509,8 +520,11 @@ export class ContextWindow {
   /**
    * Add multiple artifacts at once.
    */
-  addArtifacts(artifacts: Array<Omit<import('types').ArtifactItem, 'type' | 'id' | 'timestamp'>>): string[] {
-    return artifacts.map(a => this.addArtifact(a));
+  addArtifacts(
+    artifacts: Array<Omit<import('types').ArtifactItem, 'type' | 'id' | 'timestamp'>>,
+    workItemId?: string
+  ): string[] {
+    return artifacts.map(a => this.addArtifact(a, workItemId));
   }
 
   /**
@@ -1005,6 +1019,21 @@ export class ContextWindow {
   }
 
   /**
+   * Rebuild readFiles from current file_content items.
+   * Useful when creating filtered context views.
+   */
+  rebuildReadFilesFromItems(): void {
+    const next = new Set<string>();
+    for (const item of this._items) {
+      if (item.type === 'file_content') {
+        next.add(item.path);
+      }
+    }
+    this._readFiles = next;
+    this._version++;
+  }
+
+  /**
    * Check if a file has been read in this session.
    */
   hasReadFile(path: string): boolean {
@@ -1064,8 +1093,8 @@ export class ContextWindow {
    * Handles provider-specific conversions.
    * Batches artifacts into a single message to reduce token overhead.
    */
-  getItemsForLLM(): Array<Record<string, unknown>> {
-    const result: Array<Record<string, unknown>> = [];
+  getItemsForLLM(): LLMItem[] {
+    const result: LLMItem[] = [];
     const artifactItems: ArtifactItem[] = [];
 
     for (const item of this._items) {

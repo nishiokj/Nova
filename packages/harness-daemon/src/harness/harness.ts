@@ -27,15 +27,17 @@ import {
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
-import { createAdapter, RateLimitError, CircuitOpenError, RetriesExhaustedError, type ProviderKeyService } from 'llm';
+import { createAdapter, type ProviderKeyService } from 'llm';
+import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind } from 'types';
+import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import { ContextWindow } from 'context';
-import { profiler, buildLLMRequestConfig, type WatcherActionOutput } from 'shared';
+import { profiler, buildLLMRequestConfig, parseAndValidateOutput, getWatcherSchemaJsonForActions, type WatcherActionOutput } from 'shared';
 import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
+import { isGitCommitCommand, extractCommitSha } from '../subscribers/trace_subscriber.js';
 import path from 'path';
 import fs from 'fs';
 import {
@@ -62,6 +64,7 @@ import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
 import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
+import { createSessionState, touchSession, type SessionState } from './session_state.js';
 import {
   DecisionEngine,
   InMemoryDecisionDatabase,
@@ -75,12 +78,12 @@ import {
   createWorkLog,
   getWorkItemLog,
   createWorkItemLog,
+  writeSemanticFileAsync,
+  type WatcherTrigger,
   type DecisionDatabase,
   type WorkItemLog,
-  type DecisionMemory,
   type WatcherAction,
-  type DecisionLog,
-  type WorkLog,
+  type SemanticOutput,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
 import { createHookRegistry, registerHook, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
@@ -167,7 +170,7 @@ function gatherEnvironmentContext(workingDir: string): EnvironmentContext {
 
 function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentContext): AgentRegistry {
   // Registry stores ONLY agent capabilities (tools, budget, schema, llmParams).
-  // LLM provider/model comes EXCLUSIVELY from SessionStore via getModelSelection.
+  // Model selection is NOT sourced from config; it comes EXCLUSIVELY from SessionStore via getModelSelection.
   const agentConfigs: AgentConfig[] = Object.entries(config.agents).map(([agentType, resolved]) => {
     const llmParams = {
       maxTokens: resolved.llm.maxTokens,
@@ -208,7 +211,7 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
  */
 class AsyncEventQueue {
   private queue: BridgeEvent[] = [];
-  private resolvers: Array<(value: IteratorResult<BridgeEvent>) => void> = [];
+  private resolvers: Array<(value: IteratorResult<BridgeEvent, void>) => void> = [];
   private done = false;
 
   push(event: BridgeEvent): void {
@@ -225,18 +228,18 @@ class AsyncEventQueue {
   finish(): void {
     this.done = true;
     for (const resolve of this.resolvers) {
-      resolve({ value: undefined as unknown as BridgeEvent, done: true });
+      resolve({ value: undefined, done: true });
     }
     this.resolvers = [];
   }
 
-  async next(): Promise<IteratorResult<BridgeEvent>> {
+  async next(): Promise<IteratorResult<BridgeEvent, void>> {
     if (this.queue.length > 0) {
       return { value: this.queue.shift()!, done: false };
     }
 
     if (this.done) {
-      return { value: undefined as unknown as BridgeEvent, done: true };
+      return { value: undefined, done: true };
     }
 
     return new Promise((resolve) => {
@@ -312,7 +315,13 @@ class HarnessProviderKeyService implements ProviderKeyService {
 export class AgentHarness {
   private config: FullHarnessConfig;
   private toolRegistry: ToolRegistry;
-  private sessionStores = new Map<string, { store: SessionStore; lastAccessMs: number }>();
+
+  // -------------------------------------------------------------------------
+  // Per-session state (see SessionState type in session_state.ts for consolidated version)
+  // -------------------------------------------------------------------------
+  private sessions = new Map<string, SessionState>();
+  // -------------------------------------------------------------------------
+
   private readonly sessionTtlMs: number;
   private readonly pauseTimeoutMs: number;
   private logger: HarnessLogger;
@@ -327,19 +336,9 @@ export class AgentHarness {
   private hookExecutor: HookExecutor | null = null;
   private providerKeyService: HarnessProviderKeyService;
   private orchestratorRunner: OrchestratorRunner;
-  private decisionDatabases = new Map<string, DecisionDatabase>();
-  private watcherEngines = new Map<string, DecisionEngine>();
-  private sessionWorkLogs = new Map<string, WorkLog>();
-  /** Track workitem logs by composite key: `${sessionKey}:${workId}` */
-  private workItemLogs = new Map<string, WorkItemLog>();
-  /** Track which workitems have been created/logged per session */
-  private workItemCreated = new Set<string>();
   private entityGraph: EntityGraph | null = null;
   private memoryInjector: MemoryInjector | null = null;
-  /** Session-scoped watcher contexts - persists across watcher invocations */
-  private watcherContexts = new Map<string, ContextWindow>();
-  /** Cache of created watcher stop hooks by session */
-  private watcherHookRegistries = new Map<string, import('orchestrator').HookRegistry>();
+  private asyncModeIssues: string[] = [];
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
@@ -350,6 +349,7 @@ export class AgentHarness {
     // Gather environment context once at startup
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
     this.agentRegistry = buildAgentRegistry(config, envContext);
+    this.validateAsyncAgentSchemas();
 
     // Create provider key service for runtime API key resolution
     // This allows keys to be added/changed at runtime without restart
@@ -584,37 +584,20 @@ export class AgentHarness {
    * Persists context and marks session inactive before closing.
    */
   closeSession(sessionKey: string): void {
-    const entry = this.sessionStores.get(sessionKey);
-    if (entry) {
+    const state = this.sessions.get(sessionKey);
+    if (state) {
       // Persist context before closing
-      entry.store.persistContext();
-
-      // Mark session as inactive in GraphD
-      if (this.isGraphDReady()) {
-        try {
-          this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
-        } catch (error) {
-          this.logger.warning('Failed to mark session inactive', { sessionKey, error: String(error) });
-        }
-      }
-
-      entry.store.close();
-      this.sessionStores.delete(sessionKey);
+      state.store.persistContext();
+      state.store.close();
+      this.sessions.delete(sessionKey);
     }
-    this.decisionDatabases.delete(sessionKey);
-    this.watcherEngines.delete(sessionKey);
-    this.sessionWorkLogs.delete(sessionKey);
-    this.watcherContexts.delete(sessionKey);
-    this.watcherHookRegistries.delete(sessionKey);
-    // Clean up workitem logs for this session
-    for (const key of this.workItemLogs.keys()) {
-      if (key.startsWith(`${sessionKey}:`)) {
-        this.workItemLogs.delete(key);
-      }
-    }
-    for (const key of this.workItemCreated.values()) {
-      if (key.startsWith(`${sessionKey}:`)) {
-        this.workItemCreated.delete(key);
+
+    // Always mark session as inactive in GraphD, even if in-memory state was already evicted
+    if (this.isGraphDReady()) {
+      try {
+        this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
+      } catch (error) {
+        this.logger.warning('Failed to mark session inactive', { sessionKey, error: String(error) });
       }
     }
   }
@@ -692,12 +675,15 @@ export class AgentHarness {
   /**
    * Get or create a SessionStore for the session.
    */
-  private getOrCreateSessionStore(sessionKey: string, dangerousMode = false, workingDir?: string): SessionStore {
-    const existing = this.sessionStores.get(sessionKey);
-    const now = Date.now();
+  private getSessionState(sessionKey: string): SessionState | null {
+    return this.sessions.get(sessionKey) ?? null;
+  }
+
+  private getOrCreateSessionState(sessionKey: string, dangerousMode = false, workingDir?: string): SessionState {
+    const existing = this.sessions.get(sessionKey);
     if (existing) {
-      existing.lastAccessMs = now;
-      return existing.store;
+      touchSession(existing);
+      return existing;
     }
 
     const store = new SessionStore({
@@ -709,8 +695,14 @@ export class AgentHarness {
       dangerousMode,
       workingDir: workingDir ?? this.config.tools.workingDir,
     });
-    this.sessionStores.set(sessionKey, { store, lastAccessMs: now });
-    return store;
+
+    const state = createSessionState(store);
+    this.sessions.set(sessionKey, state);
+    return state;
+  }
+
+  private getOrCreateSessionStore(sessionKey: string, dangerousMode = false, workingDir?: string): SessionStore {
+    return this.getOrCreateSessionState(sessionKey, dangerousMode, workingDir).store;
   }
 
   /**
@@ -778,13 +770,18 @@ export class AgentHarness {
   }
 
   getSessionSelectedModel(sessionKey: string, agentType: string): ModelSelection | null {
-    const entry = this.sessionStores.get(sessionKey);
-    return entry?.store.getModelSelection(agentType) ?? null;
+    const state = this.sessions.get(sessionKey);
+    return state?.store.getModelSelection(agentType) ?? null;
   }
 
   getAllSessionSelectedModels(sessionKey: string): Map<string, ModelSelection> {
-    const entry = this.sessionStores.get(sessionKey);
-    return entry?.store.getAllModelSelections() ?? new Map();
+    const state = this.sessions.get(sessionKey);
+    return state?.store.getAllModelSelections() ?? new Map();
+  }
+
+  isSessionPaused(sessionKey: string): boolean {
+    const state = this.sessions.get(sessionKey);
+    return !!state?.store.getPausedState();
   }
 
   setSessionAsyncModeEnabled(sessionKey: string, enabled: boolean): void {
@@ -793,8 +790,12 @@ export class AgentHarness {
   }
 
   isSessionAsyncModeEnabled(sessionKey: string): boolean {
-    const entry = this.sessionStores.get(sessionKey);
-    return entry?.store.isAsyncModeEnabled() ?? false;
+    const state = this.sessions.get(sessionKey);
+    return state?.store.isAsyncModeEnabled() ?? false;
+  }
+
+  getAsyncModeStatus(): { ok: boolean; issues: string[] } {
+    return { ok: this.asyncModeIssues.length === 0, issues: [...this.asyncModeIssues] };
   }
 
   // --- Session-level exclusive operation management (async runs, ralph loops) ---
@@ -811,24 +812,24 @@ export class AgentHarness {
    * Get the current async run info for a session.
    */
   getSessionAsyncRun(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null {
-    const entry = this.sessionStores.get(sessionKey);
-    return entry?.store.getAsyncRun() ?? null;
+    const state = this.sessions.get(sessionKey);
+    return state?.store.getAsyncRun() ?? null;
   }
 
   /**
    * Mark the async run as cancelled for a session.
    */
   cancelSessionAsyncRun(sessionKey: string): void {
-    const entry = this.sessionStores.get(sessionKey);
-    entry?.store.cancelAsyncRun();
+    const state = this.sessions.get(sessionKey);
+    state?.store.cancelAsyncRun();
   }
 
   /**
    * Clear the async run state for a session.
    */
   clearSessionAsyncRun(sessionKey: string): void {
-    const entry = this.sessionStores.get(sessionKey);
-    entry?.store.clearAsyncRun();
+    const state = this.sessions.get(sessionKey);
+    state?.store.clearAsyncRun();
   }
 
   /**
@@ -843,40 +844,49 @@ export class AgentHarness {
    * Get the current Ralph Loop info for a session.
    */
   getSessionRalphLoop(sessionKey: string): { requestId: string; cancelled: boolean } | null {
-    const entry = this.sessionStores.get(sessionKey);
-    return entry?.store.getRalphLoop() ?? null;
+    const state = this.sessions.get(sessionKey);
+    return state?.store.getRalphLoop() ?? null;
   }
 
   /**
    * Mark the Ralph Loop as cancelled for a session.
    */
   cancelSessionRalphLoop(sessionKey: string): void {
-    const entry = this.sessionStores.get(sessionKey);
-    entry?.store.cancelRalphLoop();
+    const state = this.sessions.get(sessionKey);
+    state?.store.cancelRalphLoop();
   }
 
   /**
    * Clear the Ralph Loop state for a session.
    */
   clearSessionRalphLoop(sessionKey: string): void {
-    const entry = this.sessionStores.get(sessionKey);
-    entry?.store.clearRalphLoop();
+    const state = this.sessions.get(sessionKey);
+    state?.store.clearRalphLoop();
   }
 
   private pruneSessionStores(reason: string): void {
     if (this.sessionTtlMs <= 0) return;
     const now = Date.now();
     const cutoff = now - this.sessionTtlMs;
-    for (const [sessionKey, entry] of this.sessionStores.entries()) {
-      const pausedState = entry.store.getPausedState();
+    const markInactive = (sessionKey: string) => {
+      if (!this.isGraphDReady()) return;
+      try {
+        this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
+      } catch (error) {
+        this.logger.warning('GraphD session status update failed', { error: String(error), sessionKey });
+      }
+    };
+    for (const [sessionKey, state] of this.sessions.entries()) {
+      const pausedState = state.store.getPausedState();
       if (pausedState) {
         // Paused sessions: check if paused too long
         const pausedDuration = now - pausedState.pausedAt;
         if (pausedDuration < this.pauseTimeoutMs) continue; // Still within timeout, skip
         // Paused too long - persist and evict
-        entry.store.persistContext();
-        entry.store.close();
-        this.sessionStores.delete(sessionKey);
+        state.store.persistContext();
+        state.store.close();
+        markInactive(sessionKey);
+        this.sessions.delete(sessionKey);
         this.logger.debug('Evicted paused session (timeout)', {
           sessionKey,
           reason,
@@ -884,15 +894,49 @@ export class AgentHarness {
         });
       } else {
         // Active sessions: check TTL as before
-        if (entry.lastAccessMs > cutoff) continue;
-        entry.store.close();
-        this.sessionStores.delete(sessionKey);
+        if (state.lastAccessMs > cutoff) continue;
+        state.store.close();
+        markInactive(sessionKey);
+        this.sessions.delete(sessionKey);
         this.logger.debug('Evicted session store', {
           sessionKey,
           reason,
-          idleMs: now - entry.lastAccessMs,
+          idleMs: now - state.lastAccessMs,
         });
       }
+    }
+  }
+
+  private normalizeSchemaId(schema: { schemaId?: string; name?: string } | undefined): string | null {
+    const raw = schema?.schemaId ?? schema?.name;
+    if (!raw || typeof raw !== 'string') return null;
+    return raw.trim().toLowerCase();
+  }
+
+  private validateAsyncAgentSchemas(): void {
+    const issues: string[] = [];
+    const check = (agentType: string, expectedSchemaId: string) => {
+      if (!this.agentRegistry.has(agentType)) {
+        issues.push(`Missing required agent config: ${agentType}`);
+        return;
+      }
+      const config = this.agentRegistry.getConfig(agentType);
+      const schemaId = this.normalizeSchemaId(config.outputSchema);
+      if (!schemaId) {
+        issues.push(`Agent '${agentType}' missing output schema (expected '${expectedSchemaId}')`);
+        return;
+      }
+      if (schemaId !== expectedSchemaId) {
+        issues.push(`Agent '${agentType}' output schema mismatch: expected '${expectedSchemaId}', got '${schemaId}'`);
+      }
+    };
+
+    check('watcher', 'watcher_action');
+    check('planner', 'planner_output');
+
+    this.asyncModeIssues = issues;
+    if (issues.length > 0) {
+      this.logger.error('Async mode agent schema validation failed', { issues });
     }
   }
 
@@ -1110,11 +1154,17 @@ export class AgentHarness {
 
         if (this.isGraphDReady()) {
           try {
+            const selection = store.getModelSelection(effectiveAgentType);
+            if (!selection) {
+              this.logger.warning('No model selection available for session metadata', {
+                sessionKey,
+                agentType: effectiveAgentType,
+              });
+            }
             this.graphd!.sessionUpdateMetadata(sessionKey, {
               user_id: 'local-user',
               tier: effectiveAgentType,
-              model: agentConfig.llm.model,
-              provider: agentConfig.llm.provider,
+              ...(selection ? { model: selection.model, provider: selection.provider } : {}),
             });
           } catch (error) {
             this.logger.warning('GraphD session metadata update failed', { error: String(error) });
@@ -1184,118 +1234,36 @@ export class AgentHarness {
 
         return result;
       } catch (error) {
-        // Handle RateLimitError specially - persist context and notify user gracefully
-        if (RateLimitError.isRateLimitError(error)) {
-          const rateLimitInfo = error.info;
-          this.logger.warning('Rate limit hit during agent run', {
-            requestId,
-            provider: error.provider,
-            model: error.model,
-            type: rateLimitInfo.type,
-            retryAfterMs: rateLimitInfo.retryAfterMs,
-            limitType: rateLimitInfo.limitType,
-          });
+        // Handle recoverable errors (rate limit, circuit open, retries exhausted)
+        const recoverable = classifyRecoverableError(error, requestId);
+        if (recoverable) {
+          this.logger[recoverable.logLevel]('Recoverable error during agent run', recoverable.logMeta);
 
-          // Emit rate_limit event for monitoring/dashboards
-          emit(createEvent('rate_limit', {
-            provider: error.provider,
-            model: error.model,
-            type: rateLimitInfo.type,
-            retryAfterMs: rateLimitInfo.retryAfterMs,
-            limitType: rateLimitInfo.limitType,
-            message: rateLimitInfo.message,
-            contextPreserved: true,
-          } as RateLimitData));
-
-          // Persist context so user doesn't lose work
-          store.persistContext();
-
-          // Create a user-friendly error message based on rate limit type
-          let userMessage: string;
-          if (rateLimitInfo.type === 'billing') {
-            userMessage = `⚠️ Billing limit reached for ${error.provider}. Please check your account billing status. Your conversation has been saved.`;
-          } else if (rateLimitInfo.type === 'quota') {
-            userMessage = `⚠️ API quota exceeded for ${error.provider} (${rateLimitInfo.limitType ?? 'requests'}). This may be a daily or monthly limit. Your conversation has been saved.`;
-          } else {
-            const waitTime = rateLimitInfo.retryAfterMs
-              ? ` Please wait ${Math.ceil(rateLimitInfo.retryAfterMs / 1000)} seconds and try again.`
-              : ' Please wait a moment and try again.';
-            userMessage = `⚠️ Rate limit reached for ${error.provider}.${waitTime} Your conversation has been saved.`;
+          // Emit rate_limit event for monitoring/dashboards (if applicable)
+          if (recoverable.rateLimitData) {
+            emit(createEvent('rate_limit', recoverable.rateLimitData));
           }
 
-          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
-          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
-
-          return {
-            requestId,
-            sessionKey,
-            success: false,
-            finalText: userMessage,
-            errorMessage: error.message,
-            paused: false,
-            toolsUsed: [],
-            durationMs: 0,
-          };
-        }
-
-        // Handle CircuitOpenError - circuit breaker tripped, need to wait before retrying
-        if (error instanceof CircuitOpenError) {
-          this.logger.warning('Circuit breaker open', {
-            requestId,
-            message: error.message,
-          });
-
           // Persist context so user doesn't lose work
           store.persistContext();
 
-          const userMessage = `⚠️ Service temporarily unavailable (circuit breaker open). Please wait a moment and try again. Your conversation has been saved.`;
-
-          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
+          eventQueue.push(createErrorEvent(recoverable.userMessage, false)); // recoverable, not fatal
           eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
 
           return {
             requestId,
             sessionKey,
             success: false,
-            finalText: userMessage,
-            errorMessage: error.message,
+            finalText: recoverable.userMessage,
+            errorMessage: getErrorMessage(error),
             paused: false,
             toolsUsed: [],
             durationMs: 0,
           };
         }
 
-        // Handle RetriesExhaustedError - all retry attempts failed
-        if (error instanceof RetriesExhaustedError) {
-          const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause ?? '');
-          this.logger.warning('All retries exhausted', {
-            requestId,
-            attempts: error.attempts,
-            cause: causeMessage,
-          });
-
-          // Persist context so user doesn't lose work
-          store.persistContext();
-
-          const userMessage = `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`;
-
-          eventQueue.push(createErrorEvent(userMessage, false)); // recoverable, not fatal
-          eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
-
-          return {
-            requestId,
-            sessionKey,
-            success: false,
-            finalText: userMessage,
-            errorMessage: error.message,
-            paused: false,
-            toolsUsed: [],
-            durationMs: 0,
-          };
-        }
-
-        // Generic error handling for non-rate-limit errors
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        // Generic error handling for non-recoverable errors
+        const errorMessage = getErrorMessage(error);
         this.logger.error('Agent run failed', { error: errorMessage, requestId });
 
         emit(createEvent('goal_not_achieved', {
@@ -1405,6 +1373,27 @@ export class AgentHarness {
     return tools.filter(tool => !writeTools.has(tool));
   }
 
+  private isToolResult(value: unknown): value is ToolResult {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.toolName !== 'string') return false;
+    if (typeof record.status !== 'string') return false;
+    if (typeof record.output !== 'string') return false;
+    if (typeof record.durationMs !== 'number') return false;
+    if (typeof record.isSuccess !== 'boolean') return false;
+    if (record.error !== undefined && typeof record.error !== 'string') return false;
+    if (record.metadata !== undefined && (typeof record.metadata !== 'object' || record.metadata === null)) return false;
+
+    const validStatuses = new Set(['success', 'error', 'timeout', 'cancelled']);
+    if (!validStatuses.has(record.status)) return false;
+    if (record.status === 'success' && record.isSuccess !== true) return false;
+    if (record.status !== 'success' && record.isSuccess !== false) return false;
+
+    return true;
+  }
+
   /**
    * Create AgentHooks that handle permission checking and delegate to HookExecutor.
    */
@@ -1413,6 +1402,7 @@ export class AgentHarness {
     const workingDir = this.config.tools.workingDir;
     const logger = this.logger;
     const egHooks = this.entityGraph?.getHooks() ?? null;
+    const PERMISSION_REQUEST_TIMEOUT_MS = 60_000;
 
     // Get the session store to use its per-session permission checker
     const sessionStore = this.getOrCreateSessionStore(sessionKey);
@@ -1459,9 +1449,29 @@ export class AgentHarness {
               }
 
               // Wait for user response via promise
-              const response = await new Promise<PermissionResponse>((resolve) => {
-                permissionChecker.registerPendingRequest(request.requestId, request, resolve);
-              });
+              let timeoutId: ReturnType<typeof setTimeout> | null = null;
+              const response = await Promise.race<PermissionResponse | null>([
+                new Promise<PermissionResponse>((resolve) => {
+                  permissionChecker.registerPendingRequest(request.requestId, request, resolve);
+                }),
+                new Promise<PermissionResponse | null>((resolve) => {
+                  timeoutId = setTimeout(() => {
+                    resolve(null);
+                  }, PERMISSION_REQUEST_TIMEOUT_MS);
+                }),
+              ]);
+
+              if (timeoutId) {
+                clearTimeout(timeoutId);
+              }
+
+              if (!response) {
+                permissionChecker.cancelPendingRequest(request.requestId);
+                return {
+                  action: 'block',
+                  message: 'Permission request timed out',
+                };
+              }
 
               if (response.decision === 'deny') {
                 logger.info('User denied permission', { tool, target });
@@ -1522,6 +1532,37 @@ export class AgentHarness {
           }
         }
 
+        // Detect git commits from Bash tool and emit git_commit event
+        if (toolName === 'Bash' && toolResult.status === 'success') {
+          const command = args.command as string | undefined;
+          if (command && isGitCommitCommand(command)) {
+            const sha = extractCommitSha(toolResult.output);
+            if (sha) {
+              // Emit git_commit event via EventBus
+              const gitCommitData: GitCommitData = {
+                sha,
+                command,
+              };
+              this.eventBus.publish(createEvent('git_commit', gitCommitData, undefined, requestId, sessionKey));
+
+              // Execute PostGitCommit hooks if executor available
+              if (executor) {
+                const gitContext: SkillHookContext = {
+                  event: 'PostGitCommit',
+                  toolName: 'Bash',
+                  toolParams: args,
+                  toolResult,
+                  sessionKey,
+                  requestId,
+                  workingDir,
+                  commitSha: sha,
+                };
+                await executor.execute('PostGitCommit', gitContext);
+              }
+            }
+          }
+        }
+
         if (!executor) {
           return egModified
             ? { action: 'modify', modifiedResult: toolResult }
@@ -1542,7 +1583,13 @@ export class AgentHarness {
         // If executor modified the result, use its version.
         // Otherwise, propagate entity-graph context if present.
         if (result.action === 'modify' && result.modified) {
-          return { action: 'modify', message: result.message, modifiedResult: result.modified as unknown as ToolResult };
+          if (this.isToolResult(result.modified)) {
+            return { action: 'modify', message: result.message, modifiedResult: result.modified };
+          }
+          logger.warning('PostToolUse hook returned invalid ToolResult, ignoring modification', {
+            toolName,
+            sessionKey,
+          });
         }
         if (egModified) {
           return { action: 'modify', modifiedResult: toolResult };
@@ -1576,9 +1623,9 @@ export class AgentHarness {
    * Each session has its own permission state including dangerous mode.
    */
   getSessionPermissionChecker(sessionKey: string): PermissionChecker | null {
-    const entry = this.sessionStores.get(sessionKey);
-    if (entry) {
-      return entry.store.getPermissionChecker();
+    const state = this.sessions.get(sessionKey);
+    if (state) {
+      return state.store.getPermissionChecker();
     }
     return null;
   }
@@ -1626,6 +1673,7 @@ export class AgentHarness {
 
     // Build orchestrator runtime with optional hooks
     const sessionKey = context.sessionKey;
+    const sessionState = this.getSessionState(sessionKey);
     let lastWatcherIteration = 0;
     const minWatcherGap = DEFAULT_ORCHESTRATOR_CONFIG.minWatcherIterationGap;
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
@@ -1636,7 +1684,7 @@ export class AgentHarness {
     let effectiveHookRegistry = hookRegistry;
     if (asyncEnabledForRun && !hookRegistry) {
       // Check if we already have a cached hook registry for this session
-      const cachedRegistry = this.watcherHookRegistries.get(sessionKey);
+      const cachedRegistry = sessionState?.hookRegistry;
       if (cachedRegistry) {
         effectiveHookRegistry = cachedRegistry;
         this.logger.debug('Using cached watcher hook registry', { sessionKey });
@@ -1651,7 +1699,9 @@ export class AgentHarness {
           this.config.tools.workingDir  // Watcher artifacts at project root
         );
         effectiveHookRegistry = watcherRegistry;
-        this.watcherHookRegistries.set(sessionKey, watcherRegistry);
+        if (sessionState) {
+          sessionState.hookRegistry = watcherRegistry;
+        }
       }
     }
 
@@ -1803,8 +1853,8 @@ export class AgentHarness {
 
     if (result.success) {
       // Pre-populate in-memory cache with cloned context
-      const sourceEntry = this.sessionStores.get(sourceSessionKey);
-      const sourceSnapshot = sourceEntry?.store.getCachedContextSnapshot() ?? null;
+      const sourceState = this.sessions.get(sourceSessionKey);
+      const sourceSnapshot = sourceState?.store.getCachedContextSnapshot() ?? null;
       if (sourceSnapshot) {
         const clonedSnapshot = { ...sourceSnapshot, sessionKey: targetSessionKey };
         const targetStore = this.getOrCreateSessionStore(targetSessionKey);
@@ -1830,12 +1880,12 @@ export class AgentHarness {
    * This triggers immediate compaction regardless of current context usage.
    */
   compactContext(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string } {
-    const entry = this.sessionStores.get(sessionKey);
-    if (!entry || !entry.store.getCachedContextSnapshot()) {
+    const state = this.sessions.get(sessionKey);
+    if (!state || !state.store.getCachedContextSnapshot()) {
       return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: 'No context found for session' };
     }
 
-    const context = entry.store.getContext();
+    const context = state.store.getContext();
 
     try {
       const result = context.compact({
@@ -1851,7 +1901,7 @@ export class AgentHarness {
       });
 
       // Persist the compacted context
-      entry.store.persistContext();
+      state.store.persistContext();
 
       return {
         success: true,
@@ -1873,23 +1923,27 @@ export class AgentHarness {
    * Run the watcher agent with a trigger-specific objective.
    * Creates a mini Agent instance, executes it, and parses the structured WatcherAction output.
    */
-  private async runWatcherAgent(objective: string, sessionKey: string, trigger?: string): Promise<WatcherAction> {
+  private async runWatcherAgent(
+    objective: string,
+    sessionKey: string,
+    trigger?: WatcherTrigger,
+    signal?: AbortSignal
+  ): Promise<WatcherAction> {
     // Get the watcher agent config from registry
     if (!this.agentRegistry.has('watcher')) {
-      this.logger.warning('Watcher agent type not registered, defaulting to continue');
-      return { watcherAction: 'continue', reason: 'Watcher agent not configured' };
+      this.logger.warning('Watcher agent type not registered, defaulting to allow');
+      return { watcherAction: 'allow', reason: 'Watcher agent not configured' };
     }
 
     const agentConfig = this.agentRegistry.getConfig('watcher');
 
     // Get model selection for the watcher agent type
-    const store = this.sessionStores.get(sessionKey)?.store;
-    const modelSelection = store?.getModelSelection('watcher')
-      ?? store?.getModelSelection('standard');
+    const store = this.sessions.get(sessionKey)?.store;
+    const modelSelection = store?.getModelSelection('watcher');
 
     if (!modelSelection) {
       this.logger.warning('No model selection available for watcher agent');
-      return { watcherAction: 'continue', reason: 'No model selection for watcher' };
+      return { watcherAction: 'allow', reason: 'No model selection for watcher' };
     }
 
     const llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
@@ -1904,10 +1958,18 @@ export class AgentHarness {
     // Import getValidActions to build trigger-specific schema
     const { getValidActions } = await import('decision-watcher');
 
-    // Provide trigger-specific guidance (schema stays canonical)
-    const validActions = trigger ? getValidActions(trigger as any) : [];
-    const triggerInfo = trigger ? `\n\nValid actions for this trigger: ${validActions.join(', ')}` : '';
-    const watcherConfig = agentConfig;
+    // Build trigger-specific schema that ONLY includes valid actions for this trigger
+    // This prevents the LLM from seeing/using actions that would be rejected
+    const validActions = trigger ? getValidActions(trigger) : [];
+    const triggerSpecificSchema = validActions.length > 0
+      ? getWatcherSchemaJsonForActions(validActions)
+      : agentConfig.outputSchema;
+
+    // Override config with trigger-specific schema
+    const watcherConfig = {
+      ...agentConfig,
+      outputSchema: triggerSpecificSchema,
+    };
 
     // Create watcher-specific emit callback so watcher appears in dashboard
     const watcherRequestId = `watcher-${trigger ?? 'unknown'}-${Date.now()}`;
@@ -1929,17 +1991,20 @@ export class AgentHarness {
 
     // Use session-scoped watcher context (persists across invocations)
     // This prevents re-reading the same files every time
-    let context = this.watcherContexts.get(sessionKey);
+    const sessionState = this.sessions.get(sessionKey);
+    let context = sessionState?.watcherContext;
     if (!context) {
       context = new ContextWindow(`watcher:${sessionKey}`, 200_000);
-      this.watcherContexts.set(sessionKey, context);
+      if (sessionState) {
+        sessionState.watcherContext = context;
+      }
       this.logger.debug('Created new watcher context', { sessionKey });
     }
     const workingDir = this.config.tools.workingDir;
 
     const workItem = createWorkItem({
       goal: 'watcher_evaluation',
-      objective: objective + triggerInfo,
+      objective,
       agent: 'watcher',
       bounds: {
         maxToolCalls: agentConfig.budget.maxToolCalls,
@@ -1949,10 +2014,29 @@ export class AgentHarness {
     });
 
     try {
-      const result = await agent.run({ globalContext: context, workItem, cwd: workingDir });
-      const structured = result.structuredOutput as WatcherActionOutput | undefined;
+      if (signal?.aborted) {
+        return { watcherAction: 'allow', reason: 'Watcher aborted' };
+      }
+      const result = await agent.run({ globalContext: context, workItem, cwd: workingDir, signal });
+      let structured = result.structuredOutput as WatcherActionOutput | undefined;
 
-      if (structured && structured.action === 'done' && structured.goalStateReached === true) {
+      if (!structured && result.response) {
+        const parsed = parseAndValidateOutput('watcher_action', result.response);
+        if (parsed) {
+          structured = parsed as WatcherActionOutput;
+        }
+      }
+
+      if (structured) {
+        if (structured.action !== 'done' || structured.goalStateReached !== true) {
+          this.logger.warning('Watcher structured output ended without done', {
+            sessionKey,
+            action: structured.action,
+            goalStateReached: structured.goalStateReached,
+            terminationReason: result.terminationReason,
+          });
+        }
+
         switch (structured.watcherAction) {
           case 'answer':
             return {
@@ -1978,24 +2062,28 @@ export class AgentHarness {
             return { watcherAction: 'create_work_item', reason: structured.reason, workItems: structured.workItems };
           case 'quality_gate':
             return { watcherAction: 'quality_gate', reason: structured.reason, qualityGate: structured.qualityGate };
+          case 'allow':
+            return { watcherAction: 'allow', reason: structured.reason };
           case 'continue':
-            return { watcherAction: 'continue', reason: structured.reason };
+            return { watcherAction: 'allow', reason: structured.reason };
         }
       }
 
       // Fallback: structured output missing or malformed
       this.logger.warning('Watcher agent returned invalid structured output', {
         sessionKey,
-        hasStructured: !!structured,
-        watcherAction: structured?.watcherAction,
+        hasStructured: !!result.structuredOutput,
+        watcherAction: (result.structuredOutput as WatcherActionOutput | undefined)?.watcherAction,
+        terminationReason: result.terminationReason,
+        error: result.error,
       });
-      return { watcherAction: 'continue', reason: result.response || 'Watcher produced no valid structured output' };
+      return { watcherAction: 'allow', reason: result.response || result.error || 'Watcher produced no valid structured output' };
     } catch (err) {
       this.logger.error('Watcher agent execution failed', {
         error: err instanceof Error ? err.message : String(err),
         sessionKey,
       });
-      return { watcherAction: 'continue', reason: `Watcher error: ${err instanceof Error ? err.message : String(err)}` };
+      return { watcherAction: 'allow', reason: `Watcher error: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 
@@ -2014,6 +2102,7 @@ export class AgentHarness {
     workingDir: string,
     watcherDir?: string
   ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
+    const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
     // Use watcherDir for watcher artifacts, fallback to workingDir for backwards compatibility
     const effectiveWatcherDir = watcherDir ?? workingDir;
 
@@ -2026,17 +2115,15 @@ export class AgentHarness {
 
     const decisionLog = await createDecisionLog(effectiveWatcherDir, sessionKey);
     const workLog = await createWorkLog(effectiveWatcherDir, sessionKey);
-    this.sessionWorkLogs.set(sessionKey, workLog);
+    sessionState.workLog = workLog;
 
-    // Write session_start entry
-    await workLog.append({
-      type: 'session_start',
-      timestamp: new Date().toISOString(),
-      goal,
-      mode: 'async',
-    }).catch(err => {
-      console.warn('[HARNESS] Work log write failed (session_start):', err instanceof Error ? err.message : String(err));
-    });
+    const safeAppend = async (label: string, op: () => Promise<void>): Promise<void> => {
+      try {
+        await op();
+      } catch (err) {
+        console.warn(`[HARNESS] ${label}:`, err instanceof Error ? err.message : String(err));
+      }
+    };
 
     // Helper to get or create workitem log for this session
     const getOrCreateWorkItemLog = async (
@@ -2045,8 +2132,7 @@ export class AgentHarness {
       objective?: string,
       meta?: { domain?: string; dependencies?: string[]; targetPaths?: string[] }
     ): Promise<WorkItemLog> => {
-      const key = `${sessionKey}:${workId}`;
-      let log = this.workItemLogs.get(key);
+      let log = sessionState.workItemLogs.get(workId);
       if (!log) {
         // Try to get existing log first (artifacts in watcherDir)
         log = await getWorkItemLog(effectiveWatcherDir, sessionKey, workId) ?? undefined;
@@ -2062,10 +2148,33 @@ export class AgentHarness {
             targetPaths: meta?.targetPaths,
           });
         }
-        this.workItemLogs.set(key, log);
+        sessionState.workItemLogs.set(workId, log);
       }
       return log;
     };
+
+    const getWorkItemLogSafe = async (
+      label: string,
+      workId: string,
+      agentType: string,
+      objective?: string,
+      meta?: { domain?: string; dependencies?: string[]; targetPaths?: string[] }
+    ): Promise<WorkItemLog | null> => {
+      try {
+        return await getOrCreateWorkItemLog(workId, agentType, objective, meta);
+      } catch (err) {
+        console.warn(`[HARNESS] WorkItem log creation failed (${label}):`, err instanceof Error ? err.message : String(err));
+        return null;
+      }
+    };
+
+    // Write session_start entry
+    await safeAppend('Work log write failed (session_start)', () => workLog.append({
+      type: 'session_start',
+      timestamp: new Date().toISOString(),
+      goal,
+      mode: 'async',
+    }));
 
     // Register auto-logging hooks for workitem activity
     // NOTE: Hooks are global, so we filter by sessionKey to only process this session's events
@@ -2073,10 +2182,10 @@ export class AgentHarness {
       if (event.type !== 'workitem_created') return;
       if (ctx.sessionKey !== sessionKey) return;
 
-      const key = `${sessionKey}:${ctx.workId}`;
-      if (this.workItemCreated.has(key)) return;
+      if (sessionState.workItemsCreated.has(ctx.workId)) return;
 
-      const itemLog = await getOrCreateWorkItemLog(
+      const itemLog = await getWorkItemLogSafe(
+        'workitem_created',
         ctx.workId,
         event.agent ?? ctx.agentType,
         event.objective ?? ctx.objective,
@@ -2085,14 +2194,11 @@ export class AgentHarness {
           dependencies: event.dependencies,
           targetPaths: event.targetPaths,
         }
-      ).catch(err => {
-        console.warn('[HARNESS] WorkItem log creation failed (workitem_created):', err instanceof Error ? err.message : String(err));
-        return null;
-      });
+      );
 
       if (itemLog) {
-        this.workItemCreated.add(key);
-        await workLog.append({
+        sessionState.workItemsCreated.add(ctx.workId);
+        await safeAppend('Work log write failed (workitem_created)', () => workLog.append({
           type: 'workitem_created',
           timestamp: new Date().toISOString(),
           workId: ctx.workId,
@@ -2100,9 +2206,20 @@ export class AgentHarness {
           agent: event.agent ?? ctx.agentType,
           domain: event.domain,
           dependencies: event.dependencies,
-        }).catch(err => {
-          console.warn('[HARNESS] Work log write failed (workitem_created):', err instanceof Error ? err.message : String(err));
-        });
+        }));
+
+        // Write semantic if attached (from watcher split/create)
+        if (event.semantic) {
+          writeSemanticFileAsync(
+            {
+              workingDir: effectiveWatcherDir,
+              sessionId: sessionKey,
+              workId: ctx.workId,
+            },
+            event.semantic as SemanticOutput,
+            new Date().toISOString()
+          );
+        }
       }
     });
     registerHook('turn_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
@@ -2110,35 +2227,27 @@ export class AgentHarness {
       if (ctx.sessionKey !== sessionKey) return; // Filter by session
 
       // Get or create workitem log - use objective from context
-      const itemLog = await getOrCreateWorkItemLog(ctx.workId, ctx.agentType, ctx.objective).catch(err => {
-        console.warn('[HARNESS] WorkItem log creation failed:', err instanceof Error ? err.message : String(err));
-        return null;
-      });
+      const itemLog = await getWorkItemLogSafe('turn_completed', ctx.workId, ctx.agentType, ctx.objective);
 
       if (itemLog) {
         // Mark as started on first turn
         if (event.iteration === 1) {
-          await itemLog.markStarted().catch(err => {
-            console.warn('[HARNESS] WorkItem log write failed (markStarted):', err instanceof Error ? err.message : String(err));
-          });
+          await safeAppend('WorkItem log write failed (markStarted)', () => itemLog.markStarted());
         }
         // Note: actual message content comes via agent_message hook, not here
       }
 
       // Also log to session-level work log on first turn (fallback if creation hook missed)
       if (event.iteration === 1) {
-        const key = `${sessionKey}:${ctx.workId}`;
-        if (!this.workItemCreated.has(key)) {
-          this.workItemCreated.add(key);
-          await workLog.append({
+        if (!sessionState.workItemsCreated.has(ctx.workId)) {
+          sessionState.workItemsCreated.add(ctx.workId);
+          await safeAppend('Work log write failed (workitem_created)', () => workLog.append({
             type: 'workitem_created',
             timestamp: new Date().toISOString(),
             workId: ctx.workId,
             objective: ctx.objective ?? 'unknown',
             agent: ctx.agentType,
-          }).catch(err => {
-            console.warn('[HARNESS] Work log write failed (workitem_created):', err instanceof Error ? err.message : String(err));
-          });
+          }));
         }
       }
     });
@@ -2149,19 +2258,14 @@ export class AgentHarness {
       if (event.type !== 'agent_message') return;
       if (ctx.sessionKey !== sessionKey) return;
 
-      const itemLog = await getOrCreateWorkItemLog(ctx.workId, ctx.agentType, ctx.objective).catch(err => {
-        console.warn('[HARNESS] WorkItem log creation failed (agent_message):', err instanceof Error ? err.message : String(err));
-        return null;
-      });
+      const itemLog = await getWorkItemLogSafe('agent_message', ctx.workId, ctx.agentType, ctx.objective);
       if (itemLog) {
-        await itemLog.appendMessage(
+        await safeAppend('WorkItem log write failed (agent_message)', () => itemLog.appendMessage(
           event.role,
           event.content,
           undefined,  // watcherInjected
           event.reasoning  // Include reasoning for decision audit
-        ).catch(err => {
-          console.warn('[HARNESS] WorkItem log write failed (agent_message):', err instanceof Error ? err.message : String(err));
-        });
+        ));
       }
     });
 
@@ -2171,21 +2275,59 @@ export class AgentHarness {
       if (event.type !== 'tool_call_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
 
-      const itemLog = await getOrCreateWorkItemLog(ctx.workId, ctx.agentType, ctx.objective).catch(err => {
-        console.warn('[HARNESS] WorkItem log creation failed (tool_call_completed):', err instanceof Error ? err.message : String(err));
-        return null;
-      });
+      const itemLog = await getWorkItemLogSafe('tool_call_completed', ctx.workId, ctx.agentType, ctx.objective);
       if (itemLog) {
-        await itemLog.appendToolCall(
+        await safeAppend('WorkItem log write failed (tool_call_completed)', () => itemLog.appendToolCall(
           event.tool,
           event.args,
           event.success,
           event.resultPreview,
           event.durationMs
-        ).catch(err => {
-          console.warn('[HARNESS] WorkItem log write failed (tool_call_completed):', err instanceof Error ? err.message : String(err));
-        });
+        ));
       }
+    });
+
+    // Log memory injections with full content for observability
+    registerHook('memory_injected', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+      if (event.type !== 'memory_injected') return;
+      if (ctx.sessionKey !== sessionKey) return;
+
+      const itemLog = await getWorkItemLogSafe('memory_injected', ctx.workId, ctx.agentType, ctx.objective);
+      if (itemLog) {
+        await safeAppend('WorkItem log write failed (memory_injected)', () => itemLog.append({
+          type: 'memory_injection',
+          timestamp: new Date().toISOString(),
+          query: event.query,
+          memoryContent: event.memoryContent,
+          contextWithMemory: event.contextWithMemory,
+          resultPreview: event.resultPreview,
+          itemCount: event.itemCount,
+          success: event.success,
+          iteration: event.iteration,
+          version: event.version,
+          latencyMs: event.latencyMs,
+          coverage: event.coverage,
+          discriminatorsIncluded: event.discriminatorsIncluded,
+          totalTokens: event.totalTokens,
+          fallbackToV1: event.fallbackToV1,
+        }));
+      }
+
+      this.eventBus.publish(createEvent('memory_injected', {
+        query: event.query,
+        resultPreview: event.resultPreview,
+        memoryContent: event.memoryContent,
+        contextWithMemory: event.contextWithMemory,
+        itemCount: event.itemCount,
+        success: event.success,
+        iteration: event.iteration,
+        version: event.version,
+        latencyMs: event.latencyMs,
+        coverage: event.coverage,
+        discriminatorsIncluded: event.discriminatorsIncluded,
+        totalTokens: event.totalTokens,
+        fallbackToV1: event.fallbackToV1,
+      }, ctx.workId, ctx.requestId, ctx.sessionKey));
     });
 
     // Legacy batch hook - kept for backwards compatibility but tool_call_completed is primary
@@ -2200,30 +2342,23 @@ export class AgentHarness {
       if (ctx.sessionKey !== sessionKey) return; // Filter by session
 
       // Log to session-level work log
-      await workLog.append({
+      await safeAppend('Work log write failed (files_modified)', () => workLog.append({
         type: 'note',
         timestamp: new Date().toISOString(),
         workId: ctx.workId,
         note: `Files modified: ${event.paths.slice(0, 5).join(', ')}${event.paths.length > 5 ? ` (+${event.paths.length - 5} more)` : ''}`,
         source: 'orchestrator',
-      }).catch(err => {
-        console.warn('[HARNESS] Work log write failed (files_modified):', err instanceof Error ? err.message : String(err));
-      });
+      }));
 
       // Also log to workitem log
-      const itemLog = await getOrCreateWorkItemLog(ctx.workId, ctx.agentType, ctx.objective).catch(err => {
-        console.warn('[HARNESS] WorkItem log creation failed (files_modified):', err instanceof Error ? err.message : String(err));
-        return null;
-      });
+      const itemLog = await getWorkItemLogSafe('files_modified', ctx.workId, ctx.agentType, ctx.objective);
       if (itemLog) {
-        await itemLog.appendToolCall(
+        await safeAppend('WorkItem log write failed (files_modified)', () => itemLog.appendToolCall(
           'Edit/Write',
           { paths: event.paths },
           true,
           `Modified: ${event.paths.join(', ')}`
-        ).catch(err => {
-          console.warn('[HARNESS] WorkItem log write failed (files_modified):', err instanceof Error ? err.message : String(err));
-        });
+        ));
       }
     });
 
@@ -2234,23 +2369,18 @@ export class AgentHarness {
       const workId = ctx.workId ?? event.workId ?? 'unknown';
 
       // Log to session-level work log
-      await workLog.append({
+      await safeAppend('Work log write failed (agent_completed)', () => workLog.append({
         type: 'workitem_status',
         timestamp: new Date().toISOString(),
         workId,
         status: 'completed',
         filesModified: event.invalidatedPaths,
-      }).catch(err => {
-        console.warn('[HARNESS] Work log write failed (agent_completed):', err instanceof Error ? err.message : String(err));
-      });
+      }));
 
       // Mark workitem as completed
-      const itemLog = await getOrCreateWorkItemLog(workId, ctx.agentType, ctx.objective).catch(err => {
-        console.warn('[HARNESS] WorkItem log creation failed (agent_completed):', err instanceof Error ? err.message : String(err));
-        return null;
-      });
+      const itemLog = await getWorkItemLogSafe('agent_completed', workId, ctx.agentType, ctx.objective);
       if (itemLog) {
-        await itemLog.markCompleted(
+        await safeAppend('WorkItem log write failed (markCompleted)', () => itemLog.markCompleted(
           event.response ?? 'Agent completed',
           event.metrics ? {
             llmCalls: event.metrics.llmCallsMade,
@@ -2260,9 +2390,7 @@ export class AgentHarness {
             filesRead: event.filesRead,
             filesModified: event.invalidatedPaths,
           } : undefined
-        ).catch(err => {
-          console.warn('[HARNESS] WorkItem log write failed (markCompleted):', err instanceof Error ? err.message : String(err));
-        });
+        ));
       }
     });
 
@@ -2273,12 +2401,13 @@ export class AgentHarness {
       workLog,
       getWorkItemLog: async (workId: string) => {
         // First check our cache, then try to get from disk (artifacts in watcherDir)
-        const cached = this.workItemLogs.get(`${sessionKey}:${workId}`);
+        const cached = sessionState.workItemLogs.get(workId);
         if (cached) return cached;
         return getWorkItemLog(effectiveWatcherDir, sessionKey, workId);
       },
       workingDir: effectiveWatcherDir,
-      runAgent: (objective: string, trigger: string) => this.runWatcherAgent(objective, sessionKey, trigger),
+      runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) =>
+        this.runWatcherAgent(objective, sessionKey, trigger, signal),
       onDecision: (entry) => {
         this.logger.info('Watcher decision', {
           sessionKey,
@@ -2320,25 +2449,23 @@ export class AgentHarness {
    * Get or create a per-session DecisionDatabase, seeded with DEFAULT_DECISIONS.
    */
   getOrCreateDecisionDatabase(sessionKey: string): DecisionDatabase {
-    let db = this.decisionDatabases.get(sessionKey);
-    if (!db) {
-      db = new InMemoryDecisionDatabase(DEFAULT_DECISIONS);
-      this.decisionDatabases.set(sessionKey, db);
+    const state = this.getOrCreateSessionState(sessionKey);
+    if (!state.decisionDatabase) {
+      state.decisionDatabase = new InMemoryDecisionDatabase(DEFAULT_DECISIONS);
     }
-    return db;
+    return state.decisionDatabase;
   }
 
   /**
    * Get or create a per-session DecisionEngine.
    */
   private getOrCreateWatcherEngine(sessionKey: string): DecisionEngine {
-    let engine = this.watcherEngines.get(sessionKey);
-    if (!engine) {
+    const state = this.getOrCreateSessionState(sessionKey);
+    if (!state.watcherEngine) {
       const db = this.getOrCreateDecisionDatabase(sessionKey);
-      engine = createDecisionEngine(db, createWatcherConfig());
-      this.watcherEngines.set(sessionKey, engine);
+      state.watcherEngine = createDecisionEngine(db, createWatcherConfig());
     }
-    return engine;
+    return state.watcherEngine;
   }
 
   // =========================================================================
@@ -2347,8 +2474,8 @@ export class AgentHarness {
 
   watcherStatus(sessionKey: string): Record<string, unknown> {
     const engine = this.getOrCreateWatcherEngine(sessionKey);
-    const entry = this.sessionStores.get(sessionKey);
-    const contextSnapshot = entry?.store.getCachedContextSnapshot();
+    const state = this.sessions.get(sessionKey);
+    const contextSnapshot = state?.store.getCachedContextSnapshot();
 
     return {
       enabled: true,
@@ -2361,12 +2488,12 @@ export class AgentHarness {
   }
 
   watcherContext(sessionKey: string): Record<string, unknown> {
-    const entry = this.sessionStores.get(sessionKey);
-    if (!entry) {
+    const state = this.sessions.get(sessionKey);
+    if (!state) {
       return { error: 'No session store found', sessionKey };
     }
 
-    const context = entry.store.getContext();
+    const context = state.store.getContext();
 
     return {
       sessionKey,
@@ -2461,19 +2588,19 @@ export class AgentHarness {
   }
 
   watcherSummarize(sessionKey: string): Record<string, unknown> {
-    const entry = this.sessionStores.get(sessionKey);
-    if (!entry) {
+    const state = this.sessions.get(sessionKey);
+    if (!state) {
       return { error: 'No session store found' };
     }
 
-    const context = entry.store.getContext();
+    const context = state.store.getContext();
     const result = context.compact({
       deduplicateByPath: true,
       maxFileContentCount: 15,
       truncateOutputsTo: 3000,
     });
 
-    entry.store.persistContext();
+    state.store.persistContext();
 
     const engine = this.getOrCreateWatcherEngine(sessionKey);
     const memory = engine.getSessionMemory(sessionKey);
@@ -2524,18 +2651,18 @@ export class AgentHarness {
     this.eventBus.shutdown();
 
     // Persist and mark all sessions inactive BEFORE stopping GraphD
-    for (const [sessionKey, entry] of this.sessionStores.entries()) {
+    for (const [sessionKey, state] of this.sessions.entries()) {
       try {
-        entry.store.persistContext();
+        state.store.persistContext();
         if (this.isGraphDReady()) {
           this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
         }
       } catch (error) {
         this.logger.warning('Session persist failed during shutdown', { sessionKey, error: String(error) });
       }
-      entry.store.close();
+      state.store.close();
     }
-    this.sessionStores.clear();
+    this.sessions.clear();
 
     if (this.isGraphDReady()) {
       try {

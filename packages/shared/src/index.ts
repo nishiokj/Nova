@@ -15,6 +15,7 @@ export {
   isValidOutput,
   getOutputSchema,
   getOutputSchemaJson,
+  getWatcherSchemaJsonForActions,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
   type RoutingOutput,

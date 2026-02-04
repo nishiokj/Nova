@@ -11,6 +11,7 @@
  * - init: WorkItem creation metadata
  * - message: Conversation turn (system/user/assistant)
  * - tool_call: Tool invocation with summarized result
+ * - memory_injection: Memory injection record (query + injected content)
  * - decision: Watcher decision scoped to this workitem
  * - status: Status change (started, completed, failed)
  * - metrics: Execution metrics snapshot
@@ -23,6 +24,7 @@ import type {
   WorkItemInitEntry,
   WorkItemMessageEntry,
   WorkItemToolCallEntry,
+  WorkItemMemoryInjectionEntry,
   WorkItemDecisionEntry,
   WorkItemStatusEntry,
   WorkItemMetricsEntry,
@@ -36,6 +38,7 @@ export type {
   WorkItemInitEntry,
   WorkItemMessageEntry,
   WorkItemToolCallEntry,
+  WorkItemMemoryInjectionEntry,
   WorkItemDecisionEntry,
   WorkItemStatusEntry,
   WorkItemMetricsEntry,

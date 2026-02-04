@@ -12,6 +12,7 @@ import type { ExecutionMetrics } from './events.js';
  * Work item specification for creating new work.
  */
 export interface WorkItemSpec {
+  id?: string;
   goal: string;
   objective: string;
   agent: string;
@@ -23,6 +24,8 @@ export interface WorkItemSpec {
     maxLlmCalls?: number;
     maxDurationMs?: number;
   };
+  /** Semantic state for this work item (attached during watcher split/create) */
+  semantic?: unknown;
 }
 
 /**

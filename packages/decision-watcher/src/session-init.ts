@@ -24,7 +24,7 @@ export interface AsyncSessionConfig {
   goal: string;
   workingDir: string;
   /** Runs the watcher agent with a trigger-specific objective string. */
-  runAgent: (objective: string, trigger: WatcherTrigger) => Promise<WatcherAction>;
+  runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) => Promise<WatcherAction>;
   /** Called when watcher produces work items via split/create. */
   onCreateWorkItems?: (items: WatcherWorkItem[]) => void;
   /** Operating principles to include in the salience file. */

@@ -499,6 +499,7 @@ export type WatcherTrigger =
   | 'prompt_user'
   | 'bounds_exceeded'
   | 'agent_error'
+  | 'goal_state_reached'
   | 'work_item_completed'
   | 'scope_collision'
   | 'cadence_audit'
@@ -514,7 +515,10 @@ export type WatcherActionType =
   | 'split'
   | 'create_work_item'
   | 'quality_gate'
+  | 'allow'
   | 'continue';
+
+export type WatcherNoInterventionAction = 'allow' | 'continue';
 
 /**
  * Valid watcher action types for each trigger.
@@ -523,12 +527,13 @@ export type WatcherActionType =
 export const VALID_ACTIONS_BY_TRIGGER: Record<WatcherTrigger, WatcherActionType[]> = {
   prompt_user: ['answer'],
   bounds_exceeded: ['realign', 'split', 'create_work_item'],
-  agent_error: ['realign', 'continue'],
+  agent_error: ['realign', 'allow'],
+  goal_state_reached: ['quality_gate', 'split', 'create_work_item'],
   work_item_completed: ['quality_gate', 'split', 'create_work_item'],
-  cadence_audit: ['continue', 'realign', 'split', 'create_work_item'],
+  cadence_audit: ['allow', 'realign', 'split', 'create_work_item'],
   session_init: [],  // No action - initialization only
-  scope_collision: ['continue', 'realign'],  // Allow parallel or redirect one agent
-  handoff_approval: ['continue', 'realign'],  // Approve plan or request revision
+  scope_collision: ['allow', 'realign'],  // Allow parallel or redirect one agent
+  handoff_approval: ['allow', 'realign'],  // Approve plan or request revision
 };
 
 /**
@@ -539,6 +544,11 @@ export function getValidActions(trigger: WatcherTrigger): WatcherActionType[] {
 }
 
 import type { SemanticOutput } from './semantic/schemas.js';
+
+export interface WatcherSemanticBatchEntry {
+  workId: string;
+  semantic: SemanticOutput;
+}
 
 /**
  * Structured output from the watcher agent.
@@ -556,28 +566,35 @@ export type WatcherAction =
       watcherAction: 'answer';
       reason: string;
       answer: { text: string; contextAddendum?: string };
+      semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
       watcherAction: 'realign';
       reason: string;
       realign: { systemMessage: string; newGoal?: string };
       semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
       watcherAction: 'split' | 'create_work_item';
       reason: string;
       workItems: WatcherWorkItem[];
       semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
       watcherAction: 'quality_gate';
       reason: string;
       qualityGate: { passed: boolean; issues?: string[] };
+      semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     }
   | {
-      watcherAction: 'continue';
+      watcherAction: WatcherNoInterventionAction;
       reason: string;
       semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
     };
 
 export type WatcherActionWithWorkItems = Extract<
@@ -672,6 +689,7 @@ export type WorkItemEntry =
   | WorkItemInitEntry
   | WorkItemMessageEntry
   | WorkItemToolCallEntry
+  | WorkItemMemoryInjectionEntry
   | WorkItemDecisionEntry
   | WorkItemStatusEntry
   | WorkItemMetricsEntry;
@@ -728,6 +746,40 @@ export interface WorkItemToolCallEntry {
 }
 
 /**
+ * Memory injection record (streamed during agent execution).
+ * Captures what memory was injected and the query that retrieved it.
+ */
+export interface WorkItemMemoryInjectionEntry {
+  type: 'memory_injection';
+  timestamp: string;
+  query: string;
+  /** Full injected memory content (if available) */
+  memoryContent?: string;
+  /** Full task context with memory appended (if available) */
+  contextWithMemory?: string;
+  /** Memory content preview - first 500 chars */
+  resultPreview?: string;
+  /** Number of memory items returned */
+  itemCount: number;
+  /** Whether injection succeeded */
+  success: boolean;
+  /** Which iteration this was */
+  iteration: number;
+  /** Injection version */
+  version?: 'v1' | 'v2';
+  /** Retrieval latency (ms) */
+  latencyMs?: number;
+  /** Category coverage counts (v2 only) */
+  coverage?: Record<string, number>;
+  /** Discriminators included (v2 only) */
+  discriminatorsIncluded?: number;
+  /** Total tokens injected (v2 only) */
+  totalTokens?: number;
+  /** Whether v2 fell back to v1 */
+  fallbackToV1?: boolean;
+}
+
+/**
  * Decision made by watcher for this workitem.
  * Scoped - only this workitem's decisions, not global.
  */
@@ -774,6 +826,7 @@ export interface WorkItemMetricsEntry {
  * A work item created by the watcher with optional budget bounds.
  */
 export interface WatcherWorkItem {
+  id?: string;
   goal: string;
   objective: string;
   agent: string;

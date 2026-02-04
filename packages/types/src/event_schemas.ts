@@ -20,6 +20,7 @@ export const AgentCoreEventTypeSchema = z.enum([
   'llm_call',
   'llm_error',
   'agent_bounds_hit',
+  'memory_injected',
 ]);
 
 /**
@@ -142,6 +143,24 @@ export const LLMErrorDataSchema = z.object({
 });
 
 /**
+ * Data for memory_injected event.
+ */
+export const MemoryInjectedDataSchema = z.object({
+  query: z.string(),
+  resultPreview: z.string().optional(),
+  memoryContent: z.string().optional(),
+  contextWithMemory: z.string().optional(),
+  itemCount: z.number(),
+  success: z.boolean(),
+  iteration: z.number(),
+  version: z.enum(['v1', 'v2']).optional(),
+  latencyMs: z.number().optional(),
+  coverage: z.record(z.number()).optional(),
+  discriminatorsIncluded: z.number().optional(),
+  totalTokens: z.number().optional(),
+  fallbackToV1: z.boolean().optional(),
+});
+/**
  * Work item summary in runtime script.
  */
 export const WorkItemSummarySchema = z.object({
@@ -263,6 +282,14 @@ export const LLMErrorEventSchema = BaseEventFieldsSchema.extend({
 });
 
 /**
+ * Memory injected event.
+ */
+export const MemoryInjectedEventSchema = BaseEventFieldsSchema.extend({
+  type: z.literal('memory_injected'),
+  data: MemoryInjectedDataSchema,
+});
+
+/**
  * Agent bounds hit event.
  */
 export const AgentBoundsHitEventSchema = BaseEventFieldsSchema.extend({
@@ -334,6 +361,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
   HookCallEventSchema,
   LLMCallEventSchema,
   LLMErrorEventSchema,
+  MemoryInjectedEventSchema,
   AgentBoundsHitEventSchema,
   OrchestrationStartedEventSchema,
   IterationStartedEventSchema,
@@ -359,6 +387,7 @@ export type ToolCallData = z.infer<typeof ToolCallDataSchema>;
 export type HookCallData = z.infer<typeof HookCallDataSchema>;
 export type LLMCallData = z.infer<typeof LLMCallDataSchema>;
 export type LLMErrorData = z.infer<typeof LLMErrorDataSchema>;
+export type MemoryInjectedData = z.infer<typeof MemoryInjectedDataSchema>;
 export type RuntimeScriptCreatedData = z.infer<typeof RuntimeScriptCreatedDataSchema>;
 export type WorkItemStatusValue = z.infer<typeof WorkItemStatusValueSchema>;
 export type WorkItemStatusData = z.infer<typeof WorkItemStatusDataSchema>;
@@ -369,6 +398,7 @@ export type ToolCallEvent = z.infer<typeof ToolCallEventSchema>;
 export type HookCallEvent = z.infer<typeof HookCallEventSchema>;
 export type LLMCallEvent = z.infer<typeof LLMCallEventSchema>;
 export type LLMErrorEvent = z.infer<typeof LLMErrorEventSchema>;
+export type MemoryInjectedEvent = z.infer<typeof MemoryInjectedEventSchema>;
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
 // ============================================

@@ -73,7 +73,7 @@ export const CONNECTOR_FACTORIES: Record<ConnectorType, ConnectorFactoryEntry> =
   },
   rex_sessions: {
     factory: createRexSessionConnector,
-    displayName: 'Rex Sessions',
+    displayName: 'Rex Sessions (GraphD)',
   },
   imessage: {
     factory: createIMessageConnector,

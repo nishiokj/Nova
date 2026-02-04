@@ -24,6 +24,10 @@ function parseApiError(provider: string, status: number, responseText: string): 
   return formatApiError(provider, status, parsed);
 }
 
+function buildSchemaInstruction(schema: Record<string, unknown>): string {
+  return `Return a single JSON object that matches this schema:\n${JSON.stringify(schema)}`;
+}
+
 // ============================================
 // ANTHROPIC PROVIDER
 // ============================================
@@ -99,11 +103,16 @@ export class AnthropicProvider implements LLMProviderAdapter {
     const resolved = config;
 
     const systemMessage = params.messages.find((m) => m.role === 'system');
-    const systemPrompt =
+    let systemPrompt =
       params.system ??
       (systemMessage && typeof systemMessage.content === 'string'
         ? systemMessage.content
         : undefined);
+
+    if (params.responseSchema) {
+      const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
+    }
 
     const body: Record<string, unknown> = {
       model: resolved.model,
@@ -220,11 +229,16 @@ export class AnthropicProvider implements LLMProviderAdapter {
     const resolved = config;
 
     const systemMessage = params.messages.find((m) => m.role === 'system');
-    const systemPrompt =
+    let systemPrompt =
       params.system ??
       (systemMessage && typeof systemMessage.content === 'string'
         ? systemMessage.content
         : undefined);
+
+    if (params.responseSchema) {
+      const schemaHint = buildSchemaInstruction(params.responseSchema.schema);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
+    }
 
     const body: Record<string, unknown> = {
       model: resolved.model,

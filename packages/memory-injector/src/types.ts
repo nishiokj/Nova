@@ -86,6 +86,12 @@ export interface MemoryInjector {
   inject(params: InjectParams): Promise<string | null>;
 
   /**
+   * Summarize the internal query plan for observability.
+   * Returns a short string of sub-queries (e.g., "foo | bar | baz").
+   */
+  summarizeQueryPlan?: (query: string) => string;
+
+  /**
    * Inject relevant evidence using v2 retrieval (optional).
    * @returns Structured result with formatted content, or null if none
    */

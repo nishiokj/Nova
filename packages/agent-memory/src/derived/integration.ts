@@ -13,8 +13,10 @@ import {
   createDerivedTaskRepository,
   createDerivedJobRepository,
   createResourcePoolRepository,
+  createDerivedRunLogRepository,
 } from '../db/repositories/index.js'
 import { runDerivedScript } from './runner.js'
+import { evaluateSanityPolicy, type DerivedRunReport, type DerivedSanityPolicy } from './reporting.js'
 
 export interface DerivedIntegrationConfig {
   /** Maximum job runtime in ms (default: 1800000 = 30 min) */
@@ -34,6 +36,7 @@ export class DerivedTaskIntegration {
   private jobRepo: ReturnType<typeof createDerivedJobRepository>
   private taskRepo: ReturnType<typeof createDerivedTaskRepository>
   private poolRepo: ReturnType<typeof createResourcePoolRepository>
+  private runLogRepo: ReturnType<typeof createDerivedRunLogRepository>
 
   constructor(sql: Sql, config: DerivedIntegrationConfig = {}) {
     this.sql = sql
@@ -41,6 +44,7 @@ export class DerivedTaskIntegration {
     this.jobRepo = createDerivedJobRepository({ sql })
     this.taskRepo = createDerivedTaskRepository({ sql })
     this.poolRepo = createResourcePoolRepository({ sql })
+    this.runLogRepo = createDerivedRunLogRepository({ sql })
   }
 
   /**
@@ -280,7 +284,8 @@ export class DerivedTaskIntegration {
     jobId: string,
     error: string,
     failureClass?: FailureClass,
-    retryAfter?: number
+    retryAfter?: number,
+    errorCode?: string
   ): Promise<{ noRetry: boolean }> {
     const fc = failureClass ?? 'unknown'
 
@@ -288,7 +293,7 @@ export class DerivedTaskIntegration {
       case 'permanent':
         // Permanent failure - open circuit immediately, no retry
         await this.jobRepo.failWithClass(jobId, error, fc).catch(() => {})
-        await this.taskRepo.recordFailure(task.id, error, { openCircuit: true }).catch(() => {})
+        await this.taskRepo.recordFailure(task.id, error, { openCircuit: true, errorCode }).catch(() => {})
         return { noRetry: true }
 
       case 'rate_limited':
@@ -311,7 +316,7 @@ export class DerivedTaskIntegration {
       default:
         // Standard exponential backoff handled by circuit breaker
         await this.jobRepo.failWithClass(jobId, error, fc).catch(() => {})
-        await this.taskRepo.recordFailure(task.id, error).catch(() => {})
+        await this.taskRepo.recordFailure(task.id, error, { errorCode }).catch(() => {})
         return { noRetry: false } // Allow queue retry
     }
   }
@@ -368,7 +373,10 @@ export class DerivedTaskIntegration {
         return { success: true }
       }
 
+      const runStartedAt = Date.now()
       const result = await runDerivedScript(this.sql, task, jobForScript)
+      const report = (result as { _runReport?: DerivedRunReport })?._runReport
+      const durationMs = Date.now() - runStartedAt
 
       // Record cost if provided
       if (result?.cost_cents) {
@@ -389,12 +397,78 @@ export class DerivedTaskIntegration {
         await this.jobRepo.setOutputRef(jobForScript.id, result.outputRef ?? null)
       }
 
+      const policy = (task.sanity_policy ?? task.metadata?.sanity_policy) as DerivedSanityPolicy | undefined
+      const policyResult = evaluateSanityPolicy(policy, report)
+      if (!policyResult.ok) {
+        await this.runLogRepo.create({
+          id: jobForScript.id,
+          jobId: jobForScript.id,
+          taskId: task.id,
+          status: 'failed',
+          inputCount: report?.inputCount ?? null,
+          outputCount: report?.outputCount ?? null,
+          outputUnusableCount: report?.outputUnusableCount ?? null,
+          modelVersion: report?.modelVersion ?? null,
+          durationMs,
+          skipReason: report?.skipReason ?? null,
+          errorCode: policyResult.errorCode ?? 'policy_violation',
+          errorMsg: policyResult.errorMsg ?? 'Sanity policy violation',
+        })
+        throw Object.assign(
+          new Error(policyResult.errorMsg ?? 'Sanity policy violation'),
+          { errorCode: policyResult.errorCode ?? 'policy_violation', failureClass: 'permanent' as FailureClass }
+        )
+      }
+
+      await this.runLogRepo.create({
+        id: jobForScript.id,
+        jobId: jobForScript.id,
+        taskId: task.id,
+        status: report?.status ?? 'ok',
+        inputCount: report?.inputCount ?? null,
+        outputCount: report?.outputCount ?? null,
+        outputUnusableCount: report?.outputUnusableCount ?? null,
+        modelVersion: report?.modelVersion ?? null,
+        durationMs,
+        skipReason: report?.skipReason ?? null,
+        errorCode: report?.errorCode ?? null,
+        errorMsg: report?.errorMsg ?? null,
+      })
+
+      if (report?.samples?.length) {
+        await this.runLogRepo.insertSamples(
+          report.samples.map((sample, index) => ({
+            runId: jobForScript.id,
+            sampleIndex: index,
+            label: sample.label,
+            sample: sample.value,
+          }))
+        )
+      }
+
       await this.jobRepo.complete(jobForScript.id)
       // Circuit breaker: reset on success
       await this.taskRepo.recordSuccess(task.id).catch(() => {})
       return { success: true }
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error))
+      const errReport = (error as { runReport?: DerivedRunReport }).runReport
+      const errorCode = this.extractErrorCode(error)
+
+      await this.runLogRepo.create({
+        id: derivedJob.id,
+        jobId: derivedJob.id,
+        taskId: task.id,
+        status: 'failed',
+        inputCount: errReport?.inputCount ?? null,
+        outputCount: errReport?.outputCount ?? null,
+        outputUnusableCount: errReport?.outputUnusableCount ?? null,
+        modelVersion: errReport?.modelVersion ?? null,
+        durationMs: undefined,
+        skipReason: errReport?.skipReason ?? null,
+        errorCode: errorCode ?? null,
+        errorMsg: err.message,
+      }).catch(() => {})
 
       // Check if error has failure classification info
       const errWithClass = error as { failureClass?: FailureClass; retryAfter?: number }
@@ -403,7 +477,8 @@ export class DerivedTaskIntegration {
         derivedJob.id,
         err.message,
         errWithClass.failureClass,
-        errWithClass.retryAfter
+        errWithClass.retryAfter,
+        errorCode ?? undefined
       )
 
       return { success: false, error: err, noRetry }
@@ -423,5 +498,13 @@ export class DerivedTaskIntegration {
         }
       }
     }
+  }
+
+  private extractErrorCode(error: unknown): string | null {
+    if (!error || typeof error !== 'object') return null
+    const anyErr = error as { errorCode?: unknown; code?: unknown }
+    const code = anyErr.errorCode ?? anyErr.code
+    if (typeof code === 'string' && code.trim().length > 0) return code
+    return null
   }
 }

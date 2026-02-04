@@ -3,13 +3,14 @@
  * Derived Task: Backfill Embeddings for Coding Preferences
  *
  * Reads coding_preferences rows that lack embeddings and generates them
- * via the OpenAI Embeddings API (text-embedding-ada-002, 1536 dimensions).
+ * via the Gemini Embeddings API (text-embedding-004, 768 dimensions).
  *
  * Uses the processing ledger to skip already-processed preferences and
  * automatically retry failed ones on next run.
  */
 
 import { createHash } from 'node:crypto'
+import { GoogleGenAI } from '@google/genai'
 import type { DerivedRunContext, DerivedRunResult, DerivedMetadataSchema } from '../src/derived/runner.js'
 
 // ─── Metadata Schema ─────────────────────────────────────────────────────────
@@ -24,12 +25,12 @@ export const metadata: DerivedMetadataSchema = {
 // CONFIG
 // ============================================
 
-const EMBEDDING_MODEL = 'text-embedding-ada-002'
-const EMBEDDING_DIMENSIONS = 1536
-const BATCH_SIZE = 100 // OpenAI supports up to 2048 inputs per request
+const EMBEDDING_MODEL = 'text-embedding-004'
+const EMBEDDING_DIMENSIONS = 768
+const BATCH_SIZE = 100 // Gemini supports batching
 const MAX_PREFERENCES = 500 // safety cap per run
 
-const CONFIG_VERSION = 'v1'
+const CONFIG_VERSION = 'v2' // bumped for Gemini switch
 const CONFIG_HASH = createHash('sha256')
   .update(`${CONFIG_VERSION}:${EMBEDDING_MODEL}:${EMBEDDING_DIMENSIONS}`)
   .digest('hex')
@@ -38,11 +39,6 @@ const CONFIG_HASH = createHash('sha256')
 // ============================================
 // HELPERS
 // ============================================
-
-interface EmbeddingResponse {
-  data: Array<{ embedding: number[]; index: number }>
-  usage: { prompt_tokens: number; total_tokens: number }
-}
 
 /**
  * Build the text to embed for a preference.
@@ -69,33 +65,6 @@ function buildEmbeddingText(row: {
   return parts.join('\n')
 }
 
-/**
- * Call OpenAI embeddings API for a batch of texts.
- */
-async function fetchEmbeddings(
-  apiKey: string,
-  texts: string[]
-): Promise<EmbeddingResponse> {
-  const response = await fetch('https://api.openai.com/v1/embeddings', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: EMBEDDING_MODEL,
-      input: texts,
-    }),
-  })
-
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`OpenAI API error ${response.status}: ${body}`)
-  }
-
-  return (await response.json()) as EmbeddingResponse
-}
-
 // ============================================
 // MAIN RUNNER
 // ============================================
@@ -116,12 +85,14 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
   const config = ctx.task.metadata as Record<string, unknown> | undefined
   const limit = (config?.limit as number) ?? MAX_PREFERENCES
 
-  const apiKey = process.env.OPENAI_API_KEY?.trim()
+  const apiKey = process.env.GEMINI_API_KEY?.trim()
   if (!apiKey) {
-    throw new Error('OPENAI_API_KEY not set')
+    throw new Error('GEMINI_API_KEY not set')
   }
 
-  logger.info(`Backfilling embeddings (model=${EMBEDDING_MODEL}, limit=${limit})`)
+  const client = new GoogleGenAI({ apiKey })
+
+  logger.info(`Backfilling embeddings (model=${EMBEDDING_MODEL}, dims=${EMBEDDING_DIMENSIONS}, limit=${limit})`)
 
   // --- Fetch preferences needing embeddings ---
   const allPreferences = await sql<PreferenceRow[]>`
@@ -143,13 +114,12 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
   const preferences = allPreferences.filter((pref) => {
     const entry = processedMap.get(pref.id)
     if (!entry) return true // never processed
-    // Reprocess if created_at changed (unlikely for preferences, but consistent with pattern)
     if (entry.entity_updated_at && pref.created_at.toISOString() > entry.entity_updated_at) return true
     return false
   })
 
   const skipped = allPreferences.length - preferences.length
-  logger.info(`${allPreferences.length} without embeddings, ${preferences.length} to process, ${skipped} skipped (already logged as success)`)
+  logger.info(`${allPreferences.length} without embeddings, ${preferences.length} to process, ${skipped} skipped`)
 
   if (preferences.length === 0) {
     const stats = await processingLog.getStats(CONFIG_HASH)
@@ -157,7 +127,6 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
   }
 
   // --- Process in batches ---
-  let totalTokens = 0
   let successCount = 0
   let failCount = 0
   const logEntries: Array<{
@@ -179,19 +148,34 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
     const texts = batch.map(buildEmbeddingText)
 
     try {
-      const response = await fetchEmbeddings(apiKey, texts)
-      totalTokens += response.usage.total_tokens
+      // Gemini batch embedding - pass strings directly
+      const response = await client.models.embedContent({
+        model: EMBEDDING_MODEL,
+        contents: texts,
+      })
 
-      // Sort by index to match input order
-      const sorted = response.data.sort((a, b) => a.index - b.index)
+      const embeddings = response.embeddings ?? []
 
-      // Update each preference with its embedding
-      for (let j = 0; j < sorted.length; j++) {
+      for (let j = 0; j < batch.length; j++) {
         const pref = batch[j]
-        const embedding = sorted[j].embedding
+        const embedding = embeddings[j]?.values
+
+        if (!embedding || embedding.length === 0) {
+          logger.warn(`No embedding returned for ${pref.id}`)
+          failCount++
+          logEntries.push({
+            entityId: pref.id,
+            entityType: 'coding_preference',
+            configHash: CONFIG_HASH,
+            status: 'failed',
+            error: 'No embedding returned',
+            entityUpdatedAt: pref.created_at,
+          })
+          continue
+        }
 
         if (embedding.length !== EMBEDDING_DIMENSIONS) {
-          logger.warn(`Unexpected dimension ${embedding.length} for ${pref.id}, expected ${EMBEDDING_DIMENSIONS}`)
+          logger.warn(`Dimension mismatch for ${pref.id}: got ${embedding.length}, expected ${EMBEDDING_DIMENSIONS}`)
           failCount++
           logEntries.push({
             entityId: pref.id,
@@ -246,7 +230,7 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
 
   const stats = await processingLog.getStats(CONFIG_HASH)
 
-  logger.info(`Done: ${successCount} embedded, ${failCount} failed, ${totalTokens} tokens used`)
+  logger.info(`Done: ${successCount} embedded, ${failCount} failed`)
 
   return {
     metadata: {
@@ -255,10 +239,9 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
       skipped,
       success: successCount,
       failed: failCount,
-      tokens: totalTokens,
       lineage: {
         model: EMBEDDING_MODEL,
-        provider: 'openai',
+        provider: 'google',
         dimensions: EMBEDDING_DIMENSIONS,
         configVersion: CONFIG_VERSION,
         configHash: CONFIG_HASH,

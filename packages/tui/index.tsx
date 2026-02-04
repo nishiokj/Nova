@@ -349,11 +349,12 @@ async function fetchUsageData(): Promise<{
       }
     }
 
-    // Determine status
+    // Determine status - must respect database status field
     let status: "active" | "idle" | "ended" = "idle";
     if (raw.status === "closed" || raw.status === "expired") {
       status = "ended";
-    } else if (now - raw.last_accessed_at <= staleThreshold) {
+    } else if (raw.status === "active" && now - raw.last_accessed_at <= staleThreshold) {
+      // Only show as active if BOTH: database says active AND recently accessed
       status = "active";
     }
 
@@ -811,6 +812,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       store.setModelSelection('explorer', null);
       store.setModelSelection('coding', null);
     });
+    store.clearLastLlmCall();
 
     // Hydrate message history if provided (session rehydration)
     if (data?.history && data.history.length > 0) {
@@ -1076,6 +1078,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (!data) {
       return;
     }
+
+    // Track last model used (for per-agent clarity in async mode)
+    store.setLastLlmCall(
+      data.agentType ?? null,
+      data.model ?? null,
+      data.provider ?? null
+    );
 
     // Extract token usage from llm_call event (fields are camelCase from agent)
     const promptTokens = data.promptTokens ?? 0;
@@ -3200,13 +3209,23 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // Simple horizontal line for input separator
   const horizontalLine = "─".repeat(contentWidth);
 
-  // Get current model/reasoning for footer display (uses 'standard' agent type)
+  // Get current model/reasoning for footer display (default: 'standard' agent type)
   const standardSelection = snapshot.modelSelections.get('standard');
   const currentModelEntry = standardSelection
     ? snapshot.modelsList.find((m) => m.id === standardSelection.model && m.provider === standardSelection.provider)
     : null;
   const reasoningOptions = currentModelEntry?.reasoning ?? [];
   const hasReasoning = reasoningOptions.length > 0;
+
+  // Track last LLM call (for per-agent visibility in async mode)
+  const lastAgentType = snapshot.lastLlmAgentType;
+  const lastModelId = snapshot.lastLlmModel;
+  const lastProvider = snapshot.lastLlmProvider;
+  const lastModelEntry = lastModelId
+    ? snapshot.modelsList.find((m) => m.id === lastModelId && (!lastProvider || m.provider === lastProvider))
+    : null;
+  const lastModelName = lastModelId ? (lastModelEntry?.name ?? lastModelId) : null;
+  const showLastModel = !!lastModelName;
 
   if (snapshot.helpVisible) {
     return (
@@ -3485,22 +3504,35 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {/* Model indicator row: model (Esc+M) | reasoning (Esc+T) */}
           <Text>
             {(() => {
-              const modelName = standardSelection?.model
+              const standardBaseName = standardSelection?.model
                 ? (currentModelEntry?.name ?? standardSelection.model)
                 : "no model selected";
+              const standardProviderLabel = standardSelection?.provider;
+              const standardModelName = standardProviderLabel && standardBaseName !== "no model selected"
+                ? `${standardBaseName} [${standardProviderLabel}]`
+                : standardBaseName;
+
+              const displayModelName = showLastModel && lastModelName
+                ? `${lastModelName}${lastProvider ? ` [${lastProvider}]` : ""}`
+                : standardModelName;
+              const agentSuffix = showLastModel && lastAgentType ? ` (${lastAgentType})` : "";
+              const modelHint = lastAgentType && lastAgentType !== 'standard'
+                ? "Esc+M (standard)"
+                : "Esc+M";
               const reasoningLevel = hasReasoning ? (standardSelection?.reasoning ?? "off") : "n/a";
               // Layout: modelName (Esc+M) | reasoning (Esc+T) or n/a
               const rightContent = hasReasoning
-                ? `${modelName} (Esc+M) | ${reasoningLevel} (Esc+T)`
-                : `${modelName} (Esc+M) | n/a`;
+                ? `${displayModelName}${agentSuffix} (${modelHint}) | ${reasoningLevel} (Esc+T)`
+                : `${displayModelName}${agentSuffix} (${modelHint}) | n/a`;
               const padding = 2;
               const gap = contentWidth - rightContent.length - (padding * 2);
               return (
                 <>
                   <Text>{" ".repeat(padding)}</Text>
                   <Text>{" ".repeat(Math.max(0, gap))}</Text>
-                  <Text color={colors.muted}>{modelName}</Text>
-                  <Text color={colors.muted} dimColor> (Esc+M)</Text>
+                  <Text color={colors.muted}>{displayModelName}</Text>
+                  {agentSuffix && <Text color={colors.muted} dimColor>{agentSuffix}</Text>}
+                  <Text color={colors.muted} dimColor>{` (${modelHint})`}</Text>
                   <Text color={colors.border}> | </Text>
                   <Text color={hasReasoning ? colors.func : colors.muted} dimColor={!hasReasoning}>{reasoningLevel}</Text>
                   {hasReasoning && <Text color={colors.muted} dimColor> (Esc+T)</Text>}
@@ -3717,6 +3749,9 @@ const DIFF_REMOVE_FG = "#ffffff"; // White text for visibility
 const DIFF_REMOVE_BG = "#991b1b"; // Solid red background
 // Context uses theme's diffContextBg (same as userBg) - resolved at runtime
 
+// Hardcoded code block background - dark distinct background for visibility
+const CODE_BLOCK_BG = "#1e1e2e";  // Dark blue-gray background for code blocks
+
 const syntaxPatterns: SyntaxPattern[] = [
   // Diff/Edit tool header - format: "✓ Edit /path/to/file.ts  +3 / -2 (123ms)"
   { pattern: /^[✓✗] Edit .+$/gm, colorKey: "diffHeader", bgKey: "diffHeaderBg", bold: true },
@@ -3769,15 +3804,20 @@ const syntaxPatterns: SyntaxPattern[] = [
   // Inline code - non-greedy
   { pattern: /`.+?`/g, colorKey: "code", bold: true, transform: (s) => s.slice(1, -1) },
 
-  // Code block delimiters (``` or ```language on their own line)
+  // Code blocks (multiline ```...```) - must come BEFORE delimiter pattern due to overlap filtering
+  { pattern: /```[\s\S]*?```/g, colorKey: "code", hardcodedBg: CODE_BLOCK_BG, transform: (s) => {
+    // Remove the opening ```lang (with or without language) and closing ```
+    // Handles: ```lang```, ```lang\n, ```\n, and ```
+    const content = s.replace(/^```\w*\n?/, "").replace(/```$/, "");
+    return content;
+  }},
+
+  // Code block delimiters (``` or ```language on their own line) - fallback for unmatched delimiters
   { pattern: /^```\w*\s*$/gm, colorKey: "border", transform: (s) => {
     const langMatch = s.match(/```(\w+)/);
     const lang = langMatch ? ` ${langMatch[1]} ` : "";
     return "─".repeat(3) + lang + "─".repeat(Math.max(0, 10 - lang.length));
   }},
-
-  // Code blocks (multiline ```...```) - fallback, just color
-  { pattern: /```[\s\S]*?```/g, colorKey: "code" },
 
   // URLs (standalone, not inside markdown links)
   { pattern: /(?<!\]\()https?:\/\/[^\s<>\[\]()]+/g, colorKey: "url" },
@@ -3891,6 +3931,7 @@ function hasAnsiCodes(text: string): boolean {
 function resolveSegmentColor(color: HistoryTextSegment["color"], baseColor: string | undefined): string | undefined {
   const colors = getColors();
   switch (color) {
+    // Legacy color names
     case "red":
       return colors.error;
     case "green":
@@ -3911,6 +3952,51 @@ function resolveSegmentColor(color: HistoryTextSegment["color"], baseColor: stri
       return colors.text;
     case "muted":
       return colors.muted;
+    // Theme color keys for syntax highlighting
+    case "code":
+      return colors.code;
+    case "path":
+      return colors.path;
+    case "func":
+      return colors.func;
+    case "url":
+      return colors.url;
+    case "number":
+      return colors.number;
+    case "header":
+      return colors.header;
+    case "bold":
+      return colors.bold;
+    case "italic":
+      return colors.italic;
+    case "strikethrough":
+      return colors.strikethrough;
+    case "blockquote":
+      return colors.blockquote;
+    case "listBullet":
+      return colors.listBullet;
+    case "link":
+      return colors.link;
+    case "linkText":
+      return colors.linkText;
+    case "hr":
+      return colors.hr;
+    case "border":
+      return colors.border;
+    case "diffAdd":
+      return colors.diffAdd;
+    case "diffRemove":
+      return colors.diffRemove;
+    case "diffHeader":
+      return colors.diffHeader;
+    case "success":
+      return colors.success;
+    case "error":
+      return colors.error;
+    case "warning":
+      return colors.warning;
+    case "info":
+      return colors.info;
     default:
       return baseColor;
   }

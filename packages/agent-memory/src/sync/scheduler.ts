@@ -7,7 +7,7 @@
 
 import type { ConnectorType } from '../ids.js'
 import type { AuthProvider } from '../auth/provider.js'
-import type { Connector, WebhookSubscription } from '../connector/sdk/types.js'
+import type { Connector, ConnectorContext, WebhookSubscription } from '../connector/sdk/types.js'
 import type { SyncTask, SyncTaskRepository } from '../db/repositories/sync-task.js'
 import type { AccountRepository } from '../db/repositories/account.js'
 import type { SyncEngine } from './engine.js'
@@ -442,7 +442,23 @@ export class Scheduler {
       throw new Error('webhookBaseUrl is required for webhook subscriptions')
     }
 
-    const ctx = await this.authProvider.getContext(task.account_id)
+    let ctx: ConnectorContext
+    if (connector.authConfig.type === 'local') {
+      ctx = { accountId: task.account_id }
+    } else if (connector.authConfig.type === 'credential_reference') {
+      if (!this.authProvider) {
+        throw new Error('Auth provider required for credential_reference connector')
+      }
+      ctx = await this.authProvider.getContext(
+        connector.authConfig.accountId,
+        connector.authConfig.additionalScopes ?? []
+      )
+    } else {
+      if (!this.authProvider) {
+        throw new Error('Auth provider is not configured')
+      }
+      ctx = await this.authProvider.getContext(task.account_id)
+    }
     const callbackUrl = `${this.config.webhookBaseUrl}/webhooks/${task.connector}/${task.account_id}`
 
     const subscription = await connector.subscribe(ctx, callbackUrl, {
@@ -475,7 +491,23 @@ export class Scheduler {
     }
 
     if (connector.unsubscribe) {
-      const ctx = await this.authProvider.getContext(task.account_id)
+      let ctx: ConnectorContext
+      if (connector.authConfig.type === 'local') {
+        ctx = { accountId: task.account_id }
+      } else if (connector.authConfig.type === 'credential_reference') {
+        if (!this.authProvider) {
+          throw new Error('Auth provider required for credential_reference connector')
+        }
+        ctx = await this.authProvider.getContext(
+          connector.authConfig.accountId,
+          connector.authConfig.additionalScopes ?? []
+        )
+      } else {
+        if (!this.authProvider) {
+          throw new Error('Auth provider is not configured')
+        }
+        ctx = await this.authProvider.getContext(task.account_id)
+      }
       await connector.unsubscribe(ctx, task.webhook_subscription_id)
     }
 
@@ -511,7 +543,23 @@ export class Scheduler {
       return { subscriptionId }
     }
 
-    const ctx = await this.authProvider.getContext(task.account_id)
+    let ctx: ConnectorContext
+    if (connector.authConfig.type === 'local') {
+      ctx = { accountId: task.account_id }
+    } else if (connector.authConfig.type === 'credential_reference') {
+      if (!this.authProvider) {
+        throw new Error('Auth provider required for credential_reference connector')
+      }
+      ctx = await this.authProvider.getContext(
+        connector.authConfig.accountId,
+        connector.authConfig.additionalScopes ?? []
+      )
+    } else {
+      if (!this.authProvider) {
+        throw new Error('Auth provider is not configured')
+      }
+      ctx = await this.authProvider.getContext(task.account_id)
+    }
     const subscription = await connector.renewSubscription(ctx, task.webhook_subscription_id)
 
     await this.taskRepo.setWebhookSubscriptionId(task.id, subscription.subscriptionId)

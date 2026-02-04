@@ -23,6 +23,298 @@ import type {
 interface ScoredItem {
   content: string;
   score: number;
+  source: 'memory' | 'preference' | 'decision';
+}
+
+interface QuerySpec {
+  text: string;
+  weight: number;
+  kind: 'phrase' | 'topic' | 'hotword' | 'keyword' | 'fallback';
+}
+
+interface QueryPlan {
+  topic: string | null;
+  hotwords: string[];
+  keywords: string[];
+  phrases: string[];
+  queries: QuerySpec[];
+}
+
+const STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'can', 'could',
+  'did', 'do', 'does', 'done', 'for', 'from', 'had', 'has', 'have', 'how',
+  'if', 'in', 'into', 'is', 'it', 'its', 'just', 'like', 'make', 'made',
+  'may', 'might', 'more', 'most', 'no', 'not', 'of', 'on', 'or', 'our',
+  'out', 'over', 'please', 'should', 'so', 'some', 'such', 'than', 'that',
+  'the', 'their', 'them', 'then', 'there', 'these', 'they', 'this', 'those',
+  'to', 'up', 'use', 'using', 'was', 'we', 'were', 'what', 'when', 'where',
+  'which', 'who', 'will', 'with', 'would', 'you', 'your',
+  'context', 'contexts', 'file', 'files', 'goal', 'goals', 'item', 'items',
+  'log', 'logs', 'note', 'notes', 'objective', 'session', 'sessions', 'work',
+  'workitem', 'workitems',
+  'json', 'jsonl', 'md', 'ts', 'tsx', 'js', 'jsx', 'txt', 'yaml', 'yml',
+]);
+
+const QUERY_PLAN_MAX_QUERIES = 8;
+const QUERY_PLAN_MAX_HOTWORDS = 8;
+const QUERY_PLAN_MAX_KEYWORDS = 8;
+const QUERY_PLAN_MAX_PHRASES = 5;
+const QUERY_PLAN_PHRASE_TOKEN_COUNT = 3;
+const QUERY_PLAN_PHRASE_FALLBACK_TOKEN_COUNT = 2;
+const QUERY_PLAN_MAX_TOPIC_TOKENS = 3;
+const QUERY_PLAN_MAX_QUERY_CHARS = 80;
+const QUERY_PLAN_MIN_QUERY_CHARS = 3;
+const QUERY_WEIGHT_PHRASE = 0.95;
+const QUERY_WEIGHT_TOPIC = 0.9;
+const QUERY_WEIGHT_HOTWORD = 0.75;
+const QUERY_WEIGHT_KEYWORD = 0.65;
+const QUERY_WEIGHT_FALLBACK = 0.6;
+
+const DEFAULT_MEMORY_CONNECTORS = (() => {
+  const env = process.env.MEMORY_INJECTOR_CONNECTORS;
+  if (typeof env === 'string' && env.trim().length > 0) {
+    return env.trim();
+  }
+  return 'claude_sessions,rex_sessions,watcher_sessions';
+})();
+
+const RECENCY_WINDOW_DAYS = 30;
+const RECENCY_MAX_BONUS = 0.25;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function looksSensitive(token: string): boolean {
+  if (token.length >= 32 && /^[a-z0-9+/=_-]+$/i.test(token)) return true;
+  if (/^[a-f0-9]{32,}$/i.test(token)) return true;
+  if (/^sk-[a-z0-9]{10,}$/i.test(token)) return true;
+  if (/^[a-z0-9_-]{10,}\.[a-z0-9_-]{10,}\.[a-z0-9_-]{10,}$/i.test(token)) return true;
+  return false;
+}
+
+function normalizeToken(raw: string): string | null {
+  const trimmed = raw.trim().replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '');
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (STOPWORDS.has(lower)) return null;
+  if (looksSensitive(lower)) return null;
+  const isShortAllowed = /^[a-z]+\d+$/i.test(lower) || /^v\d+$/i.test(lower);
+  if (lower.length < 3 && !isShortAllowed) return null;
+  return lower;
+}
+
+function clampQuery(text: string): string {
+  const collapsed = collapseWhitespace(text);
+  if (collapsed.length <= QUERY_PLAN_MAX_QUERY_CHARS) return collapsed;
+  return collapsed.slice(0, QUERY_PLAN_MAX_QUERY_CHARS).trim();
+}
+
+function extractTopic(rawQuery: string): string | null {
+  const firstClause = rawQuery.split(/[\n.!?]/)[0] ?? rawQuery;
+  const tokens: string[] = [];
+  for (const chunk of firstClause.split(/[^a-z0-9._/-]+/i)) {
+    if (!chunk) continue;
+    const token = normalizeToken(chunk);
+    if (!token) continue;
+    if (tokens.includes(token)) continue;
+    tokens.push(token);
+    if (tokens.length >= QUERY_PLAN_MAX_TOPIC_TOKENS) break;
+  }
+  if (tokens.length === 0) return null;
+  const topic = tokens.join(' ');
+  return topic.length >= QUERY_PLAN_MIN_QUERY_CHARS ? topic : null;
+}
+
+function extractHotwords(rawQuery: string): string[] {
+  const candidates = new Map<string, number>();
+
+  const addCandidate = (token: string | null, score: number): void => {
+    if (!token) return;
+    const existing = candidates.get(token);
+    if (existing === undefined || score > existing) {
+      candidates.set(token, score);
+    }
+  };
+
+  const pathPattern = /(?:[a-z0-9._-]+[\\/])+[a-z0-9._-]+/gi;
+  for (const match of rawQuery.matchAll(pathPattern)) {
+    const rawPath = match[0];
+    const base = path.basename(rawPath);
+    const baseToken = normalizeToken(base);
+    addCandidate(baseToken, 2.5);
+    const stem = base.includes('.') ? base.split('.')[0] : base;
+    addCandidate(normalizeToken(stem), 2.0);
+  }
+
+  const identifierPattern = /[a-z_][a-z0-9_]{2,}/gi;
+  for (const match of rawQuery.matchAll(identifierPattern)) {
+    const raw = match[0];
+    const token = normalizeToken(raw);
+    if (!token) continue;
+    const bonus = /[A-Z]/.test(raw) || raw.includes('_') ? 1.6 : 1.0;
+    addCandidate(token, bonus);
+  }
+
+  const hyphenPattern = /[a-z][a-z0-9-]{2,}/gi;
+  for (const match of rawQuery.matchAll(hyphenPattern)) {
+    const token = normalizeToken(match[0]);
+    addCandidate(token, 1.2);
+  }
+
+  const tokens = Array.from(candidates.entries())
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
+    .map(([token]) => token);
+
+  return tokens.slice(0, QUERY_PLAN_MAX_HOTWORDS);
+}
+
+function extractOrderedTokens(rawQuery: string): string[] {
+  const tokens: string[] = [];
+  const wordPattern = /[a-z0-9]{2,}/gi;
+  for (const match of rawQuery.matchAll(wordPattern)) {
+    const token = normalizeToken(match[0]);
+    if (!token) continue;
+    tokens.push(token);
+  }
+  return tokens;
+}
+
+function extractKeywords(rawQuery: string): string[] {
+  const counts = new Map<string, { count: number; score: number }>();
+  const wordPattern = /[a-z0-9]{2,}/gi;
+
+  for (const match of rawQuery.matchAll(wordPattern)) {
+    const token = normalizeToken(match[0]);
+    if (!token) continue;
+    const existing = counts.get(token);
+    const nextCount = (existing?.count ?? 0) + 1;
+    const lengthBonus = token.length >= 10 ? 1.1 : token.length >= 7 ? 0.8 : token.length >= 5 ? 0.5 : 0.2;
+    const score = nextCount + lengthBonus;
+    counts.set(token, { count: nextCount, score });
+  }
+
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1].score - a[1].score || b[1].count - a[1].count || b[0].length - a[0].length)
+    .map(([token]) => token)
+    .slice(0, QUERY_PLAN_MAX_KEYWORDS);
+}
+
+function extractPhrases(rawQuery: string): string[] {
+  const tokens = extractOrderedTokens(rawQuery);
+  const phrases: string[] = [];
+  const phraseSize = tokens.length >= QUERY_PLAN_PHRASE_TOKEN_COUNT
+    ? QUERY_PLAN_PHRASE_TOKEN_COUNT
+    : tokens.length >= QUERY_PLAN_PHRASE_FALLBACK_TOKEN_COUNT
+      ? QUERY_PLAN_PHRASE_FALLBACK_TOKEN_COUNT
+      : 0;
+
+  if (phraseSize === 0) return phrases;
+
+  for (let i = 0; i <= tokens.length - phraseSize; i++) {
+    const phrase = tokens.slice(i, i + phraseSize).join(' ');
+    if (phrases.includes(phrase)) continue;
+    phrases.push(phrase);
+    if (phrases.length >= QUERY_PLAN_MAX_PHRASES) break;
+  }
+
+  return phrases;
+}
+
+function buildQueryPlan(rawQuery: string): QueryPlan {
+  const cleaned = collapseWhitespace(rawQuery);
+  const topic = extractTopic(cleaned);
+  const hotwords = extractHotwords(cleaned);
+  const keywords = extractKeywords(cleaned);
+  const phrases = extractPhrases(cleaned);
+
+  const queries: QuerySpec[] = [];
+  for (const phrase of phrases) {
+    const text = clampQuery(phrase);
+    if (text.length >= QUERY_PLAN_MIN_QUERY_CHARS) {
+      queries.push({ text, weight: QUERY_WEIGHT_PHRASE, kind: 'phrase' });
+    }
+  }
+  const maxLen = Math.max(hotwords.length, keywords.length);
+  for (let i = 0; i < maxLen; i++) {
+    const hotword = hotwords[i];
+    if (hotword && !queries.some((q) => q.text === hotword)) {
+      const text = clampQuery(hotword);
+      if (text.length >= QUERY_PLAN_MIN_QUERY_CHARS) {
+        queries.push({ text, weight: QUERY_WEIGHT_HOTWORD, kind: 'hotword' });
+      }
+    }
+    const keyword = keywords[i];
+    if (keyword && !queries.some((q) => q.text === keyword)) {
+      const text = clampQuery(keyword);
+      if (text.length >= QUERY_PLAN_MIN_QUERY_CHARS) {
+        queries.push({ text, weight: QUERY_WEIGHT_KEYWORD, kind: 'keyword' });
+      }
+    }
+  }
+
+  if (topic) {
+    const topicTokens = topic.split(' ').filter(Boolean);
+    for (const token of topicTokens) {
+      if (queries.some((q) => q.text === token)) continue;
+      const text = clampQuery(token);
+      if (text.length >= QUERY_PLAN_MIN_QUERY_CHARS) {
+        queries.push({ text, weight: QUERY_WEIGHT_TOPIC, kind: 'topic' });
+      }
+    }
+  }
+
+  if (queries.length === 0 && cleaned.length >= QUERY_PLAN_MIN_QUERY_CHARS) {
+    queries.push({
+      text: clampQuery(cleaned),
+      weight: QUERY_WEIGHT_FALLBACK,
+      kind: 'fallback',
+    });
+  }
+
+  const deduped = new Map<string, QuerySpec>();
+  for (const query of queries) {
+    const key = query.text.toLowerCase();
+    if (!deduped.has(key)) deduped.set(key, query);
+  }
+
+  return {
+    topic,
+    hotwords,
+    keywords,
+    phrases,
+    queries: Array.from(deduped.values()).slice(0, QUERY_PLAN_MAX_QUERIES),
+  };
+}
+
+function summarizeQueryPlan(plan: QueryPlan): string {
+  if (!plan.queries.length) return '';
+  return plan.queries.map((query) => query.text).join(' | ');
+}
+
+function safeScore(value: unknown): number {
+  if (typeof value === 'number') {
+    return Number.isNaN(value) ? 0 : value;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const coerced = Number(value);
+    return Number.isNaN(coerced) ? 0 : coerced;
+  }
+  return 0;
+}
+
+function recencyBonus(timestamp?: string): number {
+  if (!timestamp) return 0;
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return 0;
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const ageMs = Math.max(0, todayUtc - parsed);
+  const ageDays = ageMs / MS_PER_DAY;
+  const ratio = Math.max(0, 1 - ageDays / RECENCY_WINDOW_DAYS);
+  return ratio * RECENCY_MAX_BONUS;
 }
 
 /**
@@ -38,58 +330,161 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
   });
 
   return {
+    summarizeQueryPlan(rawQuery: string): string {
+      if (!rawQuery || !rawQuery.trim()) return '';
+      const plan = buildQueryPlan(rawQuery);
+      const summary = summarizeQueryPlan(plan);
+      return summary || rawQuery;
+    },
     async inject({ query, maxTokens }: InjectParams): Promise<string | null> {
       // Validate query - return null early if empty or whitespace-only
       if (!query || !query.trim()) {
         return null;
       }
+      const tokenBudget = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 0;
+      if (tokenBudget <= 0) {
+        return null;
+      }
 
-      // Search both tables in parallel with error logging
-      const [prefsResult, decisionsResult] = await Promise.all([
-        client.preferences
-          .search({ q: query, limit: 10 })
-          .catch((err) => {
-            console.error('[MemoryInjector] Preferences search failed:', err);
-            return { preferences: [] };
-          }),
-        client.decisions
-          .search({ q: query, limit: 10 })
-          .catch((err) => {
-            console.error('[MemoryInjector] Decisions search failed:', err);
-            return { decisions: [] };
-          }),
+      const queryPlan = buildQueryPlan(query);
+      if (queryPlan.queries.length === 0) {
+        return null;
+      }
+
+      const memoryLimit = 6;
+      const preferenceLimit = 6;
+      const decisionLimit = 6;
+
+      const memorySearches = queryPlan.queries.map(async (spec) => {
+        if (!client.memory?.search) {
+          return { spec, items: [] as Array<{ summary: string; source_timestamp?: string; updated_at: string }> };
+        }
+        try {
+          const res = await client.memory.search({
+            q: spec.text,
+            limit: memoryLimit,
+            connectors: DEFAULT_MEMORY_CONNECTORS,
+          });
+          return { spec, items: res?.items ?? [] };
+        } catch (err) {
+          console.error('[MemoryInjector] Conversational memory search failed:', err);
+          return { spec, items: [] as Array<{ summary: string; source_timestamp?: string; updated_at: string }> };
+        }
+      });
+
+      const preferenceSearches = queryPlan.queries.map(async (spec) => {
+        try {
+          const res = await client.preferences.search({ q: spec.text, limit: preferenceLimit });
+          return { spec, preferences: res?.preferences ?? [] };
+        } catch (err) {
+          console.error('[MemoryInjector] Preferences search failed:', err);
+          return { spec, preferences: [] };
+        }
+      });
+
+      const decisionSearches = queryPlan.queries.map(async (spec) => {
+        try {
+          const res = await client.decisions.search({ q: spec.text, limit: decisionLimit });
+          return { spec, decisions: res?.decisions ?? [] };
+        } catch (err) {
+          console.error('[MemoryInjector] Decisions search failed:', err);
+          return { spec, decisions: [] };
+        }
+      });
+
+      const [memoryResults, preferenceResults, decisionResults] = await Promise.all([
+        Promise.all(memorySearches),
+        Promise.all(preferenceSearches),
+        Promise.all(decisionSearches),
       ]);
 
-      // Handle null/undefined responses safely
-      const prefs = prefsResult?.preferences ?? [];
-      const decisions = decisionsResult?.decisions ?? [];
+      const sourceCaps = {
+        memory: 6,
+        preference: 6,
+        decision: 6,
+      } as const;
 
-      // Combine and filter out null/undefined/empty content, then sort by score
-      const items: ScoredItem[] = [
-        ...prefs
-          .map((p) => ({
-            content: p.preference,
-            score: p.rank ?? 0,
-          }))
-          .filter((item) => item.content && item.content.trim().length > 0),
-        ...decisions
-          .map((d) => ({
-            content: d.decision,
-            score: d.rank ?? d.similarity ?? 0,
-          }))
-          .filter((item) => item.content && item.content.trim().length > 0),
-      ].sort((a, b) => b.score - a.score);
+      const formatDateSuffix = (value?: string): string => {
+        if (!value) return '';
+        const parsed = Date.parse(value);
+        if (!Number.isFinite(parsed)) return '';
+        return ` (${new Date(parsed).toISOString().slice(0, 10)})`;
+      };
+
+      const memoryScoredRaw: ScoredItem[] = [];
+      for (const { spec, items } of memoryResults) {
+        items.forEach((item, index) => {
+          if (!item?.summary) return;
+          const timestamp = item.source_timestamp ?? item.updated_at;
+          const score = spec.weight + recencyBonus(timestamp) - index * 0.015;
+          memoryScoredRaw.push({
+            content: `${item.summary}${formatDateSuffix(timestamp)}`,
+            score,
+            source: 'memory',
+          });
+        });
+      }
+
+      const prefScoredRaw: ScoredItem[] = [];
+      for (const { spec, preferences } of preferenceResults) {
+        for (const pref of preferences ?? []) {
+          if (!pref?.preference) continue;
+          const timestamp = (pref as { created_at?: string }).created_at;
+          const score = safeScore(pref.rank) * spec.weight + recencyBonus(timestamp);
+          prefScoredRaw.push({
+            content: pref.preference,
+            score,
+            source: 'preference',
+          });
+        }
+      }
+
+      const decisionScoredRaw: ScoredItem[] = [];
+      for (const { spec, decisions } of decisionResults) {
+        for (const decision of decisions ?? []) {
+          if (!decision?.decision) continue;
+          const rawScore = decision.rank ?? decision.similarity;
+          const timestamp = (decision as { created_at?: string }).created_at;
+          const score = safeScore(rawScore) * spec.weight + recencyBonus(timestamp);
+          decisionScoredRaw.push({
+            content: decision.decision,
+            score,
+            source: 'decision',
+          });
+        }
+      }
+
+      const memoryScored = memoryScoredRaw
+        .filter((item) => item.content && item.content.trim().length > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, sourceCaps.memory);
+
+      const prefScored = prefScoredRaw
+        .filter((item) => item.content && item.content.trim().length > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, sourceCaps.preference);
+
+      const decisionScored = decisionScoredRaw
+        .filter((item) => item.content && item.content.trim().length > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, sourceCaps.decision);
+
+      const items: ScoredItem[] = [...memoryScored, ...prefScored, ...decisionScored]
+        .sort((a, b) => b.score - a.score);
 
       if (items.length === 0) {
         return null;
       }
 
-      // Deduplicate by content (BUG #13)
+      // Deduplicate by normalized content (BUG #13)
+      const normalizeForDedup = (text: string): string =>
+        text.trim().replace(/\s+/g, ' ').toLowerCase();
       const seen = new Set<string>();
       const dedupedItems: ScoredItem[] = [];
       for (const item of items) {
-        if (!seen.has(item.content)) {
-          seen.add(item.content);
+        const key = normalizeForDedup(item.content);
+        if (!seen.has(key)) {
+          seen.add(key);
           dedupedItems.push(item);
         }
       }
@@ -113,20 +508,30 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         return Math.ceil(tokens);
       }
 
+      const renderItem = (item: ScoredItem): string => {
+        const label = item.source === 'memory'
+          ? 'Memory'
+          : item.source === 'preference'
+            ? 'Preference'
+            : 'Decision';
+        return `**[${label}]** ${item.content}`;
+      };
+
       // Build output, respecting token limit (BUG #6: continue instead of break for large items)
       const result: string[] = [];
       let tokens = 0;
 
       for (const item of dedupedItems) {
-        const itemTokens = estimateTokens(item.content);
+        const rendered = renderItem(item);
+        const itemTokens = estimateTokens(rendered);
         // Skip items that individually exceed maxTokens, but continue checking others
-        if (itemTokens > maxTokens) {
+        if (itemTokens > tokenBudget) {
           continue;
         }
-        if (tokens + itemTokens > maxTokens) {
-          break;
+        if (tokens + itemTokens > tokenBudget) {
+          continue;
         }
-        result.push(item.content);
+        result.push(rendered);
         tokens += itemTokens;
       }
 
@@ -258,7 +663,7 @@ interface ValidSemanticData {
   };
 }
 
-function formatValidSemanticForInjection(semantic: ValidSemanticData): string {
+export function formatValidSemanticForInjection(semantic: ValidSemanticData): string {
   const sections: string[] = [];
 
   sections.push(`## WorkItem Context (${semantic.meta.workId})`);

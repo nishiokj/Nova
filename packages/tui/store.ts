@@ -3,6 +3,7 @@ import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, Q
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 import { highlightCode } from "./utils/syntax.js";
+import { toGatewayModel } from "types";
 
 /**
  * TUI Store - Central state management for the terminal UI
@@ -43,6 +44,50 @@ import { highlightCode } from "./utils/syntax.js";
 // Resource limits to prevent memory exhaustion
 const MAX_STREAMING_BYTES = 5 * 1024 * 1024;  // 5MB - cap streaming text
 const MAX_INPUT_LENGTH = 100 * 1024;           // 100KB - cap input buffer
+
+const GATEWAY_PROVIDER_ID = "vercel-gateway";
+const GATEWAY_MODEL_PROVIDERS = new Set<string>([
+  "anthropic",
+  "openai",
+  "cerebras",
+  "groq",
+  "gemini",
+  "z.ai-coder",
+  "claude",
+]);
+
+function expandGatewayModels(models: ModelEntry[]): ModelEntry[] {
+  if (models.length === 0) return models;
+
+  const expanded: ModelEntry[] = [...models];
+  const seen = new Set(models.map((model) => `${model.provider ?? ""}:${model.id}`));
+
+  for (const model of models) {
+    const provider = model.provider;
+    if (!provider || provider === GATEWAY_PROVIDER_ID) continue;
+    if (!GATEWAY_MODEL_PROVIDERS.has(provider)) continue;
+
+    let gatewayId: string;
+    try {
+      gatewayId = toGatewayModel(model.id, provider);
+    } catch {
+      continue;
+    }
+
+    const key = `${GATEWAY_PROVIDER_ID}:${gatewayId}`;
+    if (seen.has(key)) continue;
+
+    expanded.push({
+      ...model,
+      id: gatewayId,
+      provider: GATEWAY_PROVIDER_ID,
+      name: model.provider ? `${model.name} (${model.provider})` : model.name,
+    });
+    seen.add(key);
+  }
+
+  return expanded;
+}
 
 export interface AutocompleteState {
   active: boolean;
@@ -146,6 +191,10 @@ export interface StoreSnapshot {
   contextInputTokens: number | null;
   contextMaxWindowSize: number | null;
   cachedInput: string | null;
+  // LLM call state (last seen)
+  lastLlmAgentType: string | null;
+  lastLlmModel: string | null;
+  lastLlmProvider: string | null;
 }
 
 const DEFAULT_MAX_HISTORY = 500;
@@ -269,6 +318,10 @@ export class Store {
   private contextInputTokens: number | null = null;
   private contextMaxWindowSize: number | null = null;
   private cachedInput: string | null = null;
+  // ─── LLM Call ───
+  private lastLlmAgentType: string | null = null;
+  private lastLlmModel: string | null = null;
+  private lastLlmProvider: string | null = null;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CONSTRUCTOR
@@ -368,6 +421,10 @@ export class Store {
       contextInputTokens: this.contextInputTokens,
       contextMaxWindowSize: this.contextMaxWindowSize,
       cachedInput: this.cachedInput,
+      // LLM call state
+      lastLlmAgentType: this.lastLlmAgentType,
+      lastLlmModel: this.lastLlmModel,
+      lastLlmProvider: this.lastLlmProvider,
     };
   }
 
@@ -1281,11 +1338,12 @@ export class Store {
    * Updates cursor to point to the selected model for the active tab.
    */
   updateModelsList(models: ModelEntry[]): void {
-    this.modelsList = models;
+    this.modelsList = expandGatewayModels(models);
     // Update cursor position based on active tab's selection
     const selection = this.modelSelections.get(this.modelsActiveTab);
-    if (selection && models.length > 0) {
-      const idx = models.findIndex((m) => m.id === selection.model && m.provider === selection.provider);
+    const list = this.modelsList;
+    if (selection && list.length > 0) {
+      const idx = list.findIndex((m) => m.id === selection.model && m.provider === selection.provider);
       this.modelsCursor = Math.max(0, idx);
     } else {
       this.modelsCursor = 0;
@@ -1809,6 +1867,26 @@ export class Store {
   setContextWindowSize(inputTokens: number | null, maxWindowSize: number | null): void {
     this.contextInputTokens = inputTokens;
     this.contextMaxWindowSize = maxWindowSize;
+    this.emit();
+  }
+
+  /**
+   * Tracks the most recent LLM call (agent/model/provider).
+   */
+  setLastLlmCall(agentType: string | null, model: string | null, provider: string | null): void {
+    this.lastLlmAgentType = agentType;
+    this.lastLlmModel = model;
+    this.lastLlmProvider = provider;
+    this.emit();
+  }
+
+  /**
+   * Clears last LLM call tracking.
+   */
+  clearLastLlmCall(): void {
+    this.lastLlmAgentType = null;
+    this.lastLlmModel = null;
+    this.lastLlmProvider = null;
     this.emit();
   }
 

@@ -47,6 +47,8 @@ export interface MemoryInjection {
   workItemId?: string;
   query: string;
   resultPreview?: string;
+  memoryContent?: string;
+  contextWithMemory?: string;
   itemCount: number;
   success: boolean;
   iteration: number;

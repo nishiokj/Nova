@@ -13,7 +13,7 @@
  * Canonical LLM provider types (what the adapter routes to).
  * These are the actual SDK/API implementations.
  */
-export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat';
+export type LLMProvider = 'anthropic' | 'openai' | 'openai-compat' | 'vercel-gateway';
 
 /**
  * All supported provider names that can appear in configuration.
@@ -23,6 +23,7 @@ export type SupportedProvider =
   | 'anthropic'
   | 'openai'
   | 'openai-compat'
+  | 'vercel-gateway'
   | 'cerebras'
   | 'groq'
   | 'gemini'
@@ -117,6 +118,12 @@ export type ProviderResponseFormat = 'json_schema' | 'json_object' | 'none';
 export const PROVIDER_MODEL_DEFAULTS: Partial<
   Record<SupportedProvider, Partial<Record<ModelRole, string>>>
 > = {
+  'vercel-gateway': {
+    fast: 'anthropic/claude-sonnet-4.5',
+    standard: 'anthropic/claude-sonnet-4.5',
+    powerful: 'anthropic/claude-opus-4.5',
+    reasoning: 'openai/gpt-5.2-codex',
+  },
   anthropic: {
     fast: 'claude-sonnet-4.5',
     standard: 'claude-sonnet-4.5',
@@ -168,6 +175,15 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
  * This is the SINGLE SOURCE OF TRUTH for provider configuration.
  */
 export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = {
+  'vercel-gateway': {
+    id: 'vercel-gateway',
+    displayName: 'Vercel AI Gateway',
+    canonicalProvider: 'vercel-gateway',
+    baseUrl: 'https://ai-gateway.vercel.sh/v1',
+    envVar: 'AI_GATEWAY_API_KEY',
+    testEndpoint: 'https://ai-gateway.vercel.sh/v1/models',
+    dashboardUrl: 'https://vercel.com/~/ai-gateway',
+  },
   anthropic: {
     id: 'anthropic',
     displayName: 'Anthropic (Claude)',
@@ -370,6 +386,16 @@ export const OPENAI_COMPAT_PROVIDERS = new Set<string>(
 );
 
 /**
+ * Map our provider IDs to Vercel AI Gateway slugs.
+ * Most match, but some need translation.
+ */
+const PROVIDER_TO_GATEWAY_SLUG: Partial<Record<SupportedProvider, string>> = {
+  'z.ai-coder': 'zai',
+  gemini: 'google',
+  claude: 'anthropic',
+};
+
+/**
  * List of all supported provider IDs.
  */
 export const SUPPORTED_PROVIDER_IDS = Object.keys(PROVIDER_REGISTRY) as SupportedProvider[];
@@ -545,6 +571,30 @@ export function getProviderForModel(modelId: string): SupportedProvider | undefi
     }
   }
   return undefined;
+}
+
+/**
+ * Convert a model ID to Vercel AI Gateway format.
+ * @example toGatewayModel('claude-sonnet-4.5') => 'anthropic/claude-sonnet-4.5'
+ * @example toGatewayModel('llama-3.3-70b', 'cerebras') => 'cerebras/llama-3.3-70b'
+ */
+export function toGatewayModel(modelId: string, providerHint?: string): string {
+  if (modelId.includes('/')) return modelId;
+
+  let providerSlug = providerHint?.trim();
+  if (!providerSlug) {
+    providerSlug = getProviderForModel(modelId);
+  }
+
+  if (!providerSlug) {
+    throw new Error(
+      `Cannot infer gateway provider for model '${modelId}'. ` +
+      `Specify provider/model or set displayProvider.`
+    );
+  }
+
+  const mappedSlug = PROVIDER_TO_GATEWAY_SLUG[providerSlug as SupportedProvider] ?? providerSlug;
+  return `${mappedSlug}/${modelId}`;
 }
 
 /**

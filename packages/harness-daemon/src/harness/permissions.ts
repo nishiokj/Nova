@@ -99,6 +99,13 @@ export class PermissionChecker {
   }
 
   /**
+   * Cancel a pending request without resolving it.
+   */
+  cancelPendingRequest(requestId: string): void {
+    this.pendingRequests.delete(requestId);
+  }
+
+  /**
    * Check if a tool+target is allowed.
    *
    * Priority order (per spec):

@@ -224,6 +224,13 @@ export class GraphDManager {
           }
           this.store = new GraphStore(this.dbPath);
           this.store.initialize();
+
+          // CRITICAL: Start session cleanup timer even when reusing.
+          // Session cleanup is database-level, not server-level. Multiple processes
+          // can safely run cleanup concurrently (SQL UPDATE is atomic).
+          // Without this, sessions stay "active" forever when the primary GraphD
+          // instance doesn't handle sessions (e.g., dashboard-only).
+          this.startSessionCleanupTimer();
         } catch (err) {
           console.warn('GraphD reuse: failed to open local store', err);
           this.store = null;

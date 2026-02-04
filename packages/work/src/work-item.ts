@@ -149,6 +149,17 @@ export function createWorkItem(params: {
 }
 
 /**
+ * Clone a work item with new dependencies.
+ * Used for dependency ID remapping when planner IDs differ from generated workIds.
+ */
+export function cloneWorkItemWithDependencies(item: WorkItem, dependencies: string[]): WorkItem {
+  return {
+    ...item,
+    dependencies: Object.freeze(dependencies),
+  };
+}
+
+/**
  * Create a work item from step state.
  */
 export function workItemFromStepState(

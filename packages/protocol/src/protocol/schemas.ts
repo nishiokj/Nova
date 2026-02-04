@@ -123,6 +123,7 @@ export const WorkItemCompletedDecisionSchema = z.discriminatedUnion('action', [
 // ============================================
 
 export const WorkItemSpecSchema = z.object({
+  id: z.string().min(1).optional(),
   goal: z.string().min(1),
   objective: z.string().min(1),
   agent: z.string().min(1),
@@ -217,7 +218,7 @@ export const WatcherOutputSchema = z.object({
   goalStateReached: z.boolean(),
   response: z.string(),
   watcherAction: z.object({
-    action: z.enum(['answer', 'realign', 'split', 'create_work_item', 'quality_gate', 'continue']),
+    action: z.enum(['answer', 'realign', 'split', 'create_work_item', 'quality_gate', 'allow', 'continue']),
     reason: z.string(),
     answer: z.object({
       text: z.string(),

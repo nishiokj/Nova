@@ -55,6 +55,7 @@ export interface SkillInput {
 export type HookEvent =
   | 'PreToolUse'
   | 'PostToolUse'
+  | 'PostGitCommit'
   | 'UserPromptSubmit'
   | 'Stop'
   | 'SessionStart'
@@ -148,6 +149,12 @@ export interface HookContext {
   sessionKey: string;
   requestId: string;
   workingDir: string;
+  /** Git commit SHA (for PostGitCommit events) */
+  commitSha?: string;
+  /** Git commit message (for PostGitCommit events) */
+  commitMessage?: string;
+  /** Git branch (for PostGitCommit events) */
+  commitBranch?: string;
 }
 
 // ============================================
