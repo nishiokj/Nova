@@ -4,6 +4,37 @@
  * Defines the interface for injecting relevant memory into agent context.
  */
 
+export type QueryIntent =
+  | 'decision'
+  | 'preference'
+  | 'principle'
+  | 'tradeoff'
+  | 'recall'
+  | 'implementation'
+  | 'debug'
+  | 'unknown';
+
+export interface MemoryQueryStrategy {
+  enableIntentQueries?: boolean;
+  enableOverlapBoost?: boolean;
+  enableQualityFilters?: boolean;
+  maxQueries?: number;
+  maxIntentQueries?: number;
+}
+
+export interface QueryPlanSummary {
+  intent: QueryIntent;
+  topic: string | null;
+  hotwords: string[];
+  keywords: string[];
+  phrases: string[];
+  queries: Array<{
+    text: string;
+    weight: number;
+    kind: string;
+  }>;
+}
+
 /**
  * Parameters for memory injection.
  */
@@ -12,6 +43,18 @@ export interface InjectParams {
   query: string;
   /** Maximum tokens to include in injection */
   maxTokens: number;
+}
+
+/**
+ * Parameters for recent conversation summary injection.
+ */
+export interface InjectRecentParams {
+  /** Max summaries to include (default: 10) */
+  limit?: number;
+  /** Maximum tokens to include in injection */
+  maxTokens: number;
+  /** Optional connector filter */
+  connectors?: string;
 }
 
 export interface InjectParamsV2 {
@@ -86,10 +129,21 @@ export interface MemoryInjector {
   inject(params: InjectParams): Promise<string | null>;
 
   /**
+   * Inject recent conversation summaries (no search query).
+   * Intended for first-iteration priming.
+   */
+  injectRecentConversations?: (params: InjectRecentParams) => Promise<string | null>;
+
+  /**
    * Summarize the internal query plan for observability.
    * Returns a short string of sub-queries (e.g., "foo | bar | baz").
    */
   summarizeQueryPlan?: (query: string) => string;
+
+  /**
+   * Return a structured query plan summary for debugging.
+   */
+  explainQueryPlan?: (query: string) => QueryPlanSummary;
 
   /**
    * Inject relevant evidence using v2 retrieval (optional).
@@ -113,4 +167,6 @@ export interface MemoryInjectorConfig {
   baseUrl: string;
   /** Request timeout in ms (default: 5000) */
   timeout?: number;
+  /** Optional strategy flags for query planning and reranking */
+  strategy?: MemoryQueryStrategy;
 }

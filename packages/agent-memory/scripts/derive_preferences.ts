@@ -59,7 +59,7 @@ const CATEGORIES = [
 // EXTRACTION PROMPT (versioned)
 // ============================================
 
-const PROMPT_VERSION = 'v3'
+const PROMPT_VERSION = 'v4'
 
 const EXTRACTION_PROMPT = `You are extracting user preferences AND explicit decisions from a Claude Code conversation transcript.
 
@@ -154,6 +154,11 @@ GENERALIZATION TESTS (APPLY TO PREFERENCES BEFORE YOU EMIT)
    Would this still be a preference in 6 months on a different codebase?
 3) Decision test:
    Would this preference help resolve an ambiguity in a future choice?
+
+HARD FILTERS (DO NOT EMIT)
+- If the preference depends on a specific file path, class name, or one-off refactor, mark it "ignore".
+- entity_free_formulation must not contain code identifiers or file paths. If you cannot remove them, set kind="local_convention".
+- Decisions without clear alternatives or rationale should be dropped (do not emit).
 `
 
 const PROMPT_HASH = createHash('sha256').update(EXTRACTION_PROMPT).digest('hex').slice(0, 16)
@@ -261,7 +266,8 @@ export function extractOutput(text: string): ExtractedOutput | null {
 }
 
 export function normalizePreferenceKey(pref: ExtractedPreference): string {
-  return (pref.preference ?? '').trim().toLowerCase()
+  const core = pref.entity_free_formulation?.trim() || pref.preference?.trim() || ''
+  return core.toLowerCase()
 }
 
 export function dedupePreferences(prefs: ExtractedPreference[]): ExtractedPreference[] {
@@ -274,6 +280,41 @@ export function dedupePreferences(prefs: ExtractedPreference[]): ExtractedPrefer
     }
   }
   return Array.from(seen.values())
+}
+
+function isJunkText(value?: string): boolean {
+  if (!value) return true
+  const trimmed = value.trim().toLowerCase()
+  if (trimmed.length < 6) return true
+  return ['n/a', 'na', 'none', 'unknown', 'todo', 'tbd'].includes(trimmed)
+}
+
+function sanitizePreference(pref: ExtractedPreference): ExtractedPreference | null {
+  const preference = pref.preference?.trim() ?? ''
+  if (isJunkText(preference)) return null
+
+  const entityFree = pref.entity_free_formulation?.trim() ?? ''
+  const evidenceCount = pref.evidence_count ?? 0
+  const failureMode = pref.failure_mode_prevented?.trim() ?? ''
+  const signalStrength = pref.signal_strength ?? 'implicit'
+  let kind = pref.kind ?? 'ignore'
+
+  if (kind === 'ignore') return null
+
+  if (kind === 'principle_candidate') {
+    const hasStrongSignal = evidenceCount >= 2 || signalStrength === 'explicit' || failureMode.length >= 8
+    if (!entityFree || entityFree.length < 8 || !hasStrongSignal) {
+      kind = 'local_convention'
+    }
+  }
+
+  return {
+    ...pref,
+    kind,
+    preference,
+    entity_free_formulation: entityFree,
+    signal_strength: signalStrength,
+  }
 }
 
 export function normalizeDecisionKey(d: ExtractedDecision): string {
@@ -293,6 +334,37 @@ export function dedupeDecisions(decisions: ExtractedDecision[]): ExtractedDecisi
     }
   }
   return Array.from(seen.values())
+}
+
+function sanitizeDecision(decision: ExtractedDecision): ExtractedDecision | null {
+  const decisionText = decision.decision?.trim() ?? ''
+  if (isJunkText(decisionText)) return null
+
+  const rationale = decision.rationale?.trim() ?? ''
+  const alternatives = decision.alternatives_considered?.trim() ?? ''
+  const tradeoffs = decision.tradeoffs?.trim() ?? ''
+  const signalStrength = decision.signal_strength ?? 'implicit'
+  let confidence = decision.confidence ?? 'low'
+
+  if (!rationale || rationale.length < 8) {
+    confidence = confidence === 'high' ? 'medium' : 'low'
+  }
+  if (!alternatives) {
+    confidence = confidence === 'high' ? 'medium' : confidence
+  }
+  if (!tradeoffs && confidence === 'high') {
+    confidence = 'medium'
+  }
+
+  return {
+    ...decision,
+    decision: decisionText,
+    rationale,
+    alternatives_considered: alternatives,
+    tradeoffs,
+    signal_strength: signalStrength,
+    confidence,
+  }
 }
 
 export function formatTranscript(messages: Array<{ role: string; text: string }>): string {
@@ -501,7 +573,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function flushPreferences(sql: DerivedRunContext['sql'], prefs: ExtractedPreference[]): Promise<number> {
-  const deduped = dedupePreferences(prefs)
+  const cleaned = prefs
+    .map((pref) => sanitizePreference(pref))
+    .filter((pref): pref is ExtractedPreference => Boolean(pref))
+  const deduped = dedupePreferences(cleaned)
   if (deduped.length === 0) return 0
 
   const rows = deduped.map((pref) => ({
@@ -538,7 +613,10 @@ async function flushPreferences(sql: DerivedRunContext['sql'], prefs: ExtractedP
 }
 
 async function flushDecisions(sql: DerivedRunContext['sql'], decisions: ExtractedDecision[]): Promise<number> {
-  const deduped = dedupeDecisions(decisions)
+  const cleaned = decisions
+    .map((decision) => sanitizeDecision(decision))
+    .filter((decision): decision is ExtractedDecision => Boolean(decision))
+  const deduped = dedupeDecisions(cleaned)
   if (deduped.length === 0) return 0
 
   const rows = deduped.map((d) => ({

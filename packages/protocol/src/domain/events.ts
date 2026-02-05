@@ -7,6 +7,16 @@
 
 import type { HandoffSpec } from './state.js';
 import type { TerminationReason } from './termination.js';
+import {
+  controlField,
+  events,
+  isObject,
+  matchEvent,
+  matchEventAll,
+  type EventOf,
+  type HandlersFor,
+  type Validator,
+} from 'prompt-protocol';
 
 /**
  * Base event interface.
@@ -161,6 +171,65 @@ export const ALL_EVENT_TYPES: readonly ControlEventType[] = [
   'transient_error',
   'work_item_completed',
 ] as const;
+
+// ============================================
+// PROMPT-PROTOCOL DEFINITIONS
+// ============================================
+
+/**
+ * Control field for ControlEvent.type.
+ */
+export const ControlEventTypeField = controlField('type', ALL_EVENT_TYPES);
+
+/**
+ * Minimal validator for ControlEvent objects.
+ */
+export const ControlEventValidator: Validator<ControlEvent> = {
+  parse(input) {
+    if (!isObject(input) || !ControlEventTypeField.is(input.type)) {
+      throw new Error('Invalid ControlEvent');
+    }
+    if (typeof input.timestamp !== 'number') throw new Error('Invalid ControlEvent.timestamp');
+    if (typeof input.sessionKey !== 'string') throw new Error('Invalid ControlEvent.sessionKey');
+    if (typeof input.workId !== 'string') throw new Error('Invalid ControlEvent.workId');
+    return input as unknown as ControlEvent;
+  },
+  safeParse(input) {
+    try {
+      return { success: true, data: this.parse(input) as ControlEvent };
+    } catch (error) {
+      return { success: false, error };
+    }
+  },
+};
+
+/**
+ * Prompt-protocol EventDef for ControlEvent routing.
+ */
+export const ControlEvents = events<ControlEvent>({
+  discriminant: 'type',
+  validate: ControlEventValidator,
+});
+
+/**
+ * Typed event router (subset handlers allowed).
+ */
+export function matchControlEvent<R>(
+  event: EventOf<typeof ControlEvents>,
+  handlers: HandlersFor<typeof ControlEvents, R>
+): R {
+  return matchEvent<typeof ControlEvents, R>(ControlEvents, event, handlers);
+}
+
+/**
+ * Typed event router (all handlers required).
+ */
+export function matchControlEventAll<R>(
+  event: EventOf<typeof ControlEvents>,
+  handlers: HandlersFor<typeof ControlEvents, R>
+): R {
+  return matchEventAll<typeof ControlEvents, R>(ControlEvents, event, handlers);
+}
 
 // ============================================
 // TYPE GUARDS

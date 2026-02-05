@@ -2,7 +2,7 @@ import { computeInputLayout, InputBuffer } from "./buffer.js";
 import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, RalphCompletionReason, PermissionRequestData, TextSegment } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
-import { highlightCode } from "./utils/syntax.js";
+import { highlightCode, isLanguageSupported } from "./utils/syntax.js";
 import { toGatewayModel } from "types";
 
 /**
@@ -58,6 +58,8 @@ const GATEWAY_MODEL_PROVIDERS = new Set<string>([
 
 function expandGatewayModels(models: ModelEntry[]): ModelEntry[] {
   if (models.length === 0) return models;
+  const hasGatewayAccess = models.some((model) => model.provider === GATEWAY_PROVIDER_ID);
+  if (!hasGatewayAccess) return models;
 
   const expanded: ModelEntry[] = [...models];
   const seen = new Set(models.map((model) => `${model.provider ?? ""}:${model.id}`));
@@ -164,6 +166,7 @@ export interface StoreSnapshot {
   responseContent: ResponseContent | null;
   // Models selection
   modelsList: ModelEntry[];
+  modelsAvailableList: ModelEntry[];
   modelsCursor: number;
   modelDeletePending: boolean;
   modelSelections: Map<string, { model: string; provider: string; reasoning?: string }>;
@@ -258,6 +261,7 @@ export class Store {
 
   // ─── Models ───
   private modelsList: ModelEntry[] = [];
+  private modelsAvailableList: ModelEntry[] = [];
   private modelsCursor = 0;
   private modelDeletePending = false;
   private modelSelections = new Map<string, { model: string; provider: string; reasoning?: string }>();
@@ -394,6 +398,7 @@ export class Store {
       responseContent: this.responseContent,
       // Models selection
       modelsList: [...this.modelsList],
+      modelsAvailableList: [...this.modelsAvailableList],
       modelsCursor: this.modelsCursor,
       modelDeletePending: this.modelDeletePending,
       modelSelections: new Map(this.modelSelections),
@@ -1337,8 +1342,9 @@ export class Store {
    * Updates the models list without changing UI mode.
    * Updates cursor to point to the selected model for the active tab.
    */
-  updateModelsList(models: ModelEntry[]): void {
+  updateModelsList(models: ModelEntry[], availableModels?: ModelEntry[]): void {
     this.modelsList = expandGatewayModels(models);
+    this.modelsAvailableList = expandGatewayModels(availableModels ?? models);
     // Update cursor position based on active tab's selection
     const selection = this.modelSelections.get(this.modelsActiveTab);
     const list = this.modelsList;
@@ -1355,8 +1361,8 @@ export class Store {
    * Sets the models list and enters models selection mode.
    * Copies current modelSelections to stagedModelSelections for editing.
    */
-  setModelsList(models: ModelEntry[]): void {
-    this.updateModelsList(models);
+  setModelsList(models: ModelEntry[], availableModels?: ModelEntry[]): void {
+    this.updateModelsList(models, availableModels);
     // Initialize staged selections from current applied selections
     this.stagedModelSelections = new Map(this.modelSelections);
     this.uiMode = "models";
@@ -1526,6 +1532,9 @@ export class Store {
 
     const removed = this.modelsList[this.modelsCursor];
     this.modelsList = this.modelsList.filter((_, i) => i !== this.modelsCursor);
+    this.modelsAvailableList = this.modelsAvailableList.filter(
+      (model) => !(model.id === removed.id && model.provider === removed.provider)
+    );
 
     // Adjust cursor if needed
     if (this.modelsCursor >= this.modelsList.length) {
@@ -2050,137 +2059,64 @@ function isWhitespace(ch: string): boolean {
   return ch === " " || ch === "\n" || ch === "\t" || ch === "\r";
 }
 
-/**
- * Parse markdown text and convert to TextSegment[].
- * This handles bold, italic, code, and other inline markdown without rendering.
- * IMPORTANT: This does NOT handle block elements like headers, lists, code blocks.
- * Block elements must be split into separate HistoryLines before calling this.
- */
-function parseMarkdownToSegments(text: string): TextSegment[] {
-  const segments: TextSegment[] = [];
-  let remaining = text;
+const ANSI_REGEX = /\x1b\[[0-9;]*m/g;
 
-  // Define patterns for inline markdown (in order of priority)
-  const patterns = [
-    // Inline code `text`
-    {
-      regex: /`([^`]+)`/g,
-      process: (match: string) => ({ text: match, color: "yellow" as const }),
-    },
-    // Bold **text**
-    {
-      regex: /\*\*([^*]+)\*\*/g,
-      process: (match: string) => ({ text: match, bold: true }),
-    },
-    // Bold __text__
-    {
-      regex: /__([^_]+)__/g,
-      process: (match: string) => ({ text: match, bold: true }),
-    },
-    // Italic *text*
-    {
-      regex: /\*([^*]+)\*/g,
-      process: (match: string) => ({ text: match, italic: true }),
-    },
-    // Italic _text_
-    {
-      regex: /_([^_]+)_/g,
-      process: (match: string) => ({ text: match, italic: true }),
-    },
-    // Strikethrough ~~text~~
-    {
-      regex: /~~([^~]+)~~/g,
-      process: (match: string) => ({ text: match, dim: true }),
-    },
-    // Links [text](url) - show only text with blue underline
-    {
-      regex: /\[([^\]]+)\]\([^)]+\)/g,
-      process: (match: string) => ({ text: match, color: "blue" as const, underline: true }),
-    },
-  ];
-
-  let lastIndex = 0;
-
-  // For each pattern type, find all matches and build segments
-  for (const { regex, process } of patterns) {
-    let match;
-    regex.lastIndex = 0; // Reset regex state
-
-    while ((match = regex.exec(remaining)) !== null) {
-      // Add any text before the match as a plain segment
-      if (match.index > lastIndex) {
-        const plainText = remaining.slice(lastIndex, match.index);
-        if (plainText) {
-          segments.push({ text: plainText });
-        }
-      }
-
-      // Add the matched text with styling
-      const styled = process(match[1]);
-      segments.push(styled);
-
-      lastIndex = match.index + match[0].length;
-    }
-
-    // If we found matches, replace remaining with the text after the last match
-    // and continue with remaining patterns (already matched portions won't be re-matched)
-    if (lastIndex > 0) {
-      const prefix = remaining.slice(0, lastIndex);
-      remaining = remaining.slice(lastIndex);
-      // Continue processing remaining text with next patterns
-      lastIndex = 0;
-    } else {
-      // No matches found for this pattern, continue with next pattern
-    }
-  }
-
-  // Add any remaining text as a plain segment
-  if (remaining) {
-    segments.push({ text: remaining });
-  }
-
-  // Filter out empty segments
-  return segments.filter(s => s.text.length > 0);
+function hasAnsiCodes(text: string): boolean {
+  return /\x1b\[/.test(text);
 }
 
-/**
- * Parse inline markdown in a HistoryLine and return text without markdown markers.
- * This creates TextSegment[] for styled rendering.
- *
- * @param line - The HistoryLine to parse
- * @returns A HistoryLine with parsed text and optional segments
- */
-function parseInlineMarkdown(line: HistoryLine): HistoryLine {
-  let text = line.text;
+function visibleAnsiLength(text: string): number {
+  return text.replace(ANSI_REGEX, "").length;
+}
 
-  // Check if text contains markdown-like patterns
-  const hasMarkdown = /\*\*|__|\*|_|`|~~|\[|\]/.test(text);
+function truncateAnsiToWidth(text: string, maxWidth: number): string {
+  let visible = 0;
+  let i = 0;
+  let out = "";
 
-  if (hasMarkdown) {
-    const segments = parseMarkdownToSegments(text);
-    const segmentTexts = segments.map(s => s.text);
-    text = segmentTexts.join(""); // Reconstruct text without markdown markers
-
-    // Attach segments to the line for rendering with styles
-    return { ...line, text, segments };
+  while (i < text.length && visible < maxWidth) {
+    const char = text[i];
+    if (char === "\x1b" && text[i + 1] === "[") {
+      const match = /\x1b\[[0-9;]*m/.exec(text.slice(i));
+      if (match) {
+        out += match[0];
+        i += match[0].length;
+        continue;
+      }
+    }
+    out += char;
+    i += 1;
+    visible += 1;
   }
 
-  return line;
+  if (hasAnsiCodes(out)) {
+    out += "\x1b[0m";
+  }
+
+  return out;
+}
+
+function normalizeAnsiLine(text: string, width: number): string {
+  const truncated = truncateAnsiToWidth(text, width);
+  const visible = visibleAnsiLength(truncated);
+  if (visible < width) {
+    return truncated + " ".repeat(width - visible);
+  }
+  return truncated;
 }
 
 /**
  * Render a single HistoryLine to the specified width.
  * This handles width normalization (padding/truncation) but does NOT parse markdown.
- * Markdown parsing should happen BEFORE wrapping via parseInlineMarkdown.
  *
  * Order of operations:
  * 1. Sanitize: strip \r, expand \t to spaces
  * 2. Handle empty strings: "" becomes " "
  * 3. Width normalization: pad/truncate to exact width
  *
- * @param line - The HistoryLine to render (may already have segments from parseInlineMarkdown)
+ * @param line - The HistoryLine to render
  * @param width - Target width in terminal columns
- * @returns A HistoryLine with normalized text and optional segments
+ * @returns A HistoryLine with normalized text
  */
 function renderLineToWidth(line: HistoryLine, width: number): HistoryLine {
   const safeWidth = Math.max(10, width);
@@ -2199,72 +2135,23 @@ function renderLineToWidth(line: HistoryLine, width: number): HistoryLine {
   }
 
   // Check if text contains ANSI codes (from syntax highlighting)
-  // ANSI escape sequences start with \x1b[
-  const hasAnsiCodes = /\x1b\[/.test(text);
+  if (hasAnsiCodes(text)) {
+    const normalized = normalizeAnsiLine(text, safeWidth);
+    return { ...line, text: normalized };
+  }
 
   // Step 3: Truncate to width if necessary
-  // If we have ANSI codes, don't truncate - let Ink handle display width
-  if (!hasAnsiCodes && text.length > safeWidth) {
+  if (text.length > safeWidth) {
     text = text.slice(0, safeWidth);
-
-    // If we have segments, we also need to truncate them
-    if (line.segments) {
-      const truncatedSegments = truncateSegmentsToWidth(line.segments, safeWidth);
-      line.segments = truncatedSegments;
-    }
   }
 
   // Step 4: Pad to exact width with spaces
-  // Skip padding for ANSI-highlighted code - let background color provide visual width
-  if (!hasAnsiCodes && text.length < safeWidth) {
+  if (text.length < safeWidth) {
     const paddingNeeded = safeWidth - text.length;
     text += " ".repeat(paddingNeeded);
-
-    // If we have segments, add a filler segment for the padding
-    if (line.segments) {
-      line.segments.push({ text: " ".repeat(paddingNeeded) });
-    }
   }
 
-  // Return the rendered line with updated text
   return { ...line, text };
-}
-
-/**
- * Truncate an array of TextSegment to fit within a maximum width.
- * Preserves styles on the kept prefix segments.
- *
- * @param segments - The segments to truncate
- * @param maxWidth - Maximum total width in columns
- * @returns Truncated segments array
- */
-function truncateSegmentsToWidth(segments: TextSegment[], maxWidth: number): TextSegment[] {
-  const result: TextSegment[] = [];
-  let currentWidth = 0;
-
-  for (const segment of segments) {
-    const segmentWidth = segment.text.length;
-
-    if (currentWidth + segmentWidth <= maxWidth) {
-      // Entire segment fits, add it
-      result.push(segment);
-      currentWidth += segmentWidth;
-    } else if (currentWidth < maxWidth) {
-      // Partial segment fits, truncate it
-      const remainingWidth = maxWidth - currentWidth;
-      result.push({
-        ...segment,
-        text: segment.text.slice(0, remainingWidth),
-      });
-      currentWidth = maxWidth;
-      break; // We've filled the width
-    } else {
-      // Segment doesn't fit, stop
-      break;
-    }
-  }
-
-  return result;
 }
 
 /**
@@ -2274,9 +2161,8 @@ function truncateSegmentsToWidth(segments: TextSegment[], maxWidth: number): Tex
  *
  * Code blocks are syntax-highlighted using Tree-sitter for supported languages.
  *
- * This function strips block-level markdown markers (###, - for lists, etc.)
- * but keeps the text content. Inline markdown (bold, italic, code) is preserved
- * for later processing by parseMarkdownToSegments.
+ * This function preserves block-level markdown markers so the renderer can
+ * handle styling (headers, lists, blockquotes, HRs) consistently at display time.
  *
  * @param text - The markdown text to split
  * @param role - The role to assign to each line
@@ -2297,16 +2183,33 @@ function splitMarkdownIntoLines(
   const rawLines = normalized.split("\n");
 
   let inCodeBlock = false;
+  let implicitCodeBlock = false;
   let codeBlockLines: string[] = [];
   let codeBlockLang: string | undefined = undefined;
   let lineIndex = 0;
 
-  for (let rawLine of rawLines) {
+  const isLanguageLine = (line: string): string | null => {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const thinkPrefix = trimmed.startsWith("</think>") ? trimmed.slice("</think>".length).trim() : trimmed;
+    if (!thinkPrefix) return null;
+    if (!/^[a-zA-Z0-9_.+-]+$/.test(thinkPrefix)) return null;
+    return isLanguageSupported(thinkPrefix) ? thinkPrefix : null;
+  };
+
+  const isLikelyCodeLine = (line: string): boolean => {
+    if (!line.trim()) return false;
+    return /^\s*(\/\/|\/\*|\*|\}|import\b|export\b|const\b|let\b|var\b|function\b|class\b|interface\b|type\b|enum\b|return\b|if\b|for\b|while\b|switch\b|try\b|catch\b|public\b|private\b|protected\b|@|#include\b|package\b|from\b|def\b|using\b|\{|\[|\(|<)/.test(line);
+  };
+
+  for (let i = 0; i < rawLines.length; i++) {
+    let rawLine = rawLines[i];
     // Check for code fence start/end
     if (/^```/.test(rawLine.trim())) {
       if (!inCodeBlock) {
         // Starting a code block
         inCodeBlock = true;
+        implicitCodeBlock = false;
         codeBlockLines = [];
         // Extract language from ```lang
         const langMatch = rawLine.trim().match(/^```(\w*)/);
@@ -2353,26 +2256,96 @@ function splitMarkdownIntoLines(
       continue; // Skip fence lines
     }
 
-    if (inCodeBlock) {
-      // Collect code block content
-      codeBlockLines.push(rawLine);
-      continue;
+    if (!inCodeBlock) {
+      const lang = isLanguageLine(rawLine);
+      if (lang) {
+        // Lookahead: only treat as implicit code block if next non-empty line looks like code
+        let j = i + 1;
+        while (j < rawLines.length && rawLines[j].trim() === "") {
+          j++;
+        }
+        if (j < rawLines.length && isLikelyCodeLine(rawLines[j])) {
+          inCodeBlock = true;
+          implicitCodeBlock = true;
+          codeBlockLang = lang;
+          codeBlockLines = [];
+          continue; // Skip language line
+        }
+      }
     }
 
-    // Strip block-level markdown markers
-    // Headers: "### Header" -> "Header"
-    rawLine = rawLine.replace(/^#{1,6}\s+/, "");
+    if (inCodeBlock) {
+      if (implicitCodeBlock) {
+        const lang = isLanguageLine(rawLine);
+        if (lang) {
+          // Close current implicit block before starting a new one
+          const codeContent = codeBlockLines.join("\n");
+          const highlighted = highlightCode(codeContent, codeBlockLang);
+          const outputLines = (highlighted && highlighted !== codeContent)
+            ? highlighted.split("\n")
+            : codeBlockLines;
+          for (const outputLine of outputLines) {
+            const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
+            lines.push({
+              id: lineId,
+              text: outputLine,
+              role,
+              requestId,
+            });
+            lineIndex++;
+          }
 
-    // Lists: "- item" or "* item" or "1. item" -> "item"
-    rawLine = rawLine.replace(/^[-*+]\s+/, "");
-    rawLine = rawLine.replace(/^\d+\.\s+/, "");
+          codeBlockLines = [];
+          codeBlockLang = undefined;
+          inCodeBlock = false;
+          implicitCodeBlock = false;
 
-    // Blockquotes: "> quote" -> "quote"
-    rawLine = rawLine.replace(/^>\s+/, "");
+          // Re-process this line as a potential new language line
+          i -= 1;
+          continue;
+        }
+      }
 
-    // Horizontal rules: ---, ***, ___ - skip
-    if (/^[-*_]{3,}\s*$/.test(rawLine)) {
-      continue;
+      if (implicitCodeBlock && rawLine.trim() === "") {
+        // Peek ahead to decide whether to close implicit block
+        let j = i + 1;
+        while (j < rawLines.length && rawLines[j].trim() === "") {
+          j++;
+        }
+        if (j >= rawLines.length || !isLikelyCodeLine(rawLines[j])) {
+          // End implicit code block before this blank line
+          inCodeBlock = false;
+          implicitCodeBlock = false;
+
+          const codeContent = codeBlockLines.join("\n");
+          const highlighted = highlightCode(codeContent, codeBlockLang);
+          const outputLines = (highlighted && highlighted !== codeContent)
+            ? highlighted.split("\n")
+            : codeBlockLines;
+          for (const outputLine of outputLines) {
+            const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
+            lines.push({
+              id: lineId,
+              text: outputLine,
+              role,
+              requestId,
+            });
+            lineIndex++;
+          }
+
+          codeBlockLines = [];
+          codeBlockLang = undefined;
+          // Fall through to handle this blank line as normal content
+        } else {
+          // Blank line inside code block
+          codeBlockLines.push(rawLine);
+          continue;
+        }
+      } else {
+        // Collect code block content
+        codeBlockLines.push(rawLine);
+        continue;
+      }
     }
 
     const lineId = baseId ? `${baseId}:${lineIndex}` : `line:${lineIndex}`;
@@ -2438,23 +2411,17 @@ function buildHistoryLines(
     );
 
     // Process each line:
-    // 1. Parse inline markdown (removes **, *, etc.) - BEFORE wrapping
-    // 2. Wrap text to width
-    // 3. Render to exact width (padding/truncation)
+    // 1. Wrap text to width
+    // 2. Render to exact width (padding/truncation)
     let lineIndex = 0;
     for (const mdLine of markdownLines) {
-      // Step 1: Parse inline markdown
-      const parsedLine = parseInlineMarkdown(mdLine);
-
-      // Step 2: Wrap the parsed text (without markdown markers)
-      const wrapped = wrapText(parsedLine.text, safeWidth);
+      const wrapped = wrapText(mdLine.text, safeWidth);
       wrapped.forEach((wrappedLine, index) => {
         const line: HistoryLine = {
           id: `${entryLinePrefix}:${lineIndex}`,
           text: wrappedLine,
           role: entry.role,
           requestId: entry.requestId,
-          segments: index === 0 ? parsedLine.segments : undefined, // Only keep segments on first wrapped line
           isBlockStart: lineIndex === 0 && index === 0,
         };
         // Step 3: Final width normalization (padding to exact width)
@@ -2473,15 +2440,13 @@ function buildHistoryLines(
       );
 
       for (const metaLine of metaLines) {
-        const parsedLine = parseInlineMarkdown(metaLine);
-        const wrapped = wrapText(parsedLine.text, safeWidth);
+        const wrapped = wrapText(metaLine.text, safeWidth);
         wrapped.forEach((wrappedLine) => {
           const line: HistoryLine = {
             id: `${entryLinePrefix}:${lineIndex}`,
             text: wrappedLine,
             role: entry.role,
             requestId: entry.requestId,
-            segments: parsedLine.segments,
           };
           const finalLine = renderLineToWidth(line, safeWidth);
           lines.push(finalLine);
@@ -2530,14 +2495,12 @@ function buildHistoryLines(
 
     let reasonIndex = 0;
     for (const reasonLine of reasonLines) {
-      const parsedLine = parseInlineMarkdown(reasonLine);
-      const wrapped = wrapText(parsedLine.text, safeWidth);
+      const wrapped = wrapText(reasonLine.text, safeWidth);
       wrapped.forEach((wrappedLine) => {
         const line: HistoryLine = {
           id: `reasoning:${reasonIndex}`,
           text: wrappedLine,
           role: "reasoning",
-          segments: parsedLine.segments,
         };
         const finalLine = renderLineToWidth(line, safeWidth);
         lines.push(finalLine);
@@ -2571,14 +2534,12 @@ function buildHistoryLines(
 
     let streamIndex = 0;
     for (const streamLine of streamLines) {
-      const parsedLine = parseInlineMarkdown(streamLine);
-      const wrapped = wrapText(parsedLine.text, safeWidth);
+      const wrapped = wrapText(streamLine.text, safeWidth);
       wrapped.forEach((wrappedLine, index) => {
         const line: HistoryLine = {
           id: `stream:${streamIndex}`,
           text: wrappedLine,
           role: "agent",
-          segments: index === 0 ? parsedLine.segments : undefined,
           isBlockStart: streamIndex === 0 && index === 0,
         };
         const finalLine = renderLineToWidth(line, safeWidth);
@@ -2621,14 +2582,18 @@ function normalizeHistoryLines(lines: HistoryLine[], width: number): HistoryLine
         text = " ";
       }
 
-      // Final safety: truncate if somehow too long
-      if (text.length > safeWidth) {
-        text = text.slice(0, safeWidth);
-      }
+      if (hasAnsiCodes(text)) {
+        text = normalizeAnsiLine(text, safeWidth);
+      } else {
+        // Final safety: truncate if somehow too long
+        if (text.length > safeWidth) {
+          text = text.slice(0, safeWidth);
+        }
 
-      // Final safety: pad to exact width
-      while (text.length < safeWidth) {
-        text += " ";
+        // Final safety: pad to exact width
+        while (text.length < safeWidth) {
+          text += " ";
+        }
       }
 
       // Create the normalized line
@@ -2700,8 +2665,9 @@ function normalizeMarkdownSpacing(text: string): string {
   // Collapse excessive blank lines (more than 2 consecutive) to just 2
   result = result.replace(/\n{3,}/g, "\n\n");
 
-  // Trim leading/trailing whitespace but preserve internal structure
-  result = result.trim();
+  // Trim leading/trailing blank lines but preserve indentation
+  result = result.replace(/^\n+/, "");
+  result = result.replace(/\n+$/, "");
 
   return result;
 }

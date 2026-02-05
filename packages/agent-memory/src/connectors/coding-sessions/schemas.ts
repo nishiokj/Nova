@@ -150,7 +150,7 @@ export const ClaudeFileHistorySnapshotSchema = z.object({
   messageId: z.string(),
   snapshot: z.object({
     messageId: z.string(),
-    trackedFileBackups: z.record(z.unknown()),
+    trackedFileBackups: z.record(z.string(), z.unknown()),
     timestamp: z.string().refine(
       (val) => !isNaN(Date.parse(val)),
       { message: 'Invalid date format - must be ISO 8601 timestamp' }

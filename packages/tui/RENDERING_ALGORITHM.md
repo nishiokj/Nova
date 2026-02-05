@@ -753,72 +753,25 @@ User messages also receive `backgroundColor: colors.userBg` for visual distincti
 
 ### Pattern Matching
 
-`parseTextSegments()` applies regex patterns to identify syntax elements:
+`parseTextSegments()` (now in `formatting.ts`) uses a two-stage approach:
+
+1. Line-level recognition for block elements (diff headers, diff hunks, headers, blockquotes, lists, tables, HRs).
+2. Inline parsing for markdown spans (code, bold, italic, strike, links), followed by plain-text token highlighting (URLs, paths, durations, calls).
+
+This avoids regex-overlap bugs and keeps output width-stable.
+
+### Segment Building (Simplified)
 
 ```typescript
-const syntaxPatterns = [
-  // Diff headers: "✓ Edit /path/to/file.ts  +3 / -2"
-  { pattern: /^[✓✗] Edit .+$/gm, colorKey: "diffHeader", bold: true },
+function parseTextSegments(text: string, baseColor?: string): ParsedSegment[] {
+  const block = parseBlockLine(text);
+  if (block) return padSegments(block.segments);
 
-  // Diff additions: "  42 + added content"
-  { pattern: /^\s*\d+\s+\+ .*$/gm, color: "#ffffff", bg: "#166534" },
-
-  // Diff removals: "  42 - removed content"
-  { pattern: /^\s*\d+\s+- .*$/gm, color: "#ffffff", bg: "#991b1b" },
-
-  // Markdown headers: "## Header"
-  { pattern: /^#{1,6}\s+.+$/gm, colorKey: "header", bold: true },
-
-  // Inline code: `code`
-  { pattern: /`.+?`/g, colorKey: "code", bold: true },
-
-  // URLs
-  { pattern: /https?:\/\/[^\s]+/g, colorKey: "url" },
-
-  // File paths: /path/to/file
-  { pattern: /(?<!\w)\/[\w.-]+(?:\/[\w.-]+)+/g, colorKey: "path" },
-
-  // ... more patterns
-];
-```
-
-### Segment Building
-
-```typescript
-function parseTextSegments(text: string, baseColor?: string): TextSegment[] {
-  // Find all pattern matches with positions
-  const matches = [];
-  for (const pattern of syntaxPatterns) {
-    let m;
-    while ((m = pattern.regex.exec(text)) !== null) {
-      matches.push({
-        start: m.index,
-        end: m.index + m[0].length,
-        text: m[0],
-        color: pattern.color,
-        bold: pattern.bold,
-      });
-    }
-  }
-
-  // Sort by position, filter overlaps
-  matches.sort((a, b) => a.start - b.start);
-
-  // Build segments (alternating plain text and highlighted)
-  const segments = [];
-  let pos = 0;
-  for (const m of matches) {
-    if (m.start > pos) {
-      segments.push({ text: text.slice(pos, m.start), color: baseColor });
-    }
-    segments.push({ text: m.text, color: m.color, bold: m.bold });
-    pos = m.end;
-  }
-  if (pos < text.length) {
-    segments.push({ text: text.slice(pos), color: baseColor });
-  }
-
-  return segments;
+  const inline = parseInlineMarkdown(text, baseColor);
+  const highlighted = inline.flatMap(seg =>
+    seg.kind === "plain" ? highlightPlainText(seg.text) : [seg]
+  );
+  return padSegments(highlighted);
 }
 ```
 

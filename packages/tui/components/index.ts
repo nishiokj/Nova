@@ -1,4 +1,3 @@
-export { QuestionPrompt } from "./QuestionPrompt.js";
 export { SingleSelect } from "./SingleSelect.js";
 export { MultiSelect } from "./MultiSelect.js";
 export { TextInputField } from "./TextInputField.js";

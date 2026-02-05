@@ -47,6 +47,7 @@
     "build:apps": "bun run --cwd packages/harness-daemon build && bun run --cwd packages/tui build && bun run --cwd packages/launcher build",
     "clean": "bun run --cwd packages/types clean && bun run --cwd packages/shared clean && bun run --cwd packages/protocol clean && bun run --cwd packages/work clean && bun run --cwd packages/llm clean && bun run --cwd packages/context clean && bun run --cwd packages/tools clean && bun run --cwd packages/agent clean && bun run --cwd packages/agent-memory clean && bun run --cwd packages/orchestrator clean && bun run --cwd packages/decision-watcher clean && bun run --cwd packages/graphd clean && bun run --cwd packages/comms-bus clean && bun run --cwd packages/entity-graph clean && bun run --cwd packages/harness-client clean && bun run --cwd packages/harness-daemon clean && bun run --cwd packages/tui clean && bun run --cwd packages/launcher clean && rm -f packages/*/tsconfig.tsbuildinfo",
     "lint": "bun run --cwd packages/types lint && bun run --cwd packages/shared lint && bun run --cwd packages/llm lint && bun run --cwd packages/context lint && bun run --cwd packages/tools lint && bun run --cwd packages/agent lint && bun run --cwd packages/orchestrator lint && bun run --cwd packages/graphd lint && bun run --cwd packages/comms-bus lint",
+    "daemon": "bun run start:daemon",
     "start:daemon": "bun run --cwd packages/harness-daemon start",
     "start:tui": "bun run --cwd packages/tui start",
     "start": "bun run --cwd packages/launcher start",

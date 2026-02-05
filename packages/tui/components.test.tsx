@@ -48,7 +48,7 @@ const mockOptions: QuestionOption[] = [
 // UNIT TESTS FOR PURE FUNCTIONS
 // ============================================
 
-describe("QuestionPrompt text wrapping", () => {
+describe("Text wrapping utility", () => {
   // Test the text wrapping logic in isolation
   const wrapText = (text: string, maxWidth: number): string[] => {
     if (!text) return [""];
@@ -168,14 +168,7 @@ describe("TextInputField logic", () => {
   });
 });
 
-describe("QuestionPrompt logic", () => {
-  const baseQuestion: AgentQuestion = {
-    requestId: "test-req-1",
-    type: "multiple_choice",
-    question: "Which option do you prefer?",
-    options: mockOptions,
-  };
-
+describe("Question rendering logic", () => {
   it("identifies text input types", () => {
     const textTypes = ["fill_in_blank", "free_text"];
     expect(textTypes.includes("free_text")).toBe(true);
@@ -232,11 +225,6 @@ describe("Component imports", () => {
     expect(typeof mod.TextInputField).toBe("function");
   });
 
-  it("can import QuestionPrompt", async () => {
-    const mod = await import("./components/QuestionPrompt.js");
-    expect(mod.QuestionPrompt).toBeDefined();
-    expect(typeof mod.QuestionPrompt).toBe("function");
-  });
 });
 
 // ============================================

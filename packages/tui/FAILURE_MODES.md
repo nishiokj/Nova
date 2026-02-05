@@ -187,7 +187,7 @@ if (pasteBuffer.length > 10 * 1024 * 1024) {
 
 ### 9. Regex Catastrophic Backtracking
 
-**File**: `index.tsx` - `parseTextSegments()`
+**File**: `formatting.ts` - `parseTextSegments()`
 **Trigger**: Message with pathological pattern like `***...***` (1000 asterisks)
 **Impact**: Component render never completes
 

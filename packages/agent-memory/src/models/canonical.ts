@@ -40,7 +40,7 @@ export const BaseEntitySchema = z.object({
   created_at: z.string().datetime(),
   updated_at: z.string().datetime(),
   source_refs: z.array(CanonicalSourceRefSchema).min(1),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 })
 
 export type BaseEntity = z.infer<typeof BaseEntitySchema>
@@ -358,6 +358,9 @@ export const EntitySchemas = {
   attachment: AttachmentSchema,
 } as const
 
+type EntitySchema<T extends EntityType> = (typeof EntitySchemas)[T]
+type EntityOutput<T extends EntityType> = z.output<EntitySchema<T>>
+
 /**
  * Validate an entity against its schema.
  * Returns a typed result with either the validated entity or error details.
@@ -365,6 +368,6 @@ export const EntitySchemas = {
 export function validateEntity<T extends EntityType>(
   entityType: T,
   data: unknown
-): z.SafeParseReturnType<unknown, z.infer<(typeof EntitySchemas)[T]>> {
-  return EntitySchemas[entityType].safeParse(data)
+): z.ZodSafeParseResult<EntityOutput<T>> {
+  return EntitySchemas[entityType].safeParse(data) as z.ZodSafeParseResult<EntityOutput<T>>
 }

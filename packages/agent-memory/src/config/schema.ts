@@ -164,9 +164,14 @@ export const ConnectorConfigSchema = z.object({
     rateLimit: z.number().positive().default(5),
     /** Enable notifications sync */
     syncNotifications: z.boolean().default(true),
-    /** Enable starred repos sync */
-    syncStarred: z.boolean().default(false),
-  }).default({}),
+  /** Enable starred repos sync */
+  syncStarred: z.boolean().default(false),
+  }).default({
+    enabled: false,
+    rateLimit: 5,
+    syncNotifications: true,
+    syncStarred: false,
+  }),
 
   /** Gmail connector settings */
   gmail: z.object({
@@ -177,9 +182,14 @@ export const ConnectorConfigSchema = z.object({
     rateLimit: z.number().positive().default(10),
     /** Labels to sync (empty = all) */
     labels: z.array(z.string()).default([]),
-    /** Exclude labels */
-    excludeLabels: z.array(z.string()).default(['SPAM', 'TRASH']),
-  }).default({}),
+  /** Exclude labels */
+  excludeLabels: z.array(z.string()).default(['SPAM', 'TRASH']),
+  }).default({
+    enabled: false,
+    rateLimit: 10,
+    labels: [],
+    excludeLabels: ['SPAM', 'TRASH'],
+  }),
 
   /** Telegram connector settings */
   telegram: z.object({
@@ -195,9 +205,14 @@ export const ConnectorConfigSchema = z.object({
     workingDir: z.string().optional(),
     /** Allowed user IDs (empty = dangerous mode) */
     allowedUserIds: z.array(z.number()).optional(),
-    /** Allow all users (dangerous) */
-    dangerousMode: z.boolean().default(false),
-  }).default({}),
+  /** Allow all users (dangerous) */
+  dangerousMode: z.boolean().default(false),
+  }).default({
+    enabled: false,
+    harnessHost: '127.0.0.1',
+    harnessPort: 9555,
+    dangerousMode: false,
+  }),
 
   /** X.com (Twitter) connector settings */
   xcom: z.object({
@@ -205,9 +220,12 @@ export const ConnectorConfigSchema = z.object({
     enabled: z.boolean().default(false),
     bearerToken: z.string().optional(),
     clientId: z.string().optional(),
-    clientSecret: z.string().optional(),
-    rateLimit: z.number().positive().default(5),
-  }).default({}),
+  clientSecret: z.string().optional(),
+  rateLimit: z.number().positive().default(5),
+  }).default({
+    enabled: false,
+    rateLimit: 5,
+  }),
 
   /** iMessage connector settings */
   imessage: z.object({
@@ -217,9 +235,13 @@ export const ConnectorConfigSchema = z.object({
     databasePath: z.string().optional(),
     /** Sync attachments */
     syncAttachments: z.boolean().default(true),
-    /** Max message text bytes before truncation (0 = unlimited) */
-    maxTextBytes: z.number().int().nonnegative().default(1024 * 1024),
-  }).default({}),
+  /** Max message text bytes before truncation (0 = unlimited) */
+  maxTextBytes: z.number().int().nonnegative().default(1024 * 1024),
+  }).default({
+    enabled: false,
+    syncAttachments: true,
+    maxTextBytes: 1024 * 1024,
+  }),
 
   /** Claude Code Sessions connector settings */
   claude_sessions: z.object({
@@ -231,9 +253,13 @@ export const ConnectorConfigSchema = z.object({
     projectFilter: z.array(z.string()).optional(),
     /** Sessions per page (default: 10) */
     pageSize: z.number().int().positive().default(10),
-    /** Include file history snapshots */
-    includeFileHistory: z.boolean().default(false),
-  }).default({}),
+  /** Include file history snapshots */
+  includeFileHistory: z.boolean().default(false),
+  }).default({
+    enabled: false,
+    pageSize: 10,
+    includeFileHistory: false,
+  }),
 
   /** Rex Sessions connector settings */
   rex_sessions: z.object({
@@ -253,9 +279,15 @@ export const ConnectorConfigSchema = z.object({
     webhookDebounceMs: z.number().int().positive().default(500),
     /** When true, webhook ingestion starts at latest row id */
     webhookStartAtLatest: z.boolean().default(true),
-    /** Max rows to pull per webhook batch */
-    webhookBatchSize: z.number().int().positive().default(500),
-  }).default({}),
+  /** Max rows to pull per webhook batch */
+  webhookBatchSize: z.number().int().positive().default(500),
+  }).default({
+    enabled: false,
+    pageSize: 100,
+    webhookDebounceMs: 500,
+    webhookStartAtLatest: true,
+    webhookBatchSize: 500,
+  }),
 })
 
 export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>
@@ -298,27 +330,39 @@ export const SecurityConfigSchema = z.object({
 
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>
 
+// ============ Default Config Blocks ============
+
+const DEFAULT_DATABASE_CONFIG: DatabaseConfig = DatabaseConfigSchema.parse({})
+const DEFAULT_QUEUE_CONFIG: QueueConfig = QueueConfigSchema.parse({})
+const DEFAULT_HTTP_CONFIG: HttpConfig = HttpConfigSchema.parse({})
+const DEFAULT_SYNC_CONFIG: SyncConfig = SyncConfigSchema.parse({})
+const DEFAULT_ENTITY_RESOLUTION_CONFIG: EntityResolutionConfig = EntityResolutionConfigSchema.parse({})
+const DEFAULT_EMBEDDINGS_CONFIG: EmbeddingsConfig = EmbeddingsConfigSchema.parse({})
+const DEFAULT_CONNECTOR_CONFIG: ConnectorConfig = ConnectorConfigSchema.parse({})
+const DEFAULT_OBSERVABILITY_CONFIG: ObservabilityConfig = ObservabilityConfigSchema.parse({})
+const DEFAULT_SECURITY_CONFIG: SecurityConfig = SecurityConfigSchema.parse({})
+
 // ============ Top-Level Application Configuration ============
 
 export const AppConfigSchema = z.object({
   /** Database configuration */
-  database: DatabaseConfigSchema.default({}),
+  database: DatabaseConfigSchema.default(DEFAULT_DATABASE_CONFIG),
   /** Queue configuration */
-  queue: QueueConfigSchema.default({}),
+  queue: QueueConfigSchema.default(DEFAULT_QUEUE_CONFIG),
   /** HTTP client configuration */
-  http: HttpConfigSchema.default({}),
+  http: HttpConfigSchema.default(DEFAULT_HTTP_CONFIG),
   /** Sync engine configuration */
-  sync: SyncConfigSchema.default({}),
+  sync: SyncConfigSchema.default(DEFAULT_SYNC_CONFIG),
   /** Entity resolution configuration */
-  entityResolution: EntityResolutionConfigSchema.default({}),
+  entityResolution: EntityResolutionConfigSchema.default(DEFAULT_ENTITY_RESOLUTION_CONFIG),
   /** Embeddings configuration */
-  embeddings: EmbeddingsConfigSchema.default({}),
+  embeddings: EmbeddingsConfigSchema.default(DEFAULT_EMBEDDINGS_CONFIG),
   /** Connector-specific configuration */
-  connectors: ConnectorConfigSchema.default({}),
+  connectors: ConnectorConfigSchema.default(DEFAULT_CONNECTOR_CONFIG),
   /** Observability configuration */
-  observability: ObservabilityConfigSchema.default({}),
+  observability: ObservabilityConfigSchema.default(DEFAULT_OBSERVABILITY_CONFIG),
   /** Security configuration */
-  security: SecurityConfigSchema.default({}),
+  security: SecurityConfigSchema.default(DEFAULT_SECURITY_CONFIG),
   /** Data directory for file storage (default: ./data) */
   dataDir: z.string().default('./data'),
   /** Environment name */
@@ -347,6 +391,6 @@ export function parseConfig(config: unknown): AppConfig {
  * Safely validate configuration without throwing.
  * Returns the parsed config or validation errors.
  */
-export function safeParseConfig(config: unknown): z.SafeParseReturnType<unknown, AppConfig> {
+export function safeParseConfig(config: unknown): z.ZodSafeParseResult<AppConfig> {
   return AppConfigSchema.safeParse(config)
 }

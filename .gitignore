@@ -34,6 +34,10 @@ evals/results/*/*/*
 # Authentication states (sensitive cookies)
 auth-states/
 
+# OAuth tokens (Codex, etc.)
+codex-auth.json
+**/codex-auth.json
+
 # Release binaries
 dist/binaries/
 *.exe
@@ -71,3 +75,15 @@ htmlcovrepo-test/
 
 .watcher/
 data/
+
+# Debug/Profile artifacts
+debug.log
+profile-*.json
+temp_query.sql
+
+# Package-level lock files (workspace handles deps)
+packages/*/bun.lock
+
+# Additional .env patterns
+.env.local
+.env.*.local

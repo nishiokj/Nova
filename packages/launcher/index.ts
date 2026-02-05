@@ -25,7 +25,8 @@ const MINIMAL_USER_CONFIG = {
   $comment: "User preferences. API keys are stored securely in GraphD - use 'rex providers set <provider> <key>' to configure them.",
   models: {
     default: ""
-  }
+  },
+  agents: {}
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -149,6 +150,11 @@ async function isDaemonRunning(): Promise<boolean> {
 function buildDaemonArgs(): string[] {
   const daemonArgs: string[] = [];
   // --dangerous is now handled per-session by the TUI, not the daemon
+
+  // Enable dashboard HTTP server on port 9445 for control-plane API
+  // (9444 is used by GraphD)
+  daemonArgs.push('--dashboard-port', '9445');
+
   return daemonArgs;
 }
 

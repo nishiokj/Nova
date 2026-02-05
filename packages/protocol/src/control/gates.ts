@@ -26,6 +26,7 @@ import type {
 } from '../protocol/schemas.js';
 import type { Hook } from '../hooks/types.js';
 import { assertNever } from '../assertNever.js';
+import { controlField, type ControlField } from 'prompt-protocol';
 
 // ============================================
 // EVENT → DECISION TYPE MAP
@@ -137,6 +138,28 @@ export const VALID_DECISIONS_BY_EVENT = {
 } as const satisfies {
   [E in keyof DecisionActionByEvent]: readonly DecisionActionByEvent[E][];
 };
+
+// ============================================
+// PROMPT-PROTOCOL CONTROLS
+// ============================================
+
+/**
+ * Control fields used by decision prompts.
+ */
+export const DECISION_CONTROL_BY_EVENT = {
+  'goal_state_reached': controlField('verdict', VALID_DECISIONS_BY_EVENT.goal_state_reached),
+  'bounds_exceeded': controlField('action', VALID_DECISIONS_BY_EVENT.bounds_exceeded),
+  'user_input_required': controlField('action', VALID_DECISIONS_BY_EVENT.user_input_required),
+  'cadence_audit': controlField('action', VALID_DECISIONS_BY_EVENT.cadence_audit),
+  'agent_error': controlField('action', VALID_DECISIONS_BY_EVENT.agent_error),
+  'handoff_requested': controlField('action', VALID_DECISIONS_BY_EVENT.handoff_requested),
+  'work_item_completed': controlField('action', VALID_DECISIONS_BY_EVENT.work_item_completed),
+} as const satisfies Record<DecisionRequiredEvent, ControlField<'action' | 'verdict', readonly string[]>>;
+
+/**
+ * Extract the control field for a decision-required event.
+ */
+export type DecisionControlFor<E extends DecisionRequiredEvent> = (typeof DECISION_CONTROL_BY_EVENT)[E];
 
 /**
  * Get valid decision actions for an event type.

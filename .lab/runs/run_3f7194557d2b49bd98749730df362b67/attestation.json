@@ -1,0 +1,24 @@
+{
+  "schema_version": "attestation_v1",
+  "resolved_experiment_digest": "sha256:0961d0d8baaf4fdebdecd00cf84582e754e7c20aef4259d3587f67ab6d71fe24",
+  "events_hashchain": [],
+  "grades_summary": {
+    "schema_version": "grades_v1",
+    "integration_level": "cli_events",
+    "replay_grade": "best_effort",
+    "isolation_grade": "leaky",
+    "comparability_grade": "unknown",
+    "provenance_grade": "partial",
+    "privacy_grade": "unknown",
+    "evidence": {
+      "hooks": true,
+      "traces": false,
+      "sdk": false
+    }
+  },
+  "created_at": "2026-02-04T21:45:25.768295+00:00",
+  "trace_ingestion": {
+    "mode": "hooks"
+  },
+  "hooks_schema_version": "hook_events_v1"
+}

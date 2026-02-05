@@ -27,7 +27,7 @@ import {
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
-import { createAdapter, type ProviderKeyService } from 'llm';
+import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
@@ -37,7 +37,8 @@ import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
-import { isGitCommitCommand, extractCommitSha } from '../subscribers/trace_subscriber.js';
+import { createTraceSubscriber, extractCommitSha, isGitCommitCommand, type TraceSubscriber } from '../subscribers/trace_subscriber.js';
+import { SyncClient } from 'agent-memory';
 import path from 'path';
 import fs from 'fs';
 import {
@@ -182,7 +183,19 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
   const registry = new AgentRegistry(agentConfigs);
 
   // Validate agent tool references and prevent self-reference
-  const builtinTools = new Set(['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch', 'Skill', 'PromptUser']);
+  const builtinTools = new Set([
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+    'Bash',
+    'WebFetch',
+    'WebSearch',
+    'Skill',
+    'PromptUser',
+    'ExpandConversation',
+  ]);
   const registeredAgentTypes = new Set(agentConfigs.map(c => c.type));
   for (const agentConf of agentConfigs) {
     // Filter out self-references to prevent recursive agent calls
@@ -301,6 +314,10 @@ class HarnessProviderKeyService implements ProviderKeyService {
     if (!providerRequiresAuth(provider)) {
       return true;
     }
+    // Codex uses OAuth tokens, not API keys
+    if (provider === 'codex') {
+      return hasCodexCredentials();
+    }
     return this.getApiKey(provider) !== null;
   }
 
@@ -338,6 +355,8 @@ export class AgentHarness {
   private orchestratorRunner: OrchestratorRunner;
   private entityGraph: EntityGraph | null = null;
   private memoryInjector: MemoryInjector | null = null;
+  private traceSubscriber: TraceSubscriber | null = null;
+  private memoryClient: SyncClient | null = null;
   private asyncModeIssues: string[] = [];
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
@@ -507,6 +526,48 @@ export class AgentHarness {
       });
     }
 
+    // Initialize SyncClient for agent-memory daemon (used by TraceSubscriber)
+    const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || 'http://127.0.0.1:3001';
+    try {
+      this.memoryClient = new SyncClient(memoryDaemonUrl);
+      this.logger.info('Memory client initialized for traces', { url: memoryDaemonUrl });
+    } catch (error) {
+      this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // Initialize TraceSubscriber for collecting Write/Edit tool calls and emitting on git commits
+    this.traceSubscriber = createTraceSubscriber(this.eventBus, {
+      repoRoot: workingDir,
+      toolName: 'agent',
+      toolVersion: '0.1.0',
+    });
+    this.logger.debug('TraceSubscriber initialized', { repoRoot: workingDir });
+
+    // Register callback to persist traces to database when emitted
+    this.traceSubscriber.onTraceEmitted(async (trace) => {
+      try {
+        if (this.memoryClient) {
+          await this.memoryClient.traces.create({
+            revision: trace.vcs.revision,
+            session_key: undefined, // Session key is per-file in trace, top-level is nullable
+            tool_name: trace.tool.name,
+            tool_version: trace.tool.version,
+            trace: trace,
+          });
+          this.logger.info('Trace persisted to database', { revision: trace.vcs.revision });
+        }
+      } catch (error) {
+        // Log warning but don't crash the agent if DB is down
+        this.logger.warning('Failed to persist trace to database (is agent-memory daemon running?)', {
+          error: error instanceof Error ? error.message : String(error),
+          revision: trace.vcs.revision,
+        });
+      }
+    });
+
+
     const defaultAgent = config.agents[config.defaultAgent];
     this.logger.info('AgentHarness initialized', {
       defaultAgent: config.defaultAgent,
@@ -515,6 +576,7 @@ export class AgentHarness {
       agentCount: Object.keys(config.agents).length,
       graphdEnabled: this.graphd !== null,
       memoryEnabled: this.memoryInjector !== null,
+      traceEnabled: this.traceSubscriber !== null,
     });
   }
 
@@ -1666,6 +1728,8 @@ export class AgentHarness {
               provider: selection.provider,
               reasoning: selection.reasoning,
             });
+            // Update TraceSubscriber with current model
+            this.traceSubscriber?.setCurrentModel(selection.provider, selection.model);
           }
           return selection;
         }
@@ -1724,8 +1788,7 @@ export class AgentHarness {
 
         const pct = state.context.metrics.percentageUsed;
         const engine = this.getOrCreateWatcherEngine(sessionKey);
-        const memory = engine.getSessionMemory(sessionKey);
-        const hasDecisions = (memory?.decisionsMade.length ?? 0) > 0;
+        const hasDecisions = engine.hasDecisions(sessionKey);
 
         // Summarize (compact + epistemic ledger) when context is high and decisions exist
         if (pct > 0.70 && hasDecisions) {
@@ -1946,6 +2009,10 @@ export class AgentHarness {
       return { watcherAction: 'allow', reason: 'No model selection for watcher' };
     }
 
+    // Update TraceSubscriber with current model
+    this.traceSubscriber?.setCurrentModel(modelSelection.provider, modelSelection.model);
+
+
     const llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
     const rawSchemaId = agentConfig.outputSchema?.schemaId ?? agentConfig.outputSchema?.name;
     const normalizedSchemaId = typeof rawSchemaId === 'string'
@@ -1987,6 +2054,7 @@ export class AgentHarness {
       getModelSelection: store
         ? (t: string) => store.getModelSelection(t)
         : undefined,
+      memoryInjector: this.memoryInjector ?? undefined,
     });
 
     // Use session-scoped watcher context (persists across invocations)
@@ -2409,6 +2477,10 @@ export class AgentHarness {
       runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) =>
         this.runWatcherAgent(objective, sessionKey, trigger, signal),
       onDecision: (entry) => {
+        // Increment decision counter for memory-efficient tracking
+        const engine = this.getOrCreateWatcherEngine(sessionKey);
+        engine.incrementDecisionCount(sessionKey);
+
         this.logger.info('Watcher decision', {
           sessionKey,
           trigger: entry.trigger,
@@ -2547,25 +2619,11 @@ export class AgentHarness {
 
   watcherMemory(sessionKey: string): Record<string, unknown> {
     const engine = this.getOrCreateWatcherEngine(sessionKey);
-    const memory = engine.getSessionMemory(sessionKey);
-
-    if (!memory) {
-      return {
-        sessionKey,
-        decisionsMade: 0,
-        patterns: [],
-        warnings: [],
-        consistencyScore: 1.0,
-      };
-    }
-
     return {
       sessionKey,
-      decisionsMade: memory.decisionsMade.length,
-      decisions: memory.decisionsMade,
-      patterns: memory.patterns,
-      warnings: memory.warnings,
-      consistencyScore: memory.consistencyScore,
+      decisionsMade: engine.getDecisionCount(sessionKey),
+      focusTopic: engine.getFocus(),
+      salienceGoal: engine.getSalienceGoal(),
     };
   }
 
@@ -2603,7 +2661,6 @@ export class AgentHarness {
     state.store.persistContext();
 
     const engine = this.getOrCreateWatcherEngine(sessionKey);
-    const memory = engine.getSessionMemory(sessionKey);
 
     return {
       success: true,
@@ -2614,9 +2671,7 @@ export class AgentHarness {
       ledger: {
         focusTopic: engine.getFocus(),
         salienceGoal: engine.getSalienceGoal(),
-        decisionsMade: memory?.decisionsMade.length ?? 0,
-        consistencyScore: memory?.consistencyScore ?? 1.0,
-        patterns: memory?.patterns ?? [],
+        decisionsMade: engine.getDecisionCount(sessionKey),
       },
     };
   }
@@ -2627,6 +2682,17 @@ export class AgentHarness {
   async shutdown(): Promise<void> {
     if (this.isShutdown) return;
     this.isShutdown = true;
+
+    if (this.traceSubscriber) {
+      try {
+        this.traceSubscriber.close();
+        this.logger.debug('Closed TraceSubscriber');
+      } catch (error) {
+        this.logger.warning('TraceSubscriber close failed', { error: String(error) });
+      } finally {
+        this.traceSubscriber = null;
+      }
+    }
 
     if (this.graphdSubscriber) {
       try {

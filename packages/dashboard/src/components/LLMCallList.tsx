@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import type { LLMCall, AgentType } from '../domain/models'
 import { cn } from '../lib/utils'
 import { formatDuration } from '../lib/time'
@@ -77,6 +78,9 @@ function LLMCallRow({ call }: { call: LLMCall }) {
   )
 }
 
+// Threshold for enabling virtual scrolling
+const VIRTUALIZATION_THRESHOLD = 20
+
 interface LLMCallListProps {
   calls: LLMCall[]
   maxVisible?: number
@@ -84,8 +88,18 @@ interface LLMCallListProps {
 
 export function LLMCallList({ calls, maxVisible = 5 }: LLMCallListProps) {
   const [showAll, setShowAll] = useState(false)
+  const parentRef = useRef<HTMLDivElement>(null)
+
   const visible = showAll ? calls : calls.slice(0, maxVisible)
   const hasMore = calls.length > maxVisible
+  const useVirtual = showAll && calls.length > VIRTUALIZATION_THRESHOLD
+
+  const virtualizer = useVirtualizer({
+    count: useVirtual ? calls.length : 0,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 52, // Estimated row height
+    overscan: 5,
+  })
 
   if (calls.length === 0) return null
 
@@ -99,9 +113,40 @@ export function LLMCallList({ calls, maxVisible = 5 }: LLMCallListProps) {
         <span>{totalTokens.toLocaleString()} total tokens | {formatDuration(totalDuration)}</span>
       </div>
 
-      <div className="space-y-2">
-        {visible.map((call) => <LLMCallRow key={call.id} call={call} />)}
-      </div>
+      {useVirtual ? (
+        <div
+          ref={parentRef}
+          className="max-h-[500px] overflow-auto"
+          style={{ contain: 'strict' }}
+        >
+          <div
+            style={{
+              height: `${virtualizer.getTotalSize()}px`,
+              width: '100%',
+              position: 'relative',
+            }}
+          >
+            {virtualizer.getVirtualItems().map((virtualRow) => (
+              <div
+                key={virtualRow.key}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
+              >
+                <LLMCallRow call={calls[virtualRow.index]} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {visible.map((call) => <LLMCallRow key={call.id} call={call} />)}
+        </div>
+      )}
 
       {hasMore && !showAll && (
         <button

@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "bin": {
+    "rex": "./bin/rex.js"
+  },
   "scripts": {
     "start": "bun run src/index.ts",
     "profile": "bun --inspect run src/index.ts",

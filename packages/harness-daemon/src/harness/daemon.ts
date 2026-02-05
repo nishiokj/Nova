@@ -5,16 +5,28 @@
  * - TCP/JSONL bus for client connections (TUI, external integrations via harness-client)
  */
 
-import { pathToFileURL } from 'url';
+import { pathToFileURL, fileURLToPath } from 'url';
+import { createServer as createHttpServer, type Server as HttpServerType, type IncomingMessage, type ServerResponse } from 'http';
+import { createReadStream, statSync, existsSync } from 'fs';
+import { join, extname, dirname } from 'path';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
-import { BusServer } from 'comms-bus';
+import { BusServer, WsBridgeServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
 import { translateAgentEvent } from './event_translator.js';
+import { handleControlPlaneRequest, type ControlPlaneContext } from './control_plane_routes.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface HarnessDaemonOptions {
   host?: string;
   port?: number;
+  /** WebSocket port for browser dashboard access (default: port + 1, e.g., 9556) */
+  wsPort?: number;
+  /** HTTP port for serving the Control Plane dashboard. Set to enable dashboard serving. */
+  dashboardPort?: number;
+  /** Path to dashboard static files (default: auto-detect dashboard-control/dist) */
+  dashboardPath?: string;
   workingDir?: string;
   configPath?: string;
   /** Idle timeout in ms before daemon shuts down when no clients connected. Set to 0 to disable. */
@@ -29,12 +41,17 @@ const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
 export class HarnessDaemon {
   private readonly host: string;
   private readonly port: number;
+  private readonly wsPort: number;
+  private readonly dashboardPort?: number;
+  private readonly dashboardPath?: string;
   private readonly workingDir: string;
   private readonly configPath?: string;
   private readonly idleTimeoutMs: number;
   private readonly dangerousMode: boolean;
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
+  private wsBridge: WsBridgeServer | null = null;
+  private dashboardServer: HttpServerType | null = null;
   private gateway: BridgeGateway | null = null;
   private authService: AuthService | null = null;
   private authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | null = null;
@@ -45,6 +62,9 @@ export class HarnessDaemon {
     this.host = options.host ?? '127.0.0.1';
     const rawPort = options.port ?? 9555;
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
+    this.wsPort = options.wsPort ?? this.port + 1; // Default: 9556
+    this.dashboardPort = options.dashboardPort;
+    this.dashboardPath = options.dashboardPath;
     this.workingDir = options.workingDir ?? process.cwd();
     this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -123,12 +143,65 @@ export class HarnessDaemon {
       this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
     }
 
-    return this.bus.start();
+    // Start WebSocket bridge for browser dashboard access
+    if (!this.wsBridge) {
+      this.wsBridge = new WsBridgeServer({
+        host: this.host,
+        port: this.wsPort,
+        busHost: this.host,
+        busPort: this.port,
+      });
+
+      // Forward events from EventBus to WebSocket clients
+      const eventBus = this.harness.getEventBus();
+      if (eventBus) {
+        // Subscribe to all events and forward to WebSocket bridge
+        eventBus.subscribeGlobal((event) => {
+          // Extract requestId/runId from event for channel routing
+          const requestId = (event as { requestId?: string; runId?: string }).requestId
+            ?? (event as { runId?: string }).runId;
+          if (requestId) {
+            const channel = `run:${requestId}`;
+            const wireEvent = translateAgentEvent(event);
+            if (wireEvent) {
+              this.wsBridge?.publish(channel, wireEvent);
+            }
+          }
+        });
+      }
+    }
+
+    const [tcpAddress, wsAddress] = await Promise.all([
+      this.bus.start(),
+      this.wsBridge.start(),
+    ]);
+
+    console.log(`[harness-daemon] WebSocket bridge listening on ws://${wsAddress.host}:${wsAddress.port}`);
+
+    // Start dashboard HTTP server if port is configured
+    if (this.dashboardPort && !this.dashboardServer) {
+      const dashboardAddress = await this.startDashboardServer();
+      console.log(`[harness-daemon] Dashboard available at http://${dashboardAddress.host}:${dashboardAddress.port}`);
+    }
+
+    return tcpAddress;
   }
 
   async stop(): Promise<void> {
     this.cancelIdleTimer();
     this.shutdownRequested = true;
+
+    if (this.dashboardServer) {
+      await new Promise<void>((resolve) => {
+        this.dashboardServer!.close(() => resolve());
+      });
+      this.dashboardServer = null;
+    }
+
+    if (this.wsBridge) {
+      await this.wsBridge.stop();
+      this.wsBridge = null;
+    }
 
     if (this.bus) {
       await this.bus.stop();
@@ -144,6 +217,109 @@ export class HarnessDaemon {
       await this.harness.shutdown();
       this.harness = null;
     }
+  }
+
+  /**
+   * Start the dashboard HTTP server for serving static files.
+   */
+  private async startDashboardServer(): Promise<{ host: string; port: number }> {
+    // Find dashboard dist path
+    let distPath = this.dashboardPath;
+    if (!distPath) {
+      // Auto-detect from package location
+      const candidates = [
+        join(__dirname, '../../../../dashboard-control/dist'),
+        join(process.cwd(), 'packages/dashboard-control/dist'),
+        join(process.cwd(), 'node_modules/@jesus/dashboard-control/dist'),
+      ];
+      distPath = candidates.find((p) => existsSync(join(p, 'index.html')));
+    }
+
+    if (!distPath || !existsSync(join(distPath, 'index.html'))) {
+      throw new Error(`Dashboard dist not found. Build dashboard-control or provide --dashboard-path. Searched: ${distPath || 'auto-detect failed'}`);
+    }
+
+    const mimeTypes: Record<string, string> = {
+      '.html': 'text/html',
+      '.js': 'application/javascript',
+      '.css': 'text/css',
+      '.json': 'application/json',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.svg': 'image/svg+xml',
+      '.ico': 'image/x-icon',
+      '.woff': 'font/woff',
+      '.woff2': 'font/woff2',
+    };
+
+    const serveFile = (res: ServerResponse, filePath: string) => {
+      try {
+        const stat = statSync(filePath);
+        const ext = extname(filePath).toLowerCase();
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Length': stat.size,
+          'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000',
+        });
+        createReadStream(filePath).pipe(res);
+      } catch {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
+    };
+
+    const handler = (req: IncomingMessage, res: ServerResponse) => {
+      // Control Plane API context - create fresh each request so graphd is always current
+      const controlPlaneCtx: ControlPlaneContext = {
+        graphd: this.harness?.getGraphD() ?? null,
+        isGraphDReady: () => !!(this.harness?.getGraphD()),
+        workingDir: this.workingDir,
+      };
+
+      // Handle Control Plane API routes first
+      if (handleControlPlaneRequest(req, res, controlPlaneCtx)) {
+        return;
+      }
+
+      // Set CORS headers for static files
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      const url = new URL(req.url || '/', `http://${req.headers.host}`);
+      let filePath = join(distPath!, url.pathname);
+
+      // Security: prevent directory traversal
+      if (!filePath.startsWith(distPath!)) {
+        res.writeHead(403);
+        res.end('Forbidden');
+        return;
+      }
+
+      // Serve index.html for SPA routes
+      if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
+        filePath = join(distPath!, 'index.html');
+      }
+
+      serveFile(res, filePath);
+    };
+
+    this.dashboardServer = createHttpServer(handler);
+
+    return new Promise((resolve, reject) => {
+      this.dashboardServer!.on('error', reject);
+      this.dashboardServer!.listen(this.dashboardPort, this.host, () => {
+        resolve({ host: this.host, port: this.dashboardPort! });
+      });
+    });
   }
 
   getAddress(): { host: string; port: number } {
@@ -183,6 +359,8 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       console.log('[harness-daemon] WARNING: Running in dangerous mode - all permission checks disabled');
     } else if (arg === '--port' && i + 1 < args.length) {
       options.port = parseInt(args[++i], 10);
+    } else if (arg === '--ws-port' && i + 1 < args.length) {
+      options.wsPort = parseInt(args[++i], 10);
     } else if (arg === '--host' && i + 1 < args.length) {
       options.host = args[++i];
     } else if (arg === '--config' && i + 1 < args.length) {
@@ -191,6 +369,10 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       options.workingDir = args[++i];
     } else if (arg === '--idle-timeout' && i + 1 < args.length) {
       options.idleTimeoutMs = parseInt(args[++i], 10);
+    } else if (arg === '--dashboard-port' && i + 1 < args.length) {
+      options.dashboardPort = parseInt(args[++i], 10);
+    } else if (arg === '--dashboard-path' && i + 1 < args.length) {
+      options.dashboardPath = args[++i];
     }
   }
 

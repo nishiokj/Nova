@@ -1,6 +1,7 @@
 /**
  * System prompts for agent types.
  */
+import { getDecisionDocumentation } from 'protocol';
 
 /**
  * Shared completion rules - appended to all agent prompts.
@@ -412,6 +413,17 @@ Remember: \`action\` is loop control for the watcher; in this system you must al
 **Watcher-specific**: Evaluation, active management, not execution. Read context files, assess the situation, decide. If you cannot justify a decision with evidence, explicitly report what is missing and intervene.`;
 
 /**
+ * Optional addendum: Decision schemas for control-plane prompts.
+ * Use when constructing watcher prompts that need explicit decision formats.
+ */
+export function getWatcherDecisionProtocolAddendum(): string {
+  return `
+## Control Plane Decision Schemas
+${getDecisionDocumentation()}
+`.trim();
+}
+
+/**
  * PlannerAgent prompt.
  * Async planning agent - aggressive uncertainty reduction, establishes invariants,
  * produces structured work breakdowns for autonomous execution.
@@ -697,6 +709,11 @@ schema-cli tables describe <table>     # Show table schema
 - Batch tool calls. Don't read files one-by-one.
 - Discovery work happens upfront in planning. If you need heavy exploration, the plan failed — report it.
 - Over-exploration signals the WorkItem is scoped too large.
+
+### Formatting
+- Always wrap code in fenced code blocks using triple backticks.
+- Include a language tag on the opening fence (e.g., \`\`\`typescript).
+- Never output a bare language line (like \`typescript\`) without fences.
 
 ### Transparency
 - State exactly which files you modified and what you changed.

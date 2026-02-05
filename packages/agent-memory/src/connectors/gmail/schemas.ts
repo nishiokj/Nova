@@ -238,7 +238,7 @@ export const PubSubPushEnvelopeSchema = z.object({
     data: z.string(), // Base64 encoded
     messageId: z.string(),
     publishTime: z.string(),
-    attributes: z.record(z.string()).optional(),
+    attributes: z.record(z.string(), z.string()).optional(),
   }),
   subscription: z.string(),
 })

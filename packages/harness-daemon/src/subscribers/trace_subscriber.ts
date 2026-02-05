@@ -10,7 +10,7 @@
 
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
 import type { EventBusProtocol } from 'comms-bus';
 import type { AgentEvent, ToolCallData, GitCommitData } from 'types';
@@ -120,9 +120,8 @@ export class TraceSubscriber {
     if (this.closed) return;
 
     const { sha } = event.data;
-    if (!sha) return;
+    if (!sha || !isValidGitSha(sha)) return;
 
-    // Emit trace for this commit
     this.emitTrace(sha);
   }
 
@@ -501,8 +500,17 @@ export function createTraceSubscriber(
 }
 
 // ============================================
-// GIT COMMIT HOOK HELPER
+// GIT HELPERS
 // ============================================
+
+const GIT_SHA_PATTERN = /^[a-f0-9]{7,40}$/;
+
+/**
+ * Validate a git SHA to prevent command injection.
+ */
+function isValidGitSha(sha: string): boolean {
+  return GIT_SHA_PATTERN.test(sha);
+}
 
 /**
  * Helper to detect git commit in Bash tool output and extract SHA.
@@ -513,7 +521,6 @@ export function createTraceSubscriber(
  * - "[detached HEAD abc1234] Commit message"
  */
 export function extractCommitSha(bashOutput: string): string | null {
-  // Match git commit output: [branch sha] message
   const match = bashOutput.match(/\[[\w\s/-]+\s+([a-f0-9]{7,40})\]/);
   return match?.[1] ?? null;
 }

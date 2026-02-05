@@ -43,6 +43,7 @@ export {
   GlobArgsSchema,
   GrepArgsSchema,
   PromptUserArgsSchema,
+  ExpandConversationArgsSchema,
   type BashArgs,
   type ReadArgs,
   type WriteArgs,
@@ -50,6 +51,7 @@ export {
   type GlobArgs,
   type GrepArgs,
   type PromptUserArgs,
+  type ExpandConversationArgs,
 } from './tool_schemas.js';
 
 // Built-in tools
@@ -61,6 +63,7 @@ export {
   executeGrep,
   executeGlob,
   executePromptUser,
+  executeExpandConversation,
   bashToolOptions,
   readToolOptions,
   writeToolOptions,
@@ -68,6 +71,7 @@ export {
   grepToolOptions,
   globToolOptions,
   promptUserToolOptions,
+  expandConversationToolOptions,
   builtinToolOptions,
 } from './builtins/index.js';
 

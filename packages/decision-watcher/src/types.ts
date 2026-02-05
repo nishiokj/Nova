@@ -283,39 +283,8 @@ export interface PromptUserAnswer {
 }
 
 // ============================================
-// WATCHER STATE & MEMORY
+// WATCHER STATE
 // ============================================
-
-/**
- * Tracks decisions made during a session to maintain consistency.
- */
-export interface DecisionMemory {
-  /** Session ID */
-  sessionId: string;
-
-  /** Decisions made this session */
-  decisionsMade: Array<{
-    question: string;
-    answer: string;
-    decisionId?: string;
-    timestamp: number;
-  }>;
-
-  /** Inferred patterns from decisions */
-  patterns: string[];
-
-  /** Warnings issued for inconsistencies */
-  warnings: Array<{
-    message: string;
-    timestamp: number;
-  }>;
-
-  /**
-   * Consistency score (0-1).
-   * Lower scores indicate potential inconsistency.
-   */
-  consistencyScore: number;
-}
 
 /**
  * Context provided to the watcher when answering a question.
@@ -351,11 +320,6 @@ export interface WatcherContext {
     /** Project structure hints */
     structure?: string[];
   };
-
-  /**
-   * Previously made decisions for this session.
-   */
-  sessionDecisions?: DecisionMemory;
 }
 
 // ============================================

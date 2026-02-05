@@ -22,6 +22,7 @@ import type {
 import { getProviderBaseUrl, isSupportedProvider, providerRequiresAuth, toGatewayModel } from 'types';
 import { profiler } from 'shared';
 import { getProvider } from './providers/registry.js';
+import { getCodexTokenManager } from './auth/codex-auth.js';
 import type { ResolvedRequestConfig, ProviderContext, AdapterLogger } from './providers/types.js';
 import { PartialStreamError } from './providers/types.js';
 
@@ -122,7 +123,7 @@ class LLMRouterAdapter implements LLMAdapter {
    * Resolve request configuration from LLMRequestConfig.
    * Returns all information needed to make a request to a provider.
    */
-  private resolveRequestConfig(llm: LLMRequestConfig): ResolvedRequestConfig {
+  private async resolveRequestConfig(llm: LLMRequestConfig): Promise<ResolvedRequestConfig> {
     if (!llm?.model) {
       throw new Error('LLM request missing model');
     }
@@ -134,6 +135,35 @@ class LLMRouterAdapter implements LLMAdapter {
 
     if (!provider) {
       throw new Error(`Provider must be specified for model '${llm.model}'`);
+    }
+
+    // Special handling for Codex OAuth tokens
+    if (provider === 'codex') {
+      const tokenManager = getCodexTokenManager();
+      await tokenManager.initialize();
+      const token = await tokenManager.getAccessToken();
+      if (!token) {
+        throw new Error(
+          'Codex OAuth not configured. Run the authentication flow first with /providers codex login'
+        );
+      }
+      const accountId = tokenManager.getAccountId();
+      if (!accountId) {
+        throw new Error(
+          'Codex account ID not found. Please re-authenticate with /providers codex login'
+        );
+      }
+      return {
+        provider: 'codex',
+        displayProvider: 'codex',
+        model: llm.model,
+        apiKey: token, // OAuth access token
+        baseUrl: getProviderBaseUrl('codex') ?? 'https://api.openai.com',
+        maxTokens: llm.maxTokens,
+        temperature: llm.temperature,
+        reasoning: llm.reasoning,
+        chatgptAccountId: accountId,
+      };
     }
 
     // displayProvider is the user-facing name (e.g., 'z.ai-coder') for error messages
@@ -224,7 +254,7 @@ class LLMRouterAdapter implements LLMAdapter {
    * Delegates directly to the provider - no retry or fallback.
    */
   async respond(params: RespondParams): Promise<LLMResponse> {
-    const resolved = this.resolveRequestConfig(params.llm);
+    const resolved = await this.resolveRequestConfig(params.llm);
     const provider = getProvider(resolved.provider);
     const context: ProviderContext = {
       config: resolved,
@@ -250,7 +280,7 @@ class LLMRouterAdapter implements LLMAdapter {
    * Delegates directly to the provider - no retry or fallback.
    */
   async *stream(params: StreamParams): AsyncGenerator<string, LLMResponse> {
-    const resolved = this.resolveRequestConfig(params.llm);
+    const resolved = await this.resolveRequestConfig(params.llm);
     const provider = getProvider(resolved.provider);
     const context: ProviderContext = {
       config: resolved,

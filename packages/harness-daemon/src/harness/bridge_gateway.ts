@@ -27,8 +27,7 @@ import {
 } from './skills_loader.js';
 import type { AuthService } from './auth_service.js';
 import { LocalProviderManager } from './local_providers.js';
-import { isOpenAICompatProvider } from 'types';
-import { getAllModels } from 'types';
+import { getAllModels, isOpenAICompatProvider, toGatewayModel } from 'types';
 import { createHookRegistry, createRalphStopHook, type HookRegistry, type RalphCompletionReason, type RalphLoopState } from 'orchestrator';
 import type { StopHookContext, StopHookResult } from 'agent';
 import {
@@ -52,6 +51,17 @@ import {
 } from 'protocol';
 import type { AgentType } from 'agent';
 import type { PermissionChecker } from './permissions.js';
+
+const GATEWAY_PROVIDER_ID = 'vercel-gateway';
+const GATEWAY_MODEL_PROVIDERS = new Set<string>([
+  'anthropic',
+  'openai',
+  'cerebras',
+  'groq',
+  'gemini',
+  'z.ai-coder',
+  'claude',
+]);
 
 interface HarnessLike {
   run(params: {
@@ -798,15 +808,64 @@ export class BridgeGateway {
 
     // Get hidden models from user preferences
     const hiddenModels = graphd?.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+    const hiddenModelSet = new Set(hiddenModels);
+    const accessCache = new Map<string, boolean>();
+    const hasAccess = (provider: string) => {
+      if (!accessCache.has(provider)) {
+        accessCache.set(provider, this.harness.hasApiKey(provider));
+      }
+      return accessCache.get(provider) ?? false;
+    };
 
-    const models = getAllModels()
-      .filter((model) => !hiddenModels.includes(model.id))
+    const baseModels = getAllModels()
+      .filter((model) => !hiddenModelSet.has(model.id))
       .map((model) => ({
         id: model.id,
         name: model.name,
         provider: model.provider,
         reasoning: model.reasoning,
       }));
+
+    const models = [...baseModels];
+    const availableModels = baseModels.filter((model) => hasAccess(model.provider));
+
+    // If Vercel Gateway is configured, surface gateway variants for supported providers
+    if (hasAccess(GATEWAY_PROVIDER_ID)) {
+      const seen = new Set(models.map((model) => `${model.provider ?? ''}:${model.id}`));
+      const availableSeen = new Set(availableModels.map((model) => `${model.provider ?? ''}:${model.id}`));
+      for (const model of baseModels) {
+        if (!GATEWAY_MODEL_PROVIDERS.has(model.provider)) continue;
+
+        let gatewayId: string;
+        try {
+          gatewayId = toGatewayModel(model.id, model.provider);
+        } catch {
+          continue;
+        }
+
+        if (hiddenModelSet.has(gatewayId)) continue;
+
+        const key = `${GATEWAY_PROVIDER_ID}:${gatewayId}`;
+        if (!seen.has(key)) {
+          models.push({
+            id: gatewayId,
+            name: `${model.name} (${model.provider})`,
+            provider: GATEWAY_PROVIDER_ID,
+            reasoning: model.reasoning,
+          });
+          seen.add(key);
+        }
+        if (!availableSeen.has(key)) {
+          availableModels.push({
+            id: gatewayId,
+            name: `${model.name} (${model.provider})`,
+            provider: GATEWAY_PROVIDER_ID,
+            reasoning: model.reasoning,
+          });
+          availableSeen.add(key);
+        }
+      }
+    }
 
     this.sendEvent(connectionId, {
       type: 'response',
@@ -816,6 +875,7 @@ export class BridgeGateway {
         metadata: {
           kind: 'models',
           payload: models,
+          available: availableModels,
           default: config.models.default,
         },
       },

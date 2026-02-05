@@ -17,7 +17,7 @@ function isSessionActive(s: Session): boolean {
 }
 
 export default function App() {
-  const { sessions: fetchedSessions, state, error, refetch, hasRunningRequests } = useSessions()
+  const { sessions: fetchedSessions, state, error, refetch, hasRunningRequests, loadSessionMessages, loadedMessageSessions } = useSessions()
   const [deletedSessions, setDeletedSessions] = useState<Set<string>>(new Set())
 
   // Use fetched data when available, fallback to mock only on error
@@ -72,12 +72,16 @@ export default function App() {
       const updated = new Set(prev)
       if (next) {
         updated.add(sessionId)
+        // Lazy load messages when expanding a session that hasn't been loaded
+        if (!loadedMessageSessions.has(sessionId)) {
+          loadSessionMessages(sessionId)
+        }
       } else {
         updated.delete(sessionId)
       }
       return updated
     })
-  }, [])
+  }, [loadSessionMessages, loadedMessageSessions])
 
   const handleDelete = useCallback((sessionId: string) => {
     setDeletedSessions((prev) => {
