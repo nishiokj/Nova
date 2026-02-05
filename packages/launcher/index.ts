@@ -151,8 +151,9 @@ function buildDaemonArgs(): string[] {
   const daemonArgs: string[] = [];
   // --dangerous is now handled per-session by the TUI, not the daemon
 
-  // Enable dashboard HTTP server on port 9444 for control-plane API
-  daemonArgs.push('--dashboard-port', '9444');
+  // Enable dashboard HTTP server on port 9445 for control-plane API
+  // (9444 is used by GraphD)
+  daemonArgs.push('--dashboard-port', '9445');
 
   return daemonArgs;
 }

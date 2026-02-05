@@ -121,7 +121,7 @@ async function main(): Promise<void> {
     const daemon = new HarnessDaemon({
       configPath: configPath ?? undefined,
       idleTimeoutMs: 0, // Disable idle timeout in standalone mode
-      dashboardPort: 9444, // Enable control-plane API
+      dashboardPort: 9445, // Enable control-plane API (9444 is used by GraphD)
     });
 
     // Run daemon startup

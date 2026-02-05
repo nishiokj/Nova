@@ -14,12 +14,12 @@ export default defineConfig({
     port: 5175,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:9444',
+        target: 'http://127.0.0.1:9445',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
       '/control-plane': {
-        target: 'http://127.0.0.1:9444',
+        target: 'http://127.0.0.1:9445',
         changeOrigin: true,
       },
     },
