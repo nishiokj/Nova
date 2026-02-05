@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "rex": "./bin/rex.js"
+    "rex-daemon": "./bin/rex.js"
   },
   "scripts": {
     "start": "bun run src/index.ts",
