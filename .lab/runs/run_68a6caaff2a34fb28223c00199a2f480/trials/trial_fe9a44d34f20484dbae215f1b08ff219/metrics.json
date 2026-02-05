@@ -1,0 +1,14 @@
+{
+  "schema_version": "trial_output_v1",
+  "ids": {
+    "run_id": "run_68a6caaff2a34fb28223c00199a2f480",
+    "trial_id": "trial_fe9a44d34f20484dbae215f1b08ff219",
+    "variant_id": "base",
+    "task_id": "t1",
+    "repl_idx": 0
+  },
+  "outcome": "failure",
+  "metrics": {
+    "latency_ms": 49732
+  }
+}

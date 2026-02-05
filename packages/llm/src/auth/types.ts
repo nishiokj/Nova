@@ -8,6 +8,8 @@ export interface CodexTokens {
   token_type: 'Bearer';
   expires_at: number; // Unix timestamp (seconds)
   scope?: string;
+  /** ChatGPT account ID extracted from id_token - required for API requests */
+  chatgpt_account_id?: string;
 }
 
 /**

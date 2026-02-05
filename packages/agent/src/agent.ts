@@ -102,6 +102,7 @@ export interface ModelSelection {
  */
 export interface MemoryInjector {
   inject(params: { query: string; maxTokens: number }): Promise<string | null>;
+  injectRecentConversations?: (params: { limit?: number; maxTokens: number; connectors?: string }) => Promise<string | null>;
   summarizeQueryPlan?: (query: string) => string;
   explainQueryPlan?: (query: string) => { intent?: string } | undefined;
   injectV2?: (params: {
@@ -354,7 +355,19 @@ export class Agent {
       ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
       : '';
 
-    // Memory injection (v1/v2)
+    // Memory injection (recent + v1/v2)
+    let recentConversationContent: string | null = null;
+    if (this.memoryInjector?.injectRecentConversations && iteration === 0) {
+      try {
+        recentConversationContent = await this.memoryInjector.injectRecentConversations({
+          limit: 10,
+          maxTokens: 600,
+        });
+      } catch {
+        recentConversationContent = null;
+      }
+    }
+
     let memoryContent: string | null = null;
     if (this.memoryInjector) {
       try {
@@ -366,12 +379,14 @@ export class Agent {
           || intent === 'preference'
           || intent === 'principle'
           || intent === 'tradeoff';
+        const isRecallIntent = intent === 'recall';
         const eventQuery = querySummary || query;
         const queryKey = this.normalizeMemoryQueryKey(eventQuery);
         const cacheKey = this.getMemoryCacheKey(workItem);
         const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
         const shouldUseV2 = !!this.memoryInjector.injectV2
           && !isConceptIntent
+          && !isRecallIntent
           && this.shouldUseMemoryV2(this.sessionKey, workItem.workId);
         const cached = this.memoryInjectionCache.get(cacheKey);
         const canReuseCached = cached && cached.queryKey === queryKey && (
@@ -567,8 +582,11 @@ export class Agent {
     }
 
     // Combine task context with memory injection
-    const contextWithMemory = memoryContent
-      ? `${taskContext}\n\n${memoryContent}`
+    const combinedMemoryContent = [recentConversationContent, memoryContent]
+      .filter((section): section is string => typeof section === 'string' && section.trim().length > 0)
+      .join('\n\n');
+    const contextWithMemory = combinedMemoryContent
+      ? `${taskContext}\n\n${combinedMemoryContent}`
       : taskContext;
 
     const messages = this.buildMessages(

@@ -568,6 +568,10 @@ export interface MemorySearchResponse {
   items: MemorySearchItem[]
 }
 
+export interface MemoryRecentResponse {
+  items: MemorySearchItem[]
+}
+
 // ============ Evidence Retrieval ============
 
 export interface EvidenceRetrieveRequest {

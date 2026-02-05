@@ -37,9 +37,9 @@ export async function runCodexOAuthFlow(callbacks: OAuthFlowCallbacks): Promise<
 
   return new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', `http://localhost:8976`);
+      const url = new URL(req.url ?? '/', `http://localhost:1455`);
 
-      if (url.pathname !== '/callback') {
+      if (url.pathname !== '/auth/callback') {
         res.writeHead(404);
         res.end('Not found');
         return;
@@ -111,7 +111,7 @@ export async function runCodexOAuthFlow(callbacks: OAuthFlowCallbacks): Promise<
       }
     });
 
-    server.listen(8976, '127.0.0.1', () => {
+    server.listen(1455, '127.0.0.1', () => {
       const authUrl = buildAuthUrl(CODEX_OAUTH_CONFIG, pkce, state);
       callbacks.onAuthUrl(authUrl);
     });
@@ -127,12 +127,32 @@ export async function runCodexOAuthFlow(callbacks: OAuthFlowCallbacks): Promise<
 }
 
 /**
- * Check if Codex OAuth is configured.
+ * Check if Codex OAuth is configured (async - initializes token manager).
  */
 export async function isCodexAuthenticated(): Promise<boolean> {
   const tokenManager = getCodexTokenManager();
   await tokenManager.initialize();
   return tokenManager.hasTokens();
+}
+
+/**
+ * Check if Codex OAuth tokens exist (sync - just checks file existence).
+ * Use this for synchronous auth checks; use isCodexAuthenticated for full validation.
+ */
+export function hasCodexCredentials(): boolean {
+  const { existsSync } = require('fs');
+  const { homedir } = require('os');
+  const { join } = require('path');
+  const tokenPath = join(homedir(), '.jesus', 'codex-auth.json');
+  if (!existsSync(tokenPath)) return false;
+  try {
+    const content = require('fs').readFileSync(tokenPath, 'utf-8');
+    const tokens = JSON.parse(content);
+    // Check if tokens object has required fields (not just empty {})
+    return !!(tokens.access_token && tokens.refresh_token);
+  } catch {
+    return false;
+  }
 }
 
 /**

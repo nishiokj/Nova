@@ -150,6 +150,10 @@ async function isDaemonRunning(): Promise<boolean> {
 function buildDaemonArgs(): string[] {
   const daemonArgs: string[] = [];
   // --dangerous is now handled per-session by the TUI, not the daemon
+
+  // Enable dashboard HTTP server on port 9444 for control-plane API
+  daemonArgs.push('--dashboard-port', '9444');
+
   return daemonArgs;
 }
 

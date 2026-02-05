@@ -33,6 +33,7 @@ import type {
   ConnectorUnregisterResponse,
   DecisionsSearchResponse,
   MemorySearchResponse,
+  MemoryRecentResponse,
   EvidenceRetrieveRequest,
   EvidenceRetrieveResponse,
   DerivedJob,
@@ -948,6 +949,22 @@ export class SyncClient {
       if (opts.connectors) params.set('connectors', opts.connectors)
       const query = params.toString()
       return this.get<MemorySearchResponse>(`/memory/search?${query}`)
+    },
+
+    /**
+     * Fetch most recent conversational memory summaries.
+     * @param opts.limit - Max results (default: 10)
+     * @param opts.connectors - Comma-separated connector list
+     */
+    recent: async (opts?: {
+      limit?: number
+      connectors?: string
+    }): Promise<MemoryRecentResponse> => {
+      const params = new URLSearchParams()
+      if (opts?.limit !== undefined) params.set('limit', String(opts.limit))
+      if (opts?.connectors) params.set('connectors', opts.connectors)
+      const query = params.toString()
+      return this.get<MemoryRecentResponse>(`/memory/recent${query ? `?${query}` : ''}`)
     },
   }
 

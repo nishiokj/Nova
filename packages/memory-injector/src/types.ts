@@ -9,6 +9,7 @@ export type QueryIntent =
   | 'preference'
   | 'principle'
   | 'tradeoff'
+  | 'recall'
   | 'implementation'
   | 'debug'
   | 'unknown';
@@ -42,6 +43,18 @@ export interface InjectParams {
   query: string;
   /** Maximum tokens to include in injection */
   maxTokens: number;
+}
+
+/**
+ * Parameters for recent conversation summary injection.
+ */
+export interface InjectRecentParams {
+  /** Max summaries to include (default: 10) */
+  limit?: number;
+  /** Maximum tokens to include in injection */
+  maxTokens: number;
+  /** Optional connector filter */
+  connectors?: string;
 }
 
 export interface InjectParamsV2 {
@@ -114,6 +127,12 @@ export interface MemoryInjector {
    * @returns Formatted memory content, or null if no relevant memories found
    */
   inject(params: InjectParams): Promise<string | null>;
+
+  /**
+   * Inject recent conversation summaries (no search query).
+   * Intended for first-iteration priming.
+   */
+  injectRecentConversations?: (params: InjectRecentParams) => Promise<string | null>;
 
   /**
    * Summarize the internal query plan for observability.

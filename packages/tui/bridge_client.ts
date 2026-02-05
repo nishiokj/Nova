@@ -69,9 +69,9 @@ export class BridgeClient extends EventEmitter {
       const validated = validateBridgeEvent(event);
       if (!validated) {
         profiler.end(`bridge.client.validate:${event.type}`, 'tui');
-        // Provide detailed error information for debugging
+        // Emit error event for UI handling - do NOT use console.error
+        // as it breaks Ink's rendering and causes flickering
         const errorMsg = `Malformed event from bridge. Type: ${event?.type ?? 'undefined'}, Data: ${JSON.stringify(event?.data ?? {}).slice(0, 200)}`;
-        console.error('[BridgeClient] Validation failed:', errorMsg);
         this.emit('error', { message: errorMsg });
         return;
       }

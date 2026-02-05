@@ -26,7 +26,7 @@ import {
   type ToolRegistrationOptions,
   type ToolExecutionContext,
 } from './types.js';
-import { successResult, type ToolResult } from '../types/tools.js';
+import { successResult, type ToolResult } from 'types';
 
 describe('shouldSkipDir', () => {
   describe('Default exclusions', () => {
@@ -531,7 +531,7 @@ describe('Constants', () => {
 
     it('should have expected size', () => {
       // Document the current count for regression testing
-      expect(DEFAULT_EXCLUDE_DIRS.size).toBe(16);
+      expect(DEFAULT_EXCLUDE_DIRS.size).toBe(18);
     });
   });
 
@@ -547,7 +547,7 @@ describe('Constants', () => {
     });
 
     it('should have expected size', () => {
-      expect(DEFAULT_EXCLUDE_EXTENSIONS.size).toBe(9);
+      expect(DEFAULT_EXCLUDE_EXTENSIONS.size).toBe(10);
     });
   });
 
@@ -596,6 +596,10 @@ describe('Constants', () => {
       expect(DEFAULT_TOOL_CONFIG.enabledTools).toContain('Bash');
       expect(DEFAULT_TOOL_CONFIG.enabledTools).toContain('Glob');
       expect(DEFAULT_TOOL_CONFIG.enabledTools).toContain('Grep');
+    });
+
+    it('should enable conversation expansion tool', () => {
+      expect(DEFAULT_TOOL_CONFIG.enabledTools).toContain('ExpandConversation');
     });
 
     it('should have bash timeout of 30 seconds', () => {

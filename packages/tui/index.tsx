@@ -662,8 +662,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         // Set dangerous mode for this session if requested
         // Each session has its own dangerous mode state - does not affect other TUIs
         if (options.dangerousMode) {
-          void client.setDangerousMode(true).catch((err) => {
-            console.error('[tui] Failed to set dangerous mode:', err);
+          void client.setDangerousMode(true).catch(() => {
+            // Silently ignore - do NOT use console.error as it breaks Ink rendering
           });
         }
       })
@@ -1123,12 +1123,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     if (kind === "models") {
       const payload = metadata.payload as Array<{ id: string; name: string; provider?: string; reasoning?: string[] }> | undefined;
+      const availableRaw = (metadata as { available?: unknown }).available;
+      const available = Array.isArray(availableRaw)
+        ? (availableRaw as Array<{ id: string; name: string; provider?: string; reasoning?: string[] }>)
+        : undefined;
       if (payload && Array.isArray(payload)) {
         if (pendingModelsModeRef.current) {
           pendingModelsModeRef.current = false;
-          store.setModelsList(payload);
+          store.setModelsList(payload, available);
         } else {
-          store.updateModelsList(payload);
+          store.updateModelsList(payload, available);
         }
       } else if (content) {
         store.addMessage("system", content);
@@ -2416,9 +2420,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const isAfterEscapeLeader = now - escapeLeaderRef.current < LEADER_TIMEOUT;
 
     const cycleModel = () => {
-      const models = snapshot.modelsList;
+      const models = snapshot.modelsAvailableList;
       if (models.length === 0) {
-        store.addMessage("system", "No models available. Run /models to fetch model list.");
+        const message = snapshot.modelsList.length > 0
+          ? "No accessible models. Configure a provider with /providers."
+          : "No models available. Run /models to fetch model list.";
+        store.addMessage("system", message);
         return;
       }
       // Cycle the 'standard' agent type model (main/default)
@@ -2428,7 +2435,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       let currentIdx = currentId
         ? models.findIndex((m) => m.id === currentId && (!currentProvider || m.provider === currentProvider))
         : -1;
-      if (currentIdx < 0) currentIdx = Math.max(0, snapshot.modelsCursor);
+      if (currentIdx < 0) currentIdx = -1;
       const nextIdx = (currentIdx + 1) % models.length;
       const nextModel = models[nextIdx];
       if (!nextModel) return;
@@ -4108,11 +4115,11 @@ let globalCleanup: (() => void) | null = null;
 let cleanupCalled = false;
 
 // Handle graceful shutdown on signals
-const handleSignal = (signal: string) => {
+const handleSignal = (_signal: string) => {
   if (cleanupCalled) return;
   cleanupCalled = true;
 
-  console.log(`\nReceived ${signal}, shutting down gracefully...`);
+  // Do NOT use console.log here - it breaks Ink's rendering
   if (globalCleanup) {
     globalCleanup();
   }
@@ -4121,10 +4128,10 @@ const handleSignal = (signal: string) => {
 };
 
 // Process-level last resort handlers - catch anything that slips through
-process.on('uncaughtException', (error: Error) => {
-  console.error('\n[FATAL] Uncaught exception:', error.message);
-  console.error(error.stack);
-
+// IMPORTANT: Do NOT use console.log/error in these handlers as they break
+// Ink's rendering and cause flickering. Errors are silently caught here;
+// for debugging, check the UI log file.
+process.on('uncaughtException', (_error: Error) => {
   // Attempt cleanup
   if (globalCleanup && !cleanupCalled) {
     cleanupCalled = true;
@@ -4139,10 +4146,8 @@ process.on('uncaughtException', (error: Error) => {
   setTimeout(() => process.exit(1), ERROR_EXIT_DELAY);
 });
 
-process.on('unhandledRejection', (reason: unknown) => {
-  const message = reason instanceof Error ? reason.message : String(reason);
-  console.error('\n[ERROR] Unhandled promise rejection:', message);
-  // Don't exit for unhandled rejections - log and continue
+process.on('unhandledRejection', (_reason: unknown) => {
+  // Don't exit for unhandled rejections - silently continue
   // The specific operation failed but the app can continue
 });
 

@@ -147,6 +147,12 @@ class LLMRouterAdapter implements LLMAdapter {
           'Codex OAuth not configured. Run the authentication flow first with /providers codex login'
         );
       }
+      const accountId = tokenManager.getAccountId();
+      if (!accountId) {
+        throw new Error(
+          'Codex account ID not found. Please re-authenticate with /providers codex login'
+        );
+      }
       return {
         provider: 'codex',
         displayProvider: 'codex',
@@ -156,6 +162,7 @@ class LLMRouterAdapter implements LLMAdapter {
         maxTokens: llm.maxTokens,
         temperature: llm.temperature,
         reasoning: llm.reasoning,
+        chatgptAccountId: accountId,
       };
     }
 

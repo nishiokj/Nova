@@ -138,8 +138,8 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
     reasoning: 'gpt-5.2-codex',
   },
   codex: {
-    fast: 'codex-mini-latest',
-    standard: 'codex-mini-latest',
+    fast: 'gpt-5.2-codex',
+    standard: 'gpt-5.2-codex',
     powerful: 'gpt-5.2-codex',
     reasoning: 'gpt-5.2-codex',
   },
@@ -230,14 +230,9 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     id: 'codex',
     displayName: 'OpenAI Codex (Subscription)',
     canonicalProvider: 'codex',
-    baseUrl: 'https://api.openai.com',
+    // ChatGPT OAuth uses a different backend endpoint than the public API
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
     models: [
-      {
-        id: 'codex-mini-latest',
-        name: 'Codex Mini',
-        context_window: 192_000,
-        description: 'Fast coding model for subscription users',
-      },
       {
         id: 'gpt-5.2-codex',
         name: 'GPT-5.2 Codex',
@@ -247,13 +242,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     ],
     // No envVar - uses OAuth tokens, not API keys
     authRequired: true,
-    testEndpoint: 'https://api.openai.com/v1/responses',
-    testMethod: 'POST',
-    testBody: {
-      model: 'codex-mini-latest',
-      input: 'test',
-      max_output_tokens: 1,
-    },
+    // Test endpoint not applicable for OAuth - requires specific request format
     dashboardUrl: 'https://chatgpt.com/settings',
   },
   'openai-compat': {

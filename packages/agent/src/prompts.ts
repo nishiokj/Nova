@@ -1,6 +1,7 @@
 /**
  * System prompts for agent types.
  */
+import { getDecisionDocumentation } from 'protocol';
 
 /**
  * Shared completion rules - appended to all agent prompts.
@@ -410,6 +411,17 @@ Remember: \`action\` is loop control for the watcher; in this system you must al
 
 
 **Watcher-specific**: Evaluation, active management, not execution. Read context files, assess the situation, decide. If you cannot justify a decision with evidence, explicitly report what is missing and intervene.`;
+
+/**
+ * Optional addendum: Decision schemas for control-plane prompts.
+ * Use when constructing watcher prompts that need explicit decision formats.
+ */
+export function getWatcherDecisionProtocolAddendum(): string {
+  return `
+## Control Plane Decision Schemas
+${getDecisionDocumentation()}
+`.trim();
+}
 
 /**
  * PlannerAgent prompt.

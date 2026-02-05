@@ -13,6 +13,7 @@ import { SyncClient } from 'agent-memory';
 import type {
   MemoryInjector,
   InjectParams,
+  InjectRecentParams,
   InjectParamsV2,
   InjectResultV2,
   MemoryInjectorConfig,
@@ -74,6 +75,11 @@ const INTENT_PATTERNS: Record<QueryIntent, RegExp[]> = {
     /\b(trade[- ]?off[s]?|tradeoff[s]?|compare|vs\.?|versus)\b/i,
     /\bshould\s+(we|i|the team|our team)\b/i,
   ],
+  recall: [
+    /\b(what (did|have) we (talk|talked|discuss|discussed) about|what was that (conversation|chat) about)\b/i,
+    /\b(last time (we|i) (talked|discussed)|previous (conversation|chat|session)|earlier (conversation|chat|session)|prior (conversation|chat|session))\b/i,
+    /\b(remind me|recap|recall|remember)\b.*\b(conversation|chat|session|discussion)\b/i,
+  ],
   preference: [
     /\b(prefer|preference[s]?|like to|dislike|avoid|default|convention[s]?)\b/i,
     /\bshouldn'?t\b/i,
@@ -125,6 +131,7 @@ const INTENT_QUERY_SEEDS: Record<QueryIntent, string[]> = {
   preference: ['preference', 'convention', 'default', 'avoid', 'style'],
   principle: ['principle', 'guideline', 'policy', 'standard', 'best practice'],
   tradeoff: ['tradeoff', 'comparison', 'pros cons', 'vs'],
+  recall: ['recap', 'conversation', 'previous discussion', 'last time'],
   implementation: ['implementation', 'pattern', 'interface', 'workflow'],
   debug: ['bug', 'error', 'failure', 'incident'],
   unknown: [],
@@ -191,6 +198,7 @@ export function detectQueryIntent(rawQuery: string): QueryIntent {
     preference: 0,
     principle: 0,
     tradeoff: 0,
+    recall: 0,
     implementation: 0,
     debug: 0,
     unknown: 0,
@@ -212,8 +220,11 @@ export function detectQueryIntent(rawQuery: string): QueryIntent {
   if (/\b(prefer|preference|avoid|default)\b/i.test(lower)) {
     scores.preference += 1;
   }
+  if (/\b(last time (we|i) (talked|discussed)|previous (conversation|chat|session)|earlier (conversation|chat|session)|prior (conversation|chat|session))\b/i.test(lower)) {
+    scores.recall += 1;
+  }
 
-  const priority: QueryIntent[] = ['tradeoff', 'decision', 'preference', 'principle', 'debug', 'implementation'];
+  const priority: QueryIntent[] = ['recall', 'tradeoff', 'decision', 'preference', 'principle', 'debug', 'implementation'];
   let best: QueryIntent = 'unknown';
   let bestScore = 0;
 
@@ -618,6 +629,10 @@ function sourceBias(intent: QueryIntent, source: ScoredItem['source']): number {
     if (source === 'preference') return 0.9;
     return 0.6;
   }
+  if (intent === 'recall') {
+    if (source === 'memory') return 1.15;
+    return 0.85;
+  }
   if (intent === 'debug') {
     if (source === 'memory') return 1.1;
     return 0.95;
@@ -655,6 +670,30 @@ function clampText(value: string, max = 160): string {
   const trimmed = collapseWhitespace(value);
   if (trimmed.length <= max) return trimmed;
   return `${trimmed.slice(0, max).trim()}…`;
+}
+
+function formatDateSuffix(value?: string): string {
+  if (!value) return '';
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return '';
+  return ` (${new Date(parsed).toISOString().slice(0, 10)})`;
+}
+
+// Estimate token count roughly (used for trimming injected content)
+function estimateTokens(text: string): number {
+  let tokens = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    // Non-ASCII (including CJK, emoji): more tokens
+    if (code > 127) {
+      // Emoji (usually 2+ chars in UTF-16) or CJK
+      tokens += code > 0x7FF ? 1.5 : 1.2;
+    } else {
+      // ASCII: simple approximation
+      tokens += 0.25;
+    }
+  }
+  return Math.ceil(tokens);
 }
 
 /**
@@ -708,7 +747,8 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
       }
       const intent = queryPlan.intent;
       const preferStructured = isConceptIntent(intent);
-      const shouldSearchMemory = !preferStructured || intent === 'debug';
+      const shouldSearchMemory = intent === 'recall';
+      const shouldSearchStructured = intent !== 'recall';
       const queryTokenSet = strategy.enableOverlapBoost
         ? new Set(extractOrderedTokens(query))
         : null;
@@ -731,7 +771,16 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
       const memorySearches = shouldSearchMemory
         ? queryPlan.queries.map(async (spec) => {
           if (!client.memory?.search) {
-            return { spec, items: [] as Array<{ summary: string; source_timestamp?: string; updated_at: string }> };
+            return {
+              spec,
+              items: [] as Array<{
+                conversation_id: string;
+                summary: string;
+                topic?: string;
+                source_timestamp?: string;
+                updated_at: string;
+              }>,
+            };
           }
           try {
             const res = await client.memory.search({
@@ -742,40 +791,53 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
             return { spec, items: res?.items ?? [] };
           } catch (err) {
             console.error('[MemoryInjector] Conversational memory search failed:', err);
-            return { spec, items: [] as Array<{ summary: string; source_timestamp?: string; updated_at: string }> };
+            return {
+              spec,
+              items: [] as Array<{
+                conversation_id: string;
+                summary: string;
+                topic?: string;
+                source_timestamp?: string;
+                updated_at: string;
+              }>,
+            };
           }
         })
         : [];
 
-      const preferenceSearches = queryPlan.queries.map(async (spec) => {
-        try {
-          const res = await client.preferences.search({
-            q: spec.text,
-            limit: preferenceLimit,
-            mode: preferStructured ? 'trgm' : undefined,
-            minSimilarity: preferStructured ? 0.18 : undefined,
-          });
-          return { spec, preferences: res?.preferences ?? [] };
-        } catch (err) {
-          console.error('[MemoryInjector] Preferences search failed:', err);
-          return { spec, preferences: [] };
-        }
-      });
+      const preferenceSearches = shouldSearchStructured
+        ? queryPlan.queries.map(async (spec) => {
+          try {
+            const res = await client.preferences.search({
+              q: spec.text,
+              limit: preferenceLimit,
+              mode: preferStructured ? 'trgm' : undefined,
+              minSimilarity: preferStructured ? 0.18 : undefined,
+            });
+            return { spec, preferences: res?.preferences ?? [] };
+          } catch (err) {
+            console.error('[MemoryInjector] Preferences search failed:', err);
+            return { spec, preferences: [] };
+          }
+        })
+        : [];
 
-      const decisionSearches = queryPlan.queries.map(async (spec) => {
-        try {
-          const res = await client.decisions.search({
-            q: spec.text,
-            limit: decisionLimit,
-            mode: preferStructured ? 'trgm' : undefined,
-            minSimilarity: preferStructured ? 0.18 : undefined,
-          });
-          return { spec, decisions: res?.decisions ?? [] };
-        } catch (err) {
-          console.error('[MemoryInjector] Decisions search failed:', err);
-          return { spec, decisions: [] };
-        }
-      });
+      const decisionSearches = shouldSearchStructured
+        ? queryPlan.queries.map(async (spec) => {
+          try {
+            const res = await client.decisions.search({
+              q: spec.text,
+              limit: decisionLimit,
+              mode: preferStructured ? 'trgm' : undefined,
+              minSimilarity: preferStructured ? 0.18 : undefined,
+            });
+            return { spec, decisions: res?.decisions ?? [] };
+          } catch (err) {
+            console.error('[MemoryInjector] Decisions search failed:', err);
+            return { spec, decisions: [] };
+          }
+        })
+        : [];
 
       const [memoryResults, preferenceResults, decisionResults] = await Promise.all([
         Promise.all(memorySearches),
@@ -790,18 +852,14 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         if (intent === 'decision' || intent === 'tradeoff') {
           return { memory: 2, preference: 4, decision: 8 } as const;
         }
+        if (intent === 'recall') {
+          return { memory: 10, preference: 0, decision: 0 } as const;
+        }
         if (intent === 'debug') {
           return { memory: 8, preference: 4, decision: 4 } as const;
         }
         return { memory: 6, preference: 6, decision: 6 } as const;
       })();
-
-      const formatDateSuffix = (value?: string): string => {
-        if (!value) return '';
-        const parsed = Date.parse(value);
-        if (!Number.isFinite(parsed)) return '';
-        return ` (${new Date(parsed).toISOString().slice(0, 10)})`;
-      };
 
       const formatPreferenceDisplay = (pref: {
         preference?: string;
@@ -869,9 +927,14 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
           const timestamp = item.source_timestamp ?? item.updated_at;
           const baseScore = spec.weight + recencyBonus(timestamp) - index * 0.015;
           const score = adjustScore(baseScore, item.summary) * sourceBias(intent, 'memory');
+          const details: string[] = [];
+          if (item.topic?.trim()) details.push(`Topic: ${clampText(item.topic, 80)}`);
+          if (item.conversation_id?.trim()) details.push(`Id: ${item.conversation_id}`);
+          const detailStr = details.length ? ` — ${details.join(' ')}` : '';
+          const contentKey = item.conversation_id ? `${item.conversation_id}:${item.summary}` : item.summary;
           memoryScoredRaw.push({
-            content: `${item.summary}${formatDateSuffix(timestamp)}`,
-            display: `**[Memory]** ${item.summary}${formatDateSuffix(timestamp)}`,
+            content: contentKey,
+            display: `**[Memory]** ${item.summary}${detailStr}${formatDateSuffix(timestamp)}`,
             score,
             source: 'memory',
           });
@@ -970,25 +1033,6 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         }
       }
 
-      // Estimate token count more accurately (BUG #5)
-      // CJK characters: ~1-2 tokens per char, Emoji: ~1-2 tokens, Code special chars split more
-      // Use a conservative multiplier for non-ASCII content
-      function estimateTokens(text: string): number {
-        let tokens = 0;
-        for (let i = 0; i < text.length; i++) {
-          const code = text.charCodeAt(i);
-          // Non-ASCII (including CJK, emoji): more tokens
-          if (code > 127) {
-            // Emoji (usually 2+ chars in UTF-16) or CJK
-            tokens += code > 0x7FF ? 1.5 : 1.2;
-          } else {
-            // ASCII: simple approximation
-            tokens += 0.25;
-          }
-        }
-        return Math.ceil(tokens);
-      }
-
       const renderItem = (item: ScoredItem): string => {
         if (item.display) return item.display;
         const label = item.source === 'memory'
@@ -1025,6 +1069,70 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         ? '## Relevant Decisions & Preferences'
         : '## Relevant Memory';
       return `${header}\n\n${result.join('\n\n')}`;
+    },
+
+    async injectRecentConversations(params: InjectRecentParams): Promise<string | null> {
+      const tokenBudget = Number.isFinite(params.maxTokens) && params.maxTokens > 0 ? params.maxTokens : 0;
+      if (tokenBudget <= 0) return null;
+
+      if (!client.memory?.recent) {
+        return null;
+      }
+
+      const limit = Number.isFinite(params.limit) && (params.limit as number) > 0
+        ? Math.min(50, Math.floor(params.limit as number))
+        : 10;
+
+      try {
+        const res = await client.memory.recent({
+          limit,
+          connectors: params.connectors ?? DEFAULT_MEMORY_CONNECTORS,
+        });
+
+        const items = res?.items ?? [];
+        if (items.length === 0) return null;
+
+        const formatRecent = (item: {
+          conversation_id: string;
+          summary: string;
+          topic?: string;
+          source_timestamp?: string;
+          updated_at: string;
+        }): string => {
+          const summary = clampText(item.summary?.trim() || '', 220);
+          if (!summary) return '';
+          const details: string[] = [];
+          if (item.topic?.trim()) {
+            details.push(`Topic: ${clampText(item.topic, 80)}`);
+          }
+          if (item.conversation_id?.trim()) {
+            details.push(`Id: ${item.conversation_id}`);
+          }
+          const detailStr = details.length ? ` — ${details.join(' ')}` : '';
+          const timestamp = item.source_timestamp ?? item.updated_at;
+          return `**[Conversation]** ${summary}${detailStr}${formatDateSuffix(timestamp)}`;
+        };
+
+        const result: string[] = [];
+        let tokens = 0;
+
+        for (const item of items) {
+          const rendered = formatRecent(item);
+          if (!rendered) continue;
+          const itemTokens = estimateTokens(rendered);
+          if (itemTokens > tokenBudget) continue;
+          if (tokens + itemTokens > tokenBudget) continue;
+          result.push(rendered);
+          tokens += itemTokens;
+        }
+
+        if (result.length === 0) return null;
+
+        return `## Recent Conversations\n\n*Use ExpandConversation with the Id to retrieve the full transcript if needed.*\n\n${result.join('\n\n')}`;
+      } catch (err) {
+        console.error('[MemoryInjector] Recent conversation fetch failed:', err);
+        return null;
+      }
     },
 
     async injectV2(params: InjectParamsV2): Promise<InjectResultV2 | null> {

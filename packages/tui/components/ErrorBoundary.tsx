@@ -23,10 +23,11 @@ export class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
-  componentDidCatch(error: Error, info: React.ErrorInfo): void {
-    // Log to stderr for debugging
-    console.error('TUI render error:', error.message);
-    console.error('Component stack:', info.componentStack);
+  componentDidCatch(_error: Error, _info: React.ErrorInfo): void {
+    // Error is captured in state and shown in fallback UI.
+    // Do NOT use console.error here - it breaks Ink's rendering
+    // and causes flickering. The error boundary displays the error
+    // in the UI, which is sufficient for user visibility.
   }
 
   handleRetry = (): void => {

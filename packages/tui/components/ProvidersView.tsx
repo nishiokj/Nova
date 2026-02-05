@@ -92,6 +92,10 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
     loadProviders();
   }, []);
 
+  const refreshModels = () => {
+    bridgeClient.send({ type: "get_models" });
+  };
+
   const loadProviders = async () => {
     setLoading(true);
     try {
@@ -136,6 +140,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
       if (result.success) {
         setMessage({ text: `API key saved for ${provider}`, type: "success" });
         await loadProviders();
+        refreshModels();
       } else {
         setMessage({ text: result.error ?? "Failed to save API key", type: "error" });
       }
@@ -155,6 +160,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
       if (result.success) {
         setMessage({ text: `API key removed for ${provider}`, type: "success" });
         await loadProviders();
+        refreshModels();
       } else {
         setMessage({ text: result.error ?? "Failed to remove API key", type: "error" });
       }
@@ -202,6 +208,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
             setMessage({ text: "Codex authentication successful!", type: "success" });
             // Refresh provider list to show configured status
             loadProviders();
+            refreshModels();
             // Return to list after brief delay
             setTimeout(() => setViewMode({ mode: "list" }), 1500);
           },
@@ -226,6 +233,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
         await logoutCodex();
         setMessage({ text: "Logged out from Codex", type: "success" });
         await loadProviders();
+        refreshModels();
       } catch (err) {
         setMessage({
           text: err instanceof Error ? err.message : "Failed to logout",

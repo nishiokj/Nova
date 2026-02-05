@@ -1,0 +1,14 @@
+{
+  "schema_version": "grades_v1",
+  "integration_level": "cli_events",
+  "replay_grade": "best_effort",
+  "isolation_grade": "leaky",
+  "comparability_grade": "unknown",
+  "provenance_grade": "partial",
+  "privacy_grade": "unknown",
+  "evidence": {
+    "hooks": true,
+    "traces": false,
+    "sdk": false
+  }
+}

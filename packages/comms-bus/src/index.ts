@@ -21,6 +21,11 @@ export {
 } from './bus_server.js';
 
 export {
+  WsBridgeServer,
+  type WsBridgeOptions,
+} from './bus_ws_server.js';
+
+export {
   BRIDGE_COMMAND_CHANNEL,
   runChannel,
   sessionChannel,

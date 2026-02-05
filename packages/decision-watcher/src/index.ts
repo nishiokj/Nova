@@ -30,8 +30,7 @@ export type {
   WatcherResponse,
   PromptUserAnswer,
 
-  // State & Memory
-  DecisionMemory,
+  // State
   WatcherContext,
 
   // Configuration

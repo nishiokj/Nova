@@ -82,6 +82,7 @@ export {
 export {
   runCodexOAuthFlow,
   isCodexAuthenticated,
+  hasCodexCredentials,
   logoutCodex,
   type OAuthFlowCallbacks,
 } from './auth/codex-oauth-flow.js';

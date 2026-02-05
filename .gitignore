@@ -34,6 +34,10 @@ evals/results/*/*/*
 # Authentication states (sensitive cookies)
 auth-states/
 
+# OAuth tokens (Codex, etc.)
+codex-auth.json
+**/codex-auth.json
+
 # Release binaries
 dist/binaries/
 *.exe

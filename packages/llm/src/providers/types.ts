@@ -67,6 +67,8 @@ export interface ResolvedRequestConfig {
   maxTokens?: number;
   temperature?: number;
   reasoning?: LLMRequestConfig['reasoning'];
+  /** ChatGPT account ID for Codex OAuth requests */
+  chatgptAccountId?: string;
 }
 
 /**

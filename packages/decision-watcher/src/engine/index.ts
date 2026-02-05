@@ -19,7 +19,6 @@ import type {
   WatcherContext,
   DecisionDatabase,
   DecisionWatcherConfig,
-  DecisionMemory,
   DecisionCategory,
   DecisionScope,
 } from '../types.js';
@@ -36,7 +35,8 @@ export class DecisionEngine {
   private db: DecisionDatabase;
   private config: DecisionWatcherConfig;
   private llm?: LLMAdapter;
-  private sessionMemories: Map<string, DecisionMemory> = new Map();
+  /** Simple counter for decisions per session - actual data is on disk in DecisionLog */
+  private sessionDecisionCounts: Map<string, number> = new Map();
   private focusTopic: string | null = null;
   private salienceGoal: string | null = null;
 
@@ -294,45 +294,16 @@ export class DecisionEngine {
 
   /**
    * Check for consistency issues with a decision.
+   * Note: Cross-session consistency is tracked in the disk-based DecisionLog.
+   * This method is a placeholder for future per-session conflict detection.
    */
   private async checkConsistency(
-    entry: DecisionEntry,
-    context: WatcherContext
+    _entry: DecisionEntry,
+    _context: WatcherContext
   ): Promise<string[]> {
-    const warnings: string[] = [];
-
-    // Get session memory
-    const memory = this.getOrCreateMemory(context.sessionId);
-
-    // Check for conflicts with previous decisions
-    for (const prevDecision of memory.decisionsMade) {
-      if (prevDecision.decisionId === entry.id) {
-        continue; // Same decision, no conflict
-      }
-
-      // Check if current entry conflicts with previous decision
-      if ('conflictsWith' in entry) {
-        for (const conflictId of entry.conflictsWith) {
-          if (prevDecision.decisionId === conflictId) {
-            warnings.push(
-              `This decision conflicts with a previous decision in this session: "${prevDecision.question}" → "${prevDecision.answer}"`
-            );
-          }
-        }
-      }
-
-      // Check if previous decision conflicts with current entry
-      const prevEntry = await this.db.get(prevDecision.decisionId ?? '');
-      if (prevEntry && 'conflictsWith' in prevEntry) {
-        if (prevEntry.conflictsWith.includes(entry.id)) {
-          warnings.push(
-            `Previous decision conflicts with this one: "${prevDecision.question}" → "${prevDecision.answer}"`
-          );
-        }
-      }
-    }
-
-    return warnings;
+    // Consistency checking would require reading from DecisionLog on disk.
+    // For now, return empty - decisions are logged to disk for audit.
+    return [];
   }
 
   /**
@@ -577,53 +548,32 @@ export class DecisionEngine {
   }
 
   /**
-   * Get session memory, creating if needed.
+   * Increment decision count for a session. Called when a decision is logged to disk.
    */
-  private getOrCreateMemory(sessionId: string): DecisionMemory {
-    if (!this.sessionMemories.has(sessionId)) {
-      this.sessionMemories.set(sessionId, {
-        sessionId,
-        decisionsMade: [],
-        patterns: [],
-        warnings: [],
-        consistencyScore: 1.0,
-      });
-    }
-    return this.sessionMemories.get(sessionId)!;
+  incrementDecisionCount(sessionId: string): void {
+    const current = this.sessionDecisionCounts.get(sessionId) ?? 0;
+    this.sessionDecisionCounts.set(sessionId, current + 1);
   }
 
   /**
-   * Record a decision made in a session.
+   * Get decision count for a session.
    */
-  recordDecision(sessionId: string, question: string, answer: string, decisionId?: string): void {
-    const memory = this.getOrCreateMemory(sessionId);
-    memory.decisionsMade.push({
-      question,
-      answer,
-      decisionId,
-      timestamp: Date.now(),
-    });
-
-    // Update consistency score
-    if (memory.decisionsMade.length > 1) {
-      // Simple heuristic: more decisions = slightly lower consistency potential
-      const decay = 0.95 ** (memory.decisionsMade.length - 1);
-      memory.consistencyScore = memory.consistencyScore * decay;
-    }
+  getDecisionCount(sessionId: string): number {
+    return this.sessionDecisionCounts.get(sessionId) ?? 0;
   }
 
   /**
-   * Get or create session memory.
+   * Check if session has any decisions.
    */
-  getSessionMemory(sessionId: string): DecisionMemory | undefined {
-    return this.sessionMemories.get(sessionId);
+  hasDecisions(sessionId: string): boolean {
+    return (this.sessionDecisionCounts.get(sessionId) ?? 0) > 0;
   }
 
   /**
-   * Clear session memory.
+   * Clear session data.
    */
   clearSession(sessionId: string): void {
-    this.sessionMemories.delete(sessionId);
+    this.sessionDecisionCounts.delete(sessionId);
   }
 
   // ============================================

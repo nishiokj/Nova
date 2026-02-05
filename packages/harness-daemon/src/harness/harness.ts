@@ -27,7 +27,7 @@ import {
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
-import { createAdapter, type ProviderKeyService } from 'llm';
+import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
@@ -183,7 +183,19 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
   const registry = new AgentRegistry(agentConfigs);
 
   // Validate agent tool references and prevent self-reference
-  const builtinTools = new Set(['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch', 'Skill', 'PromptUser']);
+  const builtinTools = new Set([
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+    'Bash',
+    'WebFetch',
+    'WebSearch',
+    'Skill',
+    'PromptUser',
+    'ExpandConversation',
+  ]);
   const registeredAgentTypes = new Set(agentConfigs.map(c => c.type));
   for (const agentConf of agentConfigs) {
     // Filter out self-references to prevent recursive agent calls
@@ -301,6 +313,10 @@ class HarnessProviderKeyService implements ProviderKeyService {
     // Providers that don't require auth (e.g., lmstudio) always return true
     if (!providerRequiresAuth(provider)) {
       return true;
+    }
+    // Codex uses OAuth tokens, not API keys
+    if (provider === 'codex') {
+      return hasCodexCredentials();
     }
     return this.getApiKey(provider) !== null;
   }
@@ -1772,8 +1788,7 @@ export class AgentHarness {
 
         const pct = state.context.metrics.percentageUsed;
         const engine = this.getOrCreateWatcherEngine(sessionKey);
-        const memory = engine.getSessionMemory(sessionKey);
-        const hasDecisions = (memory?.decisionsMade.length ?? 0) > 0;
+        const hasDecisions = engine.hasDecisions(sessionKey);
 
         // Summarize (compact + epistemic ledger) when context is high and decisions exist
         if (pct > 0.70 && hasDecisions) {
@@ -2039,6 +2054,7 @@ export class AgentHarness {
       getModelSelection: store
         ? (t: string) => store.getModelSelection(t)
         : undefined,
+      memoryInjector: this.memoryInjector ?? undefined,
     });
 
     // Use session-scoped watcher context (persists across invocations)
@@ -2461,6 +2477,10 @@ export class AgentHarness {
       runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) =>
         this.runWatcherAgent(objective, sessionKey, trigger, signal),
       onDecision: (entry) => {
+        // Increment decision counter for memory-efficient tracking
+        const engine = this.getOrCreateWatcherEngine(sessionKey);
+        engine.incrementDecisionCount(sessionKey);
+
         this.logger.info('Watcher decision', {
           sessionKey,
           trigger: entry.trigger,
@@ -2599,25 +2619,11 @@ export class AgentHarness {
 
   watcherMemory(sessionKey: string): Record<string, unknown> {
     const engine = this.getOrCreateWatcherEngine(sessionKey);
-    const memory = engine.getSessionMemory(sessionKey);
-
-    if (!memory) {
-      return {
-        sessionKey,
-        decisionsMade: 0,
-        patterns: [],
-        warnings: [],
-        consistencyScore: 1.0,
-      };
-    }
-
     return {
       sessionKey,
-      decisionsMade: memory.decisionsMade.length,
-      decisions: memory.decisionsMade,
-      patterns: memory.patterns,
-      warnings: memory.warnings,
-      consistencyScore: memory.consistencyScore,
+      decisionsMade: engine.getDecisionCount(sessionKey),
+      focusTopic: engine.getFocus(),
+      salienceGoal: engine.getSalienceGoal(),
     };
   }
 
@@ -2655,7 +2661,6 @@ export class AgentHarness {
     state.store.persistContext();
 
     const engine = this.getOrCreateWatcherEngine(sessionKey);
-    const memory = engine.getSessionMemory(sessionKey);
 
     return {
       success: true,
@@ -2666,9 +2671,7 @@ export class AgentHarness {
       ledger: {
         focusTopic: engine.getFocus(),
         salienceGoal: engine.getSalienceGoal(),
-        decisionsMade: memory?.decisionsMade.length ?? 0,
-        consistencyScore: memory?.consistencyScore ?? 1.0,
-        patterns: memory?.patterns ?? [],
+        decisionsMade: engine.getDecisionCount(sessionKey),
       },
     };
   }

@@ -1,10 +1,11 @@
 /**
- * Codex Provider - Uses OpenAI's Responses API with OAuth tokens.
+ * Codex Provider - Uses ChatGPT's backend API with OAuth tokens.
  *
- * Key differences from standard OpenAI provider:
- * - Uses OAuth access tokens (from subscription), not API keys
- * - Same Responses API endpoint but simpler request format
- * - Optimized for Codex-specific models
+ * Key differences from standard OpenAI API:
+ * - Uses OAuth access tokens (from ChatGPT subscription), not API keys
+ * - Endpoint: https://chatgpt.com/backend-api/codex/responses
+ * - Requires: stream=true, store=false, instructions field
+ * - System prompt goes in 'instructions' field, not in input messages
  */
 
 import type {
@@ -27,81 +28,68 @@ import { PartialStreamError } from './types.js';
 export class CodexProvider implements LLMProviderAdapter {
   readonly name = 'codex' as const;
 
+  /**
+   * Non-streaming respond - internally uses streaming and collects result.
+   * The ChatGPT backend requires stream=true for OAuth requests.
+   */
   async respond(context: ProviderContext, params: RespondParams): Promise<LLMResponse> {
-    const { config, logger } = context;
-    const { messages, tools, system } = params;
-
-    const allMessages: Message[] = system
-      ? [{ role: 'system', content: system }, ...messages]
-      : messages;
-
-    const body: Record<string, unknown> = {
-      model: config.model,
-      input: this.formatInput(allMessages),
-      store: true, // Required for reasoning traces
-    };
-
-    if (config.maxTokens) body.max_output_tokens = config.maxTokens;
-    if (config.temperature !== undefined) body.temperature = config.temperature;
-    if (tools?.length) body.tools = this.formatTools(tools);
-    if (config.reasoning) {
-      body.reasoning = { effort: config.reasoning };
-    }
-
-    const url = `${config.baseUrl}/v1/responses`;
-
-    logger.debug('Codex request', { url, model: config.model });
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
+    // Collect streaming response
+    let fullContent = '';
+    const generator = this.stream(context, {
+      ...params,
+      onChunk: (chunk) => {
+        fullContent += chunk;
       },
-      body: JSON.stringify(body),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Codex API error ${response.status}: ${errorText}`);
-    }
+    // Consume the generator to get the final response
+    let result: IteratorResult<string, LLMResponse>;
+    do {
+      result = await generator.next();
+    } while (!result.done);
 
-    const data: ResponsesAPIResponse = await response.json();
-    return this.parseResponse(data, context);
+    return result.value;
   }
 
   async *stream(context: ProviderContext, params: StreamParams): AsyncGenerator<string, LLMResponse> {
     const { config, logger } = context;
     const { messages, tools, system } = params;
 
-    const allMessages: Message[] = system
-      ? [{ role: 'system', content: system }, ...messages]
-      : messages;
+    // Filter out system messages - they go in 'instructions' field
+    const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
+    // Build request body per ChatGPT backend requirements
+    // NOTE: ChatGPT backend does NOT support max_output_tokens or temperature params
     const body: Record<string, unknown> = {
       model: config.model,
-      input: this.formatInput(allMessages),
+      input: this.formatInput(nonSystemMessages),
+      // ChatGPT backend requires these exact settings for OAuth
       stream: true,
-      store: true,
+      store: false,
+      // System prompt goes in instructions field (required by backend)
+      instructions: system ?? 'You are a helpful coding assistant.',
+      // Reasoning effort: none, minimal, low, medium, high, xhigh
+      reasoning: config.reasoning ?? { effort: 'medium' },
     };
 
-    if (config.maxTokens) body.max_output_tokens = config.maxTokens;
-    if (config.temperature !== undefined) body.temperature = config.temperature;
     if (tools?.length) body.tools = this.formatTools(tools);
-    if (config.reasoning) {
-      body.reasoning = { effort: config.reasoning };
-    }
 
-    const url = `${config.baseUrl}/v1/responses`;
+    // Endpoint is /responses relative to baseUrl (https://chatgpt.com/backend-api/codex)
+    const url = `${config.baseUrl}/responses`;
 
     logger.debug('Codex stream request', { url, model: config.model });
 
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    };
+    if (config.chatgptAccountId) {
+      headers['Chatgpt-Account-Id'] = config.chatgptAccountId;
+    }
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -119,6 +107,8 @@ export class CodexProvider implements LLMProviderAdapter {
     const toolCalls: ToolCall[] = [];
     let usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let responseId: string | undefined;
+    // Track function calls being built up
+    const pendingFunctionCalls = new Map<string, { name?: string; arguments?: string }>();
 
     try {
       while (true) {
@@ -130,17 +120,22 @@ export class CodexProvider implements LLMProviderAdapter {
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
+          // Handle SSE format: "event: <type>\ndata: <json>"
+          if (line.startsWith('event:')) continue;
           if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') continue;
+
+          const data = line.slice(6).trim();
+          if (data === '[DONE]' || !data) continue;
 
           try {
             const event = JSON.parse(data) as StreamEvent;
 
-            if (event.type === 'response.created') {
-              responseId = event.id;
+            // Extract response ID from created event
+            if (event.type === 'response.created' && event.response?.id) {
+              responseId = event.response.id;
             }
 
+            // Handle text output deltas
             if (event.type === 'response.output_text.delta') {
               const text = event.delta ?? '';
               fullContent += text;
@@ -148,23 +143,52 @@ export class CodexProvider implements LLMProviderAdapter {
               yield text;
             }
 
-            if (event.type === 'response.function_call_arguments.done') {
-              toolCalls.push({
-                id: event.call_id!,
-                name: event.name!,
-                arguments: this.parseArguments(event.arguments),
-              });
+            // Track function call creation
+            if (event.type === 'response.output_item.added' && event.item?.type === 'function_call') {
+              const callId = event.item.call_id ?? event.item.id;
+              if (callId) {
+                pendingFunctionCalls.set(callId, {
+                  name: event.item.name,
+                  arguments: '',
+                });
+              }
             }
 
+            // Accumulate function call arguments
+            if (event.type === 'response.function_call_arguments.delta' && event.item_id) {
+              const pending = pendingFunctionCalls.get(event.item_id);
+              if (pending) {
+                pending.arguments = (pending.arguments ?? '') + (event.delta ?? '');
+              }
+            }
+
+            // Finalize function calls
+            if (event.type === 'response.function_call_arguments.done') {
+              const callId = event.item_id ?? event.call_id;
+              if (callId) {
+                const pending = pendingFunctionCalls.get(callId);
+                if (pending?.name) {
+                  toolCalls.push({
+                    id: callId,
+                    name: pending.name,
+                    arguments: this.parseArguments(event.arguments ?? pending.arguments),
+                  });
+                  pendingFunctionCalls.delete(callId);
+                }
+              }
+            }
+
+            // Extract usage from completed event
             if (event.type === 'response.completed' && event.response?.usage) {
               usage = {
                 promptTokens: event.response.usage.input_tokens ?? 0,
                 completionTokens: event.response.usage.output_tokens ?? 0,
-                totalTokens: event.response.usage.total_tokens ?? 0,
+                totalTokens:
+                  (event.response.usage.input_tokens ?? 0) + (event.response.usage.output_tokens ?? 0),
               };
             }
           } catch {
-            // Ignore parse errors in stream
+            // Ignore parse errors in stream - may be partial data
           }
         }
       }
@@ -212,65 +236,22 @@ export class CodexProvider implements LLMProviderAdapter {
   // ============================================
 
   private formatInput(messages: Message[]): ResponsesInput[] {
-    return messages.map((msg) => {
-      if (msg.role === 'user') {
-        return { type: 'message', role: 'user', content: msg.content as string };
-      }
-      if (msg.role === 'assistant') {
-        return { type: 'message', role: 'assistant', content: msg.content as string };
-      }
-      if (msg.role === 'system') {
-        return { type: 'message', role: 'system', content: msg.content as string };
-      }
-      if (msg.role === 'tool') {
+    return messages
+      .filter((msg) => msg.role !== 'system') // System messages go in 'instructions'
+      .map((msg) => {
+        if (msg.role === 'user') {
+          return { type: 'message', role: 'user', content: msg.content as string };
+        }
+        if (msg.role === 'assistant') {
+          return { type: 'message', role: 'assistant', content: msg.content as string };
+        }
+        // Tool results
         return {
           type: 'function_call_output',
           call_id: (msg as ToolMessage).toolCallId,
           output: msg.content as string,
         };
-      }
-      throw new Error(`Unknown message role: ${msg.role}`);
-    });
-  }
-
-  private parseResponse(data: ResponsesAPIResponse, context: ProviderContext): LLMResponse {
-    let content = '';
-    const toolCalls: ToolCall[] = [];
-
-    for (const item of data.output ?? []) {
-      if (item.type === 'message' && item.content) {
-        for (const block of item.content) {
-          if (block.type === 'output_text' || block.type === 'text') {
-            content += block.text ?? '';
-          }
-        }
-      }
-      if (item.type === 'function_call') {
-        toolCalls.push({
-          id: item.call_id!,
-          name: item.name!,
-          arguments: this.parseArguments(item.arguments),
-        });
-      }
-    }
-
-    const stopReason: StopReason = toolCalls.length > 0 ? 'tool_use' : 'end_turn';
-
-    return {
-      content,
-      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      usage: data.usage
-        ? {
-            promptTokens: data.usage.input_tokens,
-            completionTokens: data.usage.output_tokens,
-            totalTokens: data.usage.total_tokens,
-          }
-        : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      stopReason,
-      model: data.model ?? context.config.model,
-      durationMs: Date.now() - context.startTime,
-      responseId: data.id,
-    };
+      });
   }
 
   private parseArguments(args?: string): Record<string, unknown> {
@@ -293,42 +274,30 @@ interface ToolMessage extends Message {
 
 interface ResponsesInput {
   type: 'message' | 'function_call_output';
-  role?: 'user' | 'assistant' | 'system';
+  role?: 'user' | 'assistant';
   content?: string;
   call_id?: string;
   output?: string;
 }
 
-interface ResponsesAPIResponse {
-  id: string;
-  model?: string;
-  status: 'completed' | 'failed' | 'in_progress';
-  output?: Array<{
-    type: 'message' | 'function_call';
-    content?: Array<{ type: string; text?: string }>;
-    call_id?: string;
-    name?: string;
-    arguments?: string;
-  }>;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
-  };
-}
-
 interface StreamEvent {
   type: string;
-  id?: string;
   delta?: string;
+  item_id?: string;
   call_id?: string;
   name?: string;
   arguments?: string;
+  item?: {
+    id?: string;
+    type?: string;
+    call_id?: string;
+    name?: string;
+  };
   response?: {
+    id?: string;
     usage?: {
       input_tokens: number;
       output_tokens: number;
-      total_tokens: number;
     };
   };
 }

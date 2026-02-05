@@ -13,7 +13,7 @@ export const CODEX_OAUTH_CONFIG: CodexOAuthConfig = {
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
   authEndpoint: 'https://auth.openai.com/oauth/authorize',
   tokenEndpoint: 'https://auth.openai.com/oauth/token',
-  redirectUri: 'http://localhost:8976/callback',
+  redirectUri: 'http://localhost:1455/auth/callback',
   scope: 'openid profile email offline_access',
 };
 
@@ -114,6 +114,14 @@ export class CodexTokenManager implements TokenManager {
     return this.tokens !== null;
   }
 
+  /**
+   * Get the ChatGPT account ID (required for API requests).
+   * Returns null if no tokens or account ID not available.
+   */
+  getAccountId(): string | null {
+    return this.tokens?.chatgpt_account_id ?? null;
+  }
+
   async clearTokens(): Promise<void> {
     this.tokens = null;
     if (existsSync(TOKEN_PATH)) {
@@ -161,6 +169,30 @@ export function buildAuthUrl(config: CodexOAuthConfig, pkce: PKCEChallenge, stat
 }
 
 /**
+ * Parse a JWT token and extract the payload (without verification).
+ */
+function parseJwt(token: string): Record<string, unknown> {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('Invalid JWT format');
+  const payload = Buffer.from(parts[1], 'base64url').toString('utf-8');
+  return JSON.parse(payload);
+}
+
+/**
+ * Extract ChatGPT account ID from id_token JWT.
+ * The account ID is in the custom claim 'https://api.openai.com/auth'.
+ */
+function extractAccountId(idToken: string): string | undefined {
+  try {
+    const payload = parseJwt(idToken);
+    const authClaim = payload['https://api.openai.com/auth'] as Record<string, unknown> | undefined;
+    return authClaim?.chatgpt_account_id as string | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Exchange authorization code for tokens.
  */
 export async function exchangeCodeForTokens(
@@ -186,12 +218,17 @@ export async function exchangeCodeForTokens(
   }
 
   const data = await response.json();
+
+  // Extract account ID from id_token if present
+  const chatgptAccountId = data.id_token ? extractAccountId(data.id_token) : undefined;
+
   return {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
     token_type: 'Bearer',
     expires_at: Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600),
     scope: data.scope,
+    chatgpt_account_id: chatgptAccountId,
   };
 }
 

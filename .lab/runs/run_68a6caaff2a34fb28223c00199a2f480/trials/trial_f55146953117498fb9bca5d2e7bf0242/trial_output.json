@@ -1,0 +1,15 @@
+{
+  "schema_version": "trial_output_v1",
+  "ids": {
+    "run_id": "run_68a6caaff2a34fb28223c00199a2f480",
+    "trial_id": "trial_f55146953117498fb9bca5d2e7bf0242",
+    "variant_id": "base",
+    "task_id": "t2",
+    "repl_idx": 0
+  },
+  "outcome": "success",
+  "metrics": {
+    "latency_ms": 3026
+  },
+  "answer": "Hola mundo."
+}

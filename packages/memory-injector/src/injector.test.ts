@@ -5,7 +5,7 @@
  * Each test targets a specific failure mode.
  */
 
-import { describe, test, expect, mock, beforeEach } from 'bun:test';
+import { describe, test, expect, mock, beforeEach, beforeAll } from 'bun:test';
 
 // Mock fs/promises for injectWatcherContext tests
 const mockReadFile = mock(() => Promise.reject(new Error('ENOENT')));
@@ -33,10 +33,16 @@ mock.module('agent-memory', () => ({
   },
 }));
 
-// Import after mocks are set up
-import { createMemoryInjector, formatValidSemanticForInjection } from './injector.js';
+let createMemoryInjector: typeof import('./injector.js').createMemoryInjector;
+let formatValidSemanticForInjection: typeof import('./injector.js').formatValidSemanticForInjection;
 
 describe('Memory Injector - Bug Hunting', () => {
+  beforeAll(async () => {
+    const mod = await import('./injector.js');
+    createMemoryInjector = mod.createMemoryInjector;
+    formatValidSemanticForInjection = mod.formatValidSemanticForInjection;
+  });
+
   beforeEach(() => {
     mockPreferencesSearch.mockReset();
     mockDecisionsSearch.mockReset();

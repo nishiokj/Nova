@@ -33,8 +33,8 @@ export function loadLocalSession(): LocalSession | null {
 
     const data = readFileSync(SESSION_FILE, 'utf-8');
     return JSON.parse(data) as LocalSession;
-  } catch (err) {
-    console.error('[session] Failed to load local session:', err);
+  } catch {
+    // Silently return null - do NOT use console.error as it breaks Ink rendering
     return null;
   }
 }
@@ -43,18 +43,14 @@ export function loadLocalSession(): LocalSession | null {
  * Save a session to local storage.
  */
 export function saveLocalSession(session: LocalSession): void {
-  try {
-    // Ensure config directory exists
-    if (!existsSync(CONFIG_DIR)) {
-      mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-    }
-
-    // Write session file with restricted permissions
-    writeFileSync(SESSION_FILE, JSON.stringify(session, null, 2), { mode: 0o600 });
-  } catch (err) {
-    console.error('[session] Failed to save local session:', err);
-    throw err;
+  // Ensure config directory exists
+  if (!existsSync(CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
+
+  // Write session file with restricted permissions
+  // Throws on failure - caller should handle
+  writeFileSync(SESSION_FILE, JSON.stringify(session, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -65,8 +61,8 @@ export function clearLocalSession(): void {
     if (existsSync(SESSION_FILE)) {
       unlinkSync(SESSION_FILE);
     }
-  } catch (err) {
-    console.error('[session] Failed to clear local session:', err);
+  } catch {
+    // Silently ignore - do NOT use console.error as it breaks Ink rendering
   }
 }
 

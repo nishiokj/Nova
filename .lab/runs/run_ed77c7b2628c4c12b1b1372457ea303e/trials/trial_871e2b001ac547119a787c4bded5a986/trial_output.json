@@ -1,0 +1,15 @@
+{
+  "schema_version": "trial_output_v1",
+  "ids": {
+    "run_id": "run_ed77c7b2628c4c12b1b1372457ea303e",
+    "trial_id": "trial_871e2b001ac547119a787c4bded5a986",
+    "variant_id": "base",
+    "task_id": "t1",
+    "repl_idx": 0
+  },
+  "outcome": "success",
+  "metrics": {
+    "latency_ms": 106300
+  },
+  "answer": "[config] Loaded from /Users/jevinnishioka/Desktop/jesus/config/defaults.json\n[config] Resolved paths relative to /Users/jevinnishioka/Desktop/jesus:\n[config]   graphd.dbPath: ~/.graphd/graphd.db -> /Users/jevinnishioka/.graphd/graphd.db\n[config]   skills.directory: config/skills -> /Users/jevinnishioka/Desktop/jesus/config/skills\n[config]   hooks.directory: config/hooks -> /Users/jevinnishioka/Desktop/jesus/config/hooks\n[local-providers] Initialized with GraphD at /Users/jevinnishioka/.graphd/graphd.db\nAuto-created session: agentlab_trial_871e2b001ac547119a787c4bded5a986\n{\"schema_version\":\"trial_output_v1\",\"ids\":{\"run_id\":\"run_ed77c7b2628c4c12b1b1372457ea303e\",\"trial_id\":\"trial_871e2b001ac547119a787c4bded5a986\",\"variant_id\":\"base\",\"task_id\":\"t1\",\"repl_idx\":0},\"outcome\":\"success\",\"metrics\":{\"latency_ms\":106191},\"answer\":\"Please provide the paragraph you want summarized.\\n\\naction: \\\"done\\\"\\ngoalStateReached: false\\nawaitingUserInput: true\\nhandoffSpec: null\"}"
+}

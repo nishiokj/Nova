@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import type { LLMCall, ToolCall, AgentType } from '../domain/models'
 import { cn } from '../lib/utils'
 import { formatDuration } from '../lib/time'
@@ -279,6 +280,9 @@ function ToolEventRow({ call, isLast }: { call: ToolCall; isLast: boolean }) {
 // Main ExecutionFlow Component
 // ============================================
 
+// Threshold for enabling virtual scrolling
+const VIRTUALIZATION_THRESHOLD = 30
+
 interface ExecutionFlowProps {
   llmCalls: LLMCall[]
   toolCalls: ToolCall[]
@@ -287,16 +291,12 @@ interface ExecutionFlowProps {
 
 export function ExecutionFlow({ llmCalls, toolCalls, maxVisible = 10 }: ExecutionFlowProps) {
   const [showAll, setShowAll] = useState(false)
+  const parentRef = useRef<HTMLDivElement>(null)
 
   const events = useMemo(
     () => mergeExecutionEvents(llmCalls, toolCalls),
     [llmCalls, toolCalls]
   )
-
-  if (events.length === 0) return null
-
-  const visible = showAll ? events : events.slice(0, maxVisible)
-  const hasMore = events.length > maxVisible
 
   // Calculate tool count following each LLM call
   const toolCountAfterLLM = useMemo(() => {
@@ -314,9 +314,50 @@ export function ExecutionFlow({ llmCalls, toolCalls, maxVisible = 10 }: Executio
     return counts
   }, [events])
 
+  // Determine which events to show
+  const visible = showAll ? events : events.slice(0, maxVisible)
+  const hasMore = events.length > maxVisible
+  const useVirtual = showAll && events.length > VIRTUALIZATION_THRESHOLD
+
+  // Virtual list for large event sets
+  const virtualizer = useVirtualizer({
+    count: useVirtual ? events.length : 0,
+    getScrollElement: () => parentRef.current,
+    estimateSize: (index) => {
+      // LLM rows are taller than tool rows
+      return events[index].type === 'llm' ? 52 : 36
+    },
+    overscan: 5,
+  })
+
+  if (events.length === 0) return null
+
   // Stats summary
   const totalTokens = llmCalls.reduce((sum, c) => sum + c.totalTokens, 0)
   const totalDuration = [...llmCalls, ...toolCalls].reduce((sum, c) => sum + c.durationMs, 0)
+
+  const renderEvent = (event: ExecutionEvent, idx: number, allVisible: ExecutionEvent[]) => {
+    if (event.type === 'llm') {
+      const toolCount = toolCountAfterLLM.get(event.data.id) ?? 0
+      return (
+        <LLMEventRow
+          key={event.data.id}
+          call={event.data}
+          toolCount={toolCount}
+        />
+      )
+    } else {
+      const nextEvent = allVisible[idx + 1]
+      const isLastTool = !nextEvent || nextEvent.type === 'llm'
+      return (
+        <ToolEventRow
+          key={event.data.id}
+          call={event.data}
+          isLast={isLastTool}
+        />
+      )
+    }
+  }
 
   return (
     <div className="space-y-2">
@@ -326,32 +367,44 @@ export function ExecutionFlow({ llmCalls, toolCalls, maxVisible = 10 }: Executio
         <span>{totalTokens.toLocaleString()} tokens · {formatDuration(totalDuration)}</span>
       </div>
 
-      {/* Timeline */}
-      <div className="space-y-2">
-        {visible.map((event, idx) => {
-          if (event.type === 'llm') {
-            const toolCount = toolCountAfterLLM.get(event.data.id) ?? 0
-            return (
-              <LLMEventRow
-                key={event.data.id}
-                call={event.data}
-                toolCount={toolCount}
-              />
-            )
-          } else {
-            // Check if this is the last tool before an LLM call or end
-            const nextEvent = visible[idx + 1]
-            const isLastTool = !nextEvent || nextEvent.type === 'llm'
-            return (
-              <ToolEventRow
-                key={event.data.id}
-                call={event.data}
-                isLast={isLastTool}
-              />
-            )
-          }
-        })}
-      </div>
+      {/* Timeline - virtualized when showing all with many events */}
+      {useVirtual ? (
+        <div
+          ref={parentRef}
+          className="max-h-[600px] overflow-auto"
+          style={{ contain: 'strict' }}
+        >
+          <div
+            style={{
+              height: `${virtualizer.getTotalSize()}px`,
+              width: '100%',
+              position: 'relative',
+            }}
+          >
+            {virtualizer.getVirtualItems().map((virtualRow) => {
+              const event = events[virtualRow.index]
+              return (
+                <div
+                  key={virtualRow.key}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                >
+                  {renderEvent(event, virtualRow.index, events)}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {visible.map((event, idx) => renderEvent(event, idx, visible))}
+        </div>
+      )}
 
       {hasMore && !showAll && (
         <button

@@ -170,6 +170,22 @@ export const PromptUserArgsSchema = z.object({
 });
 
 // ============================================
+// EXPAND CONVERSATION TOOL
+// ============================================
+
+/**
+ * Arguments for ExpandConversation tool execution.
+ */
+export const ExpandConversationArgsSchema = z.object({
+  conversation_id: z.string().min(1, 'conversation_id cannot be empty'),
+  limit: z.number().positive().int().optional(),
+  offset: z.number().nonnegative().int().optional(),
+  max_chars_per_message: z.number().positive().int().optional(),
+  include_subject: z.boolean().optional(),
+  base_url: z.string().optional(),
+});
+
+// ============================================
 // SCHEMA REGISTRY
 // ============================================
 
@@ -185,6 +201,7 @@ export const TOOL_SCHEMAS: Record<string, z.ZodType> = {
   Grep: GrepArgsSchema,
   Skill: SkillArgsSchema,
   PromptUser: PromptUserArgsSchema,
+  ExpandConversation: ExpandConversationArgsSchema,
 };
 
 // ============================================
@@ -199,6 +216,7 @@ export type GlobArgs = z.infer<typeof GlobArgsSchema>;
 export type GrepArgs = z.infer<typeof GrepArgsSchema>;
 export type SkillArgs = z.infer<typeof SkillArgsSchema>;
 export type PromptUserArgs = z.infer<typeof PromptUserArgsSchema>;
+export type ExpandConversationArgs = z.infer<typeof ExpandConversationArgsSchema>;
 
 // ============================================
 // VALIDATION FUNCTIONS

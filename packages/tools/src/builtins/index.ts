@@ -36,6 +36,10 @@ export type { WebSearchArgs } from './web_search.js';
 export { executeWebFetch, webFetchToolOptions } from './web_fetch.js';
 export type { WebFetchArgs } from './web_fetch.js';
 
+// ExpandConversation
+export { executeExpandConversation, expandConversationToolOptions } from './expand_conversation.js';
+export type { ExpandConversationArgs } from './expand_conversation.js';
+
 // Re-export all tool options for easy registration
 import { bashToolOptions } from './bash.js';
 import { readToolOptions } from './read.js';
@@ -45,6 +49,7 @@ import { globToolOptions } from './glob.js';
 import { promptUserToolOptions } from './prompt_user.js';
 import { webSearchToolOptions } from './web_search.js';
 import { webFetchToolOptions } from './web_fetch.js';
+import { expandConversationToolOptions } from './expand_conversation.js';
 
 /**
  * All built-in tool options.
@@ -60,4 +65,5 @@ export const builtinToolOptions = [
   promptUserToolOptions,
   webSearchToolOptions,
   webFetchToolOptions,
+  expandConversationToolOptions,
 ];

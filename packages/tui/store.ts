@@ -58,6 +58,8 @@ const GATEWAY_MODEL_PROVIDERS = new Set<string>([
 
 function expandGatewayModels(models: ModelEntry[]): ModelEntry[] {
   if (models.length === 0) return models;
+  const hasGatewayAccess = models.some((model) => model.provider === GATEWAY_PROVIDER_ID);
+  if (!hasGatewayAccess) return models;
 
   const expanded: ModelEntry[] = [...models];
   const seen = new Set(models.map((model) => `${model.provider ?? ""}:${model.id}`));
@@ -164,6 +166,7 @@ export interface StoreSnapshot {
   responseContent: ResponseContent | null;
   // Models selection
   modelsList: ModelEntry[];
+  modelsAvailableList: ModelEntry[];
   modelsCursor: number;
   modelDeletePending: boolean;
   modelSelections: Map<string, { model: string; provider: string; reasoning?: string }>;
@@ -258,6 +261,7 @@ export class Store {
 
   // ─── Models ───
   private modelsList: ModelEntry[] = [];
+  private modelsAvailableList: ModelEntry[] = [];
   private modelsCursor = 0;
   private modelDeletePending = false;
   private modelSelections = new Map<string, { model: string; provider: string; reasoning?: string }>();
@@ -394,6 +398,7 @@ export class Store {
       responseContent: this.responseContent,
       // Models selection
       modelsList: [...this.modelsList],
+      modelsAvailableList: [...this.modelsAvailableList],
       modelsCursor: this.modelsCursor,
       modelDeletePending: this.modelDeletePending,
       modelSelections: new Map(this.modelSelections),
@@ -1337,8 +1342,9 @@ export class Store {
    * Updates the models list without changing UI mode.
    * Updates cursor to point to the selected model for the active tab.
    */
-  updateModelsList(models: ModelEntry[]): void {
+  updateModelsList(models: ModelEntry[], availableModels?: ModelEntry[]): void {
     this.modelsList = expandGatewayModels(models);
+    this.modelsAvailableList = expandGatewayModels(availableModels ?? models);
     // Update cursor position based on active tab's selection
     const selection = this.modelSelections.get(this.modelsActiveTab);
     const list = this.modelsList;
@@ -1355,8 +1361,8 @@ export class Store {
    * Sets the models list and enters models selection mode.
    * Copies current modelSelections to stagedModelSelections for editing.
    */
-  setModelsList(models: ModelEntry[]): void {
-    this.updateModelsList(models);
+  setModelsList(models: ModelEntry[], availableModels?: ModelEntry[]): void {
+    this.updateModelsList(models, availableModels);
     // Initialize staged selections from current applied selections
     this.stagedModelSelections = new Map(this.modelSelections);
     this.uiMode = "models";
@@ -1526,6 +1532,9 @@ export class Store {
 
     const removed = this.modelsList[this.modelsCursor];
     this.modelsList = this.modelsList.filter((_, i) => i !== this.modelsCursor);
+    this.modelsAvailableList = this.modelsAvailableList.filter(
+      (model) => !(model.id === removed.id && model.provider === removed.provider)
+    );
 
     // Adjust cursor if needed
     if (this.modelsCursor >= this.modelsList.length) {

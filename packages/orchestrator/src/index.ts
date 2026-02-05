@@ -54,6 +54,14 @@ export {
   type HookAuditEntry,
 } from './hookRunner/index.js';
 
+// Prompt-protocol helpers (re-exported from protocol)
+export {
+  ControlEvents,
+  ControlEventTypeField,
+  DECISION_PROMPT_BY_EVENT,
+  type DecisionPrompt,
+} from 'protocol';
+
 // Ralph Loop - iterative self-referential development
 export {
   RalphLoop,

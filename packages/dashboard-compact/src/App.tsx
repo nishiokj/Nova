@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Session } from '@shared/domain/models';
-import { useSessions } from './hooks/useSessions';
+import { useSessionState } from './hooks/useSessionState';
 import { Sidebar } from './components/Sidebar';
 import { Stage } from './components/Stage';
 import { SessionSummary } from './components/SessionSummary';
@@ -9,11 +9,11 @@ import { AnalyticsView } from './components/AnalyticsView';
 type ViewType = 'sessions' | 'analytics';
 
 export default function App() {
-  const { sessions, state, error } = useSessions(1000);
+  const { sessions, loading, error, connected } = useSessionState();
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [view, setView] = useState<ViewType>('sessions');
 
-  if (state === 'loading') {
+  if (loading && sessions.length === 0) {
     return (
       <div className="app-layout">
         <div className="stage-empty">Loading sessions...</div>
@@ -21,7 +21,7 @@ export default function App() {
     );
   }
 
-  if (state === 'error') {
+  if (error && sessions.length === 0) {
     return (
       <div className="app-layout">
         <div className="stage-empty" style={{ color: 'var(--red)' }}>
@@ -46,6 +46,29 @@ export default function App() {
         >
           Analytics
         </button>
+        <span
+          className="live-indicator"
+          title={connected ? 'Connected to live event bus' : 'Disconnected - using polling'}
+          style={{
+            marginLeft: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '11px',
+            color: connected ? 'var(--green)' : 'var(--text-muted)',
+          }}
+        >
+          <span
+            style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              backgroundColor: connected ? 'var(--green)' : 'var(--text-muted)',
+              animation: connected ? 'pulse 2s infinite' : 'none',
+            }}
+          />
+          {connected ? 'LIVE' : 'POLLING'}
+        </span>
       </div>
 
       {view === 'sessions' ? (
