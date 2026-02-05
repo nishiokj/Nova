@@ -35,22 +35,22 @@ interface PRInfo {
 }
 
 interface SessionRow {
-  session_key: string;
-  client_type: string;
-  working_dir: string | null;
+  sessionKey: string;
+  clientType: string;
+  workingDir: string | null;
   status: string;
-  created_at: number;
-  last_accessed_at: number;
-  metadata: Record<string, unknown> | null;
+  createdAt: number;
+  lastAccessedAt: number;
+  metadata?: Record<string, unknown>;
 }
 
 interface MessageRow {
   id: number;
   role: string;
   content: string;
-  request_id: string | null;
-  created_at: number;
-  metadata: Record<string, unknown> | null;
+  requestId: string | null;
+  createdAt: number;
+  metadata?: Record<string, unknown>;
 }
 
 // Cache for GitHub data
@@ -149,13 +149,15 @@ function matchRoute(pattern: string, pathname: string): Record<string, string> |
  * Format session row for API response
  */
 function formatSession(row: SessionRow) {
+  const createdAt = row.createdAt ? new Date(row.createdAt * 1000).toISOString() : null;
+  const lastAccessedAt = row.lastAccessedAt ? new Date(row.lastAccessedAt * 1000).toISOString() : null;
   return {
-    id: row.session_key,
-    clientType: row.client_type,
-    workingDir: row.working_dir,
+    id: row.sessionKey,
+    clientType: row.clientType,
+    workingDir: row.workingDir,
     status: row.status,
-    createdAt: new Date(row.created_at * 1000).toISOString(),
-    lastAccessedAt: new Date(row.last_accessed_at * 1000).toISOString(),
+    createdAt,
+    lastAccessedAt,
     metadata: row.metadata,
   };
 }
@@ -164,12 +166,13 @@ function formatSession(row: SessionRow) {
  * Format message row for API response
  */
 function formatMessage(row: MessageRow) {
+  const createdAt = row.createdAt ? new Date(row.createdAt * 1000).toISOString() : null;
   return {
     id: row.id,
     role: row.role,
     content: row.content,
-    requestId: row.request_id,
-    createdAt: new Date(row.created_at * 1000).toISOString(),
+    requestId: row.requestId,
+    createdAt,
     metadata: row.metadata,
   };
 }
@@ -283,20 +286,24 @@ function handleGetProjects(res: ServerResponse, ctx: ControlPlaneContext): void 
 
   try {
     const result = ctx.graphd.sessionsList({ limit: 1000 }) as { sessions?: SessionRow[]; error?: string };
+    if (result.error) {
+      sendJson(res, { projects: [], error: result.error });
+      return;
+    }
     const sessions = result.sessions ?? [];
 
     // Group by working directory
     const projectMap = new Map<string, { count: number; lastAccessed: number }>();
     for (const session of sessions) {
-      const wd = session.working_dir;
+      const wd = session.workingDir;
       if (!wd) continue;
 
       const existing = projectMap.get(wd);
       if (existing) {
         existing.count++;
-        existing.lastAccessed = Math.max(existing.lastAccessed, session.last_accessed_at);
+        existing.lastAccessed = Math.max(existing.lastAccessed, session.lastAccessedAt);
       } else {
-        projectMap.set(wd, { count: 1, lastAccessed: session.last_accessed_at });
+        projectMap.set(wd, { count: 1, lastAccessed: session.lastAccessedAt });
       }
     }
 
@@ -421,6 +428,10 @@ function handleGetSessions(res: ServerResponse, ctx: ControlPlaneContext, limit:
 
   try {
     const result = ctx.graphd.sessionsList({ limit }) as { sessions?: SessionRow[]; error?: string };
+    if (result.error) {
+      sendJson(res, { sessions: [], error: result.error });
+      return;
+    }
     const sessions = (result.sessions ?? []).map(formatSession);
     sendJson(res, { sessions });
   } catch (error) {
