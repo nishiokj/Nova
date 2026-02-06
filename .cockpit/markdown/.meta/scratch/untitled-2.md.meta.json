@@ -1,0 +1,29 @@
+{
+  "editor": "cockpit",
+  "createdBy": "user",
+  "intent": "create",
+  "source": "dashboard-control",
+  "createdAt": "2026-02-06T20:30:12.674Z",
+  "updatedAt": "2026-02-06T20:31:11.600Z",
+  "lineCount": 4,
+  "wordCount": 40,
+  "hash": "cb04b2156a49a84b7ebda3b69777dd7f0cd38534403165877642cfdae0a2fc7e",
+  "size": 239,
+  "cockpit": {
+    "path": "scratch/untitled-2.md",
+    "version": 1770409871600,
+    "etag": "W/\"1770409871600-cb04b2156a49a84b\"",
+    "hash": "cb04b2156a49a84b7ebda3b69777dd7f0cd38534403165877642cfdae0a2fc7e",
+    "lineCount": 4,
+    "wordCount": 40,
+    "operation": "patch",
+    "updatedAt": "2026-02-06T20:31:11.600Z",
+    "baseVersion": 1770409861062,
+    "previousVersion": 1770409861062
+  },
+  "mode": "autosave",
+  "dirty": true,
+  "forceOverwrite": false,
+  "patchMode": "content",
+  "changedLines": 4
+}

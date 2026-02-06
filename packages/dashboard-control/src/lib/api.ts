@@ -144,6 +144,36 @@ async function postAPI<T>(endpoint: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+async function postAPIResult<T extends Record<string, unknown>>(
+  endpoint: string,
+  body: unknown
+): Promise<T & { statusCode: number }> {
+  const res = await fetch(`${API_BASE}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let parsed: Record<string, unknown> = {};
+  try {
+    const json = await res.json() as unknown;
+    if (typeof json === 'object' && json !== null) {
+      parsed = json as Record<string, unknown>;
+    }
+  } catch {
+    parsed = {};
+  }
+  if (!res.ok && typeof parsed.error !== 'string') {
+    parsed.error = `API error: ${res.status} ${res.statusText}`;
+  }
+  if (typeof parsed.success !== 'boolean') {
+    parsed.success = res.ok;
+  }
+  return {
+    ...(parsed as T),
+    statusCode: res.status,
+  };
+}
+
 // ============ Projects ============
 
 export async function getProjects(): Promise<Project[]> {
@@ -328,6 +358,19 @@ export interface PRRollup {
   workItemId?: string;
 }
 
+export interface CockpitRollupSnapshot {
+  runningSessions: SessionRollup[];
+  readySessions: SessionRollup[];
+  doneSessions: SessionRollup[];
+  escalations: EscalationRollup[];
+  commitRollups: CommitRollup[];
+  prRollups: PRRollup[];
+  metrics: DailyMetrics | null;
+  metricsDate: string;
+  generatedAt: string;
+  error?: string;
+}
+
 export interface FocusPacket {
   packetId: string;
   sessionKey: string;
@@ -366,7 +409,7 @@ export interface DiffHotspot {
 export interface CockpitDiff {
   baseSha: string;
   headSha: string;
-  source: 'query' | 'session' | 'git-parent' | 'unknown';
+  source: 'query' | 'session' | 'git-parent' | 'working-tree' | 'unknown';
   summary: {
     added: number;
     deleted: number;
@@ -486,6 +529,72 @@ export interface CockpitBrowserState {
   lastSnapshotPreview?: string;
 }
 
+export interface CockpitMarkdownTreeNode {
+  type: 'folder' | 'file';
+  name: string;
+  path: string;
+  children?: CockpitMarkdownTreeNode[];
+  size?: number;
+  updatedAt?: string;
+  version?: number;
+}
+
+export interface CockpitMarkdownFile {
+  path: string;
+  content: string;
+  version: number;
+  updatedAt: string;
+  size: number;
+  hash?: string;
+  etag?: string;
+  lineCount?: number;
+  wordCount?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CockpitMarkdownContextInput {
+  path?: string;
+  version?: number;
+  updatedAt?: string;
+  content?: string;
+  isDirty?: boolean;
+  selectionStart?: number;
+  selectionEnd?: number;
+  metadata?: Record<string, unknown>;
+}
+
+// ============ WorkItem Templates ============
+
+export interface WorkItemSpec {
+  id: string;
+  objective: string;
+  agent: string;
+  dependencies: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkItemTemplate {
+  id: string;
+  name: string;
+  description: string;
+  specs: WorkItemSpec[];
+  createdAt?: string | number;
+  updatedAt?: string | number;
+}
+
+export async function getCockpitTemplates(): Promise<WorkItemTemplate[]> {
+  const data = await fetchAPI<{ templates: WorkItemTemplate[] }>('/cockpit/templates');
+  return data.templates ?? [];
+}
+
+export async function postCockpitSessionCreate(input: {
+  goal?: string;
+  markdownPath?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<{ success: boolean; sessionKey?: string; error?: string }> {
+  return postAPI('/cockpit/session/create', input);
+}
+
 export async function getCockpitSessionRollups(
   status: SessionPanelStatus,
   limit = 100
@@ -522,6 +631,22 @@ export async function getCockpitDailyMetrics(date?: string): Promise<DailyMetric
   const query = date ? `?date=${encodeURIComponent(date)}` : '';
   const data = await fetchAPI<{ metrics: DailyMetrics | null }>(`/cockpit/metrics/daily${query}`);
   return data.metrics ?? null;
+}
+
+export async function getCockpitRollupSnapshot(options: {
+  sessionLimit?: number;
+  escalationLimit?: number;
+  repoLimit?: number;
+  includeRepo?: boolean;
+  date?: string;
+} = {}): Promise<CockpitRollupSnapshot> {
+  const params = new URLSearchParams();
+  params.set('sessionLimit', String(options.sessionLimit ?? 120));
+  params.set('escalationLimit', String(options.escalationLimit ?? 120));
+  params.set('repoLimit', String(options.repoLimit ?? 50));
+  params.set('includeRepo', options.includeRepo === false ? '0' : '1');
+  if (options.date) params.set('date', options.date);
+  return fetchAPI<CockpitRollupSnapshot>(`/cockpit/rollups/snapshot?${params.toString()}`);
 }
 
 export async function getCockpitFocus(
@@ -625,7 +750,7 @@ export async function searchCockpitRepoLens(options: {
   if (options.sessionKey) params.set('sessionKey', options.sessionKey);
   const data = await fetchAPI<{
     results: { defs: RepoLensMatch[]; refs: RepoLensMatch[]; text: RepoLensMatch[] };
-  }>(`/cockpit/repo/lens?${params.toString()}`);
+  }>(`/cockpit/repo/grep?${params.toString()}`);
   return data.results ?? { defs: [], refs: [], text: [] };
 }
 
@@ -689,6 +814,101 @@ export async function postCockpitBrowserRunbook(input: {
   return postAPI('/cockpit/browser/runbook', input);
 }
 
+export async function getCockpitMarkdownTree(): Promise<{
+  rootDir: string;
+  tree: CockpitMarkdownTreeNode[];
+  suggestedFolders: string[];
+}> {
+  const data = await fetchAPI<{
+    rootDir: string;
+    tree: CockpitMarkdownTreeNode[];
+    suggestedFolders: string[];
+  }>('/cockpit/markdown/tree');
+  return {
+    rootDir: data.rootDir ?? '.cockpit/markdown',
+    tree: data.tree ?? [],
+    suggestedFolders: data.suggestedFolders ?? [],
+  };
+}
+
+export async function getCockpitMarkdownFile(filePath: string): Promise<CockpitMarkdownFile> {
+  const data = await fetchAPI<{ file: CockpitMarkdownFile }>(
+    `/cockpit/markdown/file?path=${encodeURIComponent(filePath)}`
+  );
+  return data.file;
+}
+
+export async function postCockpitMarkdownFile(input: {
+  path: string;
+  content: string;
+  expectedVersion?: number;
+  metadata?: Record<string, unknown>;
+  source?: string;
+}): Promise<{
+  success: boolean;
+  created?: boolean;
+  previousVersion?: number;
+  file?: CockpitMarkdownFile;
+  currentVersion?: number;
+  currentHash?: string;
+  statusCode?: number;
+  error?: string;
+}> {
+  return postAPIResult('/cockpit/markdown/file', input);
+}
+
+export async function postCockpitMarkdownFolder(input: {
+  path: string;
+}): Promise<{ success: boolean; folder?: { path: string } }> {
+  return postAPI('/cockpit/markdown/folder', input);
+}
+
+export async function importCockpitMarkdownFile(input: {
+  sessionKey?: string;
+  markdownPath?: string;
+  destinationPath?: string;
+  folder?: string;
+  filename?: string;
+  content?: string;
+  expectedVersion?: number;
+  metadata?: Record<string, unknown>;
+  source?: string;
+}): Promise<{
+  success: boolean;
+  created?: boolean;
+  previousVersion?: number;
+  file?: CockpitMarkdownFile;
+  sourcePath?: string;
+  currentVersion?: number;
+  currentHash?: string;
+  statusCode?: number;
+  error?: string;
+}> {
+  return postAPIResult('/cockpit/markdown/import', input);
+}
+
+export async function postCockpitMarkdownPatch(input: {
+  path: string;
+  expectedVersion: number;
+  content?: string;
+  patch?: string;
+  edits?: Array<{ startLine: number; endLine: number; replacement: string }>;
+  metadata?: Record<string, unknown>;
+  source?: string;
+}): Promise<{
+  success: boolean;
+  mode?: 'content' | 'patch' | 'edits';
+  changedLines?: number;
+  previousVersion?: number;
+  file?: CockpitMarkdownFile;
+  currentVersion?: number;
+  currentHash?: string;
+  statusCode?: number;
+  error?: string;
+}> {
+  return postAPIResult('/cockpit/markdown/patch', input);
+}
+
 export async function resolveCockpitEscalation(
   escalationId: string,
   input: {
@@ -708,9 +928,13 @@ export async function postCockpitPacket(
 
 export async function postCockpitSessionMessage(
   sessionKey: string,
-  message: string
-): Promise<{ success: boolean; requestId?: string; queued?: boolean }> {
-  return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/message`, { message });
+  message: string,
+  options?: { markdownContext?: CockpitMarkdownContextInput }
+): Promise<{ success: boolean; requestId?: string; queued?: boolean; markdownContextAttached?: boolean }> {
+  return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/message`, {
+    message,
+    ...(options?.markdownContext ? { markdownContext: options.markdownContext } : {}),
+  });
 }
 
 export async function postCockpitSessionControl(

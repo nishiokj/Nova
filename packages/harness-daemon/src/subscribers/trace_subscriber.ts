@@ -108,9 +108,10 @@ export class TraceSubscriber {
     const data = event.data;
     if (data.phase !== 'completed') return;
     if (!data.success) return;
-    if (data.toolName !== 'Write' && data.toolName !== 'Edit') return;
+    const toolName = typeof data.toolName === 'string' ? data.toolName.toLowerCase() : '';
+    if (toolName !== 'write' && toolName !== 'edit') return;
 
-    this.collectModification(event, data);
+    this.collectModification(event, data, toolName === 'write' ? 'Write' : 'Edit');
   }
 
   /**
@@ -128,15 +129,19 @@ export class TraceSubscriber {
   /**
    * Collect a file modification from a tool_call event.
    */
-  private collectModification(event: AgentEvent<unknown>, data: ToolCallData): void {
+  private collectModification(
+    event: AgentEvent<unknown>,
+    data: ToolCallData,
+    normalizedToolName: 'Write' | 'Edit'
+  ): void {
     const args = data.arguments as Record<string, unknown>;
-    const filePath = args.file_path as string;
-    if (!filePath) return;
+    const resolvedPath = this.resolveAbsoluteFilePath(args);
+    if (!resolvedPath) return;
 
     const modification: PendingFileModification = {
-      filePath,
-      relativePath: this.getRelativePath(filePath),
-      toolName: data.toolName as 'Write' | 'Edit',
+      filePath: resolvedPath,
+      relativePath: this.getRelativePath(resolvedPath),
+      toolName: normalizedToolName,
       sessionKey: event.sessionKey,
       modelId: this.config.currentModelId,
       timestamp: event.timestamp,
@@ -144,19 +149,29 @@ export class TraceSubscriber {
     };
 
     // Capture content for Write
-    if (data.toolName === 'Write') {
+    if (normalizedToolName === 'Write') {
       modification.content = args.content as string;
     }
 
     // Capture old/new for Edit
-    if (data.toolName === 'Edit') {
-      modification.oldContent = args.old_string as string;
-      modification.newContent = args.new_string as string;
+    if (normalizedToolName === 'Edit') {
+      modification.oldContent = (args.old_string ?? args.oldString) as string;
+      modification.newContent = (args.new_string ?? args.newString) as string;
     }
 
-    const existing = this.pendingModifications.get(filePath) ?? [];
+    const existing = this.pendingModifications.get(resolvedPath) ?? [];
     existing.push(modification);
-    this.pendingModifications.set(filePath, existing);
+    this.pendingModifications.set(resolvedPath, existing);
+  }
+
+  /**
+   * Resolve tool argument path to an absolute filesystem path.
+   */
+  private resolveAbsoluteFilePath(args: Record<string, unknown>): string | null {
+    const candidate = (args.path ?? args.file_path ?? args.filePath ?? args.absolute_path) as string | undefined;
+    if (!candidate || typeof candidate !== 'string') return null;
+    if (path.isAbsolute(candidate)) return candidate;
+    return path.resolve(this.config.repoRoot, candidate);
   }
 
   /**

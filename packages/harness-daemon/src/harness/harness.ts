@@ -1446,7 +1446,19 @@ export class AgentHarness {
    * Also handles resuming paused sessions - if a session is paused, inputText is treated as the answer.
    */
   run(params: AgentRunParams): AgentRunHandle {
-    const { requestId, inputText, tier: requestedTier, sessionKey, workingDir, planMode, hookRegistry } = params;
+    const {
+      requestId,
+      inputText,
+      tier: requestedTier,
+      sessionKey,
+      workingDir,
+      context: supplementalContextRaw,
+      planMode,
+      hookRegistry,
+    } = params;
+    const supplementalContext = typeof supplementalContextRaw === 'string'
+      ? supplementalContextRaw.trim()
+      : '';
     profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier, planMode });
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
@@ -1470,6 +1482,12 @@ export class AgentHarness {
 
       // Queue the message - this adds it to context immediately
       store.queueUserMessage(requestId, inputText);
+      if (supplementalContext.length > 0) {
+        store.getContext().addMessage(
+          'system',
+          `Control-plane supplemental context for the queued user message:\n${supplementalContext}`
+        );
+      }
 
       // Persist to GraphD if available
       this.persistUserMessage(sessionKey, requestId, inputText);
@@ -1583,6 +1601,13 @@ export class AgentHarness {
       effectiveAgentType = requestedTier || 'standard';
       effectivePlanMode = planMode;
       effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    }
+
+    if (supplementalContext.length > 0) {
+      contextWindow.addMessage(
+        'system',
+        `Control-plane supplemental context:\n${supplementalContext}`
+      );
     }
 
     if (this.isGraphDReady()) {
@@ -2026,7 +2051,21 @@ export class AgentHarness {
         if (toolName === 'Bash' && toolResult.status === 'success') {
           const command = args.command as string | undefined;
           if (command && isGitCommitCommand(command)) {
-            const sha = extractCommitSha(toolResult.output);
+            let sha = extractCommitSha(toolResult.output);
+            if (!sha) {
+              try {
+                const head = execSync('git rev-parse HEAD', {
+                  cwd: workingDir,
+                  encoding: 'utf-8',
+                  stdio: ['pipe', 'pipe', 'pipe'],
+                }).trim();
+                if (head) {
+                  sha = head;
+                }
+              } catch {
+                // Keep best-effort behavior: no git_commit event if HEAD cannot be resolved.
+              }
+            }
             if (sha) {
               const range = resolveGitCommitRange(workingDir, sha);
               // Emit git_commit event via EventBus

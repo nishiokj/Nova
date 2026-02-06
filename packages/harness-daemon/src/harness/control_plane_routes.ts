@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { GraphDManager } from 'graphd';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
+import nodePath from 'path';
 import {
   parseSessionEscalations,
   type EscalationResolutionInput,
@@ -26,7 +27,11 @@ export interface ControlPlaneContext {
   workingDir: string;
   dispatchSessionInput?: (
     sessionKey: string,
-    message: string
+    message: string,
+    options?: {
+      context?: string;
+      metadata?: Record<string, unknown>;
+    }
   ) => {
     success: boolean;
     requestId?: string;
@@ -274,6 +279,24 @@ interface PatchEditInput {
   replacement: string;
 }
 
+interface SessionFileModification {
+  path: string;
+  toolName: 'edit' | 'write';
+  timestampMs: number;
+  requestId?: string;
+  workItemId?: string;
+  oldContent?: string;
+  newContent?: string;
+  content?: string;
+}
+
+interface SessionDiffLineRange {
+  start: number;
+  end: number;
+  added: number;
+  deleted: number;
+}
+
 type BrowserActionName =
   | 'open'
   | 'back'
@@ -346,6 +369,18 @@ const ALL_SESSION_STATUSES = [
   'inactive',
   'expired',
 ] as const;
+const MARKDOWN_WORKSPACE_DIR = '.cockpit/markdown';
+const MARKDOWN_METADATA_DIR = '.meta';
+const MARKDOWN_FILE_EXTENSIONS = new Set(['.md', '.markdown', '.mdx']);
+const MARKDOWN_SUGGESTED_FOLDERS = ['notes', 'packets', 'plans', 'scratch', 'handoffs'];
+const MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;
+const MARKDOWN_METADATA_MAX_BYTES = 64 * 1024;
+const MARKDOWN_CHAT_CONTEXT_MAX_BYTES = 120 * 1024;
+const COCKPIT_SNAPSHOT_CACHE_TTL_MS = 1_500;
+
+let cockpitSnapshotCache:
+  | { key: string; expiresAt: number; data: CockpitRollupSnapshotResult }
+  | null = null;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -385,6 +420,574 @@ function asNumber(value: unknown): number | undefined {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string');
+}
+
+function hasMarkdownExtension(pathValue: string): boolean {
+  const lower = pathValue.toLowerCase();
+  for (const ext of MARKDOWN_FILE_EXTENSIONS) {
+    if (lower.endsWith(ext)) return true;
+  }
+  return false;
+}
+
+function normalizeWorkspaceRelativePath(rawPath: string, options?: { allowEmpty?: boolean }): string | null {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return options?.allowEmpty ? '' : null;
+  const slashNormalized = trimmed.replace(/\\/g, '/').replace(/^\/+/, '');
+  const pieces = slashNormalized.split('/').map((item) => item.trim()).filter(Boolean);
+  if (pieces.length === 0) return options?.allowEmpty ? '' : null;
+  if (pieces.some((piece) => piece === '.' || piece === '..')) return null;
+  return pieces.join('/');
+}
+
+function sanitizeMarkdownName(rawName: string): string {
+  const normalized = rawName
+    .trim()
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop() ?? '';
+  const safe = normalized
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return safe || 'untitled.md';
+}
+
+function ensureMarkdownFileName(rawName: string): string {
+  const safe = sanitizeMarkdownName(rawName);
+  return hasMarkdownExtension(safe) ? safe : `${safe}.md`;
+}
+
+function ensureMarkdownExtensionOnPath(rawPath: string): string | null {
+  const normalized = normalizeWorkspaceRelativePath(rawPath);
+  if (normalized === null) return null;
+  return hasMarkdownExtension(normalized) ? normalized : `${normalized}.md`;
+}
+
+function buildVersionFromMtimeMs(mtimeMs: number): number {
+  if (!Number.isFinite(mtimeMs)) return 0;
+  return Math.max(0, Math.floor(mtimeMs));
+}
+
+async function getCockpitMarkdownWorkspaceRoot(ctx: ControlPlaneContext): Promise<string> {
+  const path = await import('path');
+  const fs = await import('fs/promises');
+  const root = path.resolve(ctx.workingDir, MARKDOWN_WORKSPACE_DIR);
+  await fs.mkdir(root, { recursive: true });
+  return root;
+}
+
+async function resolveCockpitMarkdownWorkspacePath(
+  ctx: ControlPlaneContext,
+  rawPath: string,
+  options?: { allowEmpty?: boolean; requireMarkdownFile?: boolean }
+): Promise<{ rootDir: string; relativePath: string; absolutePath: string } | { error: string }> {
+  const path = await import('path');
+  const rootDir = await getCockpitMarkdownWorkspaceRoot(ctx);
+  const relativePath = normalizeWorkspaceRelativePath(rawPath, { allowEmpty: options?.allowEmpty });
+  if (relativePath === null) {
+    return { error: 'Invalid markdown path' };
+  }
+  if (options?.requireMarkdownFile && relativePath && !hasMarkdownExtension(relativePath)) {
+    return { error: 'Markdown files must end with .md, .markdown, or .mdx' };
+  }
+  const absolutePath = relativePath
+    ? path.resolve(rootDir, relativePath)
+    : rootDir;
+  const inWorkspace = absolutePath === rootDir || absolutePath.startsWith(`${rootDir}${path.sep}`);
+  if (!inWorkspace) {
+    return { error: 'Path must resolve inside the markdown workspace' };
+  }
+  return { rootDir, relativePath, absolutePath };
+}
+
+interface MarkdownWorkspaceFileRecord {
+  path: string;
+  version: number;
+  updatedAt: string;
+  size: number;
+  hash: string;
+  etag: string;
+  lineCount: number;
+  wordCount: number;
+  metadata?: Record<string, unknown>;
+}
+
+function sanitizeMetadataValue(value: unknown, depth = 0): unknown {
+  if (value === null) return null;
+  if (depth > 5) return undefined;
+  if (typeof value === 'string') {
+    return value.length > 4_000 ? value.slice(0, 4_000) : value;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (const item of value.slice(0, 128)) {
+      const next = sanitizeMetadataValue(item, depth + 1);
+      if (next !== undefined) out.push(next);
+    }
+    return out;
+  }
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = {};
+    let count = 0;
+    for (const [rawKey, rawValue] of Object.entries(value)) {
+      if (count >= 128) break;
+      const key = rawKey.trim();
+      if (!key) continue;
+      const next = sanitizeMetadataValue(rawValue, depth + 1);
+      if (next === undefined) continue;
+      out[key] = next;
+      count += 1;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function sanitizeMarkdownMetadata(value: unknown): Record<string, unknown> | undefined {
+  const sanitized = sanitizeMetadataValue(value, 0);
+  if (!isRecord(sanitized)) return undefined;
+  const serialized = JSON.stringify(sanitized);
+  if (serialized.length > MARKDOWN_METADATA_MAX_BYTES) return undefined;
+  return sanitized;
+}
+
+async function buildMarkdownContentHash(content: string): Promise<string> {
+  const crypto = await import('crypto');
+  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+function buildMarkdownWordCount(content: string): number {
+  const matches = content.match(/[^\s]+/g);
+  return matches ? matches.length : 0;
+}
+
+function buildMarkdownLineCount(content: string): number {
+  if (content.length === 0) return 0;
+  return content.split('\n').length;
+}
+
+function buildMarkdownEtag(version: number, hash: string): string {
+  const shortHash = hash.slice(0, 16);
+  return `W/"${Math.max(0, version)}-${shortHash}"`;
+}
+
+async function resolveMarkdownMetadataPath(rootDir: string, relativePath: string): Promise<string> {
+  const path = await import('path');
+  const metadataRoot = path.resolve(rootDir, MARKDOWN_METADATA_DIR);
+  const metadataPath = path.resolve(metadataRoot, `${relativePath}.meta.json`);
+  if (metadataPath === metadataRoot || metadataPath.startsWith(`${metadataRoot}${path.sep}`)) {
+    return metadataPath;
+  }
+  throw new Error('Metadata path resolved outside markdown metadata workspace');
+}
+
+async function readMarkdownWorkspaceMetadata(
+  rootDir: string,
+  relativePath: string
+): Promise<Record<string, unknown> | undefined> {
+  const fs = await import('fs/promises');
+  try {
+    const metadataPath = await resolveMarkdownMetadataPath(rootDir, relativePath);
+    const raw = await fs.readFile(metadataPath, 'utf8');
+    if (Buffer.byteLength(raw, 'utf8') > MARKDOWN_METADATA_MAX_BYTES) {
+      return undefined;
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    return sanitizeMarkdownMetadata(parsed);
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeMarkdownWorkspaceMetadata(
+  rootDir: string,
+  relativePath: string,
+  metadata: Record<string, unknown>
+): Promise<void> {
+  const fs = await import('fs/promises');
+  const path = await import('path');
+  const metadataPath = await resolveMarkdownMetadataPath(rootDir, relativePath);
+  await fs.mkdir(path.dirname(metadataPath), { recursive: true });
+  await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+}
+
+async function buildMarkdownWorkspaceFileRecord(
+  rootDir: string,
+  relativePath: string,
+  content: string,
+  stat: { mtimeMs: number; mtime: Date; size: number },
+  metadata?: Record<string, unknown>
+): Promise<MarkdownWorkspaceFileRecord> {
+  const version = buildVersionFromMtimeMs(stat.mtimeMs);
+  const hash = await buildMarkdownContentHash(content);
+  return {
+    path: relativePath,
+    version,
+    updatedAt: stat.mtime.toISOString(),
+    size: stat.size,
+    hash,
+    etag: buildMarkdownEtag(version, hash),
+    lineCount: buildMarkdownLineCount(content),
+    wordCount: buildMarkdownWordCount(content),
+    ...(metadata ? { metadata } : {}),
+  };
+}
+
+async function writeCockpitMarkdownWorkspaceFile(
+  ctx: ControlPlaneContext,
+  input: {
+    path: string;
+    content: string;
+    expectedVersion?: number;
+    metadata?: Record<string, unknown>;
+    operation?: 'write' | 'import' | 'patch';
+    source?: string;
+    baseVersion?: number;
+  }
+): Promise<
+  | { ok: true; file: MarkdownWorkspaceFileRecord; created: boolean; previousVersion: number }
+  | { ok: false; status: number; error: string; currentVersion?: number; currentUpdatedAt?: string; currentHash?: string }
+> {
+  const pathModule = await import('path');
+  const fs = await import('fs/promises');
+  const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, input.path, { requireMarkdownFile: true });
+  if ('error' in resolved) {
+    return { ok: false, status: 400, error: resolved.error };
+  }
+
+  if (Buffer.byteLength(input.content, 'utf8') > MARKDOWN_MAX_BYTES) {
+    return { ok: false, status: 400, error: `Markdown payload exceeds ${MARKDOWN_MAX_BYTES} bytes` };
+  }
+
+  let existing:
+    | {
+        version: number;
+        updatedAt: string;
+        size: number;
+        content: string;
+      }
+    | undefined;
+  try {
+    const [stat, content] = await Promise.all([
+      fs.stat(resolved.absolutePath),
+      fs.readFile(resolved.absolutePath, 'utf8'),
+    ]);
+    if (stat.isFile()) {
+      existing = {
+        version: buildVersionFromMtimeMs(stat.mtimeMs),
+        updatedAt: stat.mtime.toISOString(),
+        size: stat.size,
+        content,
+      };
+    }
+  } catch {
+    existing = undefined;
+  }
+
+  if (typeof input.expectedVersion === 'number' && Number.isFinite(input.expectedVersion)) {
+    const expected = Math.floor(input.expectedVersion);
+    const current = existing?.version ?? 0;
+    if (current !== expected) {
+      return {
+        ok: false,
+        status: 409,
+        error: 'Version conflict while writing markdown file',
+        currentVersion: current,
+        ...(existing?.updatedAt ? { currentUpdatedAt: existing.updatedAt } : {}),
+        ...(existing?.content ? { currentHash: await buildMarkdownContentHash(existing.content) } : {}),
+      };
+    }
+  }
+
+  await fs.mkdir(pathModule.dirname(resolved.absolutePath), { recursive: true });
+  await fs.writeFile(resolved.absolutePath, input.content, 'utf8');
+  const [stat, metadataBase] = await Promise.all([
+    fs.stat(resolved.absolutePath),
+    readMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath),
+  ]);
+  const incomingMetadata = sanitizeMarkdownMetadata(input.metadata);
+  const nextFile = await buildMarkdownWorkspaceFileRecord(
+    resolved.rootDir,
+    resolved.relativePath,
+    input.content,
+    stat,
+  );
+  const mergedMetadata = sanitizeMarkdownMetadata({
+    ...(metadataBase ?? {}),
+    ...(incomingMetadata ?? {}),
+    source: asString(input.source)
+      ?? asString(incomingMetadata?.source)
+      ?? asString(metadataBase?.source)
+      ?? (input.operation === 'import' ? 'import' : 'control-plane'),
+    createdAt: asString(metadataBase?.createdAt) ?? nextFile.updatedAt,
+    updatedAt: nextFile.updatedAt,
+    lineCount: nextFile.lineCount,
+    wordCount: nextFile.wordCount,
+    hash: nextFile.hash,
+    size: nextFile.size,
+    cockpit: sanitizeMetadataValue({
+      ...(isRecord(metadataBase?.cockpit) ? metadataBase.cockpit : {}),
+      path: nextFile.path,
+      version: nextFile.version,
+      etag: nextFile.etag,
+      hash: nextFile.hash,
+      lineCount: nextFile.lineCount,
+      wordCount: nextFile.wordCount,
+      ...(typeof input.baseVersion === 'number' ? { baseVersion: Math.floor(input.baseVersion) } : {}),
+      ...(typeof existing?.version === 'number' ? { previousVersion: existing.version } : {}),
+      ...(input.operation ? { operation: input.operation } : {}),
+      updatedAt: nextFile.updatedAt,
+    }),
+  });
+  try {
+    if (mergedMetadata) {
+      await writeMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath, mergedMetadata);
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      status: 500,
+      error: `Failed to persist markdown metadata: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return {
+    ok: true,
+    created: !existing,
+    previousVersion: existing?.version ?? 0,
+    file: {
+      ...nextFile,
+      ...(mergedMetadata ? { metadata: mergedMetadata } : {}),
+    },
+  };
+}
+
+interface MarkdownPatchEditInput {
+  startLine: number;
+  endLine: number;
+  replacement: string;
+}
+
+function parseMarkdownPatchEdits(value: unknown): MarkdownPatchEditInput[] {
+  if (!Array.isArray(value)) return [];
+  const edits: MarkdownPatchEditInput[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const startLine = asNumber(entry.startLine ?? entry.start_line);
+    const endLine = asNumber(entry.endLine ?? entry.end_line);
+    const replacement = typeof entry.replacement === 'string'
+      ? entry.replacement
+      : typeof entry.text === 'string'
+        ? entry.text
+        : undefined;
+    if (!startLine || !endLine || replacement === undefined) continue;
+    edits.push({
+      startLine: Math.floor(startLine),
+      endLine: Math.floor(endLine),
+      replacement,
+    });
+  }
+  return edits;
+}
+
+function applyMarkdownStructuredEdits(
+  content: string,
+  edits: MarkdownPatchEditInput[]
+): { ok: true; content: string; changedLines: number } | { ok: false; error: string; status: number } {
+  const hadTrailingNewline = content.endsWith('\n');
+  const baseText = hadTrailingNewline ? content.slice(0, -1) : content;
+  const lines = baseText.length > 0 ? baseText.split('\n') : [];
+  let changedLines = 0;
+  const ordered = [...edits].sort((a, b) => b.startLine - a.startLine);
+  for (const edit of ordered) {
+    if (edit.startLine < 1) {
+      return { ok: false, status: 400, error: 'Invalid startLine in markdown edits' };
+    }
+    if (edit.endLine < edit.startLine - 1) {
+      return { ok: false, status: 400, error: 'Invalid endLine in markdown edits' };
+    }
+    if (edit.endLine > lines.length) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Edit range out of bounds: ${edit.startLine}-${edit.endLine} (lines=${lines.length})`,
+      };
+    }
+    if (edit.startLine > lines.length + 1) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Edit start out of bounds: ${edit.startLine} (lines=${lines.length})`,
+      };
+    }
+    const startIdx = Math.min(lines.length, edit.startLine - 1);
+    const deleteCount = Math.max(0, edit.endLine - edit.startLine + 1);
+    const replacementLines = edit.replacement === '' ? [] : edit.replacement.split('\n');
+    lines.splice(startIdx, deleteCount, ...replacementLines);
+    changedLines += Math.max(deleteCount, replacementLines.length);
+  }
+  return {
+    ok: true,
+    content: lines.join('\n') + (hadTrailingNewline ? '\n' : ''),
+    changedLines,
+  };
+}
+
+async function applyMarkdownUnifiedDiffPatch(
+  relativePath: string,
+  currentContent: string,
+  patch: string
+): Promise<{ ok: true; content: string; changedLines: number } | { ok: false; error: string; status: number }> {
+  const stats = parsePatchStats(patch);
+  if (stats.hasBinary) {
+    return { ok: false, status: 400, error: 'Binary markdown patch is not supported' };
+  }
+  if (stats.files.length === 0) {
+    return { ok: false, status: 400, error: 'No files detected in markdown patch payload' };
+  }
+  const normalizedTarget = normalizeDiffPath(relativePath);
+  const mismatched = stats.files.filter((filePath) => normalizeDiffPath(filePath) !== normalizedTarget);
+  if (mismatched.length > 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Markdown patch must only target ${relativePath}; found ${mismatched.join(', ')}`,
+    };
+  }
+
+  const fs = await import('fs/promises');
+  const os = await import('os');
+  const path = await import('path');
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cockpit-md-patch-'));
+  try {
+    const targetPath = path.resolve(tempDir, normalizedTarget);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, currentContent, 'utf8');
+    const patchPath = path.join(tempDir, 'markdown.patch');
+    await fs.writeFile(patchPath, patch, 'utf8');
+    await execFileText('git', ['apply', '--check', '--whitespace=nowarn', patchPath], {
+      cwd: tempDir,
+      timeout: 20_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    await execFileText('git', ['apply', '--whitespace=nowarn', patchPath], {
+      cwd: tempDir,
+      timeout: 20_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const nextContent = await fs.readFile(targetPath, 'utf8');
+    return { ok: true, content: nextContent, changedLines: stats.changedLines };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 400,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function buildCockpitMarkdownWorkspaceTree(
+  ctx: ControlPlaneContext
+): Promise<{
+  rootDir: string;
+  tree: Array<Record<string, unknown>>;
+  suggestedFolders: string[];
+}> {
+  const path = await import('path');
+  const fs = await import('fs/promises');
+  const rootDir = await getCockpitMarkdownWorkspaceRoot(ctx);
+
+  const counters = { files: 0 };
+  const MAX_FILES = 1000;
+  const MAX_DEPTH = 6;
+
+  const scanDir = async (absoluteDir: string, relativeDir: string, depth: number): Promise<Array<Record<string, unknown>>> => {
+    if (depth > MAX_DEPTH || counters.files >= MAX_FILES) return [];
+    let entries: Array<{ name: string; isDirectory: boolean; isFile: boolean; isSymbolicLink: boolean }> = [];
+    try {
+      const dirEntries = await fs.readdir(absoluteDir, { withFileTypes: true });
+      entries = dirEntries.map((entry) => ({
+        name: entry.name,
+        isDirectory: entry.isDirectory(),
+        isFile: entry.isFile(),
+        isSymbolicLink: entry.isSymbolicLink(),
+      }));
+    } catch {
+      return [];
+    }
+
+    entries.sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    const nodes: Array<Record<string, unknown>> = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      if (entry.isSymbolicLink) continue;
+
+      const relPath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      const absPath = path.join(absoluteDir, entry.name);
+
+      if (entry.isDirectory) {
+        const children = await scanDir(absPath, relPath, depth + 1);
+        nodes.push({
+          type: 'folder',
+          name: entry.name,
+          path: relPath,
+          children,
+        });
+        continue;
+      }
+
+      if (!entry.isFile || !hasMarkdownExtension(entry.name)) continue;
+      let statSize = 0;
+      let updatedAt = new Date(0).toISOString();
+      let version = 0;
+      try {
+        const stat = await fs.stat(absPath);
+        statSize = stat.size;
+        updatedAt = stat.mtime.toISOString();
+        version = buildVersionFromMtimeMs(stat.mtimeMs);
+      } catch {
+        // Ignore flaky file metadata reads and still list the file.
+      }
+
+      counters.files += 1;
+      nodes.push({
+        type: 'file',
+        name: entry.name,
+        path: relPath,
+        size: statSize,
+        updatedAt,
+        version,
+      });
+      if (counters.files >= MAX_FILES) break;
+    }
+    return nodes;
+  };
+
+  const tree = await scanDir(rootDir, '', 0);
+  const folderSuggestions = new Set<string>(MARKDOWN_SUGGESTED_FOLDERS);
+  for (const node of tree) {
+    if (node.type !== 'folder') continue;
+    if (typeof node.path === 'string' && node.path.trim()) {
+      folderSuggestions.add(node.path);
+    }
+  }
+  return {
+    rootDir,
+    tree,
+    suggestedFolders: Array.from(folderSuggestions).slice(0, 12),
+  };
 }
 
 function parseAgentEventTokenTotalsForDay(
@@ -1715,17 +2318,28 @@ function parseBrowserStateFromMetadata(
   };
 }
 
-function parsePackets(value: unknown): FocusPacket[] {
+function parsePackets(value: unknown, defaultSessionKey?: string): FocusPacket[] {
   // Packets are harness-emitted markdown artifacts used by the frontend focus view.
-  if (!Array.isArray(value)) return [];
+  const rawPackets = Array.isArray(value)
+    ? value
+    : isRecord(value)
+      ? [value]
+      : [];
+  if (rawPackets.length === 0) return [];
   const packets: FocusPacket[] = [];
-  for (const entry of value) {
+  for (const [index, entry] of rawPackets.entries()) {
     if (!isRecord(entry)) continue;
-    const packetId = asString(entry.packetId) ?? asString(entry.id);
-    const sessionKey = asString(entry.sessionKey);
-    const typeRaw = asString(entry.type);
-    const markdown = asString(entry.contentMarkdown) ?? asString(entry.markdown);
-    const createdMs = parseTimestampMs(entry.createdAt ?? entry.created_at ?? entry.timestamp);
+    const createdMs = parseTimestampMs(entry.createdAt ?? entry.created_at ?? entry.timestamp ?? entry.at) ?? 0;
+    const packetId = asString(entry.packetId)
+      ?? asString(entry.packet_id)
+      ?? asString(entry.id)
+      ?? `packet-${createdMs}-${index + 1}`;
+    const sessionKey = asString(entry.sessionKey) ?? asString(entry.session_key) ?? defaultSessionKey;
+    const typeRaw = asString(entry.type) ?? asString(entry.packetType) ?? asString(entry.packet_type) ?? 'session';
+    const markdown =
+      asString(entry.contentMarkdown)
+      ?? asString(entry.content_markdown)
+      ?? asString(entry.markdown);
     if (!packetId || !sessionKey || !typeRaw || !markdown || !createdMs) continue;
 
     const type: FocusPacket['type'] = typeRaw === 'escalation'
@@ -1746,7 +2360,7 @@ function parsePackets(value: unknown): FocusPacket[] {
     packets.push({
       packetId,
       sessionKey,
-      workItemId: asString(entry.workItemId),
+      workItemId: asString(entry.workItemId) ?? asString(entry.work_item_id),
       type,
       createdAt: new Date(createdMs).toISOString(),
       contentMarkdown: markdown,
@@ -2556,6 +3170,11 @@ function getSignalPriority(event: NormalizedSessionEvent): 'high' | 'medium' | '
     const eventType = String(event.payload.eventType ?? '').toLowerCase();
     if (eventType.includes('error') || eventType.includes('fail')) return 'high';
     if (eventType.includes('escalation')) return 'high';
+    // Internal events that should not appear in UI
+    if (eventType === 'llm_call' || eventType === 'hook_call' || eventType === 'iteration_started' || 
+        eventType === 'memory_injected' || eventType.includes('memory') || eventType.includes('inject')) {
+      return 'status';
+    }
     return 'low';
   }
 
@@ -2602,6 +3221,13 @@ function buildSessionEvents(
     const type = asString(entry.type);
     const ts = parseTimestampMs(entry.timestamp);
     if (!type || !ts) continue;
+    
+    // Skip internal events that slow down server and UI
+    if (type === 'llm_call' || type === 'hook_call' || type === 'iteration_started' || 
+        type === 'memory_injected' || (type.includes('memory') && type.includes('inject'))) {
+      continue;
+    }
+    
     const normalizedType = normalizeAgentEventType(type);
     const data = isRecord(entry.data) ? entry.data : {};
     const defaultRole = (type === 'user_message' || type === 'send_text') ? 'user' : 'assistant';
@@ -2784,6 +3410,23 @@ export function handleControlPlaneRequest(
     return true;
   }
 
+  // GET /control-plane/cockpit/rollups/snapshot?sessionLimit=120&escalationLimit=120&repoLimit=50&includeRepo=0|1
+  if (pathname === '/control-plane/cockpit/rollups/snapshot' && req.method === 'GET') {
+    const sessionLimit = parseInt(query.get('sessionLimit') ?? '120', 10);
+    const escalationLimit = parseInt(query.get('escalationLimit') ?? '120', 10);
+    const repoLimit = parseInt(query.get('repoLimit') ?? '50', 10);
+    const includeRepo = query.get('includeRepo') !== '0';
+    const date = query.get('date');
+    void handleGetCockpitRollupSnapshot(res, ctx, {
+      sessionLimit,
+      escalationLimit,
+      repoLimit,
+      includeRepo,
+      date,
+    });
+    return true;
+  }
+
   // GET /control-plane/cockpit/rollups/escalations?status=open
   if (pathname === '/control-plane/cockpit/rollups/escalations' && req.method === 'GET') {
     const status = query.get('status');
@@ -2858,8 +3501,8 @@ export function handleControlPlaneRequest(
     return true;
   }
 
-  // GET /control-plane/cockpit/repo/lens?q=...&kind=all|defs|refs|text&sessionKey=...
-  if (pathname === '/control-plane/cockpit/repo/lens' && req.method === 'GET') {
+  // GET /control-plane/cockpit/repo/lens|grep?q=...&kind=all|defs|refs|text&sessionKey=...
+  if ((pathname === '/control-plane/cockpit/repo/lens' || pathname === '/control-plane/cockpit/repo/grep') && req.method === 'GET') {
     const q = query.get('q');
     const kind = query.get('kind');
     const sessionKey = query.get('sessionKey');
@@ -2892,6 +3535,43 @@ export function handleControlPlaneRequest(
   // POST /control-plane/cockpit/browser/runbook
   if (pathname === '/control-plane/cockpit/browser/runbook' && req.method === 'POST') {
     void handlePostCockpitBrowserRunbook(req, res, ctx);
+    return true;
+  }
+
+  // GET /control-plane/cockpit/markdown/tree
+  if (pathname === '/control-plane/cockpit/markdown/tree' && req.method === 'GET') {
+    void handleGetCockpitMarkdownTree(res, ctx);
+    return true;
+  }
+
+  // GET /control-plane/cockpit/markdown/file?path=...
+  if (pathname === '/control-plane/cockpit/markdown/file' && req.method === 'GET') {
+    const filePath = query.get('path');
+    void handleGetCockpitMarkdownFile(res, ctx, filePath);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/markdown/file
+  if (pathname === '/control-plane/cockpit/markdown/file' && req.method === 'POST') {
+    void handlePostCockpitMarkdownFile(req, res, ctx);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/markdown/folder
+  if (pathname === '/control-plane/cockpit/markdown/folder' && req.method === 'POST') {
+    void handlePostCockpitMarkdownFolder(req, res, ctx);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/markdown/import
+  if (pathname === '/control-plane/cockpit/markdown/import' && req.method === 'POST') {
+    void handlePostCockpitMarkdownImport(req, res, ctx);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/markdown/patch
+  if (pathname === '/control-plane/cockpit/markdown/patch' && req.method === 'POST') {
+    void handlePostCockpitMarkdownPatch(req, res, ctx);
     return true;
   }
 
@@ -2952,6 +3632,18 @@ export function handleControlPlaneRequest(
     return true;
   }
 
+  // GET /control-plane/cockpit/templates
+  if (pathname === '/control-plane/cockpit/templates' && req.method === 'GET') {
+    void handleGetCockpitTemplates(res);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/session/create
+  if (pathname === '/control-plane/cockpit/session/create' && req.method === 'POST') {
+    void handlePostCockpitSessionCreate(req, res, ctx);
+    return true;
+  }
+
   // 404 for unmatched control-plane routes
   sendJson(res, { error: 'Not found' }, 404);
   return true;
@@ -2981,62 +3673,12 @@ function getSession(ctx: ControlPlaneContext, sessionKey: string): SessionRow | 
   return result.session ?? null;
 }
 
-async function handleGetCockpitSessionRollups(
-  res: ServerResponse,
-  ctx: ControlPlaneContext,
-  status: string | null,
-  limit: number
-): Promise<void> {
-  const { sessions, error } = getAllSessions(ctx, Math.max(100, limit));
-  if (error) {
-    sendJson(res, { rollups: [], error });
-    return;
-  }
-
-  const traces = await loadTraceRecords(ctx.workingDir, Math.max(200, limit * 3));
-  const traceMap = new Map<string, TraceSummary>();
-  for (const session of sessions) {
-    traceMap.set(session.sessionKey, buildTraceSummary(session.sessionKey, traces));
-  }
-  const testReports = await loadLatestTestReports(sessions.map((session) => session.sessionKey));
-  const diffstatsBySession = await loadSessionDiffstats(sessions);
-
-  const filtered = buildSessionRollups(sessions, traceMap, testReports, diffstatsBySession)
-    .filter((rollup) => !status || rollup.status === status)
-    .slice(0, limit);
-
-  sendJson(res, { rollups: filtered, total: filtered.length });
+function clampInteger(value: number, fallback: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
-function handleGetCockpitEscalationRollups(
-  res: ServerResponse,
-  ctx: ControlPlaneContext,
-  status: string | null,
-  limit: number
-): void {
-  const { sessions, error } = getAllSessions(ctx, 1000);
-  if (error) {
-    sendJson(res, { rollups: [], error });
-    return;
-  }
-
-  const rollups = buildEscalationRollups(sessions)
-    .filter((rollup) => !status || status === 'open')
-    .slice(0, limit);
-  sendJson(res, { rollups, total: rollups.length });
-}
-
-async function handleGetCockpitCommitRollups(
-  res: ServerResponse,
-  ctx: ControlPlaneContext,
-  limit: number
-): Promise<void> {
-  const { sessions, error } = getAllSessions(ctx, 1000);
-  if (error) {
-    sendJson(res, { rollups: [], error });
-    return;
-  }
-
+function groupSessionsByWorkingDir(sessions: SessionRow[]): Map<string, SessionRow[]> {
   const sessionsByWorkingDir = new Map<string, SessionRow[]>();
   for (const session of sessions) {
     if (!session.workingDir) continue;
@@ -3044,13 +3686,17 @@ async function handleGetCockpitCommitRollups(
     list.push(session);
     sessionsByWorkingDir.set(session.workingDir, list);
   }
-
   for (const list of sessionsByWorkingDir.values()) {
     list.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
   }
+  return sessionsByWorkingDir;
+}
 
+async function collectCommitRollups(sessions: SessionRow[], limit: number): Promise<CommitRollup[]> {
+  const sessionsByWorkingDir = groupSessionsByWorkingDir(sessions);
   const rollups: CommitRollup[] = [];
   const perRepoLimit = Math.max(10, Math.min(limit, 100));
+
   for (const [projectPath, repoSessions] of sessionsByWorkingDir.entries()) {
     try {
       const stdout = await execFileText(
@@ -3088,33 +3734,17 @@ async function handleGetCockpitCommitRollups(
   }
 
   rollups.sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
-  sendJson(res, { rollups: rollups.slice(0, limit), total: rollups.length });
+  return rollups.slice(0, limit);
 }
 
-async function handleGetCockpitPRRollups(
-  res: ServerResponse,
-  ctx: ControlPlaneContext,
+async function collectPRRollups(
+  sessions: SessionRow[],
   status: string | null,
   limit: number
-): Promise<void> {
-  const { sessions, error } = getAllSessions(ctx, 1000);
-  if (error) {
-    sendJson(res, { rollups: [], error });
-    return;
-  }
-
-  const sessionsByWorkingDir = new Map<string, SessionRow[]>();
-  for (const session of sessions) {
-    if (!session.workingDir) continue;
-    const list = sessionsByWorkingDir.get(session.workingDir) ?? [];
-    list.push(session);
-    sessionsByWorkingDir.set(session.workingDir, list);
-  }
-  for (const list of sessionsByWorkingDir.values()) {
-    list.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
-  }
-
+): Promise<PRRollup[]> {
+  const sessionsByWorkingDir = groupSessionsByWorkingDir(sessions);
   const rollups: PRRollup[] = [];
+
   for (const [projectPath, repoSessions] of sessionsByWorkingDir.entries()) {
     try {
       const remote = await getGitRemote(projectPath);
@@ -3143,30 +3773,41 @@ async function handleGetCockpitPRRollups(
   }
 
   rollups.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-  sendJson(res, { rollups: rollups.slice(0, limit), total: rollups.length });
+  return rollups.slice(0, limit);
 }
 
-async function handleGetCockpitDailyMetrics(
-  res: ServerResponse,
+interface CockpitDailyMetricsResult {
+  date: string;
+  metrics: {
+    tokens: number;
+    locTouched: number;
+    commits: number;
+    prs: number;
+    tests: number;
+    sessions: {
+      running: number;
+      ready: number;
+      done: number;
+    };
+    escalationsOpen: number;
+  } | null;
+  error?: string;
+}
+
+async function computeCockpitDailyMetrics(
   ctx: ControlPlaneContext,
+  sessions: SessionRow[],
   dateParam: string | null
-): Promise<void> {
+): Promise<CockpitDailyMetricsResult> {
   const day = dateParam ?? new Date().toISOString().slice(0, 10);
   const start = new Date(`${day}T00:00:00`);
   if (Number.isNaN(start.getTime())) {
-    sendJson(res, { error: `Invalid date: ${day}` }, 400);
-    return;
+    return { date: day, metrics: null, error: `Invalid date: ${day}` };
   }
   const end = new Date(start);
   end.setDate(end.getDate() + 1);
   const startMs = start.getTime();
   const endMs = end.getTime();
-
-  const { sessions, error } = getAllSessions(ctx, 1000);
-  if (error) {
-    sendJson(res, { date: day, metrics: null, error });
-    return;
-  }
 
   const traces = await loadTraceRecords(ctx.workingDir, 500);
   const traceInDay = traces.filter((trace) => {
@@ -3183,8 +3824,8 @@ async function handleGetCockpitDailyMetrics(
     const files = Array.isArray(trace.files) ? trace.files : [];
     for (const file of files) {
       if (!isRecord(file)) continue;
-      const path = asString(file.path);
-      if (path) touchedFiles.add(path);
+      const p = asString(file.path);
+      if (p) touchedFiles.add(p);
     }
   }
 
@@ -3216,7 +3857,7 @@ async function handleGetCockpitDailyMetrics(
   const ready = rollups.filter((item) => item.status === 'ready').length;
   const done = rollups.filter((item) => item.status === 'done' || item.status === 'stopped').length;
 
-  sendJson(res, {
+  return {
     date: day,
     metrics: {
       tokens: totalTokens,
@@ -3231,7 +3872,238 @@ async function handleGetCockpitDailyMetrics(
       },
       escalationsOpen: buildEscalationRollups(sessions).length,
     },
-  });
+  };
+}
+
+interface CockpitRollupSnapshotResult {
+  runningSessions: SessionRollup[];
+  readySessions: SessionRollup[];
+  doneSessions: SessionRollup[];
+  escalations: EscalationRollup[];
+  commitRollups: CommitRollup[];
+  prRollups: PRRollup[];
+  metrics: CockpitDailyMetricsResult['metrics'];
+  metricsDate: string;
+  generatedAt: string;
+  error?: string;
+}
+
+async function buildCockpitRollupSnapshot(
+  ctx: ControlPlaneContext,
+  options: {
+    sessionLimit: number;
+    escalationLimit: number;
+    repoLimit: number;
+    includeRepo: boolean;
+    date: string | null;
+  }
+): Promise<CockpitRollupSnapshotResult> {
+  const sessionLimit = clampInteger(options.sessionLimit, 120, 10, 500);
+  const escalationLimit = clampInteger(options.escalationLimit, 120, 10, 500);
+  const repoLimit = clampInteger(options.repoLimit, 50, 5, 200);
+
+  const { sessions, error } = getAllSessions(ctx, 1000);
+  if (error) {
+    const metrics = await computeCockpitDailyMetrics(ctx, [], options.date);
+    return {
+      runningSessions: [],
+      readySessions: [],
+      doneSessions: [],
+      escalations: [],
+      commitRollups: [],
+      prRollups: [],
+      metrics: metrics.metrics,
+      metricsDate: metrics.date,
+      generatedAt: new Date().toISOString(),
+      error,
+    };
+  }
+
+  const traces = await loadTraceRecords(ctx.workingDir, Math.max(300, sessionLimit * 4));
+  const traceMap = new Map<string, TraceSummary>();
+  for (const session of sessions) {
+    traceMap.set(session.sessionKey, buildTraceSummary(session.sessionKey, traces));
+  }
+
+  const [testReports, diffstatsBySession, metrics] = await Promise.all([
+    loadLatestTestReports(sessions.map((session) => session.sessionKey)),
+    loadSessionDiffstats(sessions),
+    computeCockpitDailyMetrics(ctx, sessions, options.date),
+  ]);
+
+  const allRollups = buildSessionRollups(sessions, traceMap, testReports, diffstatsBySession);
+  const runningSessions = allRollups
+    .filter((rollup) => rollup.status === 'running' || rollup.status === 'blocked')
+    .slice(0, sessionLimit);
+  const readySessions = allRollups
+    .filter((rollup) => rollup.status === 'ready')
+    .slice(0, sessionLimit);
+  const doneSessions = allRollups
+    .filter((rollup) => rollup.status === 'done' || rollup.status === 'stopped')
+    .slice(0, sessionLimit);
+  const escalations = buildEscalationRollups(sessions).slice(0, escalationLimit);
+
+  const [commitRollups, prRollups] = options.includeRepo
+    ? await Promise.all([
+      collectCommitRollups(sessions, repoLimit),
+      collectPRRollups(sessions, 'open', repoLimit),
+    ])
+    : [[], []];
+
+  return {
+    runningSessions,
+    readySessions,
+    doneSessions,
+    escalations,
+    commitRollups,
+    prRollups,
+    metrics: metrics.metrics,
+    metricsDate: metrics.date,
+    generatedAt: new Date().toISOString(),
+    ...(metrics.error ? { error: metrics.error } : {}),
+  };
+}
+
+async function handleGetCockpitSessionRollups(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  status: string | null,
+  limit: number
+): Promise<void> {
+  const { sessions, error } = getAllSessions(ctx, Math.max(100, limit));
+  if (error) {
+    sendJson(res, { rollups: [], error });
+    return;
+  }
+
+  const traces = await loadTraceRecords(ctx.workingDir, Math.max(200, limit * 3));
+  const traceMap = new Map<string, TraceSummary>();
+  for (const session of sessions) {
+    traceMap.set(session.sessionKey, buildTraceSummary(session.sessionKey, traces));
+  }
+  const testReports = await loadLatestTestReports(sessions.map((session) => session.sessionKey));
+  const diffstatsBySession = await loadSessionDiffstats(sessions);
+
+  const filtered = buildSessionRollups(sessions, traceMap, testReports, diffstatsBySession)
+    .filter((rollup) => !status || rollup.status === status)
+    .slice(0, limit);
+
+  sendJson(res, { rollups: filtered, total: filtered.length });
+}
+
+async function handleGetCockpitRollupSnapshot(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  options: {
+    sessionLimit: number;
+    escalationLimit: number;
+    repoLimit: number;
+    includeRepo: boolean;
+    date: string | null;
+  }
+): Promise<void> {
+  try {
+    const cacheKey = [
+      ctx.workingDir,
+      options.sessionLimit,
+      options.escalationLimit,
+      options.repoLimit,
+      options.includeRepo ? 'repo:1' : 'repo:0',
+      options.date ?? '',
+    ].join('|');
+    const now = Date.now();
+    if (cockpitSnapshotCache && cockpitSnapshotCache.key === cacheKey && cockpitSnapshotCache.expiresAt > now) {
+      sendJson(res, cockpitSnapshotCache.data);
+      return;
+    }
+
+    const snapshot = await buildCockpitRollupSnapshot(ctx, options);
+    cockpitSnapshotCache = {
+      key: cacheKey,
+      expiresAt: now + COCKPIT_SNAPSHOT_CACHE_TTL_MS,
+      data: snapshot,
+    };
+    sendJson(res, snapshot);
+  } catch (error) {
+    sendJson(res, {
+      runningSessions: [],
+      readySessions: [],
+      doneSessions: [],
+      escalations: [],
+      commitRollups: [],
+      prRollups: [],
+      metrics: null,
+      metricsDate: new Date().toISOString().slice(0, 10),
+      generatedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+}
+
+function handleGetCockpitEscalationRollups(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  status: string | null,
+  limit: number
+): void {
+  const { sessions, error } = getAllSessions(ctx, 1000);
+  if (error) {
+    sendJson(res, { rollups: [], error });
+    return;
+  }
+
+  const rollups = buildEscalationRollups(sessions)
+    .filter((rollup) => !status || status === 'open')
+    .slice(0, limit);
+  sendJson(res, { rollups, total: rollups.length });
+}
+
+async function handleGetCockpitCommitRollups(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  limit: number
+): Promise<void> {
+  const { sessions, error } = getAllSessions(ctx, 1000);
+  if (error) {
+    sendJson(res, { rollups: [], error });
+    return;
+  }
+  const rollups = await collectCommitRollups(sessions, clampInteger(limit, 50, 1, 200));
+  sendJson(res, { rollups, total: rollups.length });
+}
+
+async function handleGetCockpitPRRollups(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  status: string | null,
+  limit: number
+): Promise<void> {
+  const { sessions, error } = getAllSessions(ctx, 1000);
+  if (error) {
+    sendJson(res, { rollups: [], error });
+    return;
+  }
+  const rollups = await collectPRRollups(sessions, status, clampInteger(limit, 50, 1, 200));
+  sendJson(res, { rollups, total: rollups.length });
+}
+
+async function handleGetCockpitDailyMetrics(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  dateParam: string | null
+): Promise<void> {
+  const { sessions, error } = getAllSessions(ctx, 1000);
+  if (error) {
+    const day = dateParam ?? new Date().toISOString().slice(0, 10);
+    sendJson(res, { date: day, metrics: null, error });
+    return;
+  }
+  const metrics = await computeCockpitDailyMetrics(ctx, sessions, dateParam);
+  if (metrics.error) {
+    sendJson(res, { date: metrics.date, metrics: metrics.metrics, error: metrics.error }, 400);
+    return;
+  }
+  sendJson(res, metrics);
 }
 
 async function handleGetCockpitFocus(
@@ -3246,14 +4118,8 @@ async function handleGetCockpitFocus(
     return;
   }
 
-  const { sessions, error } = getAllSessions(ctx, 1000);
-  if (error) {
-    sendJson(res, { error }, 500);
-    return;
-  }
-
   if (focusType === 'session') {
-    const session = sessions.find((entry) => entry.sessionKey === id);
+    const session = getSession(ctx, id);
     if (!session) {
       sendJson(res, { error: 'Session not found' }, 404);
       return;
@@ -3266,7 +4132,7 @@ async function handleGetCockpitFocus(
     const testReports = await loadLatestTestReports([session.sessionKey]);
     const diffstatsBySession = await loadSessionDiffstats([session]);
     const rollup = buildSessionRollups([session], traceMap, testReports, diffstatsBySession)[0];
-    const sessionPackets = parsePackets(session.metadata?.packets);
+    const sessionPackets = parsePackets(session.metadata?.packets, session.sessionKey);
     const unresolved = unresolvedEscalations(session).sort((a, b) => b.createdAt - a.createdAt);
     const selectedPacket = packetId
       ? sessionPackets.find((packet) => packet.packetId === packetId) ?? null
@@ -3293,6 +4159,7 @@ async function handleGetCockpitFocus(
           tests: `/control-plane/cockpit/tests?sessionKey=${encodeURIComponent(session.sessionKey)}`,
           diff: `/control-plane/cockpit/diff?sessionKey=${encodeURIComponent(session.sessionKey)}`,
           repoLens: `/control-plane/cockpit/repo/lens?sessionKey=${encodeURIComponent(session.sessionKey)}&q=`,
+          repoGrep: `/control-plane/cockpit/repo/grep?sessionKey=${encodeURIComponent(session.sessionKey)}&q=`,
         },
       },
     });
@@ -3300,18 +4167,25 @@ async function handleGetCockpitFocus(
   }
 
   if (focusType === 'escalation') {
+    const { sessions, error } = getAllSessions(ctx, 1000);
+    if (error) {
+      sendJson(res, { error }, 500);
+      return;
+    }
+
     const ownerSession = sessions.find((session) => getEscalations(session).some((item) => item.id === id));
     if (!ownerSession) {
       sendJson(res, { error: 'Escalation not found' }, 404);
       return;
     }
-    const escalation = getEscalations(ownerSession).find((item) => item.id === id);
+    const fullOwnerSession = getSession(ctx, ownerSession.sessionKey) ?? ownerSession;
+    const escalation = getEscalations(fullOwnerSession).find((item) => item.id === id);
     if (!escalation) {
       sendJson(res, { error: 'Escalation not found' }, 404);
       return;
     }
 
-    const sessionPackets = parsePackets(ownerSession.metadata?.packets);
+    const sessionPackets = parsePackets(fullOwnerSession.metadata?.packets, fullOwnerSession.sessionKey);
     const selectedPacket = packetId
       ? sessionPackets.find((packet) => packet.packetId === packetId) ?? null
       : sessionPackets[0] ?? null;
@@ -3336,6 +4210,7 @@ async function handleGetCockpitFocus(
           tests: `/control-plane/cockpit/tests?sessionKey=${encodeURIComponent(escalation.sessionKey)}`,
           diff: `/control-plane/cockpit/diff?sessionKey=${encodeURIComponent(escalation.sessionKey)}`,
           repoLens: `/control-plane/cockpit/repo/lens?sessionKey=${encodeURIComponent(escalation.sessionKey)}&q=`,
+          repoGrep: `/control-plane/cockpit/repo/grep?sessionKey=${encodeURIComponent(escalation.sessionKey)}&q=`,
         },
       },
     });
@@ -3445,6 +4320,87 @@ async function resolveDiffRange(
   };
 }
 
+async function resolveRepoHeadRange(
+  workingDir: string,
+  headCandidate?: string
+): Promise<{ baseSha: string; headSha: string; source: 'git-parent' | 'unknown' } | null> {
+  let headSha = headCandidate;
+  if (!headSha) {
+    try {
+      headSha = asString(await execFileText('git', ['rev-parse', 'HEAD'], {
+        cwd: workingDir,
+        timeout: 10_000,
+      }));
+    } catch {
+      return null;
+    }
+  }
+  if (!headSha) return null;
+
+  try {
+    const parent = await execFileText('git', ['rev-parse', `${headSha}^`], {
+      cwd: workingDir,
+      timeout: 10_000,
+    });
+    const parentSha = parent.trim();
+    if (parentSha) {
+      return { baseSha: parentSha, headSha, source: 'git-parent' };
+    }
+  } catch {
+    // Root commit or no parent; fall back to a zero-diff range.
+  }
+
+  return { baseSha: headSha, headSha, source: 'unknown' };
+}
+
+async function resolveWorkingTreeDiff(
+  workingDir: string,
+  file?: string
+): Promise<{
+  baseSha: string;
+  headSha: string;
+  source: 'working-tree';
+  summary: { added: number; deleted: number; filesTouched: number };
+  hotspots: DiffHotspot[];
+  patch: string | null;
+} | null> {
+  try {
+    const headSha = (await execFileText('git', ['rev-parse', 'HEAD'], {
+      cwd: workingDir,
+      timeout: 10_000,
+    })).trim();
+    if (!headSha) return null;
+
+    const numstat = await execFileText(
+      'git',
+      ['diff', '--numstat', '--no-color', 'HEAD'],
+      { cwd: workingDir, timeout: 20_000, maxBuffer: 8 * 1024 * 1024 }
+    );
+    const { summary, hotspots } = parseNumstatOutput(numstat);
+
+    let patch: string | null = null;
+    if (file) {
+      const diffOut = await execFileText(
+        'git',
+        ['diff', '--no-color', '--unified=3', 'HEAD', '--', file],
+        { cwd: workingDir, timeout: 20_000, maxBuffer: 8 * 1024 * 1024 }
+      );
+      patch = diffOut.length > 500_000 ? `${diffOut.slice(0, 500_000)}\n\n... (truncated)` : diffOut;
+    }
+
+    return {
+      baseSha: headSha,
+      headSha,
+      source: 'working-tree',
+      summary,
+      hotspots: hotspots.slice(0, 100),
+      patch,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function handleGetCockpitDiff(
   res: ServerResponse,
   ctx: ControlPlaneContext,
@@ -3454,19 +4410,43 @@ async function handleGetCockpitDiff(
   fileRaw: string | null
 ): Promise<void> {
   const file = asString(fileRaw);
+  const hasExplicitRange = !!(asString(baseRaw) || asString(headRaw));
   const session = sessionKey ? getSession(ctx, sessionKey) : null;
   if (sessionKey && !session) {
     sendJson(res, { error: 'Session not found' }, 404);
     return;
   }
   const workingDir = session?.workingDir ?? ctx.workingDir;
-  const range = await resolveDiffRange(session, workingDir, baseRaw, headRaw);
+  let range = await resolveDiffRange(session, workingDir, baseRaw, headRaw);
+
+  if ((!range.baseSha || !range.headSha) && !hasExplicitRange) {
+    const workingTree = await resolveWorkingTreeDiff(workingDir, file ?? undefined);
+    if (workingTree) {
+      sendJson(res, workingTree);
+      return;
+    }
+  }
+
   if (!range.baseSha || !range.headSha) {
-    sendJson(
-      res,
-      { error: 'Missing diff range. Provide base/head or ensure session has commit history.' },
-      400
-    );
+    const fallbackRange = await resolveRepoHeadRange(workingDir, range.headSha);
+    if (fallbackRange) {
+      range = {
+        baseSha: fallbackRange.baseSha,
+        headSha: fallbackRange.headSha,
+        source: range.source === 'unknown' ? fallbackRange.source : range.source,
+      };
+    }
+  }
+  if (!range.baseSha || !range.headSha) {
+    sendJson(res, {
+      baseSha: '',
+      headSha: '',
+      source: 'unknown',
+      summary: { added: 0, deleted: 0, filesTouched: 0 },
+      hotspots: [],
+      patch: null,
+      warning: 'Missing diff range. Provide base/head or ensure session has commit history.',
+    });
     return;
   }
 
@@ -3711,7 +4691,7 @@ async function handleGetCockpitRepoLens(
   } catch (error) {
     sendJson(
       res,
-      { error: `Repo lens query failed: ${error instanceof Error ? error.message : String(error)}` },
+      { error: `Repo grep query failed: ${error instanceof Error ? error.message : String(error)}` },
       500
     );
   }
@@ -4099,6 +5079,423 @@ async function handlePostCockpitBrowserRunbook(
   });
 }
 
+async function handleGetCockpitMarkdownTree(
+  res: ServerResponse,
+  ctx: ControlPlaneContext
+): Promise<void> {
+  try {
+    const data = await buildCockpitMarkdownWorkspaceTree(ctx);
+    sendJson(res, {
+      rootDir: MARKDOWN_WORKSPACE_DIR,
+      tree: data.tree,
+      suggestedFolders: data.suggestedFolders,
+    });
+  } catch (error) {
+    sendJson(
+      res,
+      { error: `Failed to load markdown tree: ${error instanceof Error ? error.message : String(error)}` },
+      500
+    );
+  }
+}
+
+async function handleGetCockpitMarkdownFile(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  rawPath: string | null
+): Promise<void> {
+  const filePath = asString(rawPath);
+  if (!filePath) {
+    sendJson(res, { error: 'Missing required query parameter: path' }, 400);
+    return;
+  }
+
+  const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, filePath, { requireMarkdownFile: true });
+  if ('error' in resolved) {
+    sendJson(res, { error: resolved.error }, 400);
+    return;
+  }
+
+  try {
+    const fs = await import('fs/promises');
+    const [content, stat, metadata] = await Promise.all([
+      fs.readFile(resolved.absolutePath, 'utf8'),
+      fs.stat(resolved.absolutePath),
+      readMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath),
+    ]);
+    const record = await buildMarkdownWorkspaceFileRecord(
+      resolved.rootDir,
+      resolved.relativePath,
+      content,
+      stat,
+      metadata,
+    );
+    res.setHeader('ETag', record.etag);
+    sendJson(res, {
+      file: { ...record, content },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.toLowerCase().includes('enoent')) {
+      sendJson(res, { error: `Markdown file not found: ${resolved.relativePath}` }, 404);
+      return;
+    }
+    sendJson(res, { error: `Failed to read markdown file: ${message}` }, 500);
+  }
+}
+
+async function handlePostCockpitMarkdownFile(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const filePath = asString(body.path) ?? asString(body.filePath);
+  if (!filePath) {
+    sendJson(res, { success: false, error: 'Missing required field: path' }, 400);
+    return;
+  }
+  const content = typeof body.content === 'string'
+    ? body.content
+    : typeof body.markdown === 'string'
+      ? body.markdown
+      : '';
+  const expectedVersion = asNumber(body.expectedVersion);
+  const metadata = sanitizeMarkdownMetadata(body.metadata);
+
+  const result = await writeCockpitMarkdownWorkspaceFile(ctx, {
+    path: filePath,
+    content,
+    ...(typeof expectedVersion === 'number' ? { expectedVersion } : {}),
+    ...(metadata ? { metadata } : {}),
+    ...(asString(body.source) ? { source: asString(body.source) } : {}),
+    operation: 'write',
+  });
+  if (!result.ok) {
+    sendJson(
+      res,
+      {
+        success: false,
+        error: result.error,
+        ...(typeof result.currentVersion === 'number' ? { currentVersion: result.currentVersion } : {}),
+        ...(result.currentUpdatedAt ? { currentUpdatedAt: result.currentUpdatedAt } : {}),
+        ...(result.currentHash ? { currentHash: result.currentHash } : {}),
+      },
+      result.status
+    );
+    return;
+  }
+
+  sendJson(
+    res,
+    {
+      success: true,
+      created: result.created,
+      previousVersion: result.previousVersion,
+      file: result.file,
+    },
+    result.created ? 201 : 200
+  );
+}
+
+async function handlePostCockpitMarkdownFolder(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const rawPath = asString(body.path)
+    ?? (
+      asString(body.parentPath) && asString(body.name)
+        ? `${asString(body.parentPath)}/${asString(body.name)}`
+        : undefined
+    );
+  if (!rawPath) {
+    sendJson(res, { success: false, error: 'Missing required field: path' }, 400);
+    return;
+  }
+  const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, rawPath, { allowEmpty: false });
+  if ('error' in resolved) {
+    sendJson(res, { success: false, error: resolved.error }, 400);
+    return;
+  }
+  try {
+    const fs = await import('fs/promises');
+    await fs.mkdir(resolved.absolutePath, { recursive: true });
+    sendJson(res, { success: true, folder: { path: resolved.relativePath } }, 201);
+  } catch (error) {
+    sendJson(
+      res,
+      { success: false, error: `Failed creating folder: ${error instanceof Error ? error.message : String(error)}` },
+      500
+    );
+  }
+}
+
+async function handlePostCockpitMarkdownImport(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const sourceSessionKey = asString(body.sessionKey);
+  const sourceContent = typeof body.content === 'string'
+    ? body.content
+    : typeof body.markdown === 'string'
+      ? body.markdown
+      : null;
+
+  let markdownContent = sourceContent;
+  let sourcePath: string | undefined;
+  if (!markdownContent) {
+    const markdownPath = asString(body.markdownPath) ?? asString(body.sourcePath) ?? asString(body.filePath);
+    if (!sourceSessionKey || !markdownPath) {
+      sendJson(
+        res,
+        { success: false, error: 'Provide content or provide sessionKey + markdownPath for markdown import' },
+        400
+      );
+      return;
+    }
+    const session = getSession(ctx, sourceSessionKey);
+    if (!session) {
+      sendJson(res, { success: false, error: `Session not found: ${sourceSessionKey}` }, 404);
+      return;
+    }
+    const resolved = await resolveSessionFilePath(session.workingDir ?? ctx.workingDir, markdownPath);
+    if (!resolved.resolvedPath || resolved.error) {
+      sendJson(res, { success: false, error: resolved.error ?? 'Invalid markdownPath for source session' }, 400);
+      return;
+    }
+    try {
+      const fs = await import('fs/promises');
+      markdownContent = await fs.readFile(resolved.resolvedPath, 'utf8');
+      sourcePath = resolved.relativePath;
+    } catch (error) {
+      sendJson(
+        res,
+        { success: false, error: `Failed reading source markdownPath: ${error instanceof Error ? error.message : String(error)}` },
+        400
+      );
+      return;
+    }
+  }
+
+  if (!markdownContent) {
+    sendJson(res, { success: false, error: 'No markdown content provided' }, 400);
+    return;
+  }
+
+  const path = await import('path');
+  const destinationFolder = normalizeWorkspaceRelativePath(
+    asString(body.folder) ?? asString(body.directory) ?? 'packets',
+    { allowEmpty: true }
+  );
+  if (destinationFolder === null) {
+    sendJson(res, { success: false, error: 'Invalid destination folder' }, 400);
+    return;
+  }
+
+  const desiredPath = asString(body.destinationPath) ?? asString(body.path);
+  const destinationPath = desiredPath
+    ? ensureMarkdownExtensionOnPath(desiredPath)
+    : `${destinationFolder ? `${destinationFolder}/` : ''}${ensureMarkdownFileName(
+      asString(body.filename)
+      ?? (sourcePath ? path.basename(sourcePath) : `import-${Date.now()}.md`)
+    )}`;
+  if (!destinationPath) {
+    sendJson(res, { success: false, error: 'Invalid destination markdown path' }, 400);
+    return;
+  }
+
+  const expectedVersion = asNumber(body.expectedVersion);
+  const metadata = sanitizeMarkdownMetadata(body.metadata);
+  const importMetadata = sanitizeMarkdownMetadata({
+    ...(metadata ?? {}),
+    ...(sourcePath ? { sourcePath } : {}),
+    ...(sourceSessionKey ? { sourceSessionKey } : {}),
+    importAt: new Date().toISOString(),
+  });
+  const writeResult = await writeCockpitMarkdownWorkspaceFile(ctx, {
+    path: destinationPath,
+    content: markdownContent,
+    ...(typeof expectedVersion === 'number' ? { expectedVersion } : {}),
+    ...(importMetadata ? { metadata: importMetadata } : {}),
+    ...(asString(body.source) ? { source: asString(body.source) } : { source: 'import' }),
+    operation: 'import',
+  });
+
+  if (!writeResult.ok) {
+    sendJson(
+      res,
+      {
+        success: false,
+        error: writeResult.error,
+        ...(typeof writeResult.currentVersion === 'number' ? { currentVersion: writeResult.currentVersion } : {}),
+        ...(writeResult.currentHash ? { currentHash: writeResult.currentHash } : {}),
+      },
+      writeResult.status
+    );
+    return;
+  }
+
+  sendJson(
+    res,
+    {
+      success: true,
+      created: writeResult.created,
+      previousVersion: writeResult.previousVersion,
+      file: writeResult.file,
+      ...(sourcePath ? { sourcePath } : {}),
+    },
+    writeResult.created ? 201 : 200
+  );
+}
+
+async function handlePostCockpitMarkdownPatch(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const filePath = asString(body.path) ?? asString(body.filePath);
+  if (!filePath) {
+    sendJson(res, { success: false, error: 'Missing required field: path' }, 400);
+    return;
+  }
+  const expectedVersionRaw = asNumber(body.expectedVersion ?? body.baseVersion);
+  if (expectedVersionRaw === undefined) {
+    sendJson(res, { success: false, error: 'Missing required field: expectedVersion' }, 400);
+    return;
+  }
+  const expectedVersion = Math.max(0, Math.floor(expectedVersionRaw));
+
+  const fullContent = typeof body.content === 'string'
+    ? body.content
+    : typeof body.markdown === 'string'
+      ? body.markdown
+      : undefined;
+  const patch = typeof body.patch === 'string' ? body.patch : undefined;
+  const edits = parseMarkdownPatchEdits(body.edits);
+  const modeCount = (typeof fullContent === 'string' ? 1 : 0) + (patch ? 1 : 0) + (edits.length > 0 ? 1 : 0);
+  if (modeCount !== 1) {
+    sendJson(res, {
+      success: false,
+      error: 'Provide exactly one markdown patch mode: content, patch, or edits',
+    }, 400);
+    return;
+  }
+
+  const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, filePath, { requireMarkdownFile: true });
+  if ('error' in resolved) {
+    sendJson(res, { success: false, error: resolved.error }, 400);
+    return;
+  }
+
+  const fs = await import('fs/promises');
+  let currentContent = '';
+  let currentStat: { mtimeMs: number; mtime: Date; size: number } | null = null;
+  try {
+    const [content, stat] = await Promise.all([
+      fs.readFile(resolved.absolutePath, 'utf8'),
+      fs.stat(resolved.absolutePath),
+    ]);
+    currentContent = content;
+    currentStat = stat;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.toLowerCase().includes('enoent')) {
+      sendJson(res, { success: false, error: `Markdown file not found: ${resolved.relativePath}` }, 404);
+      return;
+    }
+    sendJson(res, { success: false, error: `Failed reading markdown file: ${message}` }, 500);
+    return;
+  }
+
+  const currentVersion = buildVersionFromMtimeMs(currentStat.mtimeMs);
+  if (currentVersion !== expectedVersion) {
+    const currentHash = await buildMarkdownContentHash(currentContent);
+    sendJson(res, {
+      success: false,
+      error: 'Version conflict while applying markdown patch',
+      currentVersion,
+      currentUpdatedAt: currentStat.mtime.toISOString(),
+      currentHash,
+    }, 409);
+    return;
+  }
+
+  let nextContent = currentContent;
+  let changedLines = 0;
+  let mode: 'content' | 'patch' | 'edits' = 'content';
+  if (typeof fullContent === 'string') {
+    nextContent = fullContent;
+    mode = 'content';
+    changedLines = Math.max(
+      buildMarkdownLineCount(currentContent),
+      buildMarkdownLineCount(nextContent),
+    );
+  } else if (patch) {
+    const result = await applyMarkdownUnifiedDiffPatch(resolved.relativePath, currentContent, patch);
+    if (!result.ok) {
+      sendJson(res, { success: false, error: result.error }, result.status);
+      return;
+    }
+    nextContent = result.content;
+    changedLines = result.changedLines;
+    mode = 'patch';
+  } else {
+    const result = applyMarkdownStructuredEdits(currentContent, edits);
+    if (!result.ok) {
+      sendJson(res, { success: false, error: result.error }, result.status);
+      return;
+    }
+    nextContent = result.content;
+    changedLines = result.changedLines;
+    mode = 'edits';
+  }
+
+  if (Buffer.byteLength(nextContent, 'utf8') > MARKDOWN_MAX_BYTES) {
+    sendJson(res, { success: false, error: `Markdown payload exceeds ${MARKDOWN_MAX_BYTES} bytes` }, 400);
+    return;
+  }
+
+  const metadata = sanitizeMarkdownMetadata(body.metadata);
+  const writeResult = await writeCockpitMarkdownWorkspaceFile(ctx, {
+    path: resolved.relativePath,
+    content: nextContent,
+    expectedVersion,
+    ...(metadata ? {
+      metadata: sanitizeMarkdownMetadata({
+        ...metadata,
+        patchMode: mode,
+        changedLines,
+      }) ?? metadata,
+    } : {}),
+    ...(asString(body.source) ? { source: asString(body.source) } : { source: 'patch' }),
+    operation: 'patch',
+    baseVersion: expectedVersion,
+  });
+  if (!writeResult.ok) {
+    sendJson(res, {
+      success: false,
+      error: writeResult.error,
+      ...(typeof writeResult.currentVersion === 'number' ? { currentVersion: writeResult.currentVersion } : {}),
+      ...(writeResult.currentUpdatedAt ? { currentUpdatedAt: writeResult.currentUpdatedAt } : {}),
+      ...(writeResult.currentHash ? { currentHash: writeResult.currentHash } : {}),
+    }, writeResult.status);
+    return;
+  }
+
+  sendJson(res, {
+    success: true,
+    mode,
+    changedLines,
+    previousVersion: writeResult.previousVersion,
+    file: writeResult.file,
+  });
+}
+
 function handleGetCockpitSessionEvents(
   res: ServerResponse,
   ctx: ControlPlaneContext,
@@ -4140,7 +5537,7 @@ function handleGetCockpitSessionPackets(
     return;
   }
 
-  const packets = parsePackets(session.metadata?.packets);
+  const packets = parsePackets(session.metadata?.packets, session.sessionKey);
   // Do not synthesize packets server-side; return only harness-provided packet markdown.
   sendJson(res, { packets: packets.slice(0, limit) });
 }
@@ -4295,6 +5692,138 @@ async function handleResolveCockpitEscalation(
   });
 }
 
+async function buildMarkdownMessageContext(
+  ctx: ControlPlaneContext,
+  value: unknown
+): Promise<
+  | {
+      ok: true;
+      contextText?: string;
+      contextMetadata?: Record<string, unknown>;
+    }
+  | { ok: false; status: number; error: string }
+> {
+  if (!isRecord(value)) return { ok: true };
+
+  const rawPath = asString(value.path) ?? asString(value.markdownPath) ?? asString(value.filePath);
+  let content = typeof value.content === 'string'
+    ? value.content
+    : typeof value.markdown === 'string'
+      ? value.markdown
+      : undefined;
+  if (!rawPath && content === undefined) return { ok: true };
+
+  let resolvedPath: string | undefined;
+  let resolvedVersion: number | undefined = asNumber(value.version);
+  let resolvedUpdatedAt: string | undefined = asString(value.updatedAt);
+  let resolvedMetadata: Record<string, unknown> | undefined;
+
+  if (rawPath) {
+    const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, rawPath, { requireMarkdownFile: true });
+    if ('error' in resolved) {
+      return { ok: false, status: 400, error: resolved.error };
+    }
+    resolvedPath = resolved.relativePath;
+    try {
+      const fs = await import('fs/promises');
+      const [stat, persistedContent, persistedMetadata] = await Promise.all([
+        fs.stat(resolved.absolutePath),
+        content === undefined ? fs.readFile(resolved.absolutePath, 'utf8') : Promise.resolve(undefined),
+        readMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath),
+      ]);
+      if (content === undefined && typeof persistedContent === 'string') {
+        content = persistedContent;
+      }
+      resolvedVersion = resolvedVersion ?? buildVersionFromMtimeMs(stat.mtimeMs);
+      resolvedUpdatedAt = resolvedUpdatedAt ?? stat.mtime.toISOString();
+      resolvedMetadata = persistedMetadata;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (typeof content === 'string') {
+        resolvedVersion = resolvedVersion ?? 0;
+        resolvedUpdatedAt = resolvedUpdatedAt ?? new Date().toISOString();
+        resolvedMetadata = resolvedMetadata ?? undefined;
+      } else if (message.toLowerCase().includes('enoent')) {
+        return { ok: false, status: 404, error: `Markdown file not found: ${resolved.relativePath}` };
+      } else {
+        return { ok: false, status: 500, error: `Failed loading markdown context: ${message}` };
+      }
+    }
+  }
+
+  if (typeof content !== 'string') return { ok: true };
+
+  const selectionStart = asNumber(value.selectionStart ?? value.cursorStart);
+  const selectionEnd = asNumber(value.selectionEnd ?? value.cursorEnd);
+  const isDirty = asBoolean(value.isDirty) === true;
+  const clientMetadata = sanitizeMarkdownMetadata(value.metadata);
+  const mergedMetadata = sanitizeMarkdownMetadata({
+    ...(resolvedMetadata ?? {}),
+    ...(clientMetadata ?? {}),
+  });
+
+  const originalBytes = Buffer.byteLength(content, 'utf8');
+  const fullContentHash = await buildMarkdownContentHash(content);
+  let truncated = false;
+  if (originalBytes > MARKDOWN_CHAT_CONTEXT_MAX_BYTES) {
+    content = Buffer
+      .from(content, 'utf8')
+      .subarray(0, MARKDOWN_CHAT_CONTEXT_MAX_BYTES)
+      .toString('utf8');
+    truncated = true;
+  }
+  const payloadHash = truncated ? await buildMarkdownContentHash(content) : fullContentHash;
+  const contextMetadata = sanitizeMarkdownMetadata({
+    source: 'markdown-editor',
+    path: resolvedPath ?? rawPath ?? null,
+    version: resolvedVersion ?? null,
+    updatedAt: resolvedUpdatedAt ?? null,
+    isDirty,
+    selectionStart: typeof selectionStart === 'number' ? Math.max(0, Math.floor(selectionStart)) : null,
+    selectionEnd: typeof selectionEnd === 'number' ? Math.max(0, Math.floor(selectionEnd)) : null,
+    contentBytes: Buffer.byteLength(content, 'utf8'),
+    originalBytes,
+    truncated,
+    hash: fullContentHash,
+    payloadHash,
+  }) ?? {
+    source: 'markdown-editor',
+    path: resolvedPath ?? rawPath ?? null,
+    hash: fullContentHash,
+    payloadHash,
+    truncated,
+  };
+
+  let metadataJson = mergedMetadata ? JSON.stringify(mergedMetadata) : '{}';
+  if (Buffer.byteLength(metadataJson, 'utf8') > 8_000) {
+    metadataJson = `${metadataJson.slice(0, 8_000)}...`;
+  }
+  const contextText = [
+    'Control-plane active markdown context:',
+    `path: ${contextMetadata.path ?? 'unknown'}`,
+    `version: ${contextMetadata.version ?? 'unknown'}`,
+    `updatedAt: ${contextMetadata.updatedAt ?? 'unknown'}`,
+    `dirty: ${contextMetadata.isDirty === true ? 'true' : 'false'}`,
+    `selectionStart: ${contextMetadata.selectionStart ?? 'none'}`,
+    `selectionEnd: ${contextMetadata.selectionEnd ?? 'none'}`,
+    `hash: ${contextMetadata.hash ?? 'unknown'}`,
+    `truncated: ${contextMetadata.truncated === true ? 'true' : 'false'}`,
+    'metadata:',
+    metadataJson,
+    'markdown:',
+    '```markdown',
+    content,
+    '```',
+    'Treat this markdown snapshot as authoritative for the current user request.',
+  ].join('\n');
+
+  return {
+    ok: true,
+    contextText,
+    contextMetadata,
+  };
+}
+
 async function handlePostSessionMessage(
   req: IncomingMessage,
   res: ServerResponse,
@@ -4383,7 +5912,33 @@ async function handlePostSessionMessage(
     return;
   }
 
-  const result = ctx.dispatchSessionInput(sessionKey, message);
+  const contextBuild = await buildMarkdownMessageContext(
+    ctx,
+    body.markdownContext ?? body.documentContext ?? body.activeDocument
+  );
+  if (!contextBuild.ok) {
+    sendJson(res, { success: false, error: contextBuild.error }, contextBuild.status);
+    return;
+  }
+  const messageDispatchOptions = contextBuild.contextText
+    ? {
+        context: contextBuild.contextText,
+        metadata: contextBuild.contextMetadata,
+      }
+    : undefined;
+  if (ctx.graphd && contextBuild.contextMetadata) {
+    try {
+      ctx.graphd.sessionUpdateMetadata(sessionKey, {
+        cockpit_active_markdown: {
+          ...contextBuild.contextMetadata,
+          attachedAt: new Date().toISOString(),
+        },
+      });
+    } catch {
+      // Best-effort metadata update; never block chat dispatch.
+    }
+  }
+  const result = ctx.dispatchSessionInput(sessionKey, message, messageDispatchOptions);
   if (!result.success) {
     sendJson(res, { success: false, error: result.error ?? 'Failed to dispatch message' }, 400);
     return;
@@ -4393,6 +5948,7 @@ async function handlePostSessionMessage(
     sessionKey,
     requestId: result.requestId ?? null,
     queued: result.queued ?? false,
+    markdownContextAttached: !!messageDispatchOptions?.context,
   });
 }
 
@@ -5221,4 +6777,78 @@ function handleGetLiveSessions(res: ServerResponse, ctx: ControlPlaneContext): v
     console.error('[control-plane] Error getting live sessions:', error);
     sendJson(res, { sessions: [], error: String(error) });
   }
+}
+
+/**
+ * GET /control-plane/cockpit/templates
+ * List available workitem templates from the database.
+ */
+async function handleGetCockpitTemplates(res: ServerResponse): Promise<void> {
+  const rows = await withAgentMemorySql(async (sql) => {
+    return sql`
+      SELECT id, name, description, specs, created_at, updated_at
+      FROM workitem_templates
+      ORDER BY name ASC
+    `;
+  });
+
+  if (!rows) {
+    sendJson(res, { templates: [] });
+    return;
+  }
+
+  const templates = (rows as Array<Record<string, unknown>>).map((row) => ({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    specs: typeof row.specs === 'string' ? JSON.parse(row.specs as string) : (row.specs ?? []),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+
+  sendJson(res, { templates });
+}
+
+/**
+ * POST /control-plane/cockpit/session/create
+ * Lazily create a new cockpit session in GraphD.
+ */
+async function handlePostCockpitSessionCreate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext
+): Promise<void> {
+  if (!ctx.isGraphDReady() || !ctx.graphd) {
+    sendJson(res, { success: false, error: 'GraphD not available' }, 503);
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const goal = asString(body.goal);
+  const markdownPath = asString(body.markdownPath);
+  const metadata = isRecord(body.metadata) ? body.metadata : {};
+
+  const sessionKey = `cockpit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const result = ctx.graphd.sessionCreate(
+    sessionKey,
+    'cockpit',
+    ctx.workingDir,
+    undefined,
+    { ...metadata, ...(markdownPath ? { markdownPath } : {}) }
+  ) as { success?: boolean; error?: string };
+
+  if (!result.success) {
+    sendJson(res, { success: false, error: result.error ?? 'Failed to create session' }, 500);
+    return;
+  }
+
+  if (goal) {
+    try {
+      (ctx.graphd as any).sessionSetGoalIfEmpty(sessionKey, goal);
+    } catch {
+      // Goal setting is best-effort
+    }
+  }
+
+  sendJson(res, { success: true, sessionKey });
 }

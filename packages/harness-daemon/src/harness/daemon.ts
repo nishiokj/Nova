@@ -24,6 +24,8 @@ export interface HarnessDaemonOptions {
   port?: number;
   /** WebSocket port for browser dashboard access (default: port + 1, e.g., 9556) */
   wsPort?: number;
+  /** Enable WebSocket bridge (default: true). Disable for TCP-only deployments. */
+  enableWsBridge?: boolean;
   /** HTTP port for serving the Control Plane dashboard. Set to enable dashboard serving. */
   dashboardPort?: number;
   /** Path to dashboard static files (default: auto-detect dashboard-control/dist) */
@@ -43,6 +45,7 @@ export class HarnessDaemon {
   private readonly host: string;
   private readonly port: number;
   private readonly wsPort: number;
+  private readonly enableWsBridge: boolean;
   private readonly dashboardPort?: number;
   private readonly dashboardPath?: string;
   private readonly workingDir: string;
@@ -64,6 +67,7 @@ export class HarnessDaemon {
     const rawPort = options.port ?? 9555;
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
     this.wsPort = options.wsPort ?? this.port + 1; // Default: 9556
+    this.enableWsBridge = options.enableWsBridge ?? true;
     this.dashboardPort = options.dashboardPort;
     this.dashboardPath = options.dashboardPath;
     this.workingDir = options.workingDir ?? process.cwd();
@@ -145,39 +149,27 @@ export class HarnessDaemon {
     }
 
     // Start WebSocket bridge for browser dashboard access
-    if (!this.wsBridge) {
+    if (this.enableWsBridge && !this.wsBridge) {
       this.wsBridge = new WsBridgeServer({
         host: this.host,
         port: this.wsPort,
         busHost: this.host,
         busPort: this.port,
+        eventBus: this.harness.getEventBus(),
+        eventTranslator: translateAgentEvent,
       });
-
-      // Forward events from EventBus to WebSocket clients
-      const eventBus = this.harness.getEventBus();
-      if (eventBus) {
-        // Subscribe to all events and forward to WebSocket bridge
-        eventBus.subscribeGlobal((event) => {
-          // Extract requestId/runId from event for channel routing
-          const requestId = (event as { requestId?: string; runId?: string }).requestId
-            ?? (event as { runId?: string }).runId;
-          if (requestId) {
-            const channel = `run:${requestId}`;
-            const wireEvent = translateAgentEvent(event);
-            if (wireEvent) {
-              this.wsBridge?.publish(channel, wireEvent);
-            }
-          }
-        });
-      }
     }
 
     const [tcpAddress, wsAddress] = await Promise.all([
       this.bus.start(),
-      this.wsBridge.start(),
+      this.wsBridge ? this.wsBridge.start() : Promise.resolve(null),
     ]);
 
-    console.log(`[harness-daemon] WebSocket bridge listening on ws://${wsAddress.host}:${wsAddress.port}`);
+    if (wsAddress) {
+      console.log(`[harness-daemon] WebSocket bridge listening on ws://${wsAddress.host}:${wsAddress.port}`);
+    } else {
+      console.log('[harness-daemon] WebSocket bridge disabled');
+    }
 
     // Start dashboard HTTP server if port is configured
     if (this.dashboardPort && !this.dashboardServer) {
@@ -224,20 +216,23 @@ export class HarnessDaemon {
    * Start the dashboard HTTP server for serving static files.
    */
   private async startDashboardServer(): Promise<{ host: string; port: number }> {
-    // Find dashboard dist path
-    let distPath = this.dashboardPath;
-    if (!distPath) {
-      // Auto-detect from package location
+    // Find dashboard dist path (optional). When unavailable, run API-only.
+    let staticRoot: string | null = null;
+    if (this.dashboardPath && existsSync(join(this.dashboardPath, 'index.html'))) {
+      staticRoot = this.dashboardPath;
+    } else if (!this.dashboardPath) {
       const candidates = [
         join(__dirname, '../../../../dashboard-control/dist'),
         join(process.cwd(), 'packages/dashboard-control/dist'),
         join(process.cwd(), 'node_modules/@jesus/dashboard-control/dist'),
       ];
-      distPath = candidates.find((p) => existsSync(join(p, 'index.html')));
+      staticRoot = candidates.find((p) => existsSync(join(p, 'index.html'))) ?? null;
     }
 
-    if (!distPath || !existsSync(join(distPath, 'index.html'))) {
-      throw new Error(`Dashboard dist not found. Build dashboard-control or provide --dashboard-path. Searched: ${distPath || 'auto-detect failed'}`);
+    if (this.dashboardPath && !staticRoot) {
+      console.warn(`[harness-daemon] Dashboard dist not found at ${this.dashboardPath}; serving control-plane API only`);
+    } else if (!staticRoot) {
+      console.warn('[harness-daemon] Dashboard dist not found; serving control-plane API only');
     }
 
     const mimeTypes: Record<string, string> = {
@@ -273,7 +268,11 @@ export class HarnessDaemon {
 
     const handler = (req: IncomingMessage, res: ServerResponse) => {
       const dispatchSessionInput = this.harness
-        ? (sessionKey: string, message: string) => {
+        ? (
+            sessionKey: string,
+            message: string,
+            options?: { context?: string; metadata?: Record<string, unknown> }
+          ) => {
             try {
               const graphd = this.harness!.getGraphD();
               const sessionResult = graphd?.sessionGet(sessionKey) as { session?: { workingDir?: string | null } } | undefined;
@@ -282,6 +281,9 @@ export class HarnessDaemon {
               const runHandle = this.harness!.run({
                 requestId,
                 inputText: message,
+                ...(typeof options?.context === 'string' && options.context.trim().length > 0
+                  ? { context: options.context.trim() }
+                  : {}),
                 sessionKey,
                 workingDir,
               });
@@ -366,10 +368,15 @@ export class HarnessDaemon {
       }
 
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
-      let filePath = join(distPath!, url.pathname);
+      if (!staticRoot) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Dashboard static assets unavailable' }));
+        return;
+      }
+      let filePath = join(staticRoot, url.pathname);
 
       // Security: prevent directory traversal
-      if (!filePath.startsWith(distPath!)) {
+      if (!filePath.startsWith(staticRoot)) {
         res.writeHead(403);
         res.end('Forbidden');
         return;
@@ -377,7 +384,7 @@ export class HarnessDaemon {
 
       // Serve index.html for SPA routes
       if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
-        filePath = join(distPath!, 'index.html');
+        filePath = join(staticRoot, 'index.html');
       }
 
       serveFile(res, filePath);
@@ -432,6 +439,8 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       options.port = parseInt(args[++i], 10);
     } else if (arg === '--ws-port' && i + 1 < args.length) {
       options.wsPort = parseInt(args[++i], 10);
+    } else if (arg === '--no-ws') {
+      options.enableWsBridge = false;
     } else if (arg === '--host' && i + 1 < args.length) {
       options.host = args[++i];
     } else if (arg === '--config' && i + 1 < args.length) {

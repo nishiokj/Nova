@@ -223,6 +223,7 @@ BridgeClient:
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-01-19 | Initial documentation | AI Assistant |
+| 2026-02-06 | Note added | J. Nishioka |
 
 ---
 

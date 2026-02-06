@@ -3088,23 +3088,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const headerRows: Array<{
     left: string;
     right?: string;
+    center?: string;
     leftColor?: string;
     rightColor?: string;
+    centerColor?: string;
     boldLeft?: boolean;
     boldRight?: boolean;
+    boldCenter?: boolean;
   }> = [
     {
-      left: "Bloom",
-      right: `Session ${snapshot.sessionKey ?? "-"}`,
+      center: "Bloom",
       leftColor: colors.accent,
       rightColor: colors.muted,
-      boldLeft: true,
+      centerColor: colors.accent,
+      boldCenter: true,
     },
     {
-      left: `State: ${snapshot.state}${snapshot.planMode ? " | PLAN" : ""}`,
+      left: `Session ${snapshot.sessionKey ?? "-"}`,
       right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}`,
       leftColor: colors.muted,
       rightColor: colors.muted,
+    },
+    {
+      center: `State: ${snapshot.state}${snapshot.planMode ? " | PLAN" : ""}`,
+      leftColor: colors.muted,
+      rightColor: colors.muted,
+      centerColor: colors.muted,
     },
     {
       left: `Status: ${statusText}`,
@@ -3511,6 +3520,22 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       {headerRows.map((row, index) => {
         const left = row.left ?? "";
         const right = row.right ?? "";
+        const center = row.center ?? "";
+
+        if (center && !left && !right) {
+          // Centered text only
+          const maxCenterLength = contentWidth;
+          const centerText = center.length > maxCenterLength ? center.slice(0, maxCenterLength) : center;
+          const padding = Math.floor((contentWidth - centerText.length) / 2);
+          return (
+            <Text key={`header-${index}`}>
+              <Text>{" ".repeat(padding)}</Text>
+              <Text color={row.centerColor} bold={row.boldCenter}>{centerText}</Text>
+              <Text>{" ".repeat(contentWidth - padding - centerText.length)}</Text>
+            </Text>
+          );
+        }
+
         if (!right) {
           return (
             <Text key={`header-${index}`} color={row.leftColor} bold={row.boldLeft}>

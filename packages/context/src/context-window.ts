@@ -198,7 +198,6 @@ function serializeItem(item: ContextItem): string {
       lines.push(`@callId ${item.callId}`);
       lines.push(`@ts ${item.timestamp}`);
       if (item.isError) lines.push(`@isError true`);
-      if (item.durationMs !== undefined) lines.push(`@durationMs ${item.durationMs}`);
       if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
       lines.push(item.output);
       break;

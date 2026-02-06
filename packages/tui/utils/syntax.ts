@@ -276,15 +276,14 @@ export function highlightCode(code: string | null, lang: string | undefined): st
     const parser = createParser(supportedLang)
     const tree = parser.parse(code)
 
-    // Apply highlighting
+    // Apply highlighting without background (syntax only)
     const highlighted = highlightTree(tree, code)
 
-    // Add subtle background to make it stand out as code
-    return chalk.bgBlack(highlighted)
+    // Return highlighted code without background
+    return highlighted
   } catch (error) {
-    // If parsing fails, apply basic code styling
-    const colors = getColors()
-    return chalk.bgBlack.hex(colors.muted)(code)
+    // If parsing fails, return plain code without background
+    return code
   }
 }
 

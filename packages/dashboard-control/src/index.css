@@ -67,3 +67,19 @@ body {
 .pulse-live {
   animation: pulse-live 2s ease-in-out infinite;
 }
+
+/* Spin animation for refresh button */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Toast slide-in */
+@keyframes slide-up {
+  from { transform: translateY(0.5rem); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+

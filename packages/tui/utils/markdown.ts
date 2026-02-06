@@ -44,13 +44,13 @@ marked.use({
     // Emoji support
     emoji: true,
     // Custom colors using our forced-color chalk instance
-    code: chalk.bgBlack.yellow,  // Fallback (renderer.code handles this)
+    code: chalk.yellow,  // Fallback (renderer.code handles this) - no background
     blockquote: chalk.gray.italic,
     heading: chalk.magenta.underline.bold,
     firstHeading: chalk.magenta.underline.bold,
     strong: chalk.bold,
     em: chalk.italic,
-    codespan: chalk.bgBlack.yellow,
+    codespan: chalk.yellow,  // Inline code - no background
     del: chalk.strikethrough,
     link: chalk.blue,
     href: chalk.blue.underline,
