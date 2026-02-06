@@ -5,9 +5,13 @@ import {
   getCockpitFocus,
   getCockpitRollupSnapshot,
   getCockpitSessionEvents,
+  getCockpitSessionPermissions,
   getCockpitSessionPackets,
+  postCockpitSessionPermissions,
   type CockpitMarkdownContextInput,
   type CockpitDiff,
+  type CockpitSessionPermissionUpdateInput,
+  type CockpitSessionPermissions,
   type CockpitTestReport,
   type CommitRollup,
   type DailyMetrics,
@@ -46,9 +50,9 @@ export type FocusTarget =
   | { type: 'session'; id: string }
   | { type: 'escalation'; id: string };
 
-export type FocusTab = 'packet' | 'diff' | 'tests' | 'trace';
+export type FocusTab = 'packet' | 'diff' | 'tests' | 'trace' | 'permissions';
 export type GlobalTool = 'none' | 'grep' | 'browser';
-export type EventFilter = 'signal' | 'all' | 'messages' | 'tools' | 'failures' | 'audit';
+export type EventFilter = 'all' | 'messages' | 'failures' | 'audit';
 
 const REPO_ROLLUP_REFRESH_INTERVAL_MS = 45_000;
 const HEAVY_FOCUS_REFRESH_INTERVAL_MS = 20_000;
@@ -73,16 +77,22 @@ export interface CockpitState {
   selectedPacketId: string | null;
   diffData: CockpitDiff | null;
   selectedDiffFile: string | null;
+  highlightedDiffIdx: number | null;
+  diffPatchFile: string | null;
+  diffPatchLoadingFile: string | null;
+  diffPatchError: string | null;
   testReports: CockpitTestReport[];
   selectedTestReportId: string | null;
   selectedTestReport: CockpitTestReport | null;
   traces: TraceRecord[];
+  sessionPermissions: CockpitSessionPermissions | null;
   lensResults: { defs: RepoLensMatch[]; refs: RepoLensMatch[]; text: RepoLensMatch[] };
   lensQuery: string;
   sessionFilterQuery: string;
 
   eventFilter: EventFilter;
   eventDrawerOpen: boolean;
+  eventDrawerHeight: number;
   loading: boolean;
   error: string | null;
   commandStatus: string | null;
@@ -105,6 +115,8 @@ export interface CockpitState {
   // Review / resolve
   resolvingEscalationId: string | null;
   reviewDecisionAction: 'accept' | 'request_changes' | null;
+  permissionsSaving: boolean;
+  permissionsSaveStatus: string | null;
 
   // Lens
   lensLoading: boolean;
@@ -112,7 +124,7 @@ export interface CockpitState {
   // Pending commit range (for cross-linking commits → diff)
   pendingCommitRange: { sessionKey: string; base?: string; head?: string } | null;
 
-  // Templates
+  // Workflows
   templates: WorkItemTemplate[];
 
   // Document session (lazy creation)
@@ -146,16 +158,22 @@ const initialState: CockpitState = {
   selectedPacketId: null,
   diffData: null,
   selectedDiffFile: null,
+  highlightedDiffIdx: null,
+  diffPatchFile: null,
+  diffPatchLoadingFile: null,
+  diffPatchError: null,
   testReports: [],
   selectedTestReportId: null,
   selectedTestReport: null,
   traces: [],
+  sessionPermissions: null,
   lensResults: { defs: [], refs: [], text: [] },
   lensQuery: '',
   sessionFilterQuery: '',
 
   eventFilter: 'messages',
   eventDrawerOpen: false,
+  eventDrawerHeight: 160,
   loading: true,
   error: null,
   commandStatus: null,
@@ -170,10 +188,12 @@ const initialState: CockpitState = {
 
   messageDraft: '',
   sendingMessage: false,
-  inputVisible: false,
+  inputVisible: true,
 
   resolvingEscalationId: null,
   reviewDecisionAction: null,
+  permissionsSaving: false,
+  permissionsSaveStatus: null,
 
   lensLoading: false,
   pendingCommitRange: null,
@@ -193,7 +213,7 @@ const initialState: CockpitState = {
 type Action =
   | { type: 'SET'; payload: Partial<CockpitState> }
   | { type: 'SET_ROLLUPS'; payload: Pick<CockpitState, 'runningSessions' | 'readySessions' | 'doneSessions' | 'escalations' | 'commitRollups' | 'prRollups' | 'metrics'> }
-  | { type: 'SET_FOCUS_DATA'; payload: { focusData: FocusData | null; events: NormalizedSessionEvent[]; traces: TraceRecord[]; testReports: CockpitTestReport[]; diffData: CockpitDiff | null; packets: FocusPacket[] } }
+  | { type: 'SET_FOCUS_DATA'; payload: { focusData: FocusData | null; events: NormalizedSessionEvent[]; traces: TraceRecord[]; testReports: CockpitTestReport[]; diffData: CockpitDiff | null; packets: FocusPacket[]; sessionPermissions: CockpitSessionPermissions | null } }
   | { type: 'CLEAR_FOCUS' }
   | { type: 'SET_ERROR'; payload: string | null }
   | { type: 'REFRESH_DONE' };
@@ -229,11 +249,20 @@ function reducer(state: CockpitState, action: Action): CockpitState {
       return next;
     }
     case 'SET_FOCUS_DATA': {
-      const { focusData, events, traces, testReports, diffData, packets } = action.payload;
+      const { focusData, events, traces, testReports, diffData, packets, sessionPermissions } = action.payload;
       const focusPacketId = focusData?.packet?.packetId ?? null;
       const selectedPacketId = focusPacketId && packets.some((packet) => packet.packetId === focusPacketId)
         ? focusPacketId
         : packets[0]?.packetId ?? focusPacketId;
+      const selectedDiffFile = state.selectedDiffFile
+        && diffData?.hotspots?.some((h) => h.path === state.selectedDiffFile)
+        ? state.selectedDiffFile
+        : diffData?.hotspots?.[0]?.path ?? null;
+      const highlightedDiffIdx = selectedDiffFile && diffData
+        ? Math.max(diffData.hotspots.findIndex((h) => h.path === selectedDiffFile), 0)
+        : (diffData?.hotspots?.length ? 0 : null);
+      // Auto-open the event drawer when there are messages to show
+      const hasMessages = events.some((e) => e.type === 'message');
       return {
         ...state,
         focusData,
@@ -241,15 +270,24 @@ function reducer(state: CockpitState, action: Action): CockpitState {
         sessionPackets: packets,
         selectedPacketId,
         traces,
+        sessionPermissions,
         testReports,
-        diffData,
+        diffData: diffData
+          ? (state.diffData?.patch && !diffData.patch ? { ...diffData, patch: state.diffData.patch } : diffData)
+          : null,
+        selectedDiffFile,
+        highlightedDiffIdx,
+        diffPatchFile: null,
+        diffPatchLoadingFile: null,
+        diffPatchError: null,
         selectedTestReportId: testReports[0]?.id ?? null,
         selectedTestReport: testReports[0] ?? null,
-        selectedDiffFile: diffData?.hotspots?.[0]?.path ?? null,
         patchDraft: '',
         patchApplyStatus: null,
         lensResults: { defs: [], refs: [], text: [] },
+        permissionsSaveStatus: null,
         browserSessionScope: focusData?.sessionKey ?? state.browserSessionScope,
+        ...(hasMessages && !state.eventDrawerOpen ? { eventDrawerOpen: true } : {}),
       };
     }
     case 'CLEAR_FOCUS':
@@ -261,13 +299,20 @@ function reducer(state: CockpitState, action: Action): CockpitState {
         selectedPacketId: null,
         diffData: null,
         selectedDiffFile: null,
+        highlightedDiffIdx: null,
+        diffPatchFile: null,
+        diffPatchLoadingFile: null,
+        diffPatchError: null,
         testReports: [],
         selectedTestReport: null,
         selectedTestReportId: null,
         traces: [],
+        sessionPermissions: null,
         patchDraft: '',
         patchApplyStatus: null,
         lensResults: { defs: [], refs: [], text: [] },
+        permissionsSaving: false,
+        permissionsSaveStatus: null,
       };
     case 'SET_ERROR':
       return { ...state, error: action.payload };
@@ -328,21 +373,6 @@ export function selectFocusEscalationId(state: CockpitState): string | null {
 export function selectFilteredEvents(state: CockpitState): NormalizedSessionEvent[] {
   const { events, eventFilter } = state;
 
-  if (eventFilter === 'signal') {
-    return events.filter((event) => {
-      const priority = event.signalPriority;
-      if (priority) return priority === 'high' || priority === 'medium';
-      if (event.type === 'packet') return true;
-      if (isMessageLikeEvent(event)) {
-        const role = messageRoleForEvent(event);
-        const content = extractMessageContent(event.payload);
-        if (role === 'assistant' && content.length > 50) return true;
-        if (role === 'user') return true;
-      }
-      return isFailureEvent(event);
-    });
-  }
-
   if (eventFilter === 'audit') {
     return events.filter((event) => {
       if (event.isStatusOnly) return true;
@@ -355,20 +385,22 @@ export function selectFilteredEvents(state: CockpitState): NormalizedSessionEven
     return events.filter((event) => {
       if (!isMessageLikeEvent(event)) return false;
       const content = extractMessageContent(event.payload);
-      if (!content) return false;
       const role = messageRoleForEvent(event);
       const isFromMessagesTable = typeof event.payload.id === 'number' && !event.payload.eventType;
-      // User messages: only from messages table (agent_events duplicate them)
-      if (role === 'user') return isFromMessagesTable;
-      // Assistant messages: messages table always, agent events only if substantial
+      // User messages: require content, only from messages table (agent_events duplicate them)
+      if (role === 'user') return isFromMessagesTable && !!content;
+      // Assistant messages from messages table: always include (even if empty — tool-only turns get a summary)
       if (isFromMessagesTable) return true;
+      // Agent events: only if substantial text content
       return content.length > 80;
     });
   }
-  if (eventFilter === 'tools') return events.filter((e) => e.type === 'tool');
   if (eventFilter === 'failures') return events.filter(isFailureEvent);
   if (eventFilter === 'all') {
-    return events.filter((event) => event.type !== 'tool' || isFailureEvent(event));
+    return events.filter((event) => {
+      if (event.type === 'tool' || event.type === 'workflow') return isFailureEvent(event);
+      return true;
+    });
   }
   return events;
 }
@@ -381,6 +413,8 @@ export function useCockpitStore() {
   stateRef.current = state;
   const lastRepoRollupRefreshAtRef = useRef(0);
   const lastHeavyFocusRefreshAtRef = useRef(0);
+  const diffPatchRequestSeqRef = useRef(0);
+  const diffPatchCacheRef = useRef(new Map<string, string | null>());
   const markdownContextProviderRef = useRef<(() => CockpitMarkdownContextInput | null) | null>(null);
   const markdownSetContentRef = useRef<((content: string) => void) | null>(null);
   const beforeSendMessageRef = useRef<(() => Promise<boolean> | boolean) | null>(null);
@@ -388,6 +422,34 @@ export function useCockpitStore() {
   const set = useCallback((payload: Partial<CockpitState>) => {
     dispatch({ type: 'SET', payload });
   }, []);
+
+  const handleOpenUpgradePicker = useCallback((): boolean => {
+    const markdownContext = markdownContextProviderRef.current?.();
+    const markdownMetadata = (
+      markdownContext?.metadata
+      && typeof markdownContext.metadata === 'object'
+      && !Array.isArray(markdownContext.metadata)
+    )
+      ? markdownContext.metadata as Record<string, unknown>
+      : {};
+    const workspaceScope = typeof markdownMetadata.workspaceScope === 'string'
+      ? markdownMetadata.workspaceScope
+      : null;
+    const workspaceProjectPath = typeof markdownMetadata.workspaceProjectPath === 'string'
+      ? markdownMetadata.workspaceProjectPath
+      : null;
+    const workspaceSessionKey = typeof markdownMetadata.workspaceSessionKey === 'string'
+      ? markdownMetadata.workspaceSessionKey
+      : null;
+    if (workspaceScope !== 'project' && workspaceScope !== 'session' && !workspaceProjectPath && !workspaceSessionKey) {
+      set({
+        commandStatus: 'Promote/upgrade needs Project or Session workspace. Use the Files pane workspace selector to pick a project first.',
+      });
+      return false;
+    }
+    set({ upgradePickerOpen: true });
+    return true;
+  }, [set]);
 
   const refreshTemplates = useCallback(async () => {
     try {
@@ -445,9 +507,10 @@ export function useCockpitStore() {
       return;
     }
     const includeHeavy = options?.includeHeavy ?? true;
-    const [eventResponse, packetRows] = await Promise.all([
+    const [eventResponse, packetRows, sessionPermissions] = await Promise.all([
       getCockpitSessionEvents(focusData.sessionKey, { limit: 200 }),
       getCockpitSessionPackets(focusData.sessionKey, 50).catch(() => [] as FocusPacket[]),
+      getCockpitSessionPermissions(focusData.sessionKey).catch(() => null),
     ]);
     let traceRows: TraceRecord[];
     let reportRows: CockpitTestReport[];
@@ -475,6 +538,7 @@ export function useCockpitStore() {
         traces: traceRows,
         testReports: reportRows,
         diffData: diffResponse,
+        sessionPermissions,
       },
     });
     const focusPreviewUrl = typeof focusData?.header?.previewUrl === 'string'
@@ -502,6 +566,63 @@ export function useCockpitStore() {
 
   const setFocusTarget = useCallback((target: FocusTarget | null) => {
     set({ focusTarget: target });
+  }, [set]);
+
+  const handleSelectDiffFile = useCallback(async (path: string) => {
+    const s = stateRef.current;
+    if (!path || !s.diffData || !s.focusData?.sessionKey) return;
+
+    const hotspotIdx = s.diffData.hotspots.findIndex((h) => h.path === path);
+    if (hotspotIdx < 0) return;
+
+    const cacheKey = `${s.focusData.sessionKey}:${s.diffData.baseSha}:${s.diffData.headSha}:${path}`;
+    const cachedPatch = diffPatchCacheRef.current.get(cacheKey);
+    if (cachedPatch !== undefined) {
+      set({
+        selectedDiffFile: path,
+        highlightedDiffIdx: hotspotIdx,
+        diffPatchFile: path,
+        diffPatchLoadingFile: null,
+        diffPatchError: null,
+        diffData: { ...s.diffData, patch: cachedPatch },
+      });
+      return;
+    }
+
+    const reqSeq = diffPatchRequestSeqRef.current + 1;
+    diffPatchRequestSeqRef.current = reqSeq;
+    set({
+      selectedDiffFile: path,
+      highlightedDiffIdx: hotspotIdx,
+      diffPatchLoadingFile: path,
+      diffPatchError: null,
+    });
+
+    try {
+      const response = await getCockpitDiff({
+        sessionKey: s.focusData.sessionKey,
+        base: s.diffData.baseSha,
+        head: s.diffData.headSha,
+        file: path,
+      });
+      if (diffPatchRequestSeqRef.current !== reqSeq) return;
+      diffPatchCacheRef.current.set(cacheKey, response.patch);
+      const latestDiff = stateRef.current.diffData;
+      if (!latestDiff) return;
+      set({
+        diffData: { ...latestDiff, patch: response.patch },
+        diffPatchFile: path,
+        diffPatchLoadingFile: null,
+        diffPatchError: null,
+      });
+    } catch (err) {
+      if (diffPatchRequestSeqRef.current !== reqSeq) return;
+      set({
+        diffPatchFile: path,
+        diffPatchLoadingFile: null,
+        diffPatchError: err instanceof Error ? err.message : String(err),
+      });
+    }
   }, [set]);
 
   const handleApplyPatch = useCallback(async () => {
@@ -563,6 +684,37 @@ export function useCockpitStore() {
       set({ error: err instanceof Error ? err.message : String(err), reviewDecisionAction: null });
     }
   }, [set, refreshAll]);
+
+  const handleRefreshSessionPermissions = useCallback(async () => {
+    const sessionKey = stateRef.current.focusData?.sessionKey;
+    if (!sessionKey) return;
+    try {
+      const response = await getCockpitSessionPermissions(sessionKey);
+      set({ sessionPermissions: response, permissionsSaveStatus: null });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  }, [set]);
+
+  const handleUpdateSessionPermissions = useCallback(async (input: CockpitSessionPermissionUpdateInput) => {
+    const sessionKey = stateRef.current.focusData?.sessionKey;
+    if (!sessionKey) return;
+    set({ permissionsSaving: true, permissionsSaveStatus: null });
+    try {
+      const response = await postCockpitSessionPermissions(sessionKey, input);
+      set({
+        sessionPermissions: response,
+        permissionsSaving: false,
+        permissionsSaveStatus: 'Permissions updated',
+      });
+    } catch (err) {
+      set({
+        permissionsSaving: false,
+        permissionsSaveStatus: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, [set]);
 
   const handleRunGrepSearch = useCallback(async (query?: string, sessionKey?: string | null) => {
     const q = (query ?? stateRef.current.lensQuery).trim();
@@ -648,7 +800,45 @@ export function useCockpitStore() {
     }
 
     if (command === 'upgrade' || command === 'promote') {
-      set({ upgradePickerOpen: true });
+      handleOpenUpgradePicker();
+      return true;
+    }
+
+    if (command === 'new') {
+      const goal = args || 'New session';
+      set({ commandStatus: 'Creating session…' });
+      try {
+        const result = await postCockpitSessionCreate({ goal });
+        if (result.success && result.sessionKey) {
+          set({
+            focusTarget: { type: 'session', id: result.sessionKey },
+            eventDrawerOpen: true,
+            commandStatus: `Session ${result.sessionKey} created`,
+          });
+        } else {
+          set({ commandStatus: result.error ?? 'Failed to create session' });
+        }
+      } catch (err) {
+        set({ commandStatus: err instanceof Error ? err.message : String(err) });
+      }
+      return true;
+    }
+
+    if (command === 'diff') {
+      if (!stateRef.current.focusData?.sessionKey) {
+        set({ commandStatus: 'Focus a session first to view diff' });
+        return true;
+      }
+      set({ focusTab: 'diff', commandStatus: null });
+      return true;
+    }
+
+    if (command === 'tests') {
+      if (!stateRef.current.focusData?.sessionKey) {
+        set({ commandStatus: 'Focus a session first to view tests' });
+        return true;
+      }
+      set({ focusTab: 'tests', commandStatus: null });
       return true;
     }
 
@@ -658,7 +848,7 @@ export function useCockpitStore() {
 
     set({ commandStatus: `Unknown command: /${command}` });
     return true;
-  }, [set, handleRunGrepSearch]);
+  }, [set, handleRunGrepSearch, handleOpenUpgradePicker]);
 
   const handleSendMessage = useCallback(async () => {
     const { focusData, messageDraft: draft, sendingMessage: alreadySending } = stateRef.current;
@@ -681,10 +871,48 @@ export function useCockpitStore() {
         const markdownContext = markdownContextProviderRef.current?.();
         if (markdownContext) {
           const firstLine = trimmedDraft.split('\n')[0].slice(0, 200);
+          const markdownMetadata = (
+            markdownContext.metadata
+            && typeof markdownContext.metadata === 'object'
+            && !Array.isArray(markdownContext.metadata)
+          )
+            ? markdownContext.metadata as Record<string, unknown>
+            : {};
+          const workspaceProjectPath = typeof markdownMetadata.workspaceProjectPath === 'string'
+            && markdownMetadata.workspaceProjectPath.trim().length > 0
+            ? markdownMetadata.workspaceProjectPath.trim()
+            : undefined;
+          const documentType = typeof markdownMetadata.documentType === 'string'
+            ? markdownMetadata.documentType
+            : undefined;
+          if ((documentType === 'workflow' || documentType === 'executable') && !workspaceProjectPath) {
+            set({
+              sendingMessage: false,
+              error: 'Workflow/executable docs need project scope before creating a session. Pick a project in the Files workspace selector.',
+            });
+            return;
+          }
           const result = await postCockpitSessionCreate({
             goal: firstLine,
             markdownPath: markdownContext.path,
-            metadata: { source: 'cockpit-document', markdownPath: markdownContext.path },
+            ...(workspaceProjectPath ? { projectPath: workspaceProjectPath } : {}),
+            ...(workspaceProjectPath ? { createProjectPath: true } : {}),
+            metadata: {
+              source: 'cockpit-document',
+              markdownPath: markdownContext.path,
+              ...(typeof markdownMetadata.documentType === 'string'
+                ? { documentType: markdownMetadata.documentType }
+                : {}),
+              ...(typeof markdownMetadata.templateName === 'string'
+                ? { templateName: markdownMetadata.templateName }
+                : {}),
+              ...(typeof markdownMetadata.templateId === 'string'
+                ? { templateId: markdownMetadata.templateId }
+                : {}),
+              ...(Array.isArray(markdownMetadata.specs)
+                ? { specs: markdownMetadata.specs }
+                : {}),
+            },
           });
           if (result.success && result.sessionKey) {
             sessionKey = result.sessionKey;
@@ -846,17 +1074,23 @@ export function useCockpitStore() {
       set({ focusTab: 'diff' });
       if (s.focusData?.sessionKey) {
         const response = await getCockpitDiff({ sessionKey: s.focusData.sessionKey, head: target }).catch(() => null);
-        if (response) set({ diffData: response, selectedDiffFile: response.hotspots[0]?.path ?? null });
+        if (response) {
+          set({
+            diffData: response,
+            selectedDiffFile: response.hotspots[0]?.path ?? null,
+            highlightedDiffIdx: response.hotspots.length > 0 ? 0 : null,
+            diffPatchFile: null,
+            diffPatchLoadingFile: null,
+            diffPatchError: null,
+          });
+        }
       }
       return;
     }
     if (type === 'file') {
       const path = target.split('#')[0];
-      set({ focusTab: 'diff', selectedDiffFile: path });
-      if (s.focusData?.sessionKey) {
-        const response = await getCockpitDiff({ sessionKey: s.focusData.sessionKey, file: path }).catch(() => null);
-        if (response) set({ diffData: response });
-      }
+      set({ focusTab: 'diff' });
+      await handleSelectDiffFile(path);
       return;
     }
     if (type === 'testreport') {
@@ -867,7 +1101,7 @@ export function useCockpitStore() {
     if (type === 'trace') {
       set({ focusTab: 'trace' });
     }
-  }, [set, handleSelectTestReport]);
+  }, [set, handleSelectTestReport, handleSelectDiffFile]);
 
   const handlePacketLinkClick = useCallback(async (target: string) => {
     if (!target) return;
@@ -887,7 +1121,16 @@ export function useCockpitStore() {
           ...(parsed.searchParams.get('base') ? { base: String(parsed.searchParams.get('base')) } : {}),
           ...(parsed.searchParams.get('head') ? { head: String(parsed.searchParams.get('head')) } : {}),
         }).catch(() => null);
-        if (response) set({ diffData: response, selectedDiffFile: response.hotspots[0]?.path ?? null });
+        if (response) {
+          set({
+            diffData: response,
+            selectedDiffFile: response.hotspots[0]?.path ?? null,
+            highlightedDiffIdx: response.hotspots.length > 0 ? 0 : null,
+            diffPatchFile: null,
+            diffPatchLoadingFile: null,
+            diffPatchError: null,
+          });
+        }
       }
       return;
     }
@@ -915,10 +1158,14 @@ export function useCockpitStore() {
     refreshFocus,
     refreshAll,
     setFocusTarget,
+    handleSelectDiffFile,
     handleApplyPatch,
     handleResolveEscalation,
     handleReviewDecision,
+    handleRefreshSessionPermissions,
+    handleUpdateSessionPermissions,
     handleSendMessage,
+    handleOpenUpgradePicker,
     handleRunGrepSearch,
     handleSelectTestReport,
     handleSelectCommit,
@@ -938,10 +1185,14 @@ export function useCockpitStore() {
     refreshFocus,
     refreshAll,
     setFocusTarget,
+    handleSelectDiffFile,
     handleApplyPatch,
     handleResolveEscalation,
     handleReviewDecision,
+    handleRefreshSessionPermissions,
+    handleUpdateSessionPermissions,
     handleSendMessage,
+    handleOpenUpgradePicker,
     handleRunGrepSearch,
     handleSelectTestReport,
     handleSelectCommit,

@@ -51,6 +51,7 @@ import {
 } from 'protocol';
 import type { AgentType } from 'agent';
 import type { PermissionChecker } from './permissions.js';
+import { deleteSession, getTokenUsage, listSessions } from './session_queries.js';
 
 const GATEWAY_PROVIDER_ID = 'vercel-gateway';
 const GATEWAY_MODEL_PROVIDERS = new Set<string>([
@@ -89,7 +90,7 @@ interface HarnessLike {
   getAsyncModeStatus?(): { ok: boolean; issues: string[] };
   ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): void;
   getGraphD?(): import('graphd').GraphDManager | null;
-  closeSession?(sessionKey: string): void;
+  closeSession?(sessionKey: string): { success: boolean; error?: string; executingRequestId?: string };
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
   getSessionPermissionChecker?(sessionKey: string): PermissionChecker | null;  // Per-session permission checker
@@ -513,6 +514,8 @@ export class BridgeGateway {
     register('session_fork', (_data, ctx) => this.handleSessionFork(ctx.connectionId, ctx.state));
     register('session_close', (_data, ctx) => this.handleSessionClose(ctx.connectionId, ctx.state));
     register('list_sessions', (data, ctx) => this.handleListSessions(ctx.connectionId, data, ctx.state));
+    register('session_delete', (data, ctx) => this.handleSessionDelete(ctx.connectionId, data));
+    register('usage_summary', (data, ctx) => this.handleUsageSummary(ctx.connectionId, data));
     register('compact_context', (_data, ctx) => this.handleCompactContext(ctx.connectionId, ctx.state));
     register('set_model', (data, ctx) => this.handleSetModel(ctx.connectionId, data, ctx.state));
     register('get_model', (data, ctx) => this.handleGetModel(ctx.connectionId, data, ctx.state));
@@ -1511,7 +1514,16 @@ export class BridgeGateway {
     }
 
     // closeSession handles persist + marking inactive
-    this.harness.closeSession?.(sessionKey);
+    const closeResult = this.harness.closeSession?.(sessionKey);
+    if (closeResult && closeResult.success === false) {
+      this.sendAuthResponse(connectionId, 'session_close', {
+        success: false,
+        sessionKey,
+        error: closeResult.error ?? 'Failed to close session',
+        ...(closeResult.executingRequestId ? { activeRequestId: closeResult.executingRequestId } : {}),
+      });
+      return;
+    }
 
     // Clear the connection's session and async references
     state.sessionKey = null;
@@ -1531,18 +1543,8 @@ export class BridgeGateway {
   private handleListSessions(
     connectionId: string,
     data: Record<string, unknown> | undefined,
-    state: ConnectionState
+    _state: ConnectionState
   ): void {
-    const graphd = this.harness.getGraphD?.();
-    if (!graphd) {
-      this.sendAuthResponse(connectionId, 'list_sessions', {
-        success: false,
-        sessions: [],
-        error: 'GraphD not available',
-      });
-      return;
-    }
-
     // Only filter by workingDir if explicitly provided - otherwise show ALL sessions
     const workingDir = typeof data?.workingDir === 'string' ? data.workingDir : undefined;
 
@@ -1552,19 +1554,63 @@ export class BridgeGateway {
       ? data.status as string[]
       : typeof data?.status === 'string'
         ? [data.status]
-        : defaultStatuses;
+      : defaultStatuses;
 
     const limit = typeof data?.limit === 'number' ? data.limit : 20;
 
-    const result = graphd.sessionsList({
+    const graphd = this.harness.getGraphD?.() ?? null;
+    const result = listSessions(graphd, {
       workingDir: workingDir ?? undefined,
       status,
       limit,
+      includePreview: true,
     });
 
     this.sendAuthResponse(connectionId, 'list_sessions', {
-      success: !result.error,
-      sessions: result.sessions ?? [],
+      success: result.success,
+      sessions: result.sessions,
+      error: result.error,
+    });
+  }
+
+  private handleSessionDelete(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const sessionKey = typeof data?.sessionKey === 'string'
+      ? data.sessionKey
+      : typeof data?.session_key === 'string'
+        ? data.session_key
+        : '';
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'session_delete', {
+        success: false,
+        deleted: false,
+        error: 'sessionKey is required',
+      });
+      return;
+    }
+
+    const graphd = this.harness.getGraphD?.() ?? null;
+    const result = deleteSession(graphd, sessionKey);
+    this.sendAuthResponse(connectionId, 'session_delete', {
+      success: result.success,
+      deleted: result.deleted,
+      ...(result.error ? { error: result.error } : {}),
+    });
+  }
+
+  private handleUsageSummary(connectionId: string, data: Record<string, unknown> | undefined): void {
+    const limit = typeof data?.limit === 'number' ? data.limit : 1000;
+    const status = Array.isArray(data?.status)
+      ? data.status as string[]
+      : typeof data?.status === 'string'
+        ? data.status
+        : undefined;
+
+    const graphd = this.harness.getGraphD?.() ?? null;
+    const result = getTokenUsage(graphd, { limit, status });
+    this.sendAuthResponse(connectionId, 'usage_summary', {
+      success: result.success,
+      usage: result.usage,
+      sessions: result.sessions,
       error: result.error,
     });
   }

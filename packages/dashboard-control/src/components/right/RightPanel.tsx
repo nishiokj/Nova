@@ -20,7 +20,16 @@ function useStableSelect(type: FocusTarget['type']) {
 
 export function RightPanel() {
   const { state, handleResolveEscalation } = useCockpit();
-  const { runningSessions, readySessions, doneSessions, escalations, focusTarget, resolvingEscalationId, sessionFilterQuery, highlightedSessionIdx } = state;
+  const {
+    runningSessions,
+    readySessions,
+    doneSessions,
+    escalations,
+    focusTarget,
+    resolvingEscalationId,
+    sessionFilterQuery,
+    highlightedSessionIdx,
+  } = state;
   const getSessionSelect = useStableSelect('session');
   const getEscalationSelect = useStableSelect('escalation');
   const highlightRef = useRef<HTMLDivElement>(null);
@@ -56,6 +65,17 @@ export function RightPanel() {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
+      <div className="px-2 py-1.5 border-b border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)] flex items-center gap-2">
+        <span className="text-[var(--running)]">Running {runningSessions.length}</span>
+        <span className="text-[var(--accent-cyan)]">Ready {readySessions.length}</span>
+        <span>Done {doneSessions.length}</span>
+        {escalations.length > 0 && <span className="text-[var(--warning)]">Esc {escalations.length}</span>}
+        {sessionFilterQuery && (
+          <span className="ml-auto text-[var(--accent-cyan)] truncate" title={sessionFilterQuery}>
+            grep:{sessionFilterQuery}
+          </span>
+        )}
+      </div>
       <div className="flex-1 overflow-y-auto">
         {/* RUNNING section */}
         {filteredRunning.length > 0 && (

@@ -37,7 +37,7 @@ export interface WorkItemSpec {
 export interface WorkItemTemplate {
   /** Unique ID (ULID) */
   id: string;
-  /** Unique name: "feature", "bugfix", "prototype", "refactor" */
+  /** Unique name: "feature", "bugfix", "prototype", "refactor", "test" */
   name: string;
   /** Human-readable description */
   description: string;
@@ -109,9 +109,19 @@ export const REFACTOR_TEMPLATE_SPECS: WorkItemSpec[] = [
 ];
 
 /**
+ * Test template - author and validate tests.
+ */
+export const TEST_TEMPLATE_SPECS: WorkItemSpec[] = [
+  { id: 'plan-tests', objective: 'Plan test scenarios and expected behavior', agent: 'planner', dependencies: [] },
+  { id: 'write-tests', objective: 'Write or update test coverage', agent: 'coder', dependencies: ['plan-tests'] },
+  { id: 'run-tests', objective: 'Run targeted and full test suites', agent: 'test-runner', dependencies: ['write-tests'] },
+  { id: 'analyze-failures', objective: 'Summarize failures and propose follow-ups', agent: 'coder', dependencies: ['run-tests'] },
+];
+
+/**
  * All default template names.
  */
-export const DEFAULT_TEMPLATE_NAMES = ['feature', 'bugfix', 'prototype', 'refactor'] as const;
+export const DEFAULT_TEMPLATE_NAMES = ['feature', 'bugfix', 'prototype', 'refactor', 'test'] as const;
 export type DefaultTemplateName = (typeof DEFAULT_TEMPLATE_NAMES)[number];
 
 /**
@@ -127,5 +137,7 @@ export function getDefaultTemplateSpecs(name: DefaultTemplateName): WorkItemSpec
       return PROTOTYPE_TEMPLATE_SPECS;
     case 'refactor':
       return REFACTOR_TEMPLATE_SPECS;
+    case 'test':
+      return TEST_TEMPLATE_SPECS;
   }
 }

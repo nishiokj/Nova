@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCockpit } from '@/hooks/use-cockpit-store';
-import { getCockpitPreview } from '@/lib/api';
+import { getCockpitBrowserState, getCockpitPreview, type CockpitFilesystemRoot } from '@/lib/api';
 
 export function BrowserTab() {
   const { state, set } = useCockpit();
@@ -15,19 +15,26 @@ export function BrowserTab() {
   const [iframeUrl, setIframeUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [cwd, setCwd] = useState<string | null>(null);
+  const [filesystemRoots, setFilesystemRoots] = useState<CockpitFilesystemRoot[]>([]);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   // Auto-fetch preview URL when session changes
   useEffect(() => {
     if (!sessionKey) return;
     let cancelled = false;
-    getCockpitPreview({ sessionKey }).then((result) => {
+    Promise.all([
+      getCockpitPreview({ sessionKey }),
+      getCockpitBrowserState(sessionKey),
+    ]).then(([preview, browserState]) => {
       if (cancelled) return;
-      if (result?.url) {
-        set({ browserUrlDraft: result.url });
-        setIframeUrl(result.url);
+      if (preview?.url) {
+        set({ browserUrlDraft: preview.url });
+        setIframeUrl(preview.url);
         setError(null);
       }
+      setCwd(browserState?.cwd ?? null);
+      setFilesystemRoots(browserState?.filesystemRoots ?? []);
     });
     return () => { cancelled = true; };
   }, [sessionKey, set]);
@@ -76,6 +83,18 @@ export function BrowserTab() {
             ))}
           </select>
         </div>
+        {cwd && (
+          <div className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={cwd}>
+            session cwd: {cwd}
+          </div>
+        )}
+        {filesystemRoots.length > 0 && (
+          <div className="text-[10px] text-[var(--text-muted)] truncate">
+            filesystem roots: {filesystemRoots.slice(0, 3).map((root) => (
+              root.kind === 'notes' ? 'Notes (Pinned)' : root.label
+            )).join(', ')}
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <input

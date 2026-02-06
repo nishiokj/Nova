@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import {
+  getCockpitFilesystem,
   getCockpitMarkdownFile,
   getCockpitMarkdownTree,
+  postCockpitMarkdownDelete,
   postCockpitMarkdownFile,
   postCockpitMarkdownFolder,
   postCockpitMarkdownPatch,
+  type CockpitFilesystemRoot,
   type CockpitMarkdownContextInput,
+  type CockpitMarkdownScopeInput,
   type CockpitMarkdownTreeNode,
 } from '@/lib/api';
 import {
   flattenMarkdownFiles,
   gatherMarkdownFolders,
+  getDocumentType,
   normalizeDocPath,
   normalizeWorkspacePathForClient,
+  parseFrontmatter,
 } from '@/lib/markdown';
 import type { EditorHandle } from '@/components/center/MarkdownEditor';
 
@@ -21,6 +27,11 @@ const AUTOSAVE_DEBOUNCE_MS = 1400;
 
 interface MarkdownState {
   rootDir: string;
+  scopeMode: 'global' | 'session' | 'project';
+  scopeSessionKey: string | null;
+  scopeProjectPath: string | null;
+  filesystemRoots: CockpitFilesystemRoot[];
+  filesystemCwd: string | null;
   tree: CockpitMarkdownTreeNode[];
   suggestedFolders: string[];
   selectedPath: string | null;
@@ -36,11 +47,17 @@ interface MarkdownState {
   status: string | null;
   newFileDropdownOpen: boolean;
   newFileIntent: 'create' | 'save' | null;
+  newFileDefaultFolder: string | null;
   conflictVersion: number | null;
 }
 
 const initialState: MarkdownState = {
   rootDir: '.cockpit/markdown',
+  scopeMode: 'global',
+  scopeSessionKey: null,
+  scopeProjectPath: null,
+  filesystemRoots: [],
+  filesystemCwd: null,
   tree: [],
   suggestedFolders: DEFAULT_SUGGESTED_FOLDERS,
   selectedPath: null,
@@ -56,6 +73,7 @@ const initialState: MarkdownState = {
   status: null,
   newFileDropdownOpen: false,
   newFileIntent: null,
+  newFileDefaultFolder: null,
   conflictVersion: null,
 };
 
@@ -127,11 +145,22 @@ function reducer(state: MarkdownState, action: MdAction): MarkdownState {
   }
 }
 
+function buildScopeInput(state: MarkdownState): CockpitMarkdownScopeInput {
+  if (state.scopeMode === 'session' && state.scopeSessionKey) {
+    return { sessionKey: state.scopeSessionKey };
+  }
+  if (state.scopeMode === 'project' && state.scopeProjectPath) {
+    return { projectPath: state.scopeProjectPath };
+  }
+  return {};
+}
+
 export function useMarkdownWorkspace() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const stateRef = useRef(state);
   stateRef.current = state;
   const editorRef = useRef<EditorHandle | null>(null);
+  const pendingEditorRefocusTimerRef = useRef<number | null>(null);
 
   const files = useMemo(() => flattenMarkdownFiles(state.tree), [state.tree]);
 
@@ -139,29 +168,143 @@ export function useMarkdownWorkspace() {
     dispatch({ type: 'SET', payload });
   }, []);
 
-  const openNewFilePicker = useCallback((intent: 'create' | 'save' = 'create') => {
-    set({ newFileDropdownOpen: true, newFileIntent: intent });
+  const openNewFilePicker = useCallback((
+    intent: 'create' | 'save' = 'create',
+    defaultFolder?: string | null
+  ) => {
+    if (pendingEditorRefocusTimerRef.current !== null) {
+      window.clearTimeout(pendingEditorRefocusTimerRef.current);
+      pendingEditorRefocusTimerRef.current = null;
+    }
+
+    const selectedPath = stateRef.current.selectedPath;
+    const selectedParent = selectedPath && selectedPath.includes('/')
+      ? selectedPath.slice(0, selectedPath.lastIndexOf('/'))
+      : '';
+    const resolvedDefault = defaultFolder ?? selectedParent;
+    const normalizedDefault = typeof resolvedDefault === 'string'
+      ? normalizeWorkspacePathForClient(resolvedDefault, true)
+      : null;
+
+    // Blur the editor to move cursor away from the document
+    editorRef.current?.blur();
+    set({
+      newFileDropdownOpen: true,
+      newFileIntent: intent,
+      newFileDefaultFolder: normalizedDefault ?? null,
+    });
   }, [set]);
 
   const closeNewFilePicker = useCallback(() => {
-    set({ newFileDropdownOpen: false, newFileIntent: null });
+    set({ newFileDropdownOpen: false, newFileIntent: null, newFileDefaultFolder: null });
+    // Refocus the editor when the dropdown is closed
+    if (pendingEditorRefocusTimerRef.current !== null) {
+      window.clearTimeout(pendingEditorRefocusTimerRef.current);
+    }
+    pendingEditorRefocusTimerRef.current = window.setTimeout(() => {
+      editorRef.current?.focus();
+      pendingEditorRefocusTimerRef.current = null;
+    }, 0);
   }, [set]);
 
-  const refreshTree = useCallback(async () => {
+  const applyWorkspaceTree = useCallback((workspace: {
+    rootDir?: string;
+    tree?: CockpitMarkdownTreeNode[];
+    suggestedFolders?: string[];
+  }) => {
+    dispatch({
+      type: 'SET_TREE',
+      payload: {
+        rootDir: workspace.rootDir || '.cockpit/markdown',
+        tree: workspace.tree ?? [],
+        suggestedFolders: workspace.suggestedFolders?.length ? workspace.suggestedFolders : DEFAULT_SUGGESTED_FOLDERS,
+      },
+    });
+  }, []);
+
+  const refreshTree = useCallback(async (scopeOverride?: CockpitMarkdownScopeInput) => {
     try {
-      const workspace = await getCockpitMarkdownTree();
-      dispatch({
-        type: 'SET_TREE',
-        payload: {
-          rootDir: workspace.rootDir || '.cockpit/markdown',
-          tree: workspace.tree ?? [],
-          suggestedFolders: workspace.suggestedFolders?.length ? workspace.suggestedFolders : DEFAULT_SUGGESTED_FOLDERS,
-        },
-      });
+      const scopeInput = scopeOverride ?? buildScopeInput(stateRef.current);
+      const workspace = await getCockpitMarkdownTree(scopeInput);
+      applyWorkspaceTree(workspace);
     } catch {
       // tree refresh is best-effort
     }
-  }, []);
+  }, [applyWorkspaceTree]);
+
+  const refreshFilesystem = useCallback(async (scopeOverride?: {
+    mode: 'global' | 'session' | 'project';
+    sessionKey?: string | null;
+  }) => {
+    const s = stateRef.current;
+    const effectiveMode = scopeOverride?.mode ?? s.scopeMode;
+    const effectiveSessionKey = scopeOverride?.sessionKey ?? s.scopeSessionKey;
+    const filesystem = await getCockpitFilesystem(
+      effectiveMode === 'session' && effectiveSessionKey
+        ? { sessionKey: effectiveSessionKey }
+        : {}
+    );
+    if (!filesystem) return;
+    set({
+      filesystemRoots: filesystem.roots ?? [],
+      filesystemCwd: filesystem.cwd ?? null,
+    });
+  }, [set]);
+
+  const setScope = useCallback(async (scope: {
+    mode: 'global' | 'session' | 'project';
+    sessionKey?: string | null;
+    projectPath?: string | null;
+  }) => {
+    const nextSessionKey = scope.mode === 'session' ? (scope.sessionKey ?? null) : null;
+    const nextProjectPath = scope.mode === 'project'
+      ? (scope.projectPath?.trim() || null)
+      : null;
+    if (scope.mode === 'project' && !nextProjectPath) {
+      set({ status: 'Enter a project folder path to switch workspace.' });
+      return;
+    }
+    const scopeInput: CockpitMarkdownScopeInput = scope.mode === 'session'
+      ? (nextSessionKey ? { sessionKey: nextSessionKey } : {})
+      : scope.mode === 'project'
+        ? (nextProjectPath ? { projectPath: nextProjectPath } : {})
+        : {};
+    set({
+      loading: true,
+      status: scope.mode === 'global'
+        ? 'Switching workspace to pinned notes...'
+        : scope.mode === 'session'
+          ? `Switching workspace to session ${nextSessionKey ?? ''}...`
+          : `Switching workspace to project ${nextProjectPath}...`,
+    });
+    try {
+      const workspace = await getCockpitMarkdownTree(scopeInput);
+      applyWorkspaceTree(workspace);
+      set({
+        loading: false,
+        scopeMode: scope.mode,
+        scopeSessionKey: nextSessionKey,
+        scopeProjectPath: nextProjectPath,
+        status: scope.mode === 'global'
+          ? 'Workspace: pinned notes (.cockpit/markdown)'
+          : scope.mode === 'session'
+            ? `Workspace: session ${nextSessionKey ?? ''}`
+            : `Workspace: project ${nextProjectPath}`,
+      });
+      await refreshFilesystem({
+        mode: scope.mode,
+        ...(nextSessionKey ? { sessionKey: nextSessionKey } : {}),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      set({
+        loading: false,
+        status: scope.mode === 'project'
+          ? `Could not switch to project ${nextProjectPath}: ${message}`
+          : `Could not switch workspace: ${message}`,
+      });
+    }
+  }, [set, refreshFilesystem, applyWorkspaceTree]);
 
   const openFile = useCallback(async (filePath: string) => {
     set({ loading: true, status: null });
@@ -171,7 +314,7 @@ export function useMarkdownWorkspace() {
         set({ loading: false, status: 'Invalid markdown path' });
         return;
       }
-      const file = await getCockpitMarkdownFile(normalized);
+      const file = await getCockpitMarkdownFile(normalized, buildScopeInput(stateRef.current));
       dispatch({
         type: 'FILE_LOADED',
         payload: {
@@ -195,12 +338,14 @@ export function useMarkdownWorkspace() {
   ): Promise<{ ok: true } | { ok: false; conflict?: boolean }> => {
     const s = stateRef.current;
     if (!s.selectedPath) return { ok: false };
+    const scopeInput = buildScopeInput(s);
     const expectedVersion = typeof expectedVersionOverride === 'number'
       ? expectedVersionOverride
       : s.version;
 
     let response = await postCockpitMarkdownPatch({
       path: s.selectedPath,
+      ...scopeInput,
       expectedVersion,
       content: s.content,
       source: 'dashboard-control',
@@ -216,6 +361,7 @@ export function useMarkdownWorkspace() {
     if (!response.success && response.statusCode === 404) {
       response = await postCockpitMarkdownFile({
         path: s.selectedPath,
+        ...scopeInput,
         content: s.content,
         expectedVersion,
         source: 'dashboard-control',
@@ -281,7 +427,7 @@ export function useMarkdownWorkspace() {
 
   const save = useCallback(async () => {
     const s = stateRef.current;
-    if (s.saving) return;
+    if (s.saving || s.autoSaving) return;
 
     set({ saving: true, status: null });
     try {
@@ -309,7 +455,7 @@ export function useMarkdownWorkspace() {
     } catch (err) {
       set({ saving: false, status: err instanceof Error ? err.message : String(err) });
     }
-  }, [openNewFilePicker, refreshTree, saveExistingFile, set]);
+  }, [openNewFilePicker, saveExistingFile, set]);
 
   const createFile = useCallback(() => {
     openNewFilePicker('create');
@@ -318,7 +464,10 @@ export function useMarkdownWorkspace() {
 
   const createFolder = useCallback(async () => {
     const baseFolder = stateRef.current.suggestedFolders[0] ?? 'notes';
-    const entered = window.prompt('Create folder in markdown workspace', baseFolder);
+    const entered = window.prompt(
+      'Create folder in current workspace (relative path)',
+      baseFolder
+    );
     if (!entered) return;
     const normalized = normalizeWorkspacePathForClient(entered);
     if (!normalized) {
@@ -326,12 +475,65 @@ export function useMarkdownWorkspace() {
       return;
     }
     try {
-      await postCockpitMarkdownFolder({ path: normalized });
+      await postCockpitMarkdownFolder({
+        path: normalized,
+        ...buildScopeInput(stateRef.current),
+      });
       dispatch({ type: 'TOGGLE_FOLDER', path: normalized });
       set({ status: `Created folder ${normalized}` });
       await refreshTree();
     } catch (err) {
       set({ status: err instanceof Error ? err.message : String(err) });
+    }
+  }, [set, refreshTree]);
+
+  const deletePath = useCallback(async (
+    targetPath: string,
+    type: 'file' | 'folder',
+    options?: { recursive?: boolean }
+  ) => {
+    const normalized = normalizeWorkspacePathForClient(targetPath);
+    if (!normalized) {
+      set({ status: 'Invalid path' });
+      return false;
+    }
+    try {
+      const response = await postCockpitMarkdownDelete({
+        path: normalized,
+        type,
+        recursive: options?.recursive === true,
+        ...buildScopeInput(stateRef.current),
+      });
+      if (!response.success) {
+        set({ status: response.error ?? `Failed deleting ${type}` });
+        return false;
+      }
+
+      const s = stateRef.current;
+      const selected = s.selectedPath;
+      const removedSelected = selected
+        ? (type === 'file'
+            ? selected === normalized
+            : selected === normalized || selected.startsWith(`${normalized}/`))
+        : false;
+      if (removedSelected) {
+        set({
+          selectedPath: null,
+          content: '',
+          version: 0,
+          updatedAt: null,
+          hash: null,
+          dirty: false,
+          conflictVersion: null,
+        });
+      }
+
+      set({ status: `Deleted ${type}: ${normalized}` });
+      await refreshTree();
+      return true;
+    } catch (err) {
+      set({ status: err instanceof Error ? err.message : String(err) });
+      return false;
     }
   }, [set, refreshTree]);
 
@@ -348,6 +550,34 @@ export function useMarkdownWorkspace() {
     if (!s.selectedPath && !s.content.trim()) return null;
     const selectionStart = editorRef.current?.selectionStart;
     const selectionEnd = editorRef.current?.selectionEnd;
+    const { frontmatter } = parseFrontmatter(s.content);
+    const templateNameRaw = typeof frontmatter.template === 'string'
+      ? frontmatter.template
+      : typeof frontmatter.templateName === 'string'
+        ? frontmatter.templateName
+        : typeof frontmatter.template_name === 'string'
+          ? frontmatter.template_name
+          : undefined;
+    const templateName = typeof templateNameRaw === 'string' && templateNameRaw.trim().length > 0
+      ? templateNameRaw.trim()
+      : undefined;
+    const templateIdRaw = typeof frontmatter.templateId === 'string'
+      ? frontmatter.templateId
+      : typeof frontmatter.template_id === 'string'
+        ? frontmatter.template_id
+        : typeof frontmatter.workflowTemplateId === 'string'
+          ? frontmatter.workflowTemplateId
+          : typeof frontmatter.workflow_template_id === 'string'
+            ? frontmatter.workflow_template_id
+            : undefined;
+    const templateId = typeof templateIdRaw === 'string' && templateIdRaw.trim().length > 0
+      ? templateIdRaw.trim()
+      : undefined;
+    const specs = Array.isArray(frontmatter.specs)
+      ? frontmatter.specs.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : typeof frontmatter.specs === 'string' && frontmatter.specs.trim().length > 0
+        ? [frontmatter.specs.trim()]
+      : undefined;
     return {
       path: s.selectedPath ?? undefined,
       version: s.version,
@@ -359,8 +589,15 @@ export function useMarkdownWorkspace() {
       metadata: {
         editor: 'cockpit',
         rootDir: s.rootDir,
+        workspaceScope: s.scopeMode,
+        workspaceSessionKey: s.scopeSessionKey,
+        workspaceProjectPath: s.scopeProjectPath,
         hash: s.hash,
         conflictVersion: s.conflictVersion,
+        documentType: getDocumentType(s.content),
+        ...(templateName ? { templateName } : {}),
+        ...(templateId ? { templateId } : {}),
+        ...(specs && specs.length > 0 ? { specs } : {}),
       },
     };
   }, []);
@@ -408,6 +645,7 @@ export function useMarkdownWorkspace() {
       const content = s.newFileIntent === 'save' ? s.content : '';
       const response = await postCockpitMarkdownFile({
         path: normalized,
+        ...buildScopeInput(s),
         content,
         expectedVersion: 0,
         source: 'dashboard-control',
@@ -418,10 +656,20 @@ export function useMarkdownWorkspace() {
         },
       });
       if (!response.success || !response.file) {
-        set({ status: response.error ?? 'Failed creating file', newFileDropdownOpen: false, newFileIntent: null });
+        set({
+          status: response.error ?? 'Failed creating file',
+          newFileDropdownOpen: false,
+          newFileIntent: null,
+          newFileDefaultFolder: null,
+        });
         return;
       }
-      set({ newFileDropdownOpen: false, newFileIntent: null, status: `Created ${response.file.path}` });
+      set({
+        newFileDropdownOpen: false,
+        newFileIntent: null,
+        newFileDefaultFolder: null,
+        status: `Created ${response.file.path}`,
+      });
       await refreshTree();
       await openFile(response.file.path);
     } catch (err) {
@@ -429,6 +677,7 @@ export function useMarkdownWorkspace() {
         status: err instanceof Error ? err.message : String(err),
         newFileDropdownOpen: false,
         newFileIntent: null,
+        newFileDefaultFolder: null,
       });
     }
   }, [files, set, refreshTree, openFile]);
@@ -436,7 +685,8 @@ export function useMarkdownWorkspace() {
   // Initial tree load
   useEffect(() => {
     void refreshTree();
-  }, [refreshTree]);
+    void refreshFilesystem();
+  }, [refreshTree, refreshFilesystem]);
 
   // Debounced autosave for existing files.
   useEffect(() => {
@@ -458,16 +708,26 @@ export function useMarkdownWorkspace() {
     saveAutosave,
   ]);
 
+  useEffect(() => () => {
+    if (pendingEditorRefocusTimerRef.current !== null) {
+      window.clearTimeout(pendingEditorRefocusTimerRef.current);
+      pendingEditorRefocusTimerRef.current = null;
+    }
+  }, []);
+
   return {
     state,
     files,
     editorRef,
     set,
+    setScope,
+    refreshFilesystem,
     refreshTree,
     openFile,
     save,
     createFile,
     createFolder,
+    deletePath,
     toggleFolder,
     setContent,
     openNewFilePicker,

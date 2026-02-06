@@ -27,7 +27,7 @@ export const SessionCard = memo(function SessionCard({
       }`}
       style={selected ? { borderLeftColor: color } : undefined}
     >
-      <div className="text-[13px] text-[var(--text-primary)] leading-snug line-clamp-2">{row.title}</div>
+      <div className="text-[13px] text-[var(--text-primary)] leading-snug line-clamp-2" title={row.title}>{row.title}</div>
 
       <div className="flex items-center gap-2 mt-1">
         <span

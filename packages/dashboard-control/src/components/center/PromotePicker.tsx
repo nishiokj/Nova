@@ -93,6 +93,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
         ...issueFm,
         type: 'workflow',
         template: option.template.name,
+        templateId: option.template.id,
         specs: option.template.specs.map((s) => s.id),
       };
 
@@ -161,7 +162,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
       ) : options.length === 0 ? (
         <div className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
           No promotion options available.
-          {state.templates.length === 0 && ' No templates loaded from database.'}
+          {state.templates.length === 0 && ' No workflows loaded from database.'}
         </div>
       ) : (
         <div className="max-h-64 overflow-y-auto py-0.5">
@@ -183,6 +184,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
 
       <div className="px-2.5 py-1 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)]">
         {'\u2191/\u2193'} select · Enter confirm · Esc cancel · Ctrl+U toggle
+        <span className="ml-1">· requires project/session workspace</span>
       </div>
     </div>
   );

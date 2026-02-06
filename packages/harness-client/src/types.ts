@@ -51,7 +51,9 @@ export type BridgeCommandType =
   | 'providers_test'
   | 'session_fork'
   | 'session_close'
+  | 'session_delete'
   | 'list_sessions'
+  | 'usage_summary'
   | 'compact_context'
   | 'set_model'
   | 'get_model'
@@ -161,6 +163,16 @@ export interface ListSessionsCommandData extends CommandDataBase {
   limit?: number;
 }
 
+export interface SessionDeleteCommandData extends CommandDataBase {
+  sessionKey?: string;
+  session_key?: string;
+}
+
+export interface UsageSummaryCommandData extends CommandDataBase {
+  status?: string | string[];
+  limit?: number;
+}
+
 export interface SetModelCommandData extends CommandDataBase {
   agent_type?: string;
   provider?: string;
@@ -242,7 +254,9 @@ export interface BridgeCommandDataMap {
   providers_test: ProvidersCommandData;
   session_fork: NoData;
   session_close: NoData;
+  session_delete: SessionDeleteCommandData;
   list_sessions: ListSessionsCommandData;
+  usage_summary: UsageSummaryCommandData;
   compact_context: NoData;
   set_model: SetModelCommandData;
   get_model: GetModelCommandData;

@@ -1,8 +1,8 @@
 import { useCockpit } from '@/hooks/use-cockpit-store';
-import { getCockpitDiff, type RepoLensMatch } from '@/lib/api';
+import type { RepoLensMatch } from '@/lib/api';
 
 export function GrepTab() {
-  const { state, set, handleRunGrepSearch } = useCockpit();
+  const { state, set, handleRunGrepSearch, handleSelectDiffFile } = useCockpit();
   const { lensQuery, lensResults, lensLoading, focusData } = state;
 
   return (
@@ -48,10 +48,9 @@ export function GrepTab() {
                   <button
                     key={`${label}-${match.kind}-${match.path}-${match.line}-${idx}`}
                     onClick={() => {
-                      set({ focusTab: 'diff', selectedDiffFile: match.path });
+                      set({ focusTab: 'diff' });
                       if (focusData?.sessionKey) {
-                        void getCockpitDiff({ sessionKey: focusData.sessionKey, file: match.path })
-                          .then((r) => set({ diffData: r })).catch(() => {});
+                        void handleSelectDiffFile(match.path);
                       }
                     }}
                     className="w-full text-left px-2 py-1 border-b border-[var(--border-subtle)] last:border-b-0 hover:bg-[var(--bg-hover)]"

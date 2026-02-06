@@ -391,6 +391,35 @@ export interface FocusData {
   pointers: Record<string, string>;
 }
 
+export interface CockpitSessionPermissionRule {
+  tool: 'Bash' | 'Write' | 'Edit';
+  pattern: string;
+}
+
+export interface CockpitSessionPermissionState {
+  persistent: {
+    allow: CockpitSessionPermissionRule[];
+    deny: CockpitSessionPermissionRule[];
+  };
+  sessionGrants: CockpitSessionPermissionRule[];
+  sessionDenials: CockpitSessionPermissionRule[];
+  dangerousMode: boolean;
+  allowOutsideRoot?: boolean;
+  webSearchEnabled?: boolean;
+  writesNoDeletes?: boolean;
+}
+
+export interface CockpitSessionPermissions {
+  sessionKey: string;
+  workingDir: string;
+  rootLabel: string;
+  state: CockpitSessionPermissionState;
+  customConfigPath: string;
+  customConfigExists: boolean;
+  customConfigJson: string | null;
+  warning?: string;
+}
+
 export interface NormalizedSessionEvent {
   at: string;
   type: 'message' | 'tool' | 'workflow' | 'packet' | 'test' | 'trace';
@@ -471,6 +500,15 @@ export interface CockpitSessionReviewDecisionInput {
   requestId?: string;
 }
 
+export interface CockpitSessionPermissionUpdateInput {
+  profile?: 'default' | 'writes_only' | 'websearch_enabled' | 'outside_root' | 'custom';
+  dangerousMode?: boolean;
+  allowOutsideRoot?: boolean;
+  webSearchEnabled?: boolean;
+  writesNoDeletes?: boolean;
+  customJson?: string;
+}
+
 export interface CockpitPatchEditInput {
   path: string;
   startLine: number;
@@ -515,8 +553,20 @@ export interface CockpitBrowserEvidence {
   title?: string;
 }
 
+export interface CockpitFilesystemRoot {
+  id: string;
+  kind: 'notes' | 'project';
+  label: string;
+  path: string;
+  pinned: boolean;
+  source: 'daemon' | 'session-db' | 'discovered';
+  sessionCount?: number;
+  sessionKey?: string;
+}
+
 export interface CockpitBrowserState {
   sessionKey: string;
+  cwd: string;
   browserSession: string;
   available: boolean;
   connected: boolean;
@@ -525,8 +575,26 @@ export interface CockpitBrowserState {
   lastActionAt?: string;
   actions: Array<Record<string, unknown>>;
   evidence: CockpitBrowserEvidence[];
+  filesystemRoots?: CockpitFilesystemRoot[];
   lastSnapshotPath?: string;
   lastSnapshotPreview?: string;
+}
+
+export interface CockpitFilesystemState {
+  cwd: string;
+  roots: CockpitFilesystemRoot[];
+}
+
+export interface CockpitMarkdownScope {
+  mode: 'global' | 'session' | 'project';
+  workingDir: string;
+  sessionKey?: string;
+  projectPath?: string;
+}
+
+export interface CockpitMarkdownScopeInput {
+  sessionKey?: string;
+  projectPath?: string;
 }
 
 export interface CockpitMarkdownTreeNode {
@@ -590,8 +658,10 @@ export async function getCockpitTemplates(): Promise<WorkItemTemplate[]> {
 export async function postCockpitSessionCreate(input: {
   goal?: string;
   markdownPath?: string;
+  projectPath?: string;
+  createProjectPath?: boolean;
   metadata?: Record<string, unknown>;
-}): Promise<{ success: boolean; sessionKey?: string; error?: string }> {
+}): Promise<{ success: boolean; sessionKey?: string; workingDir?: string; error?: string }> {
   return postAPI('/cockpit/session/create', input);
 }
 
@@ -689,6 +759,19 @@ export async function getCockpitSessionPackets(
   return data.packets ?? [];
 }
 
+export async function getCockpitSessionPermissions(sessionKey: string): Promise<CockpitSessionPermissions> {
+  return fetchAPI<CockpitSessionPermissions>(
+    `/cockpit/session/${encodeURIComponent(sessionKey)}/permissions`
+  );
+}
+
+export async function postCockpitSessionPermissions(
+  sessionKey: string,
+  input: CockpitSessionPermissionUpdateInput
+): Promise<{ success: boolean } & CockpitSessionPermissions> {
+  return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/permissions`, input);
+}
+
 export async function getCockpitTraces(
   sessionKey: string,
   options: { workItemId?: string; limit?: number } = {}
@@ -768,6 +851,18 @@ export async function getCockpitPreview(options: {
   }
 }
 
+export async function getCockpitFilesystem(options: {
+  sessionKey?: string;
+} = {}): Promise<CockpitFilesystemState | null> {
+  const params = new URLSearchParams();
+  if (options.sessionKey) params.set('sessionKey', options.sessionKey);
+  try {
+    return await fetchAPI<CockpitFilesystemState>(`/cockpit/filesystem?${params.toString()}`);
+  } catch {
+    return null;
+  }
+}
+
 export async function getCockpitBrowserState(sessionKey: string): Promise<CockpitBrowserState | null> {
   const params = new URLSearchParams();
   params.set('sessionKey', sessionKey);
@@ -814,26 +909,39 @@ export async function postCockpitBrowserRunbook(input: {
   return postAPI('/cockpit/browser/runbook', input);
 }
 
-export async function getCockpitMarkdownTree(): Promise<{
+export async function getCockpitMarkdownTree(scope: CockpitMarkdownScopeInput = {}): Promise<{
   rootDir: string;
   tree: CockpitMarkdownTreeNode[];
   suggestedFolders: string[];
+  scope?: CockpitMarkdownScope;
 }> {
+  const params = new URLSearchParams();
+  if (scope.sessionKey) params.set('sessionKey', scope.sessionKey);
+  if (scope.projectPath) params.set('projectPath', scope.projectPath);
   const data = await fetchAPI<{
     rootDir: string;
     tree: CockpitMarkdownTreeNode[];
     suggestedFolders: string[];
-  }>('/cockpit/markdown/tree');
+    scope?: CockpitMarkdownScope;
+  }>(`/cockpit/markdown/tree?${params.toString()}`);
   return {
     rootDir: data.rootDir ?? '.cockpit/markdown',
     tree: data.tree ?? [],
     suggestedFolders: data.suggestedFolders ?? [],
+    ...(data.scope ? { scope: data.scope } : {}),
   };
 }
 
-export async function getCockpitMarkdownFile(filePath: string): Promise<CockpitMarkdownFile> {
+export async function getCockpitMarkdownFile(
+  filePath: string,
+  scope: CockpitMarkdownScopeInput = {}
+): Promise<CockpitMarkdownFile> {
+  const params = new URLSearchParams();
+  params.set('path', filePath);
+  if (scope.sessionKey) params.set('sessionKey', scope.sessionKey);
+  if (scope.projectPath) params.set('projectPath', scope.projectPath);
   const data = await fetchAPI<{ file: CockpitMarkdownFile }>(
-    `/cockpit/markdown/file?path=${encodeURIComponent(filePath)}`
+    `/cockpit/markdown/file?${params.toString()}`
   );
   return data.file;
 }
@@ -841,6 +949,8 @@ export async function getCockpitMarkdownFile(filePath: string): Promise<CockpitM
 export async function postCockpitMarkdownFile(input: {
   path: string;
   content: string;
+  sessionKey?: string;
+  projectPath?: string;
   expectedVersion?: number;
   metadata?: Record<string, unknown>;
   source?: string;
@@ -859,13 +969,32 @@ export async function postCockpitMarkdownFile(input: {
 
 export async function postCockpitMarkdownFolder(input: {
   path: string;
+  sessionKey?: string;
+  projectPath?: string;
 }): Promise<{ success: boolean; folder?: { path: string } }> {
   return postAPI('/cockpit/markdown/folder', input);
+}
+
+export async function postCockpitMarkdownDelete(input: {
+  path: string;
+  type: 'file' | 'folder';
+  recursive?: boolean;
+  sessionKey?: string;
+  projectPath?: string;
+}): Promise<{
+  success: boolean;
+  deleted?: { path: string; type: 'file' | 'folder' };
+  statusCode?: number;
+  error?: string;
+}> {
+  return postAPIResult('/cockpit/markdown/delete', input);
 }
 
 export async function importCockpitMarkdownFile(input: {
   sessionKey?: string;
   markdownPath?: string;
+  scopeSessionKey?: string;
+  projectPath?: string;
   destinationPath?: string;
   folder?: string;
   filename?: string;
@@ -890,6 +1019,8 @@ export async function importCockpitMarkdownFile(input: {
 export async function postCockpitMarkdownPatch(input: {
   path: string;
   expectedVersion: number;
+  sessionKey?: string;
+  projectPath?: string;
   content?: string;
   patch?: string;
   edits?: Array<{ startLine: number; endLine: number; replacement: string }>;
@@ -930,7 +1061,14 @@ export async function postCockpitSessionMessage(
   sessionKey: string,
   message: string,
   options?: { markdownContext?: CockpitMarkdownContextInput }
-): Promise<{ success: boolean; requestId?: string; queued?: boolean; markdownContextAttached?: boolean }> {
+): Promise<{
+  success: boolean;
+  requestId?: string;
+  queued?: boolean;
+  markdownContextAttached?: boolean;
+  workflowTemplateApplied?: boolean;
+  workflowTemplate?: { id?: string; name?: string };
+}> {
   return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/message`, {
     message,
     ...(options?.markdownContext ? { markdownContext: options.markdownContext } : {}),

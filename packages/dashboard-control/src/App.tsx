@@ -1,8 +1,9 @@
 import { Component, useEffect, type ReactNode } from 'react';
 import { useCockpitStore, CockpitContext } from '@/hooks/use-cockpit-store';
 import { useMarkdownWorkspace } from '@/hooks/use-markdown-workspace';
-import { usePolling } from '@/hooks/use-polling';
+import { usePolling, useEventStream } from '@/hooks/use-polling';
 import { useKeyboard } from '@/hooks/use-keyboard';
+import { useResizableLayout } from '@/hooks/use-resizable-layout';
 import { getCockpitDiff } from '@/lib/api';
 import { Header } from '@/components/layout/Header';
 import { StatusBar } from '@/components/layout/StatusBar';
@@ -11,6 +12,7 @@ import { CenterPanel } from '@/components/center/CenterPanel';
 import { RightPanel } from '@/components/right/RightPanel';
 import { CommandPalette } from '@/components/shared/CommandPalette';
 import { ShortcutSheet } from '@/components/shared/ShortcutSheet';
+import { ResizeHandle } from '@/components/shared/ResizeHandle';
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -31,11 +33,12 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 30_000; // Fallback only — SSE handles real-time updates
 
 export default function App() {
   const store = useCockpitStore();
   const workspace = useMarkdownWorkspace();
+  const { layout, setLeftWidth, setRightWidth } = useResizableLayout();
   const { registerMarkdownContextProvider, registerMarkdownSetContent, registerBeforeSendMessageHook } = store;
   const { getActiveContext, flushPendingAutosave, setContent } = workspace;
 
@@ -56,11 +59,17 @@ export default function App() {
     void store.refreshTemplates();
   }, [store.refreshTemplates]);
 
-  // Poll for rollup updates + side-effects (tree refresh).
+  // Poll as fallback; SSE event stream handles real-time updates.
   usePolling(async () => {
     await store.refreshAll();
     if (!workspace.state.dirty) void workspace.refreshTree();
   }, POLL_INTERVAL_MS);
+
+  // SSE event stream — triggers immediate refresh on any bus event.
+  useEventStream(async () => {
+    await store.refreshAll();
+    if (!workspace.state.dirty) void workspace.refreshTree();
+  });
 
   // Refresh focus only when focusTarget changes (periodic refresh handled by refreshAll).
   useEffect(() => {
@@ -80,6 +89,10 @@ export default function App() {
       store.set({
         diffData: response,
         selectedDiffFile: response.hotspots[0]?.path ?? null,
+        highlightedDiffIdx: response.hotspots.length > 0 ? 0 : null,
+        diffPatchFile: null,
+        diffPatchLoadingFile: null,
+        diffPatchError: null,
         focusTab: 'diff',
         pendingCommitRange: null,
       });
@@ -97,30 +110,41 @@ export default function App() {
       <div className="h-screen flex flex-col overflow-hidden" data-cockpit-root="true">
         <Header />
 
-        <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[14rem_minmax(0,1fr)_20rem] gap-0 overflow-hidden">
+        <main
+          className="flex-1 min-h-0 flex overflow-hidden"
+          style={{ '--left-width': `${layout.leftWidth}px`, '--right-width': `${layout.rightWidth}px` } as React.CSSProperties}
+        >
           {/* Left — File Explorer */}
           <section
             data-cockpit-pane="left"
             tabIndex={-1}
-            className="min-h-0 border-r border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden focus:outline-none focus-within:ring-1 focus-within:ring-inset focus-within:ring-[var(--accent-cyan)]/60"
+            className="min-h-0 flex-shrink-0 border-r border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden focus:outline-none focus-within:ring-1 focus-within:ring-inset focus-within:ring-[var(--accent-cyan)]/60"
+            style={{ width: `var(--left-width)` }}
           >
             <FileExplorer workspace={workspace} />
           </section>
+
+          {/* Resize handle between left and center */}
+          <ResizeHandle direction="horizontal" onResize={(delta) => setLeftWidth(layout.leftWidth + delta)} />
 
           {/* Center — Document editor OR Session detail */}
           <section
             data-cockpit-pane="center"
             tabIndex={-1}
-            className="min-h-0 bg-[var(--bg-surface)] overflow-hidden flex flex-col focus:outline-none focus-within:ring-1 focus-within:ring-inset focus-within:ring-[var(--accent-cyan)]/60"
+            className="flex-1 min-w-0 bg-[var(--bg-surface)] overflow-hidden flex flex-col focus:outline-none focus-within:ring-1 focus-within:ring-inset focus-within:ring-[var(--accent-cyan)]/60"
           >
             <CenterPanel workspace={workspace} />
           </section>
+
+          {/* Resize handle between center and right */}
+          <ResizeHandle direction="horizontal" onResize={(delta) => setRightWidth(layout.rightWidth - delta)} />
 
           {/* Right — Session list + commits + PRs */}
           <section
             data-cockpit-pane="right"
             tabIndex={-1}
-            className="min-h-0 border-l border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden focus:outline-none focus-within:ring-1 focus-within:ring-inset focus-within:ring-[var(--accent-cyan)]/60"
+            className="min-h-0 flex-shrink-0 border-l border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden focus:outline-none focus-within:ring-1 focus-within:ring-inset focus-within:ring-[var(--accent-cyan)]/60"
+            style={{ width: `var(--right-width)` }}
           >
             <RightPanel />
           </section>

@@ -10,6 +10,28 @@ const TYPE_BADGE_COLORS: Record<DocumentType, { color: string; bg: string }> = {
   executable: { color: 'var(--accent-green)', bg: 'var(--accent-green)' },
 };
 
+function firstNonEmptyString(values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return null;
+}
+
+function normalizeSpecsValue(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return [value.trim()];
+  }
+  return [];
+}
+
 export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) {
   const { state, setContent, editorRef } = workspace;
   const cockpit = useCockpit();
@@ -17,7 +39,39 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
   const docType = getDocumentType(state.content);
   const sessionKey = getDocumentSessionKey(state.content);
   const { frontmatter } = parseFrontmatter(state.content);
-  const templateName = typeof frontmatter.template === 'string' ? frontmatter.template : null;
+  const templateName = firstNonEmptyString([
+    frontmatter.template,
+    frontmatter.templateName,
+    frontmatter.template_name,
+  ]);
+  const templateId = firstNonEmptyString([
+    frontmatter.templateId,
+    frontmatter.template_id,
+    frontmatter.workflowTemplateId,
+    frontmatter.workflow_template_id,
+  ]);
+  const frontmatterSpecs = normalizeSpecsValue(frontmatter.specs);
+  const templateBadge = templateName ?? templateId;
+  const workflowLike = docType === 'workflow' || docType === 'executable';
+  const hasTemplateBinding = workflowLike && (templateName !== null || templateId !== null || frontmatterSpecs.length > 0);
+  const matchedTemplate = hasTemplateBinding
+    ? cockpit.state.templates.find((template) => (
+      (templateId !== null && template.id === templateId)
+      || (templateName !== null && template.name.toLowerCase() === templateName.toLowerCase())
+    )) ?? null
+    : null;
+  const templateSpecIds = matchedTemplate?.specs.map((spec) => spec.id) ?? [];
+  const specsMatch = matchedTemplate
+    ? templateSpecIds.length === frontmatterSpecs.length
+      && templateSpecIds.every((id, i) => id === frontmatterSpecs[i])
+    : true;
+  const templateBindingStatus = !hasTemplateBinding
+    ? null
+    : !matchedTemplate
+      ? 'missing-template'
+      : !specsMatch
+        ? 'spec-mismatch'
+        : 'ok';
   const badgeStyle = TYPE_BADGE_COLORS[docType];
 
   return (
@@ -33,10 +87,10 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
           {docType}
         </span>
 
-        {/* Template name badge */}
-        {templateName && (
+        {/* Workflow name badge */}
+        {templateBadge && (
           <span className="px-1.5 py-0.5 rounded text-[9px] font-mono text-[var(--accent-cyan)]" style={{ border: '1px solid var(--accent-cyan)40' }}>
-            {templateName}
+            {templateBadge}
           </span>
         )}
 
@@ -57,12 +111,20 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
         )}
 
         <span className="ml-auto flex items-center gap-2 text-[10px]">
+          {/* New File button */}
+          <button
+            onClick={() => workspace.openNewFilePicker('create')}
+            className="px-1.5 py-0.5 rounded text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/10"
+            title="New markdown file (Ctrl+N)"
+          >
+            + New
+          </button>
           {/* Promote button */}
           {docType !== 'executable' && (
             <button
-              onClick={() => cockpit.set({ upgradePickerOpen: true })}
+              onClick={() => cockpit.handleOpenUpgradePicker()}
               className="px-1.5 py-0.5 rounded text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/10"
-              title="Promote document (Ctrl+U)"
+              title="Promote document (Ctrl+U, requires project/session scope)"
             >
               Promote
             </button>
@@ -73,6 +135,22 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
           </span>
         </span>
       </div>
+      {templateBindingStatus && (
+        <div
+          className="px-2 py-1 border-b text-[10px]"
+          style={{
+            color: templateBindingStatus === 'ok' ? 'var(--text-secondary)' : 'var(--warning)',
+            borderColor: templateBindingStatus === 'ok' ? 'var(--border-subtle)' : 'var(--warning)',
+            background: templateBindingStatus === 'ok' ? 'var(--bg-elevated)' : 'color-mix(in srgb, var(--warning) 12%, transparent)',
+          }}
+        >
+          {templateBindingStatus === 'ok'
+            ? 'Template bindings active: frontmatter template/templateId/specs resolve runtime workItems and subagents from the DB template.'
+            : templateBindingStatus === 'spec-mismatch'
+              ? 'Frontmatter specs differ from the selected DB template. Runtime resolves from DB template steps, not edited markdown step text.'
+              : 'Template binding found, but no matching DB template is loaded in cockpit. Workflow resolution may fail until restored.'}
+        </div>
+      )}
       <div className="flex-1 min-h-0">
         <MarkdownEditor
           ref={editorRef}

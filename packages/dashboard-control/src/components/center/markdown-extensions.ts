@@ -32,6 +32,51 @@ const inlineCodeMark = Decoration.mark({ class: 'cm-code' });
 const linkUrlMark = Decoration.mark({ class: 'cm-link' });
 const syntaxDimMark = Decoration.mark({ class: 'cm-syntax-dim' });
 const listMarkDeco = Decoration.mark({ class: 'cm-list-mark' });
+const templateBindingLineDeco = Decoration.line({ class: 'cm-template-binding-line' });
+const templateBindingKeyDeco = Decoration.mark({ class: 'cm-template-binding-key' });
+
+const TEMPLATE_BINDING_KEYS = new Set([
+  'template',
+  'templateName',
+  'template_name',
+  'templateId',
+  'template_id',
+  'workflowTemplateId',
+  'workflow_template_id',
+  'specs',
+]);
+
+function addTemplateBindingDecorations(
+  view: EditorView,
+  ranges: Range<Decoration>[],
+): void {
+  const doc = view.state.doc;
+  if (doc.lines < 3) return;
+
+  if (doc.line(1).text.trim() !== '---') return;
+
+  let frontmatterEndLine: number | null = null;
+  for (let lineNumber = 2; lineNumber <= doc.lines; lineNumber++) {
+    if (doc.line(lineNumber).text.trim() === '---') {
+      frontmatterEndLine = lineNumber;
+      break;
+    }
+  }
+  if (!frontmatterEndLine || frontmatterEndLine <= 2) return;
+
+  for (let lineNumber = 2; lineNumber < frontmatterEndLine; lineNumber++) {
+    const line = doc.line(lineNumber);
+    const keyMatch = line.text.match(/^([A-Za-z0-9_]+)\s*:/);
+    if (!keyMatch) continue;
+    const key = keyMatch[1];
+    if (!TEMPLATE_BINDING_KEYS.has(key)) continue;
+    const keyOffset = keyMatch.index ?? 0;
+    const keyFrom = line.from + keyOffset;
+    const keyTo = keyFrom + key.length;
+    ranges.push(templateBindingLineDeco.range(line.from));
+    ranges.push(templateBindingKeyDeco.range(keyFrom, keyTo));
+  }
+}
 
 function buildDecorations(view: EditorView): DecorationSet {
   const ranges: Range<Decoration>[] = [];
@@ -115,6 +160,8 @@ function buildDecorations(view: EditorView): DecorationSet {
       },
     });
   }
+
+  addTemplateBindingDecorations(view, ranges);
 
   // Decorations must be sorted by position
   ranges.sort((a, b) => a.from - b.from || a.value.startSide - b.value.startSide);
@@ -205,4 +252,14 @@ export const cockpitEditorTheme = EditorView.theme({
 
   // Syntax dimming for markers (#, **, `, etc.)
   '.cm-syntax-dim': { color: 'var(--text-muted)', opacity: '0.7' },
+
+  // Frontmatter lines that drive workflow template resolution.
+  '.cm-template-binding-line': {
+    backgroundColor: 'rgba(56, 139, 253, 0.08)',
+    boxShadow: 'inset 2px 0 0 var(--accent-cyan)',
+  },
+  '.cm-template-binding-key': {
+    color: 'var(--accent-cyan)',
+    fontWeight: '700',
+  },
 });

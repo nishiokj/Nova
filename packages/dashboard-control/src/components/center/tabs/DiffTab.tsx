@@ -1,9 +1,20 @@
 import { useCockpit } from '@/hooks/use-cockpit-store';
-import { getCockpitDiff } from '@/lib/api';
 
 export function DiffTab() {
-  const { state, set, handleApplyPatch } = useCockpit();
-  const { diffData, selectedDiffFile, patchDraft, patchApplyStatus, applyingPatch, focusData } = state;
+  const { state, set, handleApplyPatch, handleSelectDiffFile } = useCockpit();
+  const {
+    diffData,
+    selectedDiffFile,
+    highlightedDiffIdx,
+    diffPatchFile,
+    diffPatchLoadingFile,
+    diffPatchError,
+    patchDraft,
+    patchApplyStatus,
+    applyingPatch,
+  } = state;
+
+  const hotspots = diffData?.hotspots.slice(0, 20) ?? [];
 
   if (!diffData) {
     return (
@@ -25,59 +36,84 @@ export function DiffTab() {
       </div>
 
       <div className="border border-[var(--border-subtle)] rounded overflow-hidden">
-        <div className="px-2 py-1 border-b border-[var(--border-subtle)] text-[var(--text-muted)]">Hotspots</div>
-        {diffData.hotspots.length === 0 ? (
+        <div className="px-2 py-1 border-b border-[var(--border-subtle)] text-[var(--text-muted)] flex items-center justify-between">
+          <span>Hotspots</span>
+          <span className="text-[10px] opacity-80">{'\u2191/\u2193'} navigate · Enter open</span>
+        </div>
+        {hotspots.length === 0 ? (
           <div className="px-2 py-2 text-[var(--text-muted)]">No changed files in range.</div>
         ) : (
-          diffData.hotspots.slice(0, 20).map((hotspot) => (
-            <button
-              key={hotspot.path}
-              onClick={() => {
-                set({ selectedDiffFile: hotspot.path });
-                if (focusData?.sessionKey) {
-                  void getCockpitDiff({
-                    sessionKey: focusData.sessionKey,
-                    base: diffData.baseSha,
-                    head: diffData.headSha,
-                    file: hotspot.path,
-                  }).then((r) => set({ diffData: r })).catch(() => {});
-                }
-              }}
-              className={`w-full px-2 py-1 text-left border-b border-[var(--border-subtle)] last:border-b-0 hover:bg-[var(--bg-hover)] ${
-                selectedDiffFile === hotspot.path ? 'bg-[var(--accent-cyan)]/10' : ''
-              }`}
-            >
-              <div className="font-mono text-[11px] text-[var(--text-secondary)] truncate">{hotspot.path}</div>
-              <div className="text-[10px] text-[var(--text-muted)]">+{hotspot.added} / -{hotspot.deleted}</div>
-            </button>
-          ))
+          hotspots.map((hotspot, index) => {
+            const selected = selectedDiffFile === hotspot.path;
+            const highlighted = highlightedDiffIdx === index || (highlightedDiffIdx === null && selected);
+            return (
+              <div key={hotspot.path} className="border-b border-[var(--border-subtle)] last:border-b-0">
+                <button
+                  onClick={() => void handleSelectDiffFile(hotspot.path)}
+                  onMouseEnter={() => set({ highlightedDiffIdx: index })}
+                  className={`w-full px-2 py-1 text-left transition-colors ${
+                    selected
+                      ? 'bg-[var(--accent-cyan)]/12'
+                      : highlighted
+                        ? 'bg-[var(--bg-hover)]'
+                        : 'hover:bg-[var(--bg-hover)]'
+                  }`}
+                >
+                  <div className="font-mono text-[11px] text-[var(--text-secondary)] truncate">{hotspot.path}</div>
+                  <div className="text-[10px] text-[var(--text-muted)]">+{hotspot.added} / -{hotspot.deleted}</div>
+                </button>
+                {selected && (
+                  <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+                    {diffPatchLoadingFile === hotspot.path ? (
+                      <div className="px-2 py-1.5 text-[10px] text-[var(--text-muted)]">Loading patch…</div>
+                    ) : diffPatchError && diffPatchFile === hotspot.path ? (
+                      <div className="px-2 py-1.5 text-[10px] text-[var(--error)]">{diffPatchError}</div>
+                    ) : (
+                      <>
+                        {(diffPatchFile === hotspot.path || (!diffPatchFile && diffData.patch)) && diffData.patch ? (
+                          <pre className="p-2 text-[10px] overflow-auto max-h-64 whitespace-pre font-mono leading-relaxed">
+                            {diffData.patch.split('\n').map((line, i) => {
+                              const color = line.startsWith('+') ? 'text-[var(--success)]'
+                                : line.startsWith('-') ? 'text-[var(--error)]'
+                                : line.startsWith('@@') ? 'text-[var(--accent-cyan)]'
+                                : 'text-[var(--text-secondary)]';
+                              return <div key={i} className={color}>{line || '\u00A0'}</div>;
+                            })}
+                          </pre>
+                        ) : (
+                          <div className="px-2 py-1.5 text-[10px] text-[var(--text-muted)]">
+                            Press Enter or click to open this diff.
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 
-      {diffData.patch && (
-        <pre className="p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[11px] overflow-x-auto whitespace-pre-wrap">
-          {diffData.patch}
-        </pre>
-      )}
+      {hotspots.length > 0 && !selectedDiffFile ? (
+        <div className="text-[11px] text-[var(--text-muted)] italic">Use arrows or click to pick a file, Enter to open.</div>
+      ) : null}
 
-      <div className="border border-[var(--border-subtle)] rounded p-2 space-y-2">
-        <div className="text-[var(--text-muted)]">Patch Pad (max 3 files / 30 lines)</div>
-        <textarea
+      <div className="flex items-center gap-2 border border-[var(--border-subtle)] rounded px-2 py-1">
+        <input
           value={patchDraft}
           onChange={(e) => set({ patchDraft: e.target.value })}
-          placeholder="Paste unified diff here..."
-          className="w-full min-h-28 bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[11px] font-mono text-[var(--text-secondary)]"
+          placeholder="Paste unified diff..."
+          className="flex-1 min-w-0 bg-transparent text-[11px] font-mono text-[var(--text-secondary)] outline-none placeholder:text-[var(--text-muted)]"
         />
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => void handleApplyPatch()}
-            disabled={applyingPatch || !patchDraft.trim()}
-            className="px-2 py-0.5 text-[11px] rounded bg-[var(--success)]/20 text-[var(--success)] hover:bg-[var(--success)]/30 disabled:opacity-60"
-          >
-            {applyingPatch ? 'Applying...' : 'Apply Patch'}
-          </button>
-          {patchApplyStatus && <span className="text-[10px] text-[var(--text-muted)]">{patchApplyStatus}</span>}
-        </div>
+        <button
+          onClick={() => void handleApplyPatch()}
+          disabled={applyingPatch || !patchDraft.trim()}
+          className="flex-shrink-0 px-2 py-0.5 text-[11px] rounded bg-[var(--success)]/20 text-[var(--success)] hover:bg-[var(--success)]/30 disabled:opacity-60"
+        >
+          {applyingPatch ? 'Applying...' : 'Apply'}
+        </button>
+        {patchApplyStatus && <span className="flex-shrink-0 text-[10px] text-[var(--text-muted)]">{patchApplyStatus}</span>}
       </div>
     </div>
   );

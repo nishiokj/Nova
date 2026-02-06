@@ -531,6 +531,23 @@ export class ContextWindow {
   }
 
   // =========================================================================
+  // Auto-Compaction
+  // =========================================================================
+
+  /**
+   * Auto-compact when context is near full.
+   * Deduplicates file_content by path and truncates long outputs.
+   */
+  private _maybeAutoCompact(): void {
+    if (!this.isNearFull(0.85)) return;
+    this.compact({
+      deduplicateByPath: true,
+      maxFileContentCount: 30,
+      truncateOutputsTo: 8_000,
+    });
+  }
+
+  // =========================================================================
   // Mutation Methods (increment _version, write-through to disk)
   // =========================================================================
 
@@ -551,6 +568,7 @@ export class ContextWindow {
       messageCount: this._items.filter(i => i.type === 'message').length,
     };
     this._writeDisk();
+    this._maybeAutoCompact();
   }
 
   /**
@@ -590,6 +608,7 @@ export class ContextWindow {
     });
     this._version++;
     this._writeDisk();
+    this._maybeAutoCompact();
   }
 
   /**
@@ -623,6 +642,7 @@ export class ContextWindow {
     this._readFiles.add(path);
     this._version++;
     this._writeDisk();
+    this._maybeAutoCompact();
     return id;
   }
 

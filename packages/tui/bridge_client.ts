@@ -159,6 +159,14 @@ export class BridgeClient extends EventEmitter {
     return this.client.listSessions(options);
   }
 
+  async deleteSession(sessionKey: string) {
+    return this.client.deleteSession(sessionKey);
+  }
+
+  async usageSummary(options: { status?: string | string[]; limit?: number } = {}) {
+    return this.client.usageSummary(options);
+  }
+
   async setDangerousMode(enabled: boolean) {
     return this.client.setDangerousMode(enabled);
   }

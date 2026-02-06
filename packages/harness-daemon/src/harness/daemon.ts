@@ -41,6 +41,10 @@ export interface HarnessDaemonOptions {
 // Default idle timeout: 5 seconds
 const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export class HarnessDaemon {
   private readonly host: string;
   private readonly port: number;
@@ -278,12 +282,16 @@ export class HarnessDaemon {
               const sessionResult = graphd?.sessionGet(sessionKey) as { session?: { workingDir?: string | null } } | undefined;
               const workingDir = sessionResult?.session?.workingDir ?? this.workingDir;
               const requestId = `cockpit-${randomUUID()}`;
+              const handoffSpec = isRecord(options?.metadata?.cockpit_handoff_spec)
+                ? options?.metadata?.cockpit_handoff_spec
+                : undefined;
               const runHandle = this.harness!.run({
                 requestId,
                 inputText: message,
                 ...(typeof options?.context === 'string' && options.context.trim().length > 0
                   ? { context: options.context.trim() }
                   : {}),
+                ...(handoffSpec ? { handoffSpec } : {}),
                 sessionKey,
                 workingDir,
               });
@@ -342,12 +350,38 @@ export class HarnessDaemon {
         graphd: this.harness?.getGraphD() ?? null,
         isGraphDReady: () => !!(this.harness?.getGraphD()),
         workingDir: this.workingDir,
+        getSessionPermissionState: this.harness
+          ? (sessionKey, options) => {
+              const store = this.harness!.ensureSessionHydrated(sessionKey, {
+                ...(options?.workingDir ? { workingDir: options.workingDir } : {}),
+                includeUserPreferences: false,
+              });
+              return store.getPermissionState();
+            }
+          : undefined,
+        updateSessionPermissionState: this.harness
+          ? (sessionKey, input, options) => {
+              const store = this.harness!.ensureSessionHydrated(sessionKey, {
+                ...(options?.workingDir ? { workingDir: options.workingDir } : {}),
+                includeUserPreferences: false,
+              });
+              return store.updatePermissionOptions(input);
+            }
+          : undefined,
         dispatchSessionInput,
         stopSession,
         forkSession,
+        subscribeEvents: this.harness
+          ? (handler) => this.harness!.getEventBus().subscribeAll((event) => {
+              handler({ type: event.type, sessionKey: (event as any).sessionKey });
+            })
+          : undefined,
         resolveSessionEscalation: this.harness?.resolveSessionEscalation
           ? (sessionKey, escalationId, resolution) =>
               this.harness!.resolveSessionEscalation(sessionKey, escalationId, resolution)
+          : undefined,
+        getDebugMemoryInfo: this.harness
+          ? () => this.harness!.getDebugMemoryInfo()
           : undefined,
       };
 

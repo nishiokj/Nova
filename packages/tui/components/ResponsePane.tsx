@@ -13,13 +13,13 @@ import { Box, Text } from "ink";
 import type { ResponseContent, ResponseLine } from "../types.js";
 import { getColors } from "../theme.js";
 
-// Diff colors - uses theme for header and context, hardcoded for add/remove visibility
+// Diff colors - uses theme for header and context, text-only highlighting for add/remove
 const getDiffColors = () => {
   const theme = getColors();
   return {
     header: { fg: theme.diffHeader, bg: theme.diffHeaderBg }, // From theme (matches userBg)
-    added: { fg: "#ffffff", bg: "#166534" },      // White text, solid green bg
-    removed: { fg: "#ffffff", bg: "#991b1b" },    // White text, solid red bg
+    added: { fg: "#4ade80", bg: undefined },      // Light green text, no background
+    removed: { fg: "#f87171", bg: undefined },    // Light red text, no background
     context: { fg: theme.text, bg: theme.diffContextBg }, // Theme colors (matches userBg)
     separator: { fg: theme.muted, bg: theme.diffContextBg }, // Theme separator
     text: { fg: theme.text, bg: undefined },       // Theme text

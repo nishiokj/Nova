@@ -9,6 +9,7 @@ import { markdownDecorations, cockpitEditorTheme } from './markdown-extensions';
 
 export interface EditorHandle {
   focus(): void;
+  blur(): void;
   readonly selectionStart: number;
   readonly selectionEnd: number;
 }
@@ -26,7 +27,6 @@ function isCockpitGlobal(e: KeyboardEvent): boolean {
   if (e.ctrlKey && (e.key === 'n' || e.key === 'N')) return true;
   if (e.ctrlKey && (e.key === 'u' || e.key === 'U')) return true;
   if (e.ctrlKey && e.key === '`') return true;
-  if (e.ctrlKey && e.key === 'Enter') return true;
   if (e.key === 'Escape') return true;
   if (e.altKey && !e.ctrlKey && !e.metaKey) {
     const k = e.key.toLowerCase();
@@ -47,6 +47,9 @@ export const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
     useImperativeHandle(ref, () => ({
       focus() {
         viewRef.current?.focus();
+      },
+      blur() {
+        viewRef.current?.contentDOM.blur();
       },
       get selectionStart() {
         const sel = viewRef.current?.state.selection.main;

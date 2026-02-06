@@ -1,8 +1,8 @@
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import type { CockpitMarkdownTreeNode, WorkItemTemplate } from '@/lib/api';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
 import { useCockpit } from '@/hooks/use-cockpit-store';
-import { serializeFrontmatter } from '@/lib/markdown';
+import { gatherMarkdownFolders, serializeFrontmatter } from '@/lib/markdown';
 
 const TreeNode = memo(function TreeNode({
   node,
@@ -81,11 +81,20 @@ function TemplateItem({ template, onSelect }: { template: WorkItemTemplate; onSe
 }
 
 export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
-  const { state, openFile, openNewFilePicker, createFolder } = workspace;
+  const { state, openFile, openNewFilePicker, createFolder, deletePath, toggleFolder } = workspace;
   const cockpit = useCockpit();
   const { set: setCockpit } = cockpit;
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string; type: 'file' | 'folder' } | null>(null);
   const [templatesOpen, setTemplatesOpen] = useState(false);
+  const allFolders = useMemo(() => gatherMarkdownFolders(state.tree), [state.tree]);
+
+  const handleExpandAll = useCallback(() => {
+    workspace.set({ expandedFolders: new Set(allFolders) });
+  }, [workspace, allFolders]);
+
+  const handleCollapseAll = useCallback(() => {
+    workspace.set({ expandedFolders: new Set() });
+  }, [workspace]);
 
   const handleFileSelect = useCallback((path: string) => {
     setCockpit({ focusTarget: null, globalTool: 'none' });
@@ -104,6 +113,7 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
       type: 'workflow',
       title: `New ${template.name}`,
       template: template.name,
+      templateId: template.id,
       specs: template.specs.map((s) => s.id),
     };
 
@@ -131,11 +141,101 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
   }, [setCockpit, workspace, openNewFilePicker]);
 
   const templates = cockpit.state.templates;
+  const NEW_PROJECT_SCOPE_VALUE = '__new_project_scope__';
+  const scopeOptions = useMemo(() => {
+    const base = state.filesystemRoots.length > 0
+      ? [...state.filesystemRoots]
+      : [{
+        id: 'notes:fallback',
+        kind: 'notes' as const,
+        label: '.cockpit/markdown',
+        path: state.rootDir,
+        pinned: true,
+        source: 'daemon' as const,
+      }];
+    if (
+      state.scopeMode === 'project'
+      && state.scopeProjectPath
+      && !base.some((root) => root.kind === 'project' && root.path === state.scopeProjectPath)
+    ) {
+      base.push({
+        id: `project:custom:${state.scopeProjectPath}`,
+        kind: 'project',
+        label: state.scopeProjectPath.split('/').filter(Boolean).pop() || state.scopeProjectPath,
+        path: state.scopeProjectPath,
+        pinned: false,
+        source: 'discovered',
+      });
+    }
+    return base;
+  }, [state.filesystemRoots, state.rootDir, state.scopeMode, state.scopeProjectPath]);
+  const selectedScopeId = useMemo(() => {
+    if (state.scopeMode === 'project' && state.scopeProjectPath) {
+      const matched = scopeOptions.find((root) => root.kind === 'project' && root.path === state.scopeProjectPath);
+      if (matched) return matched.id;
+    }
+    return scopeOptions.find((root) => root.kind === 'notes')?.id ?? scopeOptions[0]?.id ?? '';
+  }, [scopeOptions, state.scopeMode, state.scopeProjectPath]);
 
   return (
     <div className="h-full flex flex-col" onClick={closeMenu}>
-      <div className="px-2 py-1.5 text-[10px] text-[var(--text-muted)] font-mono truncate border-b border-[var(--border-subtle)]">
-        {state.rootDir}
+      <div className="px-2 py-1.5 border-b border-[var(--border-subtle)] space-y-1">
+        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Workspace</div>
+        <select
+          value={selectedScopeId}
+          onChange={(event) => {
+            if (event.target.value === NEW_PROJECT_SCOPE_VALUE) {
+              const entered = window.prompt(
+                'Add project workspace folder.\nUse absolute path or path relative to the current cwd.',
+                state.filesystemCwd ?? ''
+              );
+              if (!entered || !entered.trim()) return;
+              void workspace.setScope({ mode: 'project', projectPath: entered.trim() });
+              return;
+            }
+            const selected = scopeOptions.find((root) => root.id === event.target.value);
+            if (!selected) return;
+            if (selected.kind === 'notes') {
+              void workspace.setScope({ mode: 'global' });
+              return;
+            }
+            void workspace.setScope({ mode: 'project', projectPath: selected.path });
+          }}
+          className="w-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-1.5 py-1 text-[10px] text-[var(--text-secondary)]"
+        >
+          {scopeOptions.map((root) => (
+            <option key={root.id} value={root.id}>
+              {root.kind === 'notes' ? 'Notes (Pinned)' : `Project: ${root.label}`}
+            </option>
+          ))}
+          <option value={NEW_PROJECT_SCOPE_VALUE}>+ Add project path…</option>
+        </select>
+        <div className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={state.rootDir}>
+          root: {state.rootDir}
+        </div>
+      </div>
+      <div className="px-2 py-1 border-b border-[var(--border-subtle)] flex items-center gap-1">
+        <button
+          onClick={() => openNewFilePicker('create')}
+          className="px-1.5 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
+          title="New File (Ctrl+N)"
+        >+ File</button>
+        <button
+          onClick={() => void createFolder()}
+          className="px-1.5 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
+          title="New Folder (Ctrl+Shift+N)"
+        >+ Folder</button>
+        <span className="flex-1" />
+        <button
+          onClick={handleExpandAll}
+          className="px-1 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
+          title="Expand All"
+        >{'\u25BC'}</button>
+        <button
+          onClick={handleCollapseAll}
+          className="px-1 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
+          title="Collapse All"
+        >{'\u25B6'}</button>
       </div>
       <div
         className="flex-1 overflow-y-auto"
@@ -146,7 +246,7 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
       >
         {state.tree.length === 0 ? (
           <div className="px-2 py-3 text-[11px] text-[var(--text-muted)]">
-            No markdown files. Right-click or Ctrl+N.
+            No markdown files in this workspace yet. Right-click or press Ctrl+N.
           </div>
         ) : (
           state.tree.map((node) => (
@@ -161,7 +261,7 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
           ))
         )}
 
-        {/* Templates section */}
+        {/* Workflows section */}
         {templates.length > 0 && (
           <div className="border-t border-[var(--border-subtle)] mt-1">
             <button
@@ -169,7 +269,7 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
               className="w-full text-left px-2 py-1.5 text-[10px] text-[var(--accent-cyan)] font-medium hover:bg-[var(--bg-hover)]"
             >
               <span className="mr-1">{templatesOpen ? '\u25BE' : '\u25B8'}</span>
-              Templates ({templates.length})
+              Workflows ({templates.length})
             </button>
             {templatesOpen && templates.map((t) => (
               <TemplateItem key={t.id} template={t} onSelect={handleTemplateSelect} />
@@ -184,8 +284,26 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
+          {contextMenu.type === 'folder' && contextMenu.path && (
+            <button
+              onClick={() => { toggleFolder(contextMenu.path); closeMenu(); }}
+              className="w-full text-left px-3 py-1 hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
+            >
+              {state.expandedFolders.has(contextMenu.path) ? 'Collapse Folder' : 'Expand Folder'}
+            </button>
+          )}
           <button
-            onClick={() => { closeMenu(); openNewFilePicker('create'); }}
+            onClick={() => {
+              const defaultFolder = contextMenu.path
+                ? (
+                  contextMenu.type === 'folder'
+                    ? contextMenu.path
+                    : (contextMenu.path.includes('/') ? contextMenu.path.slice(0, contextMenu.path.lastIndexOf('/')) : '')
+                )
+                : '';
+              closeMenu();
+              openNewFilePicker('create', defaultFolder);
+            }}
             className="w-full text-left px-3 py-1 hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
           >
             New File
@@ -196,6 +314,28 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
           >
             New Folder
           </button>
+          {contextMenu.path && (
+            <button
+              onClick={() => {
+                const isFolder = contextMenu.type === 'folder';
+                const confirmed = window.confirm(
+                  isFolder
+                    ? `Delete folder "${contextMenu.path}" and all contents? This cannot be undone.`
+                    : `Delete file "${contextMenu.path}"? This cannot be undone.`
+                );
+                if (!confirmed) return;
+                closeMenu();
+                void deletePath(
+                  contextMenu.path,
+                  contextMenu.type,
+                  isFolder ? { recursive: true } : undefined
+                );
+              }}
+              className="w-full text-left px-3 py-1 hover:bg-[var(--bg-hover)] text-[var(--error)]"
+            >
+              {contextMenu.type === 'folder' ? 'Delete Folder' : 'Delete File'}
+            </button>
+          )}
         </div>
       )}
     </div>

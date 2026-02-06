@@ -1,10 +1,12 @@
 import { useMemo } from 'react';
 import { useCockpit, selectToolSignal, selectRecentAssistantMessage, selectFocusRollup, selectFocusStatus, selectFocusEscalationId, type FocusTab } from '@/hooks/use-cockpit-store';
 import { DiffstatLine } from '@/components/shared/DiffstatLine';
+import { ResizeHandle } from '@/components/shared/ResizeHandle';
 import { PacketTab } from './tabs/PacketTab';
 import { DiffTab } from './tabs/DiffTab';
 import { TestsTab } from './tabs/TestsTab';
 import { TraceTab } from './tabs/TraceTab';
+import { PermissionsTab } from './tabs/PermissionsTab';
 import { EventDrawer } from './EventDrawer';
 import { MessageInput } from './MessageInput';
 
@@ -13,6 +15,7 @@ const TABS: { key: FocusTab; label: string }[] = [
   { key: 'diff', label: 'Diff' },
   { key: 'tests', label: 'Tests' },
   { key: 'trace', label: 'Trace' },
+  { key: 'permissions', label: 'Permissions' },
 ];
 
 function TabContent({ tab }: { tab: FocusTab }) {
@@ -21,12 +24,13 @@ function TabContent({ tab }: { tab: FocusTab }) {
     case 'diff': return <DiffTab />;
     case 'tests': return <TestsTab />;
     case 'trace': return <TraceTab />;
+    case 'permissions': return <PermissionsTab />;
   }
 }
 
 export function SessionDetail() {
   const { state, set, handleReviewDecision, handleResolveEscalation } = useCockpit();
-  const { focusData, focusTab, reviewDecisionAction, resolvingEscalationId, diffData } = state;
+  const { focusData, focusTab, reviewDecisionAction, resolvingEscalationId, diffData, eventDrawerHeight } = state;
 
   const toolSignal = useMemo(() => selectToolSignal(state), [state.events]);
   const recentMessage = useMemo(() => selectRecentAssistantMessage(state), [state.events]);
@@ -35,6 +39,8 @@ export function SessionDetail() {
   const escalationId = selectFocusEscalationId(state);
 
   const diffSummary = diffData?.summary ?? focusRollup?.diffstat ?? null;
+
+  const setEventDrawerHeight = (height: number) => set({ eventDrawerHeight: Math.max(80, Math.min(600, height)) });
 
   if (!focusData) {
     return (
@@ -131,6 +137,9 @@ export function SessionDetail() {
       <div className="flex-1 min-h-0 overflow-y-auto p-3">
         <TabContent tab={focusTab} />
       </div>
+
+      {/* Resize handle for event drawer */}
+      <ResizeHandle direction="vertical" onResize={(delta) => setEventDrawerHeight(eventDrawerHeight - delta)} aria-label="Resize chat panel" />
 
       {/* Event drawer */}
       <EventDrawer />

@@ -27,6 +27,9 @@ import { DEFAULT_PERMISSION_SETTINGS } from 'types';
 export class PermissionChecker {
   private state: SessionPermissionState;
   private workingDirectory: string;
+  private allowOutsideRoot = false;
+  private webSearchEnabled = true;
+  private writesNoDeletes = false;
 
   /** Map of pending permission requests awaiting user response */
   private pendingRequests = new Map<string, {
@@ -57,6 +60,52 @@ export class PermissionChecker {
    */
   setDangerousMode(enabled: boolean): void {
     this.state.dangerousMode = enabled;
+  }
+
+  isAllowOutsideRoot(): boolean {
+    return this.allowOutsideRoot;
+  }
+
+  setAllowOutsideRoot(enabled: boolean): void {
+    this.allowOutsideRoot = enabled;
+  }
+
+  isWebSearchEnabled(): boolean {
+    return this.webSearchEnabled;
+  }
+
+  setWebSearchEnabled(enabled: boolean): void {
+    this.webSearchEnabled = enabled;
+  }
+
+  isWritesNoDeletesEnabled(): boolean {
+    return this.writesNoDeletes;
+  }
+
+  setWritesNoDeletes(enabled: boolean): void {
+    this.writesNoDeletes = enabled;
+  }
+
+  getRuntimeFlags(): { allowOutsideRoot: boolean; webSearchEnabled: boolean; writesNoDeletes: boolean } {
+    return {
+      allowOutsideRoot: this.allowOutsideRoot,
+      webSearchEnabled: this.webSearchEnabled,
+      writesNoDeletes: this.writesNoDeletes,
+    };
+  }
+
+  hydrateRuntimeFlags(flags: {
+    allowOutsideRoot?: boolean;
+    webSearchEnabled?: boolean;
+    writesNoDeletes?: boolean;
+  } | undefined): void {
+    this.allowOutsideRoot = flags?.allowOutsideRoot === true;
+    this.webSearchEnabled = flags?.webSearchEnabled !== false;
+    this.writesNoDeletes = flags?.writesNoDeletes === true;
+  }
+
+  reloadPersistentConfig(): void {
+    this.state.persistent = this.loadConfig(this.workingDirectory);
   }
 
   /**
@@ -137,6 +186,16 @@ export class PermissionChecker {
     return this.checkSingleTarget(tool, resolvedTarget);
   }
 
+  checkWebSearch(): PermissionDecision {
+    if (this.state.dangerousMode) {
+      return { granted: true, reason: 'dangerous_mode' };
+    }
+    if (!this.webSearchEnabled) {
+      return { granted: false, reason: 'deny_rule' };
+    }
+    return { granted: true, reason: 'allow_rule' };
+  }
+
   /**
    * Check a bash command, handling chained commands.
    */
@@ -144,6 +203,9 @@ export class PermissionChecker {
     const commands = this.parseChainedCommands(fullCommand);
 
     for (const cmd of commands) {
+      if (this.writesNoDeletes && this.isDeleteLikeCommand(cmd)) {
+        return { granted: false, reason: 'deny_rule' };
+      }
       const decision = this.checkSingleTarget('Bash', cmd.trim());
       if (decision.granted === false) {
         return decision; // Any denied command blocks the whole chain
@@ -155,6 +217,18 @@ export class PermissionChecker {
     }
 
     return { granted: true, reason: 'allow_rule' };
+  }
+
+  private isDeleteLikeCommand(command: string): boolean {
+    const normalized = command.trim().toLowerCase();
+    if (!normalized) return false;
+    if (normalized === 'rm' || normalized.startsWith('rm ')) return true;
+    if (normalized.startsWith('rmdir ')) return true;
+    if (normalized.startsWith('unlink ')) return true;
+    if (normalized === 'git rm' || normalized.startsWith('git rm ')) return true;
+    if (normalized === 'git clean' || normalized.startsWith('git clean ')) return true;
+    if (normalized.startsWith('find ') && /\s-delete(\s|$)/.test(normalized)) return true;
+    return false;
   }
 
   /**
@@ -206,6 +280,12 @@ export class PermissionChecker {
    */
   private resolveAndValidatePath(target: string): string | null {
     const resolved = path.resolve(this.workingDirectory, target);
+    if (this.allowOutsideRoot) {
+      if (path.isAbsolute(target)) {
+        return path.normalize(resolved);
+      }
+      return path.normalize(path.relative(this.workingDirectory, resolved));
+    }
     const relative = path.relative(this.workingDirectory, resolved);
 
     // If relative path starts with "..", it escapes the working directory

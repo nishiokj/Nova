@@ -119,10 +119,10 @@ interface DiffBlockProps {
   contextLines?: number;
 }
 
-/** Colors for diff rendering */
+/** Colors for diff rendering - text-only highlighting (no background) */
 const DIFF_COLORS = {
-  added: { bg: "#166534", fg: "#4ade80" },      // Vibrant green bg (higher opacity), light green text
-  removed: { bg: "#991b1b", fg: "#f87171" },    // Vibrant red bg (higher opacity), light red text
+  added: { bg: undefined, fg: "#4ade80" },      // Light green text, no background
+  removed: { bg: undefined, fg: "#f87171" },    // Light red text, no background
   context: { bg: undefined, fg: "#9ca3af" },    // No bg, gray text
   lineNum: "#6b7280",                           // Gray for line numbers
   header: "#60a5fa",                            // Blue for file path
