@@ -249,3 +249,23 @@ export {
   type AgentTraceInput,
   type TraceFilterOptions,
 } from './agent-traces.js'
+
+export {
+  createEscalationsRepository,
+  type EscalationsRepository,
+  type EscalationRow,
+  type EscalationListOptions,
+} from './escalations.js'
+
+export {
+  createWorkItemTemplatesRepository,
+  type WorkItemTemplatesRepository,
+  type WorkItemTemplateRow,
+} from './workitem-templates.js'
+
+export {
+  createTestReportsRepository,
+  type TestReportsRepository,
+  type TestReportRow,
+  type TestReportListOptions,
+} from './test-reports.js'

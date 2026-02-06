@@ -12,6 +12,7 @@ import {
   getOutputSchema,
   getOutputSchemaJson,
   getWatcherSchemaJsonForActions,
+  unwrapStructuredOutput,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
 } from './output_schemas.js';
@@ -23,6 +24,7 @@ export {
   getOutputSchema,
   getOutputSchemaJson,
   getWatcherSchemaJsonForActions,
+  unwrapStructuredOutput,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
 };
@@ -104,6 +106,7 @@ function normalizeWatcherActionCandidate(
     'realign',
     'split',
     'create_work_item',
+    'stop_work_item',
     'quality_gate',
     'allow',
     'continue',
@@ -194,6 +197,13 @@ function normalizeWatcherActionCandidate(
       const inferredText = inferBooleanFromText(`${reason} ${response}`);
       const passed = inferredStatus ?? inferredText ?? false;
       base.qualityGate = { passed };
+      return base;
+    }
+    case 'stop_work_item': {
+      const escalationIdValue = candidate.escalationId ?? candidate.escalation_id;
+      if (typeof escalationIdValue === 'string' && escalationIdValue.length > 0) {
+        base.escalationId = escalationIdValue;
+      }
       return base;
     }
     case 'allow':
@@ -387,13 +397,16 @@ export function parseAndValidateOutput<T extends OutputSchemaName>(
   const coerced = coerceStructuredOutput(rawValue);
   if (!coerced) return null;
 
+  // Unwrap "result" envelope added by zodToJsonSchema for union schemas
+  const unwrapped = unwrapStructuredOutput(coerced);
+
   if (schemaName === 'watcher_action') {
-    const lenient = parseWatcherActionLenient(coerced);
+    const lenient = parseWatcherActionLenient(unwrapped);
     if (lenient) {
       return lenient as z.output<(typeof OUTPUT_SCHEMAS)[T]>;
     }
   }
 
   // Then validate against schema
-  return parseAgentOutput(schemaName, coerced);
+  return parseAgentOutput(schemaName, unwrapped);
 }

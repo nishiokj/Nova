@@ -654,7 +654,7 @@ function signalStrengthBoost(signalStrength?: string): number {
 }
 
 function evidenceBoost(count?: number): number {
-  if (!Number.isFinite(count)) return 0;
+  if (typeof count !== 'number' || !Number.isFinite(count)) return 0;
   if (count >= 4) return 0.12;
   if (count >= 2) return 0.07;
   if (count === 1) return 0.02;

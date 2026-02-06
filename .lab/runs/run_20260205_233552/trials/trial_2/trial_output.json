@@ -1,0 +1,15 @@
+{
+  "error": {
+    "error_type": "harness_process_error",
+    "message": "harness exited without writing trial_output"
+  },
+  "ids": {
+    "repl_idx": 0,
+    "run_id": "exp_local",
+    "task_id": "task_1",
+    "trial_id": "trial_2",
+    "variant_id": "base"
+  },
+  "outcome": "error",
+  "schema_version": "trial_output_v1"
+}

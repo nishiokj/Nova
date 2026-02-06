@@ -2,8 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS canonical_event (
   id TEXT PRIMARY KEY,
-  CONSTRAINT canonical_event_id_ulid CHECK (id ~ '^[0-9A-HJKMNP-TV-Z]{26}
-),
+  CONSTRAINT canonical_event_id_ulid CHECK (id ~ '^[0-9A-HJKMNP-TV-Z]{26}$'),
   entity_type TEXT NOT NULL DEFAULT 'event' CHECK (entity_type = 'event'),
   data JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -22,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_canonical_event_embedding ON canonical_event USIN
 DROP TRIGGER IF EXISTS trg_update_search_vector_event ON canonical_event;
 
 -- Only create trigger if it doesn't exist (PostgreSQL doesn't have IF NOT EXISTS for triggers)
-DO $
+DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_trigger
@@ -32,4 +31,4 @@ BEGIN
       BEFORE INSERT OR UPDATE ON canonical_event
       FOR EACH ROW EXECUTE FUNCTION update_search_vector();
   END IF;
-END $;
+END $$;

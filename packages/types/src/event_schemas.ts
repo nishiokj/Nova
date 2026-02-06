@@ -78,7 +78,7 @@ export const ToolCallPhaseSchema = z.enum(['starting', 'completed']);
  */
 export const ToolCallDataSchema = z.object({
   toolName: z.string(),
-  arguments: z.record(z.unknown()),
+  arguments: z.record(z.string(), z.unknown()),
   phase: ToolCallPhaseSchema,
   result: z.string().optional(),
   success: z.boolean().optional(),
@@ -155,7 +155,7 @@ export const MemoryInjectedDataSchema = z.object({
   iteration: z.number(),
   version: z.enum(['v1', 'v2']).optional(),
   latencyMs: z.number().optional(),
-  coverage: z.record(z.number()).optional(),
+  coverage: z.record(z.string(), z.number()).optional(),
   discriminatorsIncluded: z.number().optional(),
   totalTokens: z.number().optional(),
   fallbackToV1: z.boolean().optional(),
@@ -294,7 +294,7 @@ export const MemoryInjectedEventSchema = BaseEventFieldsSchema.extend({
  */
 export const AgentBoundsHitEventSchema = BaseEventFieldsSchema.extend({
   type: z.literal('agent_bounds_hit'),
-  data: z.record(z.unknown()),
+  data: z.record(z.string(), z.unknown()),
 });
 
 /**
@@ -302,7 +302,7 @@ export const AgentBoundsHitEventSchema = BaseEventFieldsSchema.extend({
  */
 export const OrchestrationStartedEventSchema = BaseEventFieldsSchema.extend({
   type: z.literal('orchestration_started'),
-  data: z.record(z.unknown()),
+  data: z.record(z.string(), z.unknown()),
 });
 
 /**
@@ -310,7 +310,7 @@ export const OrchestrationStartedEventSchema = BaseEventFieldsSchema.extend({
  */
 export const IterationStartedEventSchema = BaseEventFieldsSchema.extend({
   type: z.literal('iteration_started'),
-  data: z.record(z.unknown()),
+  data: z.record(z.string(), z.unknown()),
 });
 
 /**
@@ -318,7 +318,7 @@ export const IterationStartedEventSchema = BaseEventFieldsSchema.extend({
  */
 export const IterationCompletedEventSchema = BaseEventFieldsSchema.extend({
   type: z.literal('iteration_completed'),
-  data: z.record(z.unknown()),
+  data: z.record(z.string(), z.unknown()),
 });
 
 /**

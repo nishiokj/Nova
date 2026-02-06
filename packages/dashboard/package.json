@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "bun run start-graphd.ts & sleep 1 && vite",
+    "dev": "vite",
+    "dev:with-graphd": "bun run start-graphd.ts & sleep 1 && vite",
     "dev:vite": "vite",
     "graphd": "bun run start-graphd.ts",
     "build": "tsc -b && vite build",
@@ -12,7 +13,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tanstack/react-virtual": "^3.13.18",
     "graphd": "workspace:*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

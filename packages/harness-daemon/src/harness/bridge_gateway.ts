@@ -212,6 +212,8 @@ function buildStopHookAdapterHooks(
         return 'handoff_requested';
       case 'work_item_completed':
         return 'goal_state_reached';
+      case 'escalation_resolved':
+        return 'goal_state_reached';
       case 'user_stopped':
         return 'user_stopped';
       case 'transient_error':
@@ -324,6 +326,18 @@ function buildStopHookAdapterHooks(
       const workItems = toWorkItemSpecs(result.deferredWork);
       if (workItems.length > 0) {
         return { decision: { action: 'split', workItems } };
+      }
+      if (result.decision === 'allow' && result.terminationReason === 'watcher_work_item_stopped') {
+        return {
+          decision: {
+            action: 'stop_work_item',
+            reason: result.systemMessage ?? 'Watcher requested work item stop.',
+            escalationId: result.escalationId,
+          },
+        };
+      }
+      if (result.decision === 'allow' && result.terminationReason === 'watcher_stopped') {
+        return { decision: { action: 'stop', reason: result.systemMessage ?? 'Watcher requested stop.' } };
       }
       if (result.decision === 'block' && result.reason) {
         return {
@@ -694,10 +708,49 @@ export class BridgeGateway {
       return;
     }
 
-    const text = String(data?.text ?? '');
+    let text = String(data?.text ?? '');
     if (!text.trim()) {
       this.sendError(connectionId, 'Empty message');
       return;
+    }
+
+    const commandMatch = text.trim().match(/^\/?(fork|stop)\b(?:\s+(.+))?$/i);
+    let isStopCommand = false;
+    if (commandMatch) {
+      const action = commandMatch[1].toLowerCase();
+      const commandArg = typeof commandMatch[2] === 'string' ? commandMatch[2].trim() : '';
+
+      if (action === 'fork') {
+        if (!this.harness.forkSession) {
+          this.sendAuthResponse(connectionId, 'session_fork', {
+            success: false,
+            error: 'Fork not supported by harness',
+          });
+          return;
+        }
+        const explicitTarget = commandArg
+          ? (commandArg.startsWith('target=') ? commandArg.slice('target='.length).trim() : commandArg.split(/\s+/, 1)[0])
+          : '';
+        const newSessionKey = explicitTarget || generateSessionKey();
+        const result = this.harness.forkSession(sessionKey, newSessionKey);
+        this.sendAuthResponse(connectionId, 'session_fork', {
+          success: result.success,
+          sourceSessionKey: sessionKey,
+          newSessionKey: result.success ? newSessionKey : undefined,
+          error: result.error,
+        });
+        return;
+      }
+
+      isStopCommand = true;
+      text = commandArg || 'Stop current work now and pause for user confirmation.';
+    }
+
+    // Set goal from first user message (no-op if goal already set)
+    const graphd = this.harness.getGraphD?.();
+    if (graphd && !isStopCommand) {
+      const goalPreview = text.trim().slice(0, 500);
+      graphd.sessionSetGoalIfEmpty(sessionKey, goalPreview);
     }
 
     const candidateRequestId =
@@ -2063,6 +2116,12 @@ export class BridgeGateway {
     if (!goal) {
       this.sendError(connectionId, 'Async session requires a goal.');
       return;
+    }
+
+    // Persist goal to GraphD immediately so the dashboard can show it
+    const graphd = this.harness.getGraphD?.();
+    if (graphd) {
+      graphd.sessionUpdateWorkflow(sessionKey, { goal });
     }
 
     // Create watcher hook registry for this session

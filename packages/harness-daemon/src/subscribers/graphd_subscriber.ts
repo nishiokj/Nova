@@ -121,8 +121,7 @@ export class GraphDSubscriber {
       if ((result as { success?: boolean; error?: string }).success === false) {
         console.error(`[GraphDSubscriber] Failed to persist event: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
       }
-      // NOTE: No checkpoint needed - SQLite WAL commits are immediately visible to readers.
-      // Checkpointing only merges WAL to main file for space reclamation, not visibility.
+      this.deriveWorkflowState(event);
     } catch (error) {
       console.error(`[GraphDSubscriber] Failed to persist event: ${error}`);
     }
@@ -149,6 +148,67 @@ export class GraphDSubscriber {
       session_key: event.sessionKey ?? undefined,
       data: formattedData,
     };
+  }
+
+  /**
+   * Derive workflow column updates from event semantics.
+   * Runs on every event — only issues DB writes for the few event types
+   * that carry goal/work-item/objective signals.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private deriveWorkflowState(event: AgentEvent<any>): void {
+    const sessionKey = event.sessionKey;
+    if (!sessionKey) return;
+    const data = event.data as Record<string, unknown> | undefined;
+    if (!data) return;
+
+    switch (event.type) {
+      case 'runtime_script_created': {
+        const goal = typeof data.goal === 'string' ? data.goal : null;
+        if (goal) {
+          this.graphd.sessionSetGoalIfEmpty(sessionKey, goal);
+        }
+        break;
+      }
+
+      case 'workitem_status': {
+        const status = typeof data.status === 'string' ? data.status : null;
+        const workId = typeof data.workId === 'string' ? data.workId : null;
+        const objective = typeof data.objective === 'string' ? data.objective : null;
+        if (status === 'started' && workId) {
+          this.graphd.sessionUpdateWorkflow(sessionKey, {
+            currentWorkItemId: workId,
+            currentObjective: objective,
+          });
+        } else if (status === 'completed' || status === 'failed' || status === 'skipped') {
+          this.graphd.sessionUpdateWorkflow(sessionKey, {
+            currentWorkItemId: null,
+            currentObjective: null,
+          });
+        }
+        break;
+      }
+
+      case 'goal_achieved': {
+        const goal = typeof data.goal === 'string' ? data.goal : null;
+        if (goal) this.graphd.sessionSetGoalIfEmpty(sessionKey, goal);
+        this.graphd.sessionUpdateWorkflow(sessionKey, {
+          currentWorkItemId: null,
+          currentObjective: null,
+        });
+        break;
+      }
+
+      case 'goal_not_achieved': {
+        const goal = typeof data.goal === 'string' ? data.goal : null;
+        if (goal) this.graphd.sessionSetGoalIfEmpty(sessionKey, goal);
+        this.graphd.sessionUpdateWorkflow(sessionKey, {
+          currentWorkItemId: null,
+          currentObjective: null,
+        });
+        break;
+      }
+    }
   }
 
   /**
@@ -184,6 +244,7 @@ export class GraphDSubscriber {
         const list = bySession.get(event.sessionKey) ?? [];
         list.push(this.formatEventForDashboard(event));
         bySession.set(event.sessionKey, list);
+        this.deriveWorkflowState(event);
       }
 
       for (const [sessionKey, formattedEvents] of bySession) {
@@ -194,7 +255,6 @@ export class GraphDSubscriber {
           console.error(`[GraphDSubscriber] Failed to flush batch: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
         }
       }
-      // NOTE: No checkpoint needed - SQLite WAL commits are immediately visible to readers.
 
       this.eventBatch = [];
     } catch (error) {

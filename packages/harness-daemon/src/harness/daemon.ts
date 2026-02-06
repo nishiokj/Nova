@@ -9,6 +9,7 @@ import { pathToFileURL, fileURLToPath } from 'url';
 import { createServer as createHttpServer, type Server as HttpServerType, type IncomingMessage, type ServerResponse } from 'http';
 import { createReadStream, statSync, existsSync } from 'fs';
 import { join, extname, dirname } from 'path';
+import { randomUUID } from 'crypto';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
 import { BusServer, WsBridgeServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
@@ -271,11 +272,81 @@ export class HarnessDaemon {
     };
 
     const handler = (req: IncomingMessage, res: ServerResponse) => {
+      const dispatchSessionInput = this.harness
+        ? (sessionKey: string, message: string) => {
+            try {
+              const graphd = this.harness!.getGraphD();
+              const sessionResult = graphd?.sessionGet(sessionKey) as { session?: { workingDir?: string | null } } | undefined;
+              const workingDir = sessionResult?.session?.workingDir ?? this.workingDir;
+              const requestId = `cockpit-${randomUUID()}`;
+              const runHandle = this.harness!.run({
+                requestId,
+                inputText: message,
+                sessionKey,
+                workingDir,
+              });
+              void runHandle.result.catch((error) => {
+                console.error('[harness-daemon] cockpit session message run failed', {
+                  sessionKey,
+                  requestId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
+              return { success: true, requestId };
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+          }
+        : undefined;
+
+      const stopSession = this.harness
+        ? (sessionKey: string, note?: string) => {
+            try {
+              this.harness!.cancelSessionAsyncRun(sessionKey);
+              this.harness!.cancelSessionRalphLoop(sessionKey);
+              if (!dispatchSessionInput) {
+                return { success: true };
+              }
+              return dispatchSessionInput(
+                sessionKey,
+                note ?? 'Stop current work now and wait for user direction.'
+              );
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+          }
+        : undefined;
+
+      const forkSession = this.harness
+        ? (sourceSessionKey: string, targetSessionKey?: string) => {
+            const target = targetSessionKey ?? `${sourceSessionKey}-fork-${Date.now().toString(36)}`;
+            const result = this.harness!.forkSession(sourceSessionKey, target);
+            return {
+              success: result.success,
+              ...(result.success ? { targetSessionKey: target } : {}),
+              ...(result.error ? { error: result.error } : {}),
+            };
+          }
+        : undefined;
+
       // Control Plane API context - create fresh each request so graphd is always current
       const controlPlaneCtx: ControlPlaneContext = {
         graphd: this.harness?.getGraphD() ?? null,
         isGraphDReady: () => !!(this.harness?.getGraphD()),
         workingDir: this.workingDir,
+        dispatchSessionInput,
+        stopSession,
+        forkSession,
+        resolveSessionEscalation: this.harness?.resolveSessionEscalation
+          ? (sessionKey, escalationId, resolution) =>
+              this.harness!.resolveSessionEscalation(sessionKey, escalationId, resolution)
+          : undefined,
       };
 
       // Handle Control Plane API routes first

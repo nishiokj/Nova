@@ -218,6 +218,7 @@ export function loadHooksFromConfig(config: HooksConfig): void {
 
 function isValidEventType(event: string): event is HookEventType {
   const validEvents: HookEventType[] = [
+    'workitem_created',
     'turn_completed',
     'tool_batch_completed',
     'context_threshold',
@@ -228,6 +229,11 @@ function isValidEventType(event: string): event is HookEventType {
     'tool_call_completed',
     'memory_injected',
     'git_commit',
+    'escalation_raised',
+    'escalation_resolved',
+    'watcher_agent_stopped',
+    'session_status_changed',
+    'prompt_user',
     'stop',
   ];
   return validEvents.includes(event as HookEventType);

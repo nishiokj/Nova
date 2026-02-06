@@ -112,8 +112,15 @@ export function mapCadenceDecisionToStopResult(decision: CadenceDecision): StopH
       return { decision: 'block', reason: decision.guidance };
     case 'split':
       return { decision: 'allow', deferredWork: mapWorkItemsToDeferredWork(decision.workItems) };
+    case 'stop_work_item':
+      return {
+        decision: 'allow',
+        systemMessage: decision.reason,
+        terminationReason: 'watcher_work_item_stopped',
+        escalationId: decision.escalationId,
+      };
     case 'stop':
-      return { decision: 'allow', systemMessage: decision.reason };
+      return { decision: 'allow', systemMessage: decision.reason, terminationReason: 'watcher_stopped' };
     default:
       return assertNever(decision);
   }

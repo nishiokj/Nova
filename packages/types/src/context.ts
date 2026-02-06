@@ -275,3 +275,4 @@ export interface ContextWindowTelemetry {
   /** For dashboard inspection */
   recentItems?: Array<{ type: string; preview: string; timestamp: number }>;
 }
+

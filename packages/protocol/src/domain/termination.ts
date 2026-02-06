@@ -39,6 +39,7 @@ export type TerminationReason =
 
   // Watcher intervention
   | 'watcher_stopped'
+  | 'watcher_work_item_stopped'
   | 'cadence_audit';
 
 /**
@@ -84,6 +85,7 @@ export function getTerminationCategory(reason: TerminationReason): TerminationCa
       return 'agent_error';
 
     case 'watcher_stopped':
+    case 'watcher_work_item_stopped':
     case 'cadence_audit':
       return 'watcher';
 
@@ -119,6 +121,7 @@ export function isBlockable(reason: TerminationReason): boolean {
     case 'no_action':
     case 'refusal':
     case 'watcher_stopped':
+    case 'watcher_work_item_stopped':
       return false;
 
     default:
@@ -149,6 +152,7 @@ export function isRetryable(reason: TerminationReason): boolean {
     case 'no_action':
     case 'refusal':
     case 'watcher_stopped':
+    case 'watcher_work_item_stopped':
     case 'cadence_audit':
       return false;
 
@@ -177,5 +181,6 @@ export const ALL_TERMINATION_REASONS: readonly TerminationReason[] = [
   'refusal',
   'stagnation',
   'watcher_stopped',
+  'watcher_work_item_stopped',
   'cadence_audit',
 ] as const;

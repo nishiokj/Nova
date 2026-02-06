@@ -72,6 +72,25 @@ export class CodexProvider implements LLMProviderAdapter {
       reasoning: config.reasoning ?? { effort: 'medium' },
     };
 
+    if (params.responseSchema) {
+      const schemaValue = (params.responseSchema as { schema?: unknown }).schema;
+      const hasValidSchema = !!schemaValue && typeof schemaValue === 'object' && !Array.isArray(schemaValue);
+      if (hasValidSchema) {
+        body.text = {
+          format: {
+            type: 'json_schema',
+            name: params.responseSchema.name,
+            schema: schemaValue as Record<string, unknown>,
+            strict: params.responseSchema.strict ?? true,
+          },
+        };
+      } else {
+        logger.warn('Codex response schema missing or invalid; skipping structured output', {
+          schemaName: params.responseSchema.name,
+        });
+      }
+    }
+
     if (tools?.length) body.tools = this.formatTools(tools);
 
     // Endpoint is /responses relative to baseUrl (https://chatgpt.com/backend-api/codex)
@@ -107,6 +126,7 @@ export class CodexProvider implements LLMProviderAdapter {
     const toolCalls: ToolCall[] = [];
     let usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let responseId: string | undefined;
+    let sawTextDelta = false;
     // Track function calls being built up
     const pendingFunctionCalls = new Map<string, { name?: string; arguments?: string }>();
 
@@ -139,8 +159,20 @@ export class CodexProvider implements LLMProviderAdapter {
             if (event.type === 'response.output_text.delta') {
               const text = event.delta ?? '';
               fullContent += text;
+              if (text) {
+                sawTextDelta = true;
+              }
               params.onChunk?.(text);
               yield text;
+            }
+
+            if (event.type === 'response.output_text.done') {
+              const text = event.text ?? '';
+              if (text && !sawTextDelta) {
+                fullContent += text;
+                params.onChunk?.(text);
+                yield text;
+              }
             }
 
             // Track function call creation
@@ -179,13 +211,21 @@ export class CodexProvider implements LLMProviderAdapter {
             }
 
             // Extract usage from completed event
-            if (event.type === 'response.completed' && event.response?.usage) {
-              usage = {
-                promptTokens: event.response.usage.input_tokens ?? 0,
-                completionTokens: event.response.usage.output_tokens ?? 0,
-                totalTokens:
-                  (event.response.usage.input_tokens ?? 0) + (event.response.usage.output_tokens ?? 0),
-              };
+            if (event.type === 'response.completed' && event.response) {
+              const parsedText = this.parseOutputText(event.response);
+              if (parsedText && fullContent.length === 0) {
+                fullContent = parsedText;
+              }
+
+              const usageData = event.response.usage as Record<string, unknown> | undefined;
+              if (usageData) {
+                usage = {
+                  promptTokens: (usageData.input_tokens as number) ?? 0,
+                  completionTokens: (usageData.output_tokens as number) ?? 0,
+                  totalTokens:
+                    ((usageData.input_tokens as number) ?? 0) + ((usageData.output_tokens as number) ?? 0),
+                };
+              }
             }
           } catch {
             // Ignore parse errors in stream - may be partial data
@@ -262,6 +302,65 @@ export class CodexProvider implements LLMProviderAdapter {
       return {};
     }
   }
+
+  private parseOutputText(response: Record<string, unknown>): string {
+    const direct = response.output_text as string | undefined;
+    if (direct) return direct;
+
+    const output = response.output as Array<Record<string, unknown>> | undefined;
+    if (!output) return '';
+
+    let content = '';
+    for (const item of output) {
+      if (!item || typeof item !== 'object') continue;
+      const itemType = item.type as string | undefined;
+
+      if (itemType === 'message') {
+        const contentBlocks = item.content as Array<Record<string, unknown>> | string | undefined;
+        if (typeof contentBlocks === 'string') {
+          content += contentBlocks;
+          continue;
+        }
+        if (!Array.isArray(contentBlocks)) continue;
+
+        for (const block of contentBlocks) {
+          const blockType = block.type as string | undefined;
+          if (blockType === 'output_text' || blockType === 'text') {
+            content += (block.text as string) ?? '';
+          } else if (blockType === 'output_json' || blockType === 'json') {
+            const jsonPayload = (block.json as Record<string, unknown> | undefined)
+              ?? (block.output as Record<string, unknown> | undefined);
+            if (jsonPayload) {
+              content += JSON.stringify(jsonPayload);
+            }
+          } else if (blockType === 'refusal') {
+            content += (block.refusal as string) ?? '';
+          }
+        }
+        continue;
+      }
+
+      if (itemType === 'output_text' || itemType === 'text') {
+        content += (item.text as string) ?? '';
+        continue;
+      }
+
+      if (itemType === 'output_json' || itemType === 'json') {
+        const jsonPayload = (item.json as Record<string, unknown> | undefined)
+          ?? (item.output as Record<string, unknown> | undefined);
+        if (jsonPayload) {
+          content += JSON.stringify(jsonPayload);
+        }
+        continue;
+      }
+
+      if (itemType === 'refusal') {
+        content += (item.refusal as string) ?? '';
+      }
+    }
+
+    return content;
+  }
 }
 
 // ============================================
@@ -283,6 +382,7 @@ interface ResponsesInput {
 interface StreamEvent {
   type: string;
   delta?: string;
+  text?: string;
   item_id?: string;
   call_id?: string;
   name?: string;
@@ -293,7 +393,7 @@ interface StreamEvent {
     call_id?: string;
     name?: string;
   };
-  response?: {
+  response?: Record<string, unknown> & {
     id?: string;
     usage?: {
       input_tokens: number;

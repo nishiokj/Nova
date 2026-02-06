@@ -165,7 +165,7 @@ export type {
 export {
   createWatcherControlHooks,
 } from './watcher-agent.js';
-export type { WatcherAgentConfig } from './watcher-agent.js';
+export type { WatcherAgentConfig, RaisedEscalation } from './watcher-agent.js';
 export { getValidActions } from './types.js';
 
 // ============================================

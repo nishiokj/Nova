@@ -16,10 +16,11 @@
  * v3: Added session_events table for real-time event persistence
  * v4: Added SIAS kernel persistence tables
  * v5: Added auth tables (users, user_sessions, provider_credentials)
+ * v6: Enriched sessions table with workflow fields (goal, current_work_item_id, current_objective)
  *
  * MUST match Python GRAPH_D_SCHEMA_VERSION
  */
-export const GRAPHD_SCHEMA_VERSION = 'v5';
+export const GRAPHD_SCHEMA_VERSION = 'v6';
 
 /**
  * GraphD version string.
@@ -90,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
 CREATE INDEX IF NOT EXISTS idx_edges_src ON module_edges(src_path);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON module_edges(dst_path);
 
--- Session management tables (v2)
+-- Session management tables (v2, enriched in v6)
 CREATE TABLE IF NOT EXISTS sessions (
     session_key TEXT PRIMARY KEY,
     client_type TEXT NOT NULL,
@@ -99,7 +100,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at REAL,
     working_dir TEXT,
     status TEXT DEFAULT 'active',
-    metadata_json TEXT
+    metadata_json TEXT,
+    -- Workflow fields (v6)
+    goal TEXT,
+    current_work_item_id TEXT,
+    current_objective TEXT
 );
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -349,3 +354,13 @@ export const EXPORTABLE_TABLES = new Set([
 export function isExportableTable(table: string): boolean {
   return EXPORTABLE_TABLES.has(table);
 }
+
+/**
+ * Migration statements for v6 (add workflow fields to sessions).
+ * These are run individually with error handling for existing columns.
+ */
+export const V6_MIGRATION_STATEMENTS = [
+  'ALTER TABLE sessions ADD COLUMN goal TEXT;',
+  'ALTER TABLE sessions ADD COLUMN current_work_item_id TEXT;',
+  'ALTER TABLE sessions ADD COLUMN current_objective TEXT;',
+];

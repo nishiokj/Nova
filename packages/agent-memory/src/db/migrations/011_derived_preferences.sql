@@ -2,8 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS coding_preferences (
   id TEXT PRIMARY KEY,
-  CONSTRAINT derived_preferences_id_ulid CHECK (id ~ '^[0-9A-HJKMNP-TV-Z]{26}
-),
+  CONSTRAINT derived_preferences_id_ulid CHECK (id ~ '^[0-9A-HJKMNP-TV-Z]{26}$'),
   category TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('principle_candidate', 'local_convention', 'ignore')),
   preference TEXT NOT NULL,

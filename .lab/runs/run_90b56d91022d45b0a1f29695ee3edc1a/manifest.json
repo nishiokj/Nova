@@ -1,9 +1,0 @@
-{
-  "schema_version": "manifest_v1",
-  "run_id": "run_90b56d91022d45b0a1f29695ee3edc1a",
-  "created_at": "2026-02-04T23:38:23.870692+00:00",
-  "runner_version": "0.1",
-  "resolved_experiment": {
-    "digest": "sha256:8741b79090f0017146ee8fe36459b5671084ef32dea25847a6f58bac7773a594"
-  }
-}

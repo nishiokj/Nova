@@ -5,7 +5,7 @@
  * structured output is derived from these at runtime.
  */
 
-import { z } from 'zod';
+import { z, toJSONSchema } from 'zod';
 
 // ============================================
 // OUTPUT SCHEMAS
@@ -175,7 +175,7 @@ export const WorkItemOutputSchema = z.object({
   dependencies: z.array(z.string()),
   toolHint: z.string().nullable(),
   targetPaths: z.array(z.string()).nullable(),
-  params: z.record(z.unknown()).nullable(),
+  params: z.record(z.string(), z.unknown()).nullable(),
 }).strict();
 
 /**
@@ -209,6 +209,7 @@ const WatcherActionTypeSchema = z.enum([
   'realign',
   'split',
   'create_work_item',
+  'stop_work_item',
   'quality_gate',
   'allow',
   'continue',
@@ -400,6 +401,15 @@ const WatcherQualityGateSchema = WatcherBaseSchema.extend({
   semantics: WatcherSemanticBatchSchema.optional(),
 }).strict();
 
+const WatcherStopWorkItemSchema = WatcherBaseSchema.extend({
+  action: z.literal('done'),
+  goalStateReached: z.literal(true),
+  watcherAction: z.literal('stop_work_item'),
+  escalationId: z.string().optional(),
+  semantic: WatcherSemanticOutputSchema.optional(),
+  semantics: WatcherSemanticBatchSchema.optional(),
+}).strict();
+
 const WatcherContinueDecisionSchema = WatcherBaseSchema.extend({
   action: z.literal('done'),
   goalStateReached: z.literal(true),
@@ -413,6 +423,7 @@ export const WatcherActionOutputSchema = z.union([
   WatcherRealignSchema,
   WatcherSplitSchema,
   WatcherCreateWorkItemSchema,
+  WatcherStopWorkItemSchema,
   WatcherQualityGateSchema,
   WatcherContinueDecisionSchema,
 ]);
@@ -421,7 +432,7 @@ export const WatcherActionOutputSchema = z.union([
 // Trigger-specific watcher schema generation
 // --------------------------------------------
 
-type WatcherActionType = 'answer' | 'realign' | 'split' | 'create_work_item' | 'quality_gate' | 'allow' | 'continue';
+type WatcherActionType = 'answer' | 'realign' | 'split' | 'create_work_item' | 'stop_work_item' | 'quality_gate' | 'allow' | 'continue';
 
 /**
  * Map from action type to Zod schema.
@@ -432,6 +443,7 @@ const WATCHER_ACTION_SCHEMAS: Record<WatcherActionType, z.ZodType[]> = {
   realign: [WatcherRealignSchema],
   split: [WatcherSplitSchema],
   create_work_item: [WatcherCreateWorkItemSchema],
+  stop_work_item: [WatcherStopWorkItemSchema],
   quality_gate: [WatcherQualityGateSchema],
   allow: [WatcherContinueDecisionSchema],
   continue: [WatcherContinueDecisionSchema],
@@ -532,133 +544,68 @@ export type PlannerOutput = z.infer<typeof PlannerOutputSchema>;
 
 type JsonSchema = Record<string, unknown>;
 
-function addDescription(schema: JsonSchema, zodSchema: z.ZodTypeAny): JsonSchema {
-  const description = zodSchema.description;
-  if (!description) return schema;
-  return { ...schema, description };
+/**
+ * Convert oneOf → anyOf recursively and enforce OpenAI Structured Outputs constraints.
+ *
+ * OpenAI requirements:
+ * - anyOf instead of oneOf (Zod emits oneOf for discriminated unions)
+ * - Root schema must be type: "object" with no top-level anyOf/oneOf/allOf
+ *
+ * For union schemas (z.union), we wrap the anyOf in a root object with a
+ * single "result" property. Consumers must unwrap via unwrapStructuredOutput().
+ */
+function normalizeForOpenAI(schema: JsonSchema): JsonSchema {
+  const result: JsonSchema = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === '$schema') continue;
+    if (key === 'oneOf') {
+      result['anyOf'] = (value as JsonSchema[]).map(normalizeForOpenAI);
+    } else if (Array.isArray(value)) {
+      result[key] = value.map(v =>
+        typeof v === 'object' && v !== null ? normalizeForOpenAI(v as JsonSchema) : v
+      );
+    } else if (typeof value === 'object' && value !== null) {
+      result[key] = normalizeForOpenAI(value as JsonSchema);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
-function unwrapOptional(schema: z.ZodTypeAny): { schema: z.ZodTypeAny; optional: boolean } {
-  let current = schema;
-  let optional = false;
-
-  while (current instanceof z.ZodOptional || current instanceof z.ZodDefault) {
-    optional = true;
-    const inner = (current as z.ZodOptional<z.ZodTypeAny>)._def.innerType
-      ?? (current as z.ZodDefault<z.ZodTypeAny>)._def.innerType;
-    current = inner ?? current;
+/**
+ * Wrap a non-object root schema (e.g. anyOf union) in a root object.
+ * OpenAI Structured Outputs requires root type: "object" with no top-level combinators.
+ */
+function ensureRootObject(schema: JsonSchema): JsonSchema {
+  if (schema.type === 'object' && !schema.anyOf && !schema.oneOf && !schema.allOf) {
+    return schema;
   }
-
-  return { schema: current, optional };
+  return {
+    type: 'object',
+    properties: { result: schema },
+    required: ['result'],
+    additionalProperties: false,
+  };
 }
 
 function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchema {
-  if (schema instanceof z.ZodObject) {
-    const shape = typeof schema._def.shape === 'function' ? schema._def.shape() : schema._def.shape;
-    const properties: Record<string, JsonSchema> = {};
-    const required: string[] = [];
+  return ensureRootObject(normalizeForOpenAI(toJSONSchema(schema) as JsonSchema));
+}
 
-    for (const key of Object.keys(shape)) {
-      const { schema: inner, optional } = unwrapOptional(shape[key]);
-      properties[key] = zodToJsonSchema(inner);
-      if (!optional) required.push(key);
+/**
+ * Unwrap structured output that was wrapped in a "result" envelope.
+ * If the output has a "result" key and nothing else meaningful, return its contents.
+ * Safe to call on any output - returns as-is if not wrapped.
+ */
+export function unwrapStructuredOutput(output: Record<string, unknown>): Record<string, unknown> {
+  if ('result' in output && typeof output.result === 'object' && output.result !== null) {
+    const keys = Object.keys(output);
+    if (keys.length === 1) {
+      return output.result as Record<string, unknown>;
     }
-
-    const additionalProperties = schema._def.unknownKeys === 'strict' ? false : true;
-
-    const base: JsonSchema = {
-      type: 'object',
-      properties,
-      additionalProperties,
-    };
-
-    if (required.length > 0) {
-      base.required = required;
-    }
-
-    return addDescription(base, schema);
   }
-
-  if (schema instanceof z.ZodString) {
-    const base: JsonSchema = { type: 'string' };
-    for (const check of schema._def.checks) {
-      if (check.kind === 'min') base.minLength = check.value;
-      if (check.kind === 'max') base.maxLength = check.value;
-    }
-    return addDescription(base, schema);
-  }
-
-  if (schema instanceof z.ZodNumber) {
-    const base: JsonSchema = { type: 'number' };
-    for (const check of schema._def.checks) {
-      if (check.kind === 'int') {
-        base.type = 'integer';
-      } else if (check.kind === 'min') {
-        base.minimum = check.value;
-      } else if (check.kind === 'max') {
-        base.maximum = check.value;
-      }
-    }
-    return addDescription(base, schema);
-  }
-
-  if (schema instanceof z.ZodBoolean) {
-    return addDescription({ type: 'boolean' }, schema);
-  }
-
-  if (schema instanceof z.ZodNull) {
-    return addDescription({ type: 'null' }, schema);
-  }
-
-  if (schema instanceof z.ZodLiteral) {
-    const value = schema._def.value;
-    const type = value === null ? 'null' : typeof value;
-    return addDescription({ const: value, type }, schema);
-  }
-
-  if (schema instanceof z.ZodEnum) {
-    return addDescription({ type: 'string', enum: schema._def.values }, schema);
-  }
-
-  if (schema instanceof z.ZodArray) {
-    const base: JsonSchema = {
-      type: 'array',
-      items: zodToJsonSchema(schema._def.type),
-    };
-    if (schema._def.minLength) {
-      base.minItems = schema._def.minLength.value;
-    }
-    if (schema._def.maxLength) {
-      base.maxItems = schema._def.maxLength.value;
-    }
-    return addDescription(base, schema);
-  }
-
-  if (schema instanceof z.ZodUnion) {
-    return addDescription({ oneOf: schema._def.options.map(zodToJsonSchema) }, schema);
-  }
-
-  if (schema instanceof z.ZodNullable) {
-    return addDescription(
-      { anyOf: [zodToJsonSchema(schema._def.innerType), { type: 'null' }] },
-      schema
-    );
-  }
-
-  if (schema instanceof z.ZodOptional) {
-    return addDescription(zodToJsonSchema(schema._def.innerType), schema);
-  }
-
-  if (schema instanceof z.ZodDefault) {
-    return addDescription(zodToJsonSchema(schema._def.innerType), schema);
-  }
-
-  if (schema instanceof z.ZodEffects) {
-    return addDescription(zodToJsonSchema(schema._def.schema), schema);
-  }
-
-  console.warn('[output] Unsupported Zod schema type for JSON conversion');
-  return addDescription({}, schema);
+  return output;
 }
 
 export function getOutputSchemaJson(

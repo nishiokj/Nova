@@ -27,13 +27,14 @@ import {
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import { ContextWindow } from 'context';
 import { profiler, buildLLMRequestConfig, parseAndValidateOutput, getWatcherSchemaJsonForActions, type WatcherActionOutput } from 'shared';
-import { GraphDManager, createGraphDConfig } from 'graphd';
+import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
@@ -63,7 +64,7 @@ import { SessionStore } from './session_store.js';
 import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
-import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
+import type { PermissionedTool, PermissionRequest, PermissionResponse, EscalationCreateInput } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
 import { createSessionState, touchSession, type SessionState } from './session_state.js';
 import {
@@ -84,16 +85,36 @@ import {
   type DecisionDatabase,
   type WorkItemLog,
   type WatcherAction,
+  type RaisedEscalation,
   type SemanticOutput,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
-import { createHookRegistry, registerHook, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
+import { createHookRegistry, registerHook, executeHooks, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
 import { createWorkItem } from 'work';
 import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 import { getProtocolId } from 'protocol';
+import {
+  buildEscalationResolutionGuidance,
+  parseSessionEscalations,
+  resolveSessionEscalationState,
+  type EscalationResolutionInput,
+} from './escalation_state.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
+
+type SessionGetResponse = { session?: GraphDSession; error?: string };
+
+export interface ResolveSessionEscalationResult {
+  success: boolean;
+  escalationId: string;
+  pendingCount?: number;
+  sessionStatus?: string;
+  resumed?: boolean;
+  resumeRequestId?: string;
+  alreadyResolved?: boolean;
+  error?: string;
+}
 
 /**
  * Gather environment context for system prompts.
@@ -167,6 +188,209 @@ function gatherEnvironmentContext(workingDir: string): EnvironmentContext {
   }
 
   return env;
+}
+
+function resolveGitCommitRange(
+  workingDir: string,
+  sha: string
+): { headSha: string; baseSha?: string } {
+  const normalizedSha = sha.trim();
+  if (!normalizedSha) {
+    return { headSha: sha };
+  }
+
+  try {
+    const parentInfo = execSync(`git rev-list --parents -n 1 ${normalizedSha}`, {
+      cwd: workingDir,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const parts = parentInfo.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return {
+        headSha: parts[0],
+        baseSha: parts[1],
+      };
+    }
+    if (parts.length === 1) {
+      return { headSha: parts[0] };
+    }
+  } catch {
+    // Best-effort: keep commit emission even if parent lookup fails.
+  }
+
+  return { headSha: normalizedSha };
+}
+
+function normalizeEscalationRefType(type: string): string {
+  const normalized = type.trim().toLowerCase();
+  if (normalized === 'testreport' || normalized === 'test_report' || normalized === 'test-report') return 'testReport';
+  if (normalized === 'workitem' || normalized === 'work_item' || normalized === 'work-item') return 'workItem';
+  if (normalized === 'pull_request' || normalized === 'pull-request' || normalized === 'pullrequest') return 'pr';
+  if (normalized === 'session') return 'session';
+  if (normalized === 'commit') return 'commit';
+  if (normalized === 'file') return 'file';
+  if (normalized === 'trace') return 'trace';
+  if (normalized === 'pr') return 'pr';
+  return normalized.replace(/[^a-z0-9]/g, '');
+}
+
+function toEscalationEvidenceRefs(
+  escalation: RaisedEscalation
+): Array<{ type: string; value: string; label: string }> {
+  const refs: Array<{ type: string; value: string; label: string }> = [];
+  const seen = new Set<string>();
+  for (const reference of escalation.references ?? []) {
+    const type = normalizeEscalationRefType(reference.type ?? '');
+    const value = String(reference.target ?? '').trim();
+    if (!type || !value) continue;
+    const key = `${type.toLowerCase()}::${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push({
+      type,
+      value,
+      label: reference.label || reference.type || type,
+    });
+  }
+  return refs;
+}
+
+function inlineRef(type: string, value: string): string {
+  return `@${type}(${value})`;
+}
+
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function buildEscalationPacketMarkdown(
+  escalation: RaisedEscalation,
+  trigger: WatcherTrigger
+): {
+  markdown: string;
+  evidenceIndex: Array<{ type: string; value: string }>;
+  requestedDecision: 'choose' | 'approve' | 'clarify';
+} {
+  const evidenceRefs = toEscalationEvidenceRefs(escalation);
+  const options = escalation.options ?? [];
+  const requestedDecision: 'choose' | 'approve' | 'clarify' = options.length > 1
+    ? 'choose'
+    : options.length === 1
+      ? 'approve'
+      : 'clarify';
+
+  const recommendedOption = options.find((option) => option.recommended) ?? options[0];
+  const commitRef = evidenceRefs.find((ref) => ref.type.toLowerCase() === 'commit');
+  const testReportRef = evidenceRefs.find((ref) => ref.type.toLowerCase() === 'testreport');
+  const links: Array<{ key: string; target: string }> = [];
+  if (commitRef) {
+    links.push({ key: 'diff', target: `/diff?head=${encodeURIComponent(commitRef.value)}` });
+  }
+  if (testReportRef) {
+    links.push({ key: 'tests', target: `/tests?id=${encodeURIComponent(testReportRef.value)}` });
+  }
+  if (escalation.workItemId) {
+    links.push({
+      key: 'trace',
+      target: `/trace?sessionKey=${encodeURIComponent(escalation.sessionKey)}&workItemId=${encodeURIComponent(escalation.workItemId)}`,
+    });
+  }
+
+  const lines: string[] = ['---', 'type: escalation', `sessionKey: ${yamlString(escalation.sessionKey)}`];
+  if (escalation.workItemId) {
+    lines.push(`workItemId: ${yamlString(escalation.workItemId)}`);
+  }
+  lines.push(`requestedDecision: ${requestedDecision}`);
+  if (links.length > 0) {
+    lines.push('links:');
+    for (const link of links) {
+      lines.push(`  ${link.key}: ${yamlString(link.target)}`);
+    }
+  }
+  if (evidenceRefs.length > 0) {
+    lines.push('refs:');
+    for (const ref of evidenceRefs) {
+      lines.push(`  - ${ref.type}: ${yamlString(ref.value)}`);
+    }
+  }
+  lines.push('---', '');
+
+  lines.push(`# Decision: ${escalation.title}`);
+  lines.push('', '## Context');
+  lines.push(escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`);
+
+  if ((escalation.tradeoffs ?? []).length > 0) {
+    lines.push('', '## Tradeoffs');
+    for (const tradeoff of escalation.tradeoffs ?? []) {
+      lines.push(`- ${tradeoff}`);
+    }
+  }
+
+  lines.push('', '## The Question');
+  lines.push(escalation.title);
+
+  lines.push('', '## Options');
+  if (options.length === 0) {
+    lines.push('- Provide direction for the requested decision.');
+  } else {
+    for (let idx = 0; idx < options.length; idx += 1) {
+      const option = options[idx];
+      lines.push(`${idx + 1}. **${option.label}**`);
+      if (option.description) {
+        lines.push(`   ${option.description}`);
+      }
+      for (const implication of option.implications ?? []) {
+        lines.push(`   - ${implication}`);
+      }
+      if (option.recommended) {
+        lines.push('   - Recommended by watcher');
+      }
+    }
+  }
+
+  lines.push('', '## Recommendation (Watcher)');
+  if (recommendedOption) {
+    lines.push(`Leaning **${recommendedOption.label}** based on current constraints and evidence.`);
+  } else {
+    lines.push('No single option recommended yet; request is for clarification.');
+  }
+
+  lines.push('', 'Evidence:');
+  if (evidenceRefs.length === 0) {
+    lines.push('- No explicit evidence refs were provided by watcher.');
+  } else {
+    for (const ref of evidenceRefs.slice(0, 8)) {
+      lines.push(`- ${ref.label}: ${inlineRef(ref.type, ref.value)}`);
+    }
+  }
+
+  if (options.length > 0) {
+    for (const option of options.slice(0, 4)) {
+      lines.push('', `## If you choose ${option.label}`);
+      lines.push('I will apply the selected direction, update implementation, and run verification gates.');
+    }
+  }
+
+  return {
+    markdown: lines.join('\n'),
+    evidenceIndex: evidenceRefs.map((ref) => ({ type: ref.type, value: ref.value })),
+    requestedDecision,
+  };
+}
+
+async function writeEscalationPacketFile(
+  watcherDir: string,
+  escalationId: string,
+  markdown: string
+): Promise<string> {
+  const packetsDir = path.join(watcherDir, '.cockpit', 'packets');
+  await fs.promises.mkdir(packetsDir, { recursive: true });
+  const safeEscalationId = escalationId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const absolutePath = path.join(packetsDir, `${stamp}_${safeEscalationId}.md`);
+  await fs.promises.writeFile(absolutePath, markdown, 'utf8');
+  return path.relative(watcherDir, absolutePath);
 }
 
 function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentContext): AgentRegistry {
@@ -858,6 +1082,210 @@ export class AgentHarness {
 
   getAsyncModeStatus(): { ok: boolean; issues: string[] } {
     return { ok: this.asyncModeIssues.length === 0, issues: [...this.asyncModeIssues] };
+  }
+
+  resolveSessionEscalation(
+    sessionKey: string,
+    escalationId: string,
+    resolution: EscalationResolutionInput
+  ): ResolveSessionEscalationResult {
+    if (!this.isGraphDReady() || !this.graphd) {
+      return {
+        success: false,
+        escalationId,
+        error: 'GraphD not available',
+      };
+    }
+
+    const result = this.graphd.sessionGet(sessionKey) as SessionGetResponse;
+    const session = result.session;
+    if (!session) {
+      return {
+        success: false,
+        escalationId,
+        error: result.error || `Session not found: ${sessionKey}`,
+      };
+    }
+
+    const metadata = (session.metadata ?? {}) as Record<string, unknown>;
+    const existingEscalations = parseSessionEscalations(metadata.escalations);
+    const resolvedState = resolveSessionEscalationState(existingEscalations, escalationId, resolution);
+
+    if (!resolvedState.found || !resolvedState.resolved) {
+      return {
+        success: false,
+        escalationId,
+        error: `Escalation not found: ${escalationId}`,
+      };
+    }
+
+    const nextMetadata: Record<string, unknown> = {
+      ...metadata,
+      escalations: resolvedState.escalations,
+    };
+    const metadataUpdate = this.graphd.sessionUpdateMetadata(sessionKey, nextMetadata, false) as {
+      success?: boolean;
+      error?: string;
+    };
+    if (!metadataUpdate.success) {
+      return {
+        success: false,
+        escalationId,
+        error: metadataUpdate.error || `Failed to update escalation metadata for ${sessionKey}`,
+      };
+    }
+
+    // Persist resolution to durable storage (fire-and-forget)
+    if (this.memoryClient) {
+      this.memoryClient.escalations.resolve(escalationId, {
+        optionId: resolution.optionId,
+        freeformResponse: resolution.freeformResponse,
+      }).catch((err) => {
+        this.logger.warning('Failed to persist escalation resolution to database', {
+          sessionKey,
+          escalationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+
+    const store = this.ensureSessionHydrated(sessionKey, {
+      workingDir: session.workingDir ?? undefined,
+      includeUserPreferences: false,
+    });
+    const guidance = buildEscalationResolutionGuidance(resolvedState.resolved, resolution);
+    store.getContext().addMessage('system', guidance);
+    store.persistContext();
+
+    const pausedWorkItems = store.listPausedWorkItems();
+    const pausedWorkItem = pausedWorkItems.find((item) => (
+      item.status === 'pending' && (
+        item.escalationId === escalationId ||
+        (!!resolvedState.resolved?.workItemId && item.workId === resolvedState.resolved.workItemId)
+      )
+    ));
+    const resolvedPausedWorkItem = pausedWorkItem
+      ? store.resolvePausedWorkItem(pausedWorkItem.workId, guidance)
+      : null;
+
+    const internalContext: InternalHookContext = {
+      workId: resolvedState.resolved.workItemId ?? escalationId,
+      agentType: 'watcher',
+      sessionKey,
+      requestId: '',
+      objective: resolvedState.resolved.title,
+    };
+
+    const resolutionEvent: InternalHookEvent = {
+      type: 'escalation_resolved',
+      escalationId,
+      sessionKey,
+      resolution,
+    };
+    this.emitInternalHookAsync(resolutionEvent, internalContext);
+
+    const sessionState = this.sessions.get(sessionKey);
+    if (sessionState?.workLog) {
+      void sessionState.workLog.append({
+        type: 'note',
+        timestamp: new Date().toISOString(),
+        workId: resolvedState.resolved.workItemId ?? escalationId,
+        note: `[escalation_resolved] ${resolvedState.resolved.id} (${resolution.resolvedBy})`,
+        source: 'watcher',
+      }).catch((err) => {
+        this.logger.warning('Work log write failed (escalation_resolved)', {
+          sessionKey,
+          escalationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+
+    let nextStatus = session.status;
+    if (resolvedState.pendingCount === 0 && session.status === 'blocked') {
+      const statusUpdate = this.graphd.sessionUpdateStatus(sessionKey, 'active') as {
+        success?: boolean;
+        error?: string;
+      };
+      if (!statusUpdate.success) {
+        return {
+          success: false,
+          escalationId,
+          error: statusUpdate.error || `Failed to transition ${sessionKey} to active`,
+        };
+      }
+
+      nextStatus = 'active';
+      const statusEvent: InternalHookEvent = {
+        type: 'session_status_changed',
+        sessionKey,
+        previousStatus: 'blocked',
+        newStatus: 'active',
+        reason: `Escalation ${escalationId} resolved`,
+        triggeringEscalationId: escalationId,
+      };
+      this.emitInternalHookAsync(statusEvent, internalContext);
+    }
+
+    let resumed = false;
+    let resumeRequestId: string | undefined;
+    const canAutoResume = nextStatus === 'active' &&
+      resolvedState.pendingCount === 0 &&
+      store.isAsyncModeEnabled() &&
+      !this.getSessionAsyncRun(sessionKey);
+
+    if (canAutoResume) {
+      const paused = store.getPausedState();
+      const replayContext = resolvedPausedWorkItem
+        ? [
+            '[Watcher Replay Context]',
+            `Work item: ${resolvedPausedWorkItem.workId}`,
+            `Agent: ${resolvedPausedWorkItem.agentType}`,
+            ...(resolvedPausedWorkItem.objective ? [`Original objective: ${resolvedPausedWorkItem.objective}`] : []),
+            `Watcher stop reason: ${resolvedPausedWorkItem.reason}`,
+            `Escalation: ${escalationId}`,
+            ...(sessionState?.workLog ? [`Work log: ${sessionState.workLog.filePath()}`] : []),
+            '',
+            'Human resolution guidance:',
+            guidance,
+            '',
+            'Resume this work item using the guidance above. Do not restart unrelated tasks.',
+          ].join('\n')
+        : null;
+
+      const resumeInput = paused
+        ? (resolution.freeformResponse?.trim() || resolution.optionId || guidance)
+        : replayContext ?? `Escalation ${escalationId} has been resolved.\n${guidance}`;
+      const workingDir = paused?.workingDir ?? session.workingDir ?? this.config.tools.workingDir;
+
+      resumeRequestId = `escalation-resume-${randomUUID()}`;
+      const resumeHandle = this.run({
+        requestId: resumeRequestId,
+        inputText: resumeInput,
+        sessionKey,
+        workingDir,
+      });
+      resumed = true;
+
+      void resumeHandle.result.catch((error) => {
+        this.logger.warning('Auto-resume after escalation resolution failed', {
+          sessionKey,
+          escalationId,
+          requestId: resumeRequestId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+
+    return {
+      success: true,
+      escalationId,
+      pendingCount: resolvedState.pendingCount,
+      sessionStatus: nextStatus,
+      resumed,
+      ...(resumeRequestId ? { resumeRequestId } : {}),
+      alreadyResolved: resolvedState.alreadyTerminal,
+    };
   }
 
   // --- Session-level exclusive operation management (async runs, ralph loops) ---
@@ -1600,9 +2028,12 @@ export class AgentHarness {
           if (command && isGitCommitCommand(command)) {
             const sha = extractCommitSha(toolResult.output);
             if (sha) {
+              const range = resolveGitCommitRange(workingDir, sha);
               // Emit git_commit event via EventBus
               const gitCommitData: GitCommitData = {
                 sha,
+                headSha: range.headSha,
+                ...(range.baseSha ? { baseSha: range.baseSha } : {}),
                 command,
               };
               this.eventBus.publish(createEvent('git_commit', gitCommitData, undefined, requestId, sessionKey));
@@ -2128,6 +2559,12 @@ export class AgentHarness {
             return { watcherAction: 'split', reason: structured.reason, workItems: structured.workItems };
           case 'create_work_item':
             return { watcherAction: 'create_work_item', reason: structured.reason, workItems: structured.workItems };
+          case 'stop_work_item':
+            return {
+              watcherAction: 'stop_work_item',
+              reason: structured.reason,
+              ...(structured.escalationId ? { escalationId: structured.escalationId } : {}),
+            };
           case 'quality_gate':
             return { watcherAction: 'quality_gate', reason: structured.reason, qualityGate: structured.qualityGate };
           case 'allow':
@@ -2153,6 +2590,18 @@ export class AgentHarness {
       });
       return { watcherAction: 'allow', reason: `Watcher error: ${err instanceof Error ? err.message : String(err)}` };
     }
+  }
+
+  private emitInternalHookAsync(event: InternalHookEvent, context: InternalHookContext): void {
+    queueMicrotask(() => {
+      void executeHooks(event.type, event, context).catch((err) => {
+        this.logger.warning('Failed to execute internal hook', {
+          sessionKey: context.sessionKey,
+          eventType: event.type,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    });
   }
 
   /**
@@ -2462,6 +2911,57 @@ export class AgentHarness {
       }
     });
 
+    registerHook('watcher_agent_stopped', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+      if (event.type !== 'watcher_agent_stopped') return;
+      if (ctx.sessionKey !== sessionKey) return;
+
+      const now = Date.now();
+      sessionState.store.upsertPausedWorkItem({
+        workId: event.workId,
+        agentType: event.agentType,
+        objective: ctx.objective,
+        reason: event.reason,
+        escalationId: event.escalationId,
+        status: 'pending',
+        timestamp: now,
+      });
+
+      await safeAppend('Work log write failed (watcher_agent_stopped)', () => workLog.append({
+        type: 'note',
+        timestamp: new Date(now).toISOString(),
+        workId: event.workId,
+        note: `[watcher_stop] ${event.reason}`,
+        source: 'watcher',
+      }));
+
+      if (event.escalationId && this.graphd) {
+        const sessionResult = this.graphd.sessionGet(sessionKey) as { session?: { status?: string; metadata?: Record<string, unknown> } } | undefined;
+        const sessionMeta = sessionResult?.session?.metadata ?? {};
+        const escalations = parseSessionEscalations(sessionMeta.escalations);
+        const hasPendingEscalation = escalations.some((item) => item.id === event.escalationId && item.status === 'pending');
+        const previousStatus = sessionResult?.session?.status ?? 'active';
+
+        if (hasPendingEscalation && previousStatus !== 'blocked') {
+          this.graphd.sessionUpdateStatus(sessionKey, 'blocked');
+          const statusEvent: InternalHookEvent = {
+            type: 'session_status_changed',
+            sessionKey,
+            previousStatus,
+            newStatus: 'blocked',
+            reason: `Escalation ${event.escalationId} pending`,
+            triggeringEscalationId: event.escalationId,
+          };
+          this.emitInternalHookAsync(statusEvent, {
+            workId: event.workId,
+            agentType: event.agentType,
+            sessionKey,
+            requestId: '',
+            objective: ctx.objective,
+          });
+        }
+      }
+    });
+
     const watcherHooks = createWatcherControlHooks({
       sessionId: sessionKey,
       salienceFilePath: saliencePath,
@@ -2496,6 +2996,122 @@ export class AgentHarness {
           rationale: entry.rationale,
           qualityGate: entry.qualityGate,
         }, entry.workItemId, '', sessionKey));
+      },
+      onEscalationRaised: async (
+        escalation: RaisedEscalation,
+        hookContext,
+        trigger
+      ) => {
+        const internalContext: InternalHookContext = {
+          workId: escalation.workItemId ?? hookContext.workId,
+          agentType: hookContext.agentType,
+          sessionKey,
+          requestId: '',
+          objective: hookContext.objective,
+        };
+
+        const escalationEvent: InternalHookEvent = {
+          type: 'escalation_raised',
+          escalation,
+        };
+        this.emitInternalHookAsync(escalationEvent, internalContext);
+
+        const sessionResult = this.graphd?.sessionGet(sessionKey) as { session?: { status?: string } } | undefined;
+        const previousStatus = sessionResult?.session?.status ?? 'active';
+        const now = Date.now();
+        const createdAtIso = new Date(now).toISOString();
+        const packetDraft = buildEscalationPacketMarkdown(escalation, trigger);
+        const packetId = `pkt_${escalation.id}`;
+        let packetSourcePath: string | undefined;
+        try {
+          packetSourcePath = await writeEscalationPacketFile(effectiveWatcherDir, escalation.id, packetDraft.markdown);
+        } catch (error) {
+          this.logger.warning('Failed to write escalation packet markdown file', {
+            sessionKey,
+            escalationId: escalation.id,
+            error: getErrorMessage(error),
+          });
+        }
+
+        const packetRecord: Record<string, unknown> = {
+          packetId,
+          sessionKey,
+          type: 'escalation',
+          createdAt: createdAtIso,
+          contentMarkdown: packetDraft.markdown,
+          source: 'watcher',
+          escalationId: escalation.id,
+          ...(escalation.workItemId ? { workItemId: escalation.workItemId } : {}),
+          ...(packetDraft.evidenceIndex.length > 0 ? { evidenceIndex: packetDraft.evidenceIndex } : {}),
+          ...(packetSourcePath ? { sourcePath: packetSourcePath } : {}),
+        };
+
+        const packetEvent: Record<string, unknown> = {
+          type: 'packet_emitted',
+          timestamp: createdAtIso,
+          ...(escalation.workItemId ? { work_item_id: escalation.workItemId } : {}),
+          data: {
+            packetId,
+            packetType: 'escalation',
+            source: 'watcher',
+            escalationId: escalation.id,
+            requestedDecision: packetDraft.requestedDecision,
+            ...(packetSourcePath ? { sourcePath: packetSourcePath } : {}),
+          },
+        };
+
+        this.graphd?.sessionUpdateMetadata(sessionKey, {
+          escalations: [{
+            ...escalation,
+            trigger,
+            status: 'pending',
+            createdAt: now,
+            updatedAt: now,
+          }],
+          packets: [packetRecord],
+          agent_events: [packetEvent],
+        });
+
+        // Persist to durable storage (fire-and-forget)
+        if (this.memoryClient) {
+          this.memoryClient.escalations.create({
+            type: escalation.escalationType,
+            sessionKey: escalation.sessionKey,
+            workItemId: escalation.workItemId,
+            title: escalation.title,
+            context: escalation.context,
+            tradeoffs: escalation.tradeoffs,
+            options: escalation.options,
+            references: escalation.references as EscalationCreateInput['references'],
+          }).catch((err) => {
+            this.logger.warning('Failed to persist escalation to database', {
+              sessionKey,
+              escalationId: escalation.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
+
+        if (previousStatus !== 'blocked') {
+          this.graphd?.sessionUpdateStatus(sessionKey, 'blocked');
+          const statusEvent: InternalHookEvent = {
+            type: 'session_status_changed',
+            sessionKey,
+            previousStatus,
+            newStatus: 'blocked',
+            reason: `Escalation ${escalation.id} raised`,
+            triggeringEscalationId: escalation.id,
+          };
+          this.emitInternalHookAsync(statusEvent, internalContext);
+        }
+
+        await safeAppend('Work log write failed (escalation_raised)', () => workLog.append({
+          type: 'note',
+          timestamp: new Date(now).toISOString(),
+          workId: escalation.workItemId ?? hookContext.workId,
+          note: `[escalation] ${escalation.id} (${escalation.escalationType}) ${escalation.title}`,
+          source: 'watcher',
+        }));
       },
     }, sessionKey);
 

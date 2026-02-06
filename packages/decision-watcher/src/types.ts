@@ -478,6 +478,7 @@ export type WatcherActionType =
   | 'realign'
   | 'split'
   | 'create_work_item'
+  | 'stop_work_item'
   | 'quality_gate'
   | 'allow'
   | 'continue';
@@ -494,7 +495,7 @@ export const VALID_ACTIONS_BY_TRIGGER: Record<WatcherTrigger, WatcherActionType[
   agent_error: ['realign', 'allow'],
   goal_state_reached: ['quality_gate', 'split', 'create_work_item'],
   work_item_completed: ['quality_gate', 'split', 'create_work_item'],
-  cadence_audit: ['allow', 'realign', 'split', 'create_work_item'],
+  cadence_audit: ['allow', 'realign', 'split', 'create_work_item', 'stop_work_item'],
   session_init: [],  // No action - initialization only
   scope_collision: ['allow', 'realign'],  // Allow parallel or redirect one agent
   handoff_approval: ['allow', 'realign'],  // Approve plan or request revision
@@ -551,6 +552,13 @@ export type WatcherAction =
       watcherAction: 'quality_gate';
       reason: string;
       qualityGate: { passed: boolean; issues?: string[] };
+      semantic?: SemanticOutput;
+      semantics?: WatcherSemanticBatchEntry[];
+    }
+  | {
+      watcherAction: 'stop_work_item';
+      reason: string;
+      escalationId?: string;
       semantic?: SemanticOutput;
       semantics?: WatcherSemanticBatchEntry[];
     }

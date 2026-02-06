@@ -20,7 +20,7 @@ import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, Structu
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
 import type { HandoffSpec } from 'protocol';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -296,21 +296,10 @@ export class Agent {
   ): Promise<void> {
     if (!localContext.isNearFull()) return;
 
-    try {
-      await localContext.compactWithLedger({
-        llm: this.llm,
-        llmConfig: this.llmConfig,
-        targetReductionRatio: 0.66,
-        preserveRecentItems: 12,
-        deduplicateByPath: true,
-        truncateOutputsTo: 4000,
-      });
-    } catch {
-      localContext.compact({
-        deduplicateByPath: true,
-        truncateOutputsTo: 4000,
-      });
-    }
+    localContext.compact({
+      deduplicateByPath: true,
+      truncateOutputsTo: 4000,
+    });
 
     // Rebuild localReadFiles from compacted context
     localReadFiles.clear();
@@ -635,11 +624,16 @@ export class Agent {
     content: string,
     result: MutableAgentResult
   ): 'done' | 'handoff' | 'user_input' | 'continue' | 'no_action' {
+    const avoidRawStructured = !!this.config.outputSchema;
+    const contentFallback = avoidRawStructured && (structuredOutput || coerceStructuredOutput(content))
+      ? ''
+      : content;
+
     // Check awaitingUserInput first (fallback for conversational questions)
     if (!result.needsUserInput && structuredOutput?.awaitingUserInput === true) {
       result.needsUserInput = true;
       result.userPrompt = {
-        question: responseText || content || 'Waiting for your response...',
+        question: responseText || contentFallback || 'Waiting for your response...',
       };
       result.terminationReason = 'user_input_required';
       return 'user_input';
@@ -652,7 +646,7 @@ export class Agent {
 
     const shouldInferUserPrompt = action !== 'done' || structuredOutput?.goalStateReached !== true;
     if (shouldInferUserPrompt) {
-      const responseCandidate = responseText ?? content;
+      const responseCandidate = responseText ?? contentFallback;
       const inferredPrompt = inferUserPromptFromResponse(responseCandidate);
       if (inferredPrompt) {
         result.needsUserInput = true;
@@ -674,7 +668,7 @@ export class Agent {
         return 'done';
       }
 
-      const finalText = responseText ?? content;
+      const finalText = responseText ?? contentFallback;
       if (isRefusal(finalText)) {
         result.isRefusal = true;
         result.error = 'LLM refused to complete the task';
@@ -782,23 +776,35 @@ export class Agent {
 
   /**
    * Emit fallback response for TUI when streaming didn't capture content.
-   * Only used when structured output was expected but JSON parsing failed.
+   * Only used when structured output was expected but streaming captured nothing.
    */
   private emitFallbackResponse(
     content: string,
     streamedContent: string,
+    structuredOutput: Record<string, unknown> | null,
+    responseText: string | undefined,
     workItemId: string
   ): void {
     // If we already streamed the response field, don't re-emit
     if (streamedContent.length > 0) return;
 
-    // Fallback: LLM output plain text instead of JSON, emit it
-    if (content && content.trim().length > 0) {
+    const trimmedResponse = responseText?.trim();
+    if (trimmedResponse) {
       this.emit(createEvent('agent_message', {
         agentType: this.config.type,
-        message: content,
+        message: trimmedResponse,
       }, workItemId));
+      return;
     }
+
+    // Avoid leaking structured JSON to the TUI. Only emit raw content if no JSON object is present.
+    if (!content || content.trim().length === 0) return;
+    if (structuredOutput || coerceStructuredOutput(content)) return;
+
+    this.emit(createEvent('agent_message', {
+      agentType: this.config.type,
+      message: content,
+    }, workItemId));
   }
 
   /**
@@ -1104,7 +1110,12 @@ export class Agent {
           if (cadenceResult.systemMessage) {
             localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
           }
-          result.terminationReason = 'watcher_stopped';
+          const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Watcher requested stop.';
+          result.watcherStop = {
+            reason: stopReason,
+            escalationId: cadenceResult.escalationId,
+          };
+          result.terminationReason = cadenceResult.terminationReason ?? 'watcher_stopped';
           break;
         }
       }
@@ -1230,7 +1241,13 @@ export class Agent {
 
       // Fallback: if structured output was expected but streaming didn't capture anything
       if (hasStructuredOutput) {
-        this.emitFallbackResponse(content, jsonExtractor?.getContent() ?? '', workItem.workId);
+        this.emitFallbackResponse(
+          content,
+          jsonExtractor?.getContent() ?? '',
+          structuredOutput,
+          responseText,
+          workItem.workId
+        );
       }
 
       // Hard stop on invalid structured output
@@ -1303,7 +1320,10 @@ export class Agent {
 
         case 'no_action': {
           // Handle missing action field
-          const responseCandidate = responseText ?? content;
+          const safeContent = this.config.outputSchema && (structuredOutput || coerceStructuredOutput(content))
+            ? ''
+            : content;
+          const responseCandidate = responseText ?? safeContent;
           if (responseCandidate.trim().length > 0) {
             result.response = responseCandidate;
           }
@@ -1416,6 +1436,7 @@ export class Agent {
       structuredOutput: result.structuredOutput,
       artifacts: result.artifacts,
       localContext: result.localContext,
+      watcherStop: result.watcherStop,
     };
 
     if (terminationReason !== 'user_input_required' && result.needsUserInput) {
@@ -3028,8 +3049,13 @@ export class Agent {
   }
 
   private parseStructuredOutput(content: string, result: MutableAgentResult): Record<string, unknown> | null {
-    const parsed = coerceStructuredOutput(content);
-    if (!parsed) return null;
+    const raw = coerceStructuredOutput(content);
+    if (!raw) return null;
+
+    // Unwrap "result" envelope added by zodToJsonSchema for union schemas.
+    // OpenAI Structured Outputs requires root type: "object", so unions
+    // get wrapped in { result: <actual output> }.
+    const parsed = unwrapStructuredOutput(raw);
 
     if (!this.config.outputSchema) {
       return parsed;

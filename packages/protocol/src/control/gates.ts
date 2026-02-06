@@ -46,6 +46,7 @@ export interface EventDecisionMap {
   'work_item_completed': WorkItemCompletedDecision;
   'user_stopped': never;  // No decision, always allow
   'transient_error': never;  // No decision, always allow
+  'escalation_resolved': never;  // No decision - this IS the resolution from human
 }
 
 /**
@@ -81,7 +82,7 @@ export function createHook<E extends keyof EventDecisionMap>(
 /**
  * Events that don't require a decision (pass through).
  */
-export type PassThroughEvent = Extract<ControlEventType, 'user_stopped' | 'transient_error'>;
+export type PassThroughEvent = Extract<ControlEventType, 'user_stopped' | 'transient_error' | 'escalation_resolved'>;
 
 /**
  * Events that require a decision (have hooks).
@@ -103,6 +104,7 @@ export function requiresDecision(eventType: ControlEventType): eventType is Deci
       return true;
     case 'user_stopped':
     case 'transient_error':
+    case 'escalation_resolved':
       return false;
     default:
       return assertNever(eventType);
@@ -131,7 +133,7 @@ export const VALID_DECISIONS_BY_EVENT = {
   'goal_state_reached': ['passed', 'failed', 'needs_human'],
   'bounds_exceeded': ['realign', 'split', 'wrap_up', 'abort'],
   'user_input_required': ['answer', 'escalate', 'defer'],
-  'cadence_audit': ['continue', 'inject_guidance', 'realign', 'split', 'stop'],
+  'cadence_audit': ['continue', 'inject_guidance', 'realign', 'split', 'stop', 'stop_work_item'],
   'agent_error': ['retry', 'abort', 'escalate'],
   'handoff_requested': ['approve', 'reject', 'modify'],
   'work_item_completed': ['accept', 'retry', 'split', 'escalate'],

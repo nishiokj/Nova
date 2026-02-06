@@ -168,6 +168,9 @@ async function startDaemon(): Promise<Subprocess> {
 
   console.log('[rex] Starting daemon...');
 
+  const logsDir = path.join(getProjectRoot(), 'logs');
+  mkdirSync(logsDir, { recursive: true });
+
   const daemon = spawn({
     cmd: ['bun', 'run', daemonPath, ...daemonArgs],
     env: {
@@ -177,7 +180,7 @@ async function startDaemon(): Promise<Subprocess> {
       EVENT_BUS_PORT: String(DAEMON_PORT),
     },
     stdout: 'ignore',
-    stderr: 'inherit', // Changed from 'pipe' to see debug output
+    stderr: Bun.file(path.join(logsDir, 'daemon_stderr.log')),
   });
 
   // Wait for daemon to be ready

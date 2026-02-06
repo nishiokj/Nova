@@ -61,6 +61,10 @@ export type StopHookResult =
       decision: 'allow';
       /** System message to prepend */
       systemMessage?: string;
+      /** Optional termination override for allow decisions. */
+      terminationReason?: TerminationReason;
+      /** Optional escalation correlation for watcher-driven stops. */
+      escalationId?: string;
       /** Deferred work items for async dispatch */
       deferredWork?: DeferredWorkItem[];
     }
@@ -71,6 +75,8 @@ export type StopHookResult =
       reason: string;
       /** System message to prepend */
       systemMessage?: string;
+      /** Optional escalation correlation for watcher-driven stops. */
+      escalationId?: string;
       /** Deferred work items for async dispatch */
       deferredWork?: DeferredWorkItem[];
     };

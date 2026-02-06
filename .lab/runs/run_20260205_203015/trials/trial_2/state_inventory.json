@@ -1,0 +1,56 @@
+{
+  "harness_identity": {
+    "entry_command": [
+      "node",
+      "./harness.js",
+      "run"
+    ],
+    "exec_digest": "sha256:65dffc288cc2f32e2b1d613493d9929bef19b96151d97dd016316d5452aa1c9f",
+    "name": "node"
+  },
+  "integration_level": "cli_basic",
+  "mounts": [
+    {
+      "name": "workspace",
+      "path": "/workspace",
+      "writable": true
+    },
+    {
+      "name": "state",
+      "path": "/state",
+      "writable": true
+    },
+    {
+      "name": "dataset",
+      "path": "/dataset",
+      "writable": false
+    },
+    {
+      "name": "out",
+      "path": "/out",
+      "writable": true
+    },
+    {
+      "name": "tmp",
+      "path": "/tmp",
+      "writable": true
+    }
+  ],
+  "network": {
+    "allowed_hosts": [],
+    "egress_self_test": {
+      "cases": [],
+      "performed": false
+    },
+    "enforcement_effective": "docker_none",
+    "mode_effective": "none",
+    "mode_requested": "none"
+  },
+  "sanitization_profile": "hermetic_functional_v2",
+  "schema_version": "state_inventory_v1",
+  "violations": {
+    "notes": [],
+    "profile_invariant_violation": false,
+    "state_leak": false
+  }
+}

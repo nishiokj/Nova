@@ -1,0 +1,36 @@
+{
+  "bindings": {},
+  "design": {
+    "integration_level": "cli_basic",
+    "sanitization_profile": "hermetic_functional_v2"
+  },
+  "ids": {
+    "repl_idx": 0,
+    "run_id": "exp_local",
+    "task_id": "task_1",
+    "trial_id": "trial_2",
+    "variant_id": "base"
+  },
+  "runtime": {
+    "control_plane": {
+      "mode": "file",
+      "path": "/state/lab_control.json"
+    },
+    "network": {
+      "allowed_hosts": [],
+      "mode_requested": "none"
+    },
+    "paths": {
+      "dataset": "/dataset",
+      "out": "/out",
+      "state": "/state",
+      "tmp": "/tmp",
+      "workspace": "/workspace"
+    }
+  },
+  "schema_version": "trial_input_v1",
+  "task": {
+    "id": "task_1",
+    "prompt": "Return the number 2"
+  }
+}
