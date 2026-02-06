@@ -4,6 +4,8 @@ __pycache__
 .pycache_eval
 .pytest_cache
 .claude
+.lab/**/workspace/
+config/skills/**/agent-browser/
 logs
 tui/logs
 evals/logs

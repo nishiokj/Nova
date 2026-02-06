@@ -388,6 +388,10 @@ export interface PermissionRequestEventData {
 export interface GitCommitData {
   /** Git commit SHA (7-40 hex chars) */
   sha: string;
+  /** Explicit head SHA for deterministic revision ranges (usually same as sha) */
+  headSha?: string;
+  /** Explicit base SHA captured at commit time, when available */
+  baseSha?: string;
   /** The bash command that triggered the commit */
   command: string;
   /** Commit message if extractable */

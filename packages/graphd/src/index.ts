@@ -38,6 +38,9 @@ export type {
   HealthResponse,
   UserRecord,
   ProviderCredentialRecord,
+  // Session workflow types (v6)
+  SessionStatus,
+  SessionMetrics,
 } from './types.js';
 
 export {

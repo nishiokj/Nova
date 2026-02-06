@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 import { AgentHarness, loadConfig } from '../../packages/harness-daemon/src/harness/index.ts';
+import { AgentLabEventAdapter } from './event_adapter.ts';
 import { randomUUID } from 'crypto';
+import { resolve } from 'path';
 
 async function readStdin(): Promise<string> {
   const chunks: Uint8Array[] = [];
@@ -99,6 +101,7 @@ async function main(): Promise<void> {
 
   const start = Date.now();
   let harness: AgentHarness | null = null;
+  let adapter: AgentLabEventAdapter | null = null;
 
   try {
     const configPath = process.env.HARNESS_CONFIG_PATH;
@@ -110,6 +113,28 @@ async function main(): Promise<void> {
     harness = new AgentHarness(config);
     await harness.start();
 
+    // Derive trial paths from the input. In-container these are absolute;
+    // in run-dev mode they're relative to CWD (the trial workspace).
+    const runtimePaths = input?.runtime?.paths ?? {};
+    const outDir = resolve(workingDir, runtimePaths.out ?? '/out');
+    const stateDir = resolve(workingDir, runtimePaths.state ?? '/state');
+
+    adapter = new AgentLabEventAdapter({
+      ids: {
+        run_id: ids.run_id ?? 'unknown',
+        trial_id: ids.trial_id ?? 'unknown',
+        variant_id: ids.variant_id ?? 'base',
+        task_id: ids.task_id ?? 'unknown',
+        repl_idx: ids.repl_idx ?? 0,
+      },
+      eventsPath: resolve(outDir, 'harness_events.jsonl'),
+      manifestPath: resolve(workingDir, 'harness_manifest.json'),
+      controlPath: resolve(stateDir, 'lab_control.json'),
+    });
+
+    // Subscribe to EventBus for this run. runId === requestId in the harness.
+    const unsubscribe = harness.getEventBus().subscribeRun(requestId, adapter.handle);
+
     const handle = harness.run({
       requestId,
       inputText: prompt,
@@ -118,6 +143,8 @@ async function main(): Promise<void> {
     });
 
     const result = await handle.result;
+    adapter.flush();
+    unsubscribe();
     const latencyMs = Math.max(0, Date.now() - start);
 
     if (result.paused || result.userPrompt) {
@@ -143,6 +170,7 @@ async function main(): Promise<void> {
   } catch (err: any) {
     const latencyMs = Math.max(0, Date.now() - start);
     const message = err && err.message ? String(err.message) : String(err);
+    adapter?.emitError('exception', message, err?.stack);
     const out = buildOutput({
       ids,
       outcome: 'failure',

@@ -96,7 +96,8 @@ export type CadenceDecision =
   | { action: 'inject_guidance'; message: string }
   | { action: 'realign'; guidance: string; newWork?: WorkItemSpec }
   | { action: 'split'; workItems: WorkItemSpec[] }
-  | { action: 'stop'; reason: string };
+  | { action: 'stop'; reason: string }
+  | { action: 'stop_work_item'; reason: string; escalationId?: string };
 
 /**
  * Type guard for continue action.
@@ -110,6 +111,15 @@ export function isCadenceContinue(d: CadenceDecision): d is { action: 'continue'
  */
 export function isCadenceStop(d: CadenceDecision): d is { action: 'stop'; reason: string } {
   return d.action === 'stop';
+}
+
+/**
+ * Type guard for stop_work_item action.
+ */
+export function isCadenceStopWorkItem(
+  d: CadenceDecision
+): d is { action: 'stop_work_item'; reason: string; escalationId?: string } {
+  return d.action === 'stop_work_item';
 }
 
 // ============================================
@@ -226,6 +236,7 @@ export function summarizeDecision(decision: AnyDecision): string {
       case 'continue': return 'Continuing';
       case 'inject_guidance': return 'Injecting guidance';
       case 'stop': return `Stopping: ${(decision as { reason: string }).reason}`;
+      case 'stop_work_item': return `Stopping work item: ${(decision as { reason: string }).reason}`;
       case 'retry': return `Retrying with guidance`;
       case 'approve': return 'Handoff approved';
       case 'reject': return `Handoff rejected: ${(decision as { feedback: string }).feedback}`;

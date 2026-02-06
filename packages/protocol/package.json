@@ -38,7 +38,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "zod": "^3.23.8",
+    "zod": "^4.3.5",
     "prompt-protocol": "^0.1.0"
   },
   "devDependencies": {

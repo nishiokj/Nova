@@ -9,6 +9,7 @@
  */
 
 import fs from 'fs/promises';
+import { randomUUID } from 'crypto';
 import {
   assertNever,
   createHook,
@@ -39,6 +40,7 @@ import {
   isWorkItemCompleted,
   success,
 } from 'protocol';
+import type { EscalationType } from 'types';
 import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem, WatcherActionType, WorkLogEntry, WatcherSemanticBatchEntry } from './types.js';
 import { getValidActions } from './types.js';
 import type { DecisionLog } from './decision-log.js';
@@ -402,6 +404,34 @@ export interface WatcherAgentConfig {
   onDecision?: (entry: DecisionLogEntry) => void;
   /** Base timeout for watcher agent execution (default: 90000ms). Per-trigger timeouts take precedence. */
   watcherTimeoutMs?: number;
+  /**
+   * Optional callback fired whenever the watcher raises an escalation.
+   * Consumers can persist to a DB, emit internal hook events, and update session status.
+   */
+  onEscalationRaised?: (escalation: RaisedEscalation, hook: HookContext, trigger: WatcherTrigger) => Promise<void> | void;
+}
+
+export interface RaisedEscalation {
+  id: string;
+  escalationType: EscalationType;
+  sessionKey: string;
+  workItemId?: string;
+  title: string;
+  context: string;
+  tradeoffs?: string[];
+  options?: Array<{
+    id: string;
+    label: string;
+    description: string;
+    implications: string[];
+    recommended: boolean;
+  }>;
+  references: Array<{
+    type: string;
+    label: string;
+    target: string;
+    preview?: string;
+  }>;
 }
 
 // ============================================
@@ -452,6 +482,9 @@ function toTerminationReason(event: ControlEvent): TerminationReason {
       return 'handoff_requested';
     case 'work_item_completed':
       return 'goal_state_reached';
+    case 'escalation_resolved':
+      // Escalation resolution is pass-through in current flow; map to success for fallback messaging only.
+      return 'goal_state_reached';
     case 'user_stopped':
       return 'user_stopped';
     case 'transient_error':
@@ -470,6 +503,146 @@ function toTerminationReason(event: ControlEvent): TerminationReason {
     default:
       return assertNever(event);
   }
+}
+
+function generateEscalationId(): string {
+  return `esc_${randomUUID().replace(/-/g, '')}`;
+}
+
+function mapTriggerToEscalationType(trigger: WatcherTrigger): EscalationType {
+  switch (trigger) {
+    case 'prompt_user':
+      return 'uncertainty';
+    case 'cadence_audit':
+      return 'resource';
+    case 'agent_error':
+      return 'failure';
+    case 'work_item_completed':
+    case 'goal_state_reached':
+      return 'review';
+    case 'bounds_exceeded':
+      return 'resource';
+    case 'handoff_approval':
+      return 'review';
+    case 'session_init':
+    case 'scope_collision':
+      return 'architectural';
+    default:
+      return assertNever(trigger);
+  }
+}
+
+function buildEscalationReferences(ctx: WatcherContext): RaisedEscalation['references'] {
+  const refs: RaisedEscalation['references'] = [];
+  const workId = getEventWorkId(ctx.event);
+  if (workId) {
+    refs.push({ type: 'workitem', label: 'Work item', target: workId });
+  }
+
+  for (const file of ctx.hook.filesModified.slice(0, 8)) {
+    refs.push({ type: 'file', label: file, target: file });
+  }
+
+  if (ctx.event.type === 'user_input_required') {
+    refs.push({
+      type: 'message',
+      label: 'Prompt question',
+      target: `prompt:${ctx.event.workId}`,
+      preview: ctx.event.prompt.question.slice(0, 240),
+    });
+  } else if (ctx.event.type === 'agent_error') {
+    refs.push({
+      type: 'message',
+      label: 'Agent error',
+      target: `error:${ctx.event.workId}`,
+      preview: ctx.event.error.slice(0, 240),
+    });
+  }
+
+  return refs;
+}
+
+function buildEscalationContext(params: {
+  trigger: WatcherTrigger;
+  reason: string;
+  hook: HookContext;
+  snapshotContext: string;
+  workItemLogContent?: string;
+  extra?: string;
+}): string {
+  const sections: string[] = [
+    `Trigger: ${params.trigger}`,
+    `Reason: ${params.reason}`,
+    `Objective: ${params.hook.objective}`,
+    `Iteration: ${params.hook.iteration}`,
+  ];
+
+  if (params.extra) {
+    sections.push(`Details: ${params.extra}`);
+  }
+
+  if (params.snapshotContext.trim().length > 0) {
+    sections.push(`Snapshot:\n${params.snapshotContext.slice(0, 3000)}`);
+  }
+
+  if (params.workItemLogContent && params.workItemLogContent.trim().length > 0) {
+    sections.push(`Work Item Log Excerpt:\n${params.workItemLogContent.slice(0, 5000)}`);
+  }
+
+  return sections.join('\n\n');
+}
+
+function shouldEscalateCadence(action: WatcherAction, evidence: EvidenceSummary): boolean {
+  if (action.watcherAction !== 'realign') return false;
+  const reasonText = `${action.reason}\n${action.realign.systemMessage}`.toLowerCase();
+  const uncertaintySignals = [
+    'insufficient evidence',
+    'uncertain',
+    'watcher unavailable',
+    'oversight failed',
+    'cannot verify',
+    'cannot determine',
+    'unknown',
+  ];
+  if (uncertaintySignals.some(signal => reasonText.includes(signal))) {
+    return true;
+  }
+  return isEvidenceInsufficient(evidence);
+}
+
+async function raiseEscalation(
+  config: WatcherAgentConfig,
+  ctx: WatcherContext,
+  trigger: WatcherTrigger,
+  input: {
+    type?: EscalationType;
+    title: string;
+    reason: string;
+    context: string;
+    tradeoffs?: string[];
+    options?: RaisedEscalation['options'];
+    references?: RaisedEscalation['references'];
+  }
+): Promise<RaisedEscalation> {
+  const escalation: RaisedEscalation = {
+    id: generateEscalationId(),
+    escalationType: input.type ?? mapTriggerToEscalationType(trigger),
+    sessionKey: ctx.event.sessionKey,
+    workItemId: getEventWorkId(ctx.event),
+    title: input.title,
+    context: input.context,
+    tradeoffs: input.tradeoffs,
+    options: input.options,
+    references: input.references ?? buildEscalationReferences(ctx),
+  };
+
+  try {
+    await config.onEscalationRaised?.(escalation, ctx.hook, trigger);
+  } catch (err) {
+    console.warn('[WATCHER] Escalation callback failed:', err instanceof Error ? err.message : String(err));
+  }
+
+  return escalation;
 }
 
 function toWorkItemSpecs(
@@ -870,19 +1043,29 @@ Use the inline salience above for session goal, then answer based on both the go
     };
   }
 
-  // Watcher truly failed - use default answer
-  const defaultAnswer = prompt?.options?.[0]
-    ? (typeof prompt.options[0] === 'string' ? prompt.options[0] : (prompt.options[0] as { label?: string }).label ?? 'Continue')
-    : 'Continue with your best judgment.';
+  // Watcher failed to provide a usable answer in async mode.
+  // Escalate instead of silently fabricating an answer.
+  const escalationContext = buildEscalationContext({
+    trigger: 'prompt_user',
+    reason: watcherReason,
+    hook: ctx.hook,
+    snapshotContext,
+    workItemLogContent,
+    extra: `Question: ${questionText}`,
+  });
+  const escalation = await raiseEscalation(config, ctx, 'prompt_user', {
+    type: 'uncertainty',
+    title: `Prompt unanswered: ${questionText.slice(0, 100)}`,
+    reason: watcherReason,
+    context: escalationContext,
+  });
 
-  console.error(`[WATCHER] prompt_user: Watcher failed to answer. Action: "${action.watcherAction}", Reason: "${watcherReason.slice(0, 100)}". Using default: "${defaultAnswer}"`);
+  console.error(`[WATCHER] prompt_user: Escalating unresolved prompt as ${escalation.id}. Action: "${action.watcherAction}", Reason: "${watcherReason.slice(0, 100)}".`);
 
   return {
     decision: {
-      action: 'answer',
-      text: defaultAnswer,
-      confidence: 0.4,
-      contextAddendum: `[Watcher fallback]: action="${action.watcherAction}" reason="${watcherReason.slice(0, 120)}"`,
+      action: 'escalate',
+      reason: `[escalation:${escalation.id}] ${watcherReason.slice(0, 240) || 'Watcher could not produce a safe async answer.'}`,
     },
   };
 }
@@ -957,6 +1140,7 @@ ${WORK_ITEM_ID_GUIDANCE}`;
 
     case 'answer':
     case 'quality_gate':
+    case 'stop_work_item':
       return { decision: { action: 'abort', reason: action.reason } };
 
     default:
@@ -1019,7 +1203,26 @@ Based on the workitem log above:
     case 'split':
     case 'create_work_item':
     case 'quality_gate':
-      return { decision: { action: 'abort', reason: action.reason } };
+    case 'stop_work_item': {
+      const escalationContext = buildEscalationContext({
+        trigger: 'agent_error',
+        reason: action.reason,
+        hook: ctx.hook,
+        snapshotContext,
+        workItemLogContent,
+        extra: `Error type: ${event.errorType}`,
+      });
+      const escalation = await raiseEscalation(config, ctx, 'agent_error', {
+        type: 'failure',
+        title: `Agent error requires human review (${event.errorType})`,
+        reason: action.reason,
+        context: escalationContext,
+      });
+      return {
+        decision: { action: 'escalate', to: 'user' },
+        patches: injectGuidancePatch(`[escalation:${escalation.id}] ${action.reason}`),
+      };
+    }
 
     default:
       return assertNever(action);
@@ -1122,6 +1325,7 @@ ${WORK_ITEM_ID_GUIDANCE}`;
     case 'realign':
     case 'split':
     case 'create_work_item':
+    case 'stop_work_item':
       return {
         decision: {
           verdict: 'failed',
@@ -1229,13 +1433,35 @@ ${WORK_ITEM_ID_GUIDANCE}`;
       if (action.qualityGate.passed) {
         return { decision: { action: 'accept', summary: action.reason } };
       }
-      return {
-        decision: { action: 'retry', guidance: action.qualityGate.issues?.join('\n') ?? action.reason },
-      };
+      {
+        const issueSummary = action.qualityGate.issues?.join('\n') ?? action.reason;
+        const escalationContext = buildEscalationContext({
+          trigger: 'work_item_completed',
+          reason: issueSummary,
+          hook: ctx.hook,
+          snapshotContext,
+          workItemLogContent,
+          extra: `success=${event.success}`,
+        });
+        const escalation = await raiseEscalation(config, ctx, 'work_item_completed', {
+          type: 'review',
+          title: `Quality gate failed for ${event.workId}`,
+          reason: issueSummary,
+          context: escalationContext,
+        });
+        return {
+          decision: {
+            action: 'escalate',
+            to: 'user',
+            reason: `[escalation:${escalation.id}] ${issueSummary}`,
+          },
+        };
+      }
 
     case 'allow':
     case 'continue':
     case 'answer':
+    case 'stop_work_item':
       return { decision: { action: 'accept', summary: action.reason } };
 
     default:
@@ -1322,6 +1548,10 @@ Based on the workitem log above:
 2. **"realign"** — Use when agent made progress but drifted
 
 3. **"allow"** — Use when agent is clearly on track with productive progress
+
+4. **"stop_work_item"** — Stop this work item when human review is required
+   - Provide a concise reason
+   - Include \`escalationId\` when available
 
 ${WORK_ITEM_ID_GUIDANCE}
 
@@ -1440,6 +1670,31 @@ Each semantic entry must contain:
     });
   }
 
+  if (shouldEscalateCadence(action, evidenceSummary)) {
+    const escalationContext = buildEscalationContext({
+      trigger: 'cadence_audit',
+      reason: action.reason,
+      hook: ctx.hook,
+      snapshotContext,
+      workItemLogContent,
+      extra: `elapsedMs=${event.elapsedMs}, toolCallsSinceLastAudit=${event.toolCallsSinceLastAudit}`,
+    });
+    const escalation = await raiseEscalation(config, ctx, 'cadence_audit', {
+      type: 'resource',
+      title: `Cadence uncertainty after ${Math.round(event.elapsedMs / 1000)}s`,
+      reason: action.reason,
+      context: escalationContext,
+    });
+    return {
+      decision: {
+        action: 'stop_work_item',
+        reason: `[escalation:${escalation.id}] ${action.reason}`,
+        escalationId: escalation.id,
+      },
+      patches: injectGuidancePatch(`[Escalation ${escalation.id}] Awaiting cockpit resolution.`),
+    };
+  }
+
   switch (action.watcherAction) {
     case 'allow':
     case 'continue': {
@@ -1465,6 +1720,15 @@ Each semantic entry must contain:
       }
       return { decision: { action: 'split', workItems: toWorkItemSpecs(action.workItems, action.semantics) } };
     }
+
+    case 'stop_work_item':
+      return {
+        decision: {
+          action: 'stop_work_item',
+          reason: action.reason,
+          ...(action.escalationId ? { escalationId: action.escalationId } : {}),
+        },
+      };
 
     case 'answer':
     case 'quality_gate':
@@ -1563,6 +1827,7 @@ Guidelines:
     case 'split':
     case 'create_work_item':
     case 'quality_gate':
+    case 'stop_work_item':
       return { decision: { action: 'approve' } };
 
     default:

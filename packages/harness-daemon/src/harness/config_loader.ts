@@ -40,7 +40,7 @@ import {
   getProviderForModel,
   type ModelRole,
 } from 'types';
-import { getOutputSchemaJson, type OutputSchemaName } from 'shared';
+import { getOutputSchemaJson, OUTPUT_SCHEMAS, type OutputSchemaName } from 'shared';
 
 const DEFAULT_CONFIG_PATH = 'config/defaults.json';
 const USER_CONFIG_PATH = '~/.rex/config.json';
@@ -144,6 +144,10 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
         console.warn(`[config] Invalid config at ${path}: ${issues}`);
         return null;
       }
+      if (!result.data.agents || Object.keys(result.data.agents).length === 0) {
+        console.warn(`[config] Config at ${path} has no agents; ignoring and falling back`);
+        return null;
+      }
       return result.data;
     } catch (e) {
       console.warn(`[config] Failed to parse JSON at ${path}:`, e);
@@ -213,13 +217,51 @@ function resolveOutputSchema(
     return undefined;
   }
 
+  const normalizeSchemaName = (raw: string): OutputSchemaName | null => {
+    const normalized = raw.trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(OUTPUT_SCHEMAS, normalized)) {
+      return normalized as OutputSchemaName;
+    }
+    if (normalized.endsWith('_output')) {
+      const candidate = normalized.slice(0, -7);
+      if (Object.prototype.hasOwnProperty.call(OUTPUT_SCHEMAS, candidate)) {
+        return candidate as OutputSchemaName;
+      }
+    }
+    return null;
+  };
+
   // Already a full schema object
   if (typeof schemaRef === 'object') {
-    return schemaRef;
+    const schemaValue = (schemaRef as { schema?: unknown }).schema;
+    const hasValidSchema = !!schemaValue && typeof schemaValue === 'object' && !Array.isArray(schemaValue);
+    if (hasValidSchema) {
+      return schemaRef;
+    }
+
+    const rawName = typeof schemaRef.schemaId === 'string'
+      ? schemaRef.schemaId
+      : typeof schemaRef.name === 'string'
+        ? schemaRef.name
+        : '';
+    const resolvedName = rawName ? normalizeSchemaName(rawName) : null;
+    if (resolvedName) {
+      const definition = getOutputSchemaJson(resolvedName);
+      if (definition) {
+        return {
+          ...definition,
+          strict: schemaRef.strict ?? definition.strict,
+        };
+      }
+    }
+
+    console.warn('[config] Output schema object missing valid schema; ignoring structured output');
+    return undefined;
   }
 
   // String reference - look up in Zod registry (source of truth)
-  const definition = getOutputSchemaJson(schemaRef as OutputSchemaName);
+  const resolvedName = normalizeSchemaName(schemaRef);
+  const definition = resolvedName ? getOutputSchemaJson(resolvedName) : undefined;
   if (!definition) {
     console.warn(`[config] Schema '${schemaRef}' not found in output schema registry`);
     return undefined;

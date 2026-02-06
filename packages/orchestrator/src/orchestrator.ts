@@ -36,6 +36,7 @@ import {
   createCadenceAuditEvent,
   createGoalReachedEvent,
   createHandoffRequestedEvent,
+  createWorkItemCompletedEvent,
   createUserInputRequiredEvent,
   type ControlEventType,
   type DecisionFor,
@@ -505,7 +506,7 @@ export class Orchestrator {
     cwd: string,
     runtime?: OrchestratorRuntime
   ): Promise<OrchestratorResult> {
-    const cleanup = runtime?.onStart?.(context);
+    const cleanup = runtime?.onStart?.(context as ContextWindow);
     try {
       return await this.executeInner(context, goal, agentType, cwd, runtime);
     } finally {
@@ -856,7 +857,7 @@ export class Orchestrator {
         elapsedMs: elapsed,
       });
 
-      await this.maybeAutoCompact(context, agentType, state);
+      this.maybeAutoCompact(context, agentType, state);
 
       const iterationCheck = await terminationPolicy.checkIterationBounds({
         state,
@@ -1020,8 +1021,52 @@ export class Orchestrator {
           this.completedWork.set(workId, result);
           this.mergeAgentResultContext(context, workId, result);
           state.inProgress.delete(workId);
+          let workItemHookBlocked = false;
 
-          if (workId === state.initialWorkId) {
+          const shouldRunWorkItemHook = !!runtime?.hookRegistry &&
+            (workId !== state.initialWorkId || workQueue.hasPending() || state.inProgress.size > 0);
+          if (shouldRunWorkItemHook) {
+            const stopResult = await this.callStopHook(
+              context,
+              'goal_state_reached',
+              result.response ?? '',
+              iteration,
+              item.agent,
+              runtime,
+              undefined,
+              result,
+              workId,
+              item.objective,
+              state.totalLlmCalls,
+              state.totalToolCalls,
+              undefined,
+              'work_item_completed'
+            );
+
+            if (stopResult) {
+              this.enqueueDeferredWork(stopResult);
+
+              if (stopResult.systemMessage) {
+                context.addMessage('system', stopResult.systemMessage);
+              }
+
+              if (stopResult.decision === 'block' && stopResult.reason) {
+                const retryItem = this.createWorkItem(stopResult.reason, item.agent);
+                workQueue.enqueue(retryItem);
+                workItemHookBlocked = true;
+
+                if (workId === state.initialWorkId) {
+                  state.initialWorkCompleted = false;
+                  state.initialWorkResponse = '';
+                  state.initialWorkResult = undefined;
+                  state.initialWorkId = this.resetWorkTracking(retryItem);
+                  state.startTime = Date.now();
+                }
+              }
+            }
+          }
+
+          if (!workItemHookBlocked && workId === state.initialWorkId) {
             state.initialWorkCompleted = true;
             state.initialWorkResponse = result.response;
             state.initialWorkResult = result;
@@ -1136,11 +1181,13 @@ export class Orchestrator {
 
     const initialResult = this.completedWork.get(state.initialWorkId);
     if (initialResult) {
-      this.emit(createEvent('goal_achieved', {
-        goal,
-        completed: this.completedWork.size,
-        skipped: 0,
-      }));
+      if (initialResult.terminationReason === 'goal_state_reached') {
+        this.emit(createEvent('goal_achieved', {
+          goal,
+          completed: this.completedWork.size,
+          skipped: 0,
+        }));
+      }
       return this.createResult({
         success: initialResult.success,
         response: initialResult.response,
@@ -1169,31 +1216,14 @@ export class Orchestrator {
     });
   }
 
-  private async maybeAutoCompact(context: ContextWindow, agentType: string, state: ExecutionState): Promise<void> {
+  private maybeAutoCompact(context: ContextWindow, agentType: string, state: ExecutionState): void {
     const percentUsed = context.metrics.percentageUsed;
     if (percentUsed < this.config.compactResetPercent) {
       state.compactedRecently = false;
     }
     if (!state.compactedRecently && percentUsed >= this.config.compactTriggerPercent) {
       const compactAsyncId = profiler.asyncBegin('orch.compact', 'orchestrator');
-      const llmConfig = this.resolveCompactionLlmConfig(agentType);
-      let compactResult;
-      const compactionConfig = this.getCompactionConfig();
-      if (llmConfig) {
-        try {
-          compactResult = await context.compactWithLedger({
-            llm: this.llm,
-            llmConfig,
-            targetReductionRatio: 0.66,
-            preserveRecentItems: 12,
-            ...compactionConfig,
-          });
-        } catch {
-          compactResult = context.compact(compactionConfig);
-        }
-      } else {
-        compactResult = context.compact(compactionConfig);
-      }
+      const compactResult = context.compact(this.getCompactionConfig());
       state.compactedRecently = true;
       profiler.asyncEnd('orch.compact', compactAsyncId, 'orchestrator', {
         itemsRemoved: compactResult.itemsRemoved,
@@ -1363,8 +1393,21 @@ export class Orchestrator {
                   return { action: 'stop', systemMessage: decision.guidance };
                 case 'split':
                   return { action: 'stop', systemMessage: 'Cadence audit requested split.' };
+                case 'stop_work_item':
+                  return {
+                    action: 'stop',
+                    systemMessage: decision.reason,
+                    terminationReason: 'watcher_work_item_stopped',
+                    escalationId: decision.escalationId,
+                    reason: decision.reason,
+                  };
                 case 'stop':
-                  return { action: 'stop', systemMessage: decision.reason };
+                  return {
+                    action: 'stop',
+                    systemMessage: decision.reason,
+                    terminationReason: 'watcher_stopped',
+                    reason: decision.reason,
+                  };
                 default:
                   assertNever(decision);
               }
@@ -1423,20 +1466,6 @@ export class Orchestrator {
       getModelSelection: this.getModelSelection,
       memoryInjector: this.config.memoryInjector,
     });
-  }
-
-  private resolveCompactionLlmConfig(agentType: string): LLMRequestConfig | null {
-    // For compaction, gracefully return null if no model selection - will use simple compaction
-    if (!this.agentRegistry?.has(agentType)) return null;
-
-    const modelSelection = this.getModelSelection?.(agentType);
-    if (!modelSelection) {
-      // No model selection - caller will use simple compaction instead
-      return null;
-    }
-
-    const config = this.agentRegistry.getConfig(agentType);
-    return buildLLMRequestConfig(modelSelection, config.llmParams);
   }
 
   private resolveAgentBounds(agentType: string): { maxToolCalls: number; maxDurationMs: number; maxLlmCalls: number } {
@@ -1787,11 +1816,23 @@ export class Orchestrator {
     userPrompt?: UserPromptInfo;
     agentResult?: AgentResult;
     cadence?: { elapsedMs: number; toolCallsSinceLastAudit: number; recentActivity: string; workIds?: string[] };
+    controlEventType?: 'goal_state_reached' | 'work_item_completed';
   }): ControlEvent | null {
-    const { terminationReason, context, workId, response, metrics, userPrompt, agentResult, cadence } = params;
+    const { terminationReason, context, workId, response, metrics, userPrompt, agentResult, cadence, controlEventType } = params;
 
     switch (terminationReason) {
       case 'goal_state_reached': {
+        if (controlEventType === 'work_item_completed') {
+          return createWorkItemCompletedEvent(
+            context.sessionKey,
+            workId,
+            agentResult?.success ?? true,
+            response,
+            metrics.filesModified,
+            metrics,
+            terminationReason
+          );
+        }
         const artifacts = agentResult?.artifacts?.map(a => ({
           type: 'data' as const,
           path: a.sourcePath,
@@ -1890,6 +1931,7 @@ export class Orchestrator {
       }
       case 'user_stopped':
       case 'watcher_stopped':
+      case 'watcher_work_item_stopped':
       case 'rate_limit':
       case 'circuit_open':
       case 'timeout':
@@ -1941,7 +1983,8 @@ export class Orchestrator {
     objective?: string,
     totalLlmCalls?: number,
     totalToolCalls?: number,
-    cadence?: { elapsedMs: number; toolCallsSinceLastAudit: number; recentActivity: string; workIds?: string[] }
+    cadence?: { elapsedMs: number; toolCallsSinceLastAudit: number; recentActivity: string; workIds?: string[] },
+    controlEventType?: 'goal_state_reached' | 'work_item_completed'
   ): Promise<StopHookResult | null> {
     if (!runtime?.hookRegistry) return null;
 
@@ -1973,6 +2016,7 @@ export class Orchestrator {
       userPrompt,
       agentResult,
       cadence,
+      controlEventType,
     });
 
     if (!event) return null;
@@ -2007,6 +2051,7 @@ export class Orchestrator {
           const hookResult = await this.runControlHooks<'work_item_completed'>(event, hookContext, context, runtime);
           return this.resolveHookDecision(event.type, hookResult, mapWorkItemDecisionToStopResult);
         }
+        case 'escalation_resolved':
         case 'user_stopped':
         case 'transient_error':
           return null;
@@ -2483,6 +2528,37 @@ export class Orchestrator {
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         }),
         shouldContinue: false,
+      };
+    }
+
+    // ============================================================
+    // WORK-ITEM STOP: watcher stopped this agent/work item only
+    // ============================================================
+    if (result.terminationReason === 'watcher_work_item_stopped') {
+      const reason = result.watcherStop?.reason ?? result.response ?? 'Watcher stopped this work item.';
+      this.log('info', 'Watcher stopped work item', { workId, reason: reason.slice(0, 160) });
+      this.mergeAgentResultContext(context, workId, result);
+
+      this.hookQueue.enqueue({
+        type: 'watcher_agent_stopped',
+        sessionKey: context.sessionKey,
+        workId,
+        reason,
+        escalationId: result.watcherStop?.escalationId,
+        agentType: item.agent,
+      }, {
+        workId,
+        agentType: item.agent,
+        sessionKey: context.sessionKey,
+        requestId: this.requestId,
+        objective: item.objective,
+      });
+
+      this.completedWork.set(workId, result);
+
+      return {
+        terminal: null,
+        shouldContinue: true,
       };
     }
 

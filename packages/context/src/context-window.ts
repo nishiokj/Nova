@@ -5,15 +5,14 @@
  * - items[] directly maps to OpenAI Responses API input format
  * - Mutations increment _version for optimistic concurrency
  * - getItemsForLLM() handles provider-specific conversion
+ * - Optional disk backing: pass filePath to constructor for write-through persistence
  */
 
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import nodePath from 'path';
 import type {
   ContentBlock,
   ContextWindowMetrics,
-  LLMAdapter,
-  LLMRequestConfig,
-  Message,
-  StructuredOutputSchema,
 } from 'types';
 import { createContextWindowMetrics, updateContextMetrics } from 'types';
 import type {
@@ -25,6 +24,9 @@ import type {
   FileContentItem,
   ArtifactPayload,
   ArtifactItem,
+  FunctionCallItem,
+  FunctionCallOutputItem,
+  ReasoningItem,
   EjectResult,
   CompactOptions,
   CompactResult,
@@ -78,112 +80,6 @@ function formatArtifactForLLM(artifact: ArtifactPayload): string {
   return parts.join('\n');
 }
 
-// =========================================================================
-// Epistemic Ledger (LLM-backed compaction summary)
-// =========================================================================
-
-type LedgerEntry = { text: string; sources: string[] };
-
-type LedgerPayload = {
-  constraints: LedgerEntry[];
-  decision_boundaries: LedgerEntry[];
-  actions: LedgerEntry[];
-  open_questions: LedgerEntry[];
-};
-
-const LEDGER_RESPONSE_SCHEMA: StructuredOutputSchema = {
-  name: 'epistemic_ledger',
-  strict: true,
-  schema: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      constraints: {
-        type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            text: { type: 'string' },
-            sources: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['text', 'sources'],
-        },
-      },
-      decision_boundaries: {
-        type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            text: { type: 'string' },
-            sources: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['text', 'sources'],
-        },
-      },
-      actions: {
-        type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            text: { type: 'string' },
-            sources: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['text', 'sources'],
-        },
-      },
-      open_questions: {
-        type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            text: { type: 'string' },
-            sources: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['text', 'sources'],
-        },
-      },
-    },
-    required: ['constraints', 'decision_boundaries', 'actions', 'open_questions'],
-  },
-};
-
-const LEDGER_MAX_ENTRY_CHARS = 220;
-const LEDGER_MAX_ENTRIES_PER_SECTION = 8;
-const LEDGER_MAX_ITEM_PREVIEW = 600;
-
-/** Timeout for compaction LLM calls - 30 seconds is plenty for summarization */
-const COMPACTION_LLM_TIMEOUT_MS = 30_000;
-
-/**
- * Wrap a promise with a timeout. Rejects with Error if timeout is exceeded.
- */
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    promise
-      .then((result) => {
-        clearTimeout(timer);
-        resolve(result);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
-}
-
-function truncateText(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max).trimEnd() + '...';
-}
-
 function flattenContentBlocks(content: ContentBlock[]): string {
   const parts: string[] = [];
   for (const block of content) {
@@ -205,133 +101,293 @@ function flattenContentBlocks(content: ContentBlock[]): string {
   return parts.join(' ');
 }
 
-function summarizeMessageContent(content: string | ContentBlock[]): string {
-  const text = typeof content === 'string' ? content : flattenContentBlocks(content);
-  return truncateText(text.replace(/\s+/g, ' ').trim(), LEDGER_MAX_ITEM_PREVIEW);
+// =========================================================================
+// Markdown Serialization (for disk-backed mode)
+// =========================================================================
+
+/** Regex matching item header lines — used to split body into blocks */
+const HEADER_RE = /^### (?:message:\w+|function_call_output|function_call|reasoning|file_content|artifact)/gm;
+
+interface Frontmatter {
+  session: string;
+  created: string;
+  maxTokens: number;
+  fileContentCounter?: number;
+  artifactCounter?: number;
 }
 
-function summarizeItemForLedger(item: ContextItem): string {
-  switch (item.type) {
-    case 'message':
-      return `${item.role}: ${summarizeMessageContent(item.content)}`;
-    case 'function_call':
-      return `call ${item.name} args=${truncateText(JSON.stringify(item.arguments), 240)}`;
-    case 'function_call_output':
-      return `output${item.isError ? ' (error)' : ''}: ${truncateText(item.output, 240)}`;
-    case 'reasoning':
-      return `reasoning: ${truncateText(item.content, 240)}`;
-    case 'file_content':
-      return `file ${item.path} (${item.content.length} chars)`;
-    case 'artifact':
-      return `artifact ${item.kind} ${item.sourcePath}:${item.name}`;
-  }
-}
-
-function estimateItemTokens(item: ContextItem): number {
-  switch (item.type) {
-    case 'message': {
-      const text = typeof item.content === 'string'
-        ? item.content
-        : flattenContentBlocks(item.content);
-      return Math.ceil(text.length / 4);
-    }
-    case 'file_content':
-      return Math.ceil((item.content.length + item.path.length) / 4);
-    case 'function_call_output':
-      return Math.ceil(item.output.length / 4);
-    case 'function_call':
-      return Math.ceil((JSON.stringify(item.arguments).length + item.name.length) / 4);
-    case 'reasoning':
-      return Math.ceil(item.content.length / 4);
-    case 'artifact':
-      return Math.ceil((item.name.length + item.sourcePath.length + (item.signature?.length ?? 0)) / 4);
-  }
-}
-
-function estimateItemBytes(item: ContextItem): number {
-  switch (item.type) {
-    case 'message':
-      return typeof item.content === 'string' ? item.content.length : 0;
-    case 'file_content':
-      return item.content.length;
-    case 'function_call_output':
-      return item.output.length;
-    case 'function_call':
-      return JSON.stringify(item.arguments).length + item.name.length;
-    case 'reasoning':
-      return item.content.length;
-    case 'artifact':
-      return item.name.length + item.sourcePath.length + (item.signature?.length ?? 0);
-  }
-}
-
-function parseLedgerResponse(content: string, validIds: Set<string>): LedgerPayload | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start === -1 || end === -1 || end <= start) return null;
-    try {
-      parsed = JSON.parse(content.slice(start, end + 1));
-    } catch {
-      return null;
-    }
-  }
-
-  const payload = parsed as Partial<LedgerPayload>;
-  const sections: Array<keyof LedgerPayload> = [
-    'constraints',
-    'decision_boundaries',
-    'actions',
-    'open_questions',
+function serializeFrontmatter(fm: Frontmatter): string {
+  const lines = [
+    '---',
+    `session: ${fm.session}`,
+    `created: ${fm.created}`,
+    `maxTokens: ${fm.maxTokens}`,
   ];
+  if (fm.fileContentCounter !== undefined) {
+    lines.push(`fileContentCounter: ${fm.fileContentCounter}`);
+  }
+  if (fm.artifactCounter !== undefined) {
+    lines.push(`artifactCounter: ${fm.artifactCounter}`);
+  }
+  lines.push('---', '');
+  return lines.join('\n');
+}
 
-  for (const key of sections) {
-    if (!Array.isArray(payload[key])) return null;
+function parseFrontmatter(content: string): { frontmatter: Frontmatter; bodyStart: number } | null {
+  if (!content.startsWith('---\n')) return null;
+
+  const endIdx = content.indexOf('\n---\n', 4);
+  if (endIdx === -1) return null;
+
+  const yamlBlock = content.slice(4, endIdx);
+  const lines = yamlBlock.split('\n');
+  const fm: Record<string, string> = {};
+
+  for (const line of lines) {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx > 0) {
+      const key = line.slice(0, colonIdx).trim();
+      const value = line.slice(colonIdx + 1).trim();
+      fm[key] = value;
+    }
   }
 
-  const normalizeEntries = (entries: LedgerEntry[]): LedgerEntry[] => {
-    const normalized: LedgerEntry[] = [];
-    for (const entry of entries) {
-      if (!entry || typeof entry.text !== 'string' || !Array.isArray(entry.sources)) continue;
-      const sources = entry.sources.filter((source) => validIds.has(source));
-      if (sources.length === 0) continue;
-      const text = truncateText(entry.text.replace(/\s+/g, ' ').trim(), LEDGER_MAX_ENTRY_CHARS);
-      if (text.length === 0) continue;
-      normalized.push({ text, sources });
-      if (normalized.length >= LEDGER_MAX_ENTRIES_PER_SECTION) break;
-    }
-    return normalized;
-  };
+  if (!fm.session || !fm.created || !fm.maxTokens) return null;
 
   return {
-    constraints: normalizeEntries(payload.constraints as LedgerEntry[]),
-    decision_boundaries: normalizeEntries(payload.decision_boundaries as LedgerEntry[]),
-    actions: normalizeEntries(payload.actions as LedgerEntry[]),
-    open_questions: normalizeEntries(payload.open_questions as LedgerEntry[]),
+    frontmatter: {
+      session: fm.session,
+      created: fm.created,
+      maxTokens: parseInt(fm.maxTokens, 10),
+      fileContentCounter: fm.fileContentCounter ? parseInt(fm.fileContentCounter, 10) : undefined,
+      artifactCounter: fm.artifactCounter ? parseInt(fm.artifactCounter, 10) : undefined,
+    },
+    bodyStart: endIdx + 5, // Skip '\n---\n'
   };
 }
 
-function formatLedgerMessage(ledger: LedgerPayload): string {
-  const sections: Array<{ title: string; entries: LedgerEntry[] }> = [
-    { title: 'CONSTRAINTS', entries: ledger.constraints },
-    { title: 'DECISION BOUNDARIES', entries: ledger.decision_boundaries },
-    { title: 'ACTIONS COMPLETED', entries: ledger.actions },
-    { title: 'OPEN QUESTIONS', entries: ledger.open_questions },
-  ];
+function serializeItem(item: ContextItem): string {
+  const lines: string[] = [];
 
-  const lines: string[] = ['[EPISTEMIC LEDGER]'];
-  for (const section of sections) {
-    if (section.entries.length === 0) continue;
-    lines.push(`[${section.title}]`);
-    for (const entry of section.entries) {
-      lines.push(`- ${entry.text} (sources: ${entry.sources.join(', ')})`);
+  switch (item.type) {
+    case 'message': {
+      lines.push(`### message:${item.role}`);
+      lines.push(`@ts ${item.timestamp}`);
+      if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
+      if (typeof item.content === 'string') {
+        lines.push(item.content);
+      } else {
+        lines.push(`@contentBlocks`);
+        lines.push(JSON.stringify(item.content));
+      }
+      break;
+    }
+
+    case 'function_call': {
+      lines.push(`### function_call`);
+      lines.push(`@callId ${item.callId}`);
+      lines.push(`@name ${item.name}`);
+      lines.push(`@ts ${item.timestamp}`);
+      if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
+      lines.push(JSON.stringify(item.arguments));
+      break;
+    }
+
+    case 'function_call_output': {
+      lines.push(`### function_call_output`);
+      lines.push(`@callId ${item.callId}`);
+      lines.push(`@ts ${item.timestamp}`);
+      if (item.isError) lines.push(`@isError true`);
+      if (item.durationMs !== undefined) lines.push(`@durationMs ${item.durationMs}`);
+      if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
+      lines.push(item.output);
+      break;
+    }
+
+    case 'reasoning': {
+      lines.push(`### reasoning`);
+      lines.push(`@ts ${item.timestamp}`);
+      if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
+      lines.push(item.content);
+      break;
+    }
+
+    case 'file_content': {
+      lines.push(`### file_content`);
+      lines.push(`@id ${item.id}`);
+      lines.push(`@path ${item.path}`);
+      lines.push(`@ts ${item.timestamp}`);
+      if (item.language) lines.push(`@language ${item.language}`);
+      if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
+      lines.push(item.content);
+      break;
+    }
+
+    case 'artifact': {
+      lines.push(`### artifact`);
+      lines.push(`@id ${item.id}`);
+      lines.push(`@kind ${item.kind}`);
+      lines.push(`@name ${item.name}`);
+      lines.push(`@sourcePath ${item.sourcePath}`);
+      lines.push(`@ts ${item.timestamp}`);
+      lines.push(`@discoveredBy ${item.discoveredBy}`);
+      if (item.line !== undefined) lines.push(`@line ${item.line}`);
+      if (item.signature) lines.push(`@signature ${item.signature}`);
+      if (item.modifies?.length) lines.push(`@modifies ${item.modifies.join(',')}`);
+      if (item.calls?.length) lines.push(`@calls ${item.calls.join(',')}`);
+      if (item.insight) lines.push(`@insight ${item.insight}`);
+      if (item.reduces) lines.push(`@reduces ${item.reduces}`);
+      if (item.relevance !== undefined) lines.push(`@relevance ${item.relevance}`);
+      if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
+      break;
     }
   }
 
   return lines.join('\n');
+}
+
+/** Known metadata keys — any @-prefixed line with an unknown key is content, not metadata. */
+const KNOWN_META_KEYS = new Set([
+  'ts', 'workItemId', 'callId', 'name', 'isError', 'durationMs',
+  'id', 'path', 'language', 'kind', 'sourcePath', 'discoveredBy',
+  'line', 'signature', 'modifies', 'calls', 'insight', 'reduces',
+  'relevance', 'contentBlocks',
+]);
+
+function parseItem(block: string): ContextItem | null {
+  const lines = block.trim().split('\n');
+  if (lines.length === 0) return null;
+
+  const headerLine = lines[0];
+  if (!headerLine.startsWith('### ')) return null;
+
+  const headerContent = headerLine.slice(4);
+
+  // Parse metadata lines (start with @knownKey)
+  const meta: Record<string, string> = {};
+  let contentStartIdx = 1;
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('@')) {
+      const spaceIdx = line.indexOf(' ');
+      const key = spaceIdx > 0 ? line.slice(1, spaceIdx) : line.slice(1);
+      if (!KNOWN_META_KEYS.has(key)) {
+        break; // Not a known metadata key — this is content
+      }
+      if (spaceIdx > 0) {
+        meta[key] = line.slice(spaceIdx + 1);
+      } else {
+        // Flag with no value (e.g., @contentBlocks)
+        meta[key] = 'true';
+      }
+      contentStartIdx = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  const contentLines = lines.slice(contentStartIdx);
+  const content = contentLines.join('\n');
+
+  if (headerContent.startsWith('message:')) {
+    const role = headerContent.slice(8) as MessageItem['role'];
+    const hasContentBlocks = meta.contentBlocks === 'true';
+
+    return {
+      type: 'message',
+      role,
+      content: hasContentBlocks ? JSON.parse(content) : content,
+      timestamp: parseInt(meta.ts, 10),
+      workItemId: meta.workItemId,
+    } as MessageItem;
+  }
+
+  if (headerContent === 'function_call') {
+    return {
+      type: 'function_call',
+      callId: meta.callId,
+      name: meta.name,
+      arguments: JSON.parse(content),
+      timestamp: parseInt(meta.ts, 10),
+      workItemId: meta.workItemId,
+    } as FunctionCallItem;
+  }
+
+  if (headerContent === 'function_call_output') {
+    return {
+      type: 'function_call_output',
+      callId: meta.callId,
+      output: content,
+      isError: meta.isError === 'true',
+      durationMs: meta.durationMs ? parseInt(meta.durationMs, 10) : undefined,
+      timestamp: parseInt(meta.ts, 10),
+      workItemId: meta.workItemId,
+    } as FunctionCallOutputItem;
+  }
+
+  if (headerContent === 'reasoning') {
+    return {
+      type: 'reasoning',
+      content,
+      timestamp: parseInt(meta.ts, 10),
+      workItemId: meta.workItemId,
+    } as ReasoningItem;
+  }
+
+  if (headerContent === 'file_content') {
+    return {
+      type: 'file_content',
+      id: meta.id,
+      path: meta.path,
+      content,
+      language: meta.language,
+      timestamp: parseInt(meta.ts, 10),
+      workItemId: meta.workItemId,
+    } as FileContentItem;
+  }
+
+  if (headerContent === 'artifact') {
+    return {
+      type: 'artifact',
+      id: meta.id,
+      kind: meta.kind as ArtifactItem['kind'],
+      name: meta.name,
+      sourcePath: meta.sourcePath,
+      discoveredBy: meta.discoveredBy,
+      timestamp: parseInt(meta.ts, 10),
+      line: meta.line ? parseInt(meta.line, 10) : undefined,
+      signature: meta.signature,
+      modifies: meta.modifies ? meta.modifies.split(',') : undefined,
+      calls: meta.calls ? meta.calls.split(',') : undefined,
+      insight: meta.insight,
+      reduces: meta.reduces as ArtifactItem['reduces'],
+      relevance: meta.relevance ? parseFloat(meta.relevance) : undefined,
+      workItemId: meta.workItemId,
+    } as ArtifactItem;
+  }
+
+  return null;
+}
+
+/**
+ * Parse body into item blocks using header-based splitting.
+ * Unlike `---` delimiter splitting, this is immune to content containing `---`.
+ */
+function parseItemBlocks(body: string): ContextItem[] {
+  const matches = [...body.matchAll(HEADER_RE)];
+  if (matches.length === 0) return [];
+
+  const items: ContextItem[] = [];
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index!;
+    const end = i + 1 < matches.length ? matches[i + 1].index! : body.length;
+    const block = body.slice(start, end).trim();
+    if (block.length === 0) continue;
+    const item = parseItem(block);
+    if (item) items.push(item);
+  }
+  return items;
 }
 
 // =========================================================================
@@ -392,21 +448,91 @@ export function buildSystemMessage(
 export class ContextWindow {
   readonly sessionKey: string;
   readonly maxTokens: number;
+  readonly filePath: string | null;
 
   private _items: ContextItem[] = [];
   private _metrics: ContextWindowMetrics;
   private _version = 0;
   private _readFiles: Set<string> = new Set();
   private _fileContentCounter = 0;
+  private _artifactCounter = 0;
+  private _created: string;
 
-  constructor(sessionKey: string, maxTokens = 200_000) {
+  constructor(sessionKey: string, maxTokens = 200_000, filePath?: string) {
     this.sessionKey = sessionKey;
     this.maxTokens = maxTokens;
+    this.filePath = filePath ?? null;
+    this._created = new Date().toISOString();
     this._metrics = createContextWindowMetrics(maxTokens);
+
+    if (this.filePath) {
+      mkdirSync(nodePath.dirname(this.filePath), { recursive: true });
+      if (existsSync(this.filePath)) {
+        this._loadFromDisk();
+      } else {
+        this._writeDisk();
+      }
+    }
+  }
+
+  /**
+   * Factory method to create from session directory path.
+   */
+  static fromSessionDir(workingDir: string, sessionId: string, maxTokens?: number): ContextWindow {
+    const date = new Date();
+    const dateStr = date.toISOString().split('T')[0];
+    const sessionDir = nodePath.join(workingDir, '.haiku', 'sessions', dateStr, sessionId);
+    const fp = nodePath.join(sessionDir, 'context.md');
+    return new ContextWindow(sessionId, maxTokens, fp);
   }
 
   // =========================================================================
-  // Mutation Methods (increment _version)
+  // Disk I/O (write-through model — RAM is authoritative)
+  // =========================================================================
+
+  private _renderFrontmatter(): string {
+    return serializeFrontmatter({
+      session: this.sessionKey,
+      created: this._created,
+      maxTokens: this.maxTokens,
+      fileContentCounter: this._fileContentCounter,
+      artifactCounter: this._artifactCounter,
+    });
+  }
+
+  private _loadFromDisk(): void {
+    const content = readFileSync(this.filePath!, 'utf-8');
+    const parsed = parseFrontmatter(content);
+    if (!parsed) return;
+
+    this._created = parsed.frontmatter.created;
+    this._fileContentCounter = parsed.frontmatter.fileContentCounter ?? 0;
+    this._artifactCounter = parsed.frontmatter.artifactCounter ?? 0;
+
+    const body = content.slice(parsed.bodyStart);
+    this._items = parseItemBlocks(body);
+
+    // Rebuild _readFiles from file_content items
+    for (const item of this._items) {
+      if (item.type === 'file_content') {
+        this._readFiles.add(item.path);
+      }
+    }
+  }
+
+  private _writeDisk(): void {
+    if (!this.filePath) return;
+    let content = this._renderFrontmatter();
+    for (const item of this._items) {
+      content += '\n' + serializeItem(item) + '\n';
+    }
+    const tmp = this.filePath + '.tmp';
+    writeFileSync(tmp, content, 'utf-8');
+    renameSync(tmp, this.filePath);
+  }
+
+  // =========================================================================
+  // Mutation Methods (increment _version, write-through to disk)
   // =========================================================================
 
   /**
@@ -425,6 +551,7 @@ export class ContextWindow {
       ...this._metrics,
       messageCount: this._items.filter(i => i.type === 'message').length,
     };
+    this._writeDisk();
   }
 
   /**
@@ -440,6 +567,7 @@ export class ContextWindow {
       workItemId,
     });
     this._version++;
+    this._writeDisk();
   }
 
   /**
@@ -462,6 +590,7 @@ export class ContextWindow {
       workItemId,
     });
     this._version++;
+    this._writeDisk();
   }
 
   /**
@@ -475,6 +604,7 @@ export class ContextWindow {
       workItemId,
     });
     this._version++;
+    this._writeDisk();
   }
 
   /**
@@ -493,16 +623,15 @@ export class ContextWindow {
     });
     this._readFiles.add(path);
     this._version++;
+    this._writeDisk();
     return id;
   }
-
-  private _artifactCounter = 0;
 
   /**
    * Add a semantic artifact to context. Returns the generated ID.
    */
   addArtifact(
-    artifact: Omit<import('types').ArtifactItem, 'type' | 'id' | 'timestamp'>,
+    artifact: Omit<ArtifactItem, 'type' | 'id' | 'timestamp'>,
     workItemId?: string
   ): string {
     const id = `art_${this.sessionKey.slice(0, 4)}_${++this._artifactCounter}`;
@@ -514,6 +643,7 @@ export class ContextWindow {
       workItemId: artifact.workItemId ?? workItemId,
     });
     this._version++;
+    this._writeDisk();
     return id;
   }
 
@@ -521,7 +651,7 @@ export class ContextWindow {
    * Add multiple artifacts at once.
    */
   addArtifacts(
-    artifacts: Array<Omit<import('types').ArtifactItem, 'type' | 'id' | 'timestamp'>>,
+    artifacts: Array<Omit<ArtifactItem, 'type' | 'id' | 'timestamp'>>,
     workItemId?: string
   ): string[] {
     return artifacts.map(a => this.addArtifact(a, workItemId));
@@ -530,21 +660,21 @@ export class ContextWindow {
   /**
    * Get all artifacts in context.
    */
-  getArtifacts(): import('types').ArtifactItem[] {
-    return this._items.filter((i): i is import('types').ArtifactItem => i.type === 'artifact');
+  getArtifacts(): ArtifactItem[] {
+    return this._items.filter((i): i is ArtifactItem => i.type === 'artifact');
   }
 
   /**
    * Get artifacts for a specific source path.
    */
-  getArtifactsByPath(sourcePath: string): import('types').ArtifactItem[] {
+  getArtifactsByPath(sourcePath: string): ArtifactItem[] {
     return this.getArtifacts().filter(a => a.sourcePath === sourcePath);
   }
 
   /**
    * Get artifacts by kind (function, class, etc.).
    */
-  getArtifactsByKind(kind: import('types').ArtifactKind): import('types').ArtifactItem[] {
+  getArtifactsByKind(kind: import('types').ArtifactKind): ArtifactItem[] {
     return this.getArtifacts().filter(a => a.kind === kind);
   }
 
@@ -575,6 +705,7 @@ export class ContextWindow {
   appendItem(item: ContextItem): void {
     this._items.push(item);
     this._version++;
+    this._writeDisk();
   }
 
   /**
@@ -584,6 +715,7 @@ export class ContextWindow {
   filterItems(predicate: (item: ContextItem) => boolean): void {
     this._items = this._items.filter(predicate);
     this._version++;
+    this._writeDisk();
   }
 
   /**
@@ -614,6 +746,7 @@ export class ContextWindow {
     if (ejectedIds.length > 0) {
       this._readFiles.delete(path);
       this._version++;
+      this._writeDisk();
     }
 
     return {
@@ -638,6 +771,7 @@ export class ContextWindow {
 
     if (removed > 0) {
       this._version++;
+      this._writeDisk();
     }
 
     return removed;
@@ -666,6 +800,7 @@ export class ContextWindow {
         this._readFiles.delete(ejectedPath);
       }
       this._version++;
+      this._writeDisk();
       return {
         ejectedCount: 1,
         ejectedIds: [id],
@@ -726,7 +861,7 @@ export class ContextWindow {
         if (deduplicateByPath) {
           const existing = newestByPath.get(item.path);
           if (existing) {
-            if (item.timestamp > existing.item.timestamp) {
+            if (item.timestamp >= existing.item.timestamp) {
               toRemove.add(existing.index);
               bytesRecovered += existing.item.content.length;
               newestByPath.set(item.path, { item, index });
@@ -799,6 +934,10 @@ export class ContextWindow {
       }
     }
 
+    if (toRemove.size > 0 || outputsTruncated > 0) {
+      this._writeDisk();
+    }
+
     return {
       itemsRemoved,
       fileContentRemoved,
@@ -808,194 +947,14 @@ export class ContextWindow {
   }
 
   /**
-   * Compact with an LLM-generated ledger summarizing removed items.
-   * Falls back to mechanical compaction if summarization fails.
+   * Clear all items and reset state.
    */
-  async compactWithLedger(params: CompactOptions & {
-    llm: LLMAdapter;
-    llmConfig: LLMRequestConfig;
-    targetReductionRatio?: number;
-    preserveRecentItems?: number;
-  }): Promise<CompactResult> {
-    const {
-      llm,
-      llmConfig,
-      targetReductionRatio = 0.66,
-      preserveRecentItems = 12,
-      maxFileContentAgeMs,
-      maxFileContentCount,
-      deduplicateByPath = false,
-      truncateOutputsTo,
-    } = params;
-
-    const baseResult = this.compact({
-      maxFileContentAgeMs,
-      maxFileContentCount,
-      deduplicateByPath,
-      truncateOutputsTo,
-    });
-
-    const currentTokens = this.estimateTokenUsage();
-    const ratio = Math.min(Math.max(targetReductionRatio, 0), 0.9);
-    const targetTokens = Math.max(1, Math.floor(currentTokens * (1 - ratio)));
-
-    if (currentTokens <= targetTokens) {
-      return baseResult;
-    }
-
-    const preserveStart = Math.max(0, this._items.length - preserveRecentItems);
-    const protectedIndices = new Set<number>();
-    this._items.forEach((item, index) => {
-      if (index >= preserveStart) {
-        protectedIndices.add(index);
-        return;
-      }
-      if (item.type === 'artifact') {
-        protectedIndices.add(index);
-        return;
-      }
-      if (item.type === 'message' && (item.role === 'system' || item.role === 'developer')) {
-        protectedIndices.add(index);
-      }
-    });
-
-    const candidates: number[] = [];
-    for (let i = 0; i < preserveStart; i++) {
-      if (!protectedIndices.has(i)) {
-        candidates.push(i);
-      }
-    }
-
-    if (candidates.length === 0) {
-      return baseResult;
-    }
-
-    let tokensToRemove = currentTokens - targetTokens;
-    const removalIndices: number[] = [];
-    for (const index of candidates) {
-      const item = this._items[index];
-      removalIndices.push(index);
-      tokensToRemove -= estimateItemTokens(item);
-      if (tokensToRemove <= 0) break;
-    }
-
-    if (removalIndices.length === 0) {
-      return baseResult;
-    }
-
-    const ledgerItems = removalIndices.map((index) => ({
-      id: `i${index}`,
-      item: this._items[index],
-    }));
-    const validIds = new Set(ledgerItems.map((entry) => entry.id));
-    const ledgerLines = ledgerItems.map(
-      (entry) => `- [${entry.id}] ${summarizeItemForLedger(entry.item)}`
-    );
-
-    const systemPrompt = [
-      'You distill compact, actionable context.',
-      'Only use the provided items.',
-      'Each entry must cite source item ids in sources[].',
-      'Prefer constraints and decision boundaries over narration.',
-      'Keep entries concise.',
-    ].join(' ');
-
-    const userPrompt = [
-      'Summarize these items into an epistemic ledger.',
-      'If nothing is important, return empty arrays.',
-      'Items:',
-      ledgerLines.join('\n'),
-    ].join('\n');
-
-    let ledgerPayload: LedgerPayload | null = null;
-    try {
-      // Wrap LLM call with timeout to prevent hanging
-      const response = await withTimeout(
-        llm.respond({
-          llm: {
-            ...llmConfig,
-            temperature: 0,
-            maxTokens: Math.min(llmConfig.maxTokens ?? 800, 800),
-          },
-          messages: [{ role: 'user', content: userPrompt } satisfies Message],
-          system: systemPrompt,
-          responseSchema: LEDGER_RESPONSE_SCHEMA,
-        }),
-        COMPACTION_LLM_TIMEOUT_MS,
-        'Compaction LLM call'
-      );
-      ledgerPayload = parseLedgerResponse(response.content, validIds);
-    } catch {
-      // Timeout or LLM error - fall back to mechanical compaction
-      ledgerPayload = null;
-    }
-
-    if (!ledgerPayload) {
-      return baseResult;
-    }
-
-    const ledgerMessage = formatLedgerMessage(ledgerPayload);
-    if (ledgerMessage.trim().length === 0) {
-      return baseResult;
-    }
-
-    const removedSet = new Set(removalIndices);
-    const retained: ContextItem[] = [];
-    const pathsRemoved = new Set<string>();
-    let itemsRemoved = 0;
-    let fileContentRemoved = 0;
-    let bytesRecovered = 0;
-
-    this._items.forEach((item, index) => {
-      if (removedSet.has(index)) {
-        itemsRemoved++;
-        bytesRecovered += estimateItemBytes(item);
-        if (item.type === 'file_content') {
-          fileContentRemoved++;
-          pathsRemoved.add(item.path);
-        }
-        return;
-      }
-      retained.push(item);
-    });
-
-    const summaryItem: MessageItem = {
-      type: 'message',
-      role: 'system',
-      content: ledgerMessage,
-      timestamp: Date.now(),
-    };
-
-    const removedBeforePreserve = removalIndices.length;
-    let insertIndex = preserveStart - removedBeforePreserve;
-    if (insertIndex < 0) insertIndex = 0;
-    let minInsertIndex = retained.findIndex(
-      (item) => !(item.type === 'message' && (item.role === 'system' || item.role === 'developer'))
-    );
-    if (minInsertIndex === -1) {
-      minInsertIndex = retained.length;
-    }
-    if (insertIndex < minInsertIndex) insertIndex = minInsertIndex;
-
-    retained.splice(insertIndex, 0, summaryItem);
-    this._items = retained;
+  clear(): void {
+    this._items = [];
+    this._readFiles.clear();
     this._version++;
-
-    for (const path of pathsRemoved) {
-      const hasRemaining = this._items.some(
-        (item) => item.type === 'file_content' && item.path === path
-      );
-      if (!hasRemaining) {
-        this._readFiles.delete(path);
-      }
-    }
-
-    return {
-      itemsRemoved: baseResult.itemsRemoved + itemsRemoved,
-      fileContentRemoved: baseResult.fileContentRemoved + fileContentRemoved,
-      outputsTruncated: baseResult.outputsTruncated,
-      bytesRecovered: baseResult.bytesRecovered + bytesRecovered,
-    };
+    this._metrics = createContextWindowMetrics(this.maxTokens);
+    this._writeDisk();
   }
 
   // =========================================================================
@@ -1301,14 +1260,23 @@ export class ContextWindow {
 
   /**
    * Deserialize from snapshot.
+   * Pass filePath to enable disk-backed mode (writes snapshot to disk on restore).
    */
-  static deserialize(snapshot: ContextWindowSnapshot): ContextWindow {
+  static deserialize(snapshot: ContextWindowSnapshot, filePath?: string): ContextWindow {
     const context = new ContextWindow(snapshot.sessionKey, snapshot.maxTokens);
+    // Bypass disk I/O during restore — set filePath after populating RAM
     context._items = [...snapshot.items];
     context._metrics = { ...snapshot.metrics };
     context._version = snapshot.version;
     context._readFiles = new Set(snapshot.readFiles);
     context._fileContentCounter = snapshot.fileContentCounter ?? 0;
+
+    if (filePath) {
+      (context as { filePath: string | null }).filePath = filePath;
+      mkdirSync(nodePath.dirname(filePath), { recursive: true });
+      context._writeDisk();
+    }
+
     return context;
   }
 

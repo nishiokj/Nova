@@ -1,6 +1,6 @@
-import type { ContextWindow } from 'context';
 import type { WorkItem } from 'work';
 import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMRequestConfig } from 'types';
+import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { HandoffSpec, TerminationReason } from 'protocol';
@@ -139,6 +139,11 @@ export interface AgentResultBase {
   artifacts?: ArtifactItem[];
   /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
   localContext: ContextWindow;
+  /** Optional watcher stop metadata when cadence intervention terminates a work item/session. */
+  watcherStop?: {
+    reason: string;
+    escalationId?: string;
+  };
 }
 
 export type AgentRateLimitInfo = {
@@ -287,6 +292,9 @@ export interface AgentCadenceMetrics {
 export interface AgentCadenceResult {
   action: 'continue' | 'inject' | 'stop';
   systemMessage?: string;
+  terminationReason?: Extract<TerminationReason, 'watcher_stopped' | 'watcher_work_item_stopped'>;
+  escalationId?: string;
+  reason?: string;
 }
 
 export interface AgentHooks {
@@ -450,6 +458,61 @@ export type InternalHookEvent =
       message?: string;
       /** Branch name if detectable */
       branch?: string;
+    }
+  | {
+      /** Fired when an escalation is raised (needs human attention) */
+      type: 'escalation_raised';
+      escalation: {
+        id: string;
+        escalationType: string;
+        sessionKey: string;
+        workItemId?: string;
+        title: string;
+        context: string;
+        tradeoffs?: string[];
+        options?: Array<{
+          id: string;
+          label: string;
+          description: string;
+          implications: string[];
+          recommended: boolean;
+        }>;
+        references: Array<{
+          type: string;
+          label: string;
+          target: string;
+          preview?: string;
+        }>;
+      };
+    }
+  | {
+      /** Fired when an escalation is resolved by human or system */
+      type: 'escalation_resolved';
+      escalationId: string;
+      sessionKey: string;
+      resolution: {
+        optionId?: string;
+        freeformResponse?: string;
+        resolvedBy: 'user' | 'system' | 'timeout';
+      };
+    }
+  | {
+      /** Fired when watcher stops a specific work item during cadence checks. */
+      type: 'watcher_agent_stopped';
+      sessionKey: string;
+      workId: string;
+      reason: string;
+      escalationId?: string;
+      agentType: string;
+    }
+  | {
+      /** Fired when session status changes (e.g., active → blocked) */
+      type: 'session_status_changed';
+      sessionKey: string;
+      previousStatus: string;
+      newStatus: string;
+      reason?: string;
+      triggeringEscalationId?: string;
     };
 
 /**

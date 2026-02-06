@@ -4,6 +4,7 @@ import type { ContextWindowSnapshot, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
 import type { HandoffSpec } from 'protocol';
 import { PermissionChecker } from './permissions.js';
+import path from 'path';
 
 interface SessionStoreOptions {
   sessionKey: string;
@@ -33,6 +34,21 @@ export interface PausedState {
   pausedAt: number; // Timestamp when session entered paused state
 }
 
+export type PausedWorkItemStatus = 'pending' | 'resolved' | 'cancelled';
+
+export interface PausedWorkItemState {
+  workId: string;
+  agentType: string;
+  objective?: string;
+  reason: string;
+  escalationId?: string;
+  status: PausedWorkItemStatus;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt?: number;
+  resolutionSummary?: string;
+}
+
 function normalizeHandoffSpec(value: unknown): HandoffSpec | undefined {
   if (!value) return undefined;
   let candidate = value;
@@ -49,6 +65,56 @@ function normalizeHandoffSpec(value: unknown): HandoffSpec | undefined {
     return undefined;
   }
   return spec;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asPositiveTimestamp(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function normalizePausedWorkItemStatus(value: unknown): PausedWorkItemStatus {
+  switch (value) {
+    case 'pending':
+    case 'resolved':
+    case 'cancelled':
+      return value;
+    default:
+      return 'pending';
+  }
+}
+
+function normalizePausedWorkItem(value: unknown): PausedWorkItemState | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  const workId = asNonEmptyString(input.workId);
+  const agentType = asNonEmptyString(input.agentType);
+  const reason = asNonEmptyString(input.reason);
+  if (!workId || !agentType || !reason) return null;
+  const objective = asNonEmptyString(input.objective);
+  const escalationId = asNonEmptyString(input.escalationId);
+
+  const createdAt = asPositiveTimestamp(input.createdAt) ?? Date.now();
+  const updatedAt = asPositiveTimestamp(input.updatedAt) ?? createdAt;
+  const resolvedAt = asPositiveTimestamp(input.resolvedAt);
+  const resolutionSummary = asNonEmptyString(input.resolutionSummary);
+
+  return {
+    workId,
+    agentType,
+    ...(objective ? { objective } : {}),
+    reason,
+    ...(escalationId ? { escalationId } : {}),
+    status: normalizePausedWorkItemStatus(input.status),
+    createdAt,
+    updatedAt,
+    ...(resolvedAt ? { resolvedAt } : {}),
+    ...(resolutionSummary ? { resolutionSummary } : {}),
+  };
 }
 
 /**
@@ -90,7 +156,9 @@ export class SessionStore {
   private readonly workingDir: string;
   private readonly permissionChecker: PermissionChecker;
   private context: ContextWindow | null = null;
+  private readonly contextFilePath: string;
   private pausedState: PausedState | null = null;
+  private pausedWorkItems = new Map<string, PausedWorkItemState>();
   private modelSelections = new Map<string, ModelSelection>();
   private asyncModeEnabled = false;
 
@@ -109,6 +177,8 @@ export class SessionStore {
     this.isGraphDReady = options.isGraphDReady;
     this.logger = options.logger;
     this.workingDir = options.workingDir ?? process.cwd();
+    const date = new Date().toISOString().split('T')[0];
+    this.contextFilePath = path.join(this.workingDir, '.haiku', 'sessions', date, options.sessionKey, 'context.md');
 
     // Per-session permission checker - each session has its own dangerous mode and grants
     this.permissionChecker = new PermissionChecker(
@@ -205,7 +275,7 @@ export class SessionStore {
     // First, recover paused state from GraphD metadata if it exists
     this.recoverPausedState();
 
-    // Then, hydrate context from GraphD
+    // Try to hydrate from GraphD
     if (this.isGraphDReady() && this.graphd) {
       try {
         const result = this.graphd.contextGet(this.sessionKey) as {
@@ -213,7 +283,7 @@ export class SessionStore {
           error?: string;
         };
         if (result.snapshot?.context) {
-          this.context = ContextWindow.deserialize(result.snapshot.context);
+          this.context = ContextWindow.deserialize(result.snapshot.context, this.contextFilePath);
           this.logger.debug('Hydrated context from GraphD', {
             sessionKey: this.sessionKey,
             itemCount: this.context.items.length,
@@ -229,8 +299,8 @@ export class SessionStore {
       }
     }
 
-    this.context = new ContextWindow(this.sessionKey, this.maxTokens);
-    this.logger.debug('Created new context', { sessionKey: this.sessionKey, maxTokens: this.maxTokens });
+    this.context = new ContextWindow(this.sessionKey, this.maxTokens, this.contextFilePath);
+    this.logger.debug('Created new context', { sessionKey: this.sessionKey, maxTokens: this.maxTokens, path: this.contextFilePath });
     return this.context;
   }
 
@@ -265,6 +335,21 @@ export class SessionStore {
         });
       }
 
+      const pausedWorkItemsRaw = metadata?.paused_work_items;
+      const pausedWorkItems = Array.isArray(pausedWorkItemsRaw)
+        ? pausedWorkItemsRaw.map((entry) => normalizePausedWorkItem(entry)).filter((entry): entry is PausedWorkItemState => entry !== null)
+        : [];
+      if (pausedWorkItems.length > 0) {
+        this.pausedWorkItems.clear();
+        for (const item of pausedWorkItems) {
+          this.pausedWorkItems.set(item.workId, item);
+        }
+        this.logger.debug('Recovered paused work items from GraphD', {
+          sessionKey: this.sessionKey,
+          count: pausedWorkItems.length,
+        });
+      }
+
       // Hydrate session state (model selections, permissions) from metadata
       if (metadata) {
         this.hydrateSessionState(metadata);
@@ -287,13 +372,14 @@ export class SessionStore {
    * Used for handoff transitions from planning to execution.
    */
   clearContext(): ContextWindow {
-    this.context = new ContextWindow(this.sessionKey, this.maxTokens);
+    this.context = new ContextWindow(this.sessionKey, this.maxTokens, this.contextFilePath);
+    this.context.clear(); // Wipe items loaded from existing disk file
     this.logger.debug('Cleared context for handoff', { sessionKey: this.sessionKey });
     return this.context;
   }
 
   hydrateFromSnapshot(snapshot: ContextWindowSnapshot): void {
-    this.context = ContextWindow.deserialize(snapshot);
+    this.context = ContextWindow.deserialize(snapshot, this.contextFilePath);
   }
 
   /**
@@ -407,6 +493,86 @@ export class SessionStore {
     return this.pausedState;
   }
 
+  upsertPausedWorkItem(input: {
+    workId: string;
+    agentType: string;
+    objective?: string;
+    reason: string;
+    escalationId?: string;
+    status?: PausedWorkItemStatus;
+    timestamp?: number;
+  }): PausedWorkItemState {
+    const now = input.timestamp ?? Date.now();
+    const existing = this.pausedWorkItems.get(input.workId);
+    const next: PausedWorkItemState = {
+      workId: input.workId,
+      agentType: input.agentType,
+      ...(input.objective ? { objective: input.objective } : existing?.objective ? { objective: existing.objective } : {}),
+      reason: input.reason,
+      ...(input.escalationId ? { escalationId: input.escalationId } : existing?.escalationId ? { escalationId: existing.escalationId } : {}),
+      status: input.status ?? 'pending',
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      ...(existing?.resolvedAt ? { resolvedAt: existing.resolvedAt } : {}),
+      ...(existing?.resolutionSummary ? { resolutionSummary: existing.resolutionSummary } : {}),
+    };
+    this.pausedWorkItems.set(input.workId, next);
+    this.persistPausedWorkItems();
+    return next;
+  }
+
+  listPausedWorkItems(): PausedWorkItemState[] {
+    return Array.from(this.pausedWorkItems.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  resolvePausedWorkItem(workId: string, resolutionSummary?: string, timestamp: number = Date.now()): PausedWorkItemState | null {
+    const existing = this.pausedWorkItems.get(workId);
+    if (!existing) return null;
+    if (existing.status === 'resolved' || existing.status === 'cancelled') return existing;
+
+    const next: PausedWorkItemState = {
+      ...existing,
+      status: 'resolved',
+      updatedAt: timestamp,
+      resolvedAt: timestamp,
+      ...(resolutionSummary ? { resolutionSummary } : {}),
+    };
+    this.pausedWorkItems.set(workId, next);
+    this.persistPausedWorkItems();
+    return next;
+  }
+
+  cancelPausedWorkItem(workId: string, resolutionSummary?: string, timestamp: number = Date.now()): PausedWorkItemState | null {
+    const existing = this.pausedWorkItems.get(workId);
+    if (!existing) return null;
+    if (existing.status === 'resolved' || existing.status === 'cancelled') return existing;
+
+    const next: PausedWorkItemState = {
+      ...existing,
+      status: 'cancelled',
+      updatedAt: timestamp,
+      resolvedAt: timestamp,
+      ...(resolutionSummary ? { resolutionSummary } : {}),
+    };
+    this.pausedWorkItems.set(workId, next);
+    this.persistPausedWorkItems();
+    return next;
+  }
+
+  private persistPausedWorkItems(): void {
+    if (!this.isGraphDReady() || !this.graphd) return;
+    try {
+      this.graphd.sessionUpdateMetadata(this.sessionKey, {
+        paused_work_items: Array.from(this.pausedWorkItems.values()),
+      });
+    } catch (error) {
+      this.logger.warning('Failed to persist paused work items to GraphD', {
+        sessionKey: this.sessionKey,
+        error: String(error),
+      });
+    }
+  }
+
   clearPausedState(): void {
     this.pausedState = null;
     // Clear paused state from GraphD session metadata
@@ -427,6 +593,7 @@ export class SessionStore {
     this.persistContext();
     this.context = null;
     this.pausedState = null;
+    this.pausedWorkItems.clear();
     this.modelSelections.clear();
     this.asyncRun = null;
     this.ralphLoop = null;

@@ -1,9 +1,0 @@
-{
-  "name": "agentlab-harness-wrapper",
-  "private": true,
-  "type": "commonjs",
-  "scripts": {
-    "agentlab:harness": "node ./agentlab/harness.js"
-  }
-}
-

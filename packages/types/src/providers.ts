@@ -123,7 +123,7 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
     fast: 'anthropic/claude-sonnet-4.5',
     standard: 'anthropic/claude-sonnet-4.5',
     powerful: 'anthropic/claude-opus-4.5',
-    reasoning: 'openai/gpt-5.2-codex',
+    reasoning: 'openai/gpt-5.3-codex',
   },
   anthropic: {
     fast: 'claude-sonnet-4.5',
@@ -135,13 +135,13 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
     fast: 'gpt-5-nano',
     standard: 'gpt-5-mini',
     powerful: 'gpt-5.2',
-    reasoning: 'gpt-5.2-codex',
+    reasoning: 'gpt-5.3-codex',
   },
   codex: {
-    fast: 'gpt-5.2-codex',
-    standard: 'gpt-5.2-codex',
-    powerful: 'gpt-5.2-codex',
-    reasoning: 'gpt-5.2-codex',
+    fast: 'gpt-5.3-codex',
+    standard: 'gpt-5.3-codex',
+    powerful: 'gpt-5.3-codex',
+    reasoning: 'gpt-5.3-codex',
   },
   cerebras: {
     fast: 'llama-3.3-70b',
@@ -220,7 +220,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
       { id: 'gpt-5.2', name: 'gpt-5.2', context_window: 256_000, reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5-mini', name: 'gpt-5-mini', context_window: 128_000, reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5-nano', name: 'gpt-5-nano', context_window: 128_000 },
-      { id: 'gpt-5.2-codex', name: 'gpt-5.2-codex', context_window: 256_000, reasoning: ['low', 'medium', 'high'] },
+      { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex', context_window: 256_000, reasoning: ['low', 'medium', 'high'] },
     ],
     envVar: 'OPENAI_API_KEY',
     testEndpoint: 'https://api.openai.com/v1/models',
@@ -234,8 +234,8 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     models: [
       {
-        id: 'gpt-5.2-codex',
-        name: 'GPT-5.2 Codex',
+        id: 'gpt-5.3-codex',
+        name: 'GPT-5.3 Codex',
         context_window: 256_000,
         reasoning: ['low', 'medium', 'high'],
       },

@@ -9,8 +9,8 @@ import path from 'path';
 import { homedir } from 'os';
 
 const ROOT_PATH = path.resolve(process.cwd(), '..', '..');
-const DB_PATH = path.join(homedir(), '.graphd', 'graphd.db');
-const PORT = 9444;
+const DB_PATH = process.env.GRAPHD_DB_PATH ?? path.join(homedir(), '.graphd', 'graphd.db');
+const PORT = Number(process.env.GRAPHD_PORT ?? '9444');
 
 async function main() {
   console.log('Starting GraphD server...');

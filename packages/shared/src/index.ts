@@ -15,6 +15,7 @@ export {
   isValidOutput,
   getOutputSchema,
   getOutputSchemaJson,
+  unwrapStructuredOutput,
   getWatcherSchemaJsonForActions,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,

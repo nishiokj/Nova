@@ -1,0 +1,11 @@
+{
+  "baseline_id": "base",
+  "schema_version": "analysis_summary_v1",
+  "variants": {
+    "base": {
+      "event_counts": {},
+      "success_rate": 0.0,
+      "total": 2.0
+    }
+  }
+}

@@ -264,6 +264,39 @@ export interface RunArtifact {
 // ============================================
 
 /**
+ * Session lifecycle status.
+ * Transitions:
+ *   active → blocked (escalation raised)
+ *   active → review (PR created)
+ *   active → completed (goal achieved)
+ *   active → failed (unrecoverable)
+ *   active → cancelled (user abort)
+ *   blocked → active (escalations resolved)
+ *   review → active (changes requested)
+ *   review → completed (approved + merged)
+ */
+export type SessionStatus =
+  | 'active' // Work in progress
+  | 'blocked' // Waiting on escalation
+  | 'review' // PR created, awaiting review
+  | 'completed' // Successfully finished
+  | 'failed' // Unrecoverable failure
+  | 'cancelled' // User aborted
+  | 'inactive' // Stale (legacy, no recent activity)
+  | 'expired'; // Cleaned up (legacy)
+
+/**
+ * Session metrics aggregated during execution.
+ */
+export interface SessionMetrics {
+  workItemsCompleted: number;
+  workItemsFailed: number;
+  toolCalls: number;
+  llmCalls: number;
+  durationMs: number;
+}
+
+/**
  * GraphD session as stored in database.
  */
 export interface GraphDSession {
@@ -273,11 +306,19 @@ export interface GraphDSession {
   lastAccessedAt: number;
   expiresAt: number | null;
   workingDir: string | null;
-  status: string;
+  status: SessionStatus;
   metadataJson: string | null;
   metadata?: Record<string, unknown>;
   /** Truncated preview of the last user message (for session lists) */
   lastUserMessagePreview?: string | null;
+
+  // Workflow-like fields (enriched for Cockpit)
+  /** Original user goal/objective */
+  goal?: string | null;
+  /** Currently executing work item ID */
+  currentWorkItemId?: string | null;
+  /** Human-readable "working on..." description */
+  currentObjective?: string | null;
 }
 
 /**

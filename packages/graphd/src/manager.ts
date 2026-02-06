@@ -722,6 +722,40 @@ export class GraphDManager {
   }
 
   /**
+   * Update session workflow state (goal, current work item, objective).
+   */
+  sessionUpdateWorkflow(
+    sessionKey: string,
+    updates: {
+      status?: string;
+      goal?: string | null;
+      currentWorkItemId?: string | null;
+      currentObjective?: string | null;
+    }
+  ): boolean {
+    if (!this.store) return false;
+    try {
+      return this.store.updateSessionWorkflow(sessionKey, updates);
+    } catch (err) {
+      console.warn('Session workflow update failed:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Set goal only if not already set.
+   */
+  sessionSetGoalIfEmpty(sessionKey: string, goal: string): boolean {
+    if (!this.store) return false;
+    try {
+      return this.store.setGoalIfEmpty(sessionKey, goal);
+    } catch (err) {
+      console.warn('Session set goal failed:', err);
+      return false;
+    }
+  }
+
+  /**
    * Delete a session.
    */
   sessionDelete(sessionKey: string): boolean {
@@ -745,6 +779,7 @@ export class GraphDManager {
       workingDir?: string;
       status?: string | string[];
       limit?: number;
+      includePreview?: boolean;
     } = {}
   ): Record<string, unknown> {
     if (!this.store) {

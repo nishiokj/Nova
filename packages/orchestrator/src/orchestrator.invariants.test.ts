@@ -501,6 +501,86 @@ describe('Invariant: Hook Invocation', () => {
     expect(result.terminationReason).toBe('goal_state_reached');
   });
 
+  it('work_item_completed hook called for non-terminal completed work items', async () => {
+    const handoffPayload = JSON.stringify({
+      goal: 'Execute plan',
+      context: 'Test context',
+      workItems: [
+        { id: 'A', objective: 'Do A', delta: 'Do A', agent: 'standard', dependencies: [] },
+        { id: 'B', objective: 'Do B', delta: 'Do B', agent: 'standard', dependencies: [] },
+      ],
+    });
+
+    let callCount = 0;
+    const completedResponses: string[] = [];
+    const llm = {
+      respond: async () => {
+        callCount++;
+        return {
+          content: JSON.stringify({
+            action: 'done',
+            response: callCount === 1 ? 'Completed A' : 'Completed B',
+            goalStateReached: true,
+            awaitingUserInput: false,
+          }),
+          stopReason: 'end_turn',
+          usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+          toolCalls: [],
+        };
+      },
+      stream: async function* () {
+        const resp = await (this as LLMAdapter).respond({
+          messages: [],
+          llm: { provider: 'test', model: 'test' },
+        });
+        yield resp.content;
+        return resp;
+      },
+      getConfig: () => ({ provider: 'test', model: 'test' }),
+      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
+    } as unknown as LLMAdapter;
+
+    const registry = createHookRegistry();
+    registry.register({
+      id: 'workitem-completed-observer',
+      event: 'work_item_completed',
+      policy: { kind: 'fire_and_forget' },
+      criticality: 'non_critical',
+      idempotency: 'idempotent',
+      priority: 100,
+      timeoutMs: 5000,
+      run: async (event) => {
+        completedResponses.push(event.response);
+        return {
+          kind: 'success',
+          decision: { action: 'accept' } as const,
+          patches: [],
+        };
+      },
+    }, HOOK_META);
+
+    const orch = new Orchestrator(
+      { maxIterations: 20 },
+      createToolRegistry(),
+      llm,
+      () => {},
+      REQUEST_ID,
+      undefined,
+      createAgentRegistry(),
+      undefined,
+      undefined,
+      () => getModelSelection()
+    );
+
+    const runtime: OrchestratorRuntime = { hookRegistry: registry };
+    const result = await orch.execute(createContext(), handoffPayload, 'standard', CWD, runtime);
+
+    expect(result.success).toBe(true);
+    expect(completedResponses.length).toBe(2);
+    expect(completedResponses).toContain('Completed A');
+    expect(completedResponses).toContain('Completed B');
+  });
+
   it('hook block decision prevents termination and continues loop', async () => {
     // Bug hypothesis: Hook returns 'block' but termination proceeds anyway
     let hookCallCount = 0;

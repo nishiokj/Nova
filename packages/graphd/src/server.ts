@@ -51,6 +51,12 @@ export class GraphDRequestHandler {
     params: URLSearchParams,
     res: ServerResponse
   ): Promise<void> {
+    // Control-plane routes
+    if (path.startsWith('/control-plane/')) {
+      this.handleControlPlaneGet(path, params, res);
+      return;
+    }
+
     switch (path) {
       case '/health':
         this.sendJson(res, this.manager.handleHealth());
@@ -80,6 +86,121 @@ export class GraphDRequestHandler {
       default:
         this.sendJson(res, { error: 'not_found' }, 404);
     }
+  }
+
+  /**
+   * Handle control-plane GET requests for dashboard-control.
+   */
+  private handleControlPlaneGet(
+    path: string,
+    params: URLSearchParams,
+    res: ServerResponse
+  ): void {
+    // GET /control-plane/sessions
+    if (path === '/control-plane/sessions') {
+      const limit = safeInt(params.get('limit'), 50);
+      const result = this.manager.sessionsList({ limit });
+      const sessions = ((result as { sessions?: unknown[] }).sessions ?? []).map(this.formatSession);
+      this.sendJson(res, { sessions });
+      return;
+    }
+
+    // GET /control-plane/projects
+    if (path === '/control-plane/projects') {
+      const result = this.manager.sessionsList({ limit: 1000 });
+      const sessions = (result as { sessions?: Array<{ workingDir?: string; lastAccessedAt?: number }> }).sessions ?? [];
+
+      const projectMap = new Map<string, { count: number; lastAccessed: number }>();
+      for (const session of sessions) {
+        const wd = session.workingDir;
+        if (!wd) continue;
+        const existing = projectMap.get(wd);
+        if (existing) {
+          existing.count++;
+          existing.lastAccessed = Math.max(existing.lastAccessed, session.lastAccessedAt ?? 0);
+        } else {
+          projectMap.set(wd, { count: 1, lastAccessed: session.lastAccessedAt ?? 0 });
+        }
+      }
+
+      const projects = Array.from(projectMap.entries())
+        .map(([p, data]) => ({
+          id: p,
+          name: p.split('/').pop() || p,
+          path: p,
+          sessionCount: data.count,
+          activeGoals: 0,
+        }))
+        .sort((a, b) => b.sessionCount - a.sessionCount);
+
+      this.sendJson(res, { projects });
+      return;
+    }
+
+    // GET /control-plane/sessions/:id/messages
+    const messagesMatch = path.match(/^\/control-plane\/sessions\/([^/]+)\/messages$/);
+    if (messagesMatch) {
+      const sessionKey = decodeURIComponent(messagesMatch[1]);
+      const result = this.manager.messagesGet(sessionKey, 200, 0);
+      const messages = ((result as { messages?: unknown[] }).messages ?? []).map(this.formatMessage);
+      this.sendJson(res, { messages });
+      return;
+    }
+
+    // GET /control-plane/sessions/:id
+    const sessionMatch = path.match(/^\/control-plane\/sessions\/([^/]+)$/);
+    if (sessionMatch) {
+      const sessionKey = decodeURIComponent(sessionMatch[1]);
+      const result = this.manager.sessionGet(sessionKey);
+      const session = (result as { session?: unknown }).session;
+      this.sendJson(res, { session: session ? this.formatSession(session) : null });
+      return;
+    }
+
+    // GET /control-plane/traces (placeholder - returns empty)
+    if (path === '/control-plane/traces') {
+      this.sendJson(res, { traces: [] });
+      return;
+    }
+
+    // GET /control-plane/goals/hierarchy (placeholder)
+    if (path === '/control-plane/goals/hierarchy') {
+      this.sendJson(res, { goals: [] });
+      return;
+    }
+
+    // GET /control-plane/token-usage (placeholder)
+    if (path === '/control-plane/token-usage') {
+      this.sendJson(res, { usage: [] });
+      return;
+    }
+
+    this.sendJson(res, { error: 'not_found' }, 404);
+  }
+
+  private formatSession(row: unknown): object {
+    const r = row as { sessionKey?: string; clientType?: string; workingDir?: string; status?: string; createdAt?: number; lastAccessedAt?: number; metadata?: unknown };
+    return {
+      id: r.sessionKey,
+      clientType: r.clientType,
+      workingDir: r.workingDir,
+      status: r.status,
+      createdAt: r.createdAt ? new Date(r.createdAt * 1000).toISOString() : null,
+      lastAccessedAt: r.lastAccessedAt ? new Date(r.lastAccessedAt * 1000).toISOString() : null,
+      metadata: r.metadata,
+    };
+  }
+
+  private formatMessage(row: unknown): object {
+    const r = row as { id?: number; role?: string; content?: string; requestId?: string; createdAt?: number; metadata?: unknown };
+    return {
+      id: r.id,
+      role: r.role,
+      content: r.content,
+      requestId: r.requestId,
+      createdAt: r.createdAt ? new Date(r.createdAt * 1000).toISOString() : null,
+      metadata: r.metadata,
+    };
   }
 
   private async handlePost(

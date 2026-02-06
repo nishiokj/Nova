@@ -294,3 +294,65 @@ export {
   rfc3339Timestamp,
   generateTraceId,
 } from './agent_trace.js';
+
+// ============================================
+// ESCALATION (Cockpit control plane)
+// ============================================
+export type {
+  EscalationType,
+  EscalationStatus,
+  EscalationOption,
+  EscalationReference,
+  EscalationResolution,
+  Escalation,
+  EscalationCreateInput,
+  EscalationResolveInput,
+} from './escalation.js';
+
+export {
+  isEscalationPending,
+  isEscalationTerminal,
+  isEscalationBlocking,
+  ALL_ESCALATION_TYPES,
+  ALL_ESCALATION_STATUSES,
+} from './escalation.js';
+
+// ============================================
+// WORKITEM TEMPLATES
+// ============================================
+export type {
+  WorkItemSpec,
+  WorkItemTemplate,
+  WorkItemTemplateCreateInput,
+  DefaultTemplateName,
+} from './workitem-template.js';
+
+export {
+  FEATURE_TEMPLATE_SPECS,
+  BUGFIX_TEMPLATE_SPECS,
+  PROTOTYPE_TEMPLATE_SPECS,
+  REFACTOR_TEMPLATE_SPECS,
+  DEFAULT_TEMPLATE_NAMES,
+  getDefaultTemplateSpecs,
+} from './workitem-template.js';
+
+// ============================================
+// TEST REPORTS
+// ============================================
+export type {
+  TestVerdict,
+  TestCategory,
+  TestCase,
+  CategorySummary,
+  TestCoverage,
+  TestReport,
+  TestReportCreateInput,
+} from './test-report.js';
+
+export {
+  ALL_TEST_CATEGORIES,
+  ALL_TEST_VERDICTS,
+  computeAggregateVerdict,
+  buildCategorySummary,
+  buildAllCategorySummaries,
+} from './test-report.js';

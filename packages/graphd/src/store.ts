@@ -17,6 +17,7 @@ import {
   ENABLE_NORMAL_SYNC,
   EXPORTABLE_TABLES,
   isExportableTable,
+  V6_MIGRATION_STATEMENTS,
 } from './schema.js';
 import type {
   SymbolDef,
@@ -39,6 +40,7 @@ import type {
   UserRecord,
   UserSessionRecord,
   ProviderCredentialRecord,
+  SessionStatus,
 } from './types.js';
 import { nowSeconds, safeJsonParse } from './utils.js';
 
@@ -154,6 +156,22 @@ export class GraphStore {
     // Create all tables (IF NOT EXISTS is idempotent) - safely adds new tables
     this.db.exec(GRAPHD_SCHEMA_DDL);
     this.db.exec(ENABLE_FOREIGN_KEYS);
+
+    // Run v6 migrations (add columns to existing tables)
+    // These fail gracefully if columns already exist
+    if (existingNum < 6) {
+      for (const stmt of V6_MIGRATION_STATEMENTS) {
+        try {
+          this.db.exec(stmt);
+        } catch (err) {
+          // Ignore "duplicate column name" errors - column already exists
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!msg.includes('duplicate column name')) {
+            throw err;
+          }
+        }
+      }
+    }
 
     // Update schema version
     if (existingVersion && existingNum < expectedNum) {
@@ -497,15 +515,16 @@ export class GraphStore {
     clientType: string,
     workingDir?: string,
     expiresAt?: number,
-    metadata?: Record<string, unknown>
+    metadata?: Record<string, unknown>,
+    goal?: string
   ): boolean {
     const now = nowSeconds();
     try {
       this.db
         .query(
           `INSERT INTO sessions (session_key, client_type, created_at, last_accessed_at,
-                                 expires_at, working_dir, status, metadata_json)
-           VALUES (?, ?, ?, ?, ?, ?, 'active', ?);`
+                                 expires_at, working_dir, status, metadata_json, goal)
+           VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?);`
         )
         .run(
           sessionKey,
@@ -514,7 +533,8 @@ export class GraphStore {
           now,
           expiresAt ?? null,
           workingDir ?? null,
-          metadata ? JSON.stringify(metadata) : null
+          metadata ? JSON.stringify(metadata) : null,
+          goal ?? null
         );
       return true;
     } catch (err) {
@@ -543,8 +563,12 @@ export class GraphStore {
       lastAccessedAt: row.last_accessed_at as number,
       expiresAt: row.expires_at as number | null,
       workingDir: row.working_dir as string | null,
-      status: row.status as string,
+      status: row.status as SessionStatus,
       metadataJson: row.metadata_json as string | null,
+      // Workflow fields (v6)
+      goal: row.goal as string | null,
+      currentWorkItemId: row.current_work_item_id as string | null,
+      currentObjective: row.current_objective as string | null,
     };
 
     // Parse metadata JSON
@@ -578,6 +602,58 @@ export class GraphStore {
     const result = this.db
       .query('UPDATE sessions SET status = ? WHERE session_key = ?;')
       .run(status, sessionKey);
+    return result.changes > 0;
+  }
+
+  /**
+   * Update session workflow state (goal, current work item, objective).
+   * Only updates non-null fields.
+   */
+  updateSessionWorkflow(
+    sessionKey: string,
+    updates: {
+      status?: string;
+      goal?: string | null;
+      currentWorkItemId?: string | null;
+      currentObjective?: string | null;
+    }
+  ): boolean {
+    const setClauses: string[] = [];
+    const params: (string | null)[] = [];
+
+    if (updates.status !== undefined) {
+      setClauses.push('status = ?');
+      params.push(updates.status);
+    }
+    if (updates.goal !== undefined) {
+      setClauses.push('goal = ?');
+      params.push(updates.goal);
+    }
+    if (updates.currentWorkItemId !== undefined) {
+      setClauses.push('current_work_item_id = ?');
+      params.push(updates.currentWorkItemId);
+    }
+    if (updates.currentObjective !== undefined) {
+      setClauses.push('current_objective = ?');
+      params.push(updates.currentObjective);
+    }
+
+    if (setClauses.length === 0) return false;
+
+    params.push(sessionKey);
+    const result = this.db
+      .query(`UPDATE sessions SET ${setClauses.join(', ')} WHERE session_key = ?;`)
+      .run(...params);
+    return result.changes > 0;
+  }
+
+  /**
+   * Set goal only if not already set (first-message semantics).
+   */
+  setGoalIfEmpty(sessionKey: string, goal: string): boolean {
+    const result = this.db
+      .query('UPDATE sessions SET goal = ? WHERE session_key = ? AND (goal IS NULL OR goal = ?);')
+      .run(goal, sessionKey, '');
     return result.changes > 0;
   }
 
@@ -712,9 +788,13 @@ export class GraphStore {
       lastAccessedAt: row.last_accessed_at as number,
       expiresAt: row.expires_at as number | null,
       workingDir: row.working_dir as string | null,
-      status: row.status as string,
+      status: row.status as SessionStatus,
       metadataJson: row.metadata_json as string | null,
       lastUserMessagePreview: includePreview ? (row.last_user_preview as string | null) : undefined,
+      // Workflow fields (v6)
+      goal: row.goal as string | null,
+      currentWorkItemId: row.current_work_item_id as string | null,
+      currentObjective: row.current_objective as string | null,
     }));
   }
 

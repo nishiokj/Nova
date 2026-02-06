@@ -28,6 +28,7 @@ export const TerminationReasonSchema = z.enum([
   'refusal',
   'stagnation',
   'watcher_stopped',
+  'watcher_work_item_stopped',
   'cadence_audit',
 ]);
 
@@ -90,6 +91,11 @@ export const CadenceDecisionSchema = z.discriminatedUnion('action', [
     })),
   }),
   z.object({ action: z.literal('stop'), reason: z.string() }),
+  z.object({
+    action: z.literal('stop_work_item'),
+    reason: z.string(),
+    escalationId: z.string().optional(),
+  }),
 ]);
 
 export const AgentErrorDecisionSchema = z.discriminatedUnion('action', [
@@ -182,7 +188,7 @@ export const StatePatchSchema = z.discriminatedUnion('op', [
       timestamp: z.number(),
       source: z.string(),
       event: z.string(),
-      details: z.record(z.unknown()),
+      details: z.record(z.string(), z.unknown()),
     }),
   }),
 ]);
@@ -218,8 +224,9 @@ export const WatcherOutputSchema = z.object({
   goalStateReached: z.boolean(),
   response: z.string(),
   watcherAction: z.object({
-    action: z.enum(['answer', 'realign', 'split', 'create_work_item', 'quality_gate', 'allow', 'continue']),
+    action: z.enum(['answer', 'realign', 'split', 'create_work_item', 'stop_work_item', 'quality_gate', 'allow', 'continue']),
     reason: z.string(),
+    escalationId: z.string().optional(),
     answer: z.object({
       text: z.string(),
       contextAddendum: z.string().optional(),
