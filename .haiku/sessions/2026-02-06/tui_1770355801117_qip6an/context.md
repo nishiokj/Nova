@@ -4354,3 +4354,403 @@ packages/harness-daemon/src/harness/daemon.ts:353:11:      if (handleControlPlan
 @ts 1770357282691
 @workItemId 4b090577
 Waiting for user input...
+
+### message:system
+@ts 1770357333653
+These choices support a centralized, session-agnostic markdown workspace that serves as the dashboard's primary interface. The initial markdown-only view creates a clean entry point, while keyboard shortcuts (1/3/Ctrl+`) enable rapid panel access. Both content context and filesystem access give the agent full capabilities for the Chat+markdown integration use case.
+
+### message:user
+@ts 1770357333654
+**Implementation Decisions:**
+
+**1. Markdown File Storage Location:** Option B - Centralized markdown workspace (e.g., `~/cockpit-markdown/`)
+   - Rationale: Enables cross-session document access, aligns with first-class status, and separates user documents from session-specific data. Centralized location makes directory navigation and folder/file creation UI more coherent.
+
+**2. "Done" Sessions to Right Side:** Option A - Move 'done' from left to right completely
+   - LEFT_SECTIONS: ['running', 'ready', 'metrics']
+   - RIGHT_SECTIONS: ['queue', 'done', 'commits', 'prs']
+   - Rationale: Goal explicitly says "Move the 'Done' Sessions to the right Side" - this is a clear directive to relocate, not duplicate.
+
+**3. Initial Loading Behavior:** Option A - Default view is Markdown editor, session panels hidden until user presses 1 or 3
+   - Rationale: Goal says "screen should load without a session selected with a blank markdown file directly in the browser" - this implies markdown is the primary initial state. The panels are accessible via keyboard shortcuts (1/3) as specified.
+
+**4. Chat + Markdown Context:** Option C - Both: content as context + filesystem access
+   - Rationale: Goal mentions "Chat about Document" and "Chat + markdown edits" use cases. Having both immediate content (for fast context) and filesystem access (for persistence, navigation, and more complex operations) provides maximum flexibility for the agent.
+
+**5. Version Numbers:** Option A - Increment a number on each save (stored in file metadata)
+   - Rationale: Simple, predictable, doesn't require the files to be in a git repository. The metadata version can support the patch-based updates mentioned in the goal ("we should probably support Patches to our markdown files") without overcomplicating.
+
+### message:system
+@ts 1770357453662
+[Escalation esc_0a7979861cf949a38085251fdb4b628a] Awaiting cockpit resolution.
+
+### message:system
+@ts 1770357453663
+[escalation:esc_0a7979861cf949a38085251fdb4b628a] Oversight unavailable (Watcher timeout after 120000ms): Insufficient evidence to allow
+
+### function_call
+@callId call_6d9f8b13169a4de9a3e06b94
+@name Read
+@ts 1770357467190
+@workItemId 59a8532e
+{"path":"/Users/jevinnishioka/Desktop/jesus/packages/dashboard-control/src/App.tsx","startLine":1700,"endLine":1900}
+
+### function_call
+@callId call_12e07b33b99d4cc7821d4aeb
+@name Grep
+@ts 1770357467190
+@workItemId 59a8532e
+{"path":"packages/dashboard-control/src/App.tsx","pattern":"panelFocus|setPanelFocus"}
+
+### function_call_output
+@callId call_6d9f8b13169a4de9a3e06b94
+@ts 1770357467409
+@durationMs 4
+@workItemId 59a8532e
+// Lines 1700-1900 of 2501 total
+          }
+          if (rightSection === 'commits') {
+            setRightSelection((current) => ({
+              ...current,
+              commits: cycleIndex(commitRollups.length, current.commits, delta),
+            }));
+            return;
+          }
+          if (rightSection === 'prs') {
+            setRightSelection((current) => ({
+              ...current,
+              prs: cycleIndex(prRollups.length, current.prs, delta),
+            }));
+            return;
+          }
+        }
+      }
+
+      if (event.key === 'Enter') {
+        if (panelFocus === 'left') {
+          event.preventDefault();
+          if (leftSection === 'running' && runningSessions[leftSelection.running]) {
+            setFocusTarget({ type: 'session', id: runningSessions[leftSelection.running].sessionKey });
+            return;
+          }
+          if (leftSection === 'ready' && readySessions[leftSelection.ready]) {
+            setFocusTarget({ type: 'session', id: readySessions[leftSelection.ready].sessionKey });
+            return;
+          }
+          if (leftSection === 'done' && doneSessions[leftSelection.done]) {
+            setFocusTarget({ type: 'session', id: doneSessions[leftSelection.done].sessionKey });
+            return;
+          }
+        }
+        if (panelFocus === 'right') {
+          event.preventDefault();
+          if (rightSection === 'queue' && escalations[rightSelection.queue]) {
+            setFocusTarget({ type: 'escalation', id: escalations[rightSelection.queue].escalationId });
+            return;
+          }
+          if (rightSection === 'commits' && commitRollups[rightSelection.commits]) {
+            handleSelectCommit(commitRollups[rightSelection.commits], rightSelection.commits);
+            return;
+          }
+          if (rightSection === 'prs' && prRollups[rightSelection.prs]) {
+            handleSelectPR(prRollups[rightSelection.prs], rightSelection.prs);
+            return;
+          }
+        }
+      }
+
+      if (event.key === 'd' || event.key === 'D') setFocusTab('diff');
+      if (event.key === 't' || event.key === 'T') setFocusTab('tests');
+      if (event.key === 'l' || event.key === 'L') setFocusTab('trace');
+      if (event.key === 'm' || event.key === 'M') setFocusTab('packet');
+      if (event.key === 'q' || event.key === 'Q') setFocusTab('lens');
+      if (event.key === 'b' || event.key === 'B') setFocusTab('browser');
+      if ((event.key === 'r' || event.key === 'R') && focusEscalationId) {
+        void handleResolveEscalation(focusEscalationId);
+      }
+      if ((event.key === 'a' || event.key === 'A') && focusStatus === 'ready') {
+        void handleReviewDecision('accept');
+      }
+      if ((event.key === 'c' || event.key === 'C') && focusStatus === 'ready') {
+        void handleReviewDecision('request_changes');
+      }
+      if (event.key === 'p' || event.key === 'P') {
+        const selectedPr = prRollups[rightSelection.prs] ?? prRollups[0];
+        if (selectedPr) handleSelectPR(selectedPr, rightSelection.prs);
+      }
+      if (event.key === 'v' || event.key === 'V') {
+        void handleTogglePreview();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    panelFocus,
+    leftSection,
+    rightSection,
+    runningSessions,
+    readySessions,
+    doneSessions,
+    escalations,
+    commitRollups,
+    prRollups,
+    leftSelection,
+    rightSelection,
+    focusEscalationId,
+    focusStatus,
+    handleResolveEscalation,
+    handleReviewDecision,
+    handleSelectCommit,
+    handleSelectPR,
+    handleSendMessage,
+    handleTogglePreview,
+  ]);
+
+  const lastEditedLineByPath = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const trace of traces) {
+      for (const file of trace.files ?? []) {
+        if (!file.path) continue;
+        const lines = (file.conversations ?? [])
+          .flatMap((conversation) => conversation.ranges ?? [])
+          .map((range) => range.end_line)
+          .filter((value): value is number => typeof value === 'number');
+        const line = lines.length > 0 ? lines[lines.length - 1] : undefined;
+        if (typeof line === 'number') {
+          map.set(file.path, line);
+        }
+      }
+    }
+    return map;
+  }, [traces]);
+
+  const traceDerivedDiffstat = useMemo(() => {
+    const files = new Set<string>();
+    let lineTouches = 0;
+    for (const trace of traces) {
+      for (const file of trace.files ?? []) {
+        if (!file.path) continue;
+        files.add(file.path);
+        for (const conversation of file.conversations ?? []) {
+          for (const range of conversation.ranges ?? []) {
+            const span = Math.max(0, (range.end_line ?? 0) - (range.start_line ?? 0) + 1);
+            lineTouches += span;
+          }
+        }
+      }
+    }
+    return {
+      filesTouched: files.size,
+      lineTouches,
+    };
+  }, [traces]);
+
+  const diffDrift = useMemo(() => {
+    if (!diffData) return null;
+    if (traceDerivedDiffstat.filesTouched <= 0) return null;
+    const fileDrift = diffData.summary.filesTouched !== traceDerivedDiffstat.filesTouched;
+    if (!fileDrift) return null;
+    return {
+      gitFiles: diffData.summary.filesTouched,
+      traceFiles: traceDerivedDiffstat.filesTouched,
+    };
+  }, [diffData, traceDerivedDiffstat]);
+
+  return (
+    <div className="h-screen flex flex-col overflow-hidden">
+      <header className="h-9 shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-[var(--text-primary)] font-semibold">Cockpit</span>
+          <span className="text-xs text-[var(--text-muted)]">
+            Running {runningSessions.length} · Ready {readySessions.length} · Done {doneSessions.length}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-xs text-[var(--text-muted)]">
+          <span>Updated {lastUpdate.toLocaleTimeString()}</span>
+          <button onClick={() => void refreshAll()} className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]">
+            {loading ? '...' : 'Refresh'}
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[24rem_minmax(0,1fr)_22rem] gap-2 p-2 overflow-hidden">
+        <section
+          onClick={() => setPanelFocus('left')}
+          className={`min-h-0 border border-[var(--border-subtle)] rounded bg-[var(--bg-surface)] overflow-hidden flex flex-col ${
+            panelFocus === 'left' ? 'ring-1 ring-[var(--accent-cyan)]' : ''
+          }`}
+        >
+          <div className="px-2 py-1 text-xs text-[var(--text-muted)] border-b border-[var(--border-subtle)] flex items-center justify-between">
+            <span>Sessions ({runningSessions.length + readySessions.length + doneSessions.length})</span>
+            <span className="text-[10px] text-[var(--text-muted)]">Tab cycles sections</span>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            <button
+              onClick={() => setLeftSection('running')}
+              className={`w-full text-left text-[10px] uppercase tracking-wide px-2 py-1 ${
+                leftSection === 'running'
+                  ? 'text-[var(--running)] bg-[var(--running)]/10'
+                  : 'text-[var(--running)] bg-[var(--bg-elevated)]'
+              }`}
+            >
+              Running {runningSessions.length > 0 && `(${runningSessions.length})`}
+            </button>
+            {runningSessions.map((row) => (
+              <SessionRow
+                key={row.sessionKey}
+                row={row}
+                selected={
+                  (focusTarget?.type === 'session' && focusTarget.id === row.sessionKey)
+                  || (panelFocus === 'left' && leftSection === 'running' && runningSessions[leftSelection.running]?.sessionKey === row.sessionKey)
+                }
+                onSelect={() => {
+                  setLeftSection('running');
+                  setFocusTarget({ type: 'session', id: row.sessionKey });
+                  setPanelFocus('left');
+                }}
+
+### function_call_output
+@callId call_12e07b33b99d4cc7821d4aeb
+@ts 1770357467409
+@durationMs 215
+@workItemId 59a8532e
+packages/dashboard-control/src/App.tsx:45:6:type PanelFocus = 'left' | 'center' | 'right' | 'input';
+packages/dashboard-control/src/App.tsx:757:10:  const [panelFocus, setPanelFocus] = useState<PanelFocus>('left');
+packages/dashboard-control/src/App.tsx:1589:9:        setPanelFocus('input');
+packages/dashboard-control/src/App.tsx:1597:9:        setPanelFocus('left');
+packages/dashboard-control/src/App.tsx:1601:9:        setPanelFocus('center');
+packages/dashboard-control/src/App.tsx:1605:9:        setPanelFocus('right');
+packages/dashboard-control/src/App.tsx:1611:13:        if (panelFocus === 'left') {
+packages/dashboard-control/src/App.tsx:1615:13:        if (panelFocus === 'right') {
+packages/dashboard-control/src/App.tsx:1619:13:        if (panelFocus === 'center') {
+packages/dashboard-control/src/App.tsx:1623:9:        setPanelFocus('left');
+packages/dashboard-control/src/App.tsx:1628:20:      if (alpha && panelFocus === 'left') {
+packages/dashboard-control/src/App.tsx:1648:20:      if (alpha && panelFocus === 'right') {
+packages/dashboard-control/src/App.tsx:1668:13:        if (panelFocus === 'left') {
+packages/dashboard-control/src/App.tsx:1692:13:        if (panelFocus === 'right') {
+packages/dashboard-control/src/App.tsx:1719:13:        if (panelFocus === 'left') {
+packages/dashboard-control/src/App.tsx:1734:13:        if (panelFocus === 'right') {
+packages/dashboard-control/src/App.tsx:1778:5:    panelFocus,
+packages/dashboard-control/src/App.tsx:1868:26:          onClick={() => setPanelFocus('left')}
+packages/dashboard-control/src/App.tsx:1870:13:            panelFocus === 'left' ? 'ring-1 ring-[var(--accent-cyan)]' : ''
+packages/dashboard-control/src/App.tsx:1894:23:                  || (panelFocus === 'left' && leftSection === 'running' && runningSessions[leftSelection.running]?.sessionKey === row.sessionKey)
+...[truncated at 20 results]
+
+### function_call
+@callId call_e120ce5240564c4fa03a761c
+@name Read
+@ts 1770357544261
+@workItemId 59a8532e
+{"path":"/Users/jevinnishioka/Desktop/jesus/packages/harness-daemon/src/harness/daemon.ts","startLine":1,"endLine":100}
+
+### function_call_output
+@callId call_e120ce5240564c4fa03a761c
+@ts 1770357544265
+@durationMs 2
+@workItemId 59a8532e
+// Lines 1-100 of 475 total
+/**
+ * Harness daemon entrypoint for JSONL/TCP bridge.
+ *
+ * Supports:
+ * - TCP/JSONL bus for client connections (TUI, external integrations via harness-client)
+ */
+
+import { pathToFileURL, fileURLToPath } from 'url';
+import { createServer as createHttpServer, type Server as HttpServerType, type IncomingMessage, type ServerResponse } from 'http';
+import { createReadStream, statSync, existsSync } from 'fs';
+import { join, extname, dirname } from 'path';
+import { randomUUID } from 'crypto';
+import { createHarnessFromEnv, type AgentHarness } from './harness.js';
+import { BusServer, WsBridgeServer } from 'comms-bus';
+import { BridgeGateway } from './bridge_gateway.js';
+import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
+import { translateAgentEvent } from './event_translator.js';
+import { handleControlPlaneRequest, type ControlPlaneContext } from './control_plane_routes.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+export interface HarnessDaemonOptions {
+  host?: string;
+  port?: number;
+  /** WebSocket port for browser dashboard access (default: port + 1, e.g., 9556) */
+  wsPort?: number;
+  /** HTTP port for serving the Control Plane dashboard. Set to enable dashboard serving. */
+  dashboardPort?: number;
+  /** Path to dashboard static files (default: auto-detect dashboard-control/dist) */
+  dashboardPath?: string;
+  workingDir?: string;
+  configPath?: string;
+  /** Idle timeout in ms before daemon shuts down when no clients connected. Set to 0 to disable. */
+  idleTimeoutMs?: number;
+  /** Dangerous mode - bypasses all permission checks. Use with extreme caution. */
+  dangerousMode?: boolean;
+}
+
+// Default idle timeout: 5 seconds
+const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
+
+export class HarnessDaemon {
+  private readonly host: string;
+  private readonly port: number;
+  private readonly wsPort: number;
+  private readonly dashboardPort?: number;
+  private readonly dashboardPath?: string;
+  private readonly workingDir: string;
+  private readonly configPath?: string;
+  private readonly idleTimeoutMs: number;
+  private readonly dangerousMode: boolean;
+  private harness: AgentHarness | null = null;
+  private bus: BusServer | null = null;
+  private wsBridge: WsBridgeServer | null = null;
+  private dashboardServer: HttpServerType | null = null;
+  private gateway: BridgeGateway | null = null;
+  private authService: AuthService | null = null;
+  private authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private shutdownRequested = false;
+
+  constructor(options: HarnessDaemonOptions = {}) {
+    this.host = options.host ?? '127.0.0.1';
+    const rawPort = options.port ?? 9555;
+    this.port = Number.isFinite(rawPort) ? rawPort : 9555;
+    this.wsPort = options.wsPort ?? this.port + 1; // Default: 9556
+    this.dashboardPort = options.dashboardPort;
+    this.dashboardPath = options.dashboardPath;
+    this.workingDir = options.workingDir ?? process.cwd();
+    this.configPath = options.configPath;
+    this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    this.dangerousMode = options.dangerousMode ?? false;
+  }
+
+  private cancelIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  private startIdleTimer(): void {
+    if (this.idleTimeoutMs <= 0 || this.shutdownRequested) return;
+
+    this.cancelIdleTimer();
+    console.log(`[harness-daemon] No clients connected, will shutdown in ${this.idleTimeoutMs / 1000}s`);
+
+    this.idleTimer = setTimeout(() => {
+      if (this.bus && this.bus.getConnectionCount() === 0) {
+        console.log('[harness-daemon] Idle timeout reached, shutting down');
+        this.shutdownRequested = true;
+        void this.stop().then(() => process.exit(0));
+      }
+    }, this.idleTimeoutMs);
+  }
+
+  private handleConnect(connectionId: string): void {
+    console.log(`[harness-daemon] Client connected: ${connectionId}`);
+    this.cancelIdleTimer();
+  }
+
+### message:assistant
+@ts 1770357619897
+Now I have sufficient context to create a comprehensive plan. Let me produce the handoffSpec.
