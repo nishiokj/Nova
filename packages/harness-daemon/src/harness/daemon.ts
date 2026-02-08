@@ -5,25 +5,20 @@
  * - TCP/JSONL bus for client connections (TUI, external integrations via harness-client)
  */
 
-import { pathToFileURL, fileURLToPath } from 'url';
-import { createServer as createHttpServer, type Server as HttpServerType, type IncomingMessage, type ServerResponse } from 'http';
-import { createReadStream, statSync, existsSync } from 'fs';
-import { join, extname, dirname } from 'path';
-import { randomUUID } from 'crypto';
+import { pathToFileURL } from 'url';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
 import { BusServer, WsBridgeServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
 import { translateAgentEvent } from './event_translator.js';
-import { handleControlPlaneRequest, type ControlPlaneContext } from './control_plane_routes.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface HarnessDaemonOptions {
   host?: string;
   port?: number;
   /** WebSocket port for browser dashboard access (default: port + 1, e.g., 9556) */
   wsPort?: number;
+  /** Enable WebSocket bridge (default: true). Disable for TCP-only deployments. */
+  enableWsBridge?: boolean;
   /** HTTP port for serving the Control Plane dashboard. Set to enable dashboard serving. */
   dashboardPort?: number;
   /** Path to dashboard static files (default: auto-detect dashboard-control/dist) */
@@ -43,6 +38,7 @@ export class HarnessDaemon {
   private readonly host: string;
   private readonly port: number;
   private readonly wsPort: number;
+  private readonly enableWsBridge: boolean;
   private readonly dashboardPort?: number;
   private readonly dashboardPath?: string;
   private readonly workingDir: string;
@@ -52,7 +48,10 @@ export class HarnessDaemon {
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
   private wsBridge: WsBridgeServer | null = null;
-  private dashboardServer: HttpServerType | null = null;
+  private controlPlaneServer: {
+    start(): Promise<{ host: string; port: number }>;
+    stop(): Promise<void>;
+  } | null = null;
   private gateway: BridgeGateway | null = null;
   private authService: AuthService | null = null;
   private authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | null = null;
@@ -64,6 +63,7 @@ export class HarnessDaemon {
     const rawPort = options.port ?? 9555;
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
     this.wsPort = options.wsPort ?? this.port + 1; // Default: 9556
+    this.enableWsBridge = options.enableWsBridge ?? true;
     this.dashboardPort = options.dashboardPort;
     this.dashboardPath = options.dashboardPath;
     this.workingDir = options.workingDir ?? process.cwd();
@@ -145,43 +145,42 @@ export class HarnessDaemon {
     }
 
     // Start WebSocket bridge for browser dashboard access
-    if (!this.wsBridge) {
+    if (this.enableWsBridge && !this.wsBridge) {
       this.wsBridge = new WsBridgeServer({
         host: this.host,
         port: this.wsPort,
         busHost: this.host,
         busPort: this.port,
+        eventBus: this.harness.getEventBus(),
+        eventTranslator: translateAgentEvent,
       });
-
-      // Forward events from EventBus to WebSocket clients
-      const eventBus = this.harness.getEventBus();
-      if (eventBus) {
-        // Subscribe to all events and forward to WebSocket bridge
-        eventBus.subscribeGlobal((event) => {
-          // Extract requestId/runId from event for channel routing
-          const requestId = (event as { requestId?: string; runId?: string }).requestId
-            ?? (event as { runId?: string }).runId;
-          if (requestId) {
-            const channel = `run:${requestId}`;
-            const wireEvent = translateAgentEvent(event);
-            if (wireEvent) {
-              this.wsBridge?.publish(channel, wireEvent);
-            }
-          }
-        });
-      }
     }
 
     const [tcpAddress, wsAddress] = await Promise.all([
       this.bus.start(),
-      this.wsBridge.start(),
+      this.wsBridge ? this.wsBridge.start() : Promise.resolve(null),
     ]);
 
-    console.log(`[harness-daemon] WebSocket bridge listening on ws://${wsAddress.host}:${wsAddress.port}`);
+    if (wsAddress) {
+      console.log(`[harness-daemon] WebSocket bridge listening on ws://${wsAddress.host}:${wsAddress.port}`);
+    } else {
+      console.log('[harness-daemon] WebSocket bridge disabled');
+    }
 
-    // Start dashboard HTTP server if port is configured
-    if (this.dashboardPort && !this.dashboardServer) {
-      const dashboardAddress = await this.startDashboardServer();
+    // Start control-plane HTTP server if port is configured.
+    // Use lazy import so daemon hot path does not load control-plane modules.
+    if (this.dashboardPort && !this.controlPlaneServer) {
+      const { ControlPlaneServer } = await import('./control_plane_server.js');
+      this.controlPlaneServer = new ControlPlaneServer({
+        host: this.host,
+        port: this.dashboardPort,
+        dashboardPath: this.dashboardPath,
+        workingDir: this.workingDir,
+        configPath: this.configPath,
+        busHost: this.host,
+        busPort: this.port,
+      });
+      const dashboardAddress = await this.controlPlaneServer.start();
       console.log(`[harness-daemon] Dashboard available at http://${dashboardAddress.host}:${dashboardAddress.port}`);
     }
 
@@ -192,11 +191,9 @@ export class HarnessDaemon {
     this.cancelIdleTimer();
     this.shutdownRequested = true;
 
-    if (this.dashboardServer) {
-      await new Promise<void>((resolve) => {
-        this.dashboardServer!.close(() => resolve());
-      });
-      this.dashboardServer = null;
+    if (this.controlPlaneServer) {
+      await this.controlPlaneServer.stop();
+      this.controlPlaneServer = null;
     }
 
     if (this.wsBridge) {
@@ -218,179 +215,6 @@ export class HarnessDaemon {
       await this.harness.shutdown();
       this.harness = null;
     }
-  }
-
-  /**
-   * Start the dashboard HTTP server for serving static files.
-   */
-  private async startDashboardServer(): Promise<{ host: string; port: number }> {
-    // Find dashboard dist path
-    let distPath = this.dashboardPath;
-    if (!distPath) {
-      // Auto-detect from package location
-      const candidates = [
-        join(__dirname, '../../../../dashboard-control/dist'),
-        join(process.cwd(), 'packages/dashboard-control/dist'),
-        join(process.cwd(), 'node_modules/@jesus/dashboard-control/dist'),
-      ];
-      distPath = candidates.find((p) => existsSync(join(p, 'index.html')));
-    }
-
-    if (!distPath || !existsSync(join(distPath, 'index.html'))) {
-      throw new Error(`Dashboard dist not found. Build dashboard-control or provide --dashboard-path. Searched: ${distPath || 'auto-detect failed'}`);
-    }
-
-    const mimeTypes: Record<string, string> = {
-      '.html': 'text/html',
-      '.js': 'application/javascript',
-      '.css': 'text/css',
-      '.json': 'application/json',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.svg': 'image/svg+xml',
-      '.ico': 'image/x-icon',
-      '.woff': 'font/woff',
-      '.woff2': 'font/woff2',
-    };
-
-    const serveFile = (res: ServerResponse, filePath: string) => {
-      try {
-        const stat = statSync(filePath);
-        const ext = extname(filePath).toLowerCase();
-        const contentType = mimeTypes[ext] || 'application/octet-stream';
-
-        res.writeHead(200, {
-          'Content-Type': contentType,
-          'Content-Length': stat.size,
-          'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000',
-        });
-        createReadStream(filePath).pipe(res);
-      } catch {
-        res.writeHead(404);
-        res.end('Not Found');
-      }
-    };
-
-    const handler = (req: IncomingMessage, res: ServerResponse) => {
-      const dispatchSessionInput = this.harness
-        ? (sessionKey: string, message: string) => {
-            try {
-              const graphd = this.harness!.getGraphD();
-              const sessionResult = graphd?.sessionGet(sessionKey) as { session?: { workingDir?: string | null } } | undefined;
-              const workingDir = sessionResult?.session?.workingDir ?? this.workingDir;
-              const requestId = `cockpit-${randomUUID()}`;
-              const runHandle = this.harness!.run({
-                requestId,
-                inputText: message,
-                sessionKey,
-                workingDir,
-              });
-              void runHandle.result.catch((error) => {
-                console.error('[harness-daemon] cockpit session message run failed', {
-                  sessionKey,
-                  requestId,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              });
-              return { success: true, requestId };
-            } catch (error) {
-              return {
-                success: false,
-                error: error instanceof Error ? error.message : String(error),
-              };
-            }
-          }
-        : undefined;
-
-      const stopSession = this.harness
-        ? (sessionKey: string, note?: string) => {
-            try {
-              this.harness!.cancelSessionAsyncRun(sessionKey);
-              this.harness!.cancelSessionRalphLoop(sessionKey);
-              if (!dispatchSessionInput) {
-                return { success: true };
-              }
-              return dispatchSessionInput(
-                sessionKey,
-                note ?? 'Stop current work now and wait for user direction.'
-              );
-            } catch (error) {
-              return {
-                success: false,
-                error: error instanceof Error ? error.message : String(error),
-              };
-            }
-          }
-        : undefined;
-
-      const forkSession = this.harness
-        ? (sourceSessionKey: string, targetSessionKey?: string) => {
-            const target = targetSessionKey ?? `${sourceSessionKey}-fork-${Date.now().toString(36)}`;
-            const result = this.harness!.forkSession(sourceSessionKey, target);
-            return {
-              success: result.success,
-              ...(result.success ? { targetSessionKey: target } : {}),
-              ...(result.error ? { error: result.error } : {}),
-            };
-          }
-        : undefined;
-
-      // Control Plane API context - create fresh each request so graphd is always current
-      const controlPlaneCtx: ControlPlaneContext = {
-        graphd: this.harness?.getGraphD() ?? null,
-        isGraphDReady: () => !!(this.harness?.getGraphD()),
-        workingDir: this.workingDir,
-        dispatchSessionInput,
-        stopSession,
-        forkSession,
-        resolveSessionEscalation: this.harness?.resolveSessionEscalation
-          ? (sessionKey, escalationId, resolution) =>
-              this.harness!.resolveSessionEscalation(sessionKey, escalationId, resolution)
-          : undefined,
-      };
-
-      // Handle Control Plane API routes first
-      if (handleControlPlaneRequest(req, res, controlPlaneCtx)) {
-        return;
-      }
-
-      // Set CORS headers for static files
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-
-      const url = new URL(req.url || '/', `http://${req.headers.host}`);
-      let filePath = join(distPath!, url.pathname);
-
-      // Security: prevent directory traversal
-      if (!filePath.startsWith(distPath!)) {
-        res.writeHead(403);
-        res.end('Forbidden');
-        return;
-      }
-
-      // Serve index.html for SPA routes
-      if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
-        filePath = join(distPath!, 'index.html');
-      }
-
-      serveFile(res, filePath);
-    };
-
-    this.dashboardServer = createHttpServer(handler);
-
-    return new Promise((resolve, reject) => {
-      this.dashboardServer!.on('error', reject);
-      this.dashboardServer!.listen(this.dashboardPort, this.host, () => {
-        resolve({ host: this.host, port: this.dashboardPort! });
-      });
-    });
   }
 
   getAddress(): { host: string; port: number } {
@@ -432,6 +256,8 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       options.port = parseInt(args[++i], 10);
     } else if (arg === '--ws-port' && i + 1 < args.length) {
       options.wsPort = parseInt(args[++i], 10);
+    } else if (arg === '--no-ws') {
+      options.enableWsBridge = false;
     } else if (arg === '--host' && i + 1 < args.length) {
       options.host = args[++i];
     } else if (arg === '--config' && i + 1 < args.length) {

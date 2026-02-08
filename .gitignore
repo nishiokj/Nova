@@ -39,7 +39,7 @@ auth-states/
 # OAuth tokens (Codex, etc.)
 codex-auth.json
 **/codex-auth.json
-
+.cockpit/*
 # Release binaries
 dist/binaries/
 *.exe
@@ -89,3 +89,5 @@ packages/*/bun.lock
 # Additional .env patterns
 .env.local
 .env.*.local
+
+.haiku/*

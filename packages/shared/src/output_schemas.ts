@@ -6,6 +6,12 @@
  */
 
 import { z, toJSONSchema } from 'zod';
+import {
+  WATCHER_ACTION_VALUES,
+  WATCHER_NO_INTERVENTION_ACTION_VALUES,
+  isWatcherActionType,
+  type WatcherActionType,
+} from './watcher_contract.js';
 
 // ============================================
 // OUTPUT SCHEMAS
@@ -204,21 +210,9 @@ export const RuntimeScriptOutputSchema = z.union([
 // Watcher output schema (explicit action states)
 // --------------------------------------------
 
-const WatcherActionTypeSchema = z.enum([
-  'answer',
-  'realign',
-  'split',
-  'create_work_item',
-  'stop_work_item',
-  'quality_gate',
-  'allow',
-  'continue',
-]);
+const WatcherActionTypeSchema = z.enum(WATCHER_ACTION_VALUES);
 
-const WatcherNoInterventionSchema = z.union([
-  z.literal('allow'),
-  z.literal('continue'),
-]);
+const WatcherNoInterventionSchema = z.enum(WATCHER_NO_INTERVENTION_ACTION_VALUES);
 
 // --------------------------------------------
 // Semantic output schema (produced during cadence audits)
@@ -432,8 +426,6 @@ export const WatcherActionOutputSchema = z.union([
 // Trigger-specific watcher schema generation
 // --------------------------------------------
 
-type WatcherActionType = 'answer' | 'realign' | 'split' | 'create_work_item' | 'stop_work_item' | 'quality_gate' | 'allow' | 'continue';
-
 /**
  * Map from action type to Zod schema.
  * 'allow' and 'continue' both map to the same decision schema.
@@ -453,12 +445,13 @@ const WATCHER_ACTION_SCHEMAS: Record<WatcherActionType, z.ZodType[]> = {
  * Build a Zod schema containing only the specified watcher actions.
  * Used to constrain LLM output to valid actions for a given trigger.
  */
-export function buildWatcherSchemaForActions(actions: string[]): z.ZodType {
+export function buildWatcherSchemaForActions(actions: readonly string[]): z.ZodType {
   const schemas: z.ZodType[] = [];
   const seen = new Set<z.ZodType>();
 
   for (const action of actions) {
-    const actionSchemas = WATCHER_ACTION_SCHEMAS[action as WatcherActionType];
+    if (!isWatcherActionType(action)) continue;
+    const actionSchemas = WATCHER_ACTION_SCHEMAS[action];
     if (actionSchemas) {
       for (const schema of actionSchemas) {
         if (!seen.has(schema)) {
@@ -483,7 +476,7 @@ export function buildWatcherSchemaForActions(actions: string[]): z.ZodType {
  * Returns a StructuredOutputSchema ready to pass to the LLM.
  */
 export function getWatcherSchemaJsonForActions(
-  actions: string[]
+  actions: readonly string[]
 ): { name: string; schema: Record<string, unknown>; strict: boolean; schemaId: string } {
   const zodSchema = buildWatcherSchemaForActions(actions);
   return {

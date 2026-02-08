@@ -8,18 +8,24 @@
 import { createServer, type Server as HttpServer, type IncomingMessage } from 'http';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { BusMessage, BusServerMessage, BusClientMessage } from './bus_types.js';
+import type { EventBusProtocol } from './event_bus.js';
+import type { EventTranslator } from './bus_server.js';
 
 export interface WsBridgeOptions {
   /** HTTP port to listen on for WebSocket connections */
   port: number;
   /** Host to bind to (default: 127.0.0.1) */
   host?: string;
-  /** TCP bus host to connect to */
-  busHost: string;
-  /** TCP bus port to connect to */
-  busPort: number;
+  /** TCP bus host to connect to (reserved for compatibility) */
+  busHost?: string;
+  /** TCP bus port to connect to (reserved for compatibility) */
+  busPort?: number;
   /** Optional CORS origin for browser access (default: *) */
   corsOrigin?: string;
+  /** Optional EventBus for direct run channel subscriptions */
+  eventBus?: EventBusProtocol;
+  /** Optional translator for EventBus events before sending over WebSocket */
+  eventTranslator?: EventTranslator;
 }
 
 interface WsConnectionState {
@@ -34,6 +40,8 @@ export class WsBridgeServer {
   private readonly busHost: string;
   private readonly busPort: number;
   private readonly corsOrigin: string;
+  private readonly eventBus: EventBusProtocol | null;
+  private readonly eventTranslator: EventTranslator | null;
 
   private httpServer: HttpServer | null = null;
   private wss: WebSocketServer | null = null;
@@ -42,13 +50,17 @@ export class WsBridgeServer {
 
   // Global subscription tracking: channel → set of connection IDs
   private channelSubscribers = new Map<string, Set<string>>();
+  /** Maps runId → unsubscribe function for EventBus subscriptions */
+  private runSubscriptions = new Map<string, () => void>();
 
   constructor(options: WsBridgeOptions) {
     this.port = options.port;
     this.host = options.host ?? '127.0.0.1';
-    this.busHost = options.busHost;
-    this.busPort = options.busPort;
+    this.busHost = options.busHost ?? this.host;
+    this.busPort = options.busPort ?? 0;
     this.corsOrigin = options.corsOrigin ?? '*';
+    this.eventBus = options.eventBus ?? null;
+    this.eventTranslator = options.eventTranslator ?? null;
   }
 
   async start(): Promise<{ host: string; port: number }> {
@@ -95,6 +107,11 @@ export class WsBridgeServer {
 
   async stop(): Promise<void> {
     if (!this.httpServer) return;
+
+    for (const unsubscribe of this.runSubscriptions.values()) {
+      unsubscribe();
+    }
+    this.runSubscriptions.clear();
 
     // Close all WebSocket connections
     for (const connection of this.connections.values()) {
@@ -181,6 +198,10 @@ export class WsBridgeServer {
           this.channelSubscribers.delete(channel);
         }
       }
+      const runMatch = channel.match(/^run:(.+)$/);
+      if (runMatch && !this.hasSubscribers(channel)) {
+        this.unsubscribeFromRun(runMatch[1]);
+      }
     }
 
     this.connections.delete(connection.id);
@@ -223,6 +244,11 @@ export class WsBridgeServer {
       this.channelSubscribers.set(channel, new Set());
     }
     this.channelSubscribers.get(channel)!.add(connection.id);
+
+    const runMatch = channel.match(/^run:(.+)$/);
+    if (runMatch && this.eventBus) {
+      this.subscribeToRun(runMatch[1], channel);
+    }
   }
 
   private handleUnsubscribe(connection: WsConnectionState, channel: string): void {
@@ -235,6 +261,36 @@ export class WsBridgeServer {
         this.channelSubscribers.delete(channel);
       }
     }
+
+    const runMatch = channel.match(/^run:(.+)$/);
+    if (runMatch && !this.hasSubscribers(channel)) {
+      this.unsubscribeFromRun(runMatch[1]);
+    }
+  }
+
+  private subscribeToRun(runId: string, channel: string): void {
+    if (!this.eventBus || this.runSubscriptions.has(runId)) return;
+
+    const unsubscribe = this.eventBus.subscribeRun(runId, (event) => {
+      const wireEvent = this.eventTranslator ? this.eventTranslator(event) : event;
+      if (wireEvent !== null) {
+        this.publish(channel, wireEvent);
+      }
+    });
+
+    this.runSubscriptions.set(runId, unsubscribe);
+  }
+
+  private unsubscribeFromRun(runId: string): void {
+    const unsubscribe = this.runSubscriptions.get(runId);
+    if (!unsubscribe) return;
+    unsubscribe();
+    this.runSubscriptions.delete(runId);
+  }
+
+  private hasSubscribers(channel: string): boolean {
+    const subscribers = this.channelSubscribers.get(channel);
+    return !!(subscribers && subscribers.size > 0);
   }
 
   private sendError(connection: WsConnectionState, message: string, detail?: unknown): void {

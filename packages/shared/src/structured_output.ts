@@ -16,6 +16,7 @@ import {
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
 } from './output_schemas.js';
+import { WATCHER_ACTION_VALUES } from './watcher_contract.js';
 
 // Re-export schema types and functions
 export {
@@ -101,16 +102,7 @@ function normalizeWatcherActionCandidate(
   const watcherActionRaw = typeof watcherActionValue === 'string'
     ? watcherActionValue.trim().toLowerCase()
     : '';
-  const validWatcherActions = new Set([
-    'answer',
-    'realign',
-    'split',
-    'create_work_item',
-    'stop_work_item',
-    'quality_gate',
-    'allow',
-    'continue',
-  ]);
+  const validWatcherActions = new Set<string>(WATCHER_ACTION_VALUES);
   if (!validWatcherActions.has(watcherActionRaw)) return null;
 
   const response = typeof candidate.response === 'string' ? candidate.response : '';

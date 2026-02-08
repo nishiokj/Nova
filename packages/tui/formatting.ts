@@ -237,12 +237,12 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
   }
 
   if (/^\s*\d+\s+\+ .*$/.test(text)) {
-    const segment = { text, color: "#ffffff", backgroundColor: "#166534" };
+    const segment = { text, color: "#4ade80", backgroundColor: undefined };
     return { segments: [segment], fill: segment };
   }
 
   if (/^\s*\d+\s+- .*$/.test(text)) {
-    const segment = { text, color: "#ffffff", backgroundColor: "#991b1b" };
+    const segment = { text, color: "#f87171", backgroundColor: undefined };
     return { segments: [segment], fill: segment };
   }
 

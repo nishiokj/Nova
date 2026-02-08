@@ -86,7 +86,12 @@ const IN_FLIGHT_WATCHERS = new Map<string, InFlightWatcher>();
 
 function normalizeWatcherAction(action: WatcherAction): WatcherAction {
   if (action.watcherAction !== 'continue') return action;
-  return { ...action, watcherAction: 'allow' } as WatcherAction;
+  return {
+    watcherAction: 'allow',
+    reason: action.reason,
+    ...(action.semantic ? { semantic: action.semantic } : {}),
+    ...(action.semantics ? { semantics: action.semantics } : {}),
+  };
 }
 
 function isNoInterventionAction(action: WatcherActionType): boolean {
@@ -1445,9 +1450,41 @@ ${WORK_ITEM_ID_GUIDANCE}`;
         });
         const escalation = await raiseEscalation(config, ctx, 'work_item_completed', {
           type: 'review',
-          title: `Quality gate failed for ${event.workId}`,
+          title: `Review required: quality gate failed for ${event.workId}`,
           reason: issueSummary,
           context: escalationContext,
+          options: [
+            {
+              id: 'retry_with_evidence',
+              label: 'Retry with evidence',
+              description: 'Require concrete proof of completion (files changed, non-empty outputs, or test artifacts).',
+              implications: [
+                'Agent continues only after producing verifiable output.',
+                'Adds one more execution pass before accepting completion.',
+              ],
+              recommended: true,
+            },
+            {
+              id: 'accept_anyway',
+              label: 'Accept anyway',
+              description: 'Mark the work item complete despite insufficient evidence.',
+              implications: [
+                'Execution proceeds immediately.',
+                'Risk: incomplete or unverifiable work may ship.',
+              ],
+              recommended: false,
+            },
+            {
+              id: 'stop_and_investigate',
+              label: 'Stop and investigate',
+              description: 'Pause execution and investigate why evidence collection failed.',
+              implications: [
+                'Prevents further progress until root cause is clarified.',
+                'Best when telemetry/logging is suspected broken.',
+              ],
+              recommended: false,
+            },
+          ],
         });
         return {
           decision: {

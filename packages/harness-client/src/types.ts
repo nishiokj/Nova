@@ -51,7 +51,9 @@ export type BridgeCommandType =
   | 'providers_test'
   | 'session_fork'
   | 'session_close'
+  | 'session_delete'
   | 'list_sessions'
+  | 'usage_summary'
   | 'compact_context'
   | 'set_model'
   | 'get_model'
@@ -71,6 +73,15 @@ export type BridgeCommandType =
   | 'async_start'
   | 'async_cancel'
   | 'async_status'
+  | 'control_plane_dispatch'
+  | 'control_plane_stop'
+  | 'control_plane_fork'
+  | 'control_plane_permissions_get'
+  | 'control_plane_permissions_update'
+  | 'control_plane_resolve_escalation'
+  | 'control_plane_memory_info'
+  | 'control_plane_model_get'
+  | 'control_plane_model_set'
   | 'shutdown';
 
 export interface InitCommandData extends CommandDataBase {
@@ -161,6 +172,16 @@ export interface ListSessionsCommandData extends CommandDataBase {
   limit?: number;
 }
 
+export interface SessionDeleteCommandData extends CommandDataBase {
+  sessionKey?: string;
+  session_key?: string;
+}
+
+export interface UsageSummaryCommandData extends CommandDataBase {
+  status?: string | string[];
+  limit?: number;
+}
+
 export interface SetModelCommandData extends CommandDataBase {
   agent_type?: string;
   provider?: string;
@@ -205,6 +226,66 @@ export interface WatcherReanchorCommandData extends CommandDataBase {
   goal: string;
 }
 
+export interface ControlPlaneDispatchCommandData extends CommandDataBase {
+  session_key: string;
+  message: string;
+  context?: string;
+  metadata?: Record<string, unknown>;
+  request_id?: string;
+  working_dir?: string;
+}
+
+export interface ControlPlaneStopCommandData extends CommandDataBase {
+  session_key: string;
+  note?: string;
+  working_dir?: string;
+}
+
+export interface ControlPlaneForkCommandData extends CommandDataBase {
+  source_session_key: string;
+  target_session_key?: string;
+}
+
+export interface ControlPlanePermissionsGetCommandData extends CommandDataBase {
+  session_key: string;
+  working_dir?: string;
+}
+
+export interface ControlPlanePermissionsUpdateCommandData extends CommandDataBase {
+  session_key: string;
+  working_dir?: string;
+  update: {
+    dangerousMode?: boolean;
+    allowOutsideRoot?: boolean;
+    webSearchEnabled?: boolean;
+    writesNoDeletes?: boolean;
+    restrictWriteToPaths?: string[] | null;
+    reloadPersistentConfig?: boolean;
+  };
+}
+
+export interface ControlPlaneResolveEscalationCommandData extends CommandDataBase {
+  session_key: string;
+  escalation_id: string;
+  resolution: {
+    optionId?: string;
+    freeformResponse?: string;
+    resolvedBy?: 'user' | 'system' | 'timeout';
+  };
+}
+
+export interface ControlPlaneModelGetCommandData extends CommandDataBase {
+  session_key: string;
+}
+
+export interface ControlPlaneModelSetCommandData extends CommandDataBase {
+  session_key: string;
+  agent_type?: string;
+  provider: string;
+  model: string;
+  reasoning?: string;
+}
+
 export interface BridgeCommandDataMap {
   init: InitCommandData;
   send_text: SendTextCommandData;
@@ -242,7 +323,9 @@ export interface BridgeCommandDataMap {
   providers_test: ProvidersCommandData;
   session_fork: NoData;
   session_close: NoData;
+  session_delete: SessionDeleteCommandData;
   list_sessions: ListSessionsCommandData;
+  usage_summary: UsageSummaryCommandData;
   compact_context: NoData;
   set_model: SetModelCommandData;
   get_model: GetModelCommandData;
@@ -262,6 +345,15 @@ export interface BridgeCommandDataMap {
   async_start: AsyncStartCommandData;
   async_cancel: NoData;
   async_status: NoData;
+  control_plane_dispatch: ControlPlaneDispatchCommandData;
+  control_plane_stop: ControlPlaneStopCommandData;
+  control_plane_fork: ControlPlaneForkCommandData;
+  control_plane_permissions_get: ControlPlanePermissionsGetCommandData;
+  control_plane_permissions_update: ControlPlanePermissionsUpdateCommandData;
+  control_plane_resolve_escalation: ControlPlaneResolveEscalationCommandData;
+  control_plane_memory_info: NoData;
+  control_plane_model_get: ControlPlaneModelGetCommandData;
+  control_plane_model_set: ControlPlaneModelSetCommandData;
   shutdown: NoData;
 }
 

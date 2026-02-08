@@ -24,6 +24,13 @@ export interface HarnessLogger {
   flush?(): void;
 }
 
+export type SessionPermissionStateWithFlags = SessionPermissionState & {
+  allowOutsideRoot: boolean;
+  webSearchEnabled: boolean;
+  writesNoDeletes: boolean;
+  restrictWriteToPaths?: string[];
+};
+
 export interface PausedState {
   goal: string;
   agentType: string;
@@ -420,14 +427,19 @@ export class SessionStore {
       const metadata: Record<string, unknown> = {
         model_selections: Object.fromEntries(this.modelSelections),
         permission_state: this.permissionChecker.getState(),
+        permission_flags: this.permissionChecker.getRuntimeFlags(),
       };
       this.graphd.sessionUpdateMetadata(this.sessionKey, metadata);
+      const runtimeFlags = this.permissionChecker.getRuntimeFlags();
       this.logger.debug('Persisted session state to GraphD', {
         sessionKey: this.sessionKey,
         modelSelectionsCount: this.modelSelections.size,
         permissionGrants: this.permissionChecker.getState().sessionGrants.length,
         permissionDenials: this.permissionChecker.getState().sessionDenials.length,
         dangerousMode: this.permissionChecker.getState().dangerousMode,
+        allowOutsideRoot: runtimeFlags.allowOutsideRoot,
+        webSearchEnabled: runtimeFlags.webSearchEnabled,
+        writesNoDeletes: runtimeFlags.writesNoDeletes,
       });
     } catch (error) {
       this.logger.warning('Failed to persist session state to GraphD', {
@@ -453,13 +465,24 @@ export class SessionStore {
 
     // Hydrate permission state
     const permissionState = metadata.permission_state as SessionPermissionState | undefined;
+    const permissionFlags = metadata.permission_flags as {
+      allowOutsideRoot?: boolean;
+      webSearchEnabled?: boolean;
+      writesNoDeletes?: boolean;
+      restrictWriteToPaths?: string[];
+    } | undefined;
+    this.permissionChecker.hydrateRuntimeFlags(permissionFlags);
     if (permissionState) {
       this.permissionChecker.hydrateState(permissionState);
+      const runtimeFlags = this.permissionChecker.getRuntimeFlags();
       this.logger.debug('Hydrated permission state from GraphD', {
         sessionKey: this.sessionKey,
         grants: permissionState.sessionGrants.length,
         denials: permissionState.sessionDenials.length,
         dangerousMode: permissionState.dangerousMode,
+        allowOutsideRoot: runtimeFlags.allowOutsideRoot,
+        webSearchEnabled: runtimeFlags.webSearchEnabled,
+        writesNoDeletes: runtimeFlags.writesNoDeletes,
       });
     }
   }
@@ -649,6 +672,47 @@ export class SessionStore {
       sessionKey: this.sessionKey,
       enabled,
     });
+    this.persistSessionState();
+  }
+
+  getPermissionState(): SessionPermissionStateWithFlags {
+    return {
+      ...this.permissionChecker.getState(),
+      ...this.permissionChecker.getRuntimeFlags(),
+    };
+  }
+
+  updatePermissionOptions(input: {
+    dangerousMode?: boolean;
+    allowOutsideRoot?: boolean;
+    webSearchEnabled?: boolean;
+    writesNoDeletes?: boolean;
+    restrictWriteToPaths?: string[] | null;
+    reloadPersistentConfig?: boolean;
+  }): SessionPermissionStateWithFlags {
+    if (typeof input.dangerousMode === 'boolean') {
+      this.permissionChecker.setDangerousMode(input.dangerousMode);
+    }
+    if (typeof input.allowOutsideRoot === 'boolean') {
+      this.permissionChecker.setAllowOutsideRoot(input.allowOutsideRoot);
+    }
+    if (typeof input.webSearchEnabled === 'boolean') {
+      this.permissionChecker.setWebSearchEnabled(input.webSearchEnabled);
+    }
+    if (typeof input.writesNoDeletes === 'boolean') {
+      this.permissionChecker.setWritesNoDeletes(input.writesNoDeletes);
+    }
+    if (Array.isArray(input.restrictWriteToPaths) || input.restrictWriteToPaths === null) {
+      this.permissionChecker.setRestrictWriteToPaths(input.restrictWriteToPaths);
+    }
+    if (input.reloadPersistentConfig === true) {
+      this.permissionChecker.reloadPersistentConfig();
+    }
+    this.persistSessionState();
+    return {
+      ...this.permissionChecker.getState(),
+      ...this.permissionChecker.getRuntimeFlags(),
+    };
   }
 
   // --- Execution tracking ---

@@ -38,6 +38,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "shared": "workspace:*",
     "zod": "^4.3.5",
     "prompt-protocol": "^0.1.0"
   },

@@ -8,6 +8,13 @@
 
 import type { UserPromptInfo } from 'agent';
 import type { LLMAdapter } from 'llm';
+import {
+  VALID_ACTIONS_BY_TRIGGER,
+  getValidActions,
+  type WatcherActionType,
+  type WatcherNoInterventionAction,
+  type WatcherTrigger,
+} from 'protocol';
 
 // ============================================
 // DECISION TYPES
@@ -454,59 +461,16 @@ export type PromptUserHookResult =
 // WATCHER TRIGGER & ACTION TYPES
 // ============================================
 
-/**
- * Trigger types for the LLM-backed watcher.
- * Each trigger maps to a specific orchestrator terminal condition or lifecycle event.
- */
-export type WatcherTrigger =
-  | 'session_init'
-  | 'prompt_user'
-  | 'bounds_exceeded'
-  | 'agent_error'
-  | 'goal_state_reached'
-  | 'work_item_completed'
-  | 'scope_collision'
-  | 'cadence_audit'
-  | 'handoff_approval';
-
-/**
- * Structured watcher output action types.
- * These determine what the watcher instructs the orchestrator to do.
- */
-export type WatcherActionType =
-  | 'answer'
-  | 'realign'
-  | 'split'
-  | 'create_work_item'
-  | 'stop_work_item'
-  | 'quality_gate'
-  | 'allow'
-  | 'continue';
-
-export type WatcherNoInterventionAction = 'allow' | 'continue';
-
-/**
- * Valid watcher action types for each trigger.
- * This prevents LLM from being presented with invalid options.
- */
-export const VALID_ACTIONS_BY_TRIGGER: Record<WatcherTrigger, WatcherActionType[]> = {
-  prompt_user: ['answer'],
-  bounds_exceeded: ['realign', 'split', 'create_work_item'],
-  agent_error: ['realign', 'allow'],
-  goal_state_reached: ['quality_gate', 'split', 'create_work_item'],
-  work_item_completed: ['quality_gate', 'split', 'create_work_item'],
-  cadence_audit: ['allow', 'realign', 'split', 'create_work_item', 'stop_work_item'],
-  session_init: [],  // No action - initialization only
-  scope_collision: ['allow', 'realign'],  // Allow parallel or redirect one agent
-  handoff_approval: ['allow', 'realign'],  // Approve plan or request revision
+export type {
+  WatcherTrigger,
+  WatcherActionType,
+  WatcherNoInterventionAction,
 };
 
-/**
- * Get valid actions for a specific trigger.
- */
-export function getValidActions(trigger: WatcherTrigger): WatcherActionType[] {
-  return VALID_ACTIONS_BY_TRIGGER[trigger];
-}
+export {
+  VALID_ACTIONS_BY_TRIGGER,
+  getValidActions,
+};
 
 import type { SemanticOutput } from './semantic/schemas.js';
 

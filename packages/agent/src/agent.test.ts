@@ -95,6 +95,45 @@ describe('Agent', () => {
     expect(result.response).toBe('done');
   });
 
+  it('preserves watcher stop_work_item structured output', async () => {
+    const llm = createMockLLM({
+      content: JSON.stringify({
+        action: 'done',
+        response: 'Stopping work item for review',
+        goalStateReached: true,
+        awaitingUserInput: false,
+        watcherAction: 'stop_work_item',
+        reason: 'Insufficient evidence to justify completion',
+        escalationId: 'esc_test_123',
+      }),
+      stopReason: 'end_turn',
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      model: 'test-model',
+      durationMs: 1,
+    });
+
+    const config: AgentConfig = {
+      type: 'watcher',
+      systemPrompt: 'Watcher test prompt',
+      tools: [],
+      budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+      outputSchema: { name: 'watcher_action_output', schema: { type: 'object' }, strict: true, schemaId: 'watcher_action' },
+    };
+
+    const agent = new Agent(config, {
+      llm,
+      toolRegistry: createMockToolRegistry(),
+      llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+    });
+    const context = new ContextWindow('test-session', 200_000);
+    const workItem = createWorkItem({ goal: 'test', objective: 'test' });
+
+    const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
+    expect(result.success).toBe(true);
+    expect(result.structuredOutput?.watcherAction).toBe('stop_work_item');
+    expect(result.structuredOutput?.escalationId).toBe('esc_test_123');
+  });
+
   describe('Bounds Checking', () => {
     it('emits agent_bounds_hit event and terminates with max_tool_calls_exceeded', async () => {
       const events: Array<{ type: string; data: unknown }> = [];

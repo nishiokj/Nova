@@ -20,7 +20,7 @@ import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, Structu
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
 import type { HandoffSpec } from 'protocol';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput, WATCHER_ACTION_VALUES } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -294,7 +294,7 @@ export class Agent {
     localReadFiles: Set<string>,
     workItem: WorkItem
   ): Promise<void> {
-    if (!localContext.isNearFull()) return;
+    if (!localContext.isNearFull(0.5)) return;
 
     localContext.compact({
       deduplicateByPath: true,
@@ -2719,7 +2719,8 @@ export class Agent {
 
   private buildSchemaReminder(schemaId: string | null): string {
     if (schemaId === 'watcher_action') {
-      return `[SCHEMA REMINDER] For watcher_action output, you MUST return JSON with: action ("done" only), goalStateReached (true), awaitingUserInput (always false), response (short summary), watcherAction (answer|realign|split|create_work_item|quality_gate|allow), reason (always required). Include only the payload for your watcherAction. Do NOT include handoffSpec.`;
+      const watcherActions = WATCHER_ACTION_VALUES.join('|');
+      return `[SCHEMA REMINDER] For watcher_action output, you MUST return JSON with: action ("done" only), goalStateReached (true), awaitingUserInput (always false), response (short summary), watcherAction (${watcherActions}), reason (always required). Include only the payload for your watcherAction. Do NOT include handoffSpec.`;
     }
 
     if (schemaId === 'planner_output') {
@@ -2793,15 +2794,7 @@ export class Agent {
     const watcherActionRaw = typeof watcherActionValue === 'string'
       ? watcherActionValue.trim().toLowerCase()
       : '';
-    const validWatcherActions = new Set([
-      'answer',
-      'realign',
-      'split',
-      'create_work_item',
-      'quality_gate',
-      'allow',
-      'continue',
-    ]);
+    const validWatcherActions = new Set<string>(WATCHER_ACTION_VALUES);
     if (!validWatcherActions.has(watcherActionRaw)) return null;
 
     const response = typeof candidate.response === 'string' ? candidate.response : '';
@@ -2873,6 +2866,13 @@ export class Agent {
           return base;
         }
         base.qualityGate = this.inferQualityGate(candidate, response, reason);
+        return base;
+      }
+      case 'stop_work_item': {
+        const escalationIdValue = candidate.escalationId ?? candidate.escalation_id;
+        if (typeof escalationIdValue === 'string' && escalationIdValue.length > 0) {
+          base.escalationId = escalationIdValue;
+        }
         return base;
       }
       case 'allow':

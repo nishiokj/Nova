@@ -42,6 +42,8 @@ interface ConnectionState {
   subscriptions: Set<string>;
 }
 
+const GLOBAL_EVENTS_CHANNEL = 'events:all';
+
 export class BusServer {
   private server: Server | null = null;
   private nextId = 1;
@@ -55,6 +57,8 @@ export class BusServer {
   private readonly eventTranslator: EventTranslator | null;
   /** Maps runId → unsubscribe function for EventBus subscriptions */
   private runSubscriptions = new Map<string, () => void>();
+  /** Unsubscribe function for a global EventBus subscription */
+  private allEventsUnsubscribe: (() => void) | null = null;
 
   constructor(options: BusServerOptions) {
     this.host = options.host;
@@ -95,6 +99,24 @@ export class BusServer {
     }
   }
 
+  private subscribeToAllEvents(channel: string): void {
+    if (!this.eventBus || this.allEventsUnsubscribe) return;
+
+    this.allEventsUnsubscribe = this.eventBus.subscribeAll((event) => {
+      const wireEvent = this.eventTranslator ? this.eventTranslator(event) : event;
+      if (wireEvent !== null) {
+        this.publish(channel, wireEvent);
+      }
+    });
+  }
+
+  private unsubscribeFromAllEvents(): void {
+    if (this.allEventsUnsubscribe) {
+      this.allEventsUnsubscribe();
+      this.allEventsUnsubscribe = null;
+    }
+  }
+
   /**
    * Check if any connection is still subscribed to a channel.
    */
@@ -130,6 +152,7 @@ export class BusServer {
       unsubscribe();
     }
     this.runSubscriptions.clear();
+    this.unsubscribeFromAllEvents();
 
     for (const connection of this.connections.values()) {
       connection.socket.destroy();
@@ -207,6 +230,9 @@ export class BusServer {
       if (runMatch && !this.hasSubscribers(channel)) {
         this.unsubscribeFromRun(runMatch[1]);
       }
+      if (channel === GLOBAL_EVENTS_CHANNEL && !this.hasSubscribers(channel)) {
+        this.unsubscribeFromAllEvents();
+      }
     }
 
     this.connections.delete(connection.id);
@@ -258,6 +284,9 @@ export class BusServer {
         if (runMatch && this.eventBus) {
           this.subscribeToRun(runMatch[1], message.channel);
         }
+        if (message.channel === GLOBAL_EVENTS_CHANNEL && this.eventBus) {
+          this.subscribeToAllEvents(message.channel);
+        }
         profiler.end(`bus.server.dispatch:${message.type}`, 'bus');
         return;
       }
@@ -268,6 +297,9 @@ export class BusServer {
         const runMatch = message.channel.match(/^run:(.+)$/);
         if (runMatch && !this.hasSubscribers(message.channel)) {
           this.unsubscribeFromRun(runMatch[1]);
+        }
+        if (message.channel === GLOBAL_EVENTS_CHANNEL && !this.hasSubscribers(message.channel)) {
+          this.unsubscribeFromAllEvents();
         }
         profiler.end(`bus.server.dispatch:${message.type}`, 'bus');
         return;

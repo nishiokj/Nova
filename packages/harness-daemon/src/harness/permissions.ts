@@ -27,6 +27,11 @@ import { DEFAULT_PERMISSION_SETTINGS } from 'types';
 export class PermissionChecker {
   private state: SessionPermissionState;
   private workingDirectory: string;
+  private allowOutsideRoot = false;
+  private webSearchEnabled = true;
+  private writesNoDeletes = false;
+  private restrictWriteToPathsEnabled = false;
+  private restrictWriteToPaths = new Set<string>();
 
   /** Map of pending permission requests awaiting user response */
   private pendingRequests = new Map<string, {
@@ -59,6 +64,80 @@ export class PermissionChecker {
     this.state.dangerousMode = enabled;
   }
 
+  isAllowOutsideRoot(): boolean {
+    return this.allowOutsideRoot;
+  }
+
+  setAllowOutsideRoot(enabled: boolean): void {
+    this.allowOutsideRoot = enabled;
+  }
+
+  isWebSearchEnabled(): boolean {
+    return this.webSearchEnabled;
+  }
+
+  setWebSearchEnabled(enabled: boolean): void {
+    this.webSearchEnabled = enabled;
+  }
+
+  isWritesNoDeletesEnabled(): boolean {
+    return this.writesNoDeletes;
+  }
+
+  setWritesNoDeletes(enabled: boolean): void {
+    this.writesNoDeletes = enabled;
+  }
+
+  getRuntimeFlags(): {
+    allowOutsideRoot: boolean;
+    webSearchEnabled: boolean;
+    writesNoDeletes: boolean;
+    restrictWriteToPaths?: string[];
+  } {
+    const restricted = this.restrictWriteToPathsEnabled
+      ? Array.from(this.restrictWriteToPaths).sort()
+      : undefined;
+    return {
+      allowOutsideRoot: this.allowOutsideRoot,
+      webSearchEnabled: this.webSearchEnabled,
+      writesNoDeletes: this.writesNoDeletes,
+      ...(restricted ? { restrictWriteToPaths: restricted } : {}),
+    };
+  }
+
+  hydrateRuntimeFlags(flags: {
+    allowOutsideRoot?: boolean;
+    webSearchEnabled?: boolean;
+    writesNoDeletes?: boolean;
+    restrictWriteToPaths?: string[];
+  } | undefined): void {
+    this.allowOutsideRoot = flags?.allowOutsideRoot === true;
+    this.webSearchEnabled = flags?.webSearchEnabled !== false;
+    this.writesNoDeletes = flags?.writesNoDeletes === true;
+    this.setRestrictWriteToPaths(flags?.restrictWriteToPaths);
+  }
+
+  setRestrictWriteToPaths(paths: string[] | undefined | null): void {
+    if (!Array.isArray(paths)) {
+      this.restrictWriteToPathsEnabled = false;
+      this.restrictWriteToPaths = new Set();
+      return;
+    }
+    this.restrictWriteToPathsEnabled = true;
+    const normalized = new Set<string>();
+    for (const candidate of paths) {
+      if (typeof candidate !== 'string' || candidate.trim().length === 0) continue;
+      const resolved = this.resolveAndValidatePath(candidate);
+      if (resolved === null) continue;
+      normalized.add(this.normalizePathKey(resolved));
+    }
+    this.restrictWriteToPaths = normalized;
+  }
+
+  reloadPersistentConfig(): void {
+    this.state.persistent = this.loadConfig(this.workingDirectory);
+  }
+
   /**
    * Get session permission state for persistence.
    */
@@ -75,9 +154,9 @@ export class PermissionChecker {
    * Hydrate session permission state from persistence.
    */
   hydrateState(state: SessionPermissionState): void {
-    this.state.sessionGrants = [...state.sessionGrants];
-    this.state.sessionDenials = [...state.sessionDenials];
-    this.state.dangerousMode = state.dangerousMode;
+    this.state.sessionGrants = this.sanitizeRuleList((state as unknown as { sessionGrants?: unknown }).sessionGrants);
+    this.state.sessionDenials = this.sanitizeRuleList((state as unknown as { sessionDenials?: unknown }).sessionDenials);
+    this.state.dangerousMode = (state as unknown as { dangerousMode?: unknown }).dangerousMode === true;
   }
 
   /**
@@ -134,7 +213,25 @@ export class PermissionChecker {
       return { granted: false, reason: 'path_traversal' };
     }
 
+    if ((tool === 'Write' || tool === 'Edit') && this.restrictWriteToPathsEnabled) {
+      const normalizedTarget = this.normalizePathKey(resolvedTarget);
+      if (this.restrictWriteToPaths.has(normalizedTarget)) {
+        return { granted: true, reason: 'allow_rule' };
+      }
+      return { granted: false, reason: 'deny_rule' };
+    }
+
     return this.checkSingleTarget(tool, resolvedTarget);
+  }
+
+  checkWebSearch(): PermissionDecision {
+    if (this.state.dangerousMode) {
+      return { granted: true, reason: 'dangerous_mode' };
+    }
+    if (!this.webSearchEnabled) {
+      return { granted: false, reason: 'deny_rule' };
+    }
+    return { granted: true, reason: 'allow_rule' };
   }
 
   /**
@@ -144,6 +241,9 @@ export class PermissionChecker {
     const commands = this.parseChainedCommands(fullCommand);
 
     for (const cmd of commands) {
+      if (this.writesNoDeletes && this.isDeleteLikeCommand(cmd)) {
+        return { granted: false, reason: 'deny_rule' };
+      }
       const decision = this.checkSingleTarget('Bash', cmd.trim());
       if (decision.granted === false) {
         return decision; // Any denied command blocks the whole chain
@@ -155,6 +255,18 @@ export class PermissionChecker {
     }
 
     return { granted: true, reason: 'allow_rule' };
+  }
+
+  private isDeleteLikeCommand(command: string): boolean {
+    const normalized = command.trim().toLowerCase();
+    if (!normalized) return false;
+    if (normalized === 'rm' || normalized.startsWith('rm ')) return true;
+    if (normalized.startsWith('rmdir ')) return true;
+    if (normalized.startsWith('unlink ')) return true;
+    if (normalized === 'git rm' || normalized.startsWith('git rm ')) return true;
+    if (normalized === 'git clean' || normalized.startsWith('git clean ')) return true;
+    if (normalized.startsWith('find ') && /\s-delete(\s|$)/.test(normalized)) return true;
+    return false;
   }
 
   /**
@@ -206,6 +318,12 @@ export class PermissionChecker {
    */
   private resolveAndValidatePath(target: string): string | null {
     const resolved = path.resolve(this.workingDirectory, target);
+    if (this.allowOutsideRoot) {
+      if (path.isAbsolute(target)) {
+        return path.normalize(resolved);
+      }
+      return path.normalize(path.relative(this.workingDirectory, resolved));
+    }
     const relative = path.relative(this.workingDirectory, resolved);
 
     // If relative path starts with "..", it escapes the working directory
@@ -214,6 +332,29 @@ export class PermissionChecker {
     }
 
     return relative;
+  }
+
+  private normalizePathKey(value: string): string {
+    return path.normalize(value).replace(/\\/g, '/');
+  }
+
+  private sanitizeRuleList(value: unknown): PermissionRule[] {
+    if (!Array.isArray(value)) return [];
+    const rules: PermissionRule[] = [];
+    for (const entry of value) {
+      if (!entry || typeof entry !== 'object') continue;
+      const record = entry as { tool?: unknown; pattern?: unknown };
+      const tool = record.tool;
+      const pattern = record.pattern;
+      if (
+        (tool === 'Bash' || tool === 'Write' || tool === 'Edit')
+        && typeof pattern === 'string'
+        && pattern.length > 0
+      ) {
+        rules.push({ tool, pattern });
+      }
+    }
+    return rules;
   }
 
   /**

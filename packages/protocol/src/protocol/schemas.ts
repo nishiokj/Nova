@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { WATCHER_ACTION_VALUES } from '../control/watcher.js';
 
 // ============================================
 // TERMINATION SCHEMAS
@@ -224,7 +225,7 @@ export const WatcherOutputSchema = z.object({
   goalStateReached: z.boolean(),
   response: z.string(),
   watcherAction: z.object({
-    action: z.enum(['answer', 'realign', 'split', 'create_work_item', 'stop_work_item', 'quality_gate', 'allow', 'continue']),
+    action: z.enum(WATCHER_ACTION_VALUES),
     reason: z.string(),
     escalationId: z.string().optional(),
     answer: z.object({

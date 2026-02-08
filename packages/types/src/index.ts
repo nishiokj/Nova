@@ -332,6 +332,7 @@ export {
   BUGFIX_TEMPLATE_SPECS,
   PROTOTYPE_TEMPLATE_SPECS,
   REFACTOR_TEMPLATE_SPECS,
+  TEST_TEMPLATE_SPECS,
   DEFAULT_TEMPLATE_NAMES,
   getDefaultTemplateSpecs,
 } from './workitem-template.js';

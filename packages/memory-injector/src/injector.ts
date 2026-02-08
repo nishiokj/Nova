@@ -1136,17 +1136,60 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
     },
 
     async injectV2(params: InjectParamsV2): Promise<InjectResultV2 | null> {
-      if (params.options?.forceV1Fallback) {
+      const debugParams = params as InjectParamsV2 & {
+        query?: string;
+        maxTokens?: number;
+        connectors?: unknown;
+        filters?: unknown;
+      };
+      const task = debugParams.task;
+
+      // Log request payload
+      console.log('[MemoryInjector] V2 Request:', {
+        taskObjective: task?.objective ?? null,
+        touchedFiles: task?.touchedFiles?.length ?? 0,
+        touchedFileNames: task?.touchedFiles?.slice(0, 5) ?? [],
+        sessionId: task?.sessionId ?? null,
+        iteration: task?.iteration ?? null,
+        query: debugParams.query ?? null,
+        maxTokens: debugParams.maxTokens ?? null,
+        connectors: debugParams.connectors ?? null,
+        hasFilters: debugParams.filters !== undefined,
+        options: debugParams.options,
+      });
+
+      if (debugParams.options?.forceV1Fallback) {
+        console.log('[MemoryInjector] V2 returning null: forceV1Fallback=true');
         return null;
       }
+
       try {
         const response = await client.evidence.retrieve(params);
+
         if (!response?.content) {
+          console.log('[MemoryInjector] V2 returning null: response or content empty', {
+            hasResponse: !!response,
+            hasContent: !!response?.content,
+            responseKeys: response ? Object.keys(response) : [],
+          });
           return null;
         }
+
+        // Log successful response details
+        console.log('[MemoryInjector] V2 Success:', {
+          contentLength: response.content.length,
+          atomCount: response.atoms?.length ?? 0,
+          metrics: response.metrics,
+        });
+
         return response;
       } catch (err) {
-        console.error('[MemoryInjector] Evidence retrieval failed:', err);
+        const errorDetails = {
+          message: err instanceof Error ? err.message : String(err),
+          name: err instanceof Error ? err.name : 'Unknown',
+          stack: err instanceof Error ? err.stack : undefined,
+        };
+        console.error('[MemoryInjector] V2 returning null: error caught', errorDetails);
         return null;
       }
     },

@@ -198,7 +198,6 @@ function serializeItem(item: ContextItem): string {
       lines.push(`@callId ${item.callId}`);
       lines.push(`@ts ${item.timestamp}`);
       if (item.isError) lines.push(`@isError true`);
-      if (item.durationMs !== undefined) lines.push(`@durationMs ${item.durationMs}`);
       if (item.workItemId) lines.push(`@workItemId ${item.workItemId}`);
       lines.push(item.output);
       break;
@@ -532,6 +531,23 @@ export class ContextWindow {
   }
 
   // =========================================================================
+  // Auto-Compaction
+  // =========================================================================
+
+  /**
+   * Auto-compact when context is near full.
+   * Deduplicates file_content by path and truncates long outputs.
+   */
+  private _maybeAutoCompact(): void {
+    if (!this.isNearFull(0.5)) return;
+    this.compact({
+      deduplicateByPath: true,
+      maxFileContentCount: 30,
+      truncateOutputsTo: 8_000,
+    });
+  }
+
+  // =========================================================================
   // Mutation Methods (increment _version, write-through to disk)
   // =========================================================================
 
@@ -552,6 +568,7 @@ export class ContextWindow {
       messageCount: this._items.filter(i => i.type === 'message').length,
     };
     this._writeDisk();
+    this._maybeAutoCompact();
   }
 
   /**
@@ -591,6 +608,7 @@ export class ContextWindow {
     });
     this._version++;
     this._writeDisk();
+    this._maybeAutoCompact();
   }
 
   /**
@@ -624,6 +642,7 @@ export class ContextWindow {
     this._readFiles.add(path);
     this._version++;
     this._writeDisk();
+    this._maybeAutoCompact();
     return id;
   }
 

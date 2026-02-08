@@ -27,7 +27,11 @@ export type AgentCoreEventType =
   | 'agent_progress'
   | 'memory_injected'
   | 'permission_request'
-  | 'git_commit';
+  | 'git_commit'
+  | 'harness_response'
+  | 'harness_status'
+  | 'harness_error'
+  | 'harness_user_prompt';
 
 /**
  * Orchestrator event types.

@@ -10,6 +10,22 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'codemirror-view': ['@codemirror/view', '@codemirror/state'],
+          'codemirror-lang': [
+            '@codemirror/commands',
+            '@codemirror/autocomplete',
+            '@codemirror/language',
+            '@codemirror/lang-markdown',
+          ],
+        },
+      },
+    },
+  },
   server: {
     port: 5175,
     proxy: {

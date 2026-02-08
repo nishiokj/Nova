@@ -538,10 +538,11 @@ describe('ContextWindow (disk-backed)', () => {
     expect(content).toContain('### function_call');
     expect(content).toContain('@name Read');
 
-    ctx.addFunctionCallOutput('c1', 'file output');
+    ctx.addFunctionCallOutput('c1', 'file output', false, 123);
     content = readFileSync(fp, 'utf-8');
     expect(content).toContain('### function_call_output');
     expect(content).toContain('file output');
+    expect(content).not.toContain('@durationMs');
   });
 
   it('loads from existing file on construction', () => {

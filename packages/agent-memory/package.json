@@ -14,6 +14,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
+    "lint:scripts": "tsc -p tsconfig.scripts.json --noEmit",
     "clean": "rm -rf dist",
     "daemon": "./scripts/start.sh",
     "daemon:only": "bun run scripts/sync-daemon.ts",
@@ -31,6 +32,7 @@
     "open": "^10.1.0",
     "pgvector": "^0.2.1",
     "postgres": "^3.4.8",
+    "protocol": "workspace:*",
     "types": "workspace:*",
     "ulid": "^2.3.0",
     "zod": "^4.3.5"

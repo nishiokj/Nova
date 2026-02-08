@@ -111,6 +111,20 @@ describe('Hook Registry', () => {
       expect(getHooks('turn_completed')).toHaveLength(1);
       expect(getHooks('agent_completed')).toHaveLength(1);
     });
+
+    it('returns an unregister function that removes only that hook instance', () => {
+      const callback1: HookCallback = async () => {};
+      const callback2: HookCallback = async () => {};
+
+      const unregister1 = registerHook('turn_completed', callback1);
+      registerHook('turn_completed', callback2);
+
+      unregister1();
+
+      const hooks = getHooks('turn_completed');
+      expect(hooks).toHaveLength(1);
+      expect(hooks[0]).toBe(callback2);
+    });
   });
 
   describe('clearHooks', () => {

@@ -45,6 +45,8 @@ export interface SessionState {
   watcherContext?: ContextWindow;
   /** Watcher hook registry (optional) */
   hookRegistry?: HookRegistry;
+  /** Internal-hook unregister callbacks for session-scoped global hooks */
+  internalHookUnregisters: Array<() => void>;
 }
 
 /**
@@ -56,6 +58,7 @@ export function createSessionState(store: SessionStore): SessionState {
     lastAccessMs: Date.now(),
     workItemLogs: new Map(),
     workItemsCreated: new Set(),
+    internalHookUnregisters: [],
   };
 }
 
@@ -71,6 +74,16 @@ export function touchSession(state: SessionState): void {
  */
 export function isSessionExpired(state: SessionState, ttlMs: number): boolean {
   return Date.now() - state.lastAccessMs > ttlMs;
+}
+
+/**
+ * Clear mutable state before session eviction.
+ * Prevents unbounded accumulation in long-lived sessions.
+ */
+export function clearSessionState(state: SessionState): void {
+  state.workItemsCreated.clear();
+  state.workItemLogs.clear();
+  state.internalHookUnregisters.length = 0;
 }
 
 /**

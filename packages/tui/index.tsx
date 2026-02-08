@@ -32,6 +32,7 @@ import {
   type UsageSessionSummary,
   type UsageDayStats,
   type UsageProviderStats,
+  type SessionEntry,
   type RalphProgressData,
   type RalphCompletionReason,
   type PermissionRequestData,
@@ -66,15 +67,12 @@ import {
   SCROLL_AMOUNT,
   STATUS_TICK_INTERVAL,
   SESSION_STALE_THRESHOLD,
-  NETWORK_TIMEOUT,
   FILE_CACHE_REFRESH_INTERVAL,
   CLEANUP_DELAY,
   GRACEFUL_SHUTDOWN_DELAY,
   ERROR_EXIT_DELAY,
   RALPH_MAX_ITERATIONS,
   RALPH_DEFAULT_PROMISE,
-  DEFAULT_GRAPHD_HOST,
-  DEFAULT_GRAPHD_PORT,
   DEFAULT_EVENT_BUS_HOST,
   DEFAULT_EVENT_BUS_PORT,
   RANDOM_HEX_RADIX,
@@ -175,25 +173,6 @@ function parseRalphArgs(arg: string): RalphArgs | null {
   };
 }
 
-interface GraphDSession {
-  session_key: string;
-  status: string;
-  working_dir: string | null;
-  last_accessed_at: number;
-  created_at: number;
-  client_type: string;
-  metadata_json?: string;
-}
-
-function resolveGraphdUrl(): string {
-  if (process.env.GRAPHD_URL) {
-    return process.env.GRAPHD_URL;
-  }
-  const host = process.env.GRAPHD_HOST ?? DEFAULT_GRAPHD_HOST;
-  const port = process.env.GRAPHD_PORT ?? DEFAULT_GRAPHD_PORT;
-  return `http://${host}:${port}`;
-}
-
 function resolveBusConfig(): { host: string; port: number } {
   const host = process.env.EVENT_BUS_HOST ?? DEFAULT_EVENT_BUS_HOST;
   const portValue = Number(process.env.EVENT_BUS_PORT ?? String(DEFAULT_EVENT_BUS_PORT));
@@ -203,114 +182,80 @@ function resolveBusConfig(): { host: string; port: number } {
   };
 }
 
-// Fetch with timeout to prevent indefinite hangs
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeoutMs = 10000
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+type UsageSessionRecord = {
+  sessionKey: string;
+  status: string;
+  workingDir: string | null;
+  lastAccessedAt: number;
+  createdAt: number;
+  metadataJson: string | null;
+  metadata?: Record<string, unknown>;
+};
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function parseSessionMetadata(session: UsageSessionRecord): Record<string, unknown> {
+  if (session.metadata && isRecord(session.metadata)) {
+    return session.metadata;
+  }
+  if (!session.metadataJson || session.metadataJson.trim().length === 0) {
+    return {};
+  }
   try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
-  } finally {
-    clearTimeout(timeoutId);
+    const parsed = JSON.parse(session.metadataJson) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
 }
 
-async function fetchGraphdSessions(): Promise<GraphDSession[]> {
-  const baseUrl = resolveGraphdUrl();
-  const response = await fetchWithTimeout(`${baseUrl}/export?table=sessions`);
-  if (!response.ok) {
-    throw new Error(`GraphD export failed (${response.status})`);
-  }
-  const payload = (await response.json()) as { data?: string };
-  if (!payload.data) return [];
-  return payload.data
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as GraphDSession);
-}
+function mapUsageStatus(rawStatus: string, lastAccessedAt: number, nowSec: number): "active" | "idle" | "ended" {
+  const endedStatuses = new Set(["completed", "failed", "cancelled", "expired", "closed"]);
+  if (endedStatuses.has(rawStatus)) return "ended";
 
-async function deleteGraphdSession(sessionKey: string): Promise<boolean> {
-  const baseUrl = resolveGraphdUrl();
-  const response = await fetchWithTimeout(
-    `${baseUrl}/session/${encodeURIComponent(sessionKey)}`,
-    { method: "DELETE" }
-  );
-  if (!response.ok) {
-    return false;
+  const activeStatuses = new Set(["active", "blocked", "review"]);
+  if (activeStatuses.has(rawStatus) && nowSec - lastAccessedAt <= SESSION_STALE_THRESHOLD) {
+    return "active";
   }
-  const payload = (await response.json()) as { deleted?: boolean };
-  return payload.deleted === true;
-}
 
-interface GraphDMessage {
-  session_key: string;
-  request_id: string;
-  role: string;
-  content: string;
-  timestamp: number;
-  metadata_json?: string;
+  return "idle";
 }
 
 /**
- * Fetch usage data from GraphD and compute session summaries.
+ * Fetch usage data through the bridge and compute session summaries.
  */
-async function fetchUsageData(): Promise<{
+async function fetchUsageData(client: BridgeClient): Promise<{
   sessions: UsageSessionSummary[];
   dayStats: UsageDayStats[];
   providerStats: UsageProviderStats[];
 }> {
-  const baseUrl = resolveGraphdUrl();
-
-  // Fetch sessions and messages in parallel
-  const [sessionsResponse, messagesResponse] = await Promise.all([
-    fetchWithTimeout(`${baseUrl}/export?table=sessions`),
-    fetchWithTimeout(`${baseUrl}/export?table=conversation_messages`),
-  ]);
-
-  if (!sessionsResponse.ok) {
-    throw new Error(`GraphD sessions export failed (${sessionsResponse.status})`);
+  const response = await client.usageSummary({
+    status: ["active", "blocked", "review", "completed", "failed", "cancelled", "inactive", "expired"],
+    limit: 1000,
+  });
+  if (!response.success) {
+    throw new Error(response.error ?? "Failed to fetch usage summary");
   }
-
-  const sessionsPayload = (await sessionsResponse.json()) as { data?: string };
-  const rawSessions: GraphDSession[] = sessionsPayload.data
-    ? sessionsPayload.data.split("\n").filter(Boolean).map((line) => JSON.parse(line) as GraphDSession)
-    : [];
-
-  // Parse messages if available
-  let rawMessages: GraphDMessage[] = [];
-  if (messagesResponse.ok) {
-    const messagesPayload = (await messagesResponse.json()) as { data?: string };
-    if (messagesPayload.data) {
-      rawMessages = messagesPayload.data
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as GraphDMessage);
-    }
-  }
-
-  // Group messages by session
-  const messagesBySession = new Map<string, GraphDMessage[]>();
-  for (const msg of rawMessages) {
-    const list = messagesBySession.get(msg.session_key) ?? [];
-    list.push(msg);
-    messagesBySession.set(msg.session_key, list);
-  }
+  const rawSessions = (response.sessions ?? []) as UsageSessionRecord[];
 
   // Build session summaries
   const now = Date.now() / 1000;
-  const staleThreshold = SESSION_STALE_THRESHOLD;
 
   const sessions: UsageSessionSummary[] = rawSessions.map((raw) => {
-    const messages = messagesBySession.get(raw.session_key) ?? [];
-    const meta = raw.metadata_json ? JSON.parse(raw.metadata_json) : {};
+    const meta = parseSessionMetadata(raw);
 
     // Compute token metrics from agent_events if available
     let inputTokens = 0;
@@ -333,9 +278,9 @@ async function fetchUsageData(): Promise<{
         }
 
         if (eventType === "llm_call") {
-          const data = (e.data ?? {}) as Record<string, unknown>;
-          const promptTokens = (data.prompt_tokens as number) ?? (data.promptTokens as number) ?? 0;
-          const completionTokens = (data.completion_tokens as number) ?? (data.completionTokens as number) ?? 0;
+          const data = isRecord(e.data) ? e.data : {};
+          const promptTokens = asNumber(data.prompt_tokens ?? data.promptTokens);
+          const completionTokens = asNumber(data.completion_tokens ?? data.completionTokens);
           inputTokens += promptTokens;
           outputTokens += completionTokens;
           llmCallCount++;
@@ -347,26 +292,23 @@ async function fetchUsageData(): Promise<{
         }
       }
     }
-
-    // Determine status - must respect database status field
-    let status: "active" | "idle" | "ended" = "idle";
-    if (raw.status === "closed" || raw.status === "expired") {
-      status = "ended";
-    } else if (raw.status === "active" && now - raw.last_accessed_at <= staleThreshold) {
-      // Only show as active if BOTH: database says active AND recently accessed
-      status = "active";
+    if (inputTokens === 0 && outputTokens === 0) {
+      inputTokens = asNumber(meta.total_tokens ?? meta.totalTokens);
     }
 
-    const projectName = raw.working_dir?.split("/").pop() ?? "unknown";
-    const durationMs = (raw.last_accessed_at - raw.created_at) * 1000;
+    // Determine status - must respect database status field
+    const status = mapUsageStatus(raw.status, raw.lastAccessedAt, now);
+
+    const projectName = raw.workingDir?.split("/").pop() ?? "unknown";
+    const durationMs = Math.max(0, (raw.lastAccessedAt - raw.createdAt) * 1000);
 
     return {
-      sessionKey: raw.session_key,
+      sessionKey: raw.sessionKey,
       status,
       projectName,
-      workingDir: raw.working_dir,
-      createdAt: raw.created_at,
-      lastAccessedAt: raw.last_accessed_at,
+      workingDir: raw.workingDir,
+      createdAt: raw.createdAt,
+      lastAccessedAt: raw.lastAccessedAt,
       requestCount,
       inputTokens,
       outputTokens,
@@ -514,7 +456,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const fileCacheRef = useRef<FileCache | null>(null);
   const deleteFlowRef = useRef<{
     stage: "select" | "confirm";
-    sessions: GraphDSession[];
+    sessions: SessionEntry[];
     selectedKey?: string;
   } | null>(null);
   const maxScrollRef = useRef(0);
@@ -2577,31 +2519,45 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   });
 
   const startDeleteFlow = async (arg?: string) => {
+    const client = clientRef.current;
+    if (!client) {
+      store.addMessage("system", "Client not connected.");
+      return;
+    }
+
     if (arg) {
       deleteFlowRef.current = { stage: "confirm", sessions: [], selectedKey: arg };
       store.addMessage("system", `Delete session ${arg}? (y/n)`);
       return;
     }
 
-    store.addMessage("system", "Fetching active sessions...");
+    store.addMessage("system", "Fetching deletable sessions...");
     try {
-      const sessions = await fetchGraphdSessions();
-      const active = sessions.filter((s) => s.status === "active");
-      if (active.length === 0) {
-        store.addMessage("system", "No active sessions found.");
+      const result = await client.listSessions({
+        status: ["active", "blocked", "review", "completed", "failed", "cancelled", "inactive", "expired"],
+        limit: 100,
+      });
+      if (!result.success) {
+        store.addMessage("system", `Failed to fetch sessions: ${result.error ?? "Unknown error"}`);
+        deleteFlowRef.current = null;
+        return;
+      }
+
+      if (result.sessions.length === 0) {
+        store.addMessage("system", "No deletable sessions found.");
         deleteFlowRef.current = null;
         return;
       }
 
       store.addMessage("system", "Select a session to delete:");
-      active.forEach((session, idx) => {
-        const suffix = session.working_dir
-          ? ` (${session.working_dir.split("/").pop()})`
+      result.sessions.forEach((session, idx) => {
+        const suffix = session.workingDir
+          ? ` (${session.workingDir.split("/").pop()})`
           : "";
-        store.addMessage("system", `${idx + 1}. ${session.session_key}${suffix}`);
+        store.addMessage("system", `${idx + 1}. ${session.sessionKey}${suffix}`);
       });
       store.addMessage("system", "Enter a number or session key, or type 'cancel'.");
-      deleteFlowRef.current = { stage: "select", sessions: active };
+      deleteFlowRef.current = { stage: "select", sessions: result.sessions };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       store.addMessage("system", `Failed to fetch sessions: ${message}`);
@@ -2628,12 +2584,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
 
-      let selected: GraphDSession | undefined;
-      if (/^\\d+$/.test(input)) {
+      let selected: SessionEntry | undefined;
+      if (/^\d+$/.test(input)) {
         const idx = Number.parseInt(input, 10) - 1;
         selected = flow.sessions[idx];
       } else {
-        selected = flow.sessions.find((s) => s.session_key === input);
+        selected = flow.sessions.find((s) => s.sessionKey === input);
       }
 
       if (!selected) {
@@ -2641,8 +2597,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         return;
       }
 
-      deleteFlowRef.current = { stage: "confirm", sessions: flow.sessions, selectedKey: selected.session_key };
-      store.addMessage("system", `Delete session ${selected.session_key}? (y/n)`);
+      deleteFlowRef.current = { stage: "confirm", sessions: flow.sessions, selectedKey: selected.sessionKey };
+      store.addMessage("system", `Delete session ${selected.sessionKey}? (y/n)`);
       return;
     }
 
@@ -2660,11 +2616,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           return;
         }
 
+        const client = clientRef.current;
+        if (!client) {
+          store.addMessage("system", "Client not connected.");
+          deleteFlowRef.current = null;
+          return;
+        }
+
         store.addMessage("system", `Deleting session ${target}...`);
-        const deleted = await deleteGraphdSession(target);
+        const result = await client.deleteSession(target);
         store.addMessage(
           "system",
-          deleted ? `Deleted session ${target}.` : `Failed to delete session ${target}.`,
+          result.success && result.deleted
+            ? `Deleted session ${target}.`
+            : `Failed to delete session ${target}${result.error ? `: ${result.error}` : "."}`,
         );
         deleteFlowRef.current = null;
         return;
@@ -2707,11 +2672,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const startUsageFlow = async () => {
+    const client = clientRef.current;
+    if (!client) {
+      store.addMessage("system", "Client not connected.");
+      return;
+    }
+
     store.setUsageLoading(true);
     store.setUIMode("usage");
 
     try {
-      const { sessions, dayStats, providerStats } = await fetchUsageData();
+      const { sessions, dayStats, providerStats } = await fetchUsageData(client);
       store.batch(() => {
         store.setUsageSessions(sessions);
         store.setUsageAnalytics(dayStats, providerStats);
@@ -3085,29 +3056,75 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
   const rightStatus = [scrollInfo, newMessageInfo].filter(Boolean).join(" | ");
 
+  // Helper function to create "big" text (300% larger) by stacking characters
+  // Returns an array of 3 strings for each row of the big text
+  const makeBigText = (text: string): string[] => {
+    // Create 3-line tall big text using unicode block elements
+    const charMaps: Record<string, string[]> = {
+      'N': ['█▀▀', '█ █', '█ █'],
+      'O': ['▄▀▄', '█ █', '▀▄▀'],
+      'V': ['█ █', '█ █', ' ▀ '],
+      'A': ['▀█▀', '█ █', '█ █'],
+      '-': ['   ', '───', '   '],
+      ' ': ['   ', '   ', '   '],
+    };
+
+    const lines = ['', '', ''];
+    for (const char of text.toUpperCase()) {
+      const map = charMaps[char] || ['   ', ' █ ', '   '];
+      lines[0] += map[0];
+      lines[1] += map[1];
+      lines[2] += map[2];
+    }
+    return lines;
+  };
+
+  // Get the big NOVA text lines
+  const novaTextLines = makeBigText("NOVA");
+
   const headerRows: Array<{
     left: string;
     right?: string;
+    center?: string;
     leftColor?: string;
     rightColor?: string;
+    centerColor?: string;
     boldLeft?: boolean;
     boldRight?: boolean;
+    boldCenter?: boolean;
   }> = [
+    // Row 1: Top line of big NOVA
     {
-      left: "Bloom",
-      right: `Session ${snapshot.sessionKey ?? "-"}`,
+      center: novaTextLines[0],
       leftColor: colors.accent,
       rightColor: colors.muted,
-      boldLeft: true,
+      centerColor: colors.accent,
+      boldCenter: true,
+    },
+    // Row 2: Middle line of big NOVA
+    {
+      center: novaTextLines[1],
+      leftColor: colors.accent,
+      rightColor: colors.muted,
+      centerColor: colors.accent,
+      boldCenter: true,
+    },
+    // Row 3: Bottom line of big NOVA
+    {
+      center: novaTextLines[2],
+      leftColor: colors.accent,
+      rightColor: colors.muted,
+      centerColor: colors.accent,
+      boldCenter: true,
     },
     {
-      left: `State: ${snapshot.state}${snapshot.planMode ? " | PLAN" : ""}`,
-      right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}`,
+      left: `${snapshot.sessionKey ?? "-"}`,
+      right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}${snapshot.state !== "idle" ? ` | State: ${snapshot.state}` : ""}${snapshot.planMode ? " | PLAN" : ""}`,
       leftColor: colors.muted,
       rightColor: colors.muted,
     },
     {
-      left: `Status: ${statusText}`,
+      left: `${statusText}`,
       right: rightStatus,
       leftColor: statusColor,
       rightColor: colors.muted,
@@ -3511,6 +3528,22 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       {headerRows.map((row, index) => {
         const left = row.left ?? "";
         const right = row.right ?? "";
+        const center = row.center ?? "";
+
+        if (center && !left && !right) {
+          // Centered text only
+          const maxCenterLength = contentWidth;
+          const centerText = center.length > maxCenterLength ? center.slice(0, maxCenterLength) : center;
+          const padding = Math.floor((contentWidth - centerText.length) / 2);
+          return (
+            <Text key={`header-${index}`}>
+              <Text>{" ".repeat(padding)}</Text>
+              <Text color={row.centerColor} bold={row.boldCenter}>{centerText}</Text>
+              <Text>{" ".repeat(contentWidth - padding - centerText.length)}</Text>
+            </Text>
+          );
+        }
+
         if (!right) {
           return (
             <Text key={`header-${index}`} color={row.leftColor} bold={row.boldLeft}>

@@ -340,6 +340,38 @@ export class HarnessClient extends EventEmitter {
     return this.sendAuthCommand('list_sessions', options);
   }
 
+  async deleteSession(sessionKey: string): Promise<{
+    success: boolean;
+    deleted: boolean;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('session_delete', { sessionKey });
+  }
+
+  async usageSummary(
+    options: { status?: string | string[]; limit?: number } = {}
+  ): Promise<{
+    success: boolean;
+    usage?: Array<{ provider: string; model: string; totalTokens: number; sessionCount: number }>;
+    sessions?: Array<{
+      sessionKey: string;
+      clientType: string;
+      createdAt: number;
+      lastAccessedAt: number;
+      workingDir: string | null;
+      status: string;
+      metadataJson: string | null;
+      metadata?: Record<string, unknown>;
+      lastUserMessagePreview?: string | null;
+      goal?: string | null;
+      currentWorkItemId?: string | null;
+      currentObjective?: string | null;
+    }>;
+    error?: string;
+  }> {
+    return this.sendAuthCommand('usage_summary', options);
+  }
+
   async setDangerousMode(enabled: boolean): Promise<{
     success: boolean;
     enabled?: boolean;
@@ -420,6 +452,13 @@ export class HarnessClient extends EventEmitter {
 
   async watcherSummarize(): Promise<{ success: boolean; ledger?: Record<string, unknown>; error?: string }> {
     return this.sendAuthCommand('watcher_summarize', {});
+  }
+
+  async request<T extends Record<string, unknown>>(
+    type: BridgeCommandType,
+    data: Record<string, unknown> = {}
+  ): Promise<T> {
+    return this.sendAuthCommand<T>(type, data);
   }
 
   // =========================================================================

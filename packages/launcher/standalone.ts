@@ -121,12 +121,23 @@ async function main(): Promise<void> {
     const daemon = new HarnessDaemon({
       configPath: configPath ?? undefined,
       idleTimeoutMs: 0, // Disable idle timeout in standalone mode
-      dashboardPort: 9445, // Enable control-plane API (9444 is used by GraphD)
+    });
+
+    const { ControlPlaneServer } = await import('../harness-daemon/src/harness/control_plane_server.js');
+    const controlPlane = new ControlPlaneServer({
+      host: process.env.CONTROL_PLANE_HOST ?? '127.0.0.1',
+      port: Number(process.env.CONTROL_PLANE_PORT ?? '9445'),
+      configPath: configPath ?? undefined,
+      workingDir: process.cwd(),
+      busHost: process.env.EVENT_BUS_HOST ?? '127.0.0.1',
+      busPort: Number(process.env.EVENT_BUS_PORT ?? '9555'),
     });
 
     // Run daemon startup
     const address = await daemon.start();
     console.log(`[rex] Daemon started on ${address.host}:${address.port}`);
+    const controlPlaneAddress = await controlPlane.start();
+    console.log(`[rex] Control-plane started on ${controlPlaneAddress.host}:${controlPlaneAddress.port}`);
 
     // Small delay for daemon to fully initialize
     await new Promise(r => setTimeout(r, 200));
@@ -141,6 +152,7 @@ async function main(): Promise<void> {
       await startTui({ initialPrompt });
     } finally {
       // Clean shutdown
+      await controlPlane.stop();
       await daemon.stop();
     }
 

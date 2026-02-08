@@ -66,7 +66,7 @@ import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
 import type { PermissionedTool, PermissionRequest, PermissionResponse, EscalationCreateInput } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
-import { createSessionState, touchSession, type SessionState } from './session_state.js';
+import { createSessionState, touchSession, clearSessionState, type SessionState } from './session_state.js';
 import {
   DecisionEngine,
   InMemoryDecisionDatabase,
@@ -114,6 +114,12 @@ export interface ResolveSessionEscalationResult {
   resumeRequestId?: string;
   alreadyResolved?: boolean;
   error?: string;
+}
+
+export interface CloseSessionResult {
+  success: boolean;
+  error?: string;
+  executingRequestId?: string;
 }
 
 /**
@@ -316,59 +322,47 @@ function buildEscalationPacketMarkdown(
   }
   lines.push('---', '');
 
-  lines.push(`# Decision: ${escalation.title}`);
-  lines.push('', '## Context');
-  lines.push(escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`);
-
-  if ((escalation.tradeoffs ?? []).length > 0) {
-    lines.push('', '## Tradeoffs');
-    for (const tradeoff of escalation.tradeoffs ?? []) {
-      lines.push(`- ${tradeoff}`);
-    }
-  }
-
-  lines.push('', '## The Question');
-  lines.push(escalation.title);
+  lines.push(`# Escalation: ${escalation.title}`);
+  lines.push('', '## Action');
+  lines.push('Pick one option, then click **Resolve Escalation** in Cockpit.');
+  lines.push('', '## Situation');
+  const context = escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`;
+  lines.push(context.slice(0, 280));
 
   lines.push('', '## Options');
   if (options.length === 0) {
-    lines.push('- Provide direction for the requested decision.');
+    lines.push('1. **Proceed**');
+    lines.push('   Continue with current approach.');
+    lines.push('2. **Retry with stronger evidence**');
+    lines.push('   Re-run with stricter verification.');
+    lines.push('3. **Stop and investigate**');
+    lines.push('   Pause and inspect root cause.');
   } else {
     for (let idx = 0; idx < options.length; idx += 1) {
       const option = options[idx];
       lines.push(`${idx + 1}. **${option.label}**`);
       if (option.description) {
-        lines.push(`   ${option.description}`);
-      }
-      for (const implication of option.implications ?? []) {
-        lines.push(`   - ${implication}`);
+        lines.push(`   ${option.description.slice(0, 220)}`);
       }
       if (option.recommended) {
-        lines.push('   - Recommended by watcher');
+        lines.push('   - Recommended');
       }
     }
   }
 
-  lines.push('', '## Recommendation (Watcher)');
+  lines.push('', '## Recommendation');
   if (recommendedOption) {
-    lines.push(`Leaning **${recommendedOption.label}** based on current constraints and evidence.`);
+    lines.push(`Prefer **${recommendedOption.label}** based on current evidence.`);
   } else {
-    lines.push('No single option recommended yet; request is for clarification.');
+    lines.push('No single option is recommended yet.');
   }
 
-  lines.push('', 'Evidence:');
+  lines.push('', '## Evidence');
   if (evidenceRefs.length === 0) {
-    lines.push('- No explicit evidence refs were provided by watcher.');
+    lines.push('- No explicit refs were provided by watcher.');
   } else {
     for (const ref of evidenceRefs.slice(0, 8)) {
       lines.push(`- ${ref.label}: ${inlineRef(ref.type, ref.value)}`);
-    }
-  }
-
-  if (options.length > 0) {
-    for (const option of options.slice(0, 4)) {
-      lines.push('', `## If you choose ${option.label}`);
-      lines.push('I will apply the selected direction, update implementation, and run verification gates.');
     }
   }
 
@@ -565,6 +559,7 @@ export class AgentHarness {
 
   private readonly sessionTtlMs: number;
   private readonly pauseTimeoutMs: number;
+  private readonly maxSessions: number;
   private logger: HarnessLogger;
   private isShutdown = false;
   private graphd: GraphDManager | null = null;
@@ -588,6 +583,7 @@ export class AgentHarness {
     this.logger = logger ?? consoleLogger;
     this.sessionTtlMs = config.context.sessionTtlMs;
     this.pauseTimeoutMs = config.context.pauseTimeoutMs;
+    this.maxSessions = config.context.maxSessions;
 
     // Gather environment context once at startup
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
@@ -811,6 +807,59 @@ export class AgentHarness {
     return this.eventBus;
   }
 
+  getDebugMemoryInfo(): {
+    sessionCount: number;
+    maxSessions: number;
+    sessions: Array<{
+      sessionKey: string;
+      contextItemCount: number;
+      contextEstimatedTokens: number;
+      watcherContextItemCount: number;
+      workItemLogCount: number;
+      workItemsCreatedCount: number;
+      lastAccessMs: number;
+      isExecuting: boolean;
+    }>;
+  } {
+    const sessions = [];
+    for (const [sessionKey, state] of this.sessions.entries()) {
+      const context = state.store.getCachedContextSnapshot();
+      const contextItemCount = context?.items?.length ?? 0;
+      // Estimate tokens: ~4 chars per token
+      let contextChars = 0;
+      if (context?.items) {
+        for (const item of context.items) {
+          if (item.type === 'message') {
+            contextChars += typeof item.content === 'string' ? item.content.length : 500;
+          } else if (item.type === 'file_content') {
+            contextChars += item.content.length;
+          } else if (item.type === 'function_call_output') {
+            contextChars += item.output.length;
+          } else if (item.type === 'function_call') {
+            contextChars += JSON.stringify(item.arguments).length;
+          } else if (item.type === 'reasoning') {
+            contextChars += item.content.length;
+          }
+        }
+      }
+      sessions.push({
+        sessionKey,
+        contextItemCount,
+        contextEstimatedTokens: Math.ceil(contextChars / 4),
+        watcherContextItemCount: state.watcherContext?.items.length ?? 0,
+        workItemLogCount: state.workItemLogs.size,
+        workItemsCreatedCount: state.workItemsCreated.size,
+        lastAccessMs: state.lastAccessMs,
+        isExecuting: state.store.isExecuting(),
+      });
+    }
+    return {
+      sessionCount: this.sessions.size,
+      maxSessions: this.maxSessions,
+      sessions,
+    };
+  }
+
   /**
    * Check if GraphD is initialized and running.
    */
@@ -865,16 +914,45 @@ export class AgentHarness {
     };
   }
 
+  private cleanupSessionInternalHooks(sessionKey: string, state: SessionState): void {
+    const unregisters = state.internalHookUnregisters.splice(0);
+    for (const unregister of unregisters) {
+      try {
+        unregister();
+      } catch (error) {
+        this.logger.warning('Failed to unregister internal session hook', {
+          sessionKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   /**
    * Close and evict in-memory state for a session.
    * Persists context and marks session inactive before closing.
    */
-  closeSession(sessionKey: string): void {
+  closeSession(sessionKey: string): CloseSessionResult {
     const state = this.sessions.get(sessionKey);
     if (state) {
+      if (state.store.isExecuting()) {
+        const executingRequestId = state.store.getExecutingRequestId() ?? undefined;
+        this.logger.warning('Refusing to close session during active execution', {
+          sessionKey,
+          executingRequestId,
+        });
+        return {
+          success: false,
+          error: 'Session has an active execution',
+          ...(executingRequestId ? { executingRequestId } : {}),
+        };
+      }
+
+      this.cleanupSessionInternalHooks(sessionKey, state);
       // Persist context before closing
       state.store.persistContext();
       state.store.close();
+      clearSessionState(state);
       this.sessions.delete(sessionKey);
     }
 
@@ -886,6 +964,7 @@ export class AgentHarness {
         this.logger.warning('Failed to mark session inactive', { sessionKey, error: String(error) });
       }
     }
+    return { success: true };
   }
 
   /**
@@ -972,6 +1051,11 @@ export class AgentHarness {
       return existing;
     }
 
+    // LRU eviction: if at capacity, evict the oldest idle session
+    if (this.sessions.size >= this.maxSessions) {
+      this.evictOldestIdleSession();
+    }
+
     const store = new SessionStore({
       sessionKey,
       maxTokens: this.config.context.maxTokens,
@@ -985,6 +1069,44 @@ export class AgentHarness {
     const state = createSessionState(store);
     this.sessions.set(sessionKey, state);
     return state;
+  }
+
+  private evictOldestIdleSession(): void {
+    let oldestKey: string | null = null;
+    let oldestAccessMs = Infinity;
+
+    for (const [key, state] of this.sessions.entries()) {
+      // Skip sessions with active work
+      if (state.store.isExecuting() || state.store.getAsyncRun() || state.store.getRalphLoop()) {
+        continue;
+      }
+      if (state.lastAccessMs < oldestAccessMs) {
+        oldestAccessMs = state.lastAccessMs;
+        oldestKey = key;
+      }
+    }
+
+    if (!oldestKey) return;
+
+    const state = this.sessions.get(oldestKey)!;
+    this.cleanupSessionInternalHooks(oldestKey, state);
+    state.store.persistContext();
+    state.store.close();
+    clearSessionState(state);
+    this.sessions.delete(oldestKey);
+    this.logger.debug('LRU evicted session (maxSessions reached)', {
+      sessionKey: oldestKey,
+      maxSessions: this.maxSessions,
+      idleMs: Date.now() - oldestAccessMs,
+    });
+
+    if (this.isGraphDReady()) {
+      try {
+        this.graphd!.sessionUpdateStatus(oldestKey, 'inactive');
+      } catch (error) {
+        this.logger.warning('Failed to mark evicted session inactive', { sessionKey: oldestKey, error: String(error) });
+      }
+    }
   }
 
   private getOrCreateSessionStore(sessionKey: string, dangerousMode = false, workingDir?: string): SessionStore {
@@ -1367,14 +1489,19 @@ export class AgentHarness {
       }
     };
     for (const [sessionKey, state] of this.sessions.entries()) {
+      if (state.store.isExecuting() || state.store.getAsyncRun() || state.store.getRalphLoop()) {
+        continue;
+      }
       const pausedState = state.store.getPausedState();
       if (pausedState) {
         // Paused sessions: check if paused too long
         const pausedDuration = now - pausedState.pausedAt;
         if (pausedDuration < this.pauseTimeoutMs) continue; // Still within timeout, skip
         // Paused too long - persist and evict
+        this.cleanupSessionInternalHooks(sessionKey, state);
         state.store.persistContext();
         state.store.close();
+        clearSessionState(state);
         markInactive(sessionKey);
         this.sessions.delete(sessionKey);
         this.logger.debug('Evicted paused session (timeout)', {
@@ -1385,7 +1512,9 @@ export class AgentHarness {
       } else {
         // Active sessions: check TTL as before
         if (state.lastAccessMs > cutoff) continue;
+        this.cleanupSessionInternalHooks(sessionKey, state);
         state.store.close();
+        clearSessionState(state);
         markInactive(sessionKey);
         this.sessions.delete(sessionKey);
         this.logger.debug('Evicted session store', {
@@ -1446,10 +1575,26 @@ export class AgentHarness {
    * Also handles resuming paused sessions - if a session is paused, inputText is treated as the answer.
    */
   run(params: AgentRunParams): AgentRunHandle {
-    const { requestId, inputText, tier: requestedTier, sessionKey, workingDir, planMode, hookRegistry } = params;
+    const {
+      requestId,
+      inputText,
+      tier: requestedTier,
+      sessionKey,
+      workingDir,
+      context: supplementalContextRaw,
+      handoffSpec,
+      planMode,
+      hookRegistry,
+    } = params;
+    const supplementalContext = typeof supplementalContextRaw === 'string'
+      ? supplementalContextRaw.trim()
+      : '';
     profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier, planMode });
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
+    // Create emit early so harness-level events (status, response, error, user_prompt)
+    // reach EventBus → BusServer → SSE, not just the TUI's eventQueue.
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
     this.pruneSessionStores('run');
     const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
@@ -1457,7 +1602,9 @@ export class AgentHarness {
 
     // Determine if this is a resume (paused state exists) or fresh run
     const isResume = !!paused;
-    eventQueue.push(createStatusEvent('sending', isResume ? 'Resuming with user input...' : 'Processing request...'));
+    const sendingMessage = isResume ? 'Resuming with user input...' : 'Processing request...';
+    eventQueue.push(createStatusEvent('sending', sendingMessage));
+    emit(createEvent('harness_status', { state: 'sending', message: sendingMessage }));
 
     // Attempt to mark execution as started; if another run is active, queue instead.
     if (!store.startExecution(requestId)) {
@@ -1470,12 +1617,19 @@ export class AgentHarness {
 
       // Queue the message - this adds it to context immediately
       store.queueUserMessage(requestId, inputText);
+      if (supplementalContext.length > 0) {
+        store.getContext().addMessage(
+          'system',
+          `Control-plane supplemental context for the queued user message:\n${supplementalContext}`
+        );
+      }
 
       // Persist to GraphD if available
       this.persistUserMessage(sessionKey, requestId, inputText);
 
       // Emit a status event indicating the message was queued
       eventQueue.push(createStatusEvent('idle', 'Message queued - agent will see it on next turn'));
+      emit(createEvent('harness_status', { state: 'idle', message: 'Message queued - agent will see it on next turn' }));
 
       // Return a "queued" result - not an error, but also not a full response
       const resultPromise = Promise.resolve({
@@ -1579,10 +1733,19 @@ export class AgentHarness {
     } else {
       // Fresh run - inputText is the goal
       contextWindow.addMessage('user', inputText);
-      goal = inputText;
+      goal = (handoffSpec && typeof handoffSpec === 'object' && !Array.isArray(handoffSpec) && Object.keys(handoffSpec).length > 0)
+        ? JSON.stringify({ handoffSpec })
+        : inputText;
       effectiveAgentType = requestedTier || 'standard';
       effectivePlanMode = planMode;
       effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    }
+
+    if (supplementalContext.length > 0) {
+      contextWindow.addMessage(
+        'system',
+        `Control-plane supplemental context:\n${supplementalContext}`
+      );
     }
 
     if (this.isGraphDReady()) {
@@ -1599,11 +1762,11 @@ export class AgentHarness {
     }
 
     const userMessagePersisted = clearContextForHandoff ? false : this.persistUserMessage(sessionKey, requestId, inputText);
-    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
-    // NOTE: Agent events (agent_message, tool_call, etc.) are now forwarded directly
-    // from EventBus to BusServer via BusServer's direct subscription. The eventQueue
-    // is only used for harness-level events (status, response, error, user_prompt).
+    // NOTE: Agent events (agent_message, tool_call, etc.) are forwarded directly
+    // from EventBus to BusServer via BusServer's direct subscription. Harness-level
+    // events (status, response, error, user_prompt) are pushed to eventQueue AND
+    // emitted on EventBus so the browser SSE stream receives them too.
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
@@ -1617,13 +1780,16 @@ export class AgentHarness {
           };
           const hookResult = await this.hookExecutor.execute('UserPromptSubmit', hookContext);
           if (hookResult.action === 'block') {
-            eventQueue.push(createErrorEvent(hookResult.message || 'Request blocked by hook', false));
+            const blockMsg = hookResult.message || 'Request blocked by hook';
+            eventQueue.push(createErrorEvent(blockMsg, false));
             eventQueue.push(createStatusEvent('idle'));
+            emit(createEvent('harness_error', { message: blockMsg, fatal: false }));
+            emit(createEvent('harness_status', { state: 'idle' }));
             return {
               requestId,
               sessionKey,
               success: false,
-              finalText: hookResult.message || 'Request blocked by hook',
+              finalText: blockMsg,
               errorMessage: hookResult.message,
               paused: false,
               toolsUsed: [],
@@ -1693,6 +1859,13 @@ export class AgentHarness {
                 result.metadata
               )
             );
+            emit(createEvent('harness_response', {
+              success: true,
+              content: result.finalText,
+              toolsUsed: result.toolsUsed,
+              durationMs: result.durationMs,
+              metadata: result.metadata,
+            }));
           }
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
@@ -1703,6 +1876,14 @@ export class AgentHarness {
             result.userPrompt.questionType,
             result.userPrompt.questions
           ));
+          emit(createEvent('harness_user_prompt', {
+            question: result.userPrompt.question,
+            options: result.userPrompt.options,
+            context: result.userPrompt.context,
+            multiSelect: result.userPrompt.multiSelect,
+            questionType: result.userPrompt.questionType,
+            questions: result.userPrompt.questions,
+          }));
         } else {
           // Execution completed (success or failure) - emit response event
           eventQueue.push(
@@ -1716,9 +1897,18 @@ export class AgentHarness {
               result.metadata
             )
           );
+          emit(createEvent('harness_response', {
+            success: result.success,
+            content: result.finalText,
+            toolsUsed: result.toolsUsed,
+            durationMs: result.durationMs,
+            error: result.errorMessage,
+            metadata: result.metadata,
+          }));
         }
 
         eventQueue.push(createStatusEvent('idle'));
+        emit(createEvent('harness_status', { state: 'idle' }));
 
         this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs, userMessagePersisted);
 
@@ -1739,6 +1929,8 @@ export class AgentHarness {
 
           eventQueue.push(createErrorEvent(recoverable.userMessage, false)); // recoverable, not fatal
           eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+          emit(createEvent('harness_error', { message: recoverable.userMessage, fatal: false }));
+          emit(createEvent('harness_status', { state: 'idle' }));
 
           return {
             requestId,
@@ -1766,6 +1958,8 @@ export class AgentHarness {
 
         eventQueue.push(createErrorEvent(errorMessage, false));
         eventQueue.push(createStatusEvent('error', errorMessage));
+        emit(createEvent('harness_error', { message: errorMessage, fatal: false }));
+        emit(createEvent('harness_status', { state: 'error', message: errorMessage }));
 
         return {
           requestId,
@@ -1794,7 +1988,7 @@ export class AgentHarness {
             event: 'Stop',
             sessionKey,
             requestId,
-            workingDir,
+            workingDir: effectiveWorkingDir,
           };
           await this.hookExecutor.execute('Stop', hookContext).catch((err) => {
             this.logger.warning('Stop hook failed', { error: String(err) });
@@ -1887,9 +2081,13 @@ export class AgentHarness {
   /**
    * Create AgentHooks that handle permission checking and delegate to HookExecutor.
    */
-  private createAgentHooks(sessionKey: string, requestId: string, emit?: (event: AgentEvent) => void): AgentHooks {
+  private createAgentHooks(
+    sessionKey: string,
+    requestId: string,
+    workingDir: string,
+    emit?: (event: AgentEvent) => void
+  ): AgentHooks {
     const executor = this.hookExecutor;
-    const workingDir = this.config.tools.workingDir;
     const logger = this.logger;
     const egHooks = this.entityGraph?.getHooks() ?? null;
     const PERMISSION_REQUEST_TIMEOUT_MS = 60_000;
@@ -1900,6 +2098,17 @@ export class AgentHarness {
 
     return {
       preToolUse: async (toolName: string, args: Record<string, unknown>): Promise<ToolHookResult> => {
+        if (toolName.toLowerCase() === 'websearch') {
+          const decision = permissionChecker.checkWebSearch();
+          if (decision.granted === false) {
+            logger.info('Permission denied', { tool: 'WebSearch', reason: decision.reason });
+            return {
+              action: 'block',
+              message: `Permission denied: ${decision.reason}`,
+            };
+          }
+        }
+
         // Check permissions for Bash, Write, Edit tools
         if (isPermissionedTool(toolName)) {
           const tool = normalizeToolName(toolName);
@@ -2026,7 +2235,21 @@ export class AgentHarness {
         if (toolName === 'Bash' && toolResult.status === 'success') {
           const command = args.command as string | undefined;
           if (command && isGitCommitCommand(command)) {
-            const sha = extractCommitSha(toolResult.output);
+            let sha = extractCommitSha(toolResult.output);
+            if (!sha) {
+              try {
+                const head = execSync('git rev-parse HEAD', {
+                  cwd: workingDir,
+                  encoding: 'utf-8',
+                  stdio: ['pipe', 'pipe', 'pipe'],
+                }).trim();
+                if (head) {
+                  sha = head;
+                }
+              } catch {
+                // Keep best-effort behavior: no git_commit event if HEAD cannot be resolved.
+              }
+            }
             if (sha) {
               const range = resolveGitCommitRange(workingDir, sha);
               // Emit git_commit event via EventBus
@@ -2138,7 +2361,8 @@ export class AgentHarness {
     store?: SessionStore,
     hookRegistry?: HookRegistry
   ): Promise<AgentRunResult> {
-    const hooks = this.createAgentHooks(context.sessionKey, requestId, emit);
+    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    const hooks = this.createAgentHooks(context.sessionKey, requestId, effectiveWorkingDir, emit);
 
     // Build plan mode options if enabled
     const planModeOptions = planMode ? {
@@ -2171,8 +2395,7 @@ export class AgentHarness {
     const sessionState = this.getSessionState(sessionKey);
     let lastWatcherIteration = 0;
     const minWatcherGap = DEFAULT_ORCHESTRATOR_CONFIG.minWatcherIterationGap;
-    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-
+    const watcherCompactTrigger = DEFAULT_ORCHESTRATOR_CONFIG.compactTriggerPercent;
     const asyncEnabledForRun = (store?.isAsyncModeEnabled() ?? false) || !!hookRegistry;
 
     // Only create/use watcher hooks when async mode is enabled for this session/run
@@ -2222,15 +2445,23 @@ export class AgentHarness {
         const hasDecisions = engine.hasDecisions(sessionKey);
 
         // Summarize (compact + epistemic ledger) when context is high and decisions exist
-        if (pct > 0.70 && hasDecisions) {
-          this.logger.info('Watcher: summarizing (context high + decisions in play)', { pct, sessionKey });
+        if (pct >= watcherCompactTrigger && hasDecisions) {
+          this.logger.info('Watcher: summarizing (context high + decisions in play)', {
+            pct,
+            sessionKey,
+            watcherCompactTrigger,
+          });
           this.watcherSummarize(sessionKey);
           return;
         }
 
         // Plain compact when context is high but no decisions to ledger
-        if (pct > 0.75) {
-          this.logger.info('Watcher: triggering compact (context > 75%)', { pct, sessionKey });
+        if (pct >= watcherCompactTrigger) {
+          this.logger.info('Watcher: triggering compact', {
+            pct,
+            sessionKey,
+            watcherCompactTrigger,
+          });
           this.watcherSummarize(sessionKey);
           return;
         }
@@ -2421,7 +2652,8 @@ export class AgentHarness {
     objective: string,
     sessionKey: string,
     trigger?: WatcherTrigger,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    workingDir?: string
   ): Promise<WatcherAction> {
     // Get the watcher agent config from registry
     if (!this.agentRegistry.has('watcher')) {
@@ -2490,16 +2722,20 @@ export class AgentHarness {
 
     // Use session-scoped watcher context (persists across invocations)
     // This prevents re-reading the same files every time
+    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const sessionState = this.sessions.get(sessionKey);
     let context = sessionState?.watcherContext;
     if (!context) {
-      context = new ContextWindow(`watcher:${sessionKey}`, 200_000);
+      const dateStr = new Date().toISOString().split('T')[0];
+      const watcherContextPath = path.join(
+        effectiveWorkingDir, '.haiku', 'sessions', dateStr, sessionKey, 'watcher-context.md'
+      );
+      context = new ContextWindow(`watcher:${sessionKey}`, 200_000, watcherContextPath);
       if (sessionState) {
         sessionState.watcherContext = context;
       }
-      this.logger.debug('Created new watcher context', { sessionKey });
+      this.logger.debug('Created new watcher context', { sessionKey, path: watcherContextPath });
     }
-    const workingDir = this.config.tools.workingDir;
 
     const workItem = createWorkItem({
       goal: 'watcher_evaluation',
@@ -2516,7 +2752,7 @@ export class AgentHarness {
       if (signal?.aborted) {
         return { watcherAction: 'allow', reason: 'Watcher aborted' };
       }
-      const result = await agent.run({ globalContext: context, workItem, cwd: workingDir, signal });
+      const result = await agent.run({ globalContext: context, workItem, cwd: effectiveWorkingDir, signal });
       let structured = result.structuredOutput as WatcherActionOutput | undefined;
 
       if (!structured && result.response) {
@@ -2642,6 +2878,18 @@ export class AgentHarness {
       }
     };
 
+    if (sessionState.internalHookUnregisters.length > 0) {
+      this.cleanupSessionInternalHooks(sessionKey, sessionState);
+    }
+
+    const registerSessionInternalHook = (
+      event: InternalHookEvent['type'],
+      hook: (event: InternalHookEvent, ctx: InternalHookContext) => Promise<void>
+    ): void => {
+      const unregister = registerHook(event, hook);
+      sessionState.internalHookUnregisters.push(unregister);
+    };
+
     // Helper to get or create workitem log for this session
     const getOrCreateWorkItemLog = async (
       workId: string,
@@ -2695,7 +2943,7 @@ export class AgentHarness {
 
     // Register auto-logging hooks for workitem activity
     // NOTE: Hooks are global, so we filter by sessionKey to only process this session's events
-    registerHook('workitem_created', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('workitem_created', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'workitem_created') return;
       if (ctx.sessionKey !== sessionKey) return;
 
@@ -2739,7 +2987,7 @@ export class AgentHarness {
         }
       }
     });
-    registerHook('turn_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('turn_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'turn_completed') return;
       if (ctx.sessionKey !== sessionKey) return; // Filter by session
 
@@ -2771,7 +3019,7 @@ export class AgentHarness {
 
     // Log actual agent messages (real content + reasoning for audit trail)
     // NOTE: Uses getOrCreateWorkItemLog because agent_message fires BEFORE turn_completed
-    registerHook('agent_message', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('agent_message', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'agent_message') return;
       if (ctx.sessionKey !== sessionKey) return;
 
@@ -2788,7 +3036,7 @@ export class AgentHarness {
 
     // Log individual tool calls with full details
     // NOTE: Uses getOrCreateWorkItemLog because tool_call_completed can fire before turn_completed
-    registerHook('tool_call_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('tool_call_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'tool_call_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
 
@@ -2805,7 +3053,7 @@ export class AgentHarness {
     });
 
     // Log memory injections with full content for observability
-    registerHook('memory_injected', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('memory_injected', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'memory_injected') return;
       if (ctx.sessionKey !== sessionKey) return;
 
@@ -2848,13 +3096,13 @@ export class AgentHarness {
     });
 
     // Legacy batch hook - kept for backwards compatibility but tool_call_completed is primary
-    registerHook('tool_batch_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('tool_batch_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'tool_batch_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
       // tool_call_completed handles individual calls now, this is just for summary events
     });
 
-    registerHook('files_modified', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('files_modified', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'files_modified') return;
       if (ctx.sessionKey !== sessionKey) return; // Filter by session
 
@@ -2879,7 +3127,7 @@ export class AgentHarness {
       }
     });
 
-    registerHook('agent_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('agent_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'agent_completed') return;
       if (ctx.sessionKey !== sessionKey) return; // Filter by session
 
@@ -2911,7 +3159,7 @@ export class AgentHarness {
       }
     });
 
-    registerHook('watcher_agent_stopped', async (event: InternalHookEvent, ctx: InternalHookContext) => {
+    registerSessionInternalHook('watcher_agent_stopped', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'watcher_agent_stopped') return;
       if (ctx.sessionKey !== sessionKey) return;
 
@@ -2975,7 +3223,7 @@ export class AgentHarness {
       },
       workingDir: effectiveWatcherDir,
       runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) =>
-        this.runWatcherAgent(objective, sessionKey, trigger, signal),
+        this.runWatcherAgent(objective, sessionKey, trigger, signal, workingDir),
       onDecision: (entry) => {
         // Increment decision counter for memory-efficient tracking
         const engine = this.getOrCreateWatcherEngine(sessionKey);
@@ -3334,6 +3582,7 @@ export class AgentHarness {
 
     // Persist and mark all sessions inactive BEFORE stopping GraphD
     for (const [sessionKey, state] of this.sessions.entries()) {
+      this.cleanupSessionInternalHooks(sessionKey, state);
       try {
         state.store.persistContext();
         if (this.isGraphDReady()) {

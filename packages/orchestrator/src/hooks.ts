@@ -74,10 +74,24 @@ const registry = new Map<HookEventType, HookEntry[]>();
  * Register a hook for an event type.
  * Multiple hooks per event are supported; all execute in parallel.
  */
-export function registerHook(event: HookEventType, hook: HookEntry): void {
+export function registerHook(event: HookEventType, hook: HookEntry): () => void {
   const hooks = registry.get(event) ?? [];
   hooks.push(hook);
   registry.set(event, hooks);
+
+  // Return disposer to prevent long-lived processes from leaking hook handlers.
+  return () => {
+    const existing = registry.get(event);
+    if (!existing || existing.length === 0) return;
+    const idx = existing.indexOf(hook);
+    if (idx === -1) return;
+    existing.splice(idx, 1);
+    if (existing.length === 0) {
+      registry.delete(event);
+    } else {
+      registry.set(event, existing);
+    }
+  };
 }
 
 /**
