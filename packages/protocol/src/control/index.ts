@@ -6,3 +6,4 @@
 
 export * from './decisions.js';
 export * from './gates.js';
+export * from './watcher.js';

@@ -1,35 +1,33 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { useCockpit, type FocusTarget } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore, type FocusTarget } from '@/hooks/use-cockpit-store';
 import { SessionCard } from './SessionCard';
 import { CommitList } from './CommitList';
 import { PRList } from './PRList';
 
 function useStableSelect(type: FocusTarget['type']) {
-  const { set } = useCockpit();
+  const store = useCockpitStore();
   const cacheRef = useRef(new Map<string, () => void>());
 
   return useCallback((id: string) => {
     let fn = cacheRef.current.get(id);
     if (!fn) {
-      fn = () => set({ focusTarget: { type, id } });
+      fn = () => store.set({ focusTarget: { type, id } });
       cacheRef.current.set(id, fn);
     }
     return fn;
-  }, [set, type]);
+  }, [store, type]);
 }
 
 export function RightPanel() {
-  const { state, handleResolveEscalation } = useCockpit();
-  const {
-    runningSessions,
-    readySessions,
-    doneSessions,
-    escalations,
-    focusTarget,
-    resolvingEscalationId,
-    sessionFilterQuery,
-    highlightedSessionIdx,
-  } = state;
+  const runningSessions = useCockpit(s => s.runningSessions);
+  const readySessions = useCockpit(s => s.readySessions);
+  const doneSessions = useCockpit(s => s.doneSessions);
+  const escalations = useCockpit(s => s.escalations);
+  const focusTarget = useCockpit(s => s.focusTarget);
+  const resolvingEscalationId = useCockpit(s => s.resolvingEscalationId);
+  const sessionFilterQuery = useCockpit(s => s.sessionFilterQuery);
+  const highlightedSessionIdx = useCockpit(s => s.highlightedSessionIdx);
+  const store = useCockpitStore();
   const getSessionSelect = useStableSelect('session');
   const getEscalationSelect = useStableSelect('escalation');
   const highlightRef = useRef<HTMLDivElement>(null);
@@ -162,7 +160,7 @@ export function RightPanel() {
                   </div>
                 </button>
                 <button
-                  onClick={() => void handleResolveEscalation(row.escalationId)}
+                  onClick={() => void store.handleResolveEscalation(row.escalationId)}
                   disabled={resolvingEscalationId === row.escalationId}
                   className="mt-1 px-1.5 py-0.5 text-[11px] rounded bg-[var(--success)]/20 text-[var(--success)] hover:bg-[var(--success)]/30 disabled:opacity-60"
                 >

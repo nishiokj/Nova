@@ -1,9 +1,11 @@
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import { formatRelativeFromIso } from '@/lib/format';
 
 export function TestsTab() {
-  const { state, handleSelectTestReport } = useCockpit();
-  const { testReports, selectedTestReportId, selectedTestReport } = state;
+  const testReports = useCockpit(s => s.testReports);
+  const selectedTestReportId = useCockpit(s => s.selectedTestReportId);
+  const selectedTestReport = useCockpit(s => s.selectedTestReport);
+  const store = useCockpitStore();
 
   if (testReports.length === 0) {
     return (
@@ -21,7 +23,7 @@ export function TestsTab() {
           {testReports.map((report) => (
             <button
               key={report.id}
-              onClick={() => void handleSelectTestReport(report.id)}
+              onClick={() => void store.handleSelectTestReport(report.id)}
               className={`w-full px-2 py-1 text-left border-b border-[var(--border-subtle)] last:border-b-0 hover:bg-[var(--bg-hover)] ${
                 selectedTestReportId === report.id ? 'bg-[var(--success)]/10' : ''
               }`}

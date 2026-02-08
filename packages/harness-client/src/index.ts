@@ -454,6 +454,13 @@ export class HarnessClient extends EventEmitter {
     return this.sendAuthCommand('watcher_summarize', {});
   }
 
+  async request<T extends Record<string, unknown>>(
+    type: BridgeCommandType,
+    data: Record<string, unknown> = {}
+  ): Promise<T> {
+    return this.sendAuthCommand<T>(type, data);
+  }
+
   // =========================================================================
   // Private Methods
   // =========================================================================

@@ -1,22 +1,25 @@
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import type { RepoLensMatch } from '@/lib/api';
 
 export function GrepTab() {
-  const { state, set, handleRunGrepSearch, handleSelectDiffFile } = useCockpit();
-  const { lensQuery, lensResults, lensLoading, focusData } = state;
+  const lensQuery = useCockpit(s => s.lensQuery);
+  const lensResults = useCockpit(s => s.lensResults);
+  const lensLoading = useCockpit(s => s.lensLoading);
+  const focusData = useCockpit(s => s.focusData);
+  const store = useCockpitStore();
 
   return (
     <div className="space-y-3 text-xs">
       <div className="flex items-center gap-2">
         <input
           value={lensQuery}
-          onChange={(e) => set({ lensQuery: e.target.value })}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleRunGrepSearch(); } }}
-          placeholder="grep repo..."
+          onChange={(e) => store.set({ lensQuery: e.target.value })}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void store.handleRunGrepSearch(); } }}
+          placeholder="grep query..."
           className="flex-1 bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[var(--text-secondary)]"
         />
         <button
-          onClick={() => void handleRunGrepSearch()}
+          onClick={() => void store.handleRunGrepSearch()}
           disabled={!lensQuery.trim() || lensLoading}
           className="px-2 py-1 rounded bg-[var(--accent-cyan)]/20 text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/30 disabled:opacity-60"
         >
@@ -48,9 +51,9 @@ export function GrepTab() {
                   <button
                     key={`${label}-${match.kind}-${match.path}-${match.line}-${idx}`}
                     onClick={() => {
-                      set({ focusTab: 'diff' });
+                      store.set({ focusTab: 'diff' });
                       if (focusData?.sessionKey) {
-                        void handleSelectDiffFile(match.path);
+                        void store.handleSelectDiffFile(match.path);
                       }
                     }}
                     className="w-full text-left px-2 py-1 border-b border-[var(--border-subtle)] last:border-b-0 hover:bg-[var(--bg-hover)]"

@@ -1,11 +1,21 @@
-import { useEffect, useImperativeHandle, useRef, forwardRef } from 'react';
+import { useEffect, useImperativeHandle, useMemo, useRef, forwardRef } from 'react';
 import { EditorView, keymap, placeholder as cmPlaceholder } from '@codemirror/view';
 import { Compartment, EditorState } from '@codemirror/state';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
 import { defaultKeymap, indentWithTab, history, historyKeymap } from '@codemirror/commands';
-import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
+import {
+  autocompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  completeAnyWord,
+  type Completion,
+  type CompletionContext,
+} from '@codemirror/autocomplete';
 import { markdownDecorations, cockpitEditorTheme } from './markdown-extensions';
+import { detectAtMention, rankPathSuggestions } from '@/lib/autocomplete';
+import { ghostCompletion } from '@/lib/ghost-completion';
+import { streamCompletion } from '@/lib/api/autocomplete';
 
 export interface EditorHandle {
   focus(): void;
@@ -19,6 +29,66 @@ interface MarkdownEditorProps {
   onChange: (content: string) => void;
   readOnly?: boolean;
   placeholder?: string;
+  fileSuggestions?: string[];
+}
+
+const STATIC_MARKDOWN_COMPLETIONS: Completion[] = [
+  { label: 'title', type: 'property' },
+  { label: 'summary', type: 'property' },
+  { label: 'context', type: 'property' },
+  { label: 'steps', type: 'property' },
+  { label: 'notes', type: 'property' },
+  { label: 'sessionKey', type: 'property' },
+  { label: 'template', type: 'property' },
+  { label: 'templateId', type: 'property' },
+  { label: 'specs', type: 'property' },
+  { label: 'workflow', type: 'keyword' },
+  { label: 'executable', type: 'keyword' },
+  { label: 'issue', type: 'keyword' },
+  { label: 'checklist', type: 'keyword' },
+  { label: 'acceptance-criteria', type: 'keyword' },
+];
+
+function buildAutocompleteSource(fileSuggestions: string[]) {
+  const mentionPool = Array.from(new Set(fileSuggestions.filter((path) => path && path.trim().length > 0)));
+  return (context: CompletionContext) => {
+    const line = context.state.doc.lineAt(context.pos);
+    const mentionInLine = detectAtMention(line.text, context.pos - line.from);
+    if (mentionInLine) {
+      const options = rankPathSuggestions(mentionPool, mentionInLine.query, 12).map((path) => ({
+        label: `@${path}`,
+        type: 'variable',
+        apply: `@${path}`,
+      }));
+      if (options.length === 0) return null;
+      return {
+        from: line.from + mentionInLine.from,
+        to: line.from + mentionInLine.to,
+        options,
+        validFor: /@[A-Za-z0-9_./-]*/,
+      };
+    }
+
+    const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_-]*/);
+    if (!word) {
+      if (!context.explicit) return null;
+      return { from: context.pos, options: STATIC_MARKDOWN_COMPLETIONS };
+    }
+    if (word.from === word.to && !context.explicit) return null;
+
+    const query = word.text.toLowerCase();
+    const options = STATIC_MARKDOWN_COMPLETIONS
+      .filter((item) => query.length === 0 || item.label.toLowerCase().includes(query))
+      .slice(0, 12);
+
+    if (options.length === 0 && !context.explicit) return null;
+    return {
+      from: word.from,
+      to: context.pos,
+      options: options.length > 0 ? options : STATIC_MARKDOWN_COMPLETIONS.slice(0, 8),
+      validFor: /[A-Za-z0-9_-]*/,
+    };
+  };
 }
 
 /** Keybindings that should bubble up to the window-level cockpit handler. */
@@ -35,13 +105,18 @@ function isCockpitGlobal(e: KeyboardEvent): boolean {
   return false;
 }
 
-export const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
-  function MarkdownEditor({ content, onChange, readOnly, placeholder }, ref) {
+const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
+  function MarkdownEditor({ content, onChange, readOnly, placeholder, fileSuggestions = [] }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
     const onChangeRef = useRef(onChange);
     onChangeRef.current = onChange;
     const readOnlyCompartment = useRef(new Compartment());
+    const autocompleteCompartment = useRef(new Compartment());
+    const completionSource = useMemo(
+      () => buildAutocompleteSource(fileSuggestions),
+      [fileSuggestions],
+    );
 
     // Expose imperative handle
     useImperativeHandle(ref, () => ({
@@ -84,6 +159,10 @@ export const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
         doc: content,
         extensions: [
           passthroughKeymap,
+          ghostCompletion({
+            fetchCompletion: (textBefore, textAfter, signal, onToken) =>
+              streamCompletion({ textBefore, textAfter }, signal, onToken),
+          }),
           keymap.of([
             ...closeBracketsKeymap,
             ...historyKeymap,
@@ -92,6 +171,10 @@ export const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
           ]),
           history(),
           closeBrackets(),
+          autocompleteCompartment.current.of(autocompletion({
+            activateOnTyping: true,
+            override: [completionSource, completeAnyWord],
+          })),
           markdown({ base: markdownLanguage, codeLanguages: languages }),
           markdownDecorations,
           cockpitEditorTheme,
@@ -135,6 +218,21 @@ export const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
       });
     }, [readOnly]);
 
+    // Sync autocomplete source.
+    useEffect(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({
+        effects: autocompleteCompartment.current.reconfigure(autocompletion({
+          activateOnTyping: true,
+          override: [completionSource, completeAnyWord],
+        })),
+      });
+    }, [completionSource]);
+
     return <div ref={containerRef} className="h-full min-h-0 overflow-hidden" />;
   },
 );
+
+export { MarkdownEditor };
+export default MarkdownEditor;

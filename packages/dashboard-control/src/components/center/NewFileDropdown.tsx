@@ -1,6 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
-import { gatherMarkdownFolders } from '@/lib/markdown';
+import { gatherMarkdownFolders, normalizeWorkspacePathForClient } from '@/lib/markdown';
+import {
+  NEW_PROJECT_SCOPE_VALUE,
+  buildWorkspaceScopeOptions,
+  getSelectedWorkspaceScopeId,
+  getWorkspaceScopeOptionLabel,
+} from '@/lib/workspace-scope';
 
 interface FolderOption {
   path: string;
@@ -59,36 +65,48 @@ function buildFolderOptions(workspace: MarkdownWorkspace): FolderOption[] {
 export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace }) {
   const ref = useRef<HTMLDivElement>(null);
   const filenameRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [filename, setFilename] = useState('untitled.md');
-  const [isNavigatingFolders, setIsNavigatingFolders] = useState(false);
+  const [folderPath, setFolderPath] = useState('');
   const intent = workspace.state.newFileIntent ?? 'create';
   const options = useMemo(
     () => buildFolderOptions(workspace),
     [workspace.state.tree, workspace.state.suggestedFolders],
   );
   const safeIndex = Math.min(Math.max(activeIndex, 0), Math.max(options.length - 1, 0));
+  const folderInputListId = 'new-file-folder-options';
   const scopeLabel = workspace.state.scopeMode === 'project'
     ? 'project'
     : workspace.state.scopeMode === 'session'
       ? 'session'
-      : 'notes';
+      : '.cockpit';
+  const scopeOptions = useMemo(() => buildWorkspaceScopeOptions({
+    filesystemRoots: workspace.state.filesystemRoots,
+    rootDir: workspace.state.rootDir,
+    scopeMode: workspace.state.scopeMode,
+    scopeProjectPath: workspace.state.scopeProjectPath,
+  }), [
+    workspace.state.filesystemRoots,
+    workspace.state.rootDir,
+    workspace.state.scopeMode,
+    workspace.state.scopeProjectPath,
+  ]);
+  const selectedScopeId = useMemo(() => getSelectedWorkspaceScopeId({
+    options: scopeOptions,
+    scopeMode: workspace.state.scopeMode,
+    scopeProjectPath: workspace.state.scopeProjectPath,
+  }), [scopeOptions, workspace.state.scopeMode, workspace.state.scopeProjectPath]);
 
   useEffect(() => {
     setFilename('untitled.md');
-    setIsNavigatingFolders(false);
-  }, [workspace.state.newFileDropdownOpen, intent]);
-
-  useEffect(() => {
     const defaultFolder = workspace.state.newFileDefaultFolder;
-    if (typeof defaultFolder !== 'string') {
-      setActiveIndex(0);
-      return;
-    }
-    const idx = options.findIndex((opt) => opt.path === defaultFolder);
+    const initialFolder = typeof defaultFolder === 'string' ? defaultFolder : '';
+    setFolderPath(initialFolder);
+    const idx = options.findIndex((opt) => opt.path === initialFolder);
     setActiveIndex(idx >= 0 ? idx : 0);
-  }, [workspace.state.newFileDefaultFolder, options]);
+  }, [workspace.state.newFileDropdownOpen, intent]);
 
   useLayoutEffect(() => {
     if (!workspace.state.newFileDropdownOpen) return;
@@ -131,25 +149,27 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
 
   useEffect(() => {
     const target = optionRefs.current[safeIndex];
-    if (target && isNavigatingFolders) {
+    if (target) {
       target.scrollIntoView({ block: 'nearest' });
     }
-  }, [safeIndex, isNavigatingFolders]);
+  }, [safeIndex]);
 
-  const submit = (path?: string) => {
-    if (path) {
-      void workspace.createFileInFolder(path, { filename });
+  const submit = (pathOverride?: string) => {
+    const resolvedFolderInput = typeof pathOverride === 'string' ? pathOverride : folderPath;
+    const normalizedFolder = normalizeWorkspacePathForClient(resolvedFolderInput, true);
+    if (normalizedFolder === null) {
+      workspace.set({ status: 'Invalid folder path' });
       return;
     }
-    if (options.length === 0) return;
-    const option = options[safeIndex];
-    if (!option) return;
-    void workspace.createFileInFolder(option.path, { filename });
+    void workspace.createFileInFolder(normalizedFolder, { filename });
   };
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     // Stop all keyboard events in the dropdown from propagating to global handler
     event.stopPropagation();
+    const target = event.target as EventTarget | null;
+    const targetIsSelect = target instanceof HTMLSelectElement;
+    const targetIsButton = target instanceof HTMLButtonElement;
 
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -157,54 +177,42 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
       return;
     }
 
-    // Tab to switch between filename input and folder list
-    if (event.key === 'Tab') {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') {
       event.preventDefault();
-      setIsNavigatingFolders(!isNavigatingFolders);
-      if (!isNavigatingFolders) {
-        // Moving to folder list - focus first option
-        requestAnimationFrame(() => {
-          optionRefs.current[0]?.focus();
-        });
-      } else {
-        // Moving back to filename input
-        requestAnimationFrame(() => {
-          filenameRef.current?.focus();
-          filenameRef.current?.select();
-        });
-      }
+      folderRef.current?.focus();
+      folderRef.current?.select();
       return;
     }
 
-    if (event.key === 'ArrowDown') {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
       event.preventDefault();
-      if (options.length === 0) return;
-      if (!isNavigatingFolders) {
-        setIsNavigatingFolders(true);
-      }
-      setActiveIndex((prev) => (prev + 1) % options.length);
+      filenameRef.current?.focus();
+      filenameRef.current?.select();
       return;
     }
 
-    if (event.key === 'ArrowUp') {
+    // Alt+Up / Alt+Down quickly selects folder candidates without leaving text inputs.
+    if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && event.altKey && !targetIsSelect) {
       event.preventDefault();
       if (options.length === 0) return;
-      if (!isNavigatingFolders) {
-        setIsNavigatingFolders(true);
-      }
-      setActiveIndex((prev) => (prev - 1 + options.length) % options.length);
+      setActiveIndex((prev) => {
+        const next = event.key === 'ArrowDown'
+          ? (prev + 1) % options.length
+          : (prev - 1 + options.length) % options.length;
+        const option = options[next];
+        if (option) setFolderPath(option.path);
+        return next;
+      });
       return;
     }
 
     if (event.key === 'Enter') {
+      if (targetIsSelect || targetIsButton) {
+        return;
+      }
       event.preventDefault();
       submit();
       return;
-    }
-
-    // When typing in filename input, keep focus there
-    if (document.activeElement === filenameRef.current) {
-      setIsNavigatingFolders(false);
     }
   };
 
@@ -217,6 +225,40 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
     >
       <div className="px-2.5 py-1.5 text-[10px] text-[var(--text-muted)] border-b border-[var(--border-subtle)]">
         <div>{intent === 'save' ? 'Save markdown in...' : 'New markdown in...'}</div>
+        <div className="mt-1">
+          <select
+            value={selectedScopeId}
+            onChange={(event) => {
+              event.stopPropagation();
+              if (event.target.value === NEW_PROJECT_SCOPE_VALUE) {
+                const entered = window.prompt(
+                  'Add project workspace folder.\nUse absolute path or path relative to the current cwd.',
+                  workspace.state.filesystemCwd ?? ''
+                );
+                if (!entered || !entered.trim()) return;
+                void workspace.setScope({ mode: 'project', projectPath: entered.trim() });
+                return;
+              }
+              const selected = scopeOptions.find((root) => root.id === event.target.value);
+              if (!selected) return;
+              setFolderPath('');
+              setActiveIndex(0);
+              if (selected.kind === 'notes') {
+                void workspace.setScope({ mode: 'global' });
+                return;
+              }
+              void workspace.setScope({ mode: 'project', projectPath: selected.path });
+            }}
+            className="w-full bg-[var(--bg-surface)] border border-[var(--border-default)] rounded px-1.5 py-1 text-[10px] text-[var(--text-secondary)]"
+          >
+            {scopeOptions.map((root) => (
+              <option key={root.id} value={root.id}>
+                {getWorkspaceScopeOptionLabel(root)}
+              </option>
+            ))}
+            <option value={NEW_PROJECT_SCOPE_VALUE}>+ Add project path…</option>
+          </select>
+        </div>
         <div className="font-mono truncate" title={workspace.state.rootDir}>
           {scopeLabel} root: {workspace.state.rootDir}
         </div>
@@ -231,13 +273,37 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
           value={filename}
           onChange={(event) => {
             setFilename(event.target.value);
-            setIsNavigatingFolders(false);
           }}
-          onFocus={() => setIsNavigatingFolders(false)}
           className="w-full rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent-cyan)]"
           spellCheck={false}
           placeholder="untitled.md"
         />
+      </div>
+      <div className="px-2.5 py-2 border-b border-[var(--border-subtle)]">
+        <label className="block text-[10px] text-[var(--text-muted)] mb-1">
+          Folder (relative to workspace root)
+        </label>
+        <input
+          ref={folderRef}
+          value={folderPath}
+          onChange={(event) => {
+            const next = event.target.value;
+            setFolderPath(next);
+            const normalized = normalizeWorkspacePathForClient(next, true);
+            if (normalized === null) return;
+            const idx = options.findIndex((opt) => opt.path === normalized);
+            if (idx >= 0) setActiveIndex(idx);
+          }}
+          list={folderInputListId}
+          className="w-full rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent-cyan)]"
+          spellCheck={false}
+          placeholder=".cockpit root"
+        />
+        <datalist id={folderInputListId}>
+          {options.map((opt) => (
+            <option key={opt.path || '__root'} value={opt.path} />
+          ))}
+        </datalist>
       </div>
       <div className="max-h-48 overflow-y-auto py-0.5" tabIndex={-1}>
         {options.length === 0 ? (
@@ -245,16 +311,18 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
         ) : (
           options.map((opt, index) => (
             <button
-              key={opt.path}
+              key={opt.path || '__root'}
               ref={(node) => { optionRefs.current[index] = node; }}
               onMouseEnter={() => {
                 setActiveIndex(index);
-                setIsNavigatingFolders(true);
               }}
-              onClick={() => submit(opt.path)}
+              onClick={() => {
+                setFolderPath(opt.path);
+                submit(opt.path);
+              }}
               onFocus={() => {
                 setActiveIndex(index);
-                setIsNavigatingFolders(true);
+                setFolderPath(opt.path);
               }}
               className={`w-full text-left px-3 py-1 text-[11px] text-[var(--text-primary)] flex items-center gap-1 ${
                 index === safeIndex ? 'bg-[var(--accent-cyan)]/20' : 'hover:bg-[var(--bg-hover)]'
@@ -269,7 +337,7 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
         )}
       </div>
       <div className="px-2.5 py-1 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)]">
-        {'\u2191/\u2193'} select · Tab toggle · Enter confirm · Esc cancel
+        Enter save · Tab next field · Ctrl/Cmd+L folder · Ctrl/Cmd+N name · Alt+↑/↓ folders · Esc cancel
       </div>
     </div>
   );

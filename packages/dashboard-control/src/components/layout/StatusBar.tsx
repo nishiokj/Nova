@@ -1,24 +1,25 @@
 import { useEffect, useState } from 'react';
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 
 export function StatusBar() {
-  const { state, set } = useCockpit();
+  const error = useCockpit(s => s.error);
+  const store = useCockpitStore();
   const [visible, setVisible] = useState(false);
   const [displayedError, setDisplayedError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (state.error) {
-      setDisplayedError(state.error);
+    if (error) {
+      setDisplayedError(error);
       setVisible(true);
       const timer = setTimeout(() => {
         setVisible(false);
-        setTimeout(() => set({ error: null }), 300);
+        setTimeout(() => store.set({ error: null }), 300);
       }, 8000);
       return () => clearTimeout(timer);
     } else {
       setVisible(false);
     }
-  }, [state.error, set]);
+  }, [error, store]);
 
   if (!displayedError) return null;
 
@@ -31,7 +32,7 @@ export function StatusBar() {
           <div className="text-[11px] text-[var(--text-secondary)] break-words">{displayedError}</div>
         </div>
         <button
-          onClick={() => { setVisible(false); setTimeout(() => set({ error: null }), 300); }}
+          onClick={() => { setVisible(false); setTimeout(() => store.set({ error: null }), 300); }}
           className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-xs shrink-0"
         >
           ×

@@ -72,6 +72,7 @@ interface HarnessLike {
     sessionKey: string;
     workingDir: string;
     context?: string;
+    handoffSpec?: Record<string, unknown>;
     planMode?: boolean;
     hookRegistry?: HookRegistry;
   }): AgentRunHandle;
@@ -88,12 +89,53 @@ interface HarnessLike {
   getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
   isSessionPaused?(sessionKey: string): boolean;
   getAsyncModeStatus?(): { ok: boolean; issues: string[] };
-  ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): void;
+  ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): {
+    getPermissionState?: () => unknown;
+    updatePermissionOptions?: (input: {
+      dangerousMode?: boolean;
+      allowOutsideRoot?: boolean;
+      webSearchEnabled?: boolean;
+      writesNoDeletes?: boolean;
+      reloadPersistentConfig?: boolean;
+    }) => unknown;
+  } | void;
   getGraphD?(): import('graphd').GraphDManager | null;
   closeSession?(sessionKey: string): { success: boolean; error?: string; executingRequestId?: string };
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
   getSessionPermissionChecker?(sessionKey: string): PermissionChecker | null;  // Per-session permission checker
+  resolveSessionEscalation?(
+    sessionKey: string,
+    escalationId: string,
+    resolution: {
+      optionId?: string;
+      freeformResponse?: string;
+      resolvedBy: 'user' | 'system' | 'timeout';
+    }
+  ): {
+    success: boolean;
+    escalationId: string;
+    pendingCount?: number;
+    sessionStatus?: string;
+    resumed?: boolean;
+    resumeRequestId?: string;
+    alreadyResolved?: boolean;
+    error?: string;
+  };
+  getDebugMemoryInfo?(): {
+    sessionCount: number;
+    maxSessions: number;
+    sessions: Array<{
+      sessionKey: string;
+      contextItemCount: number;
+      contextEstimatedTokens: number;
+      watcherContextItemCount: number;
+      workItemLogCount: number;
+      workItemsCreatedCount: number;
+      lastAccessMs: number;
+      isExecuting: boolean;
+    }>;
+  };
   setSessionAsyncModeEnabled?(sessionKey: string, enabled: boolean): void;
   // Session-level exclusive operation management (prevents concurrent ops from multiple connections)
   startSessionAsyncRun?(sessionKey: string, info: { requestId: string; goal: string; cancelled: boolean; startedAt: number }): boolean;
@@ -544,6 +586,13 @@ export class BridgeGateway {
     register('watcher_defocus', (_data, ctx) => this.handleWatcherDefocus(ctx.connectionId, ctx.state));
     register('watcher_reanchor', (data, ctx) => this.handleWatcherReanchor(ctx.connectionId, data, ctx.state));
     register('watcher_summarize', (_data, ctx) => this.handleWatcherSummarize(ctx.connectionId, ctx.state));
+    register('control_plane_dispatch', (data, ctx) => this.handleControlPlaneDispatch(ctx.connectionId, data));
+    register('control_plane_stop', (data, ctx) => this.handleControlPlaneStop(ctx.connectionId, data));
+    register('control_plane_fork', (data, ctx) => this.handleControlPlaneFork(ctx.connectionId, data));
+    register('control_plane_permissions_get', (data, ctx) => this.handleControlPlanePermissionsGet(ctx.connectionId, data));
+    register('control_plane_permissions_update', (data, ctx) => this.handleControlPlanePermissionsUpdate(ctx.connectionId, data));
+    register('control_plane_resolve_escalation', (data, ctx) => this.handleControlPlaneResolveEscalation(ctx.connectionId, data));
+    register('control_plane_memory_info', (_data, ctx) => this.handleControlPlaneMemoryInfo(ctx.connectionId));
     register('shutdown', (_data, ctx) => this.sendError(ctx.connectionId, 'Shutdown is not supported via bridge'));
 
     return registry;
@@ -2079,6 +2128,282 @@ export class BridgeGateway {
       success: true,
       enabled,
       sessionKey,
+    });
+  }
+
+  private dispatchControlPlaneMessage(input: {
+    sessionKey: string;
+    message: string;
+    context?: string;
+    metadata?: Record<string, unknown>;
+    requestId?: string;
+    workingDir?: string;
+  }): {
+    success: boolean;
+    requestId?: string;
+    error?: string;
+  } {
+    const trimmedMessage = input.message.trim();
+    if (!trimmedMessage) {
+      return { success: false, error: 'Missing message' };
+    }
+
+    const graphd = this.harness.getGraphD?.();
+    const sessionResult = graphd?.sessionGet(input.sessionKey) as
+      | { session?: { workingDir?: string | null } }
+      | undefined;
+    const sessionWorkingDir = sessionResult?.session?.workingDir ?? undefined;
+    const workingDir = input.workingDir ?? sessionWorkingDir ?? this.workingDir;
+    const requestId = input.requestId ?? `control-plane-${generateRequestId()}`;
+    const context = typeof input.context === 'string' && input.context.trim().length > 0
+      ? input.context.trim()
+      : undefined;
+    const metadata = isRecord(input.metadata) ? input.metadata : undefined;
+    const handoffSpec = metadata && isRecord(metadata.cockpit_handoff_spec)
+      ? metadata.cockpit_handoff_spec
+      : undefined;
+
+    try {
+      const runHandle = this.harness.run({
+        requestId,
+        inputText: trimmedMessage,
+        ...(context ? { context } : {}),
+        ...(handoffSpec ? { handoffSpec } : {}),
+        sessionKey: input.sessionKey,
+        workingDir,
+      });
+      void runHandle.result.catch((error) => {
+        console.error('[harness-daemon] control-plane dispatch run failed', {
+          sessionKey: input.sessionKey,
+          requestId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      return { success: true, requestId };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private handleControlPlaneDispatch(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const message = typeof data?.message === 'string' ? data.message : '';
+    const context = typeof data?.context === 'string' ? data.context : undefined;
+    const requestId = typeof data?.request_id === 'string' ? data.request_id : undefined;
+    const workingDir = typeof data?.working_dir === 'string' ? data.working_dir : undefined;
+    const metadata = isRecord(data?.metadata) ? data.metadata : undefined;
+
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_dispatch', { success: false, error: 'Missing session_key' });
+      return;
+    }
+    if (!message.trim()) {
+      this.sendAuthResponse(connectionId, 'control_plane_dispatch', { success: false, error: 'Missing message' });
+      return;
+    }
+
+    const result = this.dispatchControlPlaneMessage({
+      sessionKey,
+      message,
+      context,
+      metadata,
+      requestId,
+      workingDir,
+    });
+    this.sendAuthResponse(connectionId, 'control_plane_dispatch', result);
+  }
+
+  private handleControlPlaneStop(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const note = typeof data?.note === 'string' && data.note.trim().length > 0
+      ? data.note.trim()
+      : 'Stop current work now and wait for user direction.';
+    const workingDir = typeof data?.working_dir === 'string' ? data.working_dir : undefined;
+
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_stop', { success: false, error: 'Missing session_key' });
+      return;
+    }
+
+    try {
+      this.harness.cancelSessionAsyncRun?.(sessionKey);
+      this.harness.cancelSessionRalphLoop?.(sessionKey);
+    } catch {
+      // Non-fatal: still attempt to deliver stop note.
+    }
+
+    const result = this.dispatchControlPlaneMessage({
+      sessionKey,
+      message: note,
+      workingDir,
+    });
+    this.sendAuthResponse(connectionId, 'control_plane_stop', result);
+  }
+
+  private handleControlPlaneFork(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sourceSessionKey = typeof data?.source_session_key === 'string'
+      ? data.source_session_key.trim()
+      : '';
+    const targetSessionKey = typeof data?.target_session_key === 'string'
+      ? data.target_session_key.trim()
+      : '';
+
+    if (!sourceSessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_fork', { success: false, error: 'Missing source_session_key' });
+      return;
+    }
+    if (!this.harness.forkSession) {
+      this.sendAuthResponse(connectionId, 'control_plane_fork', { success: false, error: 'Fork not supported by harness' });
+      return;
+    }
+
+    const target = targetSessionKey || `${sourceSessionKey}-fork-${Date.now().toString(36)}`;
+    const result = this.harness.forkSession(sourceSessionKey, target);
+    this.sendAuthResponse(connectionId, 'control_plane_fork', {
+      success: result.success,
+      ...(result.success ? { targetSessionKey: target } : {}),
+      ...(result.error ? { error: result.error } : {}),
+    });
+  }
+
+  private handleControlPlanePermissionsGet(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const workingDir = typeof data?.working_dir === 'string' ? data.working_dir : undefined;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_permissions_get', { success: false, error: 'Missing session_key' });
+      return;
+    }
+
+    const store = this.harness.ensureSessionHydrated?.(sessionKey, {
+      ...(workingDir ? { workingDir } : {}),
+      includeUserPreferences: false,
+    });
+    if (!store || typeof store.getPermissionState !== 'function') {
+      this.sendAuthResponse(connectionId, 'control_plane_permissions_get', {
+        success: false,
+        error: 'Permission state not available',
+      });
+      return;
+    }
+    this.sendAuthResponse(connectionId, 'control_plane_permissions_get', {
+      success: true,
+      state: store.getPermissionState(),
+    });
+  }
+
+  private handleControlPlanePermissionsUpdate(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const workingDir = typeof data?.working_dir === 'string' ? data.working_dir : undefined;
+    const update = isRecord(data?.update) ? data.update : {};
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_permissions_update', { success: false, error: 'Missing session_key' });
+      return;
+    }
+
+    const store = this.harness.ensureSessionHydrated?.(sessionKey, {
+      ...(workingDir ? { workingDir } : {}),
+      includeUserPreferences: false,
+    });
+    if (!store || typeof store.updatePermissionOptions !== 'function') {
+      this.sendAuthResponse(connectionId, 'control_plane_permissions_update', {
+        success: false,
+        error: 'Permission state not available',
+      });
+      return;
+    }
+
+    const nextState = store.updatePermissionOptions({
+      ...(typeof update.dangerousMode === 'boolean' ? { dangerousMode: update.dangerousMode } : {}),
+      ...(typeof update.allowOutsideRoot === 'boolean' ? { allowOutsideRoot: update.allowOutsideRoot } : {}),
+      ...(typeof update.webSearchEnabled === 'boolean' ? { webSearchEnabled: update.webSearchEnabled } : {}),
+      ...(typeof update.writesNoDeletes === 'boolean' ? { writesNoDeletes: update.writesNoDeletes } : {}),
+      ...(Array.isArray(update.restrictWriteToPaths)
+        ? {
+            restrictWriteToPaths: update.restrictWriteToPaths
+              .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+              .map((item) => item.trim()),
+          }
+        : update.restrictWriteToPaths === null
+          ? { restrictWriteToPaths: null }
+          : {}),
+      ...(update.reloadPersistentConfig === true ? { reloadPersistentConfig: true } : {}),
+    });
+    this.sendAuthResponse(connectionId, 'control_plane_permissions_update', {
+      success: true,
+      state: nextState,
+    });
+  }
+
+  private handleControlPlaneResolveEscalation(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const escalationId = typeof data?.escalation_id === 'string' ? data.escalation_id.trim() : '';
+    const resolutionRaw = isRecord(data?.resolution) ? data.resolution : {};
+    const resolvedBy = resolutionRaw.resolvedBy === 'system' || resolutionRaw.resolvedBy === 'timeout'
+      ? resolutionRaw.resolvedBy
+      : 'user';
+    const resolution = {
+      ...(typeof resolutionRaw.optionId === 'string' && resolutionRaw.optionId.trim().length > 0
+        ? { optionId: resolutionRaw.optionId.trim() }
+        : {}),
+      ...(typeof resolutionRaw.freeformResponse === 'string' && resolutionRaw.freeformResponse.trim().length > 0
+        ? { freeformResponse: resolutionRaw.freeformResponse.trim() }
+        : {}),
+      resolvedBy,
+    } as const;
+
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', { success: false, error: 'Missing session_key' });
+      return;
+    }
+    if (!escalationId) {
+      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', { success: false, error: 'Missing escalation_id' });
+      return;
+    }
+    if (!this.harness.resolveSessionEscalation) {
+      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', {
+        success: false,
+        error: 'Escalation resolution not available',
+      });
+      return;
+    }
+
+    const result = this.harness.resolveSessionEscalation(sessionKey, escalationId, resolution);
+    this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', result as Record<string, unknown>);
+  }
+
+  private handleControlPlaneMemoryInfo(connectionId: string): void {
+    if (!this.harness.getDebugMemoryInfo) {
+      this.sendAuthResponse(connectionId, 'control_plane_memory_info', {
+        success: false,
+        error: 'Debug memory info not available',
+      });
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'control_plane_memory_info', {
+      success: true,
+      ...this.harness.getDebugMemoryInfo(),
     });
   }
 

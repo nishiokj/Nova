@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 
 const EMPTY_TEMPLATE = `{
   "permissions": {
@@ -10,8 +10,11 @@ const EMPTY_TEMPLATE = `{
 `;
 
 export function PermissionsTab() {
-  const { state, handleUpdateSessionPermissions, handleRefreshSessionPermissions } = useCockpit();
-  const permissions = state.sessionPermissions;
+  const sessionPermissions = useCockpit(s => s.sessionPermissions);
+  const permissionsSaving = useCockpit(s => s.permissionsSaving);
+  const permissionsSaveStatus = useCockpit(s => s.permissionsSaveStatus);
+  const store = useCockpitStore();
+  const permissions = sessionPermissions;
   const [customJsonDraft, setCustomJsonDraft] = useState('');
 
   useEffect(() => {
@@ -40,6 +43,9 @@ export function PermissionsTab() {
   const writesNoDeletes = current.writesNoDeletes === true;
   const webSearchEnabled = current.webSearchEnabled !== false;
   const allowOutsideRoot = current.allowOutsideRoot === true;
+  const restrictedWritePaths = Array.isArray(current.restrictWriteToPaths)
+    ? current.restrictWriteToPaths
+    : [];
 
   return (
     <div className="space-y-3 text-xs">
@@ -52,8 +58,8 @@ export function PermissionsTab() {
           <input
             type="checkbox"
             checked={dangerousMode}
-            onChange={(event) => void handleUpdateSessionPermissions({ dangerousMode: event.target.checked })}
-            disabled={state.permissionsSaving}
+            onChange={(event) => void store.handleUpdateSessionPermissions({ dangerousMode: event.target.checked })}
+            disabled={permissionsSaving}
           />
           <span>Dangerous mode</span>
         </label>
@@ -62,8 +68,8 @@ export function PermissionsTab() {
           <input
             type="checkbox"
             checked={writesNoDeletes}
-            onChange={(event) => void handleUpdateSessionPermissions({ writesNoDeletes: event.target.checked })}
-            disabled={state.permissionsSaving}
+            onChange={(event) => void store.handleUpdateSessionPermissions({ writesNoDeletes: event.target.checked })}
+            disabled={permissionsSaving}
           />
           <span>Writes only (No Deletes)</span>
         </label>
@@ -72,8 +78,8 @@ export function PermissionsTab() {
           <input
             type="checkbox"
             checked={webSearchEnabled}
-            onChange={(event) => void handleUpdateSessionPermissions({ webSearchEnabled: event.target.checked })}
-            disabled={state.permissionsSaving}
+            onChange={(event) => void store.handleUpdateSessionPermissions({ webSearchEnabled: event.target.checked })}
+            disabled={permissionsSaving}
           />
           <span>WebSearch Enabled</span>
         </label>
@@ -82,8 +88,8 @@ export function PermissionsTab() {
           <input
             type="checkbox"
             checked={allowOutsideRoot}
-            onChange={(event) => void handleUpdateSessionPermissions({ allowOutsideRoot: event.target.checked })}
-            disabled={state.permissionsSaving}
+            onChange={(event) => void store.handleUpdateSessionPermissions({ allowOutsideRoot: event.target.checked })}
+            disabled={permissionsSaving}
           />
           <span>Work outside of {rootLabel}</span>
         </label>
@@ -101,15 +107,15 @@ export function PermissionsTab() {
         />
         <div className="flex items-center gap-2">
           <button
-            onClick={() => void handleUpdateSessionPermissions({ profile: 'custom', customJson: customJsonDraft })}
-            disabled={state.permissionsSaving}
+            onClick={() => void store.handleUpdateSessionPermissions({ profile: 'custom', customJson: customJsonDraft })}
+            disabled={permissionsSaving}
             className="px-2 py-0.5 text-[11px] rounded bg-[var(--accent-cyan)]/20 text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/30 disabled:opacity-60"
           >
-            {state.permissionsSaving ? 'Saving...' : 'Save Custom JSON'}
+            {permissionsSaving ? 'Saving...' : 'Save Custom JSON'}
           </button>
           <button
-            onClick={() => void handleRefreshSessionPermissions()}
-            disabled={state.permissionsSaving}
+            onClick={() => void store.handleRefreshSessionPermissions()}
+            disabled={permissionsSaving}
             className="px-2 py-0.5 text-[11px] rounded bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] disabled:opacity-60"
           >
             Reload
@@ -120,10 +126,15 @@ export function PermissionsTab() {
       <div className="text-[10px] text-[var(--text-muted)]">
         Persistent rules: allow {current.persistent.allow.length} / deny {current.persistent.deny.length}
       </div>
+      {restrictedWritePaths.length > 0 && (
+        <div className="text-[10px] text-[var(--text-muted)] break-all">
+          Document write scope: <span className="font-mono">{restrictedWritePaths.join(', ')}</span>
+        </div>
+      )}
 
-      {(state.permissionsSaveStatus || permissions.warning) && (
+      {(permissionsSaveStatus || permissions.warning) && (
         <div className="text-[11px] text-[var(--text-muted)]">
-          {state.permissionsSaveStatus ?? permissions.warning}
+          {permissionsSaveStatus ?? permissions.warning}
         </div>
       )}
     </div>

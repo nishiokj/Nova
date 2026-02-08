@@ -28,6 +28,7 @@ export type SessionPermissionStateWithFlags = SessionPermissionState & {
   allowOutsideRoot: boolean;
   webSearchEnabled: boolean;
   writesNoDeletes: boolean;
+  restrictWriteToPaths?: string[];
 };
 
 export interface PausedState {
@@ -468,6 +469,7 @@ export class SessionStore {
       allowOutsideRoot?: boolean;
       webSearchEnabled?: boolean;
       writesNoDeletes?: boolean;
+      restrictWriteToPaths?: string[];
     } | undefined;
     this.permissionChecker.hydrateRuntimeFlags(permissionFlags);
     if (permissionState) {
@@ -685,6 +687,7 @@ export class SessionStore {
     allowOutsideRoot?: boolean;
     webSearchEnabled?: boolean;
     writesNoDeletes?: boolean;
+    restrictWriteToPaths?: string[] | null;
     reloadPersistentConfig?: boolean;
   }): SessionPermissionStateWithFlags {
     if (typeof input.dangerousMode === 'boolean') {
@@ -698,6 +701,9 @@ export class SessionStore {
     }
     if (typeof input.writesNoDeletes === 'boolean') {
       this.permissionChecker.setWritesNoDeletes(input.writesNoDeletes);
+    }
+    if (Array.isArray(input.restrictWriteToPaths) || input.restrictWriteToPaths === null) {
+      this.permissionChecker.setRestrictWriteToPaths(input.restrictWriteToPaths);
     }
     if (input.reloadPersistentConfig === true) {
       this.permissionChecker.reloadPersistentConfig();

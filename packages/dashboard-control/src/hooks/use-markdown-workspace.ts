@@ -22,8 +22,15 @@ import {
 } from '@/lib/markdown';
 import type { EditorHandle } from '@/components/center/MarkdownEditor';
 
-const DEFAULT_SUGGESTED_FOLDERS = ['notes', 'packets', 'plans', 'scratch', 'specs'];
+const DEFAULT_SUGGESTED_FOLDERS = ['scratch', 'packets', 'plans', 'specs', 'handoffs'];
 const AUTOSAVE_DEBOUNCE_MS = 1400;
+
+function createClientDraftId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 interface MarkdownState {
   rootDir: string;
@@ -160,6 +167,7 @@ export function useMarkdownWorkspace() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const editorRef = useRef<EditorHandle | null>(null);
+  const unsavedDraftIdRef = useRef<string | null>(null);
   const pendingEditorRefocusTimerRef = useRef<number | null>(null);
 
   const files = useMemo(() => flattenMarkdownFiles(state.tree), [state.tree]);
@@ -181,7 +189,9 @@ export function useMarkdownWorkspace() {
     const selectedParent = selectedPath && selectedPath.includes('/')
       ? selectedPath.slice(0, selectedPath.lastIndexOf('/'))
       : '';
-    const resolvedDefault = defaultFolder ?? selectedParent;
+    // New-file create should start from workspace root unless caller explicitly chooses a folder.
+    const fallbackDefault = intent === 'create' ? '' : selectedParent;
+    const resolvedDefault = defaultFolder ?? fallbackDefault;
     const normalizedDefault = typeof resolvedDefault === 'string'
       ? normalizeWorkspacePathForClient(resolvedDefault, true)
       : null;
@@ -235,13 +245,17 @@ export function useMarkdownWorkspace() {
   const refreshFilesystem = useCallback(async (scopeOverride?: {
     mode: 'global' | 'session' | 'project';
     sessionKey?: string | null;
+    projectPath?: string | null;
   }) => {
     const s = stateRef.current;
     const effectiveMode = scopeOverride?.mode ?? s.scopeMode;
     const effectiveSessionKey = scopeOverride?.sessionKey ?? s.scopeSessionKey;
+    const effectiveProjectPath = scopeOverride?.projectPath ?? s.scopeProjectPath;
     const filesystem = await getCockpitFilesystem(
       effectiveMode === 'session' && effectiveSessionKey
         ? { sessionKey: effectiveSessionKey }
+        : effectiveMode === 'project' && effectiveProjectPath
+          ? { projectPath: effectiveProjectPath }
         : {}
     );
     if (!filesystem) return;
@@ -272,7 +286,7 @@ export function useMarkdownWorkspace() {
     set({
       loading: true,
       status: scope.mode === 'global'
-        ? 'Switching workspace to pinned notes...'
+        ? 'Switching workspace to scratch...'
         : scope.mode === 'session'
           ? `Switching workspace to session ${nextSessionKey ?? ''}...`
           : `Switching workspace to project ${nextProjectPath}...`,
@@ -286,7 +300,7 @@ export function useMarkdownWorkspace() {
         scopeSessionKey: nextSessionKey,
         scopeProjectPath: nextProjectPath,
         status: scope.mode === 'global'
-          ? 'Workspace: pinned notes (.cockpit/markdown)'
+          ? 'Workspace: scratch (.cockpit/markdown)'
           : scope.mode === 'session'
             ? `Workspace: session ${nextSessionKey ?? ''}`
             : `Workspace: project ${nextProjectPath}`,
@@ -294,6 +308,7 @@ export function useMarkdownWorkspace() {
       await refreshFilesystem({
         mode: scope.mode,
         ...(nextSessionKey ? { sessionKey: nextSessionKey } : {}),
+        ...(nextProjectPath ? { projectPath: nextProjectPath } : {}),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -325,6 +340,7 @@ export function useMarkdownWorkspace() {
           hash: file.hash ?? null,
         },
       });
+      unsavedDraftIdRef.current = null;
       setTimeout(() => editorRef.current?.focus(), 0);
     } catch (err) {
       set({ loading: false, status: err instanceof Error ? err.message : String(err) });
@@ -463,7 +479,7 @@ export function useMarkdownWorkspace() {
   }, [openNewFilePicker, set]);
 
   const createFolder = useCallback(async () => {
-    const baseFolder = stateRef.current.suggestedFolders[0] ?? 'notes';
+    const baseFolder = stateRef.current.suggestedFolders[0] ?? 'scratch';
     const entered = window.prompt(
       'Create folder in current workspace (relative path)',
       baseFolder
@@ -542,15 +558,38 @@ export function useMarkdownWorkspace() {
   }, []);
 
   const setContent = useCallback((content: string) => {
+    if (stateRef.current.selectedPath) {
+      unsavedDraftIdRef.current = null;
+    } else if (content.trim().length === 0) {
+      unsavedDraftIdRef.current = null;
+    }
     set({ content, dirty: true });
   }, [set]);
 
   const getActiveContext = useCallback((): CockpitMarkdownContextInput | null => {
     const s = stateRef.current;
     if (!s.selectedPath && !s.content.trim()) return null;
+    if (s.selectedPath) {
+      unsavedDraftIdRef.current = null;
+    } else if (!unsavedDraftIdRef.current) {
+      unsavedDraftIdRef.current = createClientDraftId();
+    }
+    const draftId = s.selectedPath ? undefined : (unsavedDraftIdRef.current ?? undefined);
     const selectionStart = editorRef.current?.selectionStart;
     const selectionEnd = editorRef.current?.selectionEnd;
     const { frontmatter } = parseFrontmatter(s.content);
+    const frontmatterSessionKeyRaw = typeof frontmatter.sessionKey === 'string'
+      ? frontmatter.sessionKey
+      : typeof frontmatter.session_key === 'string'
+        ? frontmatter.session_key
+        : typeof frontmatter.chatSessionKey === 'string'
+          ? frontmatter.chatSessionKey
+          : typeof frontmatter.chat_session_key === 'string'
+            ? frontmatter.chat_session_key
+            : undefined;
+    const frontmatterSessionKey = typeof frontmatterSessionKeyRaw === 'string' && frontmatterSessionKeyRaw.trim().length > 0
+      ? frontmatterSessionKeyRaw.trim()
+      : undefined;
     const templateNameRaw = typeof frontmatter.template === 'string'
       ? frontmatter.template
       : typeof frontmatter.templateName === 'string'
@@ -580,6 +619,9 @@ export function useMarkdownWorkspace() {
       : undefined;
     return {
       path: s.selectedPath ?? undefined,
+      workspaceScope: s.scopeMode,
+      scopeSessionKey: s.scopeSessionKey ?? undefined,
+      projectPath: s.scopeProjectPath ?? undefined,
       version: s.version,
       updatedAt: s.updatedAt ?? undefined,
       content: s.content,
@@ -595,6 +637,8 @@ export function useMarkdownWorkspace() {
         hash: s.hash,
         conflictVersion: s.conflictVersion,
         documentType: getDocumentType(s.content),
+        ...(frontmatterSessionKey ? { documentSessionKey: frontmatterSessionKey } : {}),
+        ...(draftId ? { draftId } : {}),
         ...(templateName ? { templateName } : {}),
         ...(templateId ? { templateId } : {}),
         ...(specs && specs.length > 0 ? { specs } : {}),
@@ -622,18 +666,24 @@ export function useMarkdownWorkspace() {
       return;
     }
 
+    const normalizedFolder = normalizeWorkspacePathForClient(folder, true);
+    if (normalizedFolder === null) {
+      set({ status: 'Invalid folder path', newFileDropdownOpen: false, newFileIntent: null });
+      return;
+    }
+
     let filename = requestedName;
     if (!/\.(md|markdown|mdx)$/i.test(filename)) {
       filename = `${filename}.md`;
     }
-    let path = folder ? `${folder}/${filename}` : filename;
+    let path = normalizedFolder ? `${normalizedFolder}/${filename}` : filename;
     let counter = 2;
     while (existing.has(path)) {
       const extMatch = filename.match(/\.[^./]+$/);
       const ext = extMatch ? extMatch[0] : '.md';
       const stem = filename.slice(0, filename.length - ext.length);
       filename = `${stem}-${counter}${ext}`;
-      path = folder ? `${folder}/${filename}` : filename;
+      path = normalizedFolder ? `${normalizedFolder}/${filename}` : filename;
       counter++;
     }
     const normalized = normalizeDocPath(path);
@@ -670,6 +720,7 @@ export function useMarkdownWorkspace() {
         newFileDefaultFolder: null,
         status: `Created ${response.file.path}`,
       });
+      unsavedDraftIdRef.current = null;
       await refreshTree();
       await openFile(response.file.path);
     } catch (err) {

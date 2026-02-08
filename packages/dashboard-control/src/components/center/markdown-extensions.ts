@@ -189,7 +189,7 @@ export const cockpitEditorTheme = EditorView.theme({
   '&': {
     backgroundColor: 'transparent',
     color: 'var(--text-primary)',
-    fontSize: '13px',
+    fontSize: '11px',
     fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
     lineHeight: '1.6',
   },

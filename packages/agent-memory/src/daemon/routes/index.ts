@@ -27,6 +27,7 @@ import { registerEvidenceRoutes } from './evidence.js'
 import { registerMemoryRoutes } from './memory.js'
 import { registerControlPlaneRoutes } from './control-plane.js'
 import { registerEscalationsRoutes } from './escalations.js'
+import { registerArchitectureRoutes } from './architecture.js'
 
 /**
  * Register all API routes.
@@ -53,6 +54,7 @@ export function registerRoutes(server: HttpServer, daemon: SyncDaemon): void {
   registerMemoryRoutes(server, daemon)
   registerControlPlaneRoutes(server, daemon)
   registerEscalationsRoutes(server, daemon.escalationsRepo)
+  registerArchitectureRoutes(server, daemon)
 }
 
 export { registerAccountRoutes } from './accounts.js'
@@ -76,3 +78,4 @@ export { registerEvidenceRoutes } from './evidence.js'
 export { registerMemoryRoutes } from './memory.js'
 export { registerControlPlaneRoutes } from './control-plane.js'
 export { registerEscalationsRoutes } from './escalations.js'
+export { registerArchitectureRoutes } from './architecture.js'

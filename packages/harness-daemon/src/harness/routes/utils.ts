@@ -24,7 +24,10 @@ export type SessionPermissionStateView = SessionPermissionState & {
   allowOutsideRoot: boolean;
   webSearchEnabled: boolean;
   writesNoDeletes: boolean;
+  restrictWriteToPaths?: string[];
 };
+
+type AsyncOrSync<T> = T | Promise<T>;
 
 export interface ControlPlaneContext {
   graphd: import('graphd').GraphDManager | null;
@@ -33,7 +36,7 @@ export interface ControlPlaneContext {
   getSessionPermissionState?: (
     sessionKey: string,
     options?: { workingDir?: string }
-  ) => SessionPermissionStateView | null;
+  ) => AsyncOrSync<SessionPermissionStateView | null>;
   updateSessionPermissionState?: (
     sessionKey: string,
     input: {
@@ -41,10 +44,11 @@ export interface ControlPlaneContext {
       allowOutsideRoot?: boolean;
       webSearchEnabled?: boolean;
       writesNoDeletes?: boolean;
+      restrictWriteToPaths?: string[] | null;
       reloadPersistentConfig?: boolean;
     },
     options?: { workingDir?: string }
-  ) => SessionPermissionStateView | null;
+  ) => AsyncOrSync<SessionPermissionStateView | null>;
   dispatchSessionInput?: (
     sessionKey: string,
     message: string,
@@ -57,7 +61,12 @@ export interface ControlPlaneContext {
     requestId?: string;
     queued?: boolean;
     error?: string;
-  };
+  } | Promise<{
+    success: boolean;
+    requestId?: string;
+    queued?: boolean;
+    error?: string;
+  }>;
   stopSession?: (
     sessionKey: string,
     note?: string
@@ -65,7 +74,11 @@ export interface ControlPlaneContext {
     success: boolean;
     requestId?: string;
     error?: string;
-  };
+  } | Promise<{
+    success: boolean;
+    requestId?: string;
+    error?: string;
+  }>;
   forkSession?: (
     sourceSessionKey: string,
     targetSessionKey?: string
@@ -73,8 +86,12 @@ export interface ControlPlaneContext {
     success: boolean;
     targetSessionKey?: string;
     error?: string;
-  };
-  subscribeEvents?: (handler: (event: { type: string; sessionKey?: string }) => void) => () => void;
+  } | Promise<{
+    success: boolean;
+    targetSessionKey?: string;
+    error?: string;
+  }>;
+  subscribeEvents?: (handler: (event: { type: string; sessionKey?: string; data?: Record<string, unknown> }) => void) => () => void;
   resolveSessionEscalation?: (
     sessionKey: string,
     escalationId: string,
@@ -88,7 +105,16 @@ export interface ControlPlaneContext {
     resumeRequestId?: string;
     alreadyResolved?: boolean;
     error?: string;
-  };
+  } | Promise<{
+    success: boolean;
+    escalationId: string;
+    pendingCount?: number;
+    sessionStatus?: string;
+    resumed?: boolean;
+    resumeRequestId?: string;
+    alreadyResolved?: boolean;
+    error?: string;
+  }>;
   getDebugMemoryInfo?: () => {
     sessionCount: number;
     maxSessions: number;
@@ -102,7 +128,20 @@ export interface ControlPlaneContext {
       lastAccessMs: number;
       isExecuting: boolean;
     }>;
-  };
+  } | Promise<{
+    sessionCount: number;
+    maxSessions: number;
+    sessions: Array<{
+      sessionKey: string;
+      contextItemCount: number;
+      contextEstimatedTokens: number;
+      watcherContextItemCount: number;
+      workItemLogCount: number;
+      workItemsCreatedCount: number;
+      lastAccessMs: number;
+      isExecuting: boolean;
+    }>;
+  }>;
 }
 
 export interface PRInfo {
@@ -473,7 +512,7 @@ export const ALL_SESSION_STATUSES = [
 export const MARKDOWN_WORKSPACE_DIR = '.cockpit/markdown';
 export const MARKDOWN_METADATA_DIR = '.meta';
 export const MARKDOWN_FILE_EXTENSIONS = new Set(['.md', '.markdown', '.mdx']);
-export const MARKDOWN_SUGGESTED_FOLDERS = ['notes', 'packets', 'plans', 'scratch', 'specs', 'handoffs'];
+export const MARKDOWN_SUGGESTED_FOLDERS = ['scratch', 'packets', 'plans', 'specs', 'handoffs'];
 export const MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;
 export const MARKDOWN_METADATA_MAX_BYTES = 64 * 1024;
 export const MARKDOWN_CHAT_CONTEXT_MAX_BYTES = 120 * 1024;
@@ -727,6 +766,11 @@ export function sanitizePermissionRules(value: unknown): PermissionRule[] {
 
 export function normalizeSessionPermissionState(value: unknown): SessionPermissionStateView {
   const record = isRecord(value) ? value : {};
+  const restrictedPaths = Array.isArray(record.restrictWriteToPaths)
+    ? record.restrictWriteToPaths
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+    : [];
   const persistent = isRecord(record.persistent) ? record.persistent : {};
   return {
     persistent: {
@@ -739,6 +783,7 @@ export function normalizeSessionPermissionState(value: unknown): SessionPermissi
     allowOutsideRoot: asBoolean(record.allowOutsideRoot) === true,
     webSearchEnabled: asBoolean(record.webSearchEnabled) !== false,
     writesNoDeletes: asBoolean(record.writesNoDeletes) === true,
+    ...(restrictedPaths.length > 0 ? { restrictWriteToPaths: restrictedPaths } : {}),
   };
 }
 

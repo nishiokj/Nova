@@ -1,18 +1,19 @@
 import { useMemo, useState } from 'react';
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 
 export function CommitList() {
-  const { state, handleSelectCommit } = useCockpit();
+  const commitRollups = useCockpit(s => s.commitRollups);
+  const store = useCockpitStore();
   const [collapsed, setCollapsed] = useState(true);
 
   const uniqueCommits = useMemo(() => {
     const seen = new Set<string>();
-    return state.commitRollups.filter((row) => {
+    return commitRollups.filter((row) => {
       if (seen.has(row.sha)) return false;
       seen.add(row.sha);
       return true;
     });
-  }, [state.commitRollups]);
+  }, [commitRollups]);
 
   if (uniqueCommits.length === 0) return null;
 
@@ -27,7 +28,7 @@ export function CommitList() {
       {!collapsed && uniqueCommits.map((row) => (
         <button
           key={row.sha}
-          onClick={() => handleSelectCommit(row)}
+          onClick={() => store.handleSelectCommit(row)}
           className="w-full text-left px-2 py-1.5 border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)]"
         >
           <div className="font-mono text-[11px] text-[var(--text-secondary)]">{row.sha.slice(0, 8)}</div>

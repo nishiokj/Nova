@@ -223,7 +223,7 @@ function parseSessionMetadata(session: UsageSessionRecord): Record<string, unkno
 }
 
 function mapUsageStatus(rawStatus: string, lastAccessedAt: number, nowSec: number): "active" | "idle" | "ended" {
-  const endedStatuses = new Set(["completed", "failed", "cancelled", "expired"]);
+  const endedStatuses = new Set(["completed", "failed", "cancelled", "expired", "closed"]);
   if (endedStatuses.has(rawStatus)) return "ended";
 
   const activeStatuses = new Set(["active", "blocked", "review"]);
@@ -3056,6 +3056,32 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
   const rightStatus = [scrollInfo, newMessageInfo].filter(Boolean).join(" | ");
 
+  // Helper function to create "big" text (300% larger) by stacking characters
+  // Returns an array of 3 strings for each row of the big text
+  const makeBigText = (text: string): string[] => {
+    // Create 3-line tall big text using unicode block elements
+    const charMaps: Record<string, string[]> = {
+      'N': ['█▀▀', '█ █', '█ █'],
+      'O': ['▄▀▄', '█ █', '▀▄▀'],
+      'V': ['█ █', '█ █', ' ▀ '],
+      'A': ['▀█▀', '█ █', '█ █'],
+      '-': ['   ', '───', '   '],
+      ' ': ['   ', '   ', '   '],
+    };
+
+    const lines = ['', '', ''];
+    for (const char of text.toUpperCase()) {
+      const map = charMaps[char] || ['   ', ' █ ', '   '];
+      lines[0] += map[0];
+      lines[1] += map[1];
+      lines[2] += map[2];
+    }
+    return lines;
+  };
+
+  // Get the big NOVA text lines
+  const novaTextLines = makeBigText("NOVA");
+
   const headerRows: Array<{
     left: string;
     right?: string;
@@ -3067,27 +3093,38 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     boldRight?: boolean;
     boldCenter?: boolean;
   }> = [
+    // Row 1: Top line of big NOVA
     {
-      center: "Bloom",
+      center: novaTextLines[0],
+      leftColor: colors.accent,
+      rightColor: colors.muted,
+      centerColor: colors.accent,
+      boldCenter: true,
+    },
+    // Row 2: Middle line of big NOVA
+    {
+      center: novaTextLines[1],
+      leftColor: colors.accent,
+      rightColor: colors.muted,
+      centerColor: colors.accent,
+      boldCenter: true,
+    },
+    // Row 3: Bottom line of big NOVA
+    {
+      center: novaTextLines[2],
       leftColor: colors.accent,
       rightColor: colors.muted,
       centerColor: colors.accent,
       boldCenter: true,
     },
     {
-      left: `Session ${snapshot.sessionKey ?? "-"}`,
-      right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}`,
+      left: `${snapshot.sessionKey ?? "-"}`,
+      right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}${snapshot.state !== "idle" ? ` | State: ${snapshot.state}` : ""}${snapshot.planMode ? " | PLAN" : ""}`,
       leftColor: colors.muted,
       rightColor: colors.muted,
     },
     {
-      center: `State: ${snapshot.state}${snapshot.planMode ? " | PLAN" : ""}`,
-      leftColor: colors.muted,
-      rightColor: colors.muted,
-      centerColor: colors.muted,
-    },
-    {
-      left: `Status: ${statusText}`,
+      left: `${statusText}`,
       right: rightStatus,
       leftColor: statusColor,
       rightColor: colors.muted,

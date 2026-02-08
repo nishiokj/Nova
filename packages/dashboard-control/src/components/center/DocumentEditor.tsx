@@ -1,7 +1,10 @@
+import { lazy, Suspense, useEffect, useState } from 'react';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
-import { useCockpit } from '@/hooks/use-cockpit-store';
-import { MarkdownEditor } from './MarkdownEditor';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import { getDocumentType, getDocumentSessionKey, parseFrontmatter, type DocumentType } from '@/lib/markdown';
+import { RenderedMarkdownSurface } from './RenderedMarkdownSurface';
+
+const MarkdownEditor = lazy(() => import('./MarkdownEditor'));
 
 const TYPE_BADGE_COLORS: Record<DocumentType, { color: string; bg: string }> = {
   note: { color: 'var(--text-muted)', bg: 'var(--text-muted)' },
@@ -34,7 +37,9 @@ function normalizeSpecsValue(value: unknown): string[] {
 
 export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) {
   const { state, setContent, editorRef } = workspace;
-  const cockpit = useCockpit();
+  const templates = useCockpit(s => s.templates);
+  const store = useCockpitStore();
+  const [rawMode, setRawMode] = useState(false);
 
   const docType = getDocumentType(state.content);
   const sessionKey = getDocumentSessionKey(state.content);
@@ -55,7 +60,7 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
   const workflowLike = docType === 'workflow' || docType === 'executable';
   const hasTemplateBinding = workflowLike && (templateName !== null || templateId !== null || frontmatterSpecs.length > 0);
   const matchedTemplate = hasTemplateBinding
-    ? cockpit.state.templates.find((template) => (
+    ? templates.find((template) => (
       (templateId !== null && template.id === templateId)
       || (templateName !== null && template.name.toLowerCase() === templateName.toLowerCase())
     )) ?? null
@@ -73,6 +78,37 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
         ? 'spec-mismatch'
         : 'ok';
   const badgeStyle = TYPE_BADGE_COLORS[docType];
+  const needsProjectScopeForWorkflow = workflowLike && state.scopeMode !== 'project';
+  const needsSaveForWorkflow = workflowLike && !state.selectedPath;
+  const workflowHint = !workflowLike
+    ? null
+    : docType === 'executable'
+      ? {
+          tone: 'info' as const,
+          text: 'Session linked. Use chat below to continue this workflow.',
+          action: 'chat' as const,
+        }
+      : needsProjectScopeForWorkflow
+        ? {
+            tone: 'warning' as const,
+            text: 'Workflow docs run from project workspaces. Save this file into a project folder first.',
+            action: 'save-picker' as const,
+          }
+        : needsSaveForWorkflow
+          ? {
+              tone: 'warning' as const,
+              text: 'Workflow is unsaved. Save it (Ctrl+S), then send a chat message to start execution.',
+              action: 'save' as const,
+            }
+          : {
+              tone: 'info' as const,
+              text: 'Ready to run. Send a chat message below; first message creates a linked session.',
+              action: 'chat' as const,
+            };
+
+  useEffect(() => {
+    setRawMode(false);
+  }, [state.selectedPath]);
 
   return (
     <div className="h-full flex flex-col">
@@ -97,7 +133,7 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
         {/* Session key link */}
         {sessionKey && (
           <button
-            onClick={() => cockpit.set({ focusTarget: { type: 'session', id: sessionKey } })}
+            onClick={() => store.set({ focusTarget: { type: 'session', id: sessionKey } })}
             className="px-1.5 py-0.5 rounded text-[9px] font-mono text-[var(--accent-green)] hover:underline"
           >
             {sessionKey.slice(0, 20)}...
@@ -122,13 +158,20 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
           {/* Promote button */}
           {docType !== 'executable' && (
             <button
-              onClick={() => cockpit.handleOpenUpgradePicker()}
+              onClick={() => store.handleOpenUpgradePicker()}
               className="px-1.5 py-0.5 rounded text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/10"
-              title="Promote document (Ctrl+U, requires project/session scope)"
+              title="Promote document (Ctrl+U)"
             >
               Promote
             </button>
           )}
+          <button
+            onClick={() => setRawMode((prev) => !prev)}
+            className="px-1.5 py-0.5 rounded text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+            title={rawMode ? 'Switch to rendered markdown' : 'Switch to raw markdown editor'}
+          >
+            {rawMode ? 'Rendered' : 'Raw edit'}
+          </button>
           <span>
             {state.dirty ? 'Unsaved' : 'Saved'}
             {state.version > 0 && ` · v${state.version}`}
@@ -151,13 +194,61 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
               : 'Template binding found, but no matching DB template is loaded in cockpit. Workflow resolution may fail until restored.'}
         </div>
       )}
+      {workflowHint && (
+        <div
+          className="px-2 py-1 border-b text-[10px] flex items-center gap-2"
+          style={{
+            color: workflowHint.tone === 'warning' ? 'var(--warning)' : 'var(--text-secondary)',
+            borderColor: workflowHint.tone === 'warning' ? 'var(--warning)' : 'var(--border-subtle)',
+            background: workflowHint.tone === 'warning'
+              ? 'color-mix(in srgb, var(--warning) 12%, transparent)'
+              : 'var(--bg-elevated)',
+          }}
+        >
+          <span className="flex-1">{workflowHint.text}</span>
+          {workflowHint.action === 'save-picker' && (
+            <button
+              onClick={() => workspace.openNewFilePicker('save', 'plans')}
+              className="px-1.5 py-0.5 rounded border border-[var(--warning)]/50 text-[var(--warning)] hover:bg-[var(--warning)]/15"
+            >
+              Save in project
+            </button>
+          )}
+          {workflowHint.action === 'save' && (
+            <button
+              onClick={() => { void workspace.save(); }}
+              className="px-1.5 py-0.5 rounded border border-[var(--warning)]/50 text-[var(--warning)] hover:bg-[var(--warning)]/15"
+            >
+              Save
+            </button>
+          )}
+          {workflowHint.action === 'chat' && (
+            <button
+              onClick={() => store.set({ inputVisible: true, eventDrawerOpen: true, eventFilter: 'messages' })}
+              className="px-1.5 py-0.5 rounded border border-[var(--accent-cyan)]/40 text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/10"
+            >
+              Open chat
+            </button>
+          )}
+        </div>
+      )}
       <div className="flex-1 min-h-0">
-        <MarkdownEditor
-          ref={editorRef}
-          content={state.content}
-          onChange={setContent}
-          placeholder="# Start writing..."
-        />
+        {rawMode ? (
+          <Suspense fallback={<div className="h-full flex items-center justify-center text-[var(--text-muted)] text-xs">Loading editor...</div>}>
+            <MarkdownEditor
+              ref={editorRef}
+              content={state.content}
+              onChange={setContent}
+              fileSuggestions={workspace.files}
+              placeholder="# Start writing..."
+            />
+          </Suspense>
+        ) : (
+          <RenderedMarkdownSurface
+            content={state.content}
+            onChange={setContent}
+          />
+        )}
       </div>
       {state.status && (
         <div className="px-2 py-1 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)]">

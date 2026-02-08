@@ -43,6 +43,8 @@ import {
   handlePostCockpitBrowserRunbook,
 } from './routes/browser.js';
 
+import { handlePostAutocomplete } from './routes/autocomplete.js';
+
 import {
   handleGetCockpitMarkdownTree,
   handleGetCockpitMarkdownFile,
@@ -77,6 +79,7 @@ import {
   handleResolveCockpitEscalation,
   handleGetCockpitTemplates,
   handlePostCockpitSessionCreate,
+  handleGetCockpitEntityGraph,
 } from './routes/cockpit.js';
 
 // Re-export helpers needed by other modules
@@ -338,7 +341,8 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/filesystem
   if (pathname === '/control-plane/cockpit/filesystem' && req.method === 'GET') {
     const sessionKey = query.get('sessionKey');
-    void handleGetCockpitFilesystem(res, ctx, sessionKey);
+    const projectPath = query.get('projectPath');
+    void handleGetCockpitFilesystem(res, ctx, sessionKey, projectPath);
     return true;
   }
 
@@ -485,6 +489,19 @@ export function handleControlPlaneRequest(
   // POST /control-plane/cockpit/session/create
   if (pathname === '/control-plane/cockpit/session/create' && req.method === 'POST') {
     void handlePostCockpitSessionCreate(req, res, ctx);
+    return true;
+  }
+
+  // GET /control-plane/cockpit/entity-graph
+  if (pathname === '/control-plane/cockpit/entity-graph' && req.method === 'GET') {
+    const sessionKey = query.get('sessionKey');
+    void handleGetCockpitEntityGraph(res, ctx, sessionKey);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/autocomplete/complete
+  if (pathname === '/control-plane/cockpit/autocomplete/complete' && req.method === 'POST') {
+    void handlePostAutocomplete(req, res);
     return true;
   }
 

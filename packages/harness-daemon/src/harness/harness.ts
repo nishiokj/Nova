@@ -322,7 +322,7 @@ function buildEscalationPacketMarkdown(
   }
   lines.push('---', '');
 
-  lines.push(`# Decision: ${escalation.title}`);
+  lines.push(`# Escalation: ${escalation.title}`);
   lines.push('', '## Context');
   lines.push(escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`);
 
@@ -333,12 +333,20 @@ function buildEscalationPacketMarkdown(
     }
   }
 
-  lines.push('', '## The Question');
+  lines.push('', '## Required Action');
+  lines.push('Choose a direction below, then click **Resolve Escalation** in Cockpit.');
+
+  lines.push('', '## Decision Request');
   lines.push(escalation.title);
 
   lines.push('', '## Options');
   if (options.length === 0) {
-    lines.push('- Provide direction for the requested decision.');
+    lines.push('1. **Proceed**');
+    lines.push('   Accept current state and continue execution.');
+    lines.push('2. **Retry with stronger evidence**');
+    lines.push('   Require concrete output (files changed, non-empty response, tests/logs).');
+    lines.push('3. **Stop and investigate**');
+    lines.push('   Pause execution and diagnose why watcher evidence is missing.');
   } else {
     for (let idx = 0; idx < options.length; idx += 1) {
       const option = options[idx];
@@ -355,11 +363,11 @@ function buildEscalationPacketMarkdown(
     }
   }
 
-  lines.push('', '## Recommendation (Watcher)');
+  lines.push('', '## Watcher Recommendation');
   if (recommendedOption) {
     lines.push(`Leaning **${recommendedOption.label}** based on current constraints and evidence.`);
   } else {
-    lines.push('No single option recommended yet; request is for clarification.');
+    lines.push('No single option recommended. Human decision required.');
   }
 
   lines.push('', 'Evidence:');
@@ -1604,6 +1612,9 @@ export class AgentHarness {
     profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier, planMode });
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
+    // Create emit early so harness-level events (status, response, error, user_prompt)
+    // reach EventBus → BusServer → SSE, not just the TUI's eventQueue.
+    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
     this.pruneSessionStores('run');
     const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
@@ -1611,7 +1622,9 @@ export class AgentHarness {
 
     // Determine if this is a resume (paused state exists) or fresh run
     const isResume = !!paused;
-    eventQueue.push(createStatusEvent('sending', isResume ? 'Resuming with user input...' : 'Processing request...'));
+    const sendingMessage = isResume ? 'Resuming with user input...' : 'Processing request...';
+    eventQueue.push(createStatusEvent('sending', sendingMessage));
+    emit(createEvent('harness_status', { state: 'sending', message: sendingMessage }));
 
     // Attempt to mark execution as started; if another run is active, queue instead.
     if (!store.startExecution(requestId)) {
@@ -1636,6 +1649,7 @@ export class AgentHarness {
 
       // Emit a status event indicating the message was queued
       eventQueue.push(createStatusEvent('idle', 'Message queued - agent will see it on next turn'));
+      emit(createEvent('harness_status', { state: 'idle', message: 'Message queued - agent will see it on next turn' }));
 
       // Return a "queued" result - not an error, but also not a full response
       const resultPromise = Promise.resolve({
@@ -1768,11 +1782,11 @@ export class AgentHarness {
     }
 
     const userMessagePersisted = clearContextForHandoff ? false : this.persistUserMessage(sessionKey, requestId, inputText);
-    const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
 
-    // NOTE: Agent events (agent_message, tool_call, etc.) are now forwarded directly
-    // from EventBus to BusServer via BusServer's direct subscription. The eventQueue
-    // is only used for harness-level events (status, response, error, user_prompt).
+    // NOTE: Agent events (agent_message, tool_call, etc.) are forwarded directly
+    // from EventBus to BusServer via BusServer's direct subscription. Harness-level
+    // events (status, response, error, user_prompt) are pushed to eventQueue AND
+    // emitted on EventBus so the browser SSE stream receives them too.
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
@@ -1786,13 +1800,16 @@ export class AgentHarness {
           };
           const hookResult = await this.hookExecutor.execute('UserPromptSubmit', hookContext);
           if (hookResult.action === 'block') {
-            eventQueue.push(createErrorEvent(hookResult.message || 'Request blocked by hook', false));
+            const blockMsg = hookResult.message || 'Request blocked by hook';
+            eventQueue.push(createErrorEvent(blockMsg, false));
             eventQueue.push(createStatusEvent('idle'));
+            emit(createEvent('harness_error', { message: blockMsg, fatal: false }));
+            emit(createEvent('harness_status', { state: 'idle' }));
             return {
               requestId,
               sessionKey,
               success: false,
-              finalText: hookResult.message || 'Request blocked by hook',
+              finalText: blockMsg,
               errorMessage: hookResult.message,
               paused: false,
               toolsUsed: [],
@@ -1862,6 +1879,13 @@ export class AgentHarness {
                 result.metadata
               )
             );
+            emit(createEvent('harness_response', {
+              success: true,
+              content: result.finalText,
+              toolsUsed: result.toolsUsed,
+              durationMs: result.durationMs,
+              metadata: result.metadata,
+            }));
           }
           eventQueue.push(createUserPromptEvent(
             result.userPrompt.requestId,
@@ -1872,6 +1896,14 @@ export class AgentHarness {
             result.userPrompt.questionType,
             result.userPrompt.questions
           ));
+          emit(createEvent('harness_user_prompt', {
+            question: result.userPrompt.question,
+            options: result.userPrompt.options,
+            context: result.userPrompt.context,
+            multiSelect: result.userPrompt.multiSelect,
+            questionType: result.userPrompt.questionType,
+            questions: result.userPrompt.questions,
+          }));
         } else {
           // Execution completed (success or failure) - emit response event
           eventQueue.push(
@@ -1885,9 +1917,18 @@ export class AgentHarness {
               result.metadata
             )
           );
+          emit(createEvent('harness_response', {
+            success: result.success,
+            content: result.finalText,
+            toolsUsed: result.toolsUsed,
+            durationMs: result.durationMs,
+            error: result.errorMessage,
+            metadata: result.metadata,
+          }));
         }
 
         eventQueue.push(createStatusEvent('idle'));
+        emit(createEvent('harness_status', { state: 'idle' }));
 
         this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs, userMessagePersisted);
 
@@ -1908,6 +1949,8 @@ export class AgentHarness {
 
           eventQueue.push(createErrorEvent(recoverable.userMessage, false)); // recoverable, not fatal
           eventQueue.push(createStatusEvent('idle')); // Return to idle, not error state
+          emit(createEvent('harness_error', { message: recoverable.userMessage, fatal: false }));
+          emit(createEvent('harness_status', { state: 'idle' }));
 
           return {
             requestId,
@@ -1935,6 +1978,8 @@ export class AgentHarness {
 
         eventQueue.push(createErrorEvent(errorMessage, false));
         eventQueue.push(createStatusEvent('error', errorMessage));
+        emit(createEvent('harness_error', { message: errorMessage, fatal: false }));
+        emit(createEvent('harness_status', { state: 'error', message: errorMessage }));
 
         return {
           requestId,

@@ -7,6 +7,12 @@
  */
 
 import { z } from 'zod'
+import {
+  isWatcherActionType,
+  isWatcherTrigger,
+  type WatcherActionType,
+  type WatcherTrigger,
+} from 'protocol'
 
 // ============ Execution Metrics ============
 
@@ -23,6 +29,7 @@ export type ExecutionMetrics = z.infer<typeof ExecutionMetricsSchema>
 
 export const QualityGateSchema = z.object({
   passed: z.boolean().optional(),
+  issues: z.array(z.string()).optional(),
   checks: z.array(z.object({
     name: z.string(),
     passed: z.boolean(),
@@ -32,12 +39,58 @@ export const QualityGateSchema = z.object({
 
 export type QualityGate = z.infer<typeof QualityGateSchema>
 
+const LEGACY_TRIGGER_MAP: Record<string, WatcherTrigger> = {
+  work_complete: 'work_item_completed',
+  error: 'agent_error',
+}
+
+const LEGACY_ACTION_MAP: Record<string, WatcherActionType> = {
+  pause: 'continue',
+  escalate: 'stop_work_item',
+}
+
+function normalizeWatcherTrigger(value: string): WatcherTrigger | null {
+  const normalized = value.trim().toLowerCase()
+  const mapped = LEGACY_TRIGGER_MAP[normalized] ?? normalized
+  return isWatcherTrigger(mapped) ? mapped : null
+}
+
+function normalizeWatcherAction(value: string): WatcherActionType | null {
+  const normalized = value.trim().toLowerCase()
+  const mapped = LEGACY_ACTION_MAP[normalized] ?? normalized
+  return isWatcherActionType(mapped) ? mapped : null
+}
+
+const WatcherTriggerSchema = z.string().transform((value, ctx) => {
+  const normalized = normalizeWatcherTrigger(value)
+  if (!normalized) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Invalid watcher trigger: ${value}`,
+    })
+    return z.NEVER
+  }
+  return normalized
+})
+
+const WatcherActionSchema = z.string().transform((value, ctx) => {
+  const normalized = normalizeWatcherAction(value)
+  if (!normalized) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Invalid watcher action: ${value}`,
+    })
+    return z.NEVER
+  }
+  return normalized
+})
+
 // ============ Decision Entry ============
 
 export const DecisionEntrySchema = z.object({
   timestamp: z.string(),
-  trigger: z.enum(['prompt_user', 'cadence_audit', 'bounds_exceeded', 'work_complete', 'error']),
-  watcherAction: z.enum(['answer', 'allow', 'continue', 'realign', 'pause', 'escalate']),
+  trigger: WatcherTriggerSchema,
+  watcherAction: WatcherActionSchema,
   question: z.string().optional(),
   answer: z.string().optional(),
   rationale: z.string(),

@@ -20,6 +20,7 @@
     "agent": "workspace:*",
     "comms-bus": "workspace:*",
     "context": "workspace:*",
+    "harness-client": "workspace:*",
     "entity-graph": "workspace:*",
     "graphd": "workspace:*",
     "llm": "workspace:*",

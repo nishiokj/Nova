@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useCockpit, selectToolSignal, selectRecentAssistantMessage, selectFocusRollup, selectFocusStatus, selectFocusEscalationId, type FocusTab } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore, selectToolSignal, selectRecentAssistantMessage, selectFocusRollup, selectFocusStatus, selectFocusEscalationId, type FocusTab } from '@/hooks/use-cockpit-store';
 import { DiffstatLine } from '@/components/shared/DiffstatLine';
 import { ResizeHandle } from '@/components/shared/ResizeHandle';
 import { PacketTab } from './tabs/PacketTab';
@@ -28,19 +28,28 @@ function TabContent({ tab }: { tab: FocusTab }) {
   }
 }
 
-export function SessionDetail() {
-  const { state, set, handleReviewDecision, handleResolveEscalation } = useCockpit();
-  const { focusData, focusTab, reviewDecisionAction, resolvingEscalationId, diffData, eventDrawerHeight } = state;
-
-  const toolSignal = useMemo(() => selectToolSignal(state), [state.events]);
-  const recentMessage = useMemo(() => selectRecentAssistantMessage(state), [state.events]);
-  const focusRollup = useMemo(() => selectFocusRollup(state), [state.focusData?.sessionKey, state.runningSessions, state.readySessions, state.doneSessions]);
+export function SessionDetail({ mentionFiles = [] }: { mentionFiles?: string[] }) {
+  const focusData = useCockpit(s => s.focusData);
+  const focusTab = useCockpit(s => s.focusTab);
+  const reviewDecisionAction = useCockpit(s => s.reviewDecisionAction);
+  const resolvingEscalationId = useCockpit(s => s.resolvingEscalationId);
+  const diffData = useCockpit(s => s.diffData);
+  const eventDrawerHeight = useCockpit(s => s.eventDrawerHeight);
+  const events = useCockpit(s => s.events);
+  const runningSessions = useCockpit(s => s.runningSessions);
+  const readySessions = useCockpit(s => s.readySessions);
+  const doneSessions = useCockpit(s => s.doneSessions);
+  const store = useCockpitStore();
+  const state = store.getSnapshot();
+  const toolSignal = useMemo(() => selectToolSignal(state), [events]);
+  const recentMessage = useMemo(() => selectRecentAssistantMessage(state), [events]);
+  const focusRollup = useMemo(() => selectFocusRollup(state), [focusData?.sessionKey, runningSessions, readySessions, doneSessions]);
   const focusStatus = selectFocusStatus(state);
   const escalationId = selectFocusEscalationId(state);
 
   const diffSummary = diffData?.summary ?? focusRollup?.diffstat ?? null;
 
-  const setEventDrawerHeight = (height: number) => set({ eventDrawerHeight: Math.max(80, Math.min(600, height)) });
+  const setEventDrawerHeight = (height: number) => store.set({ eventDrawerHeight: Math.max(80, Math.min(600, height)) });
 
   if (!focusData) {
     return (
@@ -53,9 +62,9 @@ export function SessionDetail() {
   return (
     <div className="h-full flex flex-col">
       {/* Session header */}
-      <div className="px-3 py-2 border-b border-[var(--border-subtle)] shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-[var(--text-primary)] font-medium truncate">
+      <div className="px-3 py-1.5 border-b border-[var(--border-subtle)] shrink-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-[var(--text-primary)] font-medium truncate">
             {typeof focusData.header?.title === 'string' ? focusData.header.title : 'Session'}
           </span>
           {focusData.type === 'escalation' && (
@@ -63,7 +72,7 @@ export function SessionDetail() {
           )}
         </div>
 
-        <div className="text-xs text-[var(--text-muted)] mt-0.5 flex items-center gap-2">
+        <div className="flex items-center gap-x-3 gap-y-0.5 mt-0.5 flex-wrap text-xs text-[var(--text-muted)]">
           <span className="font-mono">{focusData.sessionKey}</span>
           {toolSignal ? (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--accent-cyan)]/15 text-[var(--accent-cyan)] text-[10px]">
@@ -74,16 +83,15 @@ export function SessionDetail() {
           ) : (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--bg-hover)] text-[var(--text-muted)] text-[10px]">Idle</span>
           )}
+          {diffSummary && (
+            <span className="flex-1 min-w-0">
+              <DiffstatLine added={diffSummary.added} deleted={diffSummary.deleted} files={diffSummary.filesTouched} />
+            </span>
+          )}
         </div>
 
-        {diffSummary && (
-          <div className="mt-0.5">
-            <DiffstatLine added={diffSummary.added} deleted={diffSummary.deleted} files={diffSummary.filesTouched} />
-          </div>
-        )}
-
         {recentMessage && (
-          <div className="text-[11px] text-[var(--text-secondary)] mt-0.5 truncate">
+          <div className="text-[10px] text-[var(--text-secondary)] mt-0.5 truncate">
             Latest: {recentMessage}
           </div>
         )}
@@ -92,12 +100,12 @@ export function SessionDetail() {
         {focusStatus === 'ready' && (
           <div className="mt-1 flex items-center gap-1">
             <button
-              onClick={() => void handleReviewDecision('accept')}
+              onClick={() => void store.handleReviewDecision('accept')}
               disabled={reviewDecisionAction !== null}
               className="px-2 py-0.5 text-[11px] rounded bg-[var(--success)]/20 text-[var(--success)] hover:bg-[var(--success)]/30 disabled:opacity-60"
             >{reviewDecisionAction === 'accept' ? 'Accepting...' : 'Accept'}</button>
             <button
-              onClick={() => void handleReviewDecision('request_changes')}
+              onClick={() => void store.handleReviewDecision('request_changes')}
               disabled={reviewDecisionAction !== null}
               className="px-2 py-0.5 text-[11px] rounded bg-[var(--warning)]/20 text-[var(--warning)] hover:bg-[var(--warning)]/30 disabled:opacity-60"
             >{reviewDecisionAction === 'request_changes' ? 'Sending...' : 'Request Changes'}</button>
@@ -107,7 +115,7 @@ export function SessionDetail() {
         {escalationId && (
           <div className="mt-1">
             <button
-              onClick={() => void handleResolveEscalation(escalationId)}
+              onClick={() => void store.handleResolveEscalation(escalationId)}
               disabled={resolvingEscalationId === escalationId}
               className="px-2 py-0.5 text-xs rounded bg-[var(--success)]/20 text-[var(--success)] hover:bg-[var(--success)]/30 disabled:opacity-60"
             >{resolvingEscalationId === escalationId ? 'Resolving...' : 'Resolve Escalation'}</button>
@@ -115,11 +123,11 @@ export function SessionDetail() {
         )}
 
         {/* Tab bar */}
-        <div className="mt-2 flex items-center border-b border-[var(--border-subtle)]">
+        <div className="mt-1.5 flex items-center border-b border-[var(--border-subtle)] -mx-3 px-3">
           {TABS.map((tab) => (
             <button
               key={tab.key}
-              onClick={() => set({ focusTab: tab.key })}
+              onClick={() => store.set({ focusTab: tab.key })}
               className={`px-2.5 py-1 text-[11px] border-b-2 -mb-px transition-colors ${
                 focusTab === tab.key
                   ? 'border-[var(--accent-cyan)] text-[var(--accent-cyan)]'
@@ -145,7 +153,7 @@ export function SessionDetail() {
       <EventDrawer />
 
       {/* Message input */}
-      <MessageInput />
+      <MessageInput fileSuggestions={mentionFiles} />
     </div>
   );
 }

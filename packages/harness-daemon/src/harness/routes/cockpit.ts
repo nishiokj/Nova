@@ -80,6 +80,7 @@ import {
   parseSessionEscalations,
   type EscalationResolutionInput,
 } from '../escalation_state.js';
+import { extractSessionFiles, buildSubgraph, type SubgraphResponse } from '../entity_subgraph.js';
 
 // ── internal packet helpers ─────────────────────────────────────────
 
@@ -1266,7 +1267,14 @@ export function handleGetDebugMemory(res: ServerResponse, ctx: ControlPlaneConte
     sendJson(res, { error: 'Debug memory info not available' }, 503);
     return;
   }
-  sendJson(res, ctx.getDebugMemoryInfo());
+  const info = ctx.getDebugMemoryInfo();
+  if (info && typeof (info as Promise<unknown>).then === 'function') {
+    void (info as Promise<unknown>)
+      .then((resolved) => sendJson(res, resolved))
+      .catch((error) => sendJson(res, { error: error instanceof Error ? error.message : String(error) }, 500));
+    return;
+  }
+  sendJson(res, info);
 }
 
 export async function handleGetCockpitSessionRollups(
@@ -1577,16 +1585,20 @@ export async function handleGetCockpitDiff(
   if (session && !hasExplicitRange) {
     const sessionDiff = buildSessionDiffFromEvents(session, file ?? undefined);
     if (sessionDiff && sessionDiff.summary.filesTouched > 0) {
-      const payload = {
-        baseSha: sessionDiff.baseSha,
-        headSha: sessionDiff.headSha,
-        source: sessionDiff.source,
-        summary: sessionDiff.summary,
-        hotspots: sessionDiff.hotspots,
-        patch: sessionDiff.patch,
-      };
-      sendJson(res, payload);
-      return;
+      // When requesting a specific file's patch but session events lack a preview,
+      // fall through to git diff instead of returning a null patch.
+      if (!file || sessionDiff.patch) {
+        const payload = {
+          baseSha: sessionDiff.baseSha,
+          headSha: sessionDiff.headSha,
+          source: sessionDiff.source,
+          summary: sessionDiff.summary,
+          hotspots: sessionDiff.hotspots,
+          patch: sessionDiff.patch,
+        };
+        sendJson(res, payload);
+        return;
+      }
     }
   }
 
@@ -1833,9 +1845,11 @@ export function handleGetCockpitPreview(
 export async function handleGetCockpitFilesystem(
   res: ServerResponse,
   ctx: ControlPlaneContext,
-  sessionKeyRaw: string | null
+  sessionKeyRaw: string | null,
+  projectPathRaw: string | null
 ): Promise<void> {
   const sessionKey = asString(sessionKeyRaw);
+  const projectPath = normalizeProjectPathInput(asString(projectPathRaw));
   if (sessionKey) {
     const session = getSession(ctx, sessionKey);
     if (!session) {
@@ -1846,6 +1860,7 @@ export async function handleGetCockpitFilesystem(
   try {
     const data = await buildCockpitFilesystemRoots(ctx, {
       ...(sessionKey ? { sessionKey } : {}),
+      ...(projectPath ? { projectPath } : {}),
     });
     sendJson(res, data);
   } catch (error) {
@@ -1914,7 +1929,7 @@ export async function handleGetCockpitSessionPermissions(
   }
 
   const workingDir = session.workingDir ?? ctx.workingDir;
-  const state = ctx.getSessionPermissionState?.(sessionKey, { workingDir })
+  const state = await ctx.getSessionPermissionState?.(sessionKey, { workingDir })
     ?? normalizeSessionPermissionState({
       ...(isRecord(session.metadata?.permission_state) ? session.metadata?.permission_state : {}),
       ...(isRecord(session.metadata?.permission_flags) ? session.metadata?.permission_flags : {}),
@@ -1953,6 +1968,7 @@ export async function handlePostCockpitSessionPermissions(
     allowOutsideRoot?: boolean;
     webSearchEnabled?: boolean;
     writesNoDeletes?: boolean;
+    restrictWriteToPaths?: string[] | null;
     reloadPersistentConfig?: boolean;
   } = {};
 
@@ -1962,20 +1978,24 @@ export async function handlePostCockpitSessionPermissions(
         update.allowOutsideRoot = false;
         update.webSearchEnabled = true;
         update.writesNoDeletes = false;
+        update.restrictWriteToPaths = null;
         break;
       case 'writes_only':
       case 'writes-only':
         update.allowOutsideRoot = false;
         update.webSearchEnabled = true;
         update.writesNoDeletes = true;
+        update.restrictWriteToPaths = null;
         break;
       case 'websearch_enabled':
       case 'websearch-enabled':
         update.webSearchEnabled = true;
+        update.restrictWriteToPaths = null;
         break;
       case 'outside_root':
       case 'outside-root':
         update.allowOutsideRoot = true;
+        update.restrictWriteToPaths = null;
         break;
       case 'custom':
         break;
@@ -1989,10 +2009,18 @@ export async function handlePostCockpitSessionPermissions(
   const allowOutsideRoot = asBoolean(body.allowOutsideRoot ?? body.allow_outside_root);
   const webSearchEnabled = asBoolean(body.webSearchEnabled ?? body.web_search_enabled);
   const writesNoDeletes = asBoolean(body.writesNoDeletes ?? body.writes_no_deletes);
+  const restrictWriteToPaths = Array.isArray(body.restrictWriteToPaths)
+    ? body.restrictWriteToPaths
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+    : body.restrictWriteToPaths === null
+      ? null
+      : undefined;
   if (typeof dangerousMode === 'boolean') update.dangerousMode = dangerousMode;
   if (typeof allowOutsideRoot === 'boolean') update.allowOutsideRoot = allowOutsideRoot;
   if (typeof webSearchEnabled === 'boolean') update.webSearchEnabled = webSearchEnabled;
   if (typeof writesNoDeletes === 'boolean') update.writesNoDeletes = writesNoDeletes;
+  if (Array.isArray(restrictWriteToPaths) || restrictWriteToPaths === null) update.restrictWriteToPaths = restrictWriteToPaths;
 
   const customJson = typeof body.customJson === 'string'
     ? body.customJson
@@ -2027,7 +2055,7 @@ export async function handlePostCockpitSessionPermissions(
     return;
   }
 
-  let state = ctx.updateSessionPermissionState?.(sessionKey, update, { workingDir }) ?? null;
+  let state = await ctx.updateSessionPermissionState?.(sessionKey, update, { workingDir }) ?? null;
   if (!state) {
     state = normalizeSessionPermissionState({
       ...(isRecord(session.metadata?.permission_state) ? session.metadata?.permission_state : {}),
@@ -2037,16 +2065,24 @@ export async function handlePostCockpitSessionPermissions(
     if (typeof update.allowOutsideRoot === 'boolean') state.allowOutsideRoot = update.allowOutsideRoot;
     if (typeof update.webSearchEnabled === 'boolean') state.webSearchEnabled = update.webSearchEnabled;
     if (typeof update.writesNoDeletes === 'boolean') state.writesNoDeletes = update.writesNoDeletes;
+    if (Array.isArray(update.restrictWriteToPaths)) state.restrictWriteToPaths = update.restrictWriteToPaths;
+    if (update.restrictWriteToPaths === null) delete state.restrictWriteToPaths;
     if (ctx.graphd) {
       const {
         allowOutsideRoot: allowOutsideRootVal,
         webSearchEnabled: webSearchEnabledVal,
         writesNoDeletes: writesNoDeletesVal,
+        restrictWriteToPaths: restrictWriteToPathsVal,
         ...permissionState
       } = state;
       ctx.graphd.sessionUpdateMetadata(sessionKey, {
         permission_state: permissionState,
-        permission_flags: { allowOutsideRoot: allowOutsideRootVal, webSearchEnabled: webSearchEnabledVal, writesNoDeletes: writesNoDeletesVal },
+        permission_flags: {
+          allowOutsideRoot: allowOutsideRootVal,
+          webSearchEnabled: webSearchEnabledVal,
+          writesNoDeletes: writesNoDeletesVal,
+          ...(Array.isArray(restrictWriteToPathsVal) ? { restrictWriteToPaths: restrictWriteToPathsVal } : {}),
+        },
       });
     }
   }
@@ -2193,7 +2229,7 @@ export async function handleResolveCockpitEscalation(
     resolvedBy,
   };
 
-  const result = ctx.resolveSessionEscalation(ownerSession.sessionKey, escalationId, resolution);
+  const result = await ctx.resolveSessionEscalation(ownerSession.sessionKey, escalationId, resolution);
   if (!result.success) {
     sendJson(res, { success: false, error: result.error ?? 'Failed to resolve escalation' }, 400);
     return;
@@ -2257,6 +2293,8 @@ export async function handlePostCockpitSessionCreate(
   const projectPathInput = normalizeProjectPathInput(asString(body.projectPath) ?? asString(body.project_path));
   const createProjectPath = asBoolean(body.createProjectPath ?? body.create_project_path) === true;
   const metadata = isRecord(body.metadata) ? body.metadata : {};
+  const metadataSource = (asString(metadata.source) ?? '').toLowerCase();
+  const documentScopedSession = metadataSource === 'cockpit-document';
   const path = await import('path');
   const fs = await import('fs/promises');
   let workingDir = path.resolve(ctx.workingDir);
@@ -2330,9 +2368,83 @@ export async function handlePostCockpitSessionCreate(
     }
   }
 
+  // Default: cockpit sessions are dangerous unless they originate from document chat.
+  try {
+    const resolvedMarkdownPath = markdownPath
+      ? (
+        path.isAbsolute(markdownPath)
+          ? path.resolve(markdownPath)
+          : path.resolve(workingDir, markdownPath)
+      )
+      : null;
+    const documentWriteTargets = documentScopedSession && resolvedMarkdownPath
+      ? [resolvedMarkdownPath]
+      : undefined;
+    const documentWriteOutsideRoot = !!(
+      documentScopedSession
+      && resolvedMarkdownPath
+      && resolvedMarkdownPath !== workingDir
+      && !resolvedMarkdownPath.startsWith(`${workingDir}${path.sep}`)
+    );
+    if (ctx.updateSessionPermissionState) {
+      await ctx.updateSessionPermissionState(
+        sessionKey,
+        {
+          dangerousMode: !documentScopedSession,
+          ...(documentScopedSession ? { allowOutsideRoot: documentWriteOutsideRoot } : {}),
+          ...(documentWriteTargets ? { restrictWriteToPaths: documentWriteTargets } : {}),
+        },
+        { workingDir }
+      );
+    } else if (ctx.graphd) {
+      ctx.graphd.sessionUpdateMetadata(sessionKey, {
+        permission_state: { dangerousMode: !documentScopedSession },
+        permission_flags: {
+          ...(documentScopedSession ? { allowOutsideRoot: documentWriteOutsideRoot } : {}),
+          ...(documentWriteTargets ? { restrictWriteToPaths: documentWriteTargets } : {}),
+        },
+      });
+    }
+  } catch {
+    // Permission setup is best-effort
+  }
+
   sendJson(res, {
     success: true,
     sessionKey,
     workingDir,
   });
+}
+
+// ── entity graph ────────────────────────────────────────────────────
+
+export async function handleGetCockpitEntityGraph(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  sessionKey: string | null
+): Promise<void> {
+  if (!sessionKey) {
+    sendJson(res, { error: 'sessionKey is required' }, 400);
+    return;
+  }
+
+  const session = getSession(ctx, sessionKey);
+  if (!session) {
+    sendJson(res, { nodes: [], edges: [], stats: { readFiles: 0, editedFiles: 0, totalNodes: 0, totalEdges: 0 } });
+    return;
+  }
+
+  const agentEvents = Array.isArray(session.metadata?.agent_events) ? session.metadata.agent_events : [];
+  const sessionFiles = extractSessionFiles(agentEvents);
+
+  if (sessionFiles.length === 0) {
+    sendJson(res, { nodes: [], edges: [], stats: { readFiles: 0, editedFiles: 0, totalNodes: 0, totalEdges: 0 } });
+    return;
+  }
+
+  const result = await withAgentMemorySql<SubgraphResponse>(async (sql) => {
+    return buildSubgraph(sql, sessionFiles);
+  });
+
+  sendJson(res, result ?? { nodes: [], edges: [], stats: { readFiles: 0, editedFiles: 0, totalNodes: 0, totalEdges: 0 } });
 }

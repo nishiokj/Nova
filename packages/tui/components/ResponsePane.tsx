@@ -20,8 +20,8 @@ const getDiffColors = () => {
     header: { fg: theme.diffHeader, bg: theme.diffHeaderBg }, // From theme (matches userBg)
     added: { fg: "#4ade80", bg: undefined },      // Light green text, no background
     removed: { fg: "#f87171", bg: undefined },    // Light red text, no background
-    context: { fg: theme.text, bg: theme.diffContextBg }, // Theme colors (matches userBg)
-    separator: { fg: theme.muted, bg: theme.diffContextBg }, // Theme separator
+    context: { fg: theme.text, bg: undefined },   // No background for non-affected lines
+    separator: { fg: theme.muted, bg: undefined }, // No background for separators
     text: { fg: theme.text, bg: undefined },       // Theme text
     pane: theme.diffContextBg,                     // Theme pane background
   };

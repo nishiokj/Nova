@@ -1,29 +1,44 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import { formatElapsed, statusColor } from '@/lib/format';
+import { rankByQuery } from '@/lib/autocomplete';
 
 export function CommandPalette() {
-  const { state, set } = useCockpit();
+  const runningSessions = useCockpit(s => s.runningSessions);
+  const readySessions = useCockpit(s => s.readySessions);
+  const doneSessions = useCockpit(s => s.doneSessions);
+  const store = useCockpitStore();
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const allSessions = useMemo(() => [
-    ...state.runningSessions,
-    ...state.readySessions,
-    ...state.doneSessions,
-  ], [state.runningSessions, state.readySessions, state.doneSessions]);
+    ...runningSessions,
+    ...readySessions,
+    ...doneSessions,
+  ], [runningSessions, readySessions, doneSessions]);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return allSessions.slice(0, 20);
-    const q = query.toLowerCase();
-    return allSessions.filter((s) =>
-      s.title.toLowerCase().includes(q)
-      || s.sessionKey.toLowerCase().includes(q)
-      || s.status.toLowerCase().includes(q)
-      || s.currentActivity.tool.toLowerCase().includes(q)
-      || (s.currentActivity.file ?? '').toLowerCase().includes(q)
-    ).slice(0, 20);
+    return rankByQuery(
+      allSessions,
+      query,
+      (session) => {
+        const shortKey = session.sessionKey.slice(-8);
+        const currentFile = session.currentActivity.file ?? '';
+        const fileName = currentFile.split('/').pop() ?? currentFile;
+        return [
+          { text: session.title, weight: 1 },
+          { text: session.sessionKey, weight: 1.1 },
+          { text: shortKey, weight: 1.15 },
+          { text: session.status, weight: 1.25 },
+          { text: session.kind, weight: 1.35 },
+          { text: session.currentActivity.tool, weight: 1.45 },
+          { text: fileName, weight: 1.5 },
+          { text: currentFile, weight: 1.75 },
+        ];
+      },
+      20,
+    );
   }, [query, allSessions]);
 
   useEffect(() => {
@@ -34,8 +49,16 @@ export function CommandPalette() {
     setSelectedIdx(0);
   }, [query]);
 
+  useEffect(() => {
+    if (filtered.length === 0) {
+      setSelectedIdx(0);
+      return;
+    }
+    setSelectedIdx((prev) => Math.max(0, Math.min(prev, filtered.length - 1)));
+  }, [filtered.length]);
+
   const selectSession = (sessionKey: string) => {
-    set({ focusTarget: { type: 'session', id: sessionKey }, commandPaletteOpen: false, commandPaletteQuery: '' });
+    store.set({ focusTarget: { type: 'session', id: sessionKey }, commandPaletteOpen: false, commandPaletteQuery: '' });
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -51,14 +74,14 @@ export function CommandPalette() {
       if (session) selectSession(session.sessionKey);
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      set({ commandPaletteOpen: false, commandPaletteQuery: '' });
+      store.set({ commandPaletteOpen: false, commandPaletteQuery: '' });
     }
   };
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]"
-      onClick={() => set({ commandPaletteOpen: false, commandPaletteQuery: '' })}
+      onClick={() => store.set({ commandPaletteOpen: false, commandPaletteQuery: '' })}
     >
       <div className="absolute inset-0 bg-black/50" />
       <div

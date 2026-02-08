@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
-import { useCockpit, selectActivePacket, selectParsedPacket } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore, selectActivePacket, selectParsedPacket } from '@/hooks/use-cockpit-store';
 import { parseInlineRefs, PACKET_REF_REGEX } from '@/lib/packets';
+import { EntityGraphView } from './EntityGraphView';
 
 function InlineRefs({
   text,
@@ -48,16 +49,16 @@ function PacketBody({
 }) {
   const lines = markdown.split('\n');
   return (
-    <div className="space-y-1 text-sm leading-relaxed">
+    <div className="space-y-1 text-xs leading-relaxed">
       {lines.map((rawLine, idx) => {
         const line = rawLine.trimEnd();
         if (!line.trim()) return <div key={idx} className="h-2" />;
         if (line.startsWith('### '))
-          return <h3 key={idx} className="text-sm font-semibold text-[var(--text-primary)] mt-2"><InlineRefs text={line.slice(4)} onRefClick={onRefClick} isRefResolved={isRefResolved} /></h3>;
+          return <h3 key={idx} className="text-xs font-semibold text-[var(--text-primary)] mt-2"><InlineRefs text={line.slice(4)} onRefClick={onRefClick} isRefResolved={isRefResolved} /></h3>;
         if (line.startsWith('## '))
-          return <h2 key={idx} className="text-base font-semibold text-[var(--text-primary)] mt-2"><InlineRefs text={line.slice(3)} onRefClick={onRefClick} isRefResolved={isRefResolved} /></h2>;
+          return <h2 key={idx} className="text-sm font-semibold text-[var(--text-primary)] mt-2"><InlineRefs text={line.slice(3)} onRefClick={onRefClick} isRefResolved={isRefResolved} /></h2>;
         if (line.startsWith('# '))
-          return <h1 key={idx} className="text-lg font-semibold text-[var(--text-primary)] mb-1"><InlineRefs text={line.slice(2)} onRefClick={onRefClick} isRefResolved={isRefResolved} /></h1>;
+          return <h1 key={idx} className="text-base font-semibold text-[var(--text-primary)] mb-1"><InlineRefs text={line.slice(2)} onRefClick={onRefClick} isRefResolved={isRefResolved} /></h1>;
         const numbered = line.match(/^(\d+)\.\s+(.*)$/);
         if (numbered) {
           return (
@@ -82,8 +83,12 @@ function PacketBody({
 }
 
 export function PacketTab() {
-  const { state, set, resolvePacketRef, handlePacketRefClick, handlePacketLinkClick } = useCockpit();
-  const activePacket = useMemo(() => selectActivePacket(state), [state.selectedPacketId, state.sessionPackets, state.focusData?.packet?.packetId]);
+  const selectedPacketId = useCockpit(s => s.selectedPacketId);
+  const sessionPackets = useCockpit(s => s.sessionPackets);
+  const focusData = useCockpit(s => s.focusData);
+  const store = useCockpitStore();
+  const state = store.getSnapshot();
+  const activePacket = useMemo(() => selectActivePacket(state), [selectedPacketId, sessionPackets, focusData?.packet?.packetId]);
   const parsed = useMemo(() => selectParsedPacket(state), [activePacket?.contentMarkdown]);
 
   const evidence = useMemo(() => {
@@ -96,7 +101,7 @@ export function PacketTab() {
 
     for (const ref of parsed.frontmatter?.refs ?? []) {
       totalRefs++;
-      if (resolvePacketRef(ref.type, ref.target)) resolvedRefs++;
+      if (store.resolvePacketRef(ref.type, ref.target)) resolvedRefs++;
       else brokenRefs.add(`@${ref.type}(${ref.target})`);
     }
     for (const rawLine of lines) {
@@ -105,7 +110,7 @@ export function PacketTab() {
       let match: RegExpExecArray | null;
       const lineRefs: { resolved: boolean }[] = [];
       while ((match = regex.exec(line)) !== null) {
-        const resolved = resolvePacketRef(match[1], match[2]);
+        const resolved = store.resolvePacketRef(match[1], match[2]);
         lineRefs.push({ resolved });
         totalRefs++;
         if (resolved) resolvedRefs++;
@@ -117,26 +122,21 @@ export function PacketTab() {
       }
     }
     return { summaryBullets, evidenceBackedBullets, totalRefs, resolvedRefs, brokenRefs: Array.from(brokenRefs) };
-  }, [parsed, resolvePacketRef]);
+  }, [parsed, store]);
 
   if (!activePacket) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <div className="text-[var(--text-muted)] text-sm mb-1">No packet loaded</div>
-        <div className="text-[var(--text-muted)] text-[11px] opacity-60">Packets appear when the session emits structured output</div>
-      </div>
-    );
+    return <EntityGraphView sessionKey={focusData?.sessionKey} />;
   }
 
   return (
     <div className="space-y-2">
-      {state.sessionPackets.length > 1 && (
+      {sessionPackets.length > 1 && (
         <select
-          value={state.selectedPacketId ?? activePacket.packetId}
-          onChange={(e) => set({ selectedPacketId: e.target.value })}
+          value={selectedPacketId ?? activePacket.packetId}
+          onChange={(e) => store.set({ selectedPacketId: e.target.value })}
           className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[11px] text-[var(--text-secondary)]"
         >
-          {state.sessionPackets.map((packet) => (
+          {sessionPackets.map((packet) => (
             <option key={packet.packetId} value={packet.packetId}>
               {packet.type} · {new Date(packet.createdAt).toLocaleTimeString()}
             </option>
@@ -172,7 +172,7 @@ export function PacketTab() {
               {parsed.frontmatter.links.map((link) => (
                 <button
                   key={`${link.label}:${link.target}`}
-                  onClick={() => void handlePacketLinkClick(link.target)}
+                  onClick={() => void store.handlePacketLinkClick(link.target)}
                   className="px-1.5 py-0.5 rounded bg-[var(--accent-cyan)]/10 text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/20"
                 >
                   {link.label}
@@ -183,11 +183,11 @@ export function PacketTab() {
           {parsed.frontmatter.refs.length > 0 && (
             <div className="flex flex-wrap items-center gap-1">
               {parsed.frontmatter.refs.map((ref, idx) => {
-                const resolved = resolvePacketRef(ref.type, ref.target);
+                const resolved = store.resolvePacketRef(ref.type, ref.target);
                 return (
                   <button
                     key={`${ref.type}:${ref.target}:${idx}`}
-                    onClick={() => resolved && void handlePacketRefClick(ref.type, ref.target)}
+                    onClick={() => resolved && void store.handlePacketRefClick(ref.type, ref.target)}
                     disabled={!resolved}
                     className={`px-1.5 py-0.5 rounded ${
                       resolved
@@ -212,8 +212,8 @@ export function PacketTab() {
 
       <PacketBody
         markdown={parsed.bodyMarkdown}
-        onRefClick={(r, t) => void handlePacketRefClick(r, t)}
-        isRefResolved={resolvePacketRef}
+        onRefClick={(r, t) => void store.handlePacketRefClick(r, t)}
+        isRefResolved={store.resolvePacketRef}
       />
     </div>
   );

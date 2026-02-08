@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import { getCockpitBrowserState, getCockpitPreview, type CockpitFilesystemRoot } from '@/lib/api';
 
 export function BrowserTab() {
-  const { state, set } = useCockpit();
-  const {
-    focusData, browserUrlDraft, browserSessionScope,
-    runningSessions, readySessions, doneSessions,
-  } = state;
+  const focusData = useCockpit(s => s.focusData);
+  const browserUrlDraft = useCockpit(s => s.browserUrlDraft);
+  const browserSessionScope = useCockpit(s => s.browserSessionScope);
+  const runningSessions = useCockpit(s => s.runningSessions);
+  const readySessions = useCockpit(s => s.readySessions);
+  const doneSessions = useCockpit(s => s.doneSessions);
+  const store = useCockpitStore();
 
   const sessionKey = browserSessionScope || focusData?.sessionKey || '';
   const sessionOptions = [...runningSessions, ...readySessions, ...doneSessions];
@@ -29,7 +31,7 @@ export function BrowserTab() {
     ]).then(([preview, browserState]) => {
       if (cancelled) return;
       if (preview?.url) {
-        set({ browserUrlDraft: preview.url });
+        store.set({ browserUrlDraft: preview.url });
         setIframeUrl(preview.url);
         setError(null);
       }
@@ -37,7 +39,7 @@ export function BrowserTab() {
       setFilesystemRoots(browserState?.filesystemRoots ?? []);
     });
     return () => { cancelled = true; };
-  }, [sessionKey, set]);
+  }, [sessionKey, store]);
 
   const handleNavigate = useCallback(() => {
     const url = browserUrlDraft.trim();
@@ -74,7 +76,7 @@ export function BrowserTab() {
         <div className="flex items-center gap-2">
           <select
             value={sessionKey}
-            onChange={(e) => set({ browserSessionScope: e.target.value })}
+            onChange={(e) => store.set({ browserSessionScope: e.target.value })}
             className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[11px] text-[var(--text-secondary)]"
           >
             <option value="">Select session...</option>
@@ -99,7 +101,7 @@ export function BrowserTab() {
         <div className="flex items-center gap-2">
           <input
             value={browserUrlDraft}
-            onChange={(e) => set({ browserUrlDraft: e.target.value })}
+            onChange={(e) => store.set({ browserUrlDraft: e.target.value })}
             onKeyDown={(e) => { if (e.key === 'Enter') handleNavigate(); }}
             placeholder="http://localhost:3000"
             className="flex-1 bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-xs text-[var(--text-secondary)] font-mono"

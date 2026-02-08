@@ -1,0 +1,30 @@
+{
+  "editor": "cockpit",
+  "mode": "autosave",
+  "dirty": true,
+  "forceOverwrite": false,
+  "patchMode": "content",
+  "changedLines": 222,
+  "source": "dashboard-control",
+  "createdAt": "2026-02-07T19:50:13.000Z",
+  "updatedAt": "2026-02-07T19:50:13.000Z",
+  "lineCount": 222,
+  "wordCount": 786,
+  "hash": "16a84b839eb509602c5f0bb1e194b8311a79939302dcecb08f7fc3c28dc9fc3a",
+  "size": 7038,
+  "cockpit": {
+    "path": "packages/agent/src/REFACTOR_SPEC.md",
+    "version": 1770493813000,
+    "etag": "W/\"1770493813000-16a84b839eb50960\"",
+    "hash": "16a84b839eb509602c5f0bb1e194b8311a79939302dcecb08f7fc3c28dc9fc3a",
+    "lineCount": 222,
+    "wordCount": 786,
+    "baseVersion": 1769185852387,
+    "previousVersion": 1769185852387,
+    "operation": "patch",
+    "scopeMode": "project",
+    "scopeWorkingDir": "/Users/jevinnishioka/Desktop/jesus",
+    "scopeProjectPath": "/Users/jevinnishioka/Desktop/jesus",
+    "updatedAt": "2026-02-07T19:50:13.000Z"
+  }
+}

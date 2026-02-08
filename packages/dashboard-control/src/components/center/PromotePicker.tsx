@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
 import type { WorkItemTemplate } from '@/lib/api';
 import {
@@ -50,35 +50,100 @@ const TYPE_COLORS: Record<DocumentType, string> = {
 };
 
 export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
-  const { state, set } = useCockpit();
+  const templates = useCockpit(s => s.templates);
+  const upgradePickerOpen = useCockpit(s => s.upgradePickerOpen);
+  const store = useCockpitStore();
   const ref = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
 
   const docType = getDocumentType(workspace.state.content);
-  const options = buildOptions(docType, state.templates);
+  const isProjectScoped = workspace.state.scopeMode === 'project' && !!workspace.state.scopeProjectPath;
+  const options = buildOptions(docType, templates);
   const safeIndex = Math.min(Math.max(activeIndex, 0), Math.max(options.length - 1, 0));
 
   useEffect(() => {
     setActiveIndex(0);
     ref.current?.focus();
-  }, [state.upgradePickerOpen]);
+  }, [upgradePickerOpen]);
 
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
-        set({ upgradePickerOpen: false });
+        store.set({ upgradePickerOpen: false });
       }
     };
     window.addEventListener('mousedown', onMouseDown);
     return () => window.removeEventListener('mousedown', onMouseDown);
-  }, [set]);
+  }, [store]);
 
-  const execute = (option: PromoteOption) => {
+  const suggestProjectPath = () => {
+    if (workspace.state.scopeMode === 'project' && workspace.state.scopeProjectPath) {
+      return workspace.state.scopeProjectPath;
+    }
+    const firstProject = workspace.state.filesystemRoots.find((root) => root.kind === 'project');
+    if (firstProject) return firstProject.path;
+    return workspace.state.filesystemCwd ?? '';
+  };
+
+  const maybePlaceInProject = async (
+    commandStatus: string,
+    defaultFolder: string,
+    options?: {
+      requireConfirm?: boolean;
+      confirmMessage?: string;
+    },
+  ): Promise<string> => {
+    const requireConfirm = options?.requireConfirm !== false;
+    if (requireConfirm) {
+      const placeInProject = window.confirm(
+        options?.confirmMessage
+          ?? 'This promoted artifact is outside a project folder. Move it into a project folder now?'
+      );
+      if (!placeInProject) return commandStatus;
+    }
+
+    const entered = window.prompt(
+      'Project folder path (absolute or relative to current cwd):',
+      suggestProjectPath()
+    );
+    if (!entered || !entered.trim()) return commandStatus;
+
+    const projectPath = entered.trim();
+    await workspace.setScope({ mode: 'project', projectPath });
+    workspace.set({
+      selectedPath: null,
+      dirty: true,
+      status: 'Select a project folder and filename to save the promoted document.',
+    });
+    workspace.openNewFilePicker('save', defaultFolder);
+    return `${commandStatus}. Select destination in project workspace.`;
+  };
+
+  const moveToProjectFromPicker = async () => {
+    const status = await maybePlaceInProject('Project scope selected', 'specs', {
+      requireConfirm: false,
+    });
+    store.set({
+      upgradePickerOpen: false,
+      commandStatus: status,
+    });
+  };
+
+  const execute = async (option: PromoteOption) => {
     const content = workspace.state.content;
 
     if (option.action === 'issue') {
       workspace.setContent(promoteToIssue(content));
-      set({ upgradePickerOpen: false, commandStatus: 'Promoted to issue' });
+      let status = 'Promoted to issue';
+      if (!isProjectScoped) {
+        status = await maybePlaceInProject(status, 'issues');
+      }
+      workspace.set({
+        status: isProjectScoped
+          ? 'Promoted to issue. Next: save if needed, then send a chat message to create or continue a linked session.'
+          : 'Promoted to issue. Next: choose a project destination in the save picker to continue.',
+      });
+      store.set({ upgradePickerOpen: false, commandStatus: status });
       return;
     }
 
@@ -108,7 +173,16 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
       ].join('\n');
 
       workspace.setContent(serializeFrontmatter(workflowFm, issueBody + specsSection));
-      set({ upgradePickerOpen: false, commandStatus: `Promoted to workflow: ${option.template.name}` });
+      let status = `Promoted to workflow: ${option.template.name}`;
+      if (!isProjectScoped) {
+        status = await maybePlaceInProject(status, 'plans');
+      }
+      workspace.set({
+        status: isProjectScoped
+          ? `Promoted to workflow: ${option.template.name}. Next: save if needed (Ctrl+S), then send a chat message to start execution.`
+          : `Promoted to workflow: ${option.template.name}. Next: choose a project destination in the save picker.`,
+      });
+      store.set({ upgradePickerOpen: false, commandStatus: status });
       return;
     }
   };
@@ -123,7 +197,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
           event.preventDefault();
-          set({ upgradePickerOpen: false });
+          store.set({ upgradePickerOpen: false });
           return;
         }
         if (event.key === 'ArrowDown') {
@@ -141,7 +215,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
         if (event.key === 'Enter') {
           event.preventDefault();
           const opt = options[safeIndex];
-          if (opt) execute(opt);
+          if (opt) void execute(opt);
         }
       }}
     >
@@ -154,6 +228,19 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
           {docType}
         </span>
       </div>
+      {!isProjectScoped && (
+        <div className="px-3 py-2 border-b border-[var(--warning)]/40 bg-[var(--warning)]/10 text-[10px] flex items-center gap-2">
+          <span className="text-[var(--warning)] flex-1">
+            Promoted artifacts are easier to execute/review when saved in a project folder.
+          </span>
+          <button
+            onClick={() => { void moveToProjectFromPicker(); }}
+            className="px-1.5 py-0.5 rounded border border-[var(--warning)]/50 text-[var(--warning)] hover:bg-[var(--warning)]/15"
+          >
+            Move now
+          </button>
+        </div>
+      )}
 
       {atMax ? (
         <div className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
@@ -162,7 +249,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
       ) : options.length === 0 ? (
         <div className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
           No promotion options available.
-          {state.templates.length === 0 && ' No workflows loaded from database.'}
+          {templates.length === 0 && ' No workflows loaded from database.'}
         </div>
       ) : (
         <div className="max-h-64 overflow-y-auto py-0.5">
@@ -170,7 +257,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
             <button
               key={`${opt.action}-${opt.template?.id ?? 'default'}`}
               onMouseEnter={() => setActiveIndex(index)}
-              onClick={() => execute(opt)}
+              onClick={() => { void execute(opt); }}
               className={`w-full text-left px-3 py-1.5 text-[11px] ${
                 index === safeIndex ? 'bg-[var(--accent-cyan)]/20' : 'hover:bg-[var(--bg-hover)]'
               }`}
@@ -183,8 +270,8 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
       )}
 
       <div className="px-2.5 py-1 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)]">
-        {'\u2191/\u2193'} select · Enter confirm · Esc cancel · Ctrl+U toggle
-        <span className="ml-1">· requires project/session workspace</span>
+        {'\u2191/\u2193'} select · Enter confirm · Esc cancel · Ctrl+U toggle · /promote
+        <span className="block mt-0.5">Workflow next step: save in project scope, then send a chat message to run.</span>
       </div>
     </div>
   );

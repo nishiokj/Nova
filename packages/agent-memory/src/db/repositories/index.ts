@@ -269,3 +269,23 @@ export {
   type TestReportRow,
   type TestReportListOptions,
 } from './test-reports.js'
+
+export {
+  createArchitectureRepository,
+  type ArchitectureRepository,
+  type ArchitectureRunStatus,
+  type ArchitectureAlertSeverity,
+  type ArchitectureAlertStatus,
+  type ArchitectureRunRecord,
+  type ArchitectureConcernRecord,
+  type ArchitectureConcernFileRecord,
+  type ArchitectureBoundaryRecord,
+  type ArchitectureAlertRecord,
+  type ArchitectureConcernDetail,
+  type ArchitectureRunInput,
+  type ArchitectureRunSuccessInput,
+  type ArchitectureDataInput,
+  type ArchitectureConcernsQuery,
+  type ArchitectureBoundariesQuery,
+  type ArchitectureAlertsQuery,
+} from './architecture.js'

@@ -69,6 +69,40 @@ interface CommitRollup {
   headSha?: string;
 }
 
+const SESSION_DIFFSTAT_CACHE_TTL_MS = 30_000;
+const sessionDiffstatRangeCache = new Map<string, {
+  fetchedAt: number;
+  summary: { added: number; deleted: number; filesTouched: number };
+}>();
+
+function getCachedSessionDiffstat(
+  cacheKey: string,
+  nowMs: number
+): { added: number; deleted: number; filesTouched: number } | null {
+  const cached = sessionDiffstatRangeCache.get(cacheKey);
+  if (!cached) return null;
+  if (nowMs - cached.fetchedAt > SESSION_DIFFSTAT_CACHE_TTL_MS) {
+    sessionDiffstatRangeCache.delete(cacheKey);
+    return null;
+  }
+  return cached.summary;
+}
+
+function setCachedSessionDiffstat(
+  cacheKey: string,
+  summary: { added: number; deleted: number; filesTouched: number },
+  nowMs: number
+): void {
+  sessionDiffstatRangeCache.set(cacheKey, { fetchedAt: nowMs, summary });
+  if (sessionDiffstatRangeCache.size <= 1024) return;
+
+  for (const [key, value] of sessionDiffstatRangeCache.entries()) {
+    if (nowMs - value.fetchedAt > SESSION_DIFFSTAT_CACHE_TTL_MS) {
+      sessionDiffstatRangeCache.delete(key);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Git Remote & Info
 // ---------------------------------------------------------------------------
@@ -432,8 +466,14 @@ export function collectSessionFileModifications(session: SessionRow, fileFilterR
     const success = asBoolean(data.success);
     if (phase !== 'completed' || success !== true) continue;
 
-    const toolName = (asString(data.tool_name) ?? asString(data.toolName) ?? '').toLowerCase();
-    if (toolName !== 'edit' && toolName !== 'write') continue;
+    const rawToolName = asString(data.tool_name) ?? asString(data.toolName) ?? '';
+    const normalizedToolName = rawToolName.toLowerCase().replace(/[_\s-]+/g, '');
+    const toolKind = normalizedToolName === 'write' || normalizedToolName === 'filewrite'
+      ? 'write'
+      : normalizedToolName === 'edit' || normalizedToolName === 'fileedit' || normalizedToolName === 'batchedit'
+        ? 'edit'
+        : null;
+    if (!toolKind) continue;
 
     const args = isRecord(data.arguments) ? data.arguments : {};
     const rawPath = asString(args.path)
@@ -454,7 +494,7 @@ export function collectSessionFileModifications(session: SessionRow, fileFilterR
 
     modifications.push({
       path: normalizedPath,
-      toolName: toolName === 'edit' ? 'edit' : 'write',
+      toolName: toolKind,
       timestampMs,
       ...(requestId ? { requestId } : {}),
       ...(workItemId ? { workItemId } : {}),
@@ -845,28 +885,10 @@ export async function loadSessionDiffstats(
       continue;
     }
 
-    const workingDir = session.workingDir;
-    if (!workingDir) continue;
-    const range = getLatestRevisionRange(session);
-    if (!range.baseSha || !range.headSha) continue;
-    const cacheKey = `${workingDir}\u001f${range.baseSha}\u001f${range.headSha}`;
-    const cached = cachedByRange.get(cacheKey);
-    if (cached) {
-      bySession.set(session.sessionKey, cached);
-      continue;
-    }
-    try {
-      const numstat = await execFileText(
-        'git',
-        ['diff', '--numstat', '--no-color', `${range.baseSha}..${range.headSha}`],
-        { cwd: workingDir, timeout: 15_000, maxBuffer: 4 * 1024 * 1024 }
-      );
-      const parsed = parseNumstatOutput(numstat).summary;
-      cachedByRange.set(cacheKey, parsed);
-      bySession.set(session.sessionKey, parsed);
-    } catch {
-      // Keep trace fallback when git diffstat is unavailable.
-    }
+    // No session-local edit/commit lineage yet: report zeros instead of
+    // falling back to git diff between commits, which would show global
+    // workspace changes not tied to this session.
+    bySession.set(session.sessionKey, { added: 0, deleted: 0, filesTouched: 0 });
   }
 
   return bySession;
@@ -1014,11 +1036,13 @@ export async function resolveDiffRange(
   }
 
   if (session) {
+    const commitEvents = getSessionCommitEvents(session);
+    const hasSessionCommitLineage = commitEvents.length > 0;
     const fromSession = getLatestRevisionRange(session, queryHead ?? undefined);
-    if (fromSession.headSha && fromSession.baseSha) {
+    if (hasSessionCommitLineage && fromSession.headSha && fromSession.baseSha) {
       return { ...fromSession, source: 'session' };
     }
-    if (fromSession.headSha) {
+    if (hasSessionCommitLineage && fromSession.headSha) {
       try {
         const parent = await execFileText(
           'git',

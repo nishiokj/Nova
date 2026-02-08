@@ -10,6 +10,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
+import nodePath from 'path';
 import {
   type ControlPlaneContext,
   sendJson,
@@ -52,6 +53,26 @@ import { deleteSession } from '../session_queries.js';
 // Session query utilities
 // ---------------------------------------------------------------------------
 
+function normalizeSessionTimestampToSeconds(value: unknown, fallbackSeconds: number): number {
+  const parsedMs = parseTimestampMs(value);
+  if (typeof parsedMs === 'number' && Number.isFinite(parsedMs) && parsedMs > 0) {
+    return Math.floor(parsedMs / 1000);
+  }
+  return fallbackSeconds;
+}
+
+function normalizeSessionRow(row: SessionRow): SessionRow {
+  const record = row as unknown as Record<string, unknown>;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const createdAtSeconds = normalizeSessionTimestampToSeconds(record.createdAt, nowSeconds);
+  const lastAccessedAtSeconds = normalizeSessionTimestampToSeconds(record.lastAccessedAt, createdAtSeconds);
+  return {
+    ...row,
+    createdAt: createdAtSeconds,
+    lastAccessedAt: lastAccessedAtSeconds,
+  };
+}
+
 export function getAllSessions(
   ctx: ControlPlaneContext,
   limit = 1000
@@ -64,8 +85,11 @@ export function getAllSessions(
     limit,
     includePreview: true,
   }) as { sessions?: SessionRow[]; error?: string };
+  const normalized = Array.isArray(result.sessions)
+    ? result.sessions.map(normalizeSessionRow)
+    : [];
   return {
-    sessions: result.sessions ?? [],
+    sessions: normalized,
     ...(result.error ? { error: result.error } : {}),
   };
 }
@@ -73,7 +97,7 @@ export function getAllSessions(
 export function getSession(ctx: ControlPlaneContext, sessionKey: string): SessionRow | null {
   if (!ctx.isGraphDReady() || !ctx.graphd) return null;
   const result = ctx.graphd.sessionGet(sessionKey) as { session?: SessionRow };
-  return result.session ?? null;
+  return result.session ? normalizeSessionRow(result.session) : null;
 }
 
 export function groupSessionsByWorkingDir(sessions: SessionRow[]): Map<string, SessionRow[]> {
@@ -566,7 +590,7 @@ export async function handlePostSessionMessage(
         ? (commandArg.startsWith('target=') ? commandArg.slice('target='.length).trim() : commandArg.split(/\s+/, 1)[0])
         : null;
       const targetSessionKey = explicitTarget || buildForkSessionKey(sessionKey);
-      const result = ctx.forkSession(sessionKey, targetSessionKey);
+      const result = await ctx.forkSession(sessionKey, targetSessionKey);
       if (!result.success) {
         sendJson(res, { success: false, error: result.error ?? 'Failed to fork session' }, 400);
         return;
@@ -584,7 +608,7 @@ export async function handlePostSessionMessage(
     // action === 'stop'
     const note = commandArg || 'Stop current work now and pause for user confirmation.';
     if (ctx.stopSession) {
-      const result = ctx.stopSession(sessionKey, note);
+      const result = await ctx.stopSession(sessionKey, note);
       if (!result.success) {
         sendJson(res, { success: false, error: result.error ?? 'Failed to stop session' }, 400);
         return;
@@ -599,7 +623,7 @@ export async function handlePostSessionMessage(
       return;
     }
 
-    const fallbackResult = ctx.dispatchSessionInput(sessionKey, note);
+    const fallbackResult = await ctx.dispatchSessionInput(sessionKey, note);
     if (!fallbackResult.success) {
       sendJson(res, { success: false, error: fallbackResult.error ?? 'Failed to stop session' }, 400);
       return;
@@ -616,19 +640,21 @@ export async function handlePostSessionMessage(
   }
 
   const markdownContextValue = body.markdownContext ?? body.documentContext ?? body.activeDocument;
-  const contextBuild = await buildMarkdownMessageContext(ctx, markdownContextValue, {
-    defaultSessionKey: sessionKey,
-  });
+  const [contextBuild, workflowTemplateDispatch] = await Promise.all([
+    buildMarkdownMessageContext(ctx, markdownContextValue, {
+      defaultSessionKey: sessionKey,
+    }),
+    maybeBuildWorkflowTemplateDispatch(
+      ctx,
+      session,
+      message,
+      markdownContextValue
+    ),
+  ]);
   if (!contextBuild.ok) {
     sendJson(res, { success: false, error: contextBuild.error }, contextBuild.status);
     return;
   }
-  const workflowTemplateDispatch = await maybeBuildWorkflowTemplateDispatch(
-    ctx,
-    session,
-    message,
-    markdownContextValue
-  );
   if (!workflowTemplateDispatch.ok) {
     sendJson(res, { success: false, error: workflowTemplateDispatch.error }, workflowTemplateDispatch.status);
     return;
@@ -639,6 +665,36 @@ export async function handlePostSessionMessage(
         ...workflowTemplateDispatch.dispatchMetadata,
       }
     : contextBuild.contextMetadata;
+
+  const contextMetadataRecord = isRecord(contextBuild.contextMetadata)
+    ? contextBuild.contextMetadata
+    : {};
+  const writeTargetPath = asString(contextMetadataRecord.writeTargetPath)
+    ?? asString(contextMetadataRecord.absolutePath);
+  if (writeTargetPath) {
+    const sessionWorkingDir = session.workingDir ?? '';
+    const resolvedTargetPath = nodePath.resolve(writeTargetPath);
+    const resolvedSessionRoot = sessionWorkingDir ? nodePath.resolve(sessionWorkingDir) : '';
+    const allowOutsideRoot = !!(
+      resolvedSessionRoot
+      && resolvedTargetPath !== resolvedSessionRoot
+      && !resolvedTargetPath.startsWith(`${resolvedSessionRoot}${nodePath.sep}`)
+    );
+    try {
+      await ctx.updateSessionPermissionState?.(
+        sessionKey,
+        {
+          dangerousMode: false,
+          allowOutsideRoot,
+          restrictWriteToPaths: [writeTargetPath],
+        },
+        { workingDir: session.workingDir ?? undefined }
+      );
+    } catch {
+      // Permission updates are best-effort; never block chat dispatch.
+    }
+  }
+
   const messageDispatchOptions = contextBuild.contextText
     ? {
         context: contextBuild.contextText,
@@ -656,12 +712,20 @@ export async function handlePostSessionMessage(
           ...contextBuild.contextMetadata,
           attachedAt: new Date().toISOString(),
         },
+        cockpit_chat_scope: {
+          mode: 'document',
+          source: 'markdown-editor',
+          path: asString(contextMetadataRecord.path) ?? null,
+          scopeMode: asString(contextMetadataRecord.scopeMode) ?? null,
+          ...(writeTargetPath ? { writeTargetPath } : {}),
+          updatedAt: new Date().toISOString(),
+        },
       });
     } catch {
       // Best-effort metadata update; never block chat dispatch.
     }
   }
-  const result = ctx.dispatchSessionInput(sessionKey, message, messageDispatchOptions);
+  const result = await ctx.dispatchSessionInput(sessionKey, message, messageDispatchOptions);
   if (!result.success) {
     sendJson(res, { success: false, error: result.error ?? 'Failed to dispatch message' }, 400);
     return;
@@ -731,7 +795,7 @@ export async function handlePostSessionControl(
       return;
     }
     const targetSessionKey = asString(body.targetSessionKey) ?? buildForkSessionKey(sessionKey);
-    const result = ctx.forkSession(sessionKey, targetSessionKey);
+    const result = await ctx.forkSession(sessionKey, targetSessionKey);
     if (!result.success) {
       sendJson(res, { success: false, error: result.error ?? 'Failed to fork session' }, 400);
       return;
@@ -747,7 +811,7 @@ export async function handlePostSessionControl(
 
   if (action === 'stop') {
     if (ctx.stopSession) {
-      const result = ctx.stopSession(sessionKey, asString(body.note));
+      const result = await ctx.stopSession(sessionKey, asString(body.note));
       if (!result.success) {
         sendJson(res, { success: false, error: result.error ?? 'Failed to stop session' }, 400);
         return;
@@ -765,7 +829,7 @@ export async function handlePostSessionControl(
       sendJson(res, { success: false, error: 'Session control not available in this daemon context' }, 501);
       return;
     }
-    const fallbackResult = ctx.dispatchSessionInput(
+    const fallbackResult = await ctx.dispatchSessionInput(
       sessionKey,
       asString(body.note) ?? 'Stop current work now and pause for user confirmation.'
     );
@@ -788,7 +852,7 @@ export async function handlePostSessionControl(
     return;
   }
   const resumeMessage = asString(body.message) ?? 'Continue with the current objective.';
-  const result = ctx.dispatchSessionInput(sessionKey, resumeMessage);
+  const result = await ctx.dispatchSessionInput(sessionKey, resumeMessage);
   if (!result.success) {
     sendJson(res, { success: false, error: result.error ?? 'Failed to start session' }, 400);
     return;

@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef } from 'react';
-import { useCockpit, selectFilteredEvents, type EventFilter } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore, selectFilteredEvents, type EventFilter } from '@/hooks/use-cockpit-store';
 import { formatRelativeFromIso } from '@/lib/format';
 import {
   asRecord,
@@ -151,11 +151,26 @@ function buildToolSummary(allEvents: Array<{ at: string; type: string; payload: 
 }
 
 export function EventDrawer() {
-  const { state, set } = useCockpit();
-  const { eventFilter, eventDrawerOpen, eventDrawerHeight } = state;
-  const filteredEvents = useMemo(() => selectFilteredEvents(state), [state.events, state.eventFilter]);
+  const eventFilter = useCockpit(s => s.eventFilter);
+  const eventDrawerOpen = useCockpit(s => s.eventDrawerOpen);
+  const eventDrawerHeight = useCockpit(s => s.eventDrawerHeight);
+  const events = useCockpit(s => s.events);
+  const streamingText = useCockpit(s => s.streamingText);
+  const store = useCockpitStore();
+  const filteredEvents = useMemo(() => selectFilteredEvents(store.getSnapshot()), [events, eventFilter, streamingText]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isChatMode = eventFilter === 'messages';
+
+  // Show thinking indicator when the last chat message is from the user and no streaming text is active.
+  const showThinking = useMemo(() => {
+    if (!isChatMode || filteredEvents.length === 0) return false;
+    const lastEvent = filteredEvents[filteredEvents.length - 1];
+    if (!isMessageLikeEvent(lastEvent)) return false;
+    // Streaming events (injected from SSE) are already visible — no need for dots.
+    if (lastEvent.payload?.streaming === true) return false;
+    const role = messageRoleForEvent(lastEvent);
+    return role === 'user';
+  }, [isChatMode, filteredEvents]);
 
   // Pre-compute tool summaries for empty assistant messages
   const toolSummaries = useMemo(() => {
@@ -166,22 +181,22 @@ export function EventDrawer() {
       const role = messageRoleForEvent(ev as Parameters<typeof messageRoleForEvent>[0]);
       if (role === 'assistant' && !extractMessageContent(ev.payload)) {
         // Find this event's index in the full events array
-        const fullIdx = state.events.indexOf(ev);
+        const fullIdx = events.indexOf(ev);
         if (fullIdx >= 0) {
-          const summary = buildToolSummary(state.events, fullIdx);
+          const summary = buildToolSummary(events, fullIdx);
           if (summary) map.set(i, summary);
         }
       }
     }
     return map;
-  }, [isChatMode, filteredEvents, state.events]);
+  }, [isChatMode, filteredEvents, events]);
 
-  // Auto-scroll to bottom when drawer opens or new messages arrive in chat mode
+  // Auto-scroll to bottom when drawer opens, new messages arrive, or thinking indicator appears
   useEffect(() => {
     if (eventDrawerOpen && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [eventDrawerOpen, filteredEvents.length]);
+  }, [eventDrawerOpen, filteredEvents.length, showThinking]);
 
   return (
     <div
@@ -193,7 +208,7 @@ export function EventDrawer() {
       {/* Header bar — toggle + filter pills side by side */}
       <div className="shrink-0 flex items-center justify-between px-2 py-0.5 text-[11px] text-[var(--text-muted)]">
         <button
-          onClick={() => set({ eventDrawerOpen: !eventDrawerOpen })}
+          onClick={() => store.set({ eventDrawerOpen: !eventDrawerOpen })}
           className="hover:bg-[var(--bg-hover)] px-1 py-0.5 rounded"
         >
           {eventDrawerOpen ? '\u25BE' : '\u25B8'} {isChatMode ? 'Chat' : 'Events'} ({filteredEvents.length})
@@ -202,7 +217,7 @@ export function EventDrawer() {
           {FILTERS.map((f) => (
             <button
               key={f.key}
-              onClick={() => set({ eventFilter: f.key })}
+              onClick={() => store.set({ eventFilter: f.key })}
               className={`px-1.5 py-0.5 rounded text-[10px] ${
                 eventFilter === f.key
                   ? 'bg-[var(--accent-cyan)]/20 text-[var(--accent-cyan)]'
@@ -225,9 +240,25 @@ export function EventDrawer() {
             {isChatMode ? 'No messages yet. Send a message below.' : 'No events.'}
           </div>
         ) : isChatMode ? (
-          filteredEvents.map((event, idx) => (
-            <ChatMessage key={`${event.at}-${idx}`} event={event} toolSummary={toolSummaries.get(idx)} />
-          ))
+          <>
+            {filteredEvents.map((event, idx) => (
+              <ChatMessage key={`${event.at}-${idx}`} event={event} toolSummary={toolSummaries.get(idx)} />
+            ))}
+            {showThinking && (
+              <div className="px-3 py-2 border-b border-[var(--border-subtle)]">
+                <div className="flex items-center gap-2 text-[10px] text-[var(--text-muted)] mb-0.5">
+                  <span className="font-medium text-[var(--accent-cyan)]">Agent</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+                  <span className="inline-flex gap-0.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-cyan)] animate-pulse" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-cyan)] animate-pulse" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-cyan)] animate-pulse" style={{ animationDelay: '300ms' }} />
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
           filteredEvents.map((event, idx) => (
             <EventRow key={`${event.at}-${idx}`} event={event} eventFilter={eventFilter} />

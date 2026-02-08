@@ -1,8 +1,23 @@
-import { memo, useCallback, useMemo, useState } from 'react';
-import type { CockpitMarkdownTreeNode, WorkItemTemplate } from '@/lib/api';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { postCockpitSessionCreate, type CockpitMarkdownTreeNode, type WorkItemTemplate } from '@/lib/api';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import { gatherMarkdownFolders, serializeFrontmatter } from '@/lib/markdown';
+import {
+  NEW_PROJECT_SCOPE_VALUE,
+  buildWorkspaceScopeOptions,
+  getSelectedWorkspaceScopeId,
+  getWorkspaceScopeOptionLabel,
+} from '@/lib/workspace-scope';
+
+const NEW_SESSION_CUSTOM_PROJECT_VALUE = '__new_session_custom_project__';
+const WORKSPACE_ROOT_SCOPE_VALUE = '__workspace_root_scope__';
+
+function getParentPath(pathValue: string): string {
+  const trimmed = pathValue.replace(/[\\/]+$/, '');
+  const match = trimmed.match(/^(.*)[\\/][^\\/]+$/);
+  return match ? match[1] : trimmed;
+}
 
 const TreeNode = memo(function TreeNode({
   node,
@@ -82,10 +97,17 @@ function TemplateItem({ template, onSelect }: { template: WorkItemTemplate; onSe
 
 export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
   const { state, openFile, openNewFilePicker, createFolder, deletePath, toggleFolder } = workspace;
-  const cockpit = useCockpit();
-  const { set: setCockpit } = cockpit;
+  const templates = useCockpit(s => s.templates);
+  const store = useCockpitStore();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string; type: 'file' | 'folder' } | null>(null);
   const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [newSessionGoal, setNewSessionGoal] = useState('New session');
+  const [newSessionProjectId, setNewSessionProjectId] = useState('');
+  const [newSessionCustomProjectPath, setNewSessionCustomProjectPath] = useState('');
+  const [showWorkspaceRootView, setShowWorkspaceRootView] = useState(true);
+  const [focusedActionIndex, setFocusedActionIndex] = useState<number | null>(null);
   const allFolders = useMemo(() => gatherMarkdownFolders(state.tree), [state.tree]);
 
   const handleExpandAll = useCallback(() => {
@@ -97,9 +119,9 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
   }, [workspace]);
 
   const handleFileSelect = useCallback((path: string) => {
-    setCockpit({ focusTarget: null, globalTool: 'none' });
+    store.set({ focusTarget: null, globalTool: 'none' });
     void openFile(path);
-  }, [setCockpit, openFile]);
+  }, [store, openFile]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, path: string, type: 'file' | 'folder') => {
     e.preventDefault();
@@ -135,66 +157,206 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
     ].join('\n');
 
     const content = serializeFrontmatter(frontmatter, body);
-    setCockpit({ focusTarget: null, globalTool: 'none' });
+    store.set({ focusTarget: null, globalTool: 'none' });
     workspace.set({ content, dirty: true, selectedPath: null, status: `Created from template: ${template.name}` });
     openNewFilePicker('save');
-  }, [setCockpit, workspace, openNewFilePicker]);
+  }, [store, workspace, openNewFilePicker]);
 
-  const templates = cockpit.state.templates;
-  const NEW_PROJECT_SCOPE_VALUE = '__new_project_scope__';
-  const scopeOptions = useMemo(() => {
-    const base = state.filesystemRoots.length > 0
-      ? [...state.filesystemRoots]
-      : [{
-        id: 'notes:fallback',
-        kind: 'notes' as const,
-        label: '.cockpit/markdown',
-        path: state.rootDir,
-        pinned: true,
-        source: 'daemon' as const,
-      }];
-    if (
-      state.scopeMode === 'project'
-      && state.scopeProjectPath
-      && !base.some((root) => root.kind === 'project' && root.path === state.scopeProjectPath)
-    ) {
-      base.push({
-        id: `project:custom:${state.scopeProjectPath}`,
-        kind: 'project',
-        label: state.scopeProjectPath.split('/').filter(Boolean).pop() || state.scopeProjectPath,
-        path: state.scopeProjectPath,
-        pinned: false,
-        source: 'discovered',
+  const scopeOptions = useMemo(() => buildWorkspaceScopeOptions({
+    filesystemRoots: state.filesystemRoots,
+    rootDir: state.rootDir,
+    scopeMode: state.scopeMode,
+    scopeProjectPath: state.scopeProjectPath,
+  }), [state.filesystemRoots, state.rootDir, state.scopeMode, state.scopeProjectPath]);
+  const workspaceRootPath = useMemo(() => {
+    const scratchRoot = scopeOptions.find((root) => root.kind === 'notes');
+    return getParentPath(scratchRoot?.path ?? state.rootDir);
+  }, [scopeOptions, state.rootDir]);
+  const selectedScopeId = useMemo(() => getSelectedWorkspaceScopeId({
+    options: scopeOptions,
+    scopeMode: state.scopeMode,
+    scopeProjectPath: state.scopeProjectPath,
+  }), [scopeOptions, state.scopeMode, state.scopeProjectPath]);
+  const scopeSelectValue = showWorkspaceRootView ? WORKSPACE_ROOT_SCOPE_VALUE : selectedScopeId;
+  const projectOptions = useMemo(
+    () => scopeOptions.filter((root) => root.kind === 'project'),
+    [scopeOptions],
+  );
+  const currentProjectOption = useMemo(
+    () => (
+      state.scopeMode === 'project' && state.scopeProjectPath
+        ? projectOptions.find((root) => root.path === state.scopeProjectPath) ?? null
+        : null
+    ),
+    [state.scopeMode, state.scopeProjectPath, projectOptions],
+  );
+
+  const handleAddProjectScope = useCallback(() => {
+    const entered = window.prompt(
+      'Add project workspace folder.\nUse absolute path or path relative to the current cwd.',
+      state.filesystemCwd ?? ''
+    );
+    if (!entered || !entered.trim()) return;
+    void workspace.setScope({ mode: 'project', projectPath: entered.trim() });
+  }, [state.filesystemCwd, workspace]);
+
+  const openNewSessionDialog = useCallback(() => {
+    const defaultProjectId = currentProjectOption?.id ?? projectOptions[0]?.id ?? NEW_SESSION_CUSTOM_PROJECT_VALUE;
+    setNewSessionGoal('New session');
+    setNewSessionProjectId(defaultProjectId);
+    setNewSessionCustomProjectPath(
+      state.scopeMode === 'project' && state.scopeProjectPath
+        ? state.scopeProjectPath
+        : projectOptions[0]?.path ?? ''
+    );
+    setNewSessionOpen(true);
+  }, [currentProjectOption?.id, projectOptions, state.scopeMode, state.scopeProjectPath]);
+
+  // Action button definitions for keyboard navigation (defined after openNewSessionDialog)
+  const actionButtons = useMemo(() => [
+    { id: 'file', label: '+ File', action: () => openNewFilePicker('create'), shortcut: 'Ctrl+N' },
+    { id: 'folder', label: '+ Folder', action: () => void createFolder(), shortcut: 'Ctrl+Shift+N' },
+    { id: 'session', label: '+ Session', action: openNewSessionDialog, shortcut: 'Ctrl+Shift+S' },
+  ], [openNewFilePicker, createFolder, openNewSessionDialog]);
+
+  // Store action button functions for external access (via window for keyboard hook)
+  useEffect(() => {
+    (window as any).__cockpitFileExplorerActions = {
+      triggerNewSession: openNewSessionDialog,
+      triggerNewFile: () => openNewFilePicker('create'),
+      triggerNewFolder: () => void createFolder(),
+    };
+    return () => {
+      (window as any).__cockpitFileExplorerActions = undefined;
+    };
+  }, [openNewSessionDialog, openNewFilePicker, createFolder]);
+
+  const selectedSessionProjectPath = useMemo(() => {
+    if (newSessionProjectId === NEW_SESSION_CUSTOM_PROJECT_VALUE) {
+      return newSessionCustomProjectPath.trim();
+    }
+    return projectOptions.find((root) => root.id === newSessionProjectId)?.path ?? '';
+  }, [newSessionProjectId, newSessionCustomProjectPath, projectOptions]);
+
+  const handleCreateSessionDirect = useCallback(async () => {
+    const projectPath = selectedSessionProjectPath.trim();
+    if (!projectPath) {
+      store.set({ error: 'Pick a project folder before creating a session.' });
+      return;
+    }
+    setCreatingSession(true);
+    store.set({ commandStatus: 'Creating session…' });
+    try {
+      const result = await postCockpitSessionCreate({
+        goal: newSessionGoal.trim() || 'New session',
+        projectPath,
+        createProjectPath: true,
       });
+      if (!result.success || !result.sessionKey) {
+        store.set({ error: result.error ?? 'Failed creating session' });
+        return;
+      }
+      store.set({
+        focusTarget: { type: 'session', id: result.sessionKey },
+        eventDrawerOpen: true,
+        eventFilter: 'messages',
+        commandStatus: `Session ${result.sessionKey} created`,
+      });
+      setNewSessionOpen(false);
+      await store.refreshRollups();
+      await workspace.refreshFilesystem({
+        mode: 'project',
+        projectPath,
+      });
+    } catch (err) {
+      store.set({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setCreatingSession(false);
     }
-    return base;
-  }, [state.filesystemRoots, state.rootDir, state.scopeMode, state.scopeProjectPath]);
-  const selectedScopeId = useMemo(() => {
-    if (state.scopeMode === 'project' && state.scopeProjectPath) {
-      const matched = scopeOptions.find((root) => root.kind === 'project' && root.path === state.scopeProjectPath);
-      if (matched) return matched.id;
+  }, [selectedSessionProjectPath, store, newSessionGoal, workspace]);
+
+  useEffect(() => {
+    if (state.scopeMode !== 'global') {
+      setShowWorkspaceRootView(false);
     }
-    return scopeOptions.find((root) => root.kind === 'notes')?.id ?? scopeOptions[0]?.id ?? '';
-  }, [scopeOptions, state.scopeMode, state.scopeProjectPath]);
+  }, [state.scopeMode]);
+
+  // Handle keyboard navigation for action buttons when left pane is focused
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const leftPane = document.querySelector<HTMLElement>('[data-cockpit-pane="left"]');
+      const activeElement = document.activeElement;
+      const isInLeftPane = leftPane?.contains(activeElement);
+
+      // Only handle when left pane is focused or contains focus
+      if (!isInLeftPane) return;
+
+      // Don't handle if typing in an input/textarea
+      if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement) return;
+
+      // Escape - clear focus
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setFocusedActionIndex(null);
+        leftPane?.focus();
+        return;
+      }
+
+      // j/k - navigate action buttons
+      if ((event.key === 'j' || event.key === 'k' || event.key === 'J' || event.key === 'K') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        const currentIndex = focusedActionIndex ?? -1;
+        if (event.key.toLowerCase() === 'j') {
+          setFocusedActionIndex(Math.min(currentIndex + 1, actionButtons.length - 1));
+        } else {
+          setFocusedActionIndex(Math.max(currentIndex - 1, 0));
+        }
+        return;
+      }
+
+      // Enter - trigger focused action button
+      if (event.key === 'Enter' && focusedActionIndex !== null) {
+        event.preventDefault();
+        actionButtons[focusedActionIndex].action();
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [focusedActionIndex, actionButtons]);
+
+  // Reset focused action index when pane loses focus
+  useEffect(() => {
+    const handleBlur = () => {
+      setFocusedActionIndex(null);
+    };
+
+    const leftPane = document.querySelector('[data-cockpit-pane="left"]');
+    leftPane?.addEventListener('blur', handleBlur, true);
+    return () => {
+      leftPane?.removeEventListener('blur', handleBlur, true);
+    };
+  }, []);
 
   return (
     <div className="h-full flex flex-col" onClick={closeMenu}>
       <div className="px-2 py-1.5 border-b border-[var(--border-subtle)] space-y-1">
         <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Workspace</div>
         <select
-          value={selectedScopeId}
+          value={scopeSelectValue}
           onChange={(event) => {
+            if (event.target.value === WORKSPACE_ROOT_SCOPE_VALUE) {
+              setShowWorkspaceRootView(true);
+              return;
+            }
             if (event.target.value === NEW_PROJECT_SCOPE_VALUE) {
-              const entered = window.prompt(
-                'Add project workspace folder.\nUse absolute path or path relative to the current cwd.',
-                state.filesystemCwd ?? ''
-              );
-              if (!entered || !entered.trim()) return;
-              void workspace.setScope({ mode: 'project', projectPath: entered.trim() });
+              handleAddProjectScope();
               return;
             }
             const selected = scopeOptions.find((root) => root.id === event.target.value);
             if (!selected) return;
+            setShowWorkspaceRootView(false);
             if (selected.kind === 'notes') {
               void workspace.setScope({ mode: 'global' });
               return;
@@ -203,36 +365,51 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
           }}
           className="w-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-1.5 py-1 text-[10px] text-[var(--text-secondary)]"
         >
+          <option value={WORKSPACE_ROOT_SCOPE_VALUE}>Workspace Root</option>
           {scopeOptions.map((root) => (
             <option key={root.id} value={root.id}>
-              {root.kind === 'notes' ? 'Notes (Pinned)' : `Project: ${root.label}`}
+              {getWorkspaceScopeOptionLabel(root)}
             </option>
           ))}
           <option value={NEW_PROJECT_SCOPE_VALUE}>+ Add project path…</option>
         </select>
-        <div className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={state.rootDir}>
-          root: {state.rootDir}
+        <div
+          className="text-[10px] text-[var(--text-muted)] font-mono truncate"
+          title={showWorkspaceRootView ? workspaceRootPath : state.rootDir}
+        >
+          root: {showWorkspaceRootView ? workspaceRootPath : state.rootDir}
         </div>
       </div>
       <div className="px-2 py-1 border-b border-[var(--border-subtle)] flex items-center gap-1">
-        <button
-          onClick={() => openNewFilePicker('create')}
-          className="px-1.5 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
-          title="New File (Ctrl+N)"
-        >+ File</button>
-        <button
-          onClick={() => void createFolder()}
-          className="px-1.5 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
-          title="New Folder (Ctrl+Shift+N)"
-        >+ Folder</button>
+        {actionButtons.map((btn, idx) => (
+          <button
+            key={btn.id}
+            onClick={btn.action}
+            onMouseEnter={() => setFocusedActionIndex(idx)}
+            title={`${btn.label} (${btn.shortcut})`}
+            className={`px-1.5 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)] relative group ${
+              focusedActionIndex === idx ? 'bg-[var(--accent-cyan)]/20 text-[var(--accent-cyan)]' : ''
+            }`}
+          >
+            {btn.label}
+            {/* Hover hint tooltip */}
+            <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 hidden group-hover:block z-50">
+              <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[10px] text-[var(--text-muted)] whitespace-nowrap shadow-lg">
+                <kbd className="font-mono">{btn.shortcut}</kbd>
+              </div>
+            </div>
+          </button>
+        ))}
         <span className="flex-1" />
         <button
           onClick={handleExpandAll}
+          disabled={showWorkspaceRootView}
           className="px-1 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
           title="Expand All"
         >{'\u25BC'}</button>
         <button
           onClick={handleCollapseAll}
+          disabled={showWorkspaceRootView}
           className="px-1 py-0.5 text-[10px] rounded text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
           title="Collapse All"
         >{'\u25B6'}</button>
@@ -240,11 +417,34 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
       <div
         className="flex-1 overflow-y-auto"
         onContextMenu={(e) => {
+          if (showWorkspaceRootView) return;
           e.preventDefault();
           setContextMenu({ x: e.clientX, y: e.clientY, path: '', type: 'folder' });
         }}
       >
-        {state.tree.length === 0 ? (
+        {showWorkspaceRootView ? (
+          <div className="py-1">
+            {scopeOptions.map((root) => (
+              <button
+                key={`root:${root.id}`}
+                onClick={() => {
+                  setShowWorkspaceRootView(false);
+                  if (root.kind === 'notes') {
+                    void workspace.setScope({ mode: 'global' });
+                    return;
+                  }
+                  void workspace.setScope({ mode: 'project', projectPath: root.path });
+                }}
+                className="w-full text-left px-2 py-1.5 text-[11px] hover:bg-[var(--bg-hover)]"
+                title={root.path}
+              >
+                <span className="mr-1 text-[var(--text-muted)]">{'\u25B8'}</span>
+                <span className="text-[var(--text-primary)]">{getWorkspaceScopeOptionLabel(root)}</span>
+                <span className="ml-1 text-[10px] text-[var(--text-muted)] font-mono">{root.path}</span>
+              </button>
+            ))}
+          </div>
+        ) : state.tree.length === 0 ? (
           <div className="px-2 py-3 text-[11px] text-[var(--text-muted)]">
             No markdown files in this workspace yet. Right-click or press Ctrl+N.
           </div>
@@ -278,7 +478,80 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
         )}
       </div>
 
-      {contextMenu && (
+      {newSessionOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh]"
+          onClick={() => {
+            if (!creatingSession) setNewSessionOpen(false);
+          }}
+        >
+          <div className="absolute inset-0 bg-black/50" />
+          <div
+            className="relative w-[28rem] max-w-[92vw] rounded border border-[var(--border-default)] bg-[var(--bg-elevated)] shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-3 py-2 border-b border-[var(--border-subtle)] text-[11px] text-[var(--text-muted)]">
+              Create Session
+            </div>
+            <div className="p-3 space-y-2">
+              <div>
+                <label className="block text-[10px] text-[var(--text-muted)] mb-1">Goal</label>
+                <input
+                  value={newSessionGoal}
+                  onChange={(event) => setNewSessionGoal(event.target.value)}
+                  placeholder="New session"
+                  className="w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent-cyan)]"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-[var(--text-muted)] mb-1">Project Folder</label>
+                <select
+                  value={newSessionProjectId}
+                  onChange={(event) => setNewSessionProjectId(event.target.value)}
+                  className="w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent-cyan)]"
+                >
+                  {projectOptions.map((root) => (
+                    <option key={root.id} value={root.id}>{root.path}</option>
+                  ))}
+                  <option value={NEW_SESSION_CUSTOM_PROJECT_VALUE}>Custom path...</option>
+                </select>
+              </div>
+              {newSessionProjectId === NEW_SESSION_CUSTOM_PROJECT_VALUE && (
+                <div>
+                  <label className="block text-[10px] text-[var(--text-muted)] mb-1">Custom Project Path</label>
+                  <input
+                    value={newSessionCustomProjectPath}
+                    onChange={(event) => setNewSessionCustomProjectPath(event.target.value)}
+                    placeholder={state.filesystemCwd ?? '/absolute/or/relative/path'}
+                    className="w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent-cyan)] font-mono"
+                  />
+                </div>
+              )}
+              <div className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={selectedSessionProjectPath}>
+                target: {selectedSessionProjectPath || '(select project folder)'}
+              </div>
+            </div>
+            <div className="px-3 py-2 border-t border-[var(--border-subtle)] flex items-center justify-end gap-2">
+              <button
+                onClick={() => setNewSessionOpen(false)}
+                disabled={creatingSession}
+                className="px-2 py-1 text-[11px] rounded border border-[var(--border-subtle)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleCreateSessionDirect()}
+                disabled={creatingSession || !selectedSessionProjectPath.trim()}
+                className="px-2 py-1 text-[11px] rounded bg-[var(--accent-cyan)]/20 text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/30 disabled:opacity-60"
+              >
+                {creatingSession ? 'Creating...' : 'Create Session'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {contextMenu && !showWorkspaceRootView && (
         <div
           className="fixed z-50 bg-[var(--bg-elevated)] border border-[var(--border-default)] rounded shadow-lg py-1 text-[11px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
@@ -314,7 +587,7 @@ export function FileExplorer({ workspace }: { workspace: MarkdownWorkspace }) {
           >
             New Folder
           </button>
-          {contextMenu.path && (
+          {contextMenu.path && (contextMenu.type === 'file' || state.scopeMode !== 'project') && (
             <button
               onClick={() => {
                 const isFolder = contextMenu.type === 'folder';

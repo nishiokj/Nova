@@ -16,11 +16,26 @@ import type {
 } from './types.js';
 
 /**
- * Translate an AgentEvent to a BridgeEvent for the TUI.
+ * Translate an AgentEvent to a BridgeEvent for the TUI / dashboard.
  *
- * Returns null if the event should not be forwarded to the TUI.
+ * Propagates sessionKey from the raw event into the translated data so that
+ * downstream consumers (SSE event stream → dashboard) can route by session.
+ *
+ * Returns null if the event should not be forwarded.
  */
 export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
+  const result = translateAgentEventCore(event);
+  if (result) {
+    // Propagate sessionKey for event routing (SSE → dashboard)
+    const sessionKey = (event as unknown as Record<string, unknown>).sessionKey;
+    if (typeof sessionKey === 'string') {
+      (result.data as Record<string, unknown>).session_key = sessionKey;
+    }
+  }
+  return result;
+}
+
+function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
   const { type, data, requestId } = event;
 
   switch (type as AgentEventType) {
@@ -296,6 +311,98 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
           working_directory: permData.workingDirectory || '',
           description: permData.description || '',
         },
+      };
+    }
+
+    // ── Harness-level events (also pushed to eventQueue for TUI bridge) ──
+
+    case 'harness_response': {
+      const respData = data as {
+        success?: boolean;
+        content?: string;
+        toolsUsed?: string[];
+        durationMs?: number;
+        error?: string;
+        metadata?: Record<string, unknown>;
+      };
+      return {
+        type: 'response',
+        data: {
+          request_id: requestId,
+          success: respData.success ?? false,
+          content: respData.content ?? '',
+          tools_used: respData.toolsUsed ?? [],
+          duration_ms: respData.durationMs ?? 0,
+          error: respData.error,
+          metadata: respData.metadata,
+        },
+      };
+    }
+
+    case 'harness_status': {
+      const statusData = data as {
+        state?: 'idle' | 'sending' | 'streaming' | 'error';
+        message?: string;
+      };
+      return {
+        type: 'status',
+        data: {
+          state: statusData.state ?? 'idle',
+          message: statusData.message,
+        } satisfies StatusEventData,
+      };
+    }
+
+    case 'harness_error': {
+      const errData = data as {
+        message?: string;
+        fatal?: boolean;
+      };
+      return {
+        type: 'error',
+        data: {
+          message: errData.message ?? 'Unknown error',
+          fatal: errData.fatal ?? false,
+        },
+      };
+    }
+
+    case 'harness_user_prompt': {
+      const promptData = data as {
+        question?: string;
+        options?: Array<string | { label: string; description?: string }>;
+        context?: string;
+        multiSelect?: boolean;
+        questionType?: string;
+        questions?: Array<{
+          question: string;
+          options?: Array<string | { label: string; description?: string }>;
+          context?: string;
+          multiSelect?: boolean;
+          questionType?: string;
+        }>;
+      };
+      const wireData: Record<string, unknown> = {
+        request_id: requestId,
+      };
+      if (promptData.questions && promptData.questions.length > 0) {
+        wireData.questions = promptData.questions.map((q) => ({
+          question: q.question,
+          options: q.options,
+          context: q.context,
+          multi_select: q.multiSelect,
+          question_type: q.questionType,
+        }));
+      } else if (promptData.question) {
+        wireData.question = promptData.question;
+        wireData.options = promptData.options;
+        wireData.context = promptData.context;
+        wireData.multi_select = promptData.multiSelect;
+        wireData.question_type = promptData.questionType;
+      }
+      return {
+        type: 'user_prompt',
+        data: wireData,
       };
     }
 

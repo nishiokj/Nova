@@ -1,4 +1,4 @@
-import { useCockpit } from '@/hooks/use-cockpit-store';
+import { useCockpitStore } from '@/hooks/use-cockpit-store';
 
 const SECTIONS = [
   {
@@ -7,8 +7,8 @@ const SECTIONS = [
       { keys: 'Alt+H', desc: 'Focus left pane (files)' },
       { keys: 'Alt+J/K', desc: 'Focus center pane' },
       { keys: 'Alt+L', desc: 'Focus right pane (sessions)' },
-      { keys: 'J / K', desc: 'Navigate sessions (right pane)' },
-      { keys: 'Enter', desc: 'Select highlighted session' },
+      { keys: 'J / K', desc: 'Navigate sessions (right) or actions (left)' },
+      { keys: 'Enter', desc: 'Select highlighted session/action' },
       { keys: '/', desc: 'Open command palette' },
     ],
   },
@@ -16,8 +16,6 @@ const SECTIONS = [
     title: 'Views',
     shortcuts: [
       { keys: 'M', desc: 'Document view' },
-      { keys: 'G', desc: 'Grep tool' },
-      { keys: 'B', desc: 'Preview' },
       { keys: '1-4', desc: 'Event filter (Msgs/All/Fail/Audit)' },
     ],
   },
@@ -40,7 +38,9 @@ const SECTIONS = [
       { keys: 'Ctrl+Enter', desc: 'Send message' },
       { keys: 'Ctrl+S', desc: 'Save file' },
       { keys: 'Ctrl+N', desc: 'New file' },
-      { keys: 'Ctrl+U', desc: 'Upgrade/promote picker (project/session scope)' },
+      { keys: 'Ctrl+Shift+N', desc: 'New folder' },
+      { keys: 'Ctrl+Shift+S', desc: 'New session (left pane)' },
+      { keys: 'Ctrl+U', desc: 'Promote picker' },
       { keys: 'R', desc: 'Resolve escalation' },
       { keys: 'A', desc: 'Accept review' },
       { keys: 'C', desc: 'Request changes' },
@@ -49,12 +49,12 @@ const SECTIONS = [
 ];
 
 export function ShortcutSheet() {
-  const { set } = useCockpit();
+  const store = useCockpitStore();
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
-      onClick={() => set({ shortcutSheetOpen: false })}
+      onClick={() => store.set({ shortcutSheetOpen: false })}
     >
       <div className="absolute inset-0 bg-black/50" />
       <div

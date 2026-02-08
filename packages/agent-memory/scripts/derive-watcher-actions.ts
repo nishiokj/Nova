@@ -20,6 +20,7 @@ import { readdir, stat, readFile } from 'fs/promises'
 import { join, basename, resolve, dirname, isAbsolute } from 'path'
 import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
+import type { Sql } from 'postgres'
 
 // Project root: 3 levels up from this script (scripts/ -> agent-memory/ -> packages/ -> root)
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
@@ -29,6 +30,12 @@ import type {
   DerivedMetadataSchema,
 } from '../src/derived/runner.js'
 import { generateCanonicalId } from '../src/ids.js'
+import {
+  isWatcherActionType,
+  isWatcherTrigger,
+  type WatcherActionType,
+  type WatcherTrigger,
+} from 'protocol'
 
 // ─── Metadata Schema ─────────────────────────────────────────────────────────
 
@@ -49,7 +56,7 @@ interface SessionDir {
   modifiedAt: Date
 }
 
-interface DecisionEntry {
+interface RawDecisionEntry {
   timestamp: string
   trigger: string
   watcherAction: string
@@ -65,6 +72,11 @@ interface DecisionEntry {
   }
 }
 
+type DecisionEntry = Omit<RawDecisionEntry, 'trigger' | 'watcherAction'> & {
+  trigger: WatcherTrigger
+  watcherAction: WatcherActionType
+}
+
 interface WorkLogEntry {
   timestamp: string
   type: string
@@ -72,6 +84,57 @@ interface WorkLogEntry {
   agentType?: string
   paths?: string[]
   watcherNote?: string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+const LEGACY_TRIGGER_MAP: Record<string, WatcherTrigger> = {
+  work_complete: 'work_item_completed',
+  error: 'agent_error',
+}
+
+const LEGACY_ACTION_MAP: Record<string, WatcherActionType> = {
+  pause: 'continue',
+  escalate: 'stop_work_item',
+}
+
+const OUTCOME_SIGNAL_BY_WATCHER_ACTION: Record<
+  WatcherActionType,
+  'positive' | 'negative' | 'neutral' | 'unknown'
+> = {
+  answer: 'positive',
+  allow: 'positive',
+  continue: 'positive',
+  realign: 'negative',
+  stop_work_item: 'negative',
+  split: 'neutral',
+  create_work_item: 'neutral',
+  quality_gate: 'neutral',
+}
+
+function normalizeWatcherTrigger(value: string): WatcherTrigger | null {
+  const normalized = value.trim().toLowerCase()
+  const mapped = LEGACY_TRIGGER_MAP[normalized] ?? normalized
+  return isWatcherTrigger(mapped) ? mapped : null
+}
+
+function normalizeWatcherAction(value: string): WatcherActionType | null {
+  const normalized = value.trim().toLowerCase()
+  const mapped = LEGACY_ACTION_MAP[normalized] ?? normalized
+  return isWatcherActionType(mapped) ? mapped : null
+}
+
+function normalizeDecisionEntry(entry: RawDecisionEntry): DecisionEntry | null {
+  const trigger = normalizeWatcherTrigger(entry.trigger)
+  const watcherAction = normalizeWatcherAction(entry.watcherAction)
+  if (!trigger || !watcherAction) return null
+  return {
+    ...entry,
+    trigger,
+    watcherAction,
+  }
 }
 
 // ─── Main Run Function ─────────────────────────────────────────────────────────
@@ -82,13 +145,13 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
   logger.info(`Starting watcher actions derivation (job: ${job.id})`)
   logger.debug(`Project root: ${PROJECT_ROOT}`)
 
-  const config = task.metadata as Record<string, unknown> | undefined
-  const rawWatcherPath = (config?.watcherPath as string) ?? '.watcher'
+  const config = isRecord(task.metadata) ? task.metadata : undefined
+  const rawWatcherPath = typeof config?.watcherPath === 'string' ? config.watcherPath : '.watcher'
   // Resolve relative paths against project root, not cwd
   const watcherPath = isAbsolute(rawWatcherPath) ? rawWatcherPath : resolve(PROJECT_ROOT, rawWatcherPath)
   logger.debug(`Resolved watcher path: ${watcherPath} (from: ${rawWatcherPath})`)
-  const limit = (config?.limit as number) ?? 500
-  const processWorkLogs = (config?.processWorkLogs as boolean) ?? true
+  const limit = typeof config?.limit === 'number' ? config.limit : 500
+  const processWorkLogs = typeof config?.processWorkLogs === 'boolean' ? config.processWorkLogs : true
 
   // Track metrics
   let decisionsProcessed = 0
@@ -106,7 +169,8 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
     ORDER BY completed_at DESC
     LIMIT 1
   `
-  const lastProcessedTime = lastRun[0]?.metadata?.lastProcessedTime as string | undefined
+  const maybeLastProcessedTime = lastRun[0]?.metadata?.lastProcessedTime
+  const lastProcessedTime = typeof maybeLastProcessedTime === 'string' ? maybeLastProcessedTime : undefined
   const sinceDate = lastProcessedTime ? new Date(lastProcessedTime) : new Date(0)
 
   logger.info(`Processing sessions modified since: ${sinceDate.toISOString()}`)
@@ -124,14 +188,19 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
     // Process decisions.jsonl
     const decisionsPath = join(session.path, 'decisions.jsonl')
     if (existsSync(decisionsPath)) {
-      const entries = await readJsonlFile<DecisionEntry>(decisionsPath)
+      const entries = await readJsonlFile<RawDecisionEntry>(decisionsPath)
 
       for (const entry of entries) {
         if (totalProcessed >= limit) break
 
         try {
+          const normalized = normalizeDecisionEntry(entry)
+          if (!normalized) {
+            logger.warn(`Skipping watcher decision with unsupported trigger/action: trigger="${entry.trigger}", action="${entry.watcherAction}"`)
+            continue
+          }
           const sourceId = `${session.id}:decision:${entry.timestamp}`
-          const result = await upsertDecisionAction(sql, entry, session.id, session.date, sourceId)
+          const result = await upsertDecisionAction(sql, normalized, session.id, session.date, sourceId)
 
           if (result === 'created') actionsCreated++
           else if (result === 'updated') actionsUpdated++
@@ -289,7 +358,7 @@ async function readJsonlFile<T>(filePath: string): Promise<T[]> {
 }
 
 async function upsertDecisionAction(
-  sql: ReturnType<typeof import('postgres').default>,
+  sql: Sql,
   entry: DecisionEntry,
   sessionId: string,
   sessionDate: string,
@@ -302,22 +371,7 @@ async function upsertDecisionAction(
     LIMIT 1
   `
 
-  // Infer outcome signal
-  let outcomeSignal: 'positive' | 'negative' | 'neutral' | 'unknown' = 'unknown'
-  switch (entry.watcherAction) {
-    case 'allow':
-    case 'continue':
-    case 'answer':
-      outcomeSignal = 'positive'
-      break
-    case 'realign':
-    case 'escalate':
-      outcomeSignal = 'negative'
-      break
-    case 'pause':
-      outcomeSignal = 'neutral'
-      break
-  }
+  const outcomeSignal = OUTCOME_SIGNAL_BY_WATCHER_ACTION[entry.watcherAction]
 
   const actionType = `watcher_${entry.trigger}`
   const context = {
@@ -377,7 +431,7 @@ async function upsertDecisionAction(
 }
 
 async function upsertWorkLogAction(
-  sql: ReturnType<typeof import('postgres').default>,
+  sql: Sql,
   entry: WorkLogEntry,
   sessionId: string,
   sessionDate: string,
@@ -420,7 +474,7 @@ async function upsertWorkLogAction(
         action_type = ${actionType},
         context = ${sql.json(context)},
         parameters = ${sql.json(parameters)},
-        actual_outcome = ${entry.watcherNote},
+        actual_outcome = ${entry.watcherNote ?? null},
         outcome_signal = ${outcomeSignal},
         resolved_at = ${new Date(entry.timestamp)},
         metadata = ${sql.json(metadata)}
@@ -440,7 +494,7 @@ async function upsertWorkLogAction(
       ${actionType},
       ${sql.json(context)},
       ${sql.json(parameters)},
-      ${entry.watcherNote},
+      ${entry.watcherNote ?? null},
       ${outcomeSignal},
       ${new Date(entry.timestamp)},
       ${sql.json(metadata)}

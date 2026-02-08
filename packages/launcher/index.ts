@@ -35,6 +35,8 @@ const __dirname = path.dirname(__filename);
 // Configuration
 const DAEMON_HOST = process.env.EVENT_BUS_HOST ?? '127.0.0.1';
 const DAEMON_PORT = Number(process.env.EVENT_BUS_PORT ?? '9555');
+const CONTROL_PLANE_HOST = process.env.CONTROL_PLANE_HOST ?? DAEMON_HOST;
+const CONTROL_PLANE_PORT = Number(process.env.CONTROL_PLANE_PORT ?? '9445');
 const DAEMON_STARTUP_TIMEOUT = 5000; // 5 seconds to wait for daemon
 
 // Paths - resolve relative to launcher location
@@ -52,12 +54,14 @@ const getDaemonPath = () => {
   // Check for dist first, then src
   const distPath = path.join(root, 'packages', 'harness-daemon', 'dist', 'index.js');
   const srcPath = path.join(root, 'packages', 'harness-daemon', 'src', 'index.ts');
-  try {
-    Bun.file(distPath);
-    return distPath;
-  } catch {
-    return srcPath;
-  }
+  return existsSync(distPath) ? distPath : srcPath;
+};
+
+const getControlPlanePath = () => {
+  const root = getProjectRoot();
+  const distPath = path.join(root, 'packages', 'harness-daemon', 'dist', 'control-plane.js');
+  const srcPath = path.join(root, 'packages', 'harness-daemon', 'src', 'control-plane.ts');
+  return existsSync(distPath) ? distPath : srcPath;
 };
 
 const getTuiPath = () => {
@@ -123,9 +127,9 @@ const resolveConfigPath = (): string | undefined => {
 /**
  * Check if daemon is running by attempting a TCP connection
  */
-async function isDaemonRunning(): Promise<boolean> {
+async function isPortRunning(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = createConnection({ host: DAEMON_HOST, port: DAEMON_PORT }, () => {
+    const socket = createConnection({ host, port }, () => {
       socket.destroy();
       resolve(true);
     });
@@ -143,6 +147,14 @@ async function isDaemonRunning(): Promise<boolean> {
   });
 }
 
+async function isDaemonRunning(): Promise<boolean> {
+  return isPortRunning(DAEMON_HOST, DAEMON_PORT);
+}
+
+async function isControlPlaneRunning(): Promise<boolean> {
+  return isPortRunning(CONTROL_PLANE_HOST, CONTROL_PLANE_PORT);
+}
+
 /**
  * Build daemon args from launcher argv.
  * Note: --dangerous is no longer forwarded to daemon - it's now per-session.
@@ -150,12 +162,16 @@ async function isDaemonRunning(): Promise<boolean> {
 function buildDaemonArgs(): string[] {
   const daemonArgs: string[] = [];
   // --dangerous is now handled per-session by the TUI, not the daemon
-
-  // Enable dashboard HTTP server on port 9445 for control-plane API
-  // (9444 is used by GraphD)
-  daemonArgs.push('--dashboard-port', '9445');
-
   return daemonArgs;
+}
+
+function buildControlPlaneArgs(): string[] {
+  return [
+    '--host', CONTROL_PLANE_HOST,
+    '--port', String(CONTROL_PLANE_PORT),
+    '--bus-host', DAEMON_HOST,
+    '--bus-port', String(DAEMON_PORT),
+  ];
 }
 
 /**
@@ -202,6 +218,49 @@ async function startDaemon(): Promise<Subprocess> {
 }
 
 /**
+ * Start the control-plane server in background.
+ */
+async function startControlPlane(): Promise<Subprocess> {
+  const controlPlanePath = getControlPlanePath();
+  const configPath = resolveConfigPath();
+  const controlPlaneArgs = buildControlPlaneArgs();
+
+  console.log('[rex] Starting control-plane server...');
+
+  const logsDir = path.join(getProjectRoot(), 'logs');
+  mkdirSync(logsDir, { recursive: true });
+
+  const controlPlane = spawn({
+    cmd: ['bun', 'run', controlPlanePath, ...controlPlaneArgs],
+    env: {
+      ...process.env,
+      ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
+      EVENT_BUS_HOST: DAEMON_HOST,
+      EVENT_BUS_PORT: String(DAEMON_PORT),
+      CONTROL_PLANE_HOST,
+      CONTROL_PLANE_PORT: String(CONTROL_PLANE_PORT),
+    },
+    stdout: 'ignore',
+    stderr: Bun.file(path.join(logsDir, 'control_plane_stderr.log')),
+  });
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < DAEMON_STARTUP_TIMEOUT) {
+    if (await isControlPlaneRunning()) {
+      console.log('[rex] Control-plane ready');
+      return controlPlane;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  if (controlPlane.exitCode !== null) {
+    throw new Error('Control-plane server failed to start (check control_plane_stderr.log)');
+  }
+
+  throw new Error('Control-plane startup timeout');
+}
+
+/**
  * Start the TUI
  */
 async function startTui(): Promise<void> {
@@ -233,15 +292,16 @@ async function killExistingDaemon(): Promise<void> {
   const { execSync } = await import('child_process');
   try {
     execSync('pkill -TERM -f harness-daemon', { stdio: 'ignore' });
+    execSync('pkill -TERM -f control-plane', { stdio: 'ignore' });
     // Wait for graceful shutdown
     const startTime = Date.now();
     while (Date.now() - startTime < 3000) {
-      if (!(await isDaemonRunning())) {
+      if (!(await isDaemonRunning()) && !(await isControlPlaneRunning())) {
         return;
       }
       await new Promise(r => setTimeout(r, 100));
     }
-    console.warn('[rex] Daemon did not shut down in time');
+    console.warn('[rex] Services did not shut down in time');
   } catch {
     // No daemon running or pkill failed - that's fine
   }
@@ -276,13 +336,32 @@ async function main(): Promise<void> {
       stderr: 'inherit',
     });
 
+    let controlPlane: Subprocess | null = null;
+    const controlPlaneRunning = await isControlPlaneRunning();
+    if (!controlPlaneRunning) {
+      try {
+        controlPlane = await startControlPlane();
+      } catch (error) {
+        console.error('[rex] Failed to start control-plane:', error instanceof Error ? error.message : error);
+      }
+    }
+
+    const stopControlPlane = () => {
+      if (controlPlane && controlPlane.exitCode === null) {
+        controlPlane.kill();
+      }
+    };
+    process.on('SIGINT', stopControlPlane);
+    process.on('SIGTERM', stopControlPlane);
+
     await daemon.exited;
+    stopControlPlane();
     process.exit(daemon.exitCode ?? 0);
     return;
   }
 
   // Check if daemon is already running
-  let running = await isDaemonRunning();
+  const daemonRunning = await isDaemonRunning();
 
   // Note: --dangerous is now per-session, NOT global.
   // Starting a TUI with --dangerous enables dangerous mode for that session only.
@@ -291,7 +370,7 @@ async function main(): Promise<void> {
     console.log('[rex] --dangerous mode: Will enable for this session only');
   }
 
-  if (!running) {
+  if (!daemonRunning) {
     try {
       await startDaemon();
     } catch (error) {
@@ -300,6 +379,18 @@ async function main(): Promise<void> {
     }
   } else {
     console.log('[rex] Daemon already running');
+  }
+
+  const controlPlaneRunning = await isControlPlaneRunning();
+  if (!controlPlaneRunning) {
+    try {
+      await startControlPlane();
+    } catch (error) {
+      console.error('[rex] Failed to start control-plane:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  } else {
+    console.log('[rex] Control-plane already running');
   }
 
   // Start TUI

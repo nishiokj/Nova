@@ -1,10 +1,11 @@
-import { Component, useEffect, type ReactNode } from 'react';
-import { useCockpitStore, CockpitContext } from '@/hooks/use-cockpit-store';
+import { Component, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { CockpitStoreImpl, CockpitStoreContext, useCockpit } from '@/hooks/use-cockpit-store';
 import { useMarkdownWorkspace } from '@/hooks/use-markdown-workspace';
-import { usePolling, useEventStream } from '@/hooks/use-polling';
+import { usePolling, useEventStream, type CockpitEventStreamEvent } from '@/hooks/use-polling';
 import { useKeyboard } from '@/hooks/use-keyboard';
 import { useResizableLayout } from '@/hooks/use-resizable-layout';
 import { getCockpitDiff } from '@/lib/api';
+import { parseFrontmatter } from '@/lib/markdown';
 import { Header } from '@/components/layout/Header';
 import { StatusBar } from '@/components/layout/StatusBar';
 import { FileExplorer } from '@/components/left/FileExplorer';
@@ -34,30 +35,67 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 const POLL_INTERVAL_MS = 30_000; // Fallback only — SSE handles real-time updates
+const SSE_ROLLUP_REFRESH_INTERVAL_MS = 4_000;
+
+/** Thin wrapper that reads two booleans from the store to conditionally render overlays. */
+function Overlays() {
+  const commandPaletteOpen = useCockpit(s => s.commandPaletteOpen);
+  const shortcutSheetOpen = useCockpit(s => s.shortcutSheetOpen);
+  return (
+    <>
+      {commandPaletteOpen && <CommandPalette />}
+      {shortcutSheetOpen && <ShortcutSheet />}
+    </>
+  );
+}
 
 export default function App() {
-  const store = useCockpitStore();
+  const store = useMemo(() => new CockpitStoreImpl(), []);
   const workspace = useMarkdownWorkspace();
   const { layout, setLeftWidth, setRightWidth } = useResizableLayout();
-  const { registerMarkdownContextProvider, registerMarkdownSetContent, registerBeforeSendMessageHook } = store;
   const { getActiveContext, flushPendingAutosave, setContent } = workspace;
+  const streamRefreshInFlightRef = useRef(false);
+  const streamRefreshPendingRef = useRef<CockpitEventStreamEvent | null>(null);
+  const lastSseRollupRefreshAtRef = useRef(0);
+  const rollupRefreshInFlightRef = useRef(false);
 
   // Share active markdown context + autosave-before-send + content setter with chat dispatch.
   useEffect(() => {
-    const unregisterContext = registerMarkdownContextProvider(() => getActiveContext());
-    const unregisterSetContent = registerMarkdownSetContent(setContent);
-    const unregisterBeforeSend = registerBeforeSendMessageHook(() => flushPendingAutosave());
+    const unregisterContext = store.registerMarkdownContextProvider(() => getActiveContext());
+    const unregisterSetContent = store.registerMarkdownSetContent(setContent);
+    const unregisterBeforeSend = store.registerBeforeSendMessageHook(() => flushPendingAutosave());
     return () => {
       unregisterBeforeSend();
       unregisterSetContent();
       unregisterContext();
     };
-  }, [registerMarkdownContextProvider, registerMarkdownSetContent, registerBeforeSendMessageHook, getActiveContext, flushPendingAutosave, setContent]);
+  }, [store, getActiveContext, flushPendingAutosave, setContent]);
 
   // Load templates once on mount.
   useEffect(() => {
     void store.refreshTemplates();
-  }, [store.refreshTemplates]);
+  }, [store]);
+
+  // Keep document-bound session key in sync with markdown frontmatter when available.
+  useEffect(() => {
+    const { frontmatter } = parseFrontmatter(workspace.state.content);
+    const frontmatterSessionKeyRaw = typeof frontmatter.sessionKey === 'string'
+      ? frontmatter.sessionKey
+      : typeof frontmatter.session_key === 'string'
+        ? frontmatter.session_key
+        : typeof frontmatter.chatSessionKey === 'string'
+          ? frontmatter.chatSessionKey
+          : typeof frontmatter.chat_session_key === 'string'
+            ? frontmatter.chat_session_key
+            : null;
+    const nextDocumentSessionKey = typeof frontmatterSessionKeyRaw === 'string' && frontmatterSessionKeyRaw.trim().length > 0
+      ? frontmatterSessionKeyRaw.trim()
+      : null;
+    const current = store.getSnapshot().documentSessionKey;
+    if (current !== nextDocumentSessionKey) {
+      store.set({ documentSessionKey: nextDocumentSessionKey });
+    }
+  }, [store, workspace.state.content, workspace.state.selectedPath]);
 
   // Poll as fallback; SSE event stream handles real-time updates.
   usePolling(async () => {
@@ -65,48 +103,149 @@ export default function App() {
     if (!workspace.state.dirty) void workspace.refreshTree();
   }, POLL_INTERVAL_MS);
 
-  // SSE event stream — triggers immediate refresh on any bus event.
-  useEventStream(async () => {
-    await store.refreshAll();
-    if (!workspace.state.dirty) void workspace.refreshTree();
-  });
+  const triggerRollupRefresh = useCallback((refreshWorkspaceTree: boolean) => {
+    if (rollupRefreshInFlightRef.current) return;
+    rollupRefreshInFlightRef.current = true;
+    void store.refreshRollups()
+      .then(() => {
+        if (refreshWorkspaceTree && !workspace.state.dirty) {
+          void workspace.refreshTree();
+        }
+      })
+      .finally(() => {
+        rollupRefreshInFlightRef.current = false;
+      });
+  }, [store, workspace]);
+
+  const handleSseRefresh = useCallback(async (incoming: CockpitEventStreamEvent | null) => {
+    const incomingType = incoming?.type;
+    const incomingData = (typeof incoming?.data === 'object' && incoming.data && !Array.isArray(incoming.data))
+      ? incoming.data as Record<string, unknown>
+      : null;
+    const incomingSessionKey = typeof incoming?.sessionKey === 'string' ? incoming.sessionKey : null;
+
+    // Fast path: stream chunks are injected directly into the store — no REST roundtrip.
+    if (incomingType === 'stream' && incomingData) {
+      const isReasoning = incomingData.is_reasoning === true;
+      const isFinal = incomingData.is_final === true;
+      const chunk = typeof incomingData.chunk === 'string' ? incomingData.chunk : '';
+      if (!isReasoning && chunk && !isFinal && incomingSessionKey) {
+        store.injectStreamChunk(incomingSessionKey, chunk);
+        return;
+      }
+      // is_final or empty reasoning → fall through to REST refresh
+    }
+
+    // Response events: agent turn completed — clear streaming, then re-fetch canonical data.
+    if (incomingType === 'response') {
+      store.clearStreaming();
+    }
+
+    // Back-pressure: only one REST refresh in flight at a time.
+    if (streamRefreshInFlightRef.current) {
+      streamRefreshPendingRef.current = incoming;
+      return;
+    }
+
+    streamRefreshInFlightRef.current = true;
+    let currentEvent: CockpitEventStreamEvent | null = incoming;
+    try {
+      while (true) {
+        const state = store.getSnapshot();
+        const focusedSessionKey = state.focusData?.sessionKey
+          ?? state.documentSessionKey
+          ?? null;
+        const eventSessionKey = typeof currentEvent?.sessionKey === 'string' ? currentEvent.sessionKey : null;
+        const isForDifferentSession = !!eventSessionKey && !!focusedSessionKey && eventSessionKey !== focusedSessionKey;
+        const now = Date.now();
+
+        if (focusedSessionKey && !isForDifferentSession) {
+          await store.refreshFocusEvents(focusedSessionKey, 200);
+          if ((now - lastSseRollupRefreshAtRef.current) >= SSE_ROLLUP_REFRESH_INTERVAL_MS) {
+            lastSseRollupRefreshAtRef.current = now;
+            triggerRollupRefresh(false);
+          }
+        } else if ((now - lastSseRollupRefreshAtRef.current) >= SSE_ROLLUP_REFRESH_INTERVAL_MS) {
+          lastSseRollupRefreshAtRef.current = now;
+          triggerRollupRefresh(true);
+        }
+
+        const pending = streamRefreshPendingRef.current;
+        streamRefreshPendingRef.current = null;
+        if (!pending) break;
+        currentEvent = pending;
+      }
+    } finally {
+      streamRefreshInFlightRef.current = false;
+    }
+  }, [store, triggerRollupRefresh]);
+
+  // SSE event stream — lightweight focused updates for low-latency chat rendering.
+  useEventStream(handleSseRefresh);
 
   // Refresh focus only when focusTarget changes (periodic refresh handled by refreshAll).
   useEffect(() => {
-    void store.refreshFocus(store.state.focusTarget);
-  }, [store.state.focusTarget]);
+    // We need to track focusTarget reactively — subscribe to the store for this one field.
+    let currentFocusTarget = store.getSnapshot().focusTarget;
+    void store.refreshFocus(currentFocusTarget);
+    const unsub = store.subscribe(() => {
+      const next = store.getSnapshot().focusTarget;
+      if (next === currentFocusTarget) return;
+      currentFocusTarget = next;
+      void store.refreshFocus(next);
+    });
+    return unsub;
+  }, [store]);
 
   // Handle pending commit range → diff
   useEffect(() => {
-    const { pendingCommitRange, focusData } = store.state;
-    if (!pendingCommitRange || !focusData?.sessionKey) return;
-    if (pendingCommitRange.sessionKey !== focusData.sessionKey) return;
-    void getCockpitDiff({
-      sessionKey: focusData.sessionKey,
-      ...(pendingCommitRange.base ? { base: pendingCommitRange.base } : {}),
-      ...(pendingCommitRange.head ? { head: pendingCommitRange.head } : {}),
-    }).then((response) => {
-      store.set({
-        diffData: response,
-        selectedDiffFile: response.hotspots[0]?.path ?? null,
-        highlightedDiffIdx: response.hotspots.length > 0 ? 0 : null,
-        diffPatchFile: null,
-        diffPatchLoadingFile: null,
-        diffPatchError: null,
-        focusTab: 'diff',
-        pendingCommitRange: null,
+    let currentSessionKey = store.getSnapshot().focusData?.sessionKey;
+    let currentCommitRange = store.getSnapshot().pendingCommitRange;
+
+    const handleCommitRange = () => {
+      const state = store.getSnapshot();
+      const { pendingCommitRange, focusData } = state;
+      if (!pendingCommitRange || !focusData?.sessionKey) return;
+      if (pendingCommitRange.sessionKey !== focusData.sessionKey) return;
+      void getCockpitDiff({
+        sessionKey: focusData.sessionKey,
+        ...(pendingCommitRange.base ? { base: pendingCommitRange.base } : {}),
+        ...(pendingCommitRange.head ? { head: pendingCommitRange.head } : {}),
+      }).then((response) => {
+        store.set({
+          diffData: response,
+          selectedDiffFile: response.hotspots[0]?.path ?? null,
+          highlightedDiffIdx: response.hotspots.length > 0 ? 0 : null,
+          diffPatchFile: null,
+          diffPatchLoadingFile: null,
+          diffPatchError: null,
+          focusTab: 'diff',
+          pendingCommitRange: null,
+        });
+      }).catch(() => {
+        store.set({ pendingCommitRange: null });
       });
-    }).catch(() => {
-      store.set({ pendingCommitRange: null });
+    };
+
+    handleCommitRange();
+    const unsub = store.subscribe(() => {
+      const state = store.getSnapshot();
+      const nextSessionKey = state.focusData?.sessionKey;
+      const nextCommitRange = state.pendingCommitRange;
+      if (nextSessionKey === currentSessionKey && nextCommitRange === currentCommitRange) return;
+      currentSessionKey = nextSessionKey;
+      currentCommitRange = nextCommitRange;
+      handleCommitRange();
     });
-  }, [store.state.focusData?.sessionKey, store.state.pendingCommitRange]);
+    return unsub;
+  }, [store]);
 
   // Keyboard shortcuts
   useKeyboard(store, workspace);
 
   return (
     <ErrorBoundary>
-    <CockpitContext.Provider value={store}>
+    <CockpitStoreContext.Provider value={store}>
       <div className="h-screen flex flex-col overflow-hidden" data-cockpit-root="true">
         <Header />
 
@@ -151,10 +290,9 @@ export default function App() {
         </main>
 
         <StatusBar />
-        {store.state.commandPaletteOpen && <CommandPalette />}
-        {store.state.shortcutSheetOpen && <ShortcutSheet />}
+        <Overlays />
       </div>
-    </CockpitContext.Provider>
+    </CockpitStoreContext.Provider>
     </ErrorBoundary>
   );
 }

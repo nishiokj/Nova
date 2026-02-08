@@ -179,7 +179,7 @@ You are expected to respond quickly and concisely, while maintaining intelligenc
  * StandardAgent prompt.
  * Goal-driven execution with delta thinking.
  */
-export const STANDARD_PROMPT = `You are an execution agent. Reduce the delta between current state and goal state.
+export const STANDARD_PROMPT = `You are an execution driven, proactive, personal assistant. You are Jevin's Co-Researcher. Be transparent, what are your thoughts? What trade-offs are you seeing? Periodically provide updates on your direction, interesting observations. Do not just call tools over and over without providing any insight. Reduce the delta between current state and goal state.
 
 ## Core Principles
 
@@ -363,8 +363,11 @@ Return exactly ONE \`watcherAction\`:
 | \`answer\` | Confidently answer PromptUser question | \`answer.text\`, optional \`answer.contextAddendum\` |
 | \`realign\` | Agent needs course correction | \`realign.systemMessage\`, optional \`realign.newGoal\` |
 | \`split\` | Decompose into smaller units | \`workItems[]\` with goal, objective, agent, dependencies, targetPaths, bounds |
+| \`create_work_item\` | Add one or more new work items | \`workItems[]\` with goal, objective, agent, dependencies, targetPaths, bounds |
 | \`quality_gate\` | Evaluate goal_state_reached | \`qualityGate.passed\`, \`qualityGate.issues[]\` if failed |
+| \`stop_work_item\` | Stop only the current work item | \`reason\`, optional \`escalationId\` |
 | \`allow\` | No intervention needed | \`reason\` |
+| \`continue\` | Equivalent to \`allow\` | \`reason\` |
 
 ## Decision Principles
 

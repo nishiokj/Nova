@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
+import { mkdir, mkdtemp, rm } from 'fs/promises';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 interface MockTemplateRow {
   id: string;
@@ -61,6 +64,11 @@ interface TestHarness {
   ctx: ControlPlaneContext;
   dispatchCalls: DispatchCall[];
   metadataUpdates: Record<string, unknown>[];
+  permissionUpdates: Array<{
+    sessionKey: string;
+    workingDir?: string;
+    input: Record<string, unknown>;
+  }>;
 }
 
 class MockResponse extends EventEmitter {
@@ -120,6 +128,11 @@ function createHarness(options?: {
 }): TestHarness {
   const dispatchCalls: DispatchCall[] = [];
   const metadataUpdates: Record<string, unknown>[] = [];
+  const permissionUpdates: Array<{
+    sessionKey: string;
+    workingDir?: string;
+    input: Record<string, unknown>;
+  }> = [];
 
   const graphd = {
     sessionGet: () => ({ session: createSessionRow(options?.sessionMetadata ?? {}) }),
@@ -145,9 +158,26 @@ function createHarness(options?: {
       dispatchCalls.push({ sessionKey, message, options: optionsArg });
       return { success: true, requestId: 'req-123', queued: false };
     },
+    updateSessionPermissionState: (sessionKey, input, optionsArg) => {
+      permissionUpdates.push({
+        sessionKey,
+        input: { ...input } as Record<string, unknown>,
+        ...(typeof optionsArg?.workingDir === 'string' ? { workingDir: optionsArg.workingDir } : {}),
+      });
+      return {
+        persistent: { allow: [], deny: [] },
+        sessionGrants: [],
+        sessionDenials: [],
+        dangerousMode: input.dangerousMode === true,
+        allowOutsideRoot: input.allowOutsideRoot === true,
+        webSearchEnabled: input.webSearchEnabled !== false,
+        writesNoDeletes: input.writesNoDeletes === true,
+        ...(Array.isArray(input.restrictWriteToPaths) ? { restrictWriteToPaths: input.restrictWriteToPaths } : {}),
+      };
+    },
   };
 
-  return { ctx, dispatchCalls, metadataUpdates };
+  return { ctx, dispatchCalls, metadataUpdates, permissionUpdates };
 }
 
 async function waitForFinish(res: MockResponse, timeoutMs = 500): Promise<void> {
@@ -236,6 +266,7 @@ describe('control-plane cockpit session message routes', () => {
         message: 'Summarize this note',
         markdownContext: {
           content: '# Notes\n\nhello',
+          workspaceScope: 'global',
           isDirty: true,
           metadata: { documentType: 'note' },
         },
@@ -253,10 +284,183 @@ describe('control-plane cockpit session message routes', () => {
     expect(harness.dispatchCalls[0].message).toBe('Summarize this note');
     expect(typeof harness.dispatchCalls[0].options?.context).toBe('string');
     expect(harness.dispatchCalls[0].options?.context).toContain('Control-plane active markdown context:');
+    expect(harness.dispatchCalls[0].options?.context).toContain('scopeMode: session');
+    expect(harness.dispatchCalls[0].options?.context).toContain('isDraft: true');
     expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
+
+    expect(harness.permissionUpdates).toHaveLength(1);
+    expect(harness.permissionUpdates[0].sessionKey).toBe('sess-1');
+    expect(harness.permissionUpdates[0].input.dangerousMode).toBe(false);
+    expect(harness.permissionUpdates[0].input.allowOutsideRoot).toBe(false);
+    expect(Array.isArray(harness.permissionUpdates[0].input.restrictWriteToPaths)).toBe(true);
 
     expect(harness.metadataUpdates).toHaveLength(1);
     expect(isRecord(harness.metadataUpdates[0].cockpit_active_markdown)).toBe(true);
+    const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
+    if (!isRecord(activeMarkdown)) {
+      throw new Error('Expected cockpit_active_markdown metadata record');
+    }
+    expect(activeMarkdown.isDraft).toBe(true);
+    expect(typeof activeMarkdown.writeTargetPath).toBe('string');
+    expect(String(activeMarkdown.writeTargetPath)).toContain(`${process.cwd()}/.cockpit/markdown/.drafts/session-sess-1/`);
+    expect(String(activeMarkdown.writeTargetPath)).toMatch(/\.md$/);
+  });
+
+  it('reuses client draftId for unsaved markdown context', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/session/sess-1/message',
+      ctx: harness.ctx,
+      body: {
+        message: 'Keep editing this draft',
+        markdownContext: {
+          content: '# Draft',
+          metadata: {
+            draftId: 'draft-abc-123',
+          },
+        },
+      },
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    expect(result.json?.success).toBe(true);
+    expect(harness.metadataUpdates).toHaveLength(1);
+    const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
+    if (!isRecord(activeMarkdown)) {
+      throw new Error('Expected cockpit_active_markdown metadata record');
+    }
+    expect(activeMarkdown.isDraft).toBe(true);
+    expect(activeMarkdown.draftId).toBe('draft-abc-123');
+    expect(typeof activeMarkdown.writeTargetPath).toBe('string');
+    expect(String(activeMarkdown.writeTargetPath)).toContain('draft-abc-123.md');
+  });
+
+  it('respects global markdown scope and includes an explicit write target in context', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/session/sess-1/message',
+      ctx: harness.ctx,
+      body: {
+        message: 'Please update this document',
+        markdownContext: {
+          path: 'notes/todo.md',
+          content: '# Todo\n\n- [ ] Ship fix',
+          workspaceScope: 'global',
+        },
+      },
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    expect(result.json?.success).toBe(true);
+    expect(result.json?.markdownContextAttached).toBe(true);
+
+    expect(harness.dispatchCalls).toHaveLength(1);
+    const contextText = harness.dispatchCalls[0].options?.context ?? '';
+    expect(contextText).toContain('scopeMode: global');
+    expect(contextText).toContain('workspacePath: .cockpit/markdown/notes/todo.md');
+    expect(contextText).toContain('If the user requests document edits, persist changes to writeTargetPath/absolutePath above');
+
+    expect(harness.metadataUpdates).toHaveLength(1);
+    const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
+    expect(isRecord(activeMarkdown)).toBe(true);
+    if (!isRecord(activeMarkdown)) {
+      throw new Error('Expected cockpit_active_markdown metadata record');
+    }
+    expect(activeMarkdown.scopeMode).toBe('global');
+    expect(activeMarkdown.scopeSessionKey).toBeNull();
+    expect(typeof activeMarkdown.writeTargetPath).toBe('string');
+    expect(String(activeMarkdown.writeTargetPath)).toContain('.cockpit/markdown/notes/todo.md');
+  });
+
+  it('respects project markdown scope and targets the real project directory', async () => {
+    const harness = createHarness();
+    const projectRoot = await mkdtemp(join(tmpdir(), 'cockpit-project-scope-'));
+    try {
+      const result = await invokeRoute({
+        method: 'POST',
+        url: '/control-plane/cockpit/session/sess-1/message',
+        ctx: harness.ctx,
+        body: {
+          message: 'Please edit this project document',
+          markdownContext: {
+            path: 'docs/plan.md',
+            content: '# Plan\n\n- [ ] Ship',
+            workspaceScope: 'project',
+            projectPath: projectRoot,
+          },
+        },
+      });
+
+      expect(result.handled).toBe(true);
+      expect(result.statusCode).toBe(200);
+      expect(result.json?.success).toBe(true);
+      expect(result.json?.markdownContextAttached).toBe(true);
+
+      expect(harness.dispatchCalls).toHaveLength(1);
+      const contextText = harness.dispatchCalls[0].options?.context ?? '';
+      expect(contextText).toContain('scopeMode: project');
+      expect(contextText).toContain('workspacePath: docs/plan.md');
+      expect(contextText).not.toContain('.cockpit/markdown/docs/plan.md');
+
+      expect(harness.metadataUpdates).toHaveLength(1);
+      const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
+      expect(isRecord(activeMarkdown)).toBe(true);
+      if (!isRecord(activeMarkdown)) {
+        throw new Error('Expected cockpit_active_markdown metadata record');
+      }
+      expect(activeMarkdown.scopeMode).toBe('project');
+      expect(activeMarkdown.scopeProjectPath).toBe(projectRoot);
+      expect(typeof activeMarkdown.writeTargetPath).toBe('string');
+      expect(String(activeMarkdown.writeTargetPath)).toBe(join(projectRoot, 'docs/plan.md'));
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('materializes unsaved project-scope markdown into project draft namespace', async () => {
+    const harness = createHarness();
+    const projectRoot = await mkdtemp(join(tmpdir(), 'cockpit-project-draft-'));
+    try {
+      const result = await invokeRoute({
+        method: 'POST',
+        url: '/control-plane/cockpit/session/sess-1/message',
+        ctx: harness.ctx,
+        body: {
+          message: 'Work on this unsaved project draft',
+          markdownContext: {
+            content: '# Project Draft',
+            workspaceScope: 'project',
+            projectPath: projectRoot,
+            metadata: {
+              draftId: 'project-draft-001',
+            },
+          },
+        },
+      });
+
+      expect(result.handled).toBe(true);
+      expect(result.statusCode).toBe(200);
+      expect(result.json?.success).toBe(true);
+      expect(harness.metadataUpdates).toHaveLength(1);
+      const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
+      if (!isRecord(activeMarkdown)) {
+        throw new Error('Expected cockpit_active_markdown metadata record');
+      }
+      expect(activeMarkdown.scopeMode).toBe('project');
+      expect(activeMarkdown.scopeProjectPath).toBe(projectRoot);
+      expect(activeMarkdown.isDraft).toBe(true);
+      expect(activeMarkdown.draftId).toBe('project-draft-001');
+      expect(typeof activeMarkdown.writeTargetPath).toBe('string');
+      expect(String(activeMarkdown.writeTargetPath)).toBe(
+        join(projectRoot, '.cockpit/drafts/project/project-draft-001.md')
+      );
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it('loads template and injects cockpit_handoff_spec for first workflow message', async () => {
@@ -419,5 +623,133 @@ describe('control-plane cockpit session message routes', () => {
     expect(harness.dispatchCalls).toHaveLength(1);
     expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
     expect(postgresMockState.queries).toHaveLength(0);
+  });
+});
+
+describe('control-plane cockpit rollup routes', () => {
+  it('normalizes string session timestamps for rollup snapshot responses', async () => {
+    const ctx: ControlPlaneContext = {
+      graphd: {
+        sessionsList: () => ({
+          sessions: [{
+            sessionKey: 'sess-rollup',
+            clientType: 'cockpit',
+            workingDir: process.cwd(),
+            status: 'active',
+            createdAt: '2026-02-06T12:00:00.000Z',
+            lastAccessedAt: '2026-02-06T13:00:00.000Z',
+            metadata: {},
+          }],
+        }),
+      } as unknown as ControlPlaneContext['graphd'],
+      isGraphDReady: () => true,
+      workingDir: process.cwd(),
+    };
+
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/rollups/snapshot?sessionLimit=120&escalationLimit=120&repoLimit=50&includeRepo=0',
+      ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    expect(Array.isArray(result.json?.runningSessions)).toBe(true);
+    expect((result.json?.runningSessions as unknown[] | undefined)?.length).toBe(1);
+    expect(result.json?.error).toBeUndefined();
+  });
+});
+
+describe('control-plane cockpit session create routes', () => {
+  it('creates document-scoped sessions with restricted write targets', async () => {
+    const permissionUpdates: Array<{
+      sessionKey: string;
+      input: Record<string, unknown>;
+      workingDir?: string;
+    }> = [];
+    const sessionCreateCalls: Array<Record<string, unknown>> = [];
+
+    const ctx: ControlPlaneContext = {
+      graphd: {
+        sessionCreate: (...args: unknown[]) => {
+          sessionCreateCalls.push({
+            sessionKey: args[0],
+            clientType: args[1],
+            workingDir: args[2],
+            metadata: args[4],
+          });
+          return { success: true };
+        },
+      } as unknown as ControlPlaneContext['graphd'],
+      isGraphDReady: () => true,
+      workingDir: process.cwd(),
+      updateSessionPermissionState: (sessionKey, input, optionsArg) => {
+        permissionUpdates.push({
+          sessionKey,
+          input: { ...input } as Record<string, unknown>,
+          ...(typeof optionsArg?.workingDir === 'string' ? { workingDir: optionsArg.workingDir } : {}),
+        });
+        return {
+          persistent: { allow: [], deny: [] },
+          sessionGrants: [],
+          sessionDenials: [],
+          dangerousMode: input.dangerousMode === true,
+          allowOutsideRoot: input.allowOutsideRoot === true,
+          webSearchEnabled: input.webSearchEnabled !== false,
+          writesNoDeletes: input.writesNoDeletes === true,
+          ...(Array.isArray(input.restrictWriteToPaths) ? { restrictWriteToPaths: input.restrictWriteToPaths } : {}),
+        };
+      },
+    };
+
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/session/create',
+      ctx,
+      body: {
+        goal: 'Draft this note',
+        markdownPath: 'notes/example.md',
+        metadata: {
+          source: 'cockpit-document',
+        },
+      },
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    expect(result.json?.success).toBe(true);
+    expect(typeof result.json?.sessionKey).toBe('string');
+    expect(sessionCreateCalls).toHaveLength(1);
+    expect(permissionUpdates).toHaveLength(1);
+    expect(permissionUpdates[0].input.dangerousMode).toBe(false);
+    expect(permissionUpdates[0].input.restrictWriteToPaths).toEqual([join(process.cwd(), 'notes/example.md')]);
+  });
+});
+
+describe('control-plane cockpit markdown routes', () => {
+  it('blocks folder deletion in project scope', async () => {
+    const harness = createHarness();
+    const projectRoot = await mkdtemp(join(tmpdir(), 'cockpit-project-delete-'));
+    try {
+      await mkdir(join(projectRoot, 'docs'), { recursive: true });
+      const result = await invokeRoute({
+        method: 'POST',
+        url: '/control-plane/cockpit/markdown/delete',
+        ctx: harness.ctx,
+        body: {
+          projectPath: projectRoot,
+          path: 'docs',
+          type: 'folder',
+          recursive: true,
+        },
+      });
+
+      expect(result.handled).toBe(true);
+      expect(result.statusCode).toBe(400);
+      expect(result.json?.success).toBe(false);
+      expect(String(result.json?.error ?? '')).toContain('Folder deletion is disabled in project scope');
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
   });
 });

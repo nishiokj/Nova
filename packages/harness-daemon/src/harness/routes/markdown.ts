@@ -83,6 +83,116 @@ export function ensureMarkdownExtensionOnPath(rawPath: string): string | null {
   return hasMarkdownExtension(normalized) ? normalized : `${normalized}.md`;
 }
 
+const MARKDOWN_DRAFTS_DIR = '.drafts';
+const PROJECT_DRAFTS_DIR = '.cockpit/drafts';
+
+function sanitizeScopeToken(raw: string | undefined, fallback: string): string {
+  if (!raw) return fallback;
+  const safe = raw
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return safe || fallback;
+}
+
+function sanitizeMarkdownDraftId(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const safe = raw
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return safe.length > 0 ? safe : null;
+}
+
+async function materializeMarkdownDraftFromContent(
+  ctx: ControlPlaneContext,
+  input: {
+    content: string;
+    sessionKey?: string;
+    projectPath?: string;
+    draftId?: string;
+  }
+): Promise<
+  | {
+      ok: true;
+      scope: MarkdownWorkspaceScope;
+      rootDir: string;
+      relativePath: string;
+      absolutePath: string;
+      version: number;
+      updatedAt: string;
+      hash: string;
+      draftId: string;
+    }
+  | { ok: false; status: number; error: string }
+> {
+  const path = await import('path');
+  const fs = await import('fs/promises');
+  const crypto = await import('crypto');
+
+  const scopeResult = await resolveMarkdownWorkspaceScope(ctx, {
+    sessionKey: input.sessionKey ?? null,
+    projectPath: input.projectPath ?? null,
+  });
+  if ('error' in scopeResult) {
+    return { ok: false, status: scopeResult.status, error: scopeResult.error };
+  }
+  const scope = scopeResult;
+
+  const normalizedDraftId = sanitizeMarkdownDraftId(input.draftId)
+    ?? crypto.randomUUID().replace(/-/g, '');
+  const sessionBucket = scope.sessionKey
+    ? `session-${sanitizeScopeToken(scope.sessionKey, 'session')}`
+    : (scope.mode === 'project' ? 'project' : 'global');
+
+  const rootDir = scope.mode === 'project'
+    ? path.resolve(scope.workingDir)
+    : path.resolve(scope.workingDir, MARKDOWN_WORKSPACE_DIR);
+  const draftPrefix = scope.mode === 'project' ? PROJECT_DRAFTS_DIR : MARKDOWN_DRAFTS_DIR;
+  const relativePath = normalizeWorkspaceRelativePath(`${draftPrefix}/${sessionBucket}/${normalizedDraftId}.md`);
+  if (!relativePath) {
+    return { ok: false, status: 400, error: 'Failed resolving markdown draft path' };
+  }
+  const absolutePath = path.resolve(rootDir, relativePath);
+  if (!(absolutePath === rootDir || absolutePath.startsWith(`${rootDir}${path.sep}`))) {
+    return { ok: false, status: 400, error: 'Draft path resolved outside markdown workspace' };
+  }
+
+  try {
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    let existing: string | null = null;
+    try {
+      existing = await fs.readFile(absolutePath, 'utf8');
+    } catch {
+      existing = null;
+    }
+    if (existing !== input.content) {
+      await fs.writeFile(absolutePath, input.content, 'utf8');
+    }
+    const stat = await fs.stat(absolutePath);
+    return {
+      ok: true,
+      scope,
+      rootDir,
+      relativePath,
+      absolutePath,
+      version: buildVersionFromMtimeMs(stat.mtimeMs),
+      updatedAt: stat.mtime.toISOString(),
+      hash: await buildMarkdownContentHash(input.content),
+      draftId: normalizedDraftId,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 500,
+      error: `Failed materializing markdown draft: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Versioning & Hashing
 // ---------------------------------------------------------------------------
@@ -224,8 +334,14 @@ export async function getCockpitMarkdownWorkspaceRootForScope(
   const fs = await import('fs/promises');
   const scope = await resolveMarkdownWorkspaceScope(ctx, options);
   if ('error' in scope) return scope;
-  const root = path.resolve(scope.workingDir, MARKDOWN_WORKSPACE_DIR);
-  await fs.mkdir(root, { recursive: true });
+  // Notes/global workspace lives under .cockpit/markdown.
+  // Project scope maps directly to the real project directory.
+  const root = scope.mode === 'project'
+    ? path.resolve(scope.workingDir)
+    : path.resolve(scope.workingDir, MARKDOWN_WORKSPACE_DIR);
+  if (scope.mode !== 'project') {
+    await fs.mkdir(root, { recursive: true });
+  }
   return { root, scope };
 }
 
@@ -664,10 +780,21 @@ export async function buildCockpitMarkdownWorkspaceTree(
     throw new Error(scopeRoot.error);
   }
   const rootDir = scopeRoot.root;
+  const projectScope = scopeRoot.scope.mode === 'project';
 
   const counters = { files: 0 };
   const MAX_FILES = 1000;
   const MAX_DEPTH = 6;
+  const PROJECT_IGNORED_DIRS = new Set([
+    'node_modules',
+    'dist',
+    'build',
+    'coverage',
+    'target',
+    '.next',
+    '.turbo',
+    '.cache',
+  ]);
 
   const scanDir = async (absoluteDir: string, relativeDir: string, depth: number): Promise<Array<Record<string, unknown>>> => {
     if (depth > MAX_DEPTH || counters.files >= MAX_FILES) return [];
@@ -698,6 +825,7 @@ export async function buildCockpitMarkdownWorkspaceTree(
       const absPath = path.join(absoluteDir, entry.name);
 
       if (entry.isDirectory) {
+        if (projectScope && PROJECT_IGNORED_DIRS.has(entry.name)) continue;
         const children = await scanDir(absPath, relPath, depth + 1);
         nodes.push({
           type: 'folder',
@@ -736,7 +864,9 @@ export async function buildCockpitMarkdownWorkspaceTree(
   };
 
   const tree = await scanDir(rootDir, '', 0);
-  const folderSuggestions = new Set<string>(MARKDOWN_SUGGESTED_FOLDERS);
+  const folderSuggestions = new Set<string>(
+    projectScope ? [] : MARKDOWN_SUGGESTED_FOLDERS
+  );
   for (const node of tree) {
     if (node.type !== 'folder') continue;
     if (typeof node.path === 'string' && node.path.trim()) {
@@ -805,13 +935,17 @@ export async function buildCockpitFilesystemRoots(
   ctx: ControlPlaneContext,
   options?: {
     sessionKey?: string | null;
+    projectPath?: string | null;
   }
 ): Promise<{
   cwd: string;
   roots: CockpitFilesystemRootRecord[];
 }> {
   const path = await import('path');
-  const cwdScope = await resolveMarkdownWorkspaceScope(ctx, { sessionKey: options?.sessionKey ?? null });
+  const cwdScope = await resolveMarkdownWorkspaceScope(ctx, {
+    sessionKey: options?.sessionKey ?? null,
+    projectPath: options?.projectPath ?? null,
+  });
   if ('error' in cwdScope) {
     throw new Error(cwdScope.error);
   }
@@ -828,25 +962,41 @@ export async function buildCockpitFilesystemRoots(
   }];
 
   const seenProjectPaths = new Set<string>();
-  const knownProjectCounts = new Map<string, { count: number; sessionKey?: string }>();
+  const knownProjectCounts = new Map<string, { count: number; lastAccessedAt: number; sessionKey?: string }>();
   const { sessions } = getAllSessions(ctx, 1000);
   for (const session of sessions) {
     const wd = asString(session.workingDir);
     if (!wd) continue;
     const normalized = path.resolve(wd);
+    const sessionLastAccess = Number.isFinite(session.lastAccessedAt)
+      ? session.lastAccessedAt
+      : 0;
     const existing = knownProjectCounts.get(normalized);
     if (existing) {
       existing.count += 1;
+      if (sessionLastAccess >= existing.lastAccessedAt) {
+        existing.lastAccessedAt = sessionLastAccess;
+        existing.sessionKey = session.sessionKey;
+      }
       continue;
     }
     knownProjectCounts.set(normalized, {
       count: 1,
+      lastAccessedAt: sessionLastAccess,
       ...(session.sessionKey ? { sessionKey: session.sessionKey } : {}),
     });
   }
 
   const sortedKnownProjects = Array.from(knownProjectCounts.entries())
-    .sort((a, b) => b[1].count - a[1].count);
+    .sort((a, b) => {
+      if (a[1].lastAccessedAt !== b[1].lastAccessedAt) {
+        return b[1].lastAccessedAt - a[1].lastAccessedAt;
+      }
+      if (a[1].count !== b[1].count) {
+        return b[1].count - a[1].count;
+      }
+      return a[0].localeCompare(b[0]);
+    });
   for (const [projectPath, info] of sortedKnownProjects) {
     if (seenProjectPaths.has(projectPath)) continue;
     seenProjectPaths.add(projectPath);
@@ -888,12 +1038,6 @@ export async function buildCockpitFilesystemRoots(
   const pinned = roots.filter((root) => root.pinned);
   const projects = roots
     .filter((root) => !root.pinned)
-    .sort((a, b) => {
-      const aCount = typeof a.sessionCount === 'number' ? a.sessionCount : 0;
-      const bCount = typeof b.sessionCount === 'number' ? b.sessionCount : 0;
-      if (aCount !== bCount) return bCount - aCount;
-      return a.path.localeCompare(b.path);
-    })
     .slice(0, COCKPIT_PROJECT_DISCOVERY_MAX_RESULTS);
 
   return {
@@ -1112,6 +1256,24 @@ export async function handlePostCockpitMarkdownDelete(
   if ('error' in resolved) {
     sendJson(res, { success: false, error: resolved.error }, resolved.status ?? 400);
     return;
+  }
+  if (resolved.scope.mode === 'project') {
+    if (requestedType === 'folder') {
+      sendJson(
+        res,
+        { success: false, error: 'Folder deletion is disabled in project scope' },
+        400
+      );
+      return;
+    }
+    if (!hasMarkdownExtension(resolved.relativePath)) {
+      sendJson(
+        res,
+        { success: false, error: 'Only markdown files can be deleted in project scope' },
+        400
+      );
+      return;
+    }
   }
 
   const fs = await import('fs/promises');
@@ -1483,15 +1645,35 @@ export async function buildMarkdownMessageContext(
 
   const rawPath = asString(value.path) ?? asString(value.markdownPath) ?? asString(value.filePath);
   const metadataRecord = isRecord(value.metadata) ? value.metadata : {};
-  const scopeSessionKey = asString(value.scopeSessionKey)
+  const draftIdFromClient = asString(value.draftId)
+    ?? asString(value.clientDraftId)
+    ?? asString(metadataRecord.draftId)
+    ?? asString(metadataRecord.clientDraftId);
+  const explicitScopeSessionKey = asString(value.scopeSessionKey)
     ?? asString(value.workspaceSessionKey)
     ?? asString(metadataRecord.scopeSessionKey)
-    ?? asString(metadataRecord.workspaceSessionKey)
-    ?? options?.defaultSessionKey;
+    ?? asString(metadataRecord.workspaceSessionKey);
   const scopeProjectPath = asString(value.projectPath)
     ?? asString(value.workspaceProjectPath)
     ?? asString(metadataRecord.scopeProjectPath)
     ?? asString(metadataRecord.workspaceProjectPath);
+  const workspaceScopeRaw = asString(value.workspaceScope)
+    ?? asString(value.scopeMode)
+    ?? asString(metadataRecord.workspaceScope)
+    ?? asString(metadataRecord.scopeMode);
+  const workspaceScope = workspaceScopeRaw === 'global' || workspaceScopeRaw === 'session' || workspaceScopeRaw === 'project'
+    ? workspaceScopeRaw
+    : undefined;
+  const scopeSessionKey = explicitScopeSessionKey
+    ?? (
+      scopeProjectPath
+        ? undefined
+        : (
+          workspaceScope === 'global' || workspaceScope === 'project'
+            ? undefined
+            : options?.defaultSessionKey
+        )
+    );
   let content = typeof value.content === 'string'
     ? value.content
     : typeof value.markdown === 'string'
@@ -1503,6 +1685,49 @@ export async function buildMarkdownMessageContext(
   let resolvedVersion: number | undefined = asNumber(value.version);
   let resolvedUpdatedAt: string | undefined = asString(value.updatedAt);
   let resolvedMetadata: Record<string, unknown> | undefined;
+  let resolvedScopeMode: MarkdownWorkspaceScopeMode | undefined = workspaceScope;
+  let resolvedScopeSessionKey: string | undefined;
+  let resolvedScopeProjectPath: string | undefined;
+  let resolvedRootDir: string | undefined;
+  let resolvedAbsolutePath: string | undefined;
+  let resolvedDraftId: string | undefined = sanitizeMarkdownDraftId(draftIdFromClient) ?? undefined;
+
+  if (!rawPath && typeof content === 'string') {
+    const draftSessionKey = scopeSessionKey
+      ?? (
+        !scopeProjectPath
+          ? options?.defaultSessionKey
+          : undefined
+      );
+    const draftResult = await materializeMarkdownDraftFromContent(ctx, {
+      content,
+      ...(draftSessionKey ? { sessionKey: draftSessionKey } : {}),
+      ...(scopeProjectPath ? { projectPath: scopeProjectPath } : {}),
+      ...(resolvedDraftId ? { draftId: resolvedDraftId } : {}),
+    });
+    if (!draftResult.ok) {
+      return { ok: false, status: draftResult.status, error: draftResult.error };
+    }
+    resolvedPath = draftResult.relativePath;
+    resolvedScopeMode = draftResult.scope.mode;
+    resolvedScopeSessionKey = draftResult.scope.sessionKey;
+    resolvedScopeProjectPath = draftResult.scope.projectPath;
+    resolvedRootDir = draftResult.rootDir;
+    resolvedAbsolutePath = draftResult.absolutePath;
+    resolvedVersion = resolvedVersion ?? draftResult.version;
+    resolvedUpdatedAt = resolvedUpdatedAt ?? draftResult.updatedAt;
+    resolvedMetadata = sanitizeMarkdownMetadata({
+      ...(resolvedMetadata ?? {}),
+      source: 'draft',
+      draftId: draftResult.draftId,
+      draftPath: draftResult.relativePath,
+      draftAbsolutePath: draftResult.absolutePath,
+      draftScopeMode: draftResult.scope.mode,
+      ...(draftResult.scope.projectPath ? { draftScopeProjectPath: draftResult.scope.projectPath } : {}),
+      hash: draftResult.hash,
+    });
+    resolvedDraftId = draftResult.draftId;
+  }
 
   if (rawPath) {
     const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, rawPath, {
@@ -1514,6 +1739,11 @@ export async function buildMarkdownMessageContext(
       return { ok: false, status: resolved.status ?? 400, error: resolved.error };
     }
     resolvedPath = resolved.relativePath;
+    resolvedScopeMode = resolved.scope.mode;
+    resolvedScopeSessionKey = resolved.scope.sessionKey;
+    resolvedScopeProjectPath = resolved.scope.projectPath;
+    resolvedRootDir = resolved.rootDir;
+    resolvedAbsolutePath = resolved.absolutePath;
     try {
       const fs = await import('fs/promises');
       const [stat, persistedContent, persistedMetadata] = await Promise.all([
@@ -1527,6 +1757,11 @@ export async function buildMarkdownMessageContext(
       resolvedVersion = resolvedVersion ?? buildVersionFromMtimeMs(stat.mtimeMs);
       resolvedUpdatedAt = resolvedUpdatedAt ?? stat.mtime.toISOString();
       resolvedMetadata = persistedMetadata;
+      if (!resolvedDraftId) {
+        resolvedDraftId = sanitizeMarkdownDraftId(
+          asString(persistedMetadata?.draftId) ?? asString(persistedMetadata?.clientDraftId)
+        ) ?? undefined;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (typeof content === 'string') {
@@ -1563,11 +1798,31 @@ export async function buildMarkdownMessageContext(
     truncated = true;
   }
   const payloadHash = truncated ? await buildMarkdownContentHash(content) : fullContentHash;
+  const workspaceRelativePath = resolvedPath ?? rawPath ?? null;
+  const isDraftContext = typeof workspaceRelativePath === 'string'
+    && (
+      workspaceRelativePath.startsWith(`${MARKDOWN_DRAFTS_DIR}/`)
+      || workspaceRelativePath.startsWith(`${PROJECT_DRAFTS_DIR}/`)
+    );
+  const workspacePath = workspaceRelativePath
+    ? (
+      resolvedScopeMode === 'project'
+        ? workspaceRelativePath
+        : `${MARKDOWN_WORKSPACE_DIR}/${workspaceRelativePath}`
+    )
+    : null;
   const contextMetadata = sanitizeMarkdownMetadata({
     source: 'markdown-editor',
-    path: resolvedPath ?? rawPath ?? null,
-    scopeSessionKey: scopeSessionKey ?? null,
-    scopeProjectPath: scopeProjectPath ?? null,
+    path: workspaceRelativePath,
+    workspacePath,
+    workspaceRoot: resolvedRootDir ?? null,
+    absolutePath: resolvedAbsolutePath ?? null,
+    writeTargetPath: resolvedAbsolutePath ?? null,
+    scopeMode: resolvedScopeMode ?? null,
+    scopeSessionKey: scopeSessionKey ?? resolvedScopeSessionKey ?? null,
+    scopeProjectPath: scopeProjectPath ?? resolvedScopeProjectPath ?? null,
+    isDraft: isDraftContext,
+    draftId: resolvedDraftId ?? null,
     version: resolvedVersion ?? null,
     updatedAt: resolvedUpdatedAt ?? null,
     isDirty,
@@ -1580,7 +1835,12 @@ export async function buildMarkdownMessageContext(
     payloadHash,
   }) ?? {
     source: 'markdown-editor',
-    path: resolvedPath ?? rawPath ?? null,
+    path: workspaceRelativePath,
+    workspacePath,
+    writeTargetPath: resolvedAbsolutePath ?? null,
+    scopeMode: resolvedScopeMode ?? null,
+    isDraft: isDraftContext,
+    draftId: resolvedDraftId ?? null,
     hash: fullContentHash,
     payloadHash,
     truncated,
@@ -1593,6 +1853,12 @@ export async function buildMarkdownMessageContext(
   const contextText = [
     'Control-plane active markdown context:',
     `path: ${contextMetadata.path ?? 'unknown'}`,
+    `workspacePath: ${contextMetadata.workspacePath ?? 'unknown'}`,
+    `workspaceRoot: ${contextMetadata.workspaceRoot ?? 'unknown'}`,
+    `absolutePath: ${contextMetadata.absolutePath ?? 'unknown'}`,
+    `scopeMode: ${contextMetadata.scopeMode ?? 'unknown'}`,
+    `isDraft: ${contextMetadata.isDraft === true ? 'true' : 'false'}`,
+    `draftId: ${asString(contextMetadata.draftId) ?? 'none'}`,
     `version: ${contextMetadata.version ?? 'unknown'}`,
     `updatedAt: ${contextMetadata.updatedAt ?? 'unknown'}`,
     `dirty: ${contextMetadata.isDirty === true ? 'true' : 'false'}`,
@@ -1607,6 +1873,10 @@ export async function buildMarkdownMessageContext(
     content,
     '```',
     'Treat this markdown snapshot as authoritative for the current user request.',
+    'If the user requests document edits, persist changes to writeTargetPath/absolutePath above (not similarly named files elsewhere).',
+    ...(isDraftContext
+      ? ['This document is a draft artifact. Keep edits confined to writeTargetPath until the user promotes/saves it to a project path.']
+      : []),
   ].join('\n');
 
   return {
