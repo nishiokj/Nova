@@ -47,7 +47,7 @@ rex-linux-*
 rex-darwin-*
 rex-windows-*
 latest-version.txt
-
+.haiku/*
 # Node.js / TypeScript
 node_modules/
 *.lock
