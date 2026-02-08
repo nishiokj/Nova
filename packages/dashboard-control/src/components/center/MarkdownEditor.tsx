@@ -17,6 +17,8 @@ import { detectAtMention, rankPathSuggestions } from '@/lib/autocomplete';
 import { ghostCompletion } from '@/lib/ghost-completion';
 import { streamCompletion } from '@/lib/api/autocomplete';
 
+const CHANGE_SYNC_DEBOUNCE_MS = 90;
+
 export interface EditorHandle {
   focus(): void;
   blur(): void;
@@ -30,6 +32,7 @@ interface MarkdownEditorProps {
   readOnly?: boolean;
   placeholder?: string;
   fileSuggestions?: string[];
+  autocompleteEnabled?: boolean;
 }
 
 const STATIC_MARKDOWN_COMPLETIONS: Completion[] = [
@@ -106,17 +109,51 @@ function isCockpitGlobal(e: KeyboardEvent): boolean {
 }
 
 const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
-  function MarkdownEditor({ content, onChange, readOnly, placeholder, fileSuggestions = [] }, ref) {
+  function MarkdownEditor({ content, onChange, readOnly, placeholder, fileSuggestions = [], autocompleteEnabled = false }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
     const onChangeRef = useRef(onChange);
     onChangeRef.current = onChange;
+    const pendingChangeRef = useRef<string | null>(null);
+    const pendingChangeTimerRef = useRef<number | null>(null);
+    const autocompleteEnabledRef = useRef(autocompleteEnabled);
+    autocompleteEnabledRef.current = autocompleteEnabled;
     const readOnlyCompartment = useRef(new Compartment());
     const autocompleteCompartment = useRef(new Compartment());
     const completionSource = useMemo(
       () => buildAutocompleteSource(fileSuggestions),
       [fileSuggestions],
     );
+    const clearPendingChange = () => {
+      if (pendingChangeTimerRef.current !== null) {
+        window.clearTimeout(pendingChangeTimerRef.current);
+        pendingChangeTimerRef.current = null;
+      }
+      pendingChangeRef.current = null;
+    };
+    const flushPendingChange = () => {
+      if (pendingChangeTimerRef.current !== null) {
+        window.clearTimeout(pendingChangeTimerRef.current);
+        pendingChangeTimerRef.current = null;
+      }
+      if (pendingChangeRef.current === null) return;
+      const nextDoc = pendingChangeRef.current;
+      pendingChangeRef.current = null;
+      onChangeRef.current(nextDoc);
+    };
+    const scheduleChangeSync = (nextDoc: string) => {
+      pendingChangeRef.current = nextDoc;
+      if (pendingChangeTimerRef.current !== null) {
+        window.clearTimeout(pendingChangeTimerRef.current);
+      }
+      pendingChangeTimerRef.current = window.setTimeout(() => {
+        pendingChangeTimerRef.current = null;
+        if (pendingChangeRef.current === null) return;
+        const latestDoc = pendingChangeRef.current;
+        pendingChangeRef.current = null;
+        onChangeRef.current(latestDoc);
+      }, CHANGE_SYNC_DEBOUNCE_MS);
+    };
 
     // Expose imperative handle
     useImperativeHandle(ref, () => ({
@@ -151,8 +188,14 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
 
       const updateListener = EditorView.updateListener.of((update) => {
         if (update.docChanged) {
-          onChangeRef.current(update.state.doc.toString());
+          scheduleChangeSync(update.state.doc.toString());
         }
+      });
+      const flushOnBlur = EditorView.domEventHandlers({
+        blur() {
+          flushPendingChange();
+          return false;
+        },
       });
 
       const state = EditorState.create({
@@ -162,6 +205,7 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
           ghostCompletion({
             fetchCompletion: (textBefore, textAfter, signal, onToken) =>
               streamCompletion({ textBefore, textAfter }, signal, onToken),
+            isEnabled: () => autocompleteEnabledRef.current,
           }),
           keymap.of([
             ...closeBracketsKeymap,
@@ -179,6 +223,7 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
           markdownDecorations,
           cockpitEditorTheme,
           updateListener,
+          flushOnBlur,
           EditorView.lineWrapping,
           readOnlyCompartment.current.of(EditorState.readOnly.of(readOnly ?? false)),
           ...(placeholder ? [cmPlaceholder(placeholder)] : []),
@@ -189,6 +234,7 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
       viewRef.current = view;
 
       return () => {
+        flushPendingChange();
         view.destroy();
         viewRef.current = null;
       };
@@ -201,6 +247,7 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
       if (!view) return;
       const currentDoc = view.state.doc.toString();
       if (content !== currentDoc) {
+        clearPendingChange();
         view.dispatch({
           changes: { from: 0, to: currentDoc.length, insert: content },
         });

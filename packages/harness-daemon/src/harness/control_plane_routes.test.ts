@@ -753,3 +753,32 @@ describe('control-plane cockpit markdown routes', () => {
     }
   });
 });
+
+describe('control-plane cockpit architecture routes', () => {
+  it('requires sessionKey for architecture overview', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/architecture/overview',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(400);
+    expect(result.json?.error).toBe('sessionKey is required');
+  });
+
+  it('validates architecture alerts severity values', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/architecture/alerts?severity=severe',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(400);
+    expect(String(result.json?.error ?? '')).toContain('Invalid severity');
+  });
+
+});

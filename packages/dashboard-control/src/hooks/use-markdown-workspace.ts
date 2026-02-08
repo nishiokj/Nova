@@ -18,34 +18,26 @@ import {
   getDocumentType,
   normalizeDocPath,
   normalizeWorkspacePathForClient,
-  parseFrontmatter,
 } from '@/lib/markdown';
 import type { EditorHandle } from '@/components/center/MarkdownEditor';
 
-const DEFAULT_SUGGESTED_FOLDERS = ['scratch', 'packets', 'plans', 'specs', 'handoffs'];
 const AUTOSAVE_DEBOUNCE_MS = 1400;
+const SCRATCH_ROOT = '.cockpit/scratch';
 
-function createClientDraftId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+export interface WorkspaceRoot {
+  id: string;
+  kind: 'scratch' | 'project';
+  label: string;
+  path: string;
 }
 
 interface MarkdownState {
-  rootDir: string;
-  scopeMode: 'global' | 'session' | 'project';
-  scopeSessionKey: string | null;
-  scopeProjectPath: string | null;
-  filesystemRoots: CockpitFilesystemRoot[];
-  filesystemCwd: string | null;
+  activeRoot: string;              // '.cockpit/scratch' or absolute project path
+  roots: WorkspaceRoot[];          // scratch + discovered projects
   tree: CockpitMarkdownTreeNode[];
-  suggestedFolders: string[];
   selectedPath: string | null;
   content: string;
   version: number;
-  updatedAt: string | null;
-  hash: string | null;
   dirty: boolean;
   expandedFolders: Set<string>;
   saving: boolean;
@@ -59,19 +51,12 @@ interface MarkdownState {
 }
 
 const initialState: MarkdownState = {
-  rootDir: '.cockpit/markdown',
-  scopeMode: 'global',
-  scopeSessionKey: null,
-  scopeProjectPath: null,
-  filesystemRoots: [],
-  filesystemCwd: null,
+  activeRoot: SCRATCH_ROOT,
+  roots: [],
   tree: [],
-  suggestedFolders: DEFAULT_SUGGESTED_FOLDERS,
   selectedPath: null,
   content: '',
   version: 0,
-  updatedAt: null,
-  hash: null,
   dirty: false,
   expandedFolders: new Set(),
   saving: false,
@@ -86,16 +71,14 @@ const initialState: MarkdownState = {
 
 type MdAction =
   | { type: 'SET'; payload: Partial<MarkdownState> }
-  | { type: 'SET_TREE'; payload: { rootDir: string; tree: CockpitMarkdownTreeNode[]; suggestedFolders: string[] } }
+  | { type: 'SET_TREE'; payload: { rootDir: string; tree: CockpitMarkdownTreeNode[] } }
   | { type: 'TOGGLE_FOLDER'; path: string }
-  | { type: 'FILE_LOADED'; payload: { path: string; content: string; version: number; updatedAt: string | null; hash: string | null } }
+  | { type: 'FILE_LOADED'; payload: { path: string; content: string; version: number } }
   | {
       type: 'FILE_SAVED';
       payload: {
         path: string;
         version: number;
-        updatedAt: string | null;
-        hash: string | null;
         mode: 'manual' | 'autosave';
       };
     };
@@ -105,13 +88,13 @@ function reducer(state: MarkdownState, action: MdAction): MarkdownState {
     case 'SET':
       return { ...state, ...action.payload };
     case 'SET_TREE': {
-      const { rootDir, tree, suggestedFolders } = action.payload;
+      const { rootDir, tree } = action.payload;
       const folders = gatherMarkdownFolders(tree);
       let expanded = state.expandedFolders;
       if (expanded.size === 0) {
         expanded = new Set(folders.slice(0, 4));
       }
-      return { ...state, rootDir, tree, suggestedFolders, expandedFolders: expanded };
+      return { ...state, activeRoot: rootDir, tree, expandedFolders: expanded };
     }
     case 'TOGGLE_FOLDER': {
       const next = new Set(state.expandedFolders);
@@ -125,8 +108,6 @@ function reducer(state: MarkdownState, action: MdAction): MarkdownState {
         selectedPath: action.payload.path,
         content: action.payload.content,
         version: action.payload.version,
-        updatedAt: action.payload.updatedAt,
-        hash: action.payload.hash,
         dirty: false,
         loading: false,
         conflictVersion: null,
@@ -137,8 +118,6 @@ function reducer(state: MarkdownState, action: MdAction): MarkdownState {
         ...state,
         selectedPath: action.payload.path,
         version: action.payload.version,
-        updatedAt: action.payload.updatedAt,
-        hash: action.payload.hash,
         dirty: false,
         conflictVersion: null,
         saving: false,
@@ -153,11 +132,8 @@ function reducer(state: MarkdownState, action: MdAction): MarkdownState {
 }
 
 function buildScopeInput(state: MarkdownState): CockpitMarkdownScopeInput {
-  if (state.scopeMode === 'session' && state.scopeSessionKey) {
-    return { sessionKey: state.scopeSessionKey };
-  }
-  if (state.scopeMode === 'project' && state.scopeProjectPath) {
-    return { projectPath: state.scopeProjectPath };
+  if (state.activeRoot !== SCRATCH_ROOT) {
+    return { projectPath: state.activeRoot };
   }
   return {};
 }
@@ -167,7 +143,6 @@ export function useMarkdownWorkspace() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const editorRef = useRef<EditorHandle | null>(null);
-  const unsavedDraftIdRef = useRef<string | null>(null);
   const pendingEditorRefocusTimerRef = useRef<number | null>(null);
 
   const files = useMemo(() => flattenMarkdownFiles(state.tree), [state.tree]);
@@ -189,14 +164,12 @@ export function useMarkdownWorkspace() {
     const selectedParent = selectedPath && selectedPath.includes('/')
       ? selectedPath.slice(0, selectedPath.lastIndexOf('/'))
       : '';
-    // New-file create should start from workspace root unless caller explicitly chooses a folder.
     const fallbackDefault = intent === 'create' ? '' : selectedParent;
     const resolvedDefault = defaultFolder ?? fallbackDefault;
     const normalizedDefault = typeof resolvedDefault === 'string'
       ? normalizeWorkspacePathForClient(resolvedDefault, true)
       : null;
 
-    // Blur the editor to move cursor away from the document
     editorRef.current?.blur();
     set({
       newFileDropdownOpen: true,
@@ -207,7 +180,6 @@ export function useMarkdownWorkspace() {
 
   const closeNewFilePicker = useCallback(() => {
     set({ newFileDropdownOpen: false, newFileIntent: null, newFileDefaultFolder: null });
-    // Refocus the editor when the dropdown is closed
     if (pendingEditorRefocusTimerRef.current !== null) {
       window.clearTimeout(pendingEditorRefocusTimerRef.current);
     }
@@ -220,14 +192,12 @@ export function useMarkdownWorkspace() {
   const applyWorkspaceTree = useCallback((workspace: {
     rootDir?: string;
     tree?: CockpitMarkdownTreeNode[];
-    suggestedFolders?: string[];
   }) => {
     dispatch({
       type: 'SET_TREE',
       payload: {
-        rootDir: workspace.rootDir || '.cockpit/markdown',
+        rootDir: workspace.rootDir || SCRATCH_ROOT,
         tree: workspace.tree ?? [],
-        suggestedFolders: workspace.suggestedFolders?.length ? workspace.suggestedFolders : DEFAULT_SUGGESTED_FOLDERS,
       },
     });
   }, []);
@@ -242,84 +212,44 @@ export function useMarkdownWorkspace() {
     }
   }, [applyWorkspaceTree]);
 
-  const refreshFilesystem = useCallback(async (scopeOverride?: {
-    mode: 'global' | 'session' | 'project';
-    sessionKey?: string | null;
-    projectPath?: string | null;
-  }) => {
-    const s = stateRef.current;
-    const effectiveMode = scopeOverride?.mode ?? s.scopeMode;
-    const effectiveSessionKey = scopeOverride?.sessionKey ?? s.scopeSessionKey;
-    const effectiveProjectPath = scopeOverride?.projectPath ?? s.scopeProjectPath;
-    const filesystem = await getCockpitFilesystem(
-      effectiveMode === 'session' && effectiveSessionKey
-        ? { sessionKey: effectiveSessionKey }
-        : effectiveMode === 'project' && effectiveProjectPath
-          ? { projectPath: effectiveProjectPath }
-        : {}
-    );
+  const refreshRoots = useCallback(async () => {
+    const filesystem = await getCockpitFilesystem();
     if (!filesystem) return;
-    set({
-      filesystemRoots: filesystem.roots ?? [],
-      filesystemCwd: filesystem.cwd ?? null,
-    });
+    const roots: WorkspaceRoot[] = (filesystem.roots ?? []).map((r: CockpitFilesystemRoot) => ({
+      id: r.id,
+      kind: r.kind,
+      label: r.label,
+      path: r.path,
+    }));
+    set({ roots });
   }, [set]);
 
-  const setScope = useCallback(async (scope: {
-    mode: 'global' | 'session' | 'project';
-    sessionKey?: string | null;
-    projectPath?: string | null;
-  }) => {
-    const nextSessionKey = scope.mode === 'session' ? (scope.sessionKey ?? null) : null;
-    const nextProjectPath = scope.mode === 'project'
-      ? (scope.projectPath?.trim() || null)
-      : null;
-    if (scope.mode === 'project' && !nextProjectPath) {
-      set({ status: 'Enter a project folder path to switch workspace.' });
-      return;
-    }
-    const scopeInput: CockpitMarkdownScopeInput = scope.mode === 'session'
-      ? (nextSessionKey ? { sessionKey: nextSessionKey } : {})
-      : scope.mode === 'project'
-        ? (nextProjectPath ? { projectPath: nextProjectPath } : {})
-        : {};
+  const setActiveRoot = useCallback(async (rootPath: string) => {
+    const isProject = rootPath !== SCRATCH_ROOT;
+    const scopeInput: CockpitMarkdownScopeInput = isProject
+      ? { projectPath: rootPath }
+      : {};
     set({
       loading: true,
-      status: scope.mode === 'global'
-        ? 'Switching workspace to scratch...'
-        : scope.mode === 'session'
-          ? `Switching workspace to session ${nextSessionKey ?? ''}...`
-          : `Switching workspace to project ${nextProjectPath}...`,
+      status: isProject
+        ? `Switching to project ${rootPath}...`
+        : 'Switching to scratch...',
     });
     try {
       const workspace = await getCockpitMarkdownTree(scopeInput);
       applyWorkspaceTree(workspace);
       set({
         loading: false,
-        scopeMode: scope.mode,
-        scopeSessionKey: nextSessionKey,
-        scopeProjectPath: nextProjectPath,
-        status: scope.mode === 'global'
-          ? 'Workspace: scratch (.cockpit/markdown)'
-          : scope.mode === 'session'
-            ? `Workspace: session ${nextSessionKey ?? ''}`
-            : `Workspace: project ${nextProjectPath}`,
-      });
-      await refreshFilesystem({
-        mode: scope.mode,
-        ...(nextSessionKey ? { sessionKey: nextSessionKey } : {}),
-        ...(nextProjectPath ? { projectPath: nextProjectPath } : {}),
+        status: isProject ? rootPath : 'scratch',
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       set({
         loading: false,
-        status: scope.mode === 'project'
-          ? `Could not switch to project ${nextProjectPath}: ${message}`
-          : `Could not switch workspace: ${message}`,
+        status: `Could not switch workspace: ${message}`,
       });
     }
-  }, [set, refreshFilesystem, applyWorkspaceTree]);
+  }, [set, applyWorkspaceTree]);
 
   const openFile = useCallback(async (filePath: string) => {
     set({ loading: true, status: null });
@@ -336,11 +266,8 @@ export function useMarkdownWorkspace() {
           path: file.path,
           content: file.content ?? '',
           version: file.version ?? 0,
-          updatedAt: file.updatedAt ?? null,
-          hash: file.hash ?? null,
         },
       });
-      unsavedDraftIdRef.current = null;
       setTimeout(() => editorRef.current?.focus(), 0);
     } catch (err) {
       set({ loading: false, status: err instanceof Error ? err.message : String(err) });
@@ -365,12 +292,6 @@ export function useMarkdownWorkspace() {
       expectedVersion,
       content: s.content,
       source: 'dashboard-control',
-      metadata: {
-        editor: 'cockpit',
-        mode,
-        dirty: s.dirty,
-        forceOverwrite,
-      },
     });
 
     // Compatibility fallback: older control-plane builds may not yet expose /markdown/patch.
@@ -381,13 +302,6 @@ export function useMarkdownWorkspace() {
         content: s.content,
         expectedVersion,
         source: 'dashboard-control',
-        metadata: {
-          editor: 'cockpit',
-          mode,
-          dirty: s.dirty,
-          forceOverwrite,
-          fallbackRoute: 'markdown-file',
-        },
       });
     }
 
@@ -397,8 +311,6 @@ export function useMarkdownWorkspace() {
         payload: {
           path: response.file.path,
           version: response.file.version,
-          updatedAt: response.file.updatedAt ?? null,
-          hash: response.file.hash ?? null,
           mode,
         },
       });
@@ -479,10 +391,9 @@ export function useMarkdownWorkspace() {
   }, [openNewFilePicker, set]);
 
   const createFolder = useCallback(async () => {
-    const baseFolder = stateRef.current.suggestedFolders[0] ?? 'scratch';
     const entered = window.prompt(
       'Create folder in current workspace (relative path)',
-      baseFolder
+      ''
     );
     if (!entered) return;
     const normalized = normalizeWorkspacePathForClient(entered);
@@ -537,8 +448,6 @@ export function useMarkdownWorkspace() {
           selectedPath: null,
           content: '',
           version: 0,
-          updatedAt: null,
-          hash: null,
           dirty: false,
           conflictVersion: null,
         });
@@ -558,91 +467,22 @@ export function useMarkdownWorkspace() {
   }, []);
 
   const setContent = useCallback((content: string) => {
-    if (stateRef.current.selectedPath) {
-      unsavedDraftIdRef.current = null;
-    } else if (content.trim().length === 0) {
-      unsavedDraftIdRef.current = null;
-    }
     set({ content, dirty: true });
   }, [set]);
 
   const getActiveContext = useCallback((): CockpitMarkdownContextInput | null => {
     const s = stateRef.current;
     if (!s.selectedPath && !s.content.trim()) return null;
-    if (s.selectedPath) {
-      unsavedDraftIdRef.current = null;
-    } else if (!unsavedDraftIdRef.current) {
-      unsavedDraftIdRef.current = createClientDraftId();
-    }
-    const draftId = s.selectedPath ? undefined : (unsavedDraftIdRef.current ?? undefined);
     const selectionStart = editorRef.current?.selectionStart;
     const selectionEnd = editorRef.current?.selectionEnd;
-    const { frontmatter } = parseFrontmatter(s.content);
-    const frontmatterSessionKeyRaw = typeof frontmatter.sessionKey === 'string'
-      ? frontmatter.sessionKey
-      : typeof frontmatter.session_key === 'string'
-        ? frontmatter.session_key
-        : typeof frontmatter.chatSessionKey === 'string'
-          ? frontmatter.chatSessionKey
-          : typeof frontmatter.chat_session_key === 'string'
-            ? frontmatter.chat_session_key
-            : undefined;
-    const frontmatterSessionKey = typeof frontmatterSessionKeyRaw === 'string' && frontmatterSessionKeyRaw.trim().length > 0
-      ? frontmatterSessionKeyRaw.trim()
-      : undefined;
-    const templateNameRaw = typeof frontmatter.template === 'string'
-      ? frontmatter.template
-      : typeof frontmatter.templateName === 'string'
-        ? frontmatter.templateName
-        : typeof frontmatter.template_name === 'string'
-          ? frontmatter.template_name
-          : undefined;
-    const templateName = typeof templateNameRaw === 'string' && templateNameRaw.trim().length > 0
-      ? templateNameRaw.trim()
-      : undefined;
-    const templateIdRaw = typeof frontmatter.templateId === 'string'
-      ? frontmatter.templateId
-      : typeof frontmatter.template_id === 'string'
-        ? frontmatter.template_id
-        : typeof frontmatter.workflowTemplateId === 'string'
-          ? frontmatter.workflowTemplateId
-          : typeof frontmatter.workflow_template_id === 'string'
-            ? frontmatter.workflow_template_id
-            : undefined;
-    const templateId = typeof templateIdRaw === 'string' && templateIdRaw.trim().length > 0
-      ? templateIdRaw.trim()
-      : undefined;
-    const specs = Array.isArray(frontmatter.specs)
-      ? frontmatter.specs.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      : typeof frontmatter.specs === 'string' && frontmatter.specs.trim().length > 0
-        ? [frontmatter.specs.trim()]
-      : undefined;
     return {
       path: s.selectedPath ?? undefined,
-      workspaceScope: s.scopeMode,
-      scopeSessionKey: s.scopeSessionKey ?? undefined,
-      projectPath: s.scopeProjectPath ?? undefined,
+      projectPath: s.activeRoot !== SCRATCH_ROOT ? s.activeRoot : undefined,
       version: s.version,
-      updatedAt: s.updatedAt ?? undefined,
       content: s.content,
       isDirty: s.dirty,
       selectionStart: typeof selectionStart === 'number' ? selectionStart : undefined,
       selectionEnd: typeof selectionEnd === 'number' ? selectionEnd : undefined,
-      metadata: {
-        editor: 'cockpit',
-        rootDir: s.rootDir,
-        workspaceScope: s.scopeMode,
-        workspaceSessionKey: s.scopeSessionKey,
-        workspaceProjectPath: s.scopeProjectPath,
-        hash: s.hash,
-        conflictVersion: s.conflictVersion,
-        documentType: getDocumentType(s.content),
-        ...(frontmatterSessionKey ? { documentSessionKey: frontmatterSessionKey } : {}),
-        ...(draftId ? { draftId } : {}),
-        ...(templateName ? { templateName } : {}),
-        ...(templateId ? { templateId } : {}),
-        ...(specs && specs.length > 0 ? { specs } : {}),
-      },
     };
   }, []);
 
@@ -699,11 +539,6 @@ export function useMarkdownWorkspace() {
         content,
         expectedVersion: 0,
         source: 'dashboard-control',
-        metadata: {
-          editor: 'cockpit',
-          createdBy: 'user',
-          intent: s.newFileIntent ?? 'create',
-        },
       });
       if (!response.success || !response.file) {
         set({
@@ -720,7 +555,6 @@ export function useMarkdownWorkspace() {
         newFileDefaultFolder: null,
         status: `Created ${response.file.path}`,
       });
-      unsavedDraftIdRef.current = null;
       await refreshTree();
       await openFile(response.file.path);
     } catch (err) {
@@ -736,8 +570,8 @@ export function useMarkdownWorkspace() {
   // Initial tree load
   useEffect(() => {
     void refreshTree();
-    void refreshFilesystem();
-  }, [refreshTree, refreshFilesystem]);
+    void refreshRoots();
+  }, [refreshTree, refreshRoots]);
 
   // Debounced autosave for existing files.
   useEffect(() => {
@@ -771,8 +605,8 @@ export function useMarkdownWorkspace() {
     files,
     editorRef,
     set,
-    setScope,
-    refreshFilesystem,
+    setActiveRoot,
+    refreshRoots,
     refreshTree,
     openFile,
     save,

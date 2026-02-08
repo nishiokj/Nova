@@ -1,13 +1,17 @@
 /**
  * CM6 Ghost Text Inline Completion Extension
  *
- * Copilot-style ghost text powered by a streaming LLM backend.
+ * Inline ghost text powered by a configurable LLM endpoint.
  * Self-contained: StateField + ViewPlugin + keybindings + widget + theme.
  *
+ * Only triggers when you've genuinely stopped typing at a natural boundary —
+ * end of sentence, end of line, empty line, or after a heading. Not mid-word.
+ *
  * State machine:
- *   idle ──(debounce)──> requesting ──(tokens)──> showing ──(type/Esc)──> idle
- *                                                     └──(Tab)──> idle (inserted)
- *                                                     └──(Ctrl+Right)──> showing (partial)
+ *   idle ──(pause ~1s at boundary)──> requesting ──(tokens)──> showing
+ *     showing ──(type/Esc)──> idle
+ *     showing ──(Tab)──> idle (inserted)
+ *     showing ──(Ctrl+Right)──> showing (partial accept)
  */
 
 import {
@@ -36,6 +40,8 @@ export interface GhostCompletionConfig {
     signal: AbortSignal,
     onToken: (token: string) => void,
   ) => Promise<void>;
+  /** Return false to suppress all ghost completions. Checked before each request. */
+  isEnabled?: () => boolean;
   debounceMs?: number;
   maxContextChars?: number;
 }
@@ -73,7 +79,6 @@ class GhostTextWidget extends WidgetType {
   toDOM(): HTMLElement {
     const span = document.createElement('span');
     span.className = 'cm-ghost-text';
-    // Handle multi-line: split on newlines, join with <br>
     const parts = this.text.split('\n');
     for (let i = 0; i < parts.length; i++) {
       if (i > 0) span.appendChild(document.createElement('br'));
@@ -109,29 +114,65 @@ function isInsideFencedCode(state: import('@codemirror/state').EditorState): boo
     enter(node) {
       if (node.name === 'FencedCode' && node.from <= pos && node.to >= pos) {
         inside = true;
-        return false; // stop
+        return false;
       }
     },
   });
   return inside;
 }
 
-function shouldSuppress(view: EditorView): boolean {
+/** Check if the cursor is at a position where a suggestion would be useful. */
+function isAtNaturalBoundary(state: import('@codemirror/state').EditorState): boolean {
+  const pos = state.selection.main.head;
+  const line = state.doc.lineAt(pos);
+  const textBeforeCursor = line.text.slice(0, pos - line.from);
+  const textAfterCursor = line.text.slice(pos - line.from);
+
+  // Empty line or line with only whitespace — good place for a suggestion
+  if (textBeforeCursor.trim().length === 0) {
+    // But only if there's meaningful content above (not a blank doc)
+    return pos > 50;
+  }
+
+  // Substantial text after cursor on this line — we're editing mid-line, skip
+  if (textAfterCursor.trim().length > 3) return false;
+
+  // Cursor at or near end of line — check if the line ends naturally
+  const trimmed = textBeforeCursor.trimEnd();
+
+  // After a heading (# ...) — scaffold the section
+  if (/^#{1,6}\s+.+/.test(trimmed)) return true;
+
+  // End of sentence (., !, ?, :, ;)
+  if (/[.!?:;]\s*$/.test(trimmed)) return true;
+
+  // After a list marker with content (- item, * item, 1. item)
+  if (/^[\s]*[-*]\s+.{5,}$/.test(trimmed)) return true;
+  if (/^[\s]*\d+\.\s+.{5,}$/.test(trimmed)) return true;
+
+  // End of a paragraph-length line (40+ chars, cursor at end)
+  if (trimmed.length >= 40 && textAfterCursor.trim().length === 0) return true;
+
+  return false;
+}
+
+function shouldSuppress(view: EditorView, isEnabled?: () => boolean): boolean {
+  if (isEnabled && !isEnabled()) return true;
   const state = view.state;
-  // Suppress if read-only
   if (state.readOnly) return true;
-  // Suppress if CM autocomplete dropdown is open
   if (completionStatus(state) !== null) return true;
-  // Suppress if cursor is inside a fenced code block
   if (isInsideFencedCode(state)) return true;
+  if (state.doc.length < 50) return true;
+  if (!isAtNaturalBoundary(state)) return true;
   return false;
 }
 
 // ── ViewPlugin (debounce + fetch lifecycle) ─────────────────────────
 
 function ghostPlugin(config: GhostCompletionConfig) {
-  const debounceMs = config.debounceMs ?? 300;
-  const maxContext = config.maxContextChars ?? 1500;
+  const debounceMs = config.debounceMs ?? 900;
+  const maxContext = config.maxContextChars ?? 800;
+  const isEnabled = config.isEnabled;
 
   return ViewPlugin.define((view) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -146,15 +187,13 @@ function ghostPlugin(config: GhostCompletionConfig) {
       abort();
       timer = setTimeout(() => {
         timer = null;
-        if (shouldSuppress(view)) return;
+        if (shouldSuppress(view, isEnabled)) return;
 
         const state = view.state;
         const pos = state.selection.main.head;
         const docText = state.doc.toString();
         const textBefore = docText.slice(Math.max(0, pos - maxContext), pos);
-        const textAfter = docText.slice(pos, Math.min(docText.length, pos + 500));
-
-        if (textBefore.trim().length === 0) return;
+        const textAfter = docText.slice(pos, Math.min(docText.length, pos + 300));
 
         const anchorPos = pos;
         controller = new AbortController();
@@ -162,7 +201,6 @@ function ghostPlugin(config: GhostCompletionConfig) {
         let accumulated = '';
 
         config.fetchCompletion(textBefore, textAfter, signal, (token) => {
-          // Stale guard: cursor must still be at the anchor position
           if (view.state.selection.main.head !== anchorPos) {
             controller?.abort();
             return;
@@ -180,14 +218,12 @@ function ghostPlugin(config: GhostCompletionConfig) {
     return {
       update(update: ViewUpdate) {
         if (update.docChanged) {
-          // Clear any existing ghost and restart debounce
           if (view.state.field(ghostField) !== null) {
             view.dispatch({ effects: clearGhost.of(undefined) });
           }
           abort();
           scheduleRequest();
         } else if (update.selectionSet) {
-          // Cursor moved without doc change — clear ghost, abort inflight
           if (view.state.field(ghostField) !== null) {
             view.dispatch({ effects: clearGhost.of(undefined) });
           }
@@ -205,11 +241,9 @@ function ghostPlugin(config: GhostCompletionConfig) {
 
 function findNextWordBoundary(text: string): number {
   let i = 0;
-  // Skip leading whitespace
   while (i < text.length && /\s/.test(text[i])) i++;
-  // Advance to next boundary (whitespace or end)
   while (i < text.length && !/\s/.test(text[i])) i++;
-  return Math.max(i, 1); // accept at least 1 char
+  return Math.max(i, 1);
 }
 
 const ghostKeymap = keymap.of([
@@ -236,7 +270,6 @@ const ghostKeymap = keymap.of([
       const remainder = ghost.text.slice(boundary);
 
       if (remainder.length === 0) {
-        // Accept all
         view.dispatch({
           changes: { from: ghost.anchorPos, insert: ghost.text },
           selection: { anchor: ghost.anchorPos + ghost.text.length },

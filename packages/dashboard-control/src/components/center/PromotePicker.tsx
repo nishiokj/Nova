@@ -10,6 +10,8 @@ import {
   type DocumentType,
 } from '@/lib/markdown';
 
+const SCRATCH_ROOT = '.cockpit/scratch';
+
 interface PromoteOption {
   label: string;
   description: string;
@@ -57,7 +59,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
   const [activeIndex, setActiveIndex] = useState(0);
 
   const docType = getDocumentType(workspace.state.content);
-  const isProjectScoped = workspace.state.scopeMode === 'project' && !!workspace.state.scopeProjectPath;
+  const isProjectScoped = workspace.state.activeRoot !== SCRATCH_ROOT;
   const options = buildOptions(docType, templates);
   const safeIndex = Math.min(Math.max(activeIndex, 0), Math.max(options.length - 1, 0));
 
@@ -77,12 +79,12 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
   }, [store]);
 
   const suggestProjectPath = () => {
-    if (workspace.state.scopeMode === 'project' && workspace.state.scopeProjectPath) {
-      return workspace.state.scopeProjectPath;
+    if (isProjectScoped) {
+      return workspace.state.activeRoot;
     }
-    const firstProject = workspace.state.filesystemRoots.find((root) => root.kind === 'project');
+    const firstProject = workspace.state.roots.find((root) => root.kind === 'project');
     if (firstProject) return firstProject.path;
-    return workspace.state.filesystemCwd ?? '';
+    return '';
   };
 
   const maybePlaceInProject = async (
@@ -109,7 +111,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
     if (!entered || !entered.trim()) return commandStatus;
 
     const projectPath = entered.trim();
-    await workspace.setScope({ mode: 'project', projectPath });
+    await workspace.setActiveRoot(projectPath);
     workspace.set({
       selectedPath: null,
       dirty: true,

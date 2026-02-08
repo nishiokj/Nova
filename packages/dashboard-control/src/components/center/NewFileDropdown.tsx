@@ -1,12 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
 import { gatherMarkdownFolders, normalizeWorkspacePathForClient } from '@/lib/markdown';
-import {
-  NEW_PROJECT_SCOPE_VALUE,
-  buildWorkspaceScopeOptions,
-  getSelectedWorkspaceScopeId,
-  getWorkspaceScopeOptionLabel,
-} from '@/lib/workspace-scope';
+
+const ADD_PROJECT_VALUE = '__add_project__';
+const SCRATCH_ROOT = '.cockpit/scratch';
 
 interface FolderOption {
   path: string;
@@ -17,7 +14,6 @@ interface FolderOption {
 
 function buildFolderOptions(workspace: MarkdownWorkspace): FolderOption[] {
   const { state } = workspace;
-  const existingFolders = gatherMarkdownFolders(state.tree);
   const optionsByPath = new Map<string, FolderOption>();
 
   const walk = (nodes: typeof state.tree, depth: number) => {
@@ -42,18 +38,6 @@ function buildFolderOptions(workspace: MarkdownWorkspace): FolderOption[] {
     exists: true,
   });
 
-  const existingFolderSet = new Set(existingFolders);
-  for (const suggested of state.suggestedFolders) {
-    if (!existingFolderSet.has(suggested)) {
-      optionsByPath.set(suggested, {
-        path: suggested,
-        label: suggested,
-        depth: 0,
-        exists: false,
-      });
-    }
-  }
-
   return Array.from(optionsByPath.values()).sort((a, b) => {
     if (a.path === '') return -1;
     if (b.path === '') return 1;
@@ -73,31 +57,17 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
   const intent = workspace.state.newFileIntent ?? 'create';
   const options = useMemo(
     () => buildFolderOptions(workspace),
-    [workspace.state.tree, workspace.state.suggestedFolders],
+    [workspace.state.tree],
   );
   const safeIndex = Math.min(Math.max(activeIndex, 0), Math.max(options.length - 1, 0));
   const folderInputListId = 'new-file-folder-options';
-  const scopeLabel = workspace.state.scopeMode === 'project'
-    ? 'project'
-    : workspace.state.scopeMode === 'session'
-      ? 'session'
-      : '.cockpit';
-  const scopeOptions = useMemo(() => buildWorkspaceScopeOptions({
-    filesystemRoots: workspace.state.filesystemRoots,
-    rootDir: workspace.state.rootDir,
-    scopeMode: workspace.state.scopeMode,
-    scopeProjectPath: workspace.state.scopeProjectPath,
-  }), [
-    workspace.state.filesystemRoots,
-    workspace.state.rootDir,
-    workspace.state.scopeMode,
-    workspace.state.scopeProjectPath,
-  ]);
-  const selectedScopeId = useMemo(() => getSelectedWorkspaceScopeId({
-    options: scopeOptions,
-    scopeMode: workspace.state.scopeMode,
-    scopeProjectPath: workspace.state.scopeProjectPath,
-  }), [scopeOptions, workspace.state.scopeMode, workspace.state.scopeProjectPath]);
+  const rootLabel = workspace.state.activeRoot === SCRATCH_ROOT ? 'scratch' : 'project';
+
+  // Root selector value
+  const rootSelectValue = useMemo(() => {
+    const match = workspace.state.roots.find((r) => r.path === workspace.state.activeRoot);
+    return match?.id ?? SCRATCH_ROOT;
+  }, [workspace.state.roots, workspace.state.activeRoot]);
 
   useEffect(() => {
     setFilename('untitled.md');
@@ -227,40 +197,36 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
         <div>{intent === 'save' ? 'Save markdown in...' : 'New markdown in...'}</div>
         <div className="mt-1">
           <select
-            value={selectedScopeId}
+            value={rootSelectValue}
             onChange={(event) => {
               event.stopPropagation();
-              if (event.target.value === NEW_PROJECT_SCOPE_VALUE) {
+              if (event.target.value === ADD_PROJECT_VALUE) {
                 const entered = window.prompt(
                   'Add project workspace folder.\nUse absolute path or path relative to the current cwd.',
-                  workspace.state.filesystemCwd ?? ''
+                  ''
                 );
                 if (!entered || !entered.trim()) return;
-                void workspace.setScope({ mode: 'project', projectPath: entered.trim() });
+                void workspace.setActiveRoot(entered.trim());
                 return;
               }
-              const selected = scopeOptions.find((root) => root.id === event.target.value);
+              const selected = workspace.state.roots.find((r) => r.id === event.target.value);
               if (!selected) return;
               setFolderPath('');
               setActiveIndex(0);
-              if (selected.kind === 'notes') {
-                void workspace.setScope({ mode: 'global' });
-                return;
-              }
-              void workspace.setScope({ mode: 'project', projectPath: selected.path });
+              void workspace.setActiveRoot(selected.path);
             }}
             className="w-full bg-[var(--bg-surface)] border border-[var(--border-default)] rounded px-1.5 py-1 text-[10px] text-[var(--text-secondary)]"
           >
-            {scopeOptions.map((root) => (
+            {workspace.state.roots.map((root) => (
               <option key={root.id} value={root.id}>
-                {getWorkspaceScopeOptionLabel(root)}
+                {root.kind === 'scratch' ? 'Scratch' : root.label || root.path}
               </option>
             ))}
-            <option value={NEW_PROJECT_SCOPE_VALUE}>+ Add project path…</option>
+            <option value={ADD_PROJECT_VALUE}>+ Add project path…</option>
           </select>
         </div>
-        <div className="font-mono truncate" title={workspace.state.rootDir}>
-          {scopeLabel} root: {workspace.state.rootDir}
+        <div className="font-mono truncate" title={workspace.state.activeRoot}>
+          {rootLabel} root: {workspace.state.activeRoot}
         </div>
       </div>
       <div className="px-2.5 py-2 border-b border-[var(--border-subtle)]">

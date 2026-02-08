@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import type { SessionRollup } from '@/lib/api';
-import { formatElapsed, statusColor } from '@/lib/format';
+import { formatElapsed, formatTokenCount, statusColor } from '@/lib/format';
 
 export const SessionCard = memo(function SessionCard({
   row,
@@ -20,13 +20,20 @@ export const SessionCard = memo(function SessionCard({
   return (
     <button
       onClick={onSelect}
-      className={`w-full text-left px-3 py-2 border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)] transition-colors ${
+      className={`relative w-full text-left px-3 py-2 border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)] transition-colors ${
         selected ? 'bg-[var(--bg-hover)] border-l-2'
         : highlighted ? 'bg-[var(--accent-cyan)]/8 border-l-2 border-l-[var(--accent-cyan)]/50'
         : 'border-l-2 border-l-transparent'
       }`}
       style={selected ? { borderLeftColor: color } : undefined}
     >
+      {isBlocked && (
+        <span
+          className="absolute right-2 top-2 h-2.5 w-2.5 rounded-full bg-[var(--warning)] escalation-alert-light"
+          title={`${row.blocking.unresolvedEscalationsCount} escalation${row.blocking.unresolvedEscalationsCount === 1 ? '' : 's'} pending`}
+        />
+      )}
+
       <div className="text-[13px] text-[var(--text-primary)] leading-snug line-clamp-2" title={row.title}>{row.title}</div>
 
       <div className="flex items-center gap-2 mt-1">
@@ -60,6 +67,16 @@ export const SessionCard = memo(function SessionCard({
         <div className="flex items-center gap-2 mt-1 text-[10px] text-[var(--text-muted)]">
           <span className="text-[var(--success)]">+{row.diffstat.added}/-{row.diffstat.deleted}</span>
           {row.diffstat.filesTouched > 0 && <span>{row.diffstat.filesTouched} files</span>}
+        </div>
+      )}
+
+      {row.tokenMetrics?.llmCalls > 0 && (
+        <div className="flex items-center gap-2 mt-1 text-[10px] text-[var(--text-muted)]">
+          <span title={`Input: ${formatTokenCount(row.tokenMetrics.input)} | Output: ${formatTokenCount(row.tokenMetrics.output)}${row.tokenMetrics.cached > 0 ? ` | Cached: ${formatTokenCount(row.tokenMetrics.cached)}` : ''}`}>
+            {formatTokenCount(row.tokenMetrics.total)} tok
+          </span>
+          <span>{row.tokenMetrics.llmCalls} calls</span>
+          <span>{row.tokenMetrics.avgLatencyMs}ms avg</span>
         </div>
       )}
     </button>

@@ -5,6 +5,7 @@ export interface ArchitectureConfig {
   maxPairsPerFile: number
   maxFiles: number
   emitAlerts: boolean
+  concernMode: 'graph_cluster' | 'module'
 }
 
 export const DEFAULT_ARCHITECTURE_CONFIG: ArchitectureConfig = {
@@ -13,7 +14,8 @@ export const DEFAULT_ARCHITECTURE_CONFIG: ArchitectureConfig = {
   strongEdgeWeight: 0.20,
   maxPairsPerFile: 128,
   maxFiles: 20000,
-  emitAlerts: false,
+  emitAlerts: true,
+  concernMode: 'module',
 }
 
 export interface PairSignals {
@@ -118,4 +120,3 @@ export interface DerivedConcernCluster {
   files: Set<string>
   fileScores: ConcernFileScore[]
 }
-

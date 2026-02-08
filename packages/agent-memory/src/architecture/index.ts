@@ -3,8 +3,10 @@ import type { Sql } from 'postgres'
 import { stableStringify } from '../stable-stringify.js'
 import { createArchitectureRepository } from '../db/repositories/architecture.js'
 import { discoverConcerns } from './cluster.js'
+import { generatePhase2Alerts } from './alerts.js'
 import { buildFileGraph } from './file-graph.js'
 import { computeConcernFileScores, computeMetrics } from './metrics.js'
+import { assignModuleConcerns, labelsForModuleConcerns } from './module-assignment.js'
 import { DEFAULT_ARCHITECTURE_CONFIG, type ArchitectureConfig, type ConcernAssignment } from './types.js'
 
 function jaccard(left: Set<string>, right: Set<string>): number {
@@ -263,24 +265,46 @@ export async function runArchitectureDerivation(
     logger?.info('architecture:build-file-graph', { runId: run.id, lookbackDays: config.lookbackDays })
     const fileGraph = await buildFileGraph(sql, config)
 
-    logger?.info('architecture:cluster-concerns', { runId: run.id, edges: fileGraph.edges.length })
-    const initialAssignment = discoverConcerns(fileGraph.files, fileGraph.edges, config.strongEdgeWeight)
-    const initialScores = computeConcernFileScores(initialAssignment, fileGraph.edges)
-    const provisional = makeProvisionalConcernIds(initialAssignment, initialScores)
-
     const previousRun = await architectureRepo.findLatestSuccessfulRunExcluding(run.id)
     const previousConcernFiles = previousRun
       ? await architectureRepo.getConcernFileSets(previousRun.id)
       : new Map<string, Set<string>>()
+    const previousByFinalId = new Map<string, Set<string>>()
+    let assignment: ConcernAssignment
+    let labels: Map<string, string>
+    let sourceConcernByFinal = new Map<string, string>()
 
-    const { renameMap, previousByFinalId } = chooseConcernIdsFromHistory(
-      initialAssignment,
-      provisional,
-      previousConcernFiles
-    )
-    const assignment = renameConcerns(initialAssignment, renameMap)
+    if (config.concernMode === 'module') {
+      logger?.info('architecture:module-concerns', { runId: run.id, files: fileGraph.files.length })
+      assignment = assignModuleConcerns(fileGraph.files)
+      labels = labelsForModuleConcerns(assignment)
+      for (const concernId of assignment.concernFiles.keys()) {
+        sourceConcernByFinal.set(concernId, concernId)
+        const previous = previousConcernFiles.get(concernId)
+        if (previous) previousByFinalId.set(concernId, previous)
+      }
+    } else {
+      logger?.info('architecture:cluster-concerns', { runId: run.id, edges: fileGraph.edges.length })
+      const initialAssignment = discoverConcerns(fileGraph.files, fileGraph.edges, config.strongEdgeWeight)
+      const initialScores = computeConcernFileScores(initialAssignment, fileGraph.edges)
+      const provisional = makeProvisionalConcernIds(initialAssignment, initialScores)
 
-    const labels = deriveLabels(assignment, fileGraph.termVectors)
+      const { renameMap, previousByFinalId: historyByFinal } = chooseConcernIdsFromHistory(
+        initialAssignment,
+        provisional,
+        previousConcernFiles
+      )
+      assignment = renameConcerns(initialAssignment, renameMap)
+      labels = deriveLabels(assignment, fileGraph.termVectors)
+      previousByFinalId.clear()
+      for (const [key, value] of historyByFinal.entries()) {
+        previousByFinalId.set(key, value)
+      }
+      for (const [sourceConcernId, finalConcernId] of renameMap.entries()) {
+        sourceConcernByFinal.set(finalConcernId, sourceConcernId)
+      }
+    }
+
     const metrics = computeMetrics({
       assignment,
       edges: fileGraph.edges,
@@ -290,8 +314,20 @@ export async function runArchitectureDerivation(
       previousConcernFilesById: previousByFinalId,
     })
 
+    const alertDrafts = config.emitAlerts
+      ? await generatePhase2Alerts({
+        sql,
+        runId: run.id,
+        configHash,
+        assignment,
+        edges: fileGraph.edges,
+        concerns: metrics.concerns,
+        boundaries: metrics.boundaries,
+      })
+      : []
+
     const enrichedConcerns = metrics.concerns.map((concern) => {
-      const sourceConcernId = [...renameMap.entries()].find(([, finalId]) => finalId === concern.concernId)?.[0]
+      const sourceConcernId = sourceConcernByFinal.get(concern.concernId)
       return {
         ...concern,
         metadata: {
@@ -319,7 +355,7 @@ export async function runArchitectureDerivation(
         runId: run.id,
         ...boundary,
       })),
-      alerts: [],
+      alerts: alertDrafts,
     })
 
     const singletonConcerns = [...assignment.concernFiles.values()].filter((files) => files.size === 1).length
@@ -335,7 +371,7 @@ export async function runArchitectureDerivation(
       concerns: enrichedConcerns.length,
       singletonConcerns,
       boundaries: metrics.boundaries.length,
-      alerts: 0,
+      alerts: alertDrafts.length,
     }
 
     await architectureRepo.markRunSuccess(run.id, {
@@ -353,7 +389,7 @@ export async function runArchitectureDerivation(
       runId: run.id,
       concernCount: enrichedConcerns.length,
       boundaryCount: metrics.boundaries.length,
-      alertCount: 0,
+      alertCount: alertDrafts.length,
       graphHash: fileGraph.graphHash,
       stats,
     }

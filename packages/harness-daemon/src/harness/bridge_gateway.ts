@@ -593,6 +593,8 @@ export class BridgeGateway {
     register('control_plane_permissions_update', (data, ctx) => this.handleControlPlanePermissionsUpdate(ctx.connectionId, data));
     register('control_plane_resolve_escalation', (data, ctx) => this.handleControlPlaneResolveEscalation(ctx.connectionId, data));
     register('control_plane_memory_info', (_data, ctx) => this.handleControlPlaneMemoryInfo(ctx.connectionId));
+    register('control_plane_model_get', (data, ctx) => this.handleControlPlaneModelGet(ctx.connectionId, data));
+    register('control_plane_model_set', (data, ctx) => this.handleControlPlaneModelSet(ctx.connectionId, data));
     register('shutdown', (_data, ctx) => this.sendError(ctx.connectionId, 'Shutdown is not supported via bridge'));
 
     return registry;
@@ -2404,6 +2406,61 @@ export class BridgeGateway {
     this.sendAuthResponse(connectionId, 'control_plane_memory_info', {
       success: true,
       ...this.harness.getDebugMemoryInfo(),
+    });
+  }
+
+  private handleControlPlaneModelGet(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_model_get', { success: false, error: 'Missing session_key' });
+      return;
+    }
+    const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+    const selectionsObject: Record<string, { provider: string; model: string; reasoning?: string }> = {};
+    for (const [type, selection] of selections) {
+      selectionsObject[type] = selection;
+    }
+    this.sendAuthResponse(connectionId, 'control_plane_model_get', {
+      success: true,
+      selections: selectionsObject,
+    });
+  }
+
+  private handleControlPlaneModelSet(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const agentType = typeof data?.agent_type === 'string' ? data.agent_type : 'standard';
+    const provider = typeof data?.provider === 'string' ? data.provider : null;
+    const model = typeof data?.model === 'string' ? data.model : null;
+    const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : undefined;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_model_set', { success: false, error: 'Missing session_key' });
+      return;
+    }
+    if (!provider || !model) {
+      this.sendAuthResponse(connectionId, 'control_plane_model_set', { success: false, error: 'Provider and model are required' });
+      return;
+    }
+    const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
+    this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
+
+    const graphd = this.harness.getGraphD?.();
+    if (graphd) {
+      const globalSelections = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections') ?? {};
+      const updatedSelections = { ...globalSelections, [agentType]: selectedModel };
+      graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
+      graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
+    }
+
+    this.sendAuthResponse(connectionId, 'control_plane_model_set', {
+      success: true,
+      agentType,
+      selection: selectedModel,
     });
   }
 

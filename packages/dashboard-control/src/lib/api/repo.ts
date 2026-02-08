@@ -106,11 +106,9 @@ export async function applyCockpitPatch(
 }
 
 export async function getCockpitFilesystem(options: {
-  sessionKey?: string;
   projectPath?: string;
 } = {}): Promise<CockpitFilesystemState | null> {
   const params = new URLSearchParams();
-  if (options.sessionKey) params.set('sessionKey', options.sessionKey);
   if (options.projectPath) params.set('projectPath', options.projectPath);
   try {
     return await fetchAPI<CockpitFilesystemState>(`/cockpit/filesystem?${params.toString()}`);

@@ -1,7 +1,6 @@
 import { useMemo } from 'react';
-import { useCockpit, useCockpitStore, selectActivePacket, selectParsedPacket } from '@/hooks/use-cockpit-store';
-import { parseInlineRefs, PACKET_REF_REGEX } from '@/lib/packets';
-import { EntityGraphView } from './EntityGraphView';
+import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
+import { parseInlineRefs, PACKET_REF_REGEX, parsePacketMarkdown } from '@/lib/packets';
 
 function InlineRefs({
   text,
@@ -87,9 +86,13 @@ export function PacketTab() {
   const sessionPackets = useCockpit(s => s.sessionPackets);
   const focusData = useCockpit(s => s.focusData);
   const store = useCockpitStore();
-  const state = store.getSnapshot();
-  const activePacket = useMemo(() => selectActivePacket(state), [selectedPacketId, sessionPackets, focusData?.packet?.packetId]);
-  const parsed = useMemo(() => selectParsedPacket(state), [activePacket?.contentMarkdown]);
+  const activePacket = useMemo(
+    () => selectedPacketId
+      ? sessionPackets.find((packet) => packet.packetId === selectedPacketId) ?? null
+      : focusData?.packet ?? sessionPackets[0] ?? null,
+    [selectedPacketId, sessionPackets, focusData?.packet]
+  );
+  const parsed = useMemo(() => parsePacketMarkdown(activePacket?.contentMarkdown ?? ''), [activePacket?.contentMarkdown]);
 
   const evidence = useMemo(() => {
     if (!parsed.bodyMarkdown && !parsed.frontmatter) {
@@ -125,17 +128,38 @@ export function PacketTab() {
   }, [parsed, store]);
 
   if (!activePacket) {
-    return <EntityGraphView sessionKey={focusData?.sessionKey} />;
+    return (
+      <div className="space-y-2">
+        {sessionPackets.length > 0 && (
+          <select
+            value={selectedPacketId ?? sessionPackets[0]?.packetId ?? '__packet_default__'}
+            onChange={(e) => store.set({ selectedPacketId: e.target.value === '__packet_default__' ? null : e.target.value })}
+            className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[11px] text-[var(--text-secondary)]"
+          >
+            <option value="__packet_default__">Default</option>
+            {sessionPackets.map((packet) => (
+              <option key={packet.packetId} value={packet.packetId}>
+                {packet.type} · {new Date(packet.createdAt).toLocaleTimeString()}
+              </option>
+            ))}
+          </select>
+        )}
+        <div className="rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-[11px] text-[var(--text-muted)]">
+          No escalation brief is selected.
+        </div>
+      </div>
+    );
   }
 
   return (
     <div className="space-y-2">
-      {sessionPackets.length > 1 && (
+      {sessionPackets.length > 0 && (
         <select
-          value={selectedPacketId ?? activePacket.packetId}
-          onChange={(e) => store.set({ selectedPacketId: e.target.value })}
+          value={selectedPacketId ?? activePacket?.packetId ?? '__packet_default__'}
+          onChange={(e) => store.set({ selectedPacketId: e.target.value === '__packet_default__' ? null : e.target.value })}
           className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[11px] text-[var(--text-secondary)]"
         >
+          <option value="__packet_default__">Default</option>
           {sessionPackets.map((packet) => (
             <option key={packet.packetId} value={packet.packetId}>
               {packet.type} · {new Date(packet.createdAt).toLocaleTimeString()}

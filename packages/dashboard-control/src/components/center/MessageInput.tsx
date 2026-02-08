@@ -48,6 +48,7 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
   const storeDraft = useCockpit(s => s.messageDraft);
   const store = useCockpitStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [draft, setDraft] = useState(storeDraft);
   const [mention, setMention] = useState<MentionState>(EMPTY_MENTION);
   const mentionPool = useMemo(
     () => Array.from(new Set(fileSuggestions.filter((item) => item && item.trim().length > 0))),
@@ -55,7 +56,7 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
   );
 
   // Keep send affordance aligned with handleSendMessage (which can lazily create context/session).
-  const trimmedDraft = storeDraft.trim();
+  const trimmedDraft = draft.trim();
   const canSend = !!trimmedDraft && !sendingMessage;
 
   // Focus textarea when chat opens or session changes
@@ -65,18 +66,22 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
     }
   }, [inputVisible, focusData?.sessionKey]);
 
-  // Clear textarea DOM when store draft is cleared externally (after send)
-  const prevDraftRef = useRef(storeDraft);
+  // Sync from store only for external updates (e.g. failed send restore / explicit clear).
+  const prevStoreDraftRef = useRef(storeDraft);
   useEffect(() => {
-    if (prevDraftRef.current !== '' && storeDraft === '') {
-      if (inputRef.current) {
-        inputRef.current.value = '';
-        autoResize(inputRef.current);
+    if (prevStoreDraftRef.current !== storeDraft) {
+      setDraft(storeDraft);
+      if (!storeDraft) {
+        setMention(EMPTY_MENTION);
       }
-      setMention(EMPTY_MENTION);
     }
-    prevDraftRef.current = storeDraft;
+    prevStoreDraftRef.current = storeDraft;
   }, [storeDraft]);
+
+  useEffect(() => {
+    if (!inputRef.current) return;
+    autoResize(inputRef.current);
+  }, [draft]);
 
   const clearMention = useCallback(() => {
     setMention((prev) => (prev.open ? EMPTY_MENTION : prev));
@@ -116,13 +121,10 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
     }));
   }, [mentionPool, clearMention]);
 
-  const handleChange = useCallback(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    store.set({ messageDraft: el.value });
-    autoResize(el);
+  const handleChange = useCallback((nextValue: string) => {
+    setDraft(nextValue);
     refreshMention();
-  }, [store, refreshMention]);
+  }, [refreshMention]);
 
   const applyMention = useCallback((path: string) => {
     const el = inputRef.current;
@@ -138,23 +140,30 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
     let inserted = `@${path}`;
     if (after.length === 0 || !/^\s/.test(after)) inserted += ' ';
     const next = `${before}${inserted}${after}`;
-    el.value = next;
     const nextCursor = (before + inserted).length;
-    el.setSelectionRange(nextCursor, nextCursor);
+    setDraft(next);
     store.set({ messageDraft: next });
     autoResize(el);
     setMention(EMPTY_MENTION);
-    el.focus();
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(nextCursor, nextCursor);
+    });
   }, [store, clearMention]);
 
   const clearInput = useCallback(() => {
+    setDraft('');
     store.set({ messageDraft: '' });
-    if (inputRef.current) {
-      inputRef.current.value = '';
-      autoResize(inputRef.current);
-    }
     setMention(EMPTY_MENTION);
   }, [store]);
+
+  const handleSend = useCallback(() => {
+    const outgoing = draft.trim();
+    if (!outgoing || sendingMessage) return;
+    setDraft('');
+    store.set({ messageDraft: '' });
+    void store.handleSendMessage(draft);
+  }, [draft, sendingMessage, store]);
 
   useEffect(() => {
     if (!inputVisible) {
@@ -180,9 +189,10 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
       <div className="flex items-end gap-1.5">
         <textarea
           ref={inputRef}
+          data-cockpit-chat-input="true"
           rows={1}
-          defaultValue={storeDraft}
-          onChange={handleChange}
+          value={draft}
+          onChange={(event) => handleChange(event.target.value)}
           onSelect={refreshMention}
           onClick={refreshMention}
           onKeyUp={(e) => {
@@ -245,7 +255,7 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
             // Enter — send (Shift+Enter for newline)
             if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
               e.preventDefault();
-              if (trimmedDraft) void store.handleSendMessage();
+              if (trimmedDraft) handleSend();
               return;
             }
             // Ctrl+U — clear input (readline kill-line)
@@ -260,7 +270,7 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
           style={{ maxHeight: MAX_HEIGHT }}
         />
         <button
-          onClick={() => void store.handleSendMessage()}
+          onClick={handleSend}
           disabled={sendingMessage || !canSend}
           className="shrink-0 h-[26px] w-[26px] flex items-center justify-center rounded bg-[var(--running)]/20 text-[var(--running)] hover:bg-[var(--running)]/30 disabled:opacity-30 transition-colors text-xs"
         >

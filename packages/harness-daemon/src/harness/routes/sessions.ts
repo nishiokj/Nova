@@ -641,9 +641,7 @@ export async function handlePostSessionMessage(
 
   const markdownContextValue = body.markdownContext ?? body.documentContext ?? body.activeDocument;
   const [contextBuild, workflowTemplateDispatch] = await Promise.all([
-    buildMarkdownMessageContext(ctx, markdownContextValue, {
-      defaultSessionKey: sessionKey,
-    }),
+    buildMarkdownMessageContext(ctx, markdownContextValue),
     maybeBuildWorkflowTemplateDispatch(
       ctx,
       session,
@@ -750,7 +748,7 @@ export async function handlePostSessionMessage(
     queued: result.queued ?? false,
     markdownContextAttached,
     workflowTemplateApplied: workflowTemplateDispatch.applied,
-    ...(workflowTemplateDispatch.applied
+    ...(workflowTemplateDispatch.applied && workflowTemplateDispatch.templateId
       ? {
           workflowTemplate: {
             id: workflowTemplateDispatch.templateId,
@@ -942,6 +940,8 @@ interface WorkflowTemplateHint {
   templateName?: string;
   documentType?: string;
   markdownPath?: string;
+  inlineSpecs?: WorkflowTemplateSpecRuntime[];
+  inlineGoal?: string;
 }
 
 interface WorkflowTemplateSpecRuntime {
@@ -967,8 +967,9 @@ type WorkflowTemplateDispatchResult =
       applied: true;
       dispatchMetadata: Record<string, unknown>;
       metadataPatch: Record<string, unknown>;
-      templateId: string;
-      templateName: string;
+      templateId?: string;
+      templateName?: string;
+      source: 'db-template' | 'inline';
     }
   | { ok: false; status: number; error: string };
 
@@ -1022,6 +1023,189 @@ function normalizeTemplateToken(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Inline Workflow Spec Parsing
+// ---------------------------------------------------------------------------
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function deduplicateId(id: string, seen: Set<string>): string {
+  if (!seen.has(id)) { seen.add(id); return id; }
+  let n = 2;
+  while (seen.has(`${id}-${n}`)) n++;
+  const deduped = `${id}-${n}`;
+  seen.add(deduped);
+  return deduped;
+}
+
+function parseSpecMetadataBullets(
+  lines: string[]
+): { agent?: string; dependencies: string[]; targetPaths: string[]; domain?: string } {
+  let agent: string | undefined;
+  let domain: string | undefined;
+  const dependencies: string[] = [];
+  const targetPaths: string[] = [];
+
+  for (const line of lines) {
+    const m = line.match(/^\s*-\s+(.+)$/);
+    if (!m) continue;
+    const kv = m[1].match(/^([^:]+):\s*(.+)$/);
+    if (!kv) continue;
+    const key = kv[1].trim().toLowerCase();
+    const val = kv[2].trim();
+    if (key === 'agent') {
+      agent = val;
+    } else if (key === 'domain') {
+      domain = val;
+    } else if (key === 'files' || key === 'paths' || key === 'targetpaths' || key === 'target_paths') {
+      targetPaths.push(...val.split(',').map(s => s.trim()).filter(Boolean));
+    } else if (key === 'depends on' || key === 'dependencies') {
+      dependencies.push(...val.split(',').map(s => s.trim()).filter(Boolean));
+    }
+  }
+
+  return {
+    ...(agent ? { agent } : {}),
+    dependencies,
+    targetPaths,
+    ...(domain ? { domain } : {}),
+  };
+}
+
+function parseHeadingSpecs(body: string): WorkflowTemplateSpecRuntime[] {
+  const sections = body.split(/^### /m);
+  const specs: WorkflowTemplateSpecRuntime[] = [];
+  const seen = new Set<string>();
+
+  for (const section of sections) {
+    if (!section.trim()) continue;
+    const lines = section.split('\n');
+    const heading = lines[0].trim();
+    if (!heading) continue;
+
+    const id = deduplicateId(slugify(heading), seen);
+    const contentLines = lines.slice(1);
+    const objectiveLines: string[] = [];
+    const metaLines: string[] = [];
+
+    for (const line of contentLines) {
+      if (/^\s*-\s+\S+:/.test(line)) {
+        metaLines.push(line);
+      } else if (line.trim().length > 0 && metaLines.length === 0) {
+        objectiveLines.push(line.trim());
+      }
+    }
+
+    const objective = objectiveLines.join(' ').trim();
+    if (!objective) continue;
+
+    const meta = parseSpecMetadataBullets(metaLines);
+    const spec = normalizeWorkflowTemplateSpec({
+      id,
+      objective,
+      ...meta,
+    }, specs.length);
+    if (spec) specs.push(spec);
+  }
+
+  return specs;
+}
+
+function parseNumberedListSpecs(body: string): WorkflowTemplateSpecRuntime[] {
+  const specs: WorkflowTemplateSpecRuntime[] = [];
+  const lines = body.split('\n');
+  let currentNumber: number | null = null;
+  let currentObjective = '';
+  let currentMeta: string[] = [];
+
+  const flush = () => {
+    if (currentNumber === null || !currentObjective.trim()) return;
+    const meta = parseSpecMetadataBullets(currentMeta);
+    // Normalize numeric dependency references to step-N IDs
+    const deps = meta.dependencies.map(d => /^\d+$/.test(d) ? `step-${d}` : d);
+    const spec = normalizeWorkflowTemplateSpec({
+      id: `step-${currentNumber}`,
+      objective: currentObjective.trim(),
+      agent: meta.agent,
+      dependencies: deps,
+      targetPaths: meta.targetPaths,
+      domain: meta.domain,
+    }, specs.length);
+    if (spec) specs.push(spec);
+  };
+
+  for (const line of lines) {
+    const numbered = line.match(/^(\d+)\.\s+(.+)$/);
+    if (numbered) {
+      flush();
+      currentNumber = parseInt(numbered[1], 10);
+      currentObjective = numbered[2];
+      currentMeta = [];
+    } else if (currentNumber !== null && /^\s+-\s+/.test(line)) {
+      currentMeta.push(line);
+    }
+  }
+  flush();
+
+  return specs;
+}
+
+function parseInlineWorkflowSpecs(
+  content: string
+): { specs: WorkflowTemplateSpecRuntime[]; goal: string } | null {
+  const frontmatter = parseSimpleFrontmatter(content);
+  const docType = asString(frontmatter.type)?.toLowerCase();
+  if (docType !== 'workflow' && docType !== 'executable') return null;
+
+  // Strip frontmatter to get body
+  const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+
+  // Extract goal from first H1 or frontmatter
+  const goalFromFrontmatter = asString(frontmatter.goal);
+  const h1Match = body.match(/^#\s+(.+)$/m);
+  const goal = goalFromFrontmatter || (h1Match ? h1Match[1].trim() : '');
+
+  // Strategy 1: frontmatter specs as JSON string
+  const rawSpecs = frontmatter.specs;
+  if (typeof rawSpecs === 'string') {
+    try {
+      const parsed = JSON.parse(rawSpecs);
+      if (Array.isArray(parsed)) {
+        const specs: WorkflowTemplateSpecRuntime[] = [];
+        for (let i = 0; i < parsed.length; i++) {
+          const spec = normalizeWorkflowTemplateSpec(parsed[i], i);
+          if (spec) specs.push(spec);
+        }
+        if (specs.length > 0) return { specs, goal };
+      }
+    } catch { /* fall through */ }
+  }
+  // Also handle frontmatter specs already parsed as array (won't happen with simple parser, but defensive)
+  if (Array.isArray(rawSpecs)) {
+    const specs: WorkflowTemplateSpecRuntime[] = [];
+    for (let i = 0; i < rawSpecs.length; i++) {
+      const spec = normalizeWorkflowTemplateSpec(rawSpecs[i], i);
+      if (spec) specs.push(spec);
+    }
+    if (specs.length > 0) return { specs, goal };
+  }
+
+  // Strategy 2: heading-based specs
+  const headingSpecs = parseHeadingSpecs(body);
+  if (headingSpecs.length > 0) return { specs: headingSpecs, goal };
+
+  // Strategy 3: numbered list specs
+  const numberedSpecs = parseNumberedListSpecs(body);
+  if (numberedSpecs.length > 0) return { specs: numberedSpecs, goal };
+
+  return null;
+}
+
 function extractWorkflowTemplateHint(rawContext: unknown): WorkflowTemplateHint | null {
   if (!isRecord(rawContext)) return null;
   const metadata = isRecord(rawContext.metadata) ? rawContext.metadata : {};
@@ -1058,14 +1242,29 @@ function extractWorkflowTemplateHint(rawContext: unknown): WorkflowTemplateHint 
     ?? asString(rawContext.markdownPath)
     ?? asString(rawContext.filePath));
   const hasTemplateHint = !!templateId || !!templateName;
-  const workflowLike = documentType === 'workflow' || documentType === 'executable' || hasTemplateHint;
-  if (!workflowLike || !hasTemplateHint) return null;
-  return {
-    ...(templateId ? { templateId } : {}),
-    ...(templateName ? { templateName } : {}),
-    ...(documentType ? { documentType } : {}),
-    ...(markdownPath ? { markdownPath } : {}),
-  };
+  const workflowLike = documentType === 'workflow' || documentType === 'executable';
+
+  // DB-lookup path: templateId/templateName present
+  if (hasTemplateHint) {
+    return {
+      ...(templateId ? { templateId } : {}),
+      ...(templateName ? { templateName } : {}),
+      ...(documentType ? { documentType } : {}),
+      ...(markdownPath ? { markdownPath } : {}),
+    };
+  }
+
+  // Inline path: workflow-typed document without a template reference
+  if (workflowLike) {
+    const inline = parseInlineWorkflowSpecs(content);
+    return {
+      ...(documentType ? { documentType } : {}),
+      ...(markdownPath ? { markdownPath } : {}),
+      ...(inline ? { inlineSpecs: inline.specs, inlineGoal: inline.goal } : {}),
+    };
+  }
+
+  return null;
 }
 
 function normalizeWorkflowTemplateSpec(value: unknown, index: number): WorkflowTemplateSpecRuntime | null {
@@ -1193,6 +1392,58 @@ export async function maybeBuildWorkflowTemplateDispatch(
     }
   }
 
+  // --- Inline workflow path ---
+  if (hint.inlineSpecs && hint.inlineSpecs.length > 0) {
+    const goal = hint.inlineGoal || message.trim();
+    if (!goal) {
+      return { ok: false, status: 400, error: 'Workflow execution requires a non-empty goal or message' };
+    }
+    const handoffSpec = {
+      goal,
+      context: [
+        hint.markdownPath ? `Workflow document: ${hint.markdownPath}` : '',
+        `User request: ${message.trim()}`,
+      ].filter(Boolean).join('\n'),
+      workItems: hint.inlineSpecs.map((spec) => ({
+        id: spec.id,
+        objective: spec.objective,
+        agent: spec.agent,
+        ...(spec.domain ? { domain: spec.domain } : {}),
+        ...(spec.dependencies.length > 0 ? { dependencies: spec.dependencies } : {}),
+        ...(spec.targetPaths && spec.targetPaths.length > 0 ? { targetPaths: spec.targetPaths } : {}),
+      })),
+    };
+    const startedAt = new Date().toISOString();
+    return {
+      ok: true,
+      applied: true,
+      source: 'inline',
+      dispatchMetadata: {
+        cockpit_handoff_spec: handoffSpec,
+      },
+      metadataPatch: {
+        workflow_template_applied: true,
+        workflow_template_goal: goal,
+        workflow_template_runtime: {
+          applied: true,
+          appliedAt: startedAt,
+          source: 'inline-workflow-spec',
+        },
+      },
+    };
+  }
+
+  // Workflow-typed doc but no inline specs and no template reference → error
+  if (!hint.templateId && !hint.templateName) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'Document has type: workflow but no specs could be extracted. '
+        + 'Add numbered steps, ### heading sections, or a specs JSON array in frontmatter.',
+    };
+  }
+
+  // --- DB template path ---
   const loaded = await loadWorkflowTemplateFromDb(hint);
   if (!loaded.found) {
     if (loaded.reason === 'unavailable') {
@@ -1229,6 +1480,7 @@ export async function maybeBuildWorkflowTemplateDispatch(
   return {
     ok: true,
     applied: true,
+    source: 'db-template',
     templateId: loaded.template.id,
     templateName: loaded.template.name,
     dispatchMetadata: {

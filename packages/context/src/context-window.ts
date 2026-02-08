@@ -539,7 +539,7 @@ export class ContextWindow {
    * Deduplicates file_content by path and truncates long outputs.
    */
   private _maybeAutoCompact(): void {
-    if (!this.isNearFull(0.85)) return;
+    if (!this.isNearFull(0.5)) return;
     this.compact({
       deduplicateByPath: true,
       maxFileContentCount: 30,

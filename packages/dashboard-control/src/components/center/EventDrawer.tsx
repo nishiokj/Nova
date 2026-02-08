@@ -18,13 +18,12 @@ const FILTERS: { key: EventFilter; label: string }[] = [
   { key: 'audit', label: 'Audit' },
 ];
 
-const ChatMessage = memo(function ChatMessage({ event, toolSummary }: { event: { at: string; type: string; payload: Record<string, unknown> }; toolSummary?: string }) {
+const ChatMessage = memo(function ChatMessage({ event }: { event: { at: string; type: string; payload: Record<string, unknown> } }) {
   const role = messageRoleForEvent(event as Parameters<typeof messageRoleForEvent>[0]);
   const content = extractMessageContent(event.payload);
   const isUser = role === 'user';
 
-  // Assistant turns that are entirely tool calls have empty content — show a summary instead
-  if (!content && !toolSummary) return null;
+  if (!content) return null;
 
   return (
     <div className={`px-3 py-2 border-b border-[var(--border-subtle)] ${isUser ? 'bg-[var(--bg-hover)]/40' : ''}`}>
@@ -34,13 +33,7 @@ const ChatMessage = memo(function ChatMessage({ event, toolSummary }: { event: {
         </span>
         <span>{formatRelativeFromIso(event.at)}</span>
       </div>
-      {content ? (
-        <ChatMarkdown content={content.slice(0, 2000)} />
-      ) : toolSummary ? (
-        <div className="text-[11px] text-[var(--text-muted)] italic">
-          {toolSummary}
-        </div>
-      ) : null}
+      <ChatMarkdown content={content.slice(0, 2000)} />
     </div>
   );
 });
@@ -104,52 +97,6 @@ const EventRow = memo(function EventRow({ event, eventFilter }: { event: { at: s
   );
 });
 
-/** Build a tool-activity summary for an empty assistant message by scanning nearby events. */
-function buildToolSummary(allEvents: Array<{ at: string; type: string; payload: Record<string, unknown> }>, msgIndex: number): string {
-  const tools: string[] = [];
-  const files = new Set<string>();
-  let toolCalls = 0;
-  let llmCalls = 0;
-  // Scan backwards from this message for tool/workflow events in the same request window
-  for (let i = msgIndex - 1; i >= 0 && i >= msgIndex - 40; i--) {
-    const ev = allEvents[i];
-    if (!ev) break;
-    // Stop at the previous user/assistant message
-    if (ev.type === 'message' && isMessageLikeEvent(ev as Parameters<typeof isMessageLikeEvent>[0])) break;
-    if (ev.type === 'tool') {
-      const data = asRecord(ev.payload.data);
-      const name = typeof data?.tool_name === 'string' ? data.tool_name : null;
-      if (name && !tools.includes(name)) tools.push(name);
-      const args = data?.arguments as Record<string, unknown> | undefined;
-      const filePath = typeof args?.file_path === 'string' ? args.file_path
-        : typeof args?.path === 'string' ? args.path : null;
-      if (filePath) files.add(filePath.split('/').pop() ?? filePath);
-    }
-    // Extract tool/llm call counts from iteration_completed workflow events
-    if (ev.type === 'workflow') {
-      const data = asRecord(ev.payload.data);
-      const result = asRecord(data?.result);
-      if (result) {
-        if (typeof result.tool_calls === 'number') toolCalls += result.tool_calls;
-        if (typeof result.llm_calls === 'number') llmCalls += result.llm_calls;
-      }
-    }
-  }
-  if (tools.length > 0) {
-    const toolStr = tools.slice(0, 4).join(', ');
-    const fileStr = files.size > 0 ? ` on ${[...files].slice(0, 3).join(', ')}` : '';
-    return `[${toolStr}${fileStr}]`;
-  }
-  // Fallback: use iteration stats
-  if (toolCalls > 0 || llmCalls > 0) {
-    const parts: string[] = [];
-    if (toolCalls > 0) parts.push(`${toolCalls} tool call${toolCalls > 1 ? 's' : ''}`);
-    if (llmCalls > 0) parts.push(`${llmCalls} LLM call${llmCalls > 1 ? 's' : ''}`);
-    return `[${parts.join(', ')}]`;
-  }
-  return '[completed]';
-}
-
 export function EventDrawer() {
   const eventFilter = useCockpit(s => s.eventFilter);
   const eventDrawerOpen = useCockpit(s => s.eventDrawerOpen);
@@ -171,25 +118,6 @@ export function EventDrawer() {
     const role = messageRoleForEvent(lastEvent);
     return role === 'user';
   }, [isChatMode, filteredEvents]);
-
-  // Pre-compute tool summaries for empty assistant messages
-  const toolSummaries = useMemo(() => {
-    if (!isChatMode) return new Map<number, string>();
-    const map = new Map<number, string>();
-    for (let i = 0; i < filteredEvents.length; i++) {
-      const ev = filteredEvents[i];
-      const role = messageRoleForEvent(ev as Parameters<typeof messageRoleForEvent>[0]);
-      if (role === 'assistant' && !extractMessageContent(ev.payload)) {
-        // Find this event's index in the full events array
-        const fullIdx = events.indexOf(ev);
-        if (fullIdx >= 0) {
-          const summary = buildToolSummary(events, fullIdx);
-          if (summary) map.set(i, summary);
-        }
-      }
-    }
-    return map;
-  }, [isChatMode, filteredEvents, events]);
 
   // Auto-scroll to bottom when drawer opens, new messages arrive, or thinking indicator appears
   useEffect(() => {
@@ -242,7 +170,7 @@ export function EventDrawer() {
         ) : isChatMode ? (
           <>
             {filteredEvents.map((event, idx) => (
-              <ChatMessage key={`${event.at}-${idx}`} event={event} toolSummary={toolSummaries.get(idx)} />
+              <ChatMessage key={`${event.at}-${idx}`} event={event} />
             ))}
             {showThinking && (
               <div className="px-3 py-2 border-b border-[var(--border-subtle)]">

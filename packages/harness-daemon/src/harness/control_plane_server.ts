@@ -166,7 +166,9 @@ export class ControlPlaneServer {
       | 'control_plane_permissions_get'
       | 'control_plane_permissions_update'
       | 'control_plane_resolve_escalation'
-      | 'control_plane_memory_info',
+      | 'control_plane_memory_info'
+      | 'control_plane_model_get'
+      | 'control_plane_model_set',
     data: Record<string, unknown>
   ): Promise<T> {
     return this.withBridgeClient((client) => client.request<T>(type, data));
@@ -354,6 +356,44 @@ export class ControlPlaneServer {
             maxSessions: 0,
             sessions: [],
           };
+        }
+      },
+      getSessionModelSelections: async (sessionKey) => {
+        try {
+          const result = await this.requestBridge<{
+            success?: boolean;
+            selections?: Record<string, { provider: string; model: string; reasoning?: string }>;
+          }>('control_plane_model_get', { session_key: sessionKey });
+          return {
+            success: result.success === true,
+            selections: isRecord(result.selections) ? result.selections as Record<string, { provider: string; model: string; reasoning?: string }> : {},
+          };
+        } catch {
+          return { success: false, selections: {} };
+        }
+      },
+      setSessionModelSelection: async (sessionKey, agentType, selection) => {
+        try {
+          const result = await this.requestBridge<{
+            success?: boolean;
+            agentType?: string;
+            selection?: { provider: string; model: string; reasoning?: string };
+            error?: string;
+          }>('control_plane_model_set', {
+            session_key: sessionKey,
+            agent_type: agentType,
+            provider: selection.provider,
+            model: selection.model,
+            ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
+          });
+          return {
+            success: result.success === true,
+            agentType: typeof result.agentType === 'string' ? result.agentType : agentType,
+            selection: isRecord(result.selection) ? result.selection as { provider: string; model: string; reasoning?: string } : selection,
+            ...(typeof result.error === 'string' ? { error: result.error } : {}),
+          };
+        } catch (error) {
+          return { success: false, agentType, selection, error: errorMessage(error) };
         }
       },
       subscribeEvents: (handler) => {

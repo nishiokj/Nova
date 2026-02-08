@@ -5,6 +5,7 @@
  */
 
 import type { EntityKind } from 'entity-graph';
+import nodePath from 'path';
 import { isRecord, asString, asBoolean } from './routes/utils.js';
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -55,12 +56,43 @@ const FILE_TOOLS: Record<string, 'read' | 'edited'> = {
   batchedit: 'edited',
 };
 
-export function extractSessionFiles(agentEvents: unknown[]): SessionFile[] {
+function normalizeSessionFilePath(filepath: string, workingDir?: string): string | null {
+  const trimmed = filepath.trim();
+  if (!trimmed) return null;
+
+  const normalized = nodePath.normalize(trimmed).replace(/\\/g, '/');
+  if (normalized.startsWith('./')) return normalized.slice(2);
+
+  if (!workingDir || !nodePath.isAbsolute(normalized)) {
+    return normalized;
+  }
+
+  const relative = nodePath.relative(workingDir, normalized).replace(/\\/g, '/');
+  if (relative && !relative.startsWith('../') && relative !== '..' && !nodePath.isAbsolute(relative)) {
+    return relative.startsWith('./') ? relative.slice(2) : relative;
+  }
+
+  return normalized;
+}
+
+function eventWorkItemId(entry: Record<string, unknown>): string | null {
+  const topLevel = asString(entry.work_item_id) ?? asString(entry.workItemId) ?? asString(entry.workId);
+  if (topLevel) return topLevel;
+
+  const data = isRecord(entry.data) ? entry.data : {};
+  return asString(data.work_item_id) ?? asString(data.workItemId) ?? asString(data.workId) ?? null;
+}
+
+export function extractSessionFiles(
+  agentEvents: unknown[],
+  options: { workingDir?: string; workItemId?: string } = {}
+): SessionFile[] {
   const fileMap = new Map<string, 'read' | 'edited'>();
 
   for (const entry of agentEvents) {
     if (!isRecord(entry)) continue;
     if (asString(entry.type) !== 'tool_call') continue;
+    if (options.workItemId && eventWorkItemId(entry) !== options.workItemId) continue;
 
     const data = isRecord(entry.data) ? entry.data : {};
     const rawToolName = asString(data.tool_name) ?? asString(data.toolName) ?? '';
@@ -74,10 +106,13 @@ export function extractSessionFiles(agentEvents: unknown[]): SessionFile[] {
     if (classification === 'edited' && (phase !== 'completed' || success !== true)) continue;
 
     const args = isRecord(data.arguments) ? data.arguments : {};
-    const filepath = asString(args.path)
+    const rawFilepath = asString(args.path)
       ?? asString(args.file_path)
       ?? asString(args.filePath)
       ?? asString(args.absolute_path);
+    if (!rawFilepath) continue;
+
+    const filepath = normalizeSessionFilePath(rawFilepath, options.workingDir);
     if (!filepath) continue;
 
     const existing = fileMap.get(filepath);

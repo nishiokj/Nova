@@ -1,46 +1,26 @@
 /**
- * Autocomplete route — SSE streaming inline completions via a fast LLM.
+ * Autocomplete route — thin proxy to any OpenAI-compatible endpoint.
  *
- * Lazy-initializes a module-scoped LLM adapter on first request.
- * Streams token chunks as SSE `data:` lines back to the client.
+ * Configure via env:
+ *   AUTOCOMPLETE_ENDPOINT  — base URL (default: http://localhost:11434/v1)
+ *   AUTOCOMPLETE_MODEL     — model name (default: qwen2.5-coder:1.5b)
+ *   AUTOCOMPLETE_API_KEY   — optional, omit for local inference
+ *   AUTOCOMPLETE_MAX_TOKENS — max tokens to generate (default: 60, cap 200)
+ *
+ * Forwards to ${ENDPOINT}/chat/completions with streaming, converts the
+ * OpenAI SSE format into our simpler `data: {"token":"..."}\n\n` format.
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { createAdapter, type LLMAdapter } from 'llm';
-import type { LLMRequestConfig, LLMResponse } from 'types';
-import { getProviderBaseUrl, getCanonicalProvider, getProviderEnvVar } from 'types';
 import { readJsonBody, asString } from './utils.js';
 
-// ── configuration from env ──────────────────────────────────────────
-
-const PROVIDER = process.env.AUTOCOMPLETE_PROVIDER ?? 'groq';
-const MODEL = process.env.AUTOCOMPLETE_MODEL ?? 'llama-3.3-70b-versatile';
+const ENDPOINT = process.env.AUTOCOMPLETE_ENDPOINT ?? 'http://localhost:11434/v1';
+const MODEL = process.env.AUTOCOMPLETE_MODEL ?? 'qwen2.5-coder:1.5b';
+const API_KEY = process.env.AUTOCOMPLETE_API_KEY ?? '';
 const MAX_TOKENS = Math.min(Number(process.env.AUTOCOMPLETE_MAX_TOKENS) || 60, 200);
 
 const SYSTEM_PROMPT =
   'Continue the markdown text naturally. Output ONLY the continuation, no preamble.';
-
-// ── lazy adapter singleton ──────────────────────────────────────────
-
-let adapter: LLMAdapter | null = null;
-
-function getAdapter(): LLMAdapter {
-  if (adapter) return adapter;
-
-  const envVar = getProviderEnvVar(PROVIDER);
-  const apiKey = process.env[envVar];
-  if (!apiKey) {
-    throw new Error(`Missing API key: set ${envVar} environment variable`);
-  }
-
-  const canonical = getCanonicalProvider(PROVIDER);
-  adapter = createAdapter({
-    apiKeys: { [canonical]: apiKey },
-  });
-  return adapter;
-}
-
-// ── route handler ───────────────────────────────────────────────────
 
 export async function handlePostAutocomplete(
   req: IncomingMessage,
@@ -56,12 +36,38 @@ export async function handlePostAutocomplete(
   const textAfter = asString(body.textAfter) ?? '';
   const title = asString(body.title) ?? '';
 
-  let llm: LLMAdapter;
+  const userContent = title ? `Title: ${title}\n\n${textBefore}` : textBefore;
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: userContent + (textAfter ? `\n[text after cursor]: ${textAfter}` : '') },
+  ];
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (API_KEY) headers['Authorization'] = `Bearer ${API_KEY}`;
+
+  let upstream: Response;
   try {
-    llm = getAdapter();
+    upstream = await fetch(`${ENDPOINT}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        max_tokens: MAX_TOKENS,
+        temperature: 0.3,
+        stream: true,
+      }),
+    });
   } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: (err as Error).message }));
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Upstream unreachable: ${(err as Error).message}` }));
+    return;
+  }
+
+  if (!upstream.ok) {
+    const text = await upstream.text().catch(() => '');
+    res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Upstream ${upstream.status}: ${text}` }));
     return;
   }
 
@@ -75,46 +81,47 @@ export async function handlePostAutocomplete(
   let aborted = false;
   req.on('close', () => { aborted = true; });
 
-  const userContent = title
-    ? `Title: ${title}\n\n${textBefore}`
-    : textBefore;
+  const reader = upstream.body?.getReader();
+  if (!reader) {
+    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+    res.end();
+    return;
+  }
 
-  const llmConfig: LLMRequestConfig = {
-    provider: getCanonicalProvider(PROVIDER),
-    displayProvider: PROVIDER,
-    model: MODEL,
-    baseUrl: getProviderBaseUrl(PROVIDER),
-    maxTokens: MAX_TOKENS,
-    temperature: 0.3,
-  };
+  const decoder = new TextDecoder();
+  let buf = '';
 
   try {
-    const stream = llm.stream({
-      messages: [{ role: 'user', content: [{ type: 'text', text: userContent }] }],
-      system: SYSTEM_PROMPT,
-      llm: llmConfig,
-      ...(textAfter ? {} : {}), // reserved for future context-after usage
-      onChunk(chunk: string) {
-        if (aborted) return;
-        res.write(`data: ${JSON.stringify({ token: chunk })}\n\n`);
-      },
-    });
+    for (;;) {
+      if (aborted) break;
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    // Drain the generator to completion
-    let result: IteratorResult<string, LLMResponse>;
-    do {
-      result = await stream.next();
-    } while (!result.done && !aborted);
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop()!;
 
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') break;
+        try {
+          const chunk = JSON.parse(payload);
+          const token = chunk.choices?.[0]?.delta?.content;
+          if (typeof token === 'string' && token.length > 0 && !aborted) {
+            res.write(`data: ${JSON.stringify({ token })}\n\n`);
+          }
+        } catch {
+          // skip malformed SSE lines
+        }
+      }
+    }
+  } catch {
+    // upstream read error — client likely disconnected
+  } finally {
+    reader.cancel().catch(() => {});
     if (!aborted) {
       res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-    }
-  } catch (err) {
-    if (!aborted) {
-      res.write(`data: ${JSON.stringify({ error: (err as Error).message })}\n\n`);
-    }
-  } finally {
-    if (!aborted) {
       res.end();
     }
   }

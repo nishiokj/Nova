@@ -1,8 +1,8 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState, type KeyboardEvent } from 'react';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
 import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 import { getDocumentType, getDocumentSessionKey, parseFrontmatter, type DocumentType } from '@/lib/markdown';
-import { RenderedMarkdownSurface } from './RenderedMarkdownSurface';
+import { ChatMarkdown } from '@/components/shared/ChatMarkdown';
 
 const MarkdownEditor = lazy(() => import('./MarkdownEditor'));
 
@@ -35,15 +35,23 @@ function normalizeSpecsValue(value: unknown): string[] {
   return [];
 }
 
+function shouldExitPreviewOnKey(event: KeyboardEvent<HTMLDivElement>): boolean {
+  if (event.metaKey || event.ctrlKey || event.altKey) return false;
+  if (event.key === 'Escape') return true;
+  if (event.key === 'Enter' || event.key === 'Backspace' || event.key === 'Delete') return true;
+  return event.key.length === 1;
+}
+
 export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) {
   const { state, setContent, editorRef } = workspace;
   const templates = useCockpit(s => s.templates);
+  const autocompleteEnabled = useCockpit(s => s.autocompleteEnabled);
   const store = useCockpitStore();
-  const [rawMode, setRawMode] = useState(false);
+  const [previewMode, setPreviewMode] = useState(false);
 
   const docType = getDocumentType(state.content);
   const sessionKey = getDocumentSessionKey(state.content);
-  const { frontmatter } = parseFrontmatter(state.content);
+  const { frontmatter, body } = parseFrontmatter(state.content);
   const templateName = firstNonEmptyString([
     frontmatter.template,
     frontmatter.templateName,
@@ -78,7 +86,7 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
         ? 'spec-mismatch'
         : 'ok';
   const badgeStyle = TYPE_BADGE_COLORS[docType];
-  const needsProjectScopeForWorkflow = workflowLike && state.scopeMode !== 'project';
+  const needsProjectScopeForWorkflow = workflowLike && state.activeRoot === '.cockpit/scratch';
   const needsSaveForWorkflow = workflowLike && !state.selectedPath;
   const workflowHint = !workflowLike
     ? null
@@ -107,7 +115,7 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
             };
 
   useEffect(() => {
-    setRawMode(false);
+    setPreviewMode(false);
   }, [state.selectedPath]);
 
   return (
@@ -166,11 +174,28 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
             </button>
           )}
           <button
-            onClick={() => setRawMode((prev) => !prev)}
-            className="px-1.5 py-0.5 rounded text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-            title={rawMode ? 'Switch to rendered markdown' : 'Switch to raw markdown editor'}
+            onClick={() => store.set({ autocompleteEnabled: !autocompleteEnabled })}
+            className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]"
+            style={{ color: autocompleteEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)' }}
+            title="Toggle inline autocomplete"
           >
-            {rawMode ? 'Rendered' : 'Raw edit'}
+            AC
+          </button>
+          <button
+            onClick={() => {
+              setPreviewMode((prev) => {
+                const next = !prev;
+                if (!next) {
+                  window.setTimeout(() => editorRef.current?.focus(), 0);
+                }
+                return next;
+              });
+            }}
+            className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]"
+            style={{ color: previewMode ? 'var(--accent-cyan)' : 'var(--text-muted)' }}
+            title={previewMode ? 'Switch to editable markdown' : 'Preview rendered markdown (read-only)'}
+          >
+            {previewMode ? 'Edit' : 'Preview'}
           </button>
           <span>
             {state.dirty ? 'Unsaved' : 'Saved'}
@@ -233,7 +258,23 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
         </div>
       )}
       <div className="flex-1 min-h-0">
-        {rawMode ? (
+        {previewMode ? (
+          <div
+            tabIndex={0}
+            className="h-full overflow-y-auto px-3 py-2 outline-none"
+            onKeyDown={(event) => {
+              if (!shouldExitPreviewOnKey(event)) return;
+              event.preventDefault();
+              setPreviewMode(false);
+              window.setTimeout(() => editorRef.current?.focus(), 0);
+            }}
+          >
+            <div className="mb-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 text-[10px] text-[var(--text-muted)]">
+              Read-only preview. Toggle to Edit to modify markdown.
+            </div>
+            <ChatMarkdown content={body} />
+          </div>
+        ) : (
           <Suspense fallback={<div className="h-full flex items-center justify-center text-[var(--text-muted)] text-xs">Loading editor...</div>}>
             <MarkdownEditor
               ref={editorRef}
@@ -241,13 +282,9 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
               onChange={setContent}
               fileSuggestions={workspace.files}
               placeholder="# Start writing..."
+              autocompleteEnabled={autocompleteEnabled}
             />
           </Suspense>
-        ) : (
-          <RenderedMarkdownSurface
-            content={state.content}
-            onChange={setContent}
-          />
         )}
       </div>
       {state.status && (

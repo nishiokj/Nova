@@ -111,6 +111,7 @@ export interface SessionRollup {
   kind: SessionKind;
   title: string;
   status: SessionPanelStatus;
+  isAsync?: boolean;
   activeWorkItemId?: string;
   elapsedSec: number;
   lastEventAt: string;
@@ -132,6 +133,14 @@ export interface SessionRollup {
   };
   blocking: {
     unresolvedEscalationsCount: number;
+  };
+  tokenMetrics: {
+    input: number;
+    output: number;
+    cached: number;
+    total: number;
+    llmCalls: number;
+    avgLatencyMs: number;
   };
 }
 
@@ -219,6 +228,7 @@ export interface FocusData {
   type: 'session' | 'escalation';
   id: string;
   sessionKey: string;
+  isAsync?: boolean;
   header: Record<string, unknown>;
   packet: FocusPacket | null;
   pointers: Record<string, string>;
@@ -390,7 +400,7 @@ export interface CockpitBrowserEvidence {
 
 export interface CockpitFilesystemRoot {
   id: string;
-  kind: 'notes' | 'project';
+  kind: 'scratch' | 'project';
   label: string;
   path: string;
   pinned: boolean;
@@ -421,14 +431,12 @@ export interface CockpitFilesystemState {
 }
 
 export interface CockpitMarkdownScope {
-  mode: 'global' | 'session' | 'project';
+  mode: 'scratch' | 'project';
   workingDir: string;
-  sessionKey?: string;
   projectPath?: string;
 }
 
 export interface CockpitMarkdownScopeInput {
-  sessionKey?: string;
   projectPath?: string;
 }
 
@@ -449,27 +457,17 @@ export interface CockpitMarkdownFile {
   updatedAt: string;
   size: number;
   hash?: string;
-  etag?: string;
-  lineCount?: number;
-  wordCount?: number;
-  metadata?: Record<string, unknown>;
 }
 
 export interface CockpitMarkdownContextInput {
   path?: string;
-  workspaceScope?: 'global' | 'session' | 'project';
-  scopeMode?: 'global' | 'session' | 'project';
-  scopeSessionKey?: string;
-  workspaceSessionKey?: string;
   projectPath?: string;
-  workspaceProjectPath?: string;
   version?: number;
   updatedAt?: string;
   content?: string;
   isDirty?: boolean;
   selectionStart?: number;
   selectionEnd?: number;
-  metadata?: Record<string, unknown>;
 }
 
 export type EntityKind = 'file' | 'class' | 'function' | 'method' | 'type' | 'interface' | 'enum';
@@ -501,6 +499,64 @@ export interface SubgraphResponse {
     totalNodes: number;
     totalEdges: number;
   };
+}
+
+export type ArchitectureAlertSeverity = 'low' | 'medium' | 'high' | 'critical';
+export type ArchitectureAlertStatus = 'open' | 'acknowledged' | 'resolved';
+
+export interface CockpitArchitectureConcernSummary {
+  concernId: string;
+  label: string;
+  activeScore: number;
+  touchedFiles: number;
+  editedFiles: number;
+  readFiles: number;
+  totalFiles: number;
+  touchRatio: number;
+}
+
+export interface CockpitArchitectureBoundarySummary {
+  leftConcernId: string;
+  rightConcernId: string;
+  leftLabel: string;
+  rightLabel: string;
+  crossWeight: number;
+  pressureNorm: number;
+  hardness: number;
+  interfaceRatio: number;
+  directBypassRatio: number;
+  symmetryRatio: number;
+  topCrossFiles: unknown[];
+}
+
+export interface CockpitArchitectureAlertSummary {
+  id: string;
+  alertType: string;
+  severity: ArchitectureAlertSeverity;
+  status: ArchitectureAlertStatus;
+  concernId: string | null;
+  leftConcernId: string | null;
+  rightConcernId: string | null;
+  filePath: string | null;
+  score: number;
+  threshold: number;
+  title: string;
+  description: string;
+  evidence: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface CockpitArchitectureOverview {
+  runId: string | null;
+  generatedAt: string;
+  touched: {
+    totalFiles: number;
+    readFiles: number;
+    editedFiles: number;
+  };
+  concerns: CockpitArchitectureConcernSummary[];
+  boundaries: CockpitArchitectureBoundarySummary[];
+  alerts: CockpitArchitectureAlertSummary[];
 }
 
 export interface WorkItemSpec {

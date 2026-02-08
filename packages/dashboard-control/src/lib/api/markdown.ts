@@ -9,22 +9,18 @@ import type {
 export async function getCockpitMarkdownTree(scope: CockpitMarkdownScopeInput = {}): Promise<{
   rootDir: string;
   tree: CockpitMarkdownTreeNode[];
-  suggestedFolders: string[];
   scope?: CockpitMarkdownScope;
 }> {
   const params = new URLSearchParams();
-  if (scope.sessionKey) params.set('sessionKey', scope.sessionKey);
   if (scope.projectPath) params.set('projectPath', scope.projectPath);
   const data = await fetchAPI<{
     rootDir: string;
     tree: CockpitMarkdownTreeNode[];
-    suggestedFolders: string[];
     scope?: CockpitMarkdownScope;
   }>(`/cockpit/markdown/tree?${params.toString()}`);
   return {
-    rootDir: data.rootDir ?? '.cockpit/markdown',
+    rootDir: data.rootDir ?? '.cockpit/scratch',
     tree: data.tree ?? [],
-    suggestedFolders: data.suggestedFolders ?? [],
     ...(data.scope ? { scope: data.scope } : {}),
   };
 }
@@ -35,7 +31,6 @@ export async function getCockpitMarkdownFile(
 ): Promise<CockpitMarkdownFile> {
   const params = new URLSearchParams();
   params.set('path', filePath);
-  if (scope.sessionKey) params.set('sessionKey', scope.sessionKey);
   if (scope.projectPath) params.set('projectPath', scope.projectPath);
   const data = await fetchAPI<{ file: CockpitMarkdownFile }>(
     `/cockpit/markdown/file?${params.toString()}`
@@ -46,10 +41,8 @@ export async function getCockpitMarkdownFile(
 export async function postCockpitMarkdownFile(input: {
   path: string;
   content: string;
-  sessionKey?: string;
   projectPath?: string;
   expectedVersion?: number;
-  metadata?: Record<string, unknown>;
   source?: string;
 }): Promise<{
   success: boolean;
@@ -66,7 +59,6 @@ export async function postCockpitMarkdownFile(input: {
 
 export async function postCockpitMarkdownFolder(input: {
   path: string;
-  sessionKey?: string;
   projectPath?: string;
 }): Promise<{ success: boolean; folder?: { path: string } }> {
   return postAPI('/cockpit/markdown/folder', input);
@@ -76,7 +68,6 @@ export async function postCockpitMarkdownDelete(input: {
   path: string;
   type: 'file' | 'folder';
   recursive?: boolean;
-  sessionKey?: string;
   projectPath?: string;
 }): Promise<{
   success: boolean;
@@ -90,14 +81,12 @@ export async function postCockpitMarkdownDelete(input: {
 export async function importCockpitMarkdownFile(input: {
   sessionKey?: string;
   markdownPath?: string;
-  scopeSessionKey?: string;
   projectPath?: string;
   destinationPath?: string;
   folder?: string;
   filename?: string;
   content?: string;
   expectedVersion?: number;
-  metadata?: Record<string, unknown>;
   source?: string;
 }): Promise<{
   success: boolean;
@@ -116,12 +105,10 @@ export async function importCockpitMarkdownFile(input: {
 export async function postCockpitMarkdownPatch(input: {
   path: string;
   expectedVersion: number;
-  sessionKey?: string;
   projectPath?: string;
   content?: string;
   patch?: string;
   edits?: Array<{ startLine: number; endLine: number; replacement: string }>;
-  metadata?: Record<string, unknown>;
   source?: string;
 }): Promise<{
   success: boolean;

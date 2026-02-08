@@ -10,13 +10,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import {
   type ControlPlaneContext,
   type MarkdownWorkspaceScope,
-  type MarkdownWorkspaceScopeMode,
   type CockpitFilesystemRootRecord,
-  type SessionRow,
   sendJson,
-  readBody,
   readJsonBody,
-  parseUrl,
   isRecord,
   asString,
   asNumber,
@@ -24,17 +20,13 @@ import {
   execFileText,
   normalizeDiffPath,
   MARKDOWN_WORKSPACE_DIR,
-  MARKDOWN_METADATA_DIR,
   MARKDOWN_FILE_EXTENSIONS,
-  MARKDOWN_SUGGESTED_FOLDERS,
   MARKDOWN_MAX_BYTES,
-  MARKDOWN_METADATA_MAX_BYTES,
   MARKDOWN_CHAT_CONTEXT_MAX_BYTES,
   COCKPIT_PROJECT_DISCOVERY_MAX_RESULTS,
   COCKPIT_PROJECT_DISCOVERY_MAX_DEPTH,
-  SESSION_PERMISSION_SETTINGS_RELATIVE_PATH,
 } from './utils.js';
-import { getSession, getAllSessions } from './sessions.js';
+import { getAllSessions } from './sessions.js';
 import { resolveSessionFilePath, parsePatchStats } from './git.js';
 
 // ---------------------------------------------------------------------------
@@ -83,115 +75,6 @@ export function ensureMarkdownExtensionOnPath(rawPath: string): string | null {
   return hasMarkdownExtension(normalized) ? normalized : `${normalized}.md`;
 }
 
-const MARKDOWN_DRAFTS_DIR = '.drafts';
-const PROJECT_DRAFTS_DIR = '.cockpit/drafts';
-
-function sanitizeScopeToken(raw: string | undefined, fallback: string): string {
-  if (!raw) return fallback;
-  const safe = raw
-    .trim()
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return safe || fallback;
-}
-
-function sanitizeMarkdownDraftId(raw: string | undefined): string | null {
-  if (!raw) return null;
-  const safe = raw
-    .trim()
-    .replace(/[^a-zA-Z0-9_-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80);
-  return safe.length > 0 ? safe : null;
-}
-
-async function materializeMarkdownDraftFromContent(
-  ctx: ControlPlaneContext,
-  input: {
-    content: string;
-    sessionKey?: string;
-    projectPath?: string;
-    draftId?: string;
-  }
-): Promise<
-  | {
-      ok: true;
-      scope: MarkdownWorkspaceScope;
-      rootDir: string;
-      relativePath: string;
-      absolutePath: string;
-      version: number;
-      updatedAt: string;
-      hash: string;
-      draftId: string;
-    }
-  | { ok: false; status: number; error: string }
-> {
-  const path = await import('path');
-  const fs = await import('fs/promises');
-  const crypto = await import('crypto');
-
-  const scopeResult = await resolveMarkdownWorkspaceScope(ctx, {
-    sessionKey: input.sessionKey ?? null,
-    projectPath: input.projectPath ?? null,
-  });
-  if ('error' in scopeResult) {
-    return { ok: false, status: scopeResult.status, error: scopeResult.error };
-  }
-  const scope = scopeResult;
-
-  const normalizedDraftId = sanitizeMarkdownDraftId(input.draftId)
-    ?? crypto.randomUUID().replace(/-/g, '');
-  const sessionBucket = scope.sessionKey
-    ? `session-${sanitizeScopeToken(scope.sessionKey, 'session')}`
-    : (scope.mode === 'project' ? 'project' : 'global');
-
-  const rootDir = scope.mode === 'project'
-    ? path.resolve(scope.workingDir)
-    : path.resolve(scope.workingDir, MARKDOWN_WORKSPACE_DIR);
-  const draftPrefix = scope.mode === 'project' ? PROJECT_DRAFTS_DIR : MARKDOWN_DRAFTS_DIR;
-  const relativePath = normalizeWorkspaceRelativePath(`${draftPrefix}/${sessionBucket}/${normalizedDraftId}.md`);
-  if (!relativePath) {
-    return { ok: false, status: 400, error: 'Failed resolving markdown draft path' };
-  }
-  const absolutePath = path.resolve(rootDir, relativePath);
-  if (!(absolutePath === rootDir || absolutePath.startsWith(`${rootDir}${path.sep}`))) {
-    return { ok: false, status: 400, error: 'Draft path resolved outside markdown workspace' };
-  }
-
-  try {
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    let existing: string | null = null;
-    try {
-      existing = await fs.readFile(absolutePath, 'utf8');
-    } catch {
-      existing = null;
-    }
-    if (existing !== input.content) {
-      await fs.writeFile(absolutePath, input.content, 'utf8');
-    }
-    const stat = await fs.stat(absolutePath);
-    return {
-      ok: true,
-      scope,
-      rootDir,
-      relativePath,
-      absolutePath,
-      version: buildVersionFromMtimeMs(stat.mtimeMs),
-      updatedAt: stat.mtime.toISOString(),
-      hash: await buildMarkdownContentHash(input.content),
-      draftId: normalizedDraftId,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      status: 500,
-      error: `Failed materializing markdown draft: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Versioning & Hashing
@@ -207,30 +90,6 @@ export async function buildMarkdownContentHash(content: string): Promise<string>
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-export function buildMarkdownWordCount(content: string): number {
-  const matches = content.match(/[^\s]+/g);
-  return matches ? matches.length : 0;
-}
-
-export function buildMarkdownLineCount(content: string): number {
-  if (content.length === 0) return 0;
-  return content.split('\n').length;
-}
-
-export function buildMarkdownEtag(version: number, hash: string): string {
-  const shortHash = hash.slice(0, 16);
-  return `W/"${Math.max(0, version)}-${shortHash}"`;
-}
-
-export async function resolveMarkdownMetadataPath(rootDir: string, relativePath: string): Promise<string> {
-  const path = await import('path');
-  const metadataRoot = path.resolve(rootDir, MARKDOWN_METADATA_DIR);
-  const metadataPath = path.resolve(metadataRoot, `${relativePath}.meta.json`);
-  if (metadataPath === metadataRoot || metadataPath.startsWith(`${metadataRoot}${path.sep}`)) {
-    return metadataPath;
-  }
-  throw new Error('Metadata path resolved outside markdown metadata workspace');
-}
 
 // ---------------------------------------------------------------------------
 // MarkdownWorkspaceFileRecord
@@ -242,10 +101,6 @@ export interface MarkdownWorkspaceFileRecord {
   updatedAt: string;
   size: number;
   hash: string;
-  etag: string;
-  lineCount: number;
-  wordCount: number;
-  metadata?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,13 +108,10 @@ export interface MarkdownWorkspaceFileRecord {
 // ---------------------------------------------------------------------------
 
 export function readMarkdownScopeFromBody(body: Record<string, unknown>): {
-  sessionKey?: string;
   projectPath?: string;
 } {
-  const sessionKey = asString(body.scopeSessionKey) ?? asString(body.workspaceSessionKey) ?? asString(body.sessionKey);
   const projectPath = asString(body.projectPath) ?? asString(body.project_path);
   return {
-    ...(sessionKey ? { sessionKey } : {}),
     ...(projectPath ? { projectPath } : {}),
   };
 }
@@ -273,22 +125,11 @@ export function normalizeProjectPathInput(rawPath: string | null | undefined): s
 export async function resolveMarkdownWorkspaceScope(
   ctx: ControlPlaneContext,
   options?: {
-    sessionKey?: string | null;
     projectPath?: string | null;
   }
 ): Promise<MarkdownWorkspaceScope | { error: string; status: number }> {
   const path = await import('path');
   const fs = await import('fs/promises');
-
-  const sessionKey = asString(options?.sessionKey);
-  if (sessionKey) {
-    const session = getSession(ctx, sessionKey);
-    if (!session) {
-      return { error: `Session not found: ${sessionKey}`, status: 404 };
-    }
-    const workingDir = path.resolve(session.workingDir ?? ctx.workingDir);
-    return { mode: 'session', sessionKey, workingDir };
-  }
 
   const projectPathInput = normalizeProjectPathInput(options?.projectPath ?? null);
   if (projectPathInput) {
@@ -315,7 +156,7 @@ export async function resolveMarkdownWorkspaceScope(
   }
 
   return {
-    mode: 'global',
+    mode: 'scratch',
     workingDir: path.resolve(ctx.workingDir),
   };
 }
@@ -323,7 +164,6 @@ export async function resolveMarkdownWorkspaceScope(
 export async function getCockpitMarkdownWorkspaceRootForScope(
   ctx: ControlPlaneContext,
   options?: {
-    sessionKey?: string | null;
     projectPath?: string | null;
   }
 ): Promise<
@@ -334,12 +174,22 @@ export async function getCockpitMarkdownWorkspaceRootForScope(
   const fs = await import('fs/promises');
   const scope = await resolveMarkdownWorkspaceScope(ctx, options);
   if ('error' in scope) return scope;
-  // Notes/global workspace lives under .cockpit/markdown.
-  // Project scope maps directly to the real project directory.
   const root = scope.mode === 'project'
     ? path.resolve(scope.workingDir)
     : path.resolve(scope.workingDir, MARKDOWN_WORKSPACE_DIR);
   if (scope.mode !== 'project') {
+    // Migrate from old .cockpit/markdown → .cockpit/scratch
+    const oldRoot = path.resolve(scope.workingDir, '.cockpit/markdown');
+    try {
+      const oldStat = await fs.stat(oldRoot);
+      if (oldStat.isDirectory()) {
+        try { await fs.stat(root); } catch {
+          await fs.rename(oldRoot, root);
+        }
+      }
+    } catch {
+      // old path doesn't exist — nothing to migrate
+    }
     await fs.mkdir(root, { recursive: true });
   }
   return { root, scope };
@@ -351,7 +201,6 @@ export async function resolveCockpitMarkdownWorkspacePath(
   options?: {
     allowEmpty?: boolean;
     requireMarkdownFile?: boolean;
-    sessionKey?: string | null;
     projectPath?: string | null;
   }
 ): Promise<
@@ -384,91 +233,10 @@ export async function resolveCockpitMarkdownWorkspacePath(
   return { rootDir, relativePath, absolutePath, scope: scopeRoot.scope };
 }
 
-// ---------------------------------------------------------------------------
-// Metadata I/O
-// ---------------------------------------------------------------------------
-
-export function sanitizeMetadataValue(value: unknown, depth = 0): unknown {
-  if (value === null) return null;
-  if (depth > 5) return undefined;
-  if (typeof value === 'string') {
-    return value.length > 4_000 ? value.slice(0, 4_000) : value;
-  }
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined;
-  }
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    const out: unknown[] = [];
-    for (const item of value.slice(0, 128)) {
-      const next = sanitizeMetadataValue(item, depth + 1);
-      if (next !== undefined) out.push(next);
-    }
-    return out;
-  }
-  if (isRecord(value)) {
-    const out: Record<string, unknown> = {};
-    let count = 0;
-    for (const [rawKey, rawValue] of Object.entries(value)) {
-      if (count >= 128) break;
-      const key = rawKey.trim();
-      if (!key) continue;
-      const next = sanitizeMetadataValue(rawValue, depth + 1);
-      if (next === undefined) continue;
-      out[key] = next;
-      count += 1;
-    }
-    return out;
-  }
-  return undefined;
-}
-
-export function sanitizeMarkdownMetadata(value: unknown): Record<string, unknown> | undefined {
-  const sanitized = sanitizeMetadataValue(value, 0);
-  if (!isRecord(sanitized)) return undefined;
-  const serialized = JSON.stringify(sanitized);
-  if (serialized.length > MARKDOWN_METADATA_MAX_BYTES) return undefined;
-  return sanitized;
-}
-
-export async function readMarkdownWorkspaceMetadata(
-  rootDir: string,
-  relativePath: string
-): Promise<Record<string, unknown> | undefined> {
-  const fs = await import('fs/promises');
-  try {
-    const metadataPath = await resolveMarkdownMetadataPath(rootDir, relativePath);
-    const raw = await fs.readFile(metadataPath, 'utf8');
-    if (Buffer.byteLength(raw, 'utf8') > MARKDOWN_METADATA_MAX_BYTES) {
-      return undefined;
-    }
-    const parsed = JSON.parse(raw) as unknown;
-    return sanitizeMarkdownMetadata(parsed);
-  } catch {
-    return undefined;
-  }
-}
-
-export async function writeMarkdownWorkspaceMetadata(
-  rootDir: string,
-  relativePath: string,
-  metadata: Record<string, unknown>
-): Promise<void> {
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  const metadataPath = await resolveMarkdownMetadataPath(rootDir, relativePath);
-  await fs.mkdir(path.dirname(metadataPath), { recursive: true });
-  await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
-}
-
 export async function buildMarkdownWorkspaceFileRecord(
-  rootDir: string,
   relativePath: string,
   content: string,
   stat: { mtimeMs: number; mtime: Date; size: number },
-  metadata?: Record<string, unknown>
 ): Promise<MarkdownWorkspaceFileRecord> {
   const version = buildVersionFromMtimeMs(stat.mtimeMs);
   const hash = await buildMarkdownContentHash(content);
@@ -478,10 +246,6 @@ export async function buildMarkdownWorkspaceFileRecord(
     updatedAt: stat.mtime.toISOString(),
     size: stat.size,
     hash,
-    etag: buildMarkdownEtag(version, hash),
-    lineCount: buildMarkdownLineCount(content),
-    wordCount: buildMarkdownWordCount(content),
-    ...(metadata ? { metadata } : {}),
   };
 }
 
@@ -494,13 +258,8 @@ export async function writeCockpitMarkdownWorkspaceFile(
   input: {
     path: string;
     content: string;
-    sessionKey?: string;
     projectPath?: string;
     expectedVersion?: number;
-    metadata?: Record<string, unknown>;
-    operation?: 'write' | 'import' | 'patch';
-    source?: string;
-    baseVersion?: number;
   }
 ): Promise<
   | { ok: true; file: MarkdownWorkspaceFileRecord; created: boolean; previousVersion: number }
@@ -510,7 +269,6 @@ export async function writeCockpitMarkdownWorkspaceFile(
   const fs = await import('fs/promises');
   const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, input.path, {
     requireMarkdownFile: true,
-    ...(input.sessionKey ? { sessionKey: input.sessionKey } : {}),
     ...(input.projectPath ? { projectPath: input.projectPath } : {}),
   });
   if ('error' in resolved) {
@@ -567,67 +325,17 @@ export async function writeCockpitMarkdownWorkspaceFile(
 
   await fs.mkdir(pathModule.dirname(resolved.absolutePath), { recursive: true });
   await fs.writeFile(resolved.absolutePath, input.content, 'utf8');
-  const [stat, metadataBase] = await Promise.all([
-    fs.stat(resolved.absolutePath),
-    readMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath),
-  ]);
-  const incomingMetadata = sanitizeMarkdownMetadata(input.metadata);
+  const stat = await fs.stat(resolved.absolutePath);
   const nextFile = await buildMarkdownWorkspaceFileRecord(
-    resolved.rootDir,
     resolved.relativePath,
     input.content,
     stat,
   );
-  const mergedMetadata = sanitizeMarkdownMetadata({
-    ...(metadataBase ?? {}),
-    ...(incomingMetadata ?? {}),
-    source: asString(input.source)
-      ?? asString(incomingMetadata?.source)
-      ?? asString(metadataBase?.source)
-      ?? (input.operation === 'import' ? 'import' : 'control-plane'),
-    createdAt: asString(metadataBase?.createdAt) ?? nextFile.updatedAt,
-    updatedAt: nextFile.updatedAt,
-    lineCount: nextFile.lineCount,
-    wordCount: nextFile.wordCount,
-    hash: nextFile.hash,
-    size: nextFile.size,
-    cockpit: sanitizeMetadataValue({
-      ...(isRecord(metadataBase?.cockpit) ? metadataBase.cockpit : {}),
-      path: nextFile.path,
-      version: nextFile.version,
-      etag: nextFile.etag,
-      hash: nextFile.hash,
-      lineCount: nextFile.lineCount,
-      wordCount: nextFile.wordCount,
-      ...(typeof input.baseVersion === 'number' ? { baseVersion: Math.floor(input.baseVersion) } : {}),
-      ...(typeof existing?.version === 'number' ? { previousVersion: existing.version } : {}),
-      ...(input.operation ? { operation: input.operation } : {}),
-      scopeMode: resolved.scope.mode,
-      scopeWorkingDir: resolved.scope.workingDir,
-      ...(resolved.scope.sessionKey ? { scopeSessionKey: resolved.scope.sessionKey } : {}),
-      ...(resolved.scope.projectPath ? { scopeProjectPath: resolved.scope.projectPath } : {}),
-      updatedAt: nextFile.updatedAt,
-    }),
-  });
-  try {
-    if (mergedMetadata) {
-      await writeMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath, mergedMetadata);
-    }
-  } catch (error) {
-    return {
-      ok: false,
-      status: 500,
-      error: `Failed to persist markdown metadata: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
   return {
     ok: true,
     created: !existing,
     previousVersion: existing?.version ?? 0,
-    file: {
-      ...nextFile,
-      ...(mergedMetadata ? { metadata: mergedMetadata } : {}),
-    },
+    file: nextFile,
   };
 }
 
@@ -764,13 +472,11 @@ export async function applyMarkdownUnifiedDiffPatch(
 export async function buildCockpitMarkdownWorkspaceTree(
   ctx: ControlPlaneContext,
   options?: {
-    sessionKey?: string | null;
     projectPath?: string | null;
   }
 ): Promise<{
   rootDir: string;
   tree: Array<Record<string, unknown>>;
-  suggestedFolders: string[];
   scope: MarkdownWorkspaceScope;
 }> {
   const path = await import('path');
@@ -864,19 +570,9 @@ export async function buildCockpitMarkdownWorkspaceTree(
   };
 
   const tree = await scanDir(rootDir, '', 0);
-  const folderSuggestions = new Set<string>(
-    projectScope ? [] : MARKDOWN_SUGGESTED_FOLDERS
-  );
-  for (const node of tree) {
-    if (node.type !== 'folder') continue;
-    if (typeof node.path === 'string' && node.path.trim()) {
-      folderSuggestions.add(node.path);
-    }
-  }
   return {
     rootDir,
     tree,
-    suggestedFolders: Array.from(folderSuggestions).slice(0, 12),
     scope: scopeRoot.scope,
   };
 }
@@ -934,7 +630,6 @@ export async function discoverProjectRootsFromDirectory(
 export async function buildCockpitFilesystemRoots(
   ctx: ControlPlaneContext,
   options?: {
-    sessionKey?: string | null;
     projectPath?: string | null;
   }
 ): Promise<{
@@ -943,20 +638,19 @@ export async function buildCockpitFilesystemRoots(
 }> {
   const path = await import('path');
   const cwdScope = await resolveMarkdownWorkspaceScope(ctx, {
-    sessionKey: options?.sessionKey ?? null,
     projectPath: options?.projectPath ?? null,
   });
   if ('error' in cwdScope) {
     throw new Error(cwdScope.error);
   }
   const cwd = path.resolve(cwdScope.workingDir);
-  const notesRoot = path.resolve(ctx.workingDir, MARKDOWN_WORKSPACE_DIR);
+  const scratchRoot = path.resolve(ctx.workingDir, MARKDOWN_WORKSPACE_DIR);
 
   const roots: CockpitFilesystemRootRecord[] = [{
-    id: `notes:${notesRoot}`,
-    kind: 'notes',
-    label: '.cockpit/markdown',
-    path: notesRoot,
+    id: `scratch:${scratchRoot}`,
+    kind: 'scratch',
+    label: '.cockpit/scratch',
+    path: scratchRoot,
     pinned: true,
     source: 'daemon',
   }];
@@ -1054,7 +748,6 @@ export async function handleGetCockpitMarkdownTree(
   res: ServerResponse,
   ctx: ControlPlaneContext,
   options?: {
-    sessionKey?: string | null;
     projectPath?: string | null;
   }
 ): Promise<void> {
@@ -1063,7 +756,6 @@ export async function handleGetCockpitMarkdownTree(
     sendJson(res, {
       rootDir: data.rootDir,
       tree: data.tree,
-      suggestedFolders: data.suggestedFolders,
       scope: data.scope,
     });
   } catch (error) {
@@ -1082,7 +774,6 @@ export async function handleGetCockpitMarkdownFile(
   ctx: ControlPlaneContext,
   rawPath: string | null,
   options?: {
-    sessionKey?: string | null;
     projectPath?: string | null;
   }
 ): Promise<void> {
@@ -1094,7 +785,6 @@ export async function handleGetCockpitMarkdownFile(
 
   const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, filePath, {
     requireMarkdownFile: true,
-    ...(options?.sessionKey ? { sessionKey: options.sessionKey } : {}),
     ...(options?.projectPath ? { projectPath: options.projectPath } : {}),
   });
   if ('error' in resolved) {
@@ -1104,19 +794,15 @@ export async function handleGetCockpitMarkdownFile(
 
   try {
     const fs = await import('fs/promises');
-    const [content, stat, metadata] = await Promise.all([
+    const [content, stat] = await Promise.all([
       fs.readFile(resolved.absolutePath, 'utf8'),
       fs.stat(resolved.absolutePath),
-      readMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath),
     ]);
     const record = await buildMarkdownWorkspaceFileRecord(
-      resolved.rootDir,
       resolved.relativePath,
       content,
       stat,
-      metadata,
     );
-    res.setHeader('ETag', record.etag);
     sendJson(res, {
       rootDir: resolved.rootDir,
       scope: resolved.scope,
@@ -1150,16 +836,12 @@ export async function handlePostCockpitMarkdownFile(
       ? body.markdown
       : '';
   const expectedVersion = asNumber(body.expectedVersion);
-  const metadata = sanitizeMarkdownMetadata(body.metadata);
 
   const result = await writeCockpitMarkdownWorkspaceFile(ctx, {
     path: filePath,
     content,
     ...scope,
     ...(typeof expectedVersion === 'number' ? { expectedVersion } : {}),
-    ...(metadata ? { metadata } : {}),
-    ...(asString(body.source) ? { source: asString(body.source) } : {}),
-    operation: 'write',
   });
   if (!result.ok) {
     sendJson(
@@ -1207,7 +889,6 @@ export async function handlePostCockpitMarkdownFolder(
   }
   const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, rawPath, {
     allowEmpty: false,
-    ...(scope.sessionKey ? { sessionKey: scope.sessionKey } : {}),
     ...(scope.projectPath ? { projectPath: scope.projectPath } : {}),
   });
   if ('error' in resolved) {
@@ -1250,7 +931,6 @@ export async function handlePostCockpitMarkdownDelete(
   const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, rawPath, {
     allowEmpty: false,
     ...(requestedType === 'file' ? { requireMarkdownFile: true } : {}),
-    ...(scope.sessionKey ? { sessionKey: scope.sessionKey } : {}),
     ...(scope.projectPath ? { projectPath: scope.projectPath } : {}),
   });
   if ('error' in resolved) {
@@ -1303,22 +983,10 @@ export async function handlePostCockpitMarkdownDelete(
   try {
     if (requestedType === 'file') {
       await fs.unlink(resolved.absolutePath);
-      const metadataPath = await resolveMarkdownMetadataPath(resolved.rootDir, resolved.relativePath);
-      await fs.unlink(metadataPath).catch(() => undefined);
     } else if (recursive) {
       await fs.rm(resolved.absolutePath, { recursive: true, force: false });
-      const metadataRoot = path.resolve(resolved.rootDir, MARKDOWN_METADATA_DIR);
-      const metadataDir = path.resolve(metadataRoot, resolved.relativePath);
-      if (metadataDir === metadataRoot || metadataDir.startsWith(`${metadataRoot}${path.sep}`)) {
-        await fs.rm(metadataDir, { recursive: true, force: true }).catch(() => undefined);
-      }
     } else {
       await fs.rmdir(resolved.absolutePath);
-      const metadataRoot = path.resolve(resolved.rootDir, MARKDOWN_METADATA_DIR);
-      const metadataDir = path.resolve(metadataRoot, resolved.relativePath);
-      if (metadataDir === metadataRoot || metadataDir.startsWith(`${metadataRoot}${path.sep}`)) {
-        await fs.rmdir(metadataDir).catch(() => undefined);
-      }
     }
     sendJson(res, {
       success: true,
@@ -1356,7 +1024,6 @@ export async function handlePostCockpitMarkdownImport(
 ): Promise<void> {
   const body = await readJsonBody(req);
   const sourceSessionKey = asString(body.sessionKey);
-  const destinationSessionKey = asString(body.scopeSessionKey) ?? asString(body.workspaceSessionKey);
   const destinationProjectPath = asString(body.projectPath) ?? asString(body.project_path);
   const sourceContent = typeof body.content === 'string'
     ? body.content
@@ -1376,6 +1043,7 @@ export async function handlePostCockpitMarkdownImport(
       );
       return;
     }
+    const { getSession } = await import('./sessions.js');
     const session = getSession(ctx, sourceSessionKey);
     if (!session) {
       sendJson(res, { success: false, error: `Session not found: ${sourceSessionKey}` }, 404);
@@ -1407,7 +1075,7 @@ export async function handlePostCockpitMarkdownImport(
 
   const path = await import('path');
   const destinationFolder = normalizeWorkspaceRelativePath(
-    asString(body.folder) ?? asString(body.directory) ?? 'packets',
+    asString(body.folder) ?? asString(body.directory) ?? '',
     { allowEmpty: true }
   );
   if (destinationFolder === null) {
@@ -1428,22 +1096,11 @@ export async function handlePostCockpitMarkdownImport(
   }
 
   const expectedVersion = asNumber(body.expectedVersion);
-  const metadata = sanitizeMarkdownMetadata(body.metadata);
-  const importMetadata = sanitizeMarkdownMetadata({
-    ...(metadata ?? {}),
-    ...(sourcePath ? { sourcePath } : {}),
-    ...(sourceSessionKey ? { sourceSessionKey } : {}),
-    importAt: new Date().toISOString(),
-  });
   const writeResult = await writeCockpitMarkdownWorkspaceFile(ctx, {
     path: destinationPath,
     content: markdownContent,
-    ...(destinationSessionKey ? { sessionKey: destinationSessionKey } : {}),
     ...(destinationProjectPath ? { projectPath: destinationProjectPath } : {}),
     ...(typeof expectedVersion === 'number' ? { expectedVersion } : {}),
-    ...(importMetadata ? { metadata: importMetadata } : {}),
-    ...(asString(body.source) ? { source: asString(body.source) } : { source: 'import' }),
-    operation: 'import',
   });
 
   if (!writeResult.ok) {
@@ -1510,7 +1167,6 @@ export async function handlePostCockpitMarkdownPatch(
 
   const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, filePath, {
     requireMarkdownFile: true,
-    ...(scope.sessionKey ? { sessionKey: scope.sessionKey } : {}),
     ...(scope.projectPath ? { projectPath: scope.projectPath } : {}),
   });
   if ('error' in resolved) {
@@ -1557,10 +1213,6 @@ export async function handlePostCockpitMarkdownPatch(
   if (typeof fullContent === 'string') {
     nextContent = fullContent;
     mode = 'content';
-    changedLines = Math.max(
-      buildMarkdownLineCount(currentContent),
-      buildMarkdownLineCount(nextContent),
-    );
   } else if (patch) {
     const result = await applyMarkdownUnifiedDiffPatch(resolved.relativePath, currentContent, patch);
     if (!result.ok) {
@@ -1586,22 +1238,11 @@ export async function handlePostCockpitMarkdownPatch(
     return;
   }
 
-  const metadata = sanitizeMarkdownMetadata(body.metadata);
   const writeResult = await writeCockpitMarkdownWorkspaceFile(ctx, {
     path: resolved.relativePath,
     content: nextContent,
     ...scope,
     expectedVersion,
-    ...(metadata ? {
-      metadata: sanitizeMarkdownMetadata({
-        ...metadata,
-        patchMode: mode,
-        changedLines,
-      }) ?? metadata,
-    } : {}),
-    ...(asString(body.source) ? { source: asString(body.source) } : { source: 'patch' }),
-    operation: 'patch',
-    baseVersion: expectedVersion,
   });
   if (!writeResult.ok) {
     sendJson(res, {
@@ -1630,9 +1271,6 @@ export async function handlePostCockpitMarkdownPatch(
 export async function buildMarkdownMessageContext(
   ctx: ControlPlaneContext,
   value: unknown,
-  options?: {
-    defaultSessionKey?: string;
-  }
 ): Promise<
   | {
       ok: true;
@@ -1644,36 +1282,8 @@ export async function buildMarkdownMessageContext(
   if (!isRecord(value)) return { ok: true };
 
   const rawPath = asString(value.path) ?? asString(value.markdownPath) ?? asString(value.filePath);
-  const metadataRecord = isRecord(value.metadata) ? value.metadata : {};
-  const draftIdFromClient = asString(value.draftId)
-    ?? asString(value.clientDraftId)
-    ?? asString(metadataRecord.draftId)
-    ?? asString(metadataRecord.clientDraftId);
-  const explicitScopeSessionKey = asString(value.scopeSessionKey)
-    ?? asString(value.workspaceSessionKey)
-    ?? asString(metadataRecord.scopeSessionKey)
-    ?? asString(metadataRecord.workspaceSessionKey);
   const scopeProjectPath = asString(value.projectPath)
-    ?? asString(value.workspaceProjectPath)
-    ?? asString(metadataRecord.scopeProjectPath)
-    ?? asString(metadataRecord.workspaceProjectPath);
-  const workspaceScopeRaw = asString(value.workspaceScope)
-    ?? asString(value.scopeMode)
-    ?? asString(metadataRecord.workspaceScope)
-    ?? asString(metadataRecord.scopeMode);
-  const workspaceScope = workspaceScopeRaw === 'global' || workspaceScopeRaw === 'session' || workspaceScopeRaw === 'project'
-    ? workspaceScopeRaw
-    : undefined;
-  const scopeSessionKey = explicitScopeSessionKey
-    ?? (
-      scopeProjectPath
-        ? undefined
-        : (
-          workspaceScope === 'global' || workspaceScope === 'project'
-            ? undefined
-            : options?.defaultSessionKey
-        )
-    );
+    ?? asString(value.workspaceProjectPath);
   let content = typeof value.content === 'string'
     ? value.content
     : typeof value.markdown === 'string'
@@ -1684,90 +1294,60 @@ export async function buildMarkdownMessageContext(
   let resolvedPath: string | undefined;
   let resolvedVersion: number | undefined = asNumber(value.version);
   let resolvedUpdatedAt: string | undefined = asString(value.updatedAt);
-  let resolvedMetadata: Record<string, unknown> | undefined;
-  let resolvedScopeMode: MarkdownWorkspaceScopeMode | undefined = workspaceScope;
-  let resolvedScopeSessionKey: string | undefined;
-  let resolvedScopeProjectPath: string | undefined;
   let resolvedRootDir: string | undefined;
   let resolvedAbsolutePath: string | undefined;
-  let resolvedDraftId: string | undefined = sanitizeMarkdownDraftId(draftIdFromClient) ?? undefined;
 
+  // Auto-save unsaved content to scratch
   if (!rawPath && typeof content === 'string') {
-    const draftSessionKey = scopeSessionKey
-      ?? (
-        !scopeProjectPath
-          ? options?.defaultSessionKey
-          : undefined
-      );
-    const draftResult = await materializeMarkdownDraftFromContent(ctx, {
+    const filename = `untitled-${Date.now()}.md`;
+    const saveResult = await writeCockpitMarkdownWorkspaceFile(ctx, {
+      path: filename,
       content,
-      ...(draftSessionKey ? { sessionKey: draftSessionKey } : {}),
       ...(scopeProjectPath ? { projectPath: scopeProjectPath } : {}),
-      ...(resolvedDraftId ? { draftId: resolvedDraftId } : {}),
     });
-    if (!draftResult.ok) {
-      return { ok: false, status: draftResult.status, error: draftResult.error };
+    if (!saveResult.ok) {
+      return { ok: false, status: saveResult.status, error: saveResult.error };
     }
-    resolvedPath = draftResult.relativePath;
-    resolvedScopeMode = draftResult.scope.mode;
-    resolvedScopeSessionKey = draftResult.scope.sessionKey;
-    resolvedScopeProjectPath = draftResult.scope.projectPath;
-    resolvedRootDir = draftResult.rootDir;
-    resolvedAbsolutePath = draftResult.absolutePath;
-    resolvedVersion = resolvedVersion ?? draftResult.version;
-    resolvedUpdatedAt = resolvedUpdatedAt ?? draftResult.updatedAt;
-    resolvedMetadata = sanitizeMarkdownMetadata({
-      ...(resolvedMetadata ?? {}),
-      source: 'draft',
-      draftId: draftResult.draftId,
-      draftPath: draftResult.relativePath,
-      draftAbsolutePath: draftResult.absolutePath,
-      draftScopeMode: draftResult.scope.mode,
-      ...(draftResult.scope.projectPath ? { draftScopeProjectPath: draftResult.scope.projectPath } : {}),
-      hash: draftResult.hash,
+    const scopeRoot = await getCockpitMarkdownWorkspaceRootForScope(ctx, {
+      ...(scopeProjectPath ? { projectPath: scopeProjectPath } : {}),
     });
-    resolvedDraftId = draftResult.draftId;
+    if (!('error' in scopeRoot)) {
+      const path = await import('path');
+      resolvedRootDir = scopeRoot.root;
+      resolvedAbsolutePath = path.resolve(scopeRoot.root, filename);
+    }
+    resolvedPath = filename;
+    resolvedVersion = saveResult.file.version;
+    resolvedUpdatedAt = saveResult.file.updatedAt;
   }
 
   if (rawPath) {
     const resolved = await resolveCockpitMarkdownWorkspacePath(ctx, rawPath, {
       requireMarkdownFile: true,
-      ...(scopeSessionKey ? { sessionKey: scopeSessionKey } : {}),
       ...(scopeProjectPath ? { projectPath: scopeProjectPath } : {}),
     });
     if ('error' in resolved) {
       return { ok: false, status: resolved.status ?? 400, error: resolved.error };
     }
     resolvedPath = resolved.relativePath;
-    resolvedScopeMode = resolved.scope.mode;
-    resolvedScopeSessionKey = resolved.scope.sessionKey;
-    resolvedScopeProjectPath = resolved.scope.projectPath;
     resolvedRootDir = resolved.rootDir;
     resolvedAbsolutePath = resolved.absolutePath;
     try {
       const fs = await import('fs/promises');
-      const [stat, persistedContent, persistedMetadata] = await Promise.all([
+      const [stat, persistedContent] = await Promise.all([
         fs.stat(resolved.absolutePath),
         content === undefined ? fs.readFile(resolved.absolutePath, 'utf8') : Promise.resolve(undefined),
-        readMarkdownWorkspaceMetadata(resolved.rootDir, resolved.relativePath),
       ]);
       if (content === undefined && typeof persistedContent === 'string') {
         content = persistedContent;
       }
       resolvedVersion = resolvedVersion ?? buildVersionFromMtimeMs(stat.mtimeMs);
       resolvedUpdatedAt = resolvedUpdatedAt ?? stat.mtime.toISOString();
-      resolvedMetadata = persistedMetadata;
-      if (!resolvedDraftId) {
-        resolvedDraftId = sanitizeMarkdownDraftId(
-          asString(persistedMetadata?.draftId) ?? asString(persistedMetadata?.clientDraftId)
-        ) ?? undefined;
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (typeof content === 'string') {
         resolvedVersion = resolvedVersion ?? 0;
         resolvedUpdatedAt = resolvedUpdatedAt ?? new Date().toISOString();
-        resolvedMetadata = resolvedMetadata ?? undefined;
       } else if (message.toLowerCase().includes('enoent')) {
         return { ok: false, status: 404, error: `Markdown file not found: ${resolved.relativePath}` };
       } else {
@@ -1781,11 +1361,6 @@ export async function buildMarkdownMessageContext(
   const selectionStart = asNumber(value.selectionStart ?? value.cursorStart);
   const selectionEnd = asNumber(value.selectionEnd ?? value.cursorEnd);
   const isDirty = asBoolean(value.isDirty) === true;
-  const clientMetadata = sanitizeMarkdownMetadata(value.metadata);
-  const mergedMetadata = sanitizeMarkdownMetadata({
-    ...(resolvedMetadata ?? {}),
-    ...(clientMetadata ?? {}),
-  });
 
   const originalBytes = Buffer.byteLength(content, 'utf8');
   const fullContentHash = await buildMarkdownContentHash(content);
@@ -1797,86 +1372,31 @@ export async function buildMarkdownMessageContext(
       .toString('utf8');
     truncated = true;
   }
-  const payloadHash = truncated ? await buildMarkdownContentHash(content) : fullContentHash;
-  const workspaceRelativePath = resolvedPath ?? rawPath ?? null;
-  const isDraftContext = typeof workspaceRelativePath === 'string'
-    && (
-      workspaceRelativePath.startsWith(`${MARKDOWN_DRAFTS_DIR}/`)
-      || workspaceRelativePath.startsWith(`${PROJECT_DRAFTS_DIR}/`)
-    );
-  const workspacePath = workspaceRelativePath
-    ? (
-      resolvedScopeMode === 'project'
-        ? workspaceRelativePath
-        : `${MARKDOWN_WORKSPACE_DIR}/${workspaceRelativePath}`
-    )
-    : null;
-  const contextMetadata = sanitizeMarkdownMetadata({
+
+  const contextMetadata: Record<string, unknown> = {
     source: 'markdown-editor',
-    path: workspaceRelativePath,
-    workspacePath,
-    workspaceRoot: resolvedRootDir ?? null,
-    absolutePath: resolvedAbsolutePath ?? null,
+    path: resolvedPath ?? rawPath ?? null,
     writeTargetPath: resolvedAbsolutePath ?? null,
-    scopeMode: resolvedScopeMode ?? null,
-    scopeSessionKey: scopeSessionKey ?? resolvedScopeSessionKey ?? null,
-    scopeProjectPath: scopeProjectPath ?? resolvedScopeProjectPath ?? null,
-    isDraft: isDraftContext,
-    draftId: resolvedDraftId ?? null,
     version: resolvedVersion ?? null,
     updatedAt: resolvedUpdatedAt ?? null,
     isDirty,
-    selectionStart: typeof selectionStart === 'number' ? Math.max(0, Math.floor(selectionStart)) : null,
-    selectionEnd: typeof selectionEnd === 'number' ? Math.max(0, Math.floor(selectionEnd)) : null,
-    contentBytes: Buffer.byteLength(content, 'utf8'),
-    originalBytes,
     truncated,
     hash: fullContentHash,
-    payloadHash,
-  }) ?? {
-    source: 'markdown-editor',
-    path: workspaceRelativePath,
-    workspacePath,
-    writeTargetPath: resolvedAbsolutePath ?? null,
-    scopeMode: resolvedScopeMode ?? null,
-    isDraft: isDraftContext,
-    draftId: resolvedDraftId ?? null,
-    hash: fullContentHash,
-    payloadHash,
-    truncated,
   };
 
-  let metadataJson = mergedMetadata ? JSON.stringify(mergedMetadata) : '{}';
-  if (Buffer.byteLength(metadataJson, 'utf8') > 8_000) {
-    metadataJson = `${metadataJson.slice(0, 8_000)}...`;
-  }
   const contextText = [
     'Control-plane active markdown context:',
-    `path: ${contextMetadata.path ?? 'unknown'}`,
-    `workspacePath: ${contextMetadata.workspacePath ?? 'unknown'}`,
-    `workspaceRoot: ${contextMetadata.workspaceRoot ?? 'unknown'}`,
-    `absolutePath: ${contextMetadata.absolutePath ?? 'unknown'}`,
-    `scopeMode: ${contextMetadata.scopeMode ?? 'unknown'}`,
-    `isDraft: ${contextMetadata.isDraft === true ? 'true' : 'false'}`,
-    `draftId: ${asString(contextMetadata.draftId) ?? 'none'}`,
-    `version: ${contextMetadata.version ?? 'unknown'}`,
-    `updatedAt: ${contextMetadata.updatedAt ?? 'unknown'}`,
-    `dirty: ${contextMetadata.isDirty === true ? 'true' : 'false'}`,
-    `selectionStart: ${contextMetadata.selectionStart ?? 'none'}`,
-    `selectionEnd: ${contextMetadata.selectionEnd ?? 'none'}`,
-    `hash: ${contextMetadata.hash ?? 'unknown'}`,
-    `truncated: ${contextMetadata.truncated === true ? 'true' : 'false'}`,
-    'metadata:',
-    metadataJson,
+    `path: ${resolvedPath ?? rawPath ?? 'unknown'}`,
+    `writeTargetPath: ${resolvedAbsolutePath ?? 'unknown'}`,
+    `version: ${resolvedVersion ?? 'unknown'}`,
+    `dirty: ${isDirty ? 'true' : 'false'}`,
+    `truncated: ${truncated ? 'true' : 'false'}`,
     'markdown:',
     '```markdown',
     content,
     '```',
     'Treat this markdown snapshot as authoritative for the current user request.',
-    'If the user requests document edits, persist changes to writeTargetPath/absolutePath above (not similarly named files elsewhere).',
-    ...(isDraftContext
-      ? ['This document is a draft artifact. Keep edits confined to writeTargetPath until the user promotes/saves it to a project path.']
-      : []),
+    'If the user requests document edits, persist changes to writeTargetPath above.',
   ].join('\n');
 
   return {

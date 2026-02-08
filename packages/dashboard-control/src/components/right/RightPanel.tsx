@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { useCockpit, useCockpitStore, type FocusTarget } from '@/hooks/use-cockpit-store';
+import { useCockpit, useCockpitStore, type FocusTab, type FocusTarget } from '@/hooks/use-cockpit-store';
 import { SessionCard } from './SessionCard';
 import { CommitList } from './CommitList';
 import { PRList } from './PRList';
@@ -8,11 +8,15 @@ function useStableSelect(type: FocusTarget['type']) {
   const store = useCockpitStore();
   const cacheRef = useRef(new Map<string, () => void>());
 
-  return useCallback((id: string) => {
-    let fn = cacheRef.current.get(id);
+  return useCallback((id: string, focusTab?: FocusTab) => {
+    const cacheKey = focusTab ? `${id}:${focusTab}` : id;
+    let fn = cacheRef.current.get(cacheKey);
     if (!fn) {
-      fn = () => store.set({ focusTarget: { type, id } });
-      cacheRef.current.set(id, fn);
+      fn = () => store.set({
+        focusTarget: { type, id },
+        ...(focusTab ? { focusTab } : {}),
+      });
+      cacheRef.current.set(cacheKey, fn);
     }
     return fn;
   }, [store, type]);
@@ -87,7 +91,7 @@ export function RightPanel() {
                   row={row}
                   selected={focusTarget?.type === 'session' && focusTarget.id === row.sessionKey}
                   highlighted={highlightedSessionIdx === runningOffset + i}
-                  onSelect={getSessionSelect(row.sessionKey)}
+                  onSelect={getSessionSelect(row.sessionKey, row.blocking.unresolvedEscalationsCount > 0 ? 'escalations' : undefined)}
                 />
               </div>
             ))}
@@ -106,7 +110,7 @@ export function RightPanel() {
                   row={row}
                   selected={focusTarget?.type === 'session' && focusTarget.id === row.sessionKey}
                   highlighted={highlightedSessionIdx === readyOffset + i}
-                  onSelect={getSessionSelect(row.sessionKey)}
+                  onSelect={getSessionSelect(row.sessionKey, row.blocking.unresolvedEscalationsCount > 0 ? 'escalations' : undefined)}
                 />
               </div>
             ))}
@@ -125,7 +129,7 @@ export function RightPanel() {
                   row={row}
                   selected={focusTarget?.type === 'session' && focusTarget.id === row.sessionKey}
                   highlighted={highlightedSessionIdx === doneOffset + i}
-                  onSelect={getSessionSelect(row.sessionKey)}
+                  onSelect={getSessionSelect(row.sessionKey, row.blocking.unresolvedEscalationsCount > 0 ? 'escalations' : undefined)}
                 />
               </div>
             ))}
@@ -148,7 +152,7 @@ export function RightPanel() {
                 }`}
               >
                 <button
-                  onClick={getEscalationSelect(row.escalationId)}
+                  onClick={getEscalationSelect(row.escalationId, 'escalations')}
                   className="w-full text-left hover:bg-[var(--bg-hover)] rounded px-1 py-0.5"
                 >
                   <div className="flex items-center gap-2">

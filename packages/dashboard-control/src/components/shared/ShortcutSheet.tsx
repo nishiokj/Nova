@@ -22,7 +22,8 @@ const SECTIONS = [
   {
     title: 'Session Tabs',
     shortcuts: [
-      { keys: 'X', desc: 'Packet tab' },
+      { keys: 'X', desc: 'Live tab' },
+      { keys: 'O', desc: 'Escalations tab (async)' },
       { keys: 'D', desc: 'Diff tab' },
       { keys: 'T', desc: 'Tests tab' },
       { keys: 'L', desc: 'Trace tab' },

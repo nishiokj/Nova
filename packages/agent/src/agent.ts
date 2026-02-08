@@ -294,7 +294,7 @@ export class Agent {
     localReadFiles: Set<string>,
     workItem: WorkItem
   ): Promise<void> {
-    if (!localContext.isNearFull()) return;
+    if (!localContext.isNearFull(0.5)) return;
 
     localContext.compact({
       deduplicateByPath: true,

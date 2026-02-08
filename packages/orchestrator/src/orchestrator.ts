@@ -90,9 +90,9 @@ export interface OrchestratorConfig {
   maxDurationMs: number;
   /** Max time for internal hook handler execution */
   hookTimeoutMs: number;
-  /** Percent context usage that triggers compaction (default 0.70) */
+  /** Percent context usage that triggers compaction (default 0.50) */
   compactTriggerPercent: number;
-  /** Percent context usage to reset compaction hysteresis (default 0.70) */
+  /** Percent context usage to reset compaction hysteresis (default 0.45) */
   compactResetPercent: number;
   /** Max file content items to keep during compaction */
   compactMaxFileCount: number;
@@ -169,8 +169,8 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   maxToolCalls: 250,
   maxDurationMs: 300_000, // 5 minutes
   hookTimeoutMs: 5000,
-  compactTriggerPercent: 0.70,
-  compactResetPercent: 0.7,
+  compactTriggerPercent: 0.50,
+  compactResetPercent: 0.45,
   compactMaxFileCount: 20,
   compactTruncateTo: 5000,
   minWatcherIterationGap: 5,

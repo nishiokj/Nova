@@ -773,7 +773,7 @@ export async function handleGetCockpitBrowserState(
     }
   }
 
-  const filesystem = await buildCockpitFilesystemRoots(ctx, { sessionKey }).catch(() => null);
+  const filesystem = await buildCockpitFilesystemRoots(ctx).catch(() => null);
 
   sendJson(res, {
     success: true,

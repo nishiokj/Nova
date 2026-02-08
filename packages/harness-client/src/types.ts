@@ -80,6 +80,8 @@ export type BridgeCommandType =
   | 'control_plane_permissions_update'
   | 'control_plane_resolve_escalation'
   | 'control_plane_memory_info'
+  | 'control_plane_model_get'
+  | 'control_plane_model_set'
   | 'shutdown';
 
 export interface InitCommandData extends CommandDataBase {
@@ -272,6 +274,18 @@ export interface ControlPlaneResolveEscalationCommandData extends CommandDataBas
   };
 }
 
+export interface ControlPlaneModelGetCommandData extends CommandDataBase {
+  session_key: string;
+}
+
+export interface ControlPlaneModelSetCommandData extends CommandDataBase {
+  session_key: string;
+  agent_type?: string;
+  provider: string;
+  model: string;
+  reasoning?: string;
+}
+
 export interface BridgeCommandDataMap {
   init: InitCommandData;
   send_text: SendTextCommandData;
@@ -338,6 +352,8 @@ export interface BridgeCommandDataMap {
   control_plane_permissions_update: ControlPlanePermissionsUpdateCommandData;
   control_plane_resolve_escalation: ControlPlaneResolveEscalationCommandData;
   control_plane_memory_info: NoData;
+  control_plane_model_get: ControlPlaneModelGetCommandData;
+  control_plane_model_set: ControlPlaneModelSetCommandData;
   shutdown: NoData;
 }
 

@@ -6,18 +6,24 @@ import type { SubgraphResponse } from '@/lib/api';
 const POLL_INTERVAL = 5000;
 const MAX_FILES = 120;
 const MAX_FILES_PER_SYSTEM = 18;
-const MIN_CANVAS_WIDTH = 840;
-const MIN_CANVAS_HEIGHT = 300;
+const MIN_CANVAS_WIDTH = 320;
+const MIN_CANVAS_HEIGHT = 220;
 
-const SYSTEM_NODE_WIDTH = 220;
-const SYSTEM_NODE_HEIGHT = 56;
-const FILE_NODE_WIDTH = 220;
-const FILE_NODE_HEIGHT = 34;
-const FILE_COL_GAP = 18;
-const FILE_ROW_GAP = 10;
-const SYSTEM_BLOCK_GAP = 20;
-const PADDING_X = 20;
-const PADDING_Y = 18;
+interface GraphSizing {
+  compact: boolean;
+  systemNodeWidth: number;
+  systemNodeHeight: number;
+  preferredFileNodeWidth: number;
+  minFileNodeWidth: number;
+  fileNodeHeight: number;
+  fileColGap: number;
+  fileRowGap: number;
+  systemBlockGap: number;
+  paddingX: number;
+  paddingY: number;
+  connectorGap: number;
+  maxColumns: number;
+}
 
 interface FocusFile {
   id: string;
@@ -65,6 +71,8 @@ interface FocusLayout {
   width: number;
   height: number;
   blocks: LayoutBlock[];
+  sizing: GraphSizing;
+  fileNodeWidth: number;
 }
 
 function graphSignature(graph: SubgraphResponse): string {
@@ -116,6 +124,42 @@ function truncate(value: string, max: number): string {
   if (value.length <= max) return value;
   if (max <= 3) return value.slice(0, max);
   return `${value.slice(0, max - 3)}...`;
+}
+
+function sizingForWidth(width: number): GraphSizing {
+  const compact = width < 960;
+  if (compact) {
+    return {
+      compact: true,
+      systemNodeWidth: 140,
+      systemNodeHeight: 40,
+      preferredFileNodeWidth: 136,
+      minFileNodeWidth: 112,
+      fileNodeHeight: 26,
+      fileColGap: 10,
+      fileRowGap: 8,
+      systemBlockGap: 12,
+      paddingX: 10,
+      paddingY: 10,
+      connectorGap: 20,
+      maxColumns: 2,
+    };
+  }
+  return {
+    compact: false,
+    systemNodeWidth: 200,
+    systemNodeHeight: 54,
+    preferredFileNodeWidth: 200,
+    minFileNodeWidth: 140,
+    fileNodeHeight: 32,
+    fileColGap: 16,
+    fileRowGap: 10,
+    systemBlockGap: 18,
+    paddingX: 16,
+    paddingY: 14,
+    connectorGap: 46,
+    maxColumns: 4,
+  };
 }
 
 function buildFocusModel(data: SubgraphResponse): FocusModel {
@@ -200,55 +244,67 @@ function buildFocusModel(data: SubgraphResponse): FocusModel {
 }
 
 function buildLayout(model: FocusModel, width: number, minHeight: number): FocusLayout {
+  const sizing = sizingForWidth(width);
+
   if (model.systems.length === 0) {
-    return { width, height: minHeight, blocks: [] };
+    return {
+      width,
+      height: minHeight,
+      blocks: [],
+      sizing,
+      fileNodeWidth: sizing.preferredFileNodeWidth,
+    };
   }
 
-  const fileAreaX = PADDING_X + SYSTEM_NODE_WIDTH + 84;
-  const availableFileWidth = Math.max(1, width - fileAreaX - PADDING_X);
-  const fileColumns = Math.max(
-    1,
-    Math.min(4, Math.floor((availableFileWidth + FILE_COL_GAP) / (FILE_NODE_WIDTH + FILE_COL_GAP)))
+  const fileAreaX = sizing.paddingX + sizing.systemNodeWidth + sizing.connectorGap;
+  const availableFileWidth = Math.max(1, width - fileAreaX - sizing.paddingX);
+  const fileColumns = Math.max(1, Math.min(
+    sizing.maxColumns,
+    Math.floor((availableFileWidth + sizing.fileColGap) / (sizing.preferredFileNodeWidth + sizing.fileColGap)),
+  ));
+  const fileNodeWidth = Math.max(
+    sizing.minFileNodeWidth,
+    Math.floor((availableFileWidth - (fileColumns - 1) * sizing.fileColGap) / fileColumns),
   );
 
   const blocks: LayoutBlock[] = [];
-  let cursorY = PADDING_Y;
+  let cursorY = sizing.paddingY;
 
   for (const system of model.systems) {
     const fileRows = Math.max(1, Math.ceil(system.files.length / fileColumns));
-    const fileGridHeight = fileRows * FILE_NODE_HEIGHT + Math.max(0, fileRows - 1) * FILE_ROW_GAP;
-    const footerHeight = system.hiddenFiles > 0 ? 18 : 0;
-    const blockHeight = Math.max(SYSTEM_NODE_HEIGHT + 8, fileGridHeight + 20 + footerHeight);
+    const fileGridHeight = fileRows * sizing.fileNodeHeight + Math.max(0, fileRows - 1) * sizing.fileRowGap;
+    const footerHeight = system.hiddenFiles > 0 ? (sizing.compact ? 14 : 18) : 0;
+    const blockHeight = Math.max(sizing.systemNodeHeight + 4, fileGridHeight + 12 + footerHeight);
 
     const files: LayoutFile[] = [];
     for (let idx = 0; idx < system.files.length; idx += 1) {
       const row = Math.floor(idx / fileColumns);
       const col = idx % fileColumns;
-      const x = fileAreaX + col * (FILE_NODE_WIDTH + FILE_COL_GAP);
-      const y = cursorY + 10 + row * (FILE_NODE_HEIGHT + FILE_ROW_GAP);
+      const x = fileAreaX + col * (fileNodeWidth + sizing.fileColGap);
+      const y = cursorY + 6 + row * (sizing.fileNodeHeight + sizing.fileRowGap);
       files.push({ file: system.files[idx], x, y });
     }
 
-    const systemY = cursorY + (blockHeight - SYSTEM_NODE_HEIGHT) / 2;
+    const systemY = cursorY + (blockHeight - sizing.systemNodeHeight) / 2;
     blocks.push({
       system,
-      x: PADDING_X,
+      x: sizing.paddingX,
       y: cursorY,
-      width: width - PADDING_X * 2,
+      width: width - sizing.paddingX * 2,
       height: blockHeight,
-      systemX: PADDING_X,
+      systemX: sizing.paddingX,
       systemY,
       files,
     });
 
-    cursorY += blockHeight + SYSTEM_BLOCK_GAP;
+    cursorY += blockHeight + sizing.systemBlockGap;
   }
 
-  const height = Math.max(minHeight, cursorY + PADDING_Y);
-  return { width, height, blocks };
+  const height = Math.max(minHeight, cursorY + sizing.paddingY);
+  return { width, height, blocks, sizing, fileNodeWidth };
 }
 
-export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
+export function EntityGraphView({ sessionKey, workItemId }: { sessionKey?: string; workItemId?: string }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const lastSignatureRef = useRef<string | null>(null);
   const [data, setData] = useState<SubgraphResponse | null>(null);
@@ -260,12 +316,16 @@ export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
       setData(null);
       return;
     }
-    const result = await getCockpitEntityGraph(sessionKey);
-    const nextSignature = `${sessionKey}::${graphSignature(result)}`;
-    if (lastSignatureRef.current === nextSignature) return;
-    lastSignatureRef.current = nextSignature;
-    setData(result);
-  }, [sessionKey]);
+    const graphResult = await getCockpitEntityGraph(sessionKey, {
+      ...(workItemId ? { workItemId } : {}),
+    });
+
+    const nextSignature = `${sessionKey}::${workItemId ?? ''}::${graphSignature(graphResult)}`;
+    if (lastSignatureRef.current !== nextSignature) {
+      lastSignatureRef.current = nextSignature;
+      setData(graphResult);
+    }
+  }, [sessionKey, workItemId]);
 
   usePolling(fetchGraph, POLL_INTERVAL);
 
@@ -316,27 +376,14 @@ export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
 
   return (
     <div className="relative flex flex-col h-full w-full min-h-0">
-      <div className="shrink-0 px-2 py-1 text-[11px] text-[var(--text-muted)] border-b border-[var(--border-subtle)]">
-        Focus Map
-        {' · '}
-        {model.systems.length} systems
-        {' · '}
-        {model.totalEdited} edited
-        {' · '}
-        {model.totalRead} read
-        {model.totalFiles > model.totalVisibleFiles && (
-          <>
-            {' · '}
-            showing {model.totalVisibleFiles}/{model.totalFiles} files
-          </>
-        )}
-      </div>
-
       <div ref={viewportRef} className="flex-1 min-h-0 relative overflow-auto">
         <svg width={layout.width} height={layout.height} className="block">
           {layout.blocks.map((block) => {
-            const systemCenterY = block.systemY + SYSTEM_NODE_HEIGHT / 2;
-            const systemRightX = block.systemX + SYSTEM_NODE_WIDTH;
+            const systemCenterY = block.systemY + layout.sizing.systemNodeHeight / 2;
+            const systemRightX = block.systemX + layout.sizing.systemNodeWidth;
+            const systemLabelChars = Math.max(14, Math.floor((layout.sizing.systemNodeWidth - 20) / 6));
+            const fileLabelChars = Math.max(11, Math.floor((layout.fileNodeWidth - 14) / 6));
+            const filePathChars = Math.max(13, Math.floor((layout.fileNodeWidth - 14) / 5.5));
             return (
               <g key={block.system.id}>
                 <rect
@@ -354,8 +401,8 @@ export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
                 <rect
                   x={block.systemX}
                   y={block.systemY}
-                  width={SYSTEM_NODE_WIDTH}
-                  height={SYSTEM_NODE_HEIGHT}
+                  width={layout.sizing.systemNodeWidth}
+                  height={layout.sizing.systemNodeHeight}
                   rx={8}
                   fill={block.system.editedCount > 0 ? 'var(--accent-cyan)' : 'var(--bg-elevated)'}
                   fillOpacity={block.system.editedCount > 0 ? 0.18 : 0.8}
@@ -364,18 +411,18 @@ export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
                 />
                 <text
                   x={block.systemX + 10}
-                  y={block.systemY + 21}
+                  y={block.systemY + (layout.sizing.compact ? 15 : 19)}
                   fill="var(--text-primary)"
-                  fontSize="12"
+                  fontSize={layout.sizing.compact ? 11 : 12}
                   fontWeight="600"
                 >
-                  {truncate(block.system.label, 26)}
+                  {truncate(block.system.label, systemLabelChars)}
                 </text>
                 <text
                   x={block.systemX + 10}
-                  y={block.systemY + 38}
+                  y={block.systemY + (layout.sizing.compact ? 29 : 35)}
                   fill="var(--text-secondary)"
-                  fontSize="10"
+                  fontSize={layout.sizing.compact ? 9 : 10}
                 >
                   {block.system.editedCount} edited, {block.system.readCount} read
                 </text>
@@ -386,7 +433,7 @@ export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
                       x1={systemRightX}
                       y1={systemCenterY}
                       x2={x}
-                      y2={y + FILE_NODE_HEIGHT / 2}
+                      y2={y + layout.sizing.fileNodeHeight / 2}
                       stroke={file.edited ? 'var(--running)' : 'var(--border-default)'}
                       strokeOpacity={file.edited ? 0.55 : 0.35}
                       strokeWidth={file.edited ? 1.2 : 1}
@@ -394,8 +441,8 @@ export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
                     <rect
                       x={x}
                       y={y}
-                      width={FILE_NODE_WIDTH}
-                      height={FILE_NODE_HEIGHT}
+                      width={layout.fileNodeWidth}
+                      height={layout.sizing.fileNodeHeight}
                       rx={6}
                       fill={file.edited ? 'var(--running)' : 'var(--bg-elevated)'}
                       fillOpacity={file.edited ? 0.14 : 0.85}
@@ -406,30 +453,30 @@ export function EntityGraphView({ sessionKey }: { sessionKey?: string }) {
                     </rect>
                     <text
                       x={x + 8}
-                      y={y + 14}
+                      y={y + (layout.sizing.compact ? 11 : 14)}
                       fill={file.edited ? 'var(--text-primary)' : 'var(--text-secondary)'}
-                      fontSize="10"
+                      fontSize={layout.sizing.compact ? 9 : 10}
                       fontWeight={file.edited ? '600' : '500'}
                     >
-                      {truncate(file.label, 30)}
+                      {truncate(file.label, fileLabelChars)}
                     </text>
                     <text
                       x={x + 8}
-                      y={y + 26}
+                      y={y + (layout.sizing.compact ? 21 : 25)}
                       fill="var(--text-muted)"
-                      fontSize="9"
+                      fontSize={layout.sizing.compact ? 8 : 9}
                     >
-                      {truncate(dirnameOf(file.filepath), 34)}
+                      {truncate(dirnameOf(file.filepath), filePathChars)}
                     </text>
                   </g>
                 ))}
 
                 {block.system.hiddenFiles > 0 && (
                   <text
-                    x={block.systemX + SYSTEM_NODE_WIDTH + 88}
+                    x={block.systemX + layout.sizing.systemNodeWidth + (layout.sizing.compact ? 26 : 56)}
                     y={block.y + block.height - 6}
                     fill="var(--text-muted)"
-                    fontSize="10"
+                    fontSize={layout.sizing.compact ? 9 : 10}
                   >
                     +{block.system.hiddenFiles} more files
                   </text>

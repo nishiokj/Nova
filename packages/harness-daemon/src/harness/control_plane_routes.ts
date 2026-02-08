@@ -80,6 +80,10 @@ import {
   handleGetCockpitTemplates,
   handlePostCockpitSessionCreate,
   handleGetCockpitEntityGraph,
+  handleGetCockpitArchitectureOverview,
+  handleGetCockpitArchitectureAlerts,
+  handleGetCockpitSessionModel,
+  handlePostCockpitSessionModel,
 } from './routes/cockpit.js';
 
 // Re-export helpers needed by other modules
@@ -340,9 +344,8 @@ export function handleControlPlaneRequest(
 
   // GET /control-plane/cockpit/filesystem
   if (pathname === '/control-plane/cockpit/filesystem' && req.method === 'GET') {
-    const sessionKey = query.get('sessionKey');
     const projectPath = query.get('projectPath');
-    void handleGetCockpitFilesystem(res, ctx, sessionKey, projectPath);
+    void handleGetCockpitFilesystem(res, ctx, projectPath);
     return true;
   }
 
@@ -367,18 +370,16 @@ export function handleControlPlaneRequest(
 
   // GET /control-plane/cockpit/markdown/tree
   if (pathname === '/control-plane/cockpit/markdown/tree' && req.method === 'GET') {
-    const sessionKey = query.get('sessionKey');
     const projectPath = query.get('projectPath');
-    void handleGetCockpitMarkdownTree(res, ctx, { sessionKey, projectPath });
+    void handleGetCockpitMarkdownTree(res, ctx, { projectPath });
     return true;
   }
 
   // GET /control-plane/cockpit/markdown/file
   if (pathname === '/control-plane/cockpit/markdown/file' && req.method === 'GET') {
     const filePath = query.get('path');
-    const sessionKey = query.get('sessionKey');
     const projectPath = query.get('projectPath');
-    void handleGetCockpitMarkdownFile(res, ctx, filePath, { sessionKey, projectPath });
+    void handleGetCockpitMarkdownFile(res, ctx, filePath, { projectPath });
     return true;
   }
 
@@ -440,6 +441,17 @@ export function handleControlPlaneRequest(
     return true;
   }
 
+  // GET|POST /control-plane/cockpit/session/:sessionKey/model
+  params = matchRoute('/control-plane/cockpit/session/:sessionKey/model', pathname);
+  if (params && req.method === 'GET') {
+    void handleGetCockpitSessionModel(res, ctx, params.sessionKey);
+    return true;
+  }
+  if (params && req.method === 'POST') {
+    void handlePostCockpitSessionModel(req, res, ctx, params.sessionKey);
+    return true;
+  }
+
   // POST /control-plane/cockpit/packets
   if (pathname === '/control-plane/cockpit/packets' && req.method === 'POST') {
     void handlePostCockpitPacket(req, res, ctx);
@@ -495,7 +507,46 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/entity-graph
   if (pathname === '/control-plane/cockpit/entity-graph' && req.method === 'GET') {
     const sessionKey = query.get('sessionKey');
-    void handleGetCockpitEntityGraph(res, ctx, sessionKey);
+    const workItemId = query.get('workItemId');
+    void handleGetCockpitEntityGraph(res, ctx, sessionKey, workItemId);
+    return true;
+  }
+
+  // GET /control-plane/cockpit/architecture/overview
+  if (pathname === '/control-plane/cockpit/architecture/overview' && req.method === 'GET') {
+    const sessionKey = query.get('sessionKey');
+    const runId = query.get('runId');
+    const concernLimit = parseInt(query.get('concernLimit') ?? '8', 10);
+    const boundaryLimit = parseInt(query.get('boundaryLimit') ?? '12', 10);
+    const alertLimit = parseInt(query.get('alertLimit') ?? '20', 10);
+    void handleGetCockpitArchitectureOverview(
+      res,
+      ctx,
+      sessionKey,
+      runId,
+      concernLimit,
+      boundaryLimit,
+      alertLimit
+    );
+    return true;
+  }
+
+  // GET /control-plane/cockpit/architecture/alerts
+  if (pathname === '/control-plane/cockpit/architecture/alerts' && req.method === 'GET') {
+    const sessionKey = query.get('sessionKey');
+    const runId = query.get('runId');
+    const status = query.get('status');
+    const severity = query.get('severity');
+    const type = query.get('type');
+    const limit = parseInt(query.get('limit') ?? '200', 10);
+    void handleGetCockpitArchitectureAlerts(res, ctx, {
+      sessionKey,
+      runId,
+      status,
+      severity,
+      type,
+      limit,
+    });
     return true;
   }
 

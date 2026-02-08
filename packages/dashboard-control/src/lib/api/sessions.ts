@@ -1,5 +1,9 @@
 import { fetchAPI, postAPI } from './fetch';
 import type {
+  ArchitectureAlertSeverity,
+  ArchitectureAlertStatus,
+  CockpitArchitectureAlertSummary,
+  CockpitArchitectureOverview,
   CockpitMarkdownContextInput,
   CockpitSessionControlInput,
   CockpitSessionPermissions,
@@ -52,6 +56,32 @@ export async function postCockpitSessionPermissions(
   return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/permissions`, input);
 }
 
+export interface CockpitModelEntry {
+  id: string;
+  name: string;
+  provider: string;
+  reasoning?: string[];
+}
+
+export interface CockpitModelSelection {
+  provider: string;
+  model: string;
+  reasoning?: string;
+}
+
+export async function getCockpitSessionModel(
+  sessionKey: string
+): Promise<{ selections: Record<string, CockpitModelSelection>; models: CockpitModelEntry[] }> {
+  return fetchAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/model`);
+}
+
+export async function postCockpitSessionModel(
+  sessionKey: string,
+  input: { provider: string; model: string; agentType?: string; reasoning?: string }
+): Promise<{ success: boolean; agentType: string; selection: CockpitModelSelection }> {
+  return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/model`, input);
+}
+
 export async function postCockpitSessionMessage(
   sessionKey: string,
   message: string,
@@ -98,13 +128,77 @@ const EMPTY_SUBGRAPH: SubgraphResponse = {
   nodes: [], edges: [], stats: { readFiles: 0, editedFiles: 0, totalNodes: 0, totalEdges: 0 },
 };
 
-export async function getCockpitEntityGraph(sessionKey: string): Promise<SubgraphResponse> {
+const EMPTY_ARCHITECTURE_OVERVIEW: CockpitArchitectureOverview = {
+  runId: null,
+  generatedAt: new Date(0).toISOString(),
+  touched: { totalFiles: 0, readFiles: 0, editedFiles: 0 },
+  concerns: [],
+  boundaries: [],
+  alerts: [],
+};
+
+export async function getCockpitEntityGraph(
+  sessionKey: string,
+  options: { workItemId?: string } = {}
+): Promise<SubgraphResponse> {
   try {
+    const params = new URLSearchParams({ sessionKey });
+    if (options.workItemId) params.set('workItemId', options.workItemId);
     return await fetchAPI<SubgraphResponse>(
-      `/cockpit/entity-graph?sessionKey=${encodeURIComponent(sessionKey)}`
+      `/cockpit/entity-graph?${params.toString()}`
     );
   } catch {
     return EMPTY_SUBGRAPH;
+  }
+}
+
+export async function getCockpitArchitectureOverview(
+  sessionKey: string,
+  options: {
+    runId?: string;
+    concernLimit?: number;
+    boundaryLimit?: number;
+    alertLimit?: number;
+  } = {}
+): Promise<CockpitArchitectureOverview> {
+  try {
+    const params = new URLSearchParams({
+      sessionKey,
+      ...(options.runId ? { runId: options.runId } : {}),
+      ...(typeof options.concernLimit === 'number' ? { concernLimit: String(options.concernLimit) } : {}),
+      ...(typeof options.boundaryLimit === 'number' ? { boundaryLimit: String(options.boundaryLimit) } : {}),
+      ...(typeof options.alertLimit === 'number' ? { alertLimit: String(options.alertLimit) } : {}),
+    });
+    return await fetchAPI<CockpitArchitectureOverview>(
+      `/cockpit/architecture/overview?${params.toString()}`
+    );
+  } catch {
+    return EMPTY_ARCHITECTURE_OVERVIEW;
+  }
+}
+
+export async function getCockpitArchitectureAlerts(options: {
+  sessionKey?: string;
+  runId?: string;
+  status?: ArchitectureAlertStatus;
+  severity?: ArchitectureAlertSeverity;
+  type?: string;
+  limit?: number;
+} = {}): Promise<{ runId: string | null; alerts: CockpitArchitectureAlertSummary[] }> {
+  try {
+    const params = new URLSearchParams({
+      ...(options.sessionKey ? { sessionKey: options.sessionKey } : {}),
+      ...(options.runId ? { runId: options.runId } : {}),
+      ...(options.status ? { status: options.status } : {}),
+      ...(options.severity ? { severity: options.severity } : {}),
+      ...(options.type ? { type: options.type } : {}),
+      ...(typeof options.limit === 'number' ? { limit: String(options.limit) } : {}),
+    });
+    return await fetchAPI<{ runId: string | null; alerts: CockpitArchitectureAlertSummary[] }>(
+      `/cockpit/architecture/alerts${params.toString() ? `?${params.toString()}` : ''}`
+    );
+  } catch {
+    return { runId: null, alerts: [] };
   }
 }
 

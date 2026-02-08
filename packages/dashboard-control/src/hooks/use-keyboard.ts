@@ -3,8 +3,29 @@ import type { CockpitStoreImpl, FocusTab } from './use-cockpit-store';
 import { selectFocusEscalationId, selectFocusStatus } from './use-cockpit-store';
 import type { MarkdownWorkspace } from './use-markdown-workspace';
 
-const FOCUS_TABS: FocusTab[] = ['packet', 'diff', 'tests', 'trace', 'permissions'];
 type PaneId = 'left' | 'center' | 'right';
+
+function isAsyncFocus(
+  state: ReturnType<CockpitStoreImpl['getSnapshot']>
+): boolean {
+  if (state.focusData?.type === 'escalation') return true;
+  if (state.focusData?.isAsync) return true;
+  const focusedKey = state.focusData?.sessionKey;
+  if (!focusedKey) return false;
+  const row = [...state.runningSessions, ...state.readySessions, ...state.doneSessions]
+    .find((session) => session.sessionKey === focusedKey);
+  return Boolean(row?.isAsync || row?.blocking.unresolvedEscalationsCount);
+}
+
+function getFocusableTabs(
+  state: ReturnType<CockpitStoreImpl['getSnapshot']>
+): FocusTab[] {
+  const tabs: FocusTab[] = ['live', 'diff', 'tests', 'trace', 'permissions'];
+  if (isAsyncFocus(state)) {
+    tabs.splice(1, 0, 'escalations');
+  }
+  return tabs;
+}
 
 function paneFromNode(node: EventTarget | Element | null): PaneId | null {
   if (!(node instanceof Element)) return null;
@@ -73,7 +94,9 @@ export function useKeyboard(store: CockpitStoreImpl, workspace: MarkdownWorkspac
       const ws = workspaceRef.current;
       const target = event.target as HTMLElement | null;
       const activeElement = document.activeElement as HTMLElement | null;
-      const insideCockpit = inCockpit(target) || inCockpit(activeElement);
+      const targetIsDocumentRoot = target === document.body || target === document.documentElement;
+      const hasCockpitRoot = !!document.querySelector('[data-cockpit-root="true"]');
+      const insideCockpit = inCockpit(target) || inCockpit(activeElement) || (targetIsDocumentRoot && hasCockpitRoot);
       if (!insideCockpit) return;
 
       const activePane = paneFromNode(target) ?? paneFromNode(activeElement) ?? lastPaneRef.current;
@@ -208,11 +231,16 @@ export function useKeyboard(store: CockpitStoreImpl, workspace: MarkdownWorkspac
 
         if (state.focusTarget && state.globalTool === 'none' && activePane === 'center') {
           event.preventDefault();
-          const idx = FOCUS_TABS.indexOf(state.focusTab);
+          const focusTabs = getFocusableTabs(state);
+          const idx = focusTabs.indexOf(state.focusTab);
+          if (idx < 0) {
+            store.set({ focusTab: focusTabs[0] ?? 'live' });
+            return;
+          }
           const next = event.shiftKey
-            ? (idx - 1 + FOCUS_TABS.length) % FOCUS_TABS.length
-            : (idx + 1) % FOCUS_TABS.length;
-          store.set({ focusTab: FOCUS_TABS[next] });
+            ? (idx - 1 + focusTabs.length) % focusTabs.length
+            : (idx + 1) % focusTabs.length;
+          store.set({ focusTab: focusTabs[next] });
           return;
         }
 
@@ -290,11 +318,17 @@ export function useKeyboard(store: CockpitStoreImpl, workspace: MarkdownWorkspac
 
       // Letter shortcuts
       if (state.focusTarget) {
+        if (event.key === 'x' || event.key === 'X') { store.set({ focusTab: 'live' }); return; }
+        if (event.key === 'o' || event.key === 'O') {
+          if (isAsyncFocus(state)) {
+            store.set({ focusTab: 'escalations' });
+          }
+          return;
+        }
         if (event.key === 'd' || event.key === 'D') { store.set({ focusTab: 'diff' }); return; }
         if (event.key === 't' || event.key === 'T') { store.set({ focusTab: 'tests' }); return; }
         if (event.key === 'l' || event.key === 'L') { store.set({ focusTab: 'trace' }); return; }
         if (event.key === 'p' || event.key === 'P') { store.set({ focusTab: 'permissions' }); return; }
-        if (event.key === 'x' || event.key === 'X') { store.set({ focusTab: 'packet' }); return; }
       }
       if (event.key === 'm' || event.key === 'M') { store.set({ focusTarget: null, globalTool: 'none' }); return; }
 
@@ -340,7 +374,11 @@ export function useKeyboard(store: CockpitStoreImpl, workspace: MarkdownWorkspac
         const session = allSessions[state.highlightedSessionIdx];
         if (session) {
           event.preventDefault();
-          store.set({ focusTarget: { type: 'session', id: session.sessionKey }, highlightedSessionIdx: null });
+          store.set({
+            focusTarget: { type: 'session', id: session.sessionKey },
+            ...(session.blocking.unresolvedEscalationsCount > 0 ? { focusTab: 'escalations' as const } : {}),
+            highlightedSessionIdx: null,
+          });
         }
         return;
       }

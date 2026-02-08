@@ -323,66 +323,46 @@ function buildEscalationPacketMarkdown(
   lines.push('---', '');
 
   lines.push(`# Escalation: ${escalation.title}`);
-  lines.push('', '## Context');
-  lines.push(escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`);
-
-  if ((escalation.tradeoffs ?? []).length > 0) {
-    lines.push('', '## Tradeoffs');
-    for (const tradeoff of escalation.tradeoffs ?? []) {
-      lines.push(`- ${tradeoff}`);
-    }
-  }
-
-  lines.push('', '## Required Action');
-  lines.push('Choose a direction below, then click **Resolve Escalation** in Cockpit.');
-
-  lines.push('', '## Decision Request');
-  lines.push(escalation.title);
+  lines.push('', '## Action');
+  lines.push('Pick one option, then click **Resolve Escalation** in Cockpit.');
+  lines.push('', '## Situation');
+  const context = escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`;
+  lines.push(context.slice(0, 280));
 
   lines.push('', '## Options');
   if (options.length === 0) {
     lines.push('1. **Proceed**');
-    lines.push('   Accept current state and continue execution.');
+    lines.push('   Continue with current approach.');
     lines.push('2. **Retry with stronger evidence**');
-    lines.push('   Require concrete output (files changed, non-empty response, tests/logs).');
+    lines.push('   Re-run with stricter verification.');
     lines.push('3. **Stop and investigate**');
-    lines.push('   Pause execution and diagnose why watcher evidence is missing.');
+    lines.push('   Pause and inspect root cause.');
   } else {
     for (let idx = 0; idx < options.length; idx += 1) {
       const option = options[idx];
       lines.push(`${idx + 1}. **${option.label}**`);
       if (option.description) {
-        lines.push(`   ${option.description}`);
-      }
-      for (const implication of option.implications ?? []) {
-        lines.push(`   - ${implication}`);
+        lines.push(`   ${option.description.slice(0, 220)}`);
       }
       if (option.recommended) {
-        lines.push('   - Recommended by watcher');
+        lines.push('   - Recommended');
       }
     }
   }
 
-  lines.push('', '## Watcher Recommendation');
+  lines.push('', '## Recommendation');
   if (recommendedOption) {
-    lines.push(`Leaning **${recommendedOption.label}** based on current constraints and evidence.`);
+    lines.push(`Prefer **${recommendedOption.label}** based on current evidence.`);
   } else {
-    lines.push('No single option recommended. Human decision required.');
+    lines.push('No single option is recommended yet.');
   }
 
-  lines.push('', 'Evidence:');
+  lines.push('', '## Evidence');
   if (evidenceRefs.length === 0) {
-    lines.push('- No explicit evidence refs were provided by watcher.');
+    lines.push('- No explicit refs were provided by watcher.');
   } else {
     for (const ref of evidenceRefs.slice(0, 8)) {
       lines.push(`- ${ref.label}: ${inlineRef(ref.type, ref.value)}`);
-    }
-  }
-
-  if (options.length > 0) {
-    for (const option of options.slice(0, 4)) {
-      lines.push('', `## If you choose ${option.label}`);
-      lines.push('I will apply the selected direction, update implementation, and run verification gates.');
     }
   }
 
@@ -2415,6 +2395,7 @@ export class AgentHarness {
     const sessionState = this.getSessionState(sessionKey);
     let lastWatcherIteration = 0;
     const minWatcherGap = DEFAULT_ORCHESTRATOR_CONFIG.minWatcherIterationGap;
+    const watcherCompactTrigger = DEFAULT_ORCHESTRATOR_CONFIG.compactTriggerPercent;
     const asyncEnabledForRun = (store?.isAsyncModeEnabled() ?? false) || !!hookRegistry;
 
     // Only create/use watcher hooks when async mode is enabled for this session/run
@@ -2464,15 +2445,23 @@ export class AgentHarness {
         const hasDecisions = engine.hasDecisions(sessionKey);
 
         // Summarize (compact + epistemic ledger) when context is high and decisions exist
-        if (pct > 0.70 && hasDecisions) {
-          this.logger.info('Watcher: summarizing (context high + decisions in play)', { pct, sessionKey });
+        if (pct >= watcherCompactTrigger && hasDecisions) {
+          this.logger.info('Watcher: summarizing (context high + decisions in play)', {
+            pct,
+            sessionKey,
+            watcherCompactTrigger,
+          });
           this.watcherSummarize(sessionKey);
           return;
         }
 
         // Plain compact when context is high but no decisions to ledger
-        if (pct > 0.75) {
-          this.logger.info('Watcher: triggering compact (context > 75%)', { pct, sessionKey });
+        if (pct >= watcherCompactTrigger) {
+          this.logger.info('Watcher: triggering compact', {
+            pct,
+            sessionKey,
+            watcherCompactTrigger,
+          });
           this.watcherSummarize(sessionKey);
           return;
         }

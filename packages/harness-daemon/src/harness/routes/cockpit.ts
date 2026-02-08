@@ -2,12 +2,13 @@
  * Cockpit dashboard route handlers extracted from control_plane_routes.ts.
  *
  * Includes: rollups, focus panel, traces, diff, tests, repo lens,
- * preview, filesystem, session events/packets/permissions,
+ * preview, filesystem, architecture, session events/packets/permissions,
  * escalation resolution, templates, and session creation.
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import nodePath from 'path';
+import { getAllModels } from 'types';
 import {
   type ControlPlaneContext,
   type SessionRow,
@@ -55,6 +56,7 @@ import {
   setCockpitSnapshotCache,
   SESSION_PERMISSION_SETTINGS_MAX_BYTES,
   parseAgentEventTokenTotalsForDay,
+  parseSessionTokenMetrics,
 } from './utils.js';
 import { getAllSessions, getSession, groupSessionsByWorkingDir } from './sessions.js';
 import {
@@ -81,6 +83,13 @@ import {
   type EscalationResolutionInput,
 } from '../escalation_state.js';
 import { extractSessionFiles, buildSubgraph, type SubgraphResponse } from '../entity_subgraph.js';
+import {
+  buildSessionArchitectureContext,
+  loadCockpitArchitectureOverviewFromSql,
+  loadCockpitArchitectureAlertsFromSql,
+  type ArchitectureAlertSeverity,
+  type ArchitectureAlertStatus,
+} from './cockpit_architecture.js';
 
 // ── internal packet helpers ─────────────────────────────────────────
 
@@ -191,6 +200,22 @@ function collectPacketValidationWarnings(
 function buildPacketId(): string {
   const suffix = Math.random().toString(36).slice(2, 10);
   return `pkt_${Date.now().toString(36)}_${suffix}`;
+}
+
+function parseArchitectureAlertStatus(value: string | null): ArchitectureAlertStatus | undefined {
+  if (!value) return undefined;
+  if (value === 'open' || value === 'acknowledged' || value === 'resolved') {
+    return value;
+  }
+  return undefined;
+}
+
+function parseArchitectureAlertSeverity(value: string | null): ArchitectureAlertSeverity | undefined {
+  if (!value) return undefined;
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'critical') {
+    return value;
+  }
+  return undefined;
 }
 
 async function loadPacketMarkdown(
@@ -566,21 +591,6 @@ async function loadLatestTestReports(
   return summaries;
 }
 
-async function countTestReportsForWindow(start: Date, end: Date): Promise<number | null> {
-  const result = await withAgentMemorySql(async (sql) => {
-    const rows = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count
-      FROM test_reports
-      WHERE created_at >= ${start}
-        AND created_at < ${end}
-    `;
-    return rows[0]?.count ?? '0';
-  });
-  if (result === null) return null;
-  const parsed = parseInt(String(result), 10);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function buildTraceSummary(sessionKey: string, traces: Array<Record<string, unknown>>): TraceSummary {
   const sessionUrl = `session://${sessionKey}`;
   const files = new Set<string>();
@@ -669,6 +679,44 @@ function getSessionTitle(session: SessionRow): string {
   return session.sessionKey;
 }
 
+function isAsyncSession(session: SessionRow): boolean {
+  const metadata = session.metadata ?? {};
+  const asyncFlag = asBoolean(
+    metadata.isAsync
+    ?? metadata.is_async
+    ?? metadata.asyncMode
+    ?? metadata.async_mode
+    ?? metadata.asyncModeEnabled
+    ?? metadata.async_mode_enabled
+  );
+  if (typeof asyncFlag === 'boolean') return asyncFlag;
+
+  if ((session.clientType ?? '').toLowerCase() === 'async') return true;
+
+  const escalations = parseSessionEscalations(metadata.escalations);
+  if (escalations.length > 0) return true;
+
+  const packets = parsePackets(metadata.packets, session.sessionKey);
+  if (packets.some((packet) => packet.type === 'escalation')) return true;
+
+  const agentEvents = Array.isArray(metadata.agent_events) ? metadata.agent_events : [];
+  for (const entry of agentEvents) {
+    if (!isRecord(entry)) continue;
+    const type = (asString(entry.type) ?? '').toLowerCase();
+    if (!type) continue;
+    if (
+      type.startsWith('watcher_')
+      || type === 'packet_emitted'
+      || type === 'workitem_created'
+      || type === 'escalation_raised'
+      || type === 'escalation_resolved'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // ── rollup builders ─────────────────────────────────────────────────
 
 function buildSessionRollups(
@@ -706,7 +754,9 @@ function buildSessionRollups(
       );
     const activeWorkItemId = session.currentWorkItemId
       ?? asString(metadata.currentWorkItemId)
-      ?? asString(metadata.current_work_item_id);
+      ?? asString(metadata.current_work_item_id)
+      ?? asString(metadata.currentWorkId)
+      ?? asString(metadata.current_work_id);
     const currentObjective = session.currentObjective
       ?? asString(metadata.currentObjective)
       ?? asString(metadata.current_objective);
@@ -727,6 +777,7 @@ function buildSessionRollups(
       kind: mapSessionKind(session),
       title: getSessionTitle(session),
       status,
+      isAsync: isAsyncSession(session),
       ...(activeWorkItemId ? { activeWorkItemId } : {}),
       elapsedSec: Math.max(0, Math.floor((nowMs - session.createdAt * 1000) / 1000)),
       lastEventAt: new Date(lastMs || session.createdAt * 1000).toISOString(),
@@ -749,6 +800,7 @@ function buildSessionRollups(
       blocking: {
         unresolvedEscalationsCount: escalations.length,
       },
+      tokenMetrics: parseSessionTokenMetrics(metadata),
     };
   });
 }
@@ -782,7 +834,7 @@ function buildEscalationRollups(sessions: SessionRow[]): EscalationRollup[] {
 // ── session event builders ──────────────────────────────────────────
 
 function normalizeAgentEventType(type: string): NormalizedSessionEvent['type'] {
-  if (type === 'agent_message' || type === 'user_message' || type === 'send_text' || type === 'response') return 'message';
+  if (type === 'agent_message' || type === 'user_message' || type === 'send_text' || type === 'response' || type === 'harness_response') return 'message';
   if (type === 'tool_call') return 'tool';
   if (type === 'git_commit') return 'trace';
   if (type.startsWith('browser_')) return 'tool';
@@ -850,6 +902,57 @@ function isStatusOnlyEvent(event: NormalizedSessionEvent): boolean {
   return getSignalPriority(event) === 'status';
 }
 
+function collectWorkItemObjectives(agentEvents: unknown[]): Map<string, string> {
+  const map = new Map<string, string>();
+
+  const readWorkItemId = (entry: Record<string, unknown>, data: Record<string, unknown>): string | null =>
+    asString(entry.work_item_id)
+    ?? asString(entry.workItemId)
+    ?? asString(entry.workId)
+    ?? asString(data.work_item_id)
+    ?? asString(data.workItemId)
+    ?? asString(data.workId)
+    ?? null;
+
+  const readObjective = (entry: Record<string, unknown>, data: Record<string, unknown>): string | null =>
+    asString(data.objective)
+    ?? asString(data.current_objective)
+    ?? asString(data.goal)
+    ?? asString(entry.objective)
+    ?? asString(entry.current_objective)
+    ?? asString(entry.goal)
+    ?? null;
+
+  for (const raw of agentEvents) {
+    if (!isRecord(raw)) continue;
+    const data = isRecord(raw.data) ? raw.data : {};
+
+    const directWorkId = readWorkItemId(raw, data);
+    const directObjective = readObjective(raw, data);
+    if (directWorkId && directObjective && !map.has(directWorkId)) {
+      map.set(directWorkId, directObjective);
+    }
+
+    const type = asString(raw.type);
+    if (type !== 'runtime_script_created') continue;
+
+    const workItemsRaw = Array.isArray(data.work_items)
+      ? data.work_items
+      : Array.isArray(data.workItems)
+        ? data.workItems
+        : [];
+    for (const item of workItemsRaw) {
+      if (!isRecord(item)) continue;
+      const itemWorkId = asString(item.work_id) ?? asString(item.workId) ?? asString(item.id);
+      const itemObjective = asString(item.objective) ?? asString(item.goal);
+      if (!itemWorkId || !itemObjective) continue;
+      if (!map.has(itemWorkId)) map.set(itemWorkId, itemObjective);
+    }
+  }
+
+  return map;
+}
+
 function buildSessionEvents(
   session: SessionRow,
   messages: MessageRow[],
@@ -877,6 +980,7 @@ function buildSessionEvents(
   }
 
   const agentEvents = Array.isArray(session.metadata?.agent_events) ? session.metadata?.agent_events : [];
+  const objectiveByWorkItem = collectWorkItemObjectives(agentEvents);
   for (const entry of agentEvents) {
     if (!isRecord(entry)) continue;
     const type = asString(entry.type);
@@ -889,7 +993,20 @@ function buildSessionEvents(
     }
 
     const normalizedType = normalizeAgentEventType(type);
-    const data = isRecord(entry.data) ? entry.data : {};
+    const data = isRecord(entry.data) ? { ...entry.data } : {};
+    const eventWorkItemId = asString(entry.work_item_id)
+      ?? asString(entry.workItemId)
+      ?? asString(entry.workId)
+      ?? asString(data.work_item_id)
+      ?? asString(data.workItemId)
+      ?? asString(data.workId);
+    const existingObjective = asString(data.objective)
+      ?? asString(data.current_objective)
+      ?? asString(data.goal);
+    if (!existingObjective && eventWorkItemId) {
+      const backfilledObjective = objectiveByWorkItem.get(eventWorkItemId);
+      if (backfilledObjective) data.objective = backfilledObjective;
+    }
     const defaultRole = (type === 'user_message' || type === 'send_text') ? 'user' : 'assistant';
     const messageRole = asString(data.role) ?? asString(entry.role) ?? defaultRole;
     const messageContent = extractText(data.content)
@@ -906,7 +1023,7 @@ function buildSessionEvents(
       payload: {
         eventType: type,
         requestId: asString(entry.request_id),
-        workItemId: asString(entry.work_item_id),
+        ...(eventWorkItemId ? { workItemId: eventWorkItemId } : {}),
         ...(normalizedType === 'message' ? { role: messageRole, content: messageContent } : {}),
         data,
       },
@@ -920,11 +1037,37 @@ function buildSessionEvents(
   const filtered = cursor
     ? normalized.filter((entry) => entry.ts > cursor)
     : normalized;
-  const sliced = filtered.slice(-limit);
-  const nextCursor = sliced.length > 0 ? sliced[sliced.length - 1].ts : null;
+
+  // Partition into messages and non-messages
+  const messageEntries = filtered.filter(e => e.event.type === 'message');
+  const otherEntries = filtered.filter(e => e.event.type !== 'message');
+
+  // Deduplicate: messages-table entries (numeric id, no eventType) win over agent_events duplicates
+  const seenRequestRoles = new Set<string>();
+  const dedupedMessages: typeof messageEntries = [];
+  for (const entry of messageEntries) {
+    const p = entry.event.payload;
+    const key = `${(p.requestId as string) ?? ''}:${(p.role as string) ?? ''}`;
+    const isFromTable = typeof p.id === 'number' && !p.eventType;
+    if (isFromTable) {
+      seenRequestRoles.add(key);
+      dedupedMessages.push(entry);
+    } else if (!seenRequestRoles.has(key)) {
+      dedupedMessages.push(entry);
+    }
+  }
+
+  // Budget: messages get priority (up to half), rest fills remaining slots
+  const messageBudget = Math.min(dedupedMessages.length, Math.floor(limit * 0.5));
+  const eventBudget = limit - messageBudget;
+  const selectedMessages = dedupedMessages.slice(-messageBudget);
+  const selectedOther = otherEntries.slice(-eventBudget);
+
+  const combined = [...selectedMessages, ...selectedOther].sort((a, b) => a.ts - b.ts);
+  const nextCursor = combined.length > 0 ? combined[combined.length - 1].ts : null;
 
   return {
-    events: sliced.map((entry) => entry.event),
+    events: combined.map((entry) => entry.event),
     nextCursor,
   };
 }
@@ -1015,11 +1158,16 @@ async function collectPRRollups(
   return rollups.slice(0, limit);
 }
 
-async function computeCockpitDailyMetrics(
-  ctx: ControlPlaneContext,
+function computeCockpitDailyMetrics(
   sessions: SessionRow[],
-  dateParam: string | null
-): Promise<CockpitDailyMetricsResult> {
+  dateParam: string | null,
+  precomputed: {
+    testReports: Map<string, TestReportSummary>;
+    diffstatsBySession: Map<string, { added: number; deleted: number; filesTouched: number }>;
+    statusCounts: { running: number; ready: number; done: number };
+    escalationsOpen: number;
+  }
+): CockpitDailyMetricsResult {
   const day = dateParam ?? new Date().toISOString().slice(0, 10);
   const start = new Date(`${day}T00:00:00`);
   if (Number.isNaN(start.getTime())) {
@@ -1030,29 +1178,39 @@ async function computeCockpitDailyMetrics(
   const startMs = start.getTime();
   const endMs = end.getTime();
 
-  const traces = await loadTraceRecords(ctx.workingDir, 500);
-  const traceInDay = traces.filter((trace) => {
-    const ts = parseTimestampMs(trace.timestamp);
-    return typeof ts === 'number' && ts >= startMs && ts < endMs;
-  });
-
+  // Derive commits from session commit events (replaces loadTraceRecords)
   const revisions = new Set<string>();
-  const touchedFiles = new Set<string>();
-  for (const trace of traceInDay) {
-    const vcs = isRecord(trace.vcs) ? trace.vcs : null;
-    const revision = asString(vcs?.revision);
-    if (revision) revisions.add(revision);
-    const files = Array.isArray(trace.files) ? trace.files : [];
-    for (const file of files) {
-      if (!isRecord(file)) continue;
-      const p = asString(file.path);
-      if (p) touchedFiles.add(p);
+  for (const session of sessions) {
+    const createdMs = session.createdAt * 1000;
+    const updatedMs = session.lastAccessedAt * 1000;
+    if (createdMs >= endMs || updatedMs < startMs) continue;
+    for (const commit of getSessionCommitEvents(session)) {
+      if (commit.timestampMs >= startMs && commit.timestampMs < endMs) {
+        revisions.add(commit.sha);
+      }
     }
   }
 
+  // Derive locTouched from precomputed diffstats for sessions active today
+  let locTouched = 0;
+  for (const session of sessions) {
+    const createdMs = session.createdAt * 1000;
+    const updatedMs = session.lastAccessedAt * 1000;
+    if (createdMs >= endMs || updatedMs < startMs) continue;
+    const ds = precomputed.diffstatsBySession.get(session.sessionKey);
+    if (ds) locTouched += ds.filesTouched;
+  }
+
+  // Count test reports from precomputed data (replaces countTestReportsForWindow)
+  let tests = 0;
+  for (const report of precomputed.testReports.values()) {
+    if (report.createdAtMs >= startMs && report.createdAtMs < endMs) {
+      tests++;
+    }
+  }
+
+  // Token totals from session metadata
   let totalTokens = 0;
-  const testReportCount = await countTestReportsForWindow(start, end);
-  let tests = testReportCount ?? 0;
   for (const session of sessions) {
     const createdMs = session.createdAt * 1000;
     const updatedMs = session.lastAccessedAt * 1000;
@@ -1064,34 +1222,18 @@ async function computeCockpitDailyMetrics(
     } else if (updatedMs >= startMs && updatedMs < endMs) {
       totalTokens += asNumber(metadata.total_tokens ?? metadata.totalTokens) ?? 0;
     }
-    if (testReportCount === null && updatedMs >= startMs && updatedMs < endMs) {
-      tests += asNumber(metadata.tests_run ?? metadata.testsRun) ?? 0;
-    }
   }
-
-  const rollups = buildSessionRollups(
-    sessions,
-    new Map(),
-    await loadLatestTestReports(sessions.map((session) => session.sessionKey))
-  );
-  const running = rollups.filter((item) => item.status === 'running').length;
-  const ready = rollups.filter((item) => item.status === 'ready').length;
-  const done = rollups.filter((item) => item.status === 'done' || item.status === 'stopped').length;
 
   return {
     date: day,
     metrics: {
       tokens: totalTokens,
-      locTouched: touchedFiles.size,
+      locTouched,
       commits: revisions.size,
       prs: 0,
       tests,
-      sessions: {
-        running,
-        ready,
-        done,
-      },
-      escalationsOpen: buildEscalationRollups(sessions).length,
+      sessions: precomputed.statusCounts,
+      escalationsOpen: precomputed.escalationsOpen,
     },
   };
 }
@@ -1109,10 +1251,16 @@ async function buildCockpitRollupSnapshot(
   const sessionLimit = clampInteger(options.sessionLimit, 120, 10, 500);
   const escalationLimit = clampInteger(options.escalationLimit, 120, 10, 500);
   const repoLimit = clampInteger(options.repoLimit, 50, 5, 200);
+  const emptyPrecomputed = {
+    testReports: new Map<string, TestReportSummary>(),
+    diffstatsBySession: new Map<string, { added: number; deleted: number; filesTouched: number }>(),
+    statusCounts: { running: 0, ready: 0, done: 0 },
+    escalationsOpen: 0,
+  };
 
   const { sessions, error } = getAllSessions(ctx, 1000);
   if (error) {
-    const metrics = await computeCockpitDailyMetrics(ctx, [], options.date);
+    const metrics = computeCockpitDailyMetrics([], options.date, emptyPrecomputed);
     return {
       runningSessions: [],
       readySessions: [],
@@ -1132,10 +1280,10 @@ async function buildCockpitRollupSnapshot(
     traceMap.set(session.sessionKey, buildSessionTraceSummaryFromEvents(session));
   }
 
-  const [testReports, diffstatsBySession, metrics] = await Promise.all([
+  // Fast path: load test reports + diffstats in parallel, then derive everything in-memory
+  const [testReports, diffstatsBySession] = await Promise.all([
     loadLatestTestReports(sessions.map((session) => session.sessionKey)),
     loadSessionDiffstats(sessions),
-    computeCockpitDailyMetrics(ctx, sessions, options.date),
   ]);
 
   const allRollups = buildSessionRollups(sessions, traceMap, testReports, diffstatsBySession);
@@ -1149,6 +1297,18 @@ async function buildCockpitRollupSnapshot(
     .filter((rollup) => rollup.status === 'done' || rollup.status === 'stopped')
     .slice(0, sessionLimit);
   const escalations = buildEscalationRollups(sessions).slice(0, escalationLimit);
+
+  // Metrics are now a synchronous derivation from data we already have
+  const metrics = computeCockpitDailyMetrics(sessions, options.date, {
+    testReports,
+    diffstatsBySession,
+    statusCounts: {
+      running: runningSessions.length,
+      ready: readySessions.length,
+      done: doneSessions.length,
+    },
+    escalationsOpen: escalations.length,
+  });
 
   const [commitRollups, prRollups] = options.includeRepo
     ? await Promise.all([
@@ -1410,7 +1570,28 @@ export async function handleGetCockpitDailyMetrics(
     sendJson(res, { date: day, metrics: null, error });
     return;
   }
-  const metrics = await computeCockpitDailyMetrics(ctx, sessions, dateParam);
+
+  const [testReports, diffstatsBySession] = await Promise.all([
+    loadLatestTestReports(sessions.map((s) => s.sessionKey)),
+    loadSessionDiffstats(sessions),
+  ]);
+  const traceMap = new Map<string, TraceSummary>();
+  for (const session of sessions) {
+    traceMap.set(session.sessionKey, buildSessionTraceSummaryFromEvents(session));
+  }
+  const allRollups = buildSessionRollups(sessions, traceMap, testReports, diffstatsBySession);
+  const escalations = buildEscalationRollups(sessions);
+
+  const metrics = computeCockpitDailyMetrics(sessions, dateParam, {
+    testReports,
+    diffstatsBySession,
+    statusCounts: {
+      running: allRollups.filter((r) => r.status === 'running' || r.status === 'blocked').length,
+      ready: allRollups.filter((r) => r.status === 'ready').length,
+      done: allRollups.filter((r) => r.status === 'done' || r.status === 'stopped').length,
+    },
+    escalationsOpen: escalations.length,
+  });
   if (metrics.error) {
     sendJson(res, { date: metrics.date, metrics: metrics.metrics, error: metrics.error }, 400);
     return;
@@ -1448,15 +1629,18 @@ export async function handleGetCockpitFocus(
     const selectedPacket = packetId
       ? sessionPackets.find((packet) => packet.packetId === packetId) ?? null
       : sessionPackets[0] ?? null;
+    const sessionIsAsync = isAsyncSession(session);
 
     sendJson(res, {
       focus: {
         type: 'session',
         id: session.sessionKey,
         sessionKey: session.sessionKey,
+        isAsync: sessionIsAsync,
         header: {
           title: rollup.title,
           status: rollup.status,
+          isAsync: sessionIsAsync,
           decisionRequest: unresolved[0]?.title ?? null,
           gateState: rollup.gates,
           blocking: rollup.blocking.unresolvedEscalationsCount,
@@ -1500,15 +1684,18 @@ export async function handleGetCockpitFocus(
     const selectedPacket = packetId
       ? sessionPackets.find((packet) => packet.packetId === packetId) ?? null
       : sessionPackets[0] ?? null;
+    const ownerSessionIsAsync = isAsyncSession(fullOwnerSession);
 
     sendJson(res, {
       focus: {
         type: 'escalation',
         id: escalation.id,
         sessionKey: escalation.sessionKey,
+        isAsync: ownerSessionIsAsync,
         header: {
           title: escalation.title,
           status: escalation.status,
+          isAsync: ownerSessionIsAsync,
           requestedDecision: classifyRequestedDecision(escalation.escalationType),
           ageSec: Math.max(0, Math.floor((Date.now() - escalation.createdAt) / 1000)),
         },
@@ -1582,27 +1769,73 @@ export async function handleGetCockpitDiff(
   }
   const workingDir = session?.workingDir ?? ctx.workingDir;
 
+  // When a session is provided without an explicit SHA range, the diff is
+  // exclusively what *this session* changed — session events or session commits.
+  // Never fall back to the working tree or HEAD^..HEAD; those are repo-global
+  // and would attribute unrelated changes to the session.
   if (session && !hasExplicitRange) {
     const sessionDiff = buildSessionDiffFromEvents(session, file ?? undefined);
     if (sessionDiff && sessionDiff.summary.filesTouched > 0) {
-      // When requesting a specific file's patch but session events lack a preview,
-      // fall through to git diff instead of returning a null patch.
       if (!file || sessionDiff.patch) {
-        const payload = {
+        sendJson(res, {
           baseSha: sessionDiff.baseSha,
           headSha: sessionDiff.headSha,
           source: sessionDiff.source,
           summary: sessionDiff.summary,
           hotspots: sessionDiff.hotspots,
           patch: sessionDiff.patch,
-        };
-        sendJson(res, payload);
+        });
         return;
       }
     }
+
+    // Session has commit lineage — use that as the diff range.
+    const range = await resolveDiffRange(session, workingDir, baseRaw, headRaw);
+    if (range.baseSha && range.headSha) {
+      try {
+        const numstat = await execFileText(
+          'git',
+          ['diff', '--numstat', '--no-color', `${range.baseSha}..${range.headSha}`],
+          { cwd: workingDir, timeout: 20_000, maxBuffer: 8 * 1024 * 1024 }
+        );
+        const { summary, hotspots } = parseNumstatOutput(numstat);
+        let patch: string | null = null;
+        if (file) {
+          const diffOut = await execFileText(
+            'git',
+            ['diff', '--no-color', '--unified=3', `${range.baseSha}..${range.headSha}`, '--', file],
+            { cwd: workingDir, timeout: 20_000, maxBuffer: 8 * 1024 * 1024 }
+          );
+          patch = diffOut.length > 500_000 ? `${diffOut.slice(0, 500_000)}\n\n... (truncated)` : diffOut;
+        }
+        sendJson(res, {
+          baseSha: range.baseSha,
+          headSha: range.headSha,
+          source: range.source,
+          summary,
+          hotspots: hotspots.slice(0, 100),
+          patch,
+        });
+      } catch (error) {
+        sendJson(res, { error: `Failed to compute diff: ${error instanceof Error ? error.message : String(error)}` }, 500);
+      }
+      return;
+    }
+
+    // Session exists but has no events and no commit lineage — zero diff.
+    sendJson(res, {
+      baseSha: '',
+      headSha: '',
+      source: 'session',
+      summary: { added: 0, deleted: 0, filesTouched: 0 },
+      hotspots: [],
+      patch: null,
+    });
+    return;
   }
 
-  let range = await resolveDiffRange(session, workingDir, baseRaw, headRaw);
+  // No session context — resolve from explicit query params or repo state.
+  let range = await resolveDiffRange(null, workingDir, baseRaw, headRaw);
 
   if ((!range.baseSha || !range.headSha) && !hasExplicitRange) {
     const workingTree = await resolveWorkingTreeDiff(workingDir, file ?? undefined);
@@ -1630,7 +1863,6 @@ export async function handleGetCockpitDiff(
       summary: { added: 0, deleted: 0, filesTouched: 0 },
       hotspots: [],
       patch: null,
-      warning: 'Missing diff range. Provide base/head or ensure session has commit history.',
     });
     return;
   }
@@ -1845,21 +2077,11 @@ export function handleGetCockpitPreview(
 export async function handleGetCockpitFilesystem(
   res: ServerResponse,
   ctx: ControlPlaneContext,
-  sessionKeyRaw: string | null,
   projectPathRaw: string | null
 ): Promise<void> {
-  const sessionKey = asString(sessionKeyRaw);
   const projectPath = normalizeProjectPathInput(asString(projectPathRaw));
-  if (sessionKey) {
-    const session = getSession(ctx, sessionKey);
-    if (!session) {
-      sendJson(res, { error: `Session not found: ${sessionKey}` }, 404);
-      return;
-    }
-  }
   try {
     const data = await buildCockpitFilesystemRoots(ctx, {
-      ...(sessionKey ? { sessionKey } : {}),
       ...(projectPath ? { projectPath } : {}),
     });
     sendJson(res, data);
@@ -2416,12 +2638,142 @@ export async function handlePostCockpitSessionCreate(
   });
 }
 
+// ── architecture ────────────────────────────────────────────────────
+
+export async function handleGetCockpitArchitectureOverview(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  sessionKey: string | null,
+  runId: string | null,
+  concernLimitRaw: number,
+  boundaryLimitRaw: number,
+  alertLimitRaw: number
+): Promise<void> {
+  if (!sessionKey) {
+    sendJson(res, { error: 'sessionKey is required' }, 400);
+    return;
+  }
+
+  const session = getSession(ctx, sessionKey);
+  if (!session) {
+    sendJson(
+      res,
+      {
+        runId: null,
+        generatedAt: new Date().toISOString(),
+        touched: { totalFiles: 0, readFiles: 0, editedFiles: 0 },
+        concerns: [],
+        boundaries: [],
+        alerts: [],
+      }
+    );
+    return;
+  }
+
+  const concernLimit = clampInteger(concernLimitRaw, 8, 1, 40);
+  const boundaryLimit = clampInteger(boundaryLimitRaw, 12, 1, 80);
+  const alertLimit = clampInteger(alertLimitRaw, 20, 1, 200);
+  const workingDir = session.workingDir ?? ctx.workingDir;
+  const agentEvents = Array.isArray(session.metadata?.agent_events) ? session.metadata.agent_events : [];
+  const sessionFiles = extractSessionFiles(agentEvents, { workingDir });
+
+  const overview = await withAgentMemorySql(async (sql) => {
+    return loadCockpitArchitectureOverviewFromSql({
+      sql,
+      workingDir,
+      sessionFiles,
+      ...(runId ? { runId } : {}),
+      concernLimit,
+      boundaryLimit,
+      alertLimit,
+    });
+  });
+
+  if (overview === null) {
+    sendJson(
+      res,
+      {
+        runId: null,
+        generatedAt: new Date().toISOString(),
+        touched: { totalFiles: 0, readFiles: 0, editedFiles: 0 },
+        concerns: [],
+        boundaries: [],
+        alerts: [],
+        error: 'Agent memory database not available',
+      },
+      503
+    );
+    return;
+  }
+
+  sendJson(res, overview);
+}
+
+export async function handleGetCockpitArchitectureAlerts(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  input: {
+    sessionKey?: string | null;
+    runId?: string | null;
+    status?: string | null;
+    severity?: string | null;
+    type?: string | null;
+    limit?: number;
+  }
+): Promise<void> {
+  let sessionContext: ReturnType<typeof buildSessionArchitectureContext> | undefined;
+  if (input.sessionKey) {
+    const session = getSession(ctx, input.sessionKey);
+    if (!session) {
+      sendJson(res, { runId: null, alerts: [], error: 'Session not found' }, 404);
+      return;
+    }
+    const workingDir = session.workingDir ?? ctx.workingDir;
+    const agentEvents = Array.isArray(session.metadata?.agent_events) ? session.metadata.agent_events : [];
+    const sessionFiles = extractSessionFiles(agentEvents, { workingDir });
+    sessionContext = buildSessionArchitectureContext(sessionFiles, workingDir);
+  }
+
+  const status = parseArchitectureAlertStatus(input.status ?? null);
+  if (input.status && !status) {
+    sendJson(res, { error: 'Invalid status. Allowed: open, acknowledged, resolved' }, 400);
+    return;
+  }
+
+  const severity = parseArchitectureAlertSeverity(input.severity ?? null);
+  if (input.severity && !severity) {
+    sendJson(res, { error: 'Invalid severity. Allowed: low, medium, high, critical' }, 400);
+    return;
+  }
+
+  const limit = clampInteger(input.limit ?? 200, 200, 1, 500);
+  const result = await withAgentMemorySql(async (sql) => {
+    return loadCockpitArchitectureAlertsFromSql({
+      sql,
+      ...(input.runId ? { runId: input.runId } : {}),
+      ...(status ? { status } : {}),
+      ...(severity ? { severity } : {}),
+      ...(input.type ? { type: input.type } : {}),
+      limit,
+      ...(sessionContext ? { sessionContext } : {}),
+    });
+  });
+
+  if (result === null) {
+    sendJson(res, { runId: null, alerts: [], error: 'Agent memory database not available' }, 503);
+    return;
+  }
+
+  sendJson(res, result);
+}
+
 // ── entity graph ────────────────────────────────────────────────────
 
 export async function handleGetCockpitEntityGraph(
   res: ServerResponse,
   ctx: ControlPlaneContext,
-  sessionKey: string | null
+  sessionKey: string | null,
+  workItemId: string | null
 ): Promise<void> {
   if (!sessionKey) {
     sendJson(res, { error: 'sessionKey is required' }, 400);
@@ -2435,7 +2787,10 @@ export async function handleGetCockpitEntityGraph(
   }
 
   const agentEvents = Array.isArray(session.metadata?.agent_events) ? session.metadata.agent_events : [];
-  const sessionFiles = extractSessionFiles(agentEvents);
+  const sessionFiles = extractSessionFiles(agentEvents, {
+    workingDir: session.workingDir ?? ctx.workingDir,
+    ...(workItemId ? { workItemId } : {}),
+  });
 
   if (sessionFiles.length === 0) {
     sendJson(res, { nodes: [], edges: [], stats: { readFiles: 0, editedFiles: 0, totalNodes: 0, totalEdges: 0 } });
@@ -2447,4 +2802,53 @@ export async function handleGetCockpitEntityGraph(
   });
 
   sendJson(res, result ?? { nodes: [], edges: [], stats: { readFiles: 0, editedFiles: 0, totalNodes: 0, totalEdges: 0 } });
+}
+
+// ── session model selection ─────────────────────────────────────────
+
+export async function handleGetCockpitSessionModel(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  sessionKey: string
+): Promise<void> {
+  if (!ctx.getSessionModelSelections) {
+    sendJson(res, { error: 'Model selection not available' }, 503);
+    return;
+  }
+  const result = await ctx.getSessionModelSelections(sessionKey);
+  const models = getAllModels().map((m) => ({
+    id: m.id,
+    name: m.name,
+    provider: m.provider,
+    reasoning: m.reasoning,
+  }));
+  sendJson(res, { selections: result.selections, models });
+}
+
+export async function handlePostCockpitSessionModel(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  sessionKey: string
+): Promise<void> {
+  if (!ctx.setSessionModelSelection) {
+    sendJson(res, { error: 'Model selection not available' }, 503);
+    return;
+  }
+  const body = await readJsonBody(req);
+  if (!body) {
+    sendJson(res, { error: 'Invalid JSON body' }, 400);
+    return;
+  }
+  const provider = asString(body.provider);
+  const model = asString(body.model);
+  const agentType = asString(body.agentType) ?? 'standard';
+  const reasoning = asString(body.reasoning);
+  if (!provider || !model) {
+    sendJson(res, { error: 'provider and model are required' }, 400);
+    return;
+  }
+  const selection = reasoning ? { provider, model, reasoning } : { provider, model };
+  const result = await ctx.setSessionModelSelection(sessionKey, agentType, selection);
+  sendJson(res, result);
 }

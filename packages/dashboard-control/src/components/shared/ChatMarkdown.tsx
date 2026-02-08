@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 
 /** Lightweight markdown renderer for chat messages. No external deps. */
 
@@ -38,6 +38,52 @@ function InlineContent({ text }: { text: string }) {
         }
       })}
     </>
+  );
+}
+
+function MermaidBlock({ chart }: { chart: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const mermaidModule = await import('mermaid');
+        const mermaid = mermaidModule.default;
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: 'neutral',
+        });
+        const id = `mmd-${Math.random().toString(36).slice(2, 10)}`;
+        const { svg } = await mermaid.render(id, chart);
+        if (cancelled || !containerRef.current) return;
+        containerRef.current.innerHTML = svg;
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [chart]);
+
+  if (error) {
+    return (
+      <pre className="my-1 px-2 py-1.5 rounded bg-[var(--bg-elevated)] text-[11px] font-mono text-[var(--text-secondary)] overflow-x-auto whitespace-pre">
+        {chart}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="my-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-2 overflow-x-auto">
+      <div ref={containerRef} />
+    </div>
   );
 }
 
@@ -104,10 +150,13 @@ function parseBlocks(markdown: string): Block[] {
 export const ChatMarkdown = memo(function ChatMarkdown({ content }: { content: string }) {
   const blocks = useMemo(() => parseBlocks(content), [content]);
   return (
-    <div className="text-xs text-[var(--text-primary)] leading-relaxed break-words">
+    <div className="text-[10px] text-[var(--text-primary)] leading-relaxed break-words">
       {blocks.map((block, idx) => {
         switch (block.type) {
           case 'code':
+            if (block.lang.toLowerCase() === 'mermaid') {
+              return <MermaidBlock key={idx} chart={block.content} />;
+            }
             return (
               <pre key={idx} className="my-1 px-2 py-1.5 rounded bg-[var(--bg-elevated)] text-[11px] font-mono text-[var(--text-secondary)] overflow-x-auto whitespace-pre">
                 {block.content}

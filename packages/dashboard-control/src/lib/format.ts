@@ -13,6 +13,12 @@ export function formatElapsed(sec: number): string {
   return `${Math.floor(sec / 86400)}d`;
 }
 
+export function formatTokenCount(n: number): string {
+  if (n < 1000) return `${n}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
 export function statusColor(status: string): string {
   if (status === 'running') return 'var(--running)';
   if (status === 'blocked') return 'var(--warning)';

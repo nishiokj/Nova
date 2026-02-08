@@ -142,6 +142,30 @@ export interface ControlPlaneContext {
       isExecuting: boolean;
     }>;
   }>;
+  getSessionModelSelections?: (
+    sessionKey: string
+  ) => {
+    success: boolean;
+    selections: Record<string, { provider: string; model: string; reasoning?: string }>;
+  } | Promise<{
+    success: boolean;
+    selections: Record<string, { provider: string; model: string; reasoning?: string }>;
+  }>;
+  setSessionModelSelection?: (
+    sessionKey: string,
+    agentType: string,
+    selection: { provider: string; model: string; reasoning?: string }
+  ) => {
+    success: boolean;
+    agentType: string;
+    selection: { provider: string; model: string; reasoning?: string };
+    error?: string;
+  } | Promise<{
+    success: boolean;
+    agentType: string;
+    selection: { provider: string; model: string; reasoning?: string };
+    error?: string;
+  }>;
 }
 
 export interface PRInfo {
@@ -204,6 +228,7 @@ export interface SessionRollup {
   kind: SessionKind;
   title: string;
   status: SessionPanelStatus;
+  isAsync?: boolean;
   activeWorkItemId?: string;
   elapsedSec: number;
   lastEventAt: string;
@@ -225,6 +250,14 @@ export interface SessionRollup {
   };
   blocking: {
     unresolvedEscalationsCount: number;
+  };
+  tokenMetrics: {
+    input: number;
+    output: number;
+    cached: number;
+    total: number;
+    llmCalls: number;
+    avgLatencyMs: number;
   };
 }
 
@@ -459,18 +492,17 @@ export interface CockpitRollupSnapshotResult {
   error?: string;
 }
 
-export type MarkdownWorkspaceScopeMode = 'global' | 'session' | 'project';
+export type MarkdownWorkspaceScopeMode = 'scratch' | 'project';
 
 export interface MarkdownWorkspaceScope {
   mode: MarkdownWorkspaceScopeMode;
   workingDir: string;
-  sessionKey?: string;
   projectPath?: string;
 }
 
 export interface CockpitFilesystemRootRecord {
   id: string;
-  kind: 'notes' | 'project';
+  kind: 'scratch' | 'project';
   label: string;
   path: string;
   pinned: boolean;
@@ -509,12 +541,9 @@ export const ALL_SESSION_STATUSES = [
 
 // ── markdown constants ──────────────────────────────────────────────
 
-export const MARKDOWN_WORKSPACE_DIR = '.cockpit/markdown';
-export const MARKDOWN_METADATA_DIR = '.meta';
+export const MARKDOWN_WORKSPACE_DIR = '.cockpit/scratch';
 export const MARKDOWN_FILE_EXTENSIONS = new Set(['.md', '.markdown', '.mdx']);
-export const MARKDOWN_SUGGESTED_FOLDERS = ['scratch', 'packets', 'plans', 'specs', 'handoffs'];
 export const MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;
-export const MARKDOWN_METADATA_MAX_BYTES = 64 * 1024;
 export const MARKDOWN_CHAT_CONTEXT_MAX_BYTES = 120 * 1024;
 export const COCKPIT_PROJECT_DISCOVERY_MAX_RESULTS = 40;
 export const COCKPIT_PROJECT_DISCOVERY_MAX_DEPTH = 3;
@@ -913,6 +942,35 @@ export function mapGateStatus(value: unknown): 'pass' | 'fail' | 'running' | 'un
 }
 
 // ── token parsing ───────────────────────────────────────────────────
+
+export function parseSessionTokenMetrics(
+  metadata: Record<string, unknown> | undefined
+): { input: number; output: number; cached: number; total: number; llmCalls: number; avgLatencyMs: number } {
+  const events = Array.isArray(metadata?.agent_events) ? metadata.agent_events : [];
+  let input = 0;
+  let output = 0;
+  let cached = 0;
+  let llmCalls = 0;
+  let totalLatencyMs = 0;
+  for (const entry of events) {
+    if (!isRecord(entry)) continue;
+    if (asString(entry.type) !== 'llm_call') continue;
+    const data = isRecord(entry.data) ? entry.data : {};
+    input += asNumber(data.prompt_tokens ?? data.promptTokens) ?? 0;
+    output += asNumber(data.completion_tokens ?? data.completionTokens) ?? 0;
+    cached += asNumber(data.cached_tokens ?? data.cachedTokens) ?? 0;
+    totalLatencyMs += asNumber(data.duration_ms ?? data.durationMs) ?? 0;
+    llmCalls++;
+  }
+  return {
+    input,
+    output,
+    cached,
+    total: input + output,
+    llmCalls,
+    avgLatencyMs: llmCalls > 0 ? Math.round(totalLatencyMs / llmCalls) : 0,
+  };
+}
 
 export function parseAgentEventTokenTotalsForDay(
   metadata: Record<string, unknown> | undefined,

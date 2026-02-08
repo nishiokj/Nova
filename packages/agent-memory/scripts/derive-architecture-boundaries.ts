@@ -2,6 +2,7 @@
 
 import type { DerivedMetadataSchema, DerivedRunContext, DerivedRunResult } from '../src/derived/runner.js'
 import { runArchitectureDerivation } from '../src/architecture/index.js'
+import type { ArchitectureConfig } from '../src/architecture/types.js'
 
 function numberValue(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
@@ -9,6 +10,16 @@ function numberValue(value: unknown, fallback: number): number {
 
 function booleanValue(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
+}
+
+function concernModeValue(
+  value: unknown,
+  fallback: ArchitectureConfig['concernMode']
+): ArchitectureConfig['concernMode'] {
+  if (value === 'graph_cluster' || value === 'module') {
+    return value
+  }
+  return fallback
 }
 
 export const metadata: DerivedMetadataSchema = {
@@ -40,8 +51,13 @@ export const metadata: DerivedMetadataSchema = {
     },
     emitAlerts: {
       type: 'boolean',
-      default: false,
-      description: 'Emit architecture alerts (disabled for Phase 1)',
+      default: true,
+      description: 'Emit deterministic architecture alerts',
+    },
+    concernMode: {
+      type: 'string',
+      default: 'module',
+      description: 'Concern assignment mode: module (deterministic module boundaries) or graph_cluster',
     },
   },
 }
@@ -56,7 +72,8 @@ export default async function run(ctx: DerivedRunContext): Promise<DerivedRunRes
     strongEdgeWeight: numberValue(jobMetadata.strongEdgeWeight ?? taskMetadata.strongEdgeWeight, 0.20),
     maxPairsPerFile: numberValue(jobMetadata.maxPairsPerFile ?? taskMetadata.maxPairsPerFile, 128),
     maxFiles: numberValue(jobMetadata.maxFiles ?? taskMetadata.maxFiles, 20000),
-    emitAlerts: booleanValue(jobMetadata.emitAlerts ?? taskMetadata.emitAlerts, false),
+    emitAlerts: booleanValue(jobMetadata.emitAlerts ?? taskMetadata.emitAlerts, true),
+    concernMode: concernModeValue(jobMetadata.concernMode ?? taskMetadata.concernMode, 'module'),
   }
 
   ctx.logger.info('derive-architecture-boundaries:start', resolved)
@@ -80,4 +97,3 @@ export default async function run(ctx: DerivedRunContext): Promise<DerivedRunRes
     },
   }
 }
-
