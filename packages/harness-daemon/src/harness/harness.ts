@@ -87,6 +87,7 @@ import {
   type WatcherAction,
   type RaisedEscalation,
   type SemanticOutput,
+  assertValidActionForTrigger,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
 import { createHookRegistry, registerHook, executeHooks, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
@@ -270,6 +271,71 @@ function yamlString(value: string): string {
   return JSON.stringify(value);
 }
 
+type EscalationOption = NonNullable<RaisedEscalation['options']>[number];
+
+function defaultEscalationOptions(trigger: WatcherTrigger): EscalationOption[] {
+  switch (trigger) {
+    case 'cadence_audit':
+      return [
+        {
+          id: 'continue_with_checkpoint',
+          label: 'Continue with checkpoint',
+          description: 'Resume execution, but require concrete output before the next audit (file change, test/log output, or non-empty status update).',
+          implications: ['Fastest path forward while still enforcing evidence.'],
+          recommended: true,
+        },
+        {
+          id: 'retry_audit',
+          label: 'Retry audit',
+          description: 'Run one more iteration to gather stronger evidence, then re-evaluate.',
+          implications: ['Delays resolution by one audit cycle.'],
+          recommended: false,
+        },
+        {
+          id: 'pause_and_debug',
+          label: 'Pause and debug',
+          description: 'Stop execution and investigate watcher/runtime reliability.',
+          implications: ['Highest confidence in diagnosis, highest interruption cost.'],
+          recommended: false,
+        },
+      ];
+    case 'agent_error':
+      return [
+        {
+          id: 'retry_with_recovery',
+          label: 'Retry with recovery',
+          description: 'Retry the work item with explicit recovery guidance from the error context.',
+          implications: ['Keeps progress moving if error is transient or localized.'],
+          recommended: true,
+        },
+        {
+          id: 'stop_and_investigate',
+          label: 'Stop and investigate',
+          description: 'Pause execution and investigate root cause before proceeding.',
+          implications: ['Reduces repeat failures but pauses delivery.'],
+          recommended: false,
+        },
+      ];
+    default:
+      return [
+        {
+          id: 'proceed',
+          label: 'Proceed',
+          description: 'Accept current state and continue execution.',
+          implications: ['Fastest option with least additional review.'],
+          recommended: true,
+        },
+        {
+          id: 'stop_and_investigate',
+          label: 'Stop and investigate',
+          description: 'Pause and inspect before continuing.',
+          implications: ['Safer, but blocks progress until investigation completes.'],
+          recommended: false,
+        },
+      ];
+  }
+}
+
 function buildEscalationPacketMarkdown(
   escalation: RaisedEscalation,
   trigger: WatcherTrigger
@@ -279,7 +345,9 @@ function buildEscalationPacketMarkdown(
   requestedDecision: 'choose' | 'approve' | 'clarify';
 } {
   const evidenceRefs = toEscalationEvidenceRefs(escalation);
-  const options = escalation.options ?? [];
+  const options = (escalation.options && escalation.options.length > 0)
+    ? escalation.options
+    : defaultEscalationOptions(trigger);
   const requestedDecision: 'choose' | 'approve' | 'clarify' = options.length > 1
     ? 'choose'
     : options.length === 1
@@ -324,29 +392,24 @@ function buildEscalationPacketMarkdown(
 
   lines.push(`# Escalation: ${escalation.title}`);
   lines.push('', '## Action');
-  lines.push('Pick one option, then click **Resolve Escalation** in Cockpit.');
+  lines.push('Select one option, then click **Resolve Escalation** in Cockpit.');
   lines.push('', '## Situation');
   const context = escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`;
-  lines.push(context.slice(0, 280));
+  lines.push(context.slice(0, 420));
 
   lines.push('', '## Options');
-  if (options.length === 0) {
-    lines.push('1. **Proceed**');
-    lines.push('   Continue with current approach.');
-    lines.push('2. **Retry with stronger evidence**');
-    lines.push('   Re-run with stricter verification.');
-    lines.push('3. **Stop and investigate**');
-    lines.push('   Pause and inspect root cause.');
-  } else {
-    for (let idx = 0; idx < options.length; idx += 1) {
-      const option = options[idx];
-      lines.push(`${idx + 1}. **${option.label}**`);
-      if (option.description) {
-        lines.push(`   ${option.description.slice(0, 220)}`);
-      }
-      if (option.recommended) {
-        lines.push('   - Recommended');
-      }
+  for (let idx = 0; idx < options.length; idx += 1) {
+    const option = options[idx];
+    lines.push(`${idx + 1}. **${option.label}**`);
+    if (option.description) {
+      lines.push(`   ${option.description.slice(0, 220)}`);
+    }
+    const primaryImplication = option.implications?.[0];
+    if (primaryImplication) {
+      lines.push(`   Impact: ${primaryImplication.slice(0, 180)}`);
+    }
+    if (option.recommended) {
+      lines.push('   Recommended');
     }
   }
 
@@ -354,7 +417,7 @@ function buildEscalationPacketMarkdown(
   if (recommendedOption) {
     lines.push(`Prefer **${recommendedOption.label}** based on current evidence.`);
   } else {
-    lines.push('No single option is recommended yet.');
+    lines.push('Select the option that best matches your risk tolerance.');
   }
 
   lines.push('', '## Evidence');
@@ -1170,11 +1233,17 @@ export class AgentHarness {
     const store = this.getOrCreateSessionStore(sessionKey);
     if (selectedModel) {
       store.setModelSelection(agentType, selectedModel);
-    } else {
-      // Clear this specific agent type - if agentType is 'standard', we clear all since it's the main/default
-      // For now, we don't have a clearModelSelection(agentType) method, so just set to null equivalent
-      // Actually, we should just not call this with null - the UI should only call with a valid selection
+      return;
     }
+    store.clearModelSelection(agentType);
+  }
+
+  clearAllSessionSelectedModels(sessionKey: string): void {
+    const state = this.sessions.get(sessionKey);
+    if (!state) {
+      return;
+    }
+    state.store.clearModelSelections();
   }
 
   getSessionSelectedModel(sessionKey: string, agentType: string): ModelSelection | null {
@@ -1595,6 +1664,26 @@ export class AgentHarness {
     // Create emit early so harness-level events (status, response, error, user_prompt)
     // reach EventBus → BusServer → SSE, not just the TUI's eventQueue.
     const emit = createEventEmitCallback(this.eventBus, requestId, runId, sessionKey);
+    const streamedAssistantChunks: string[] = [];
+    const emitWithAssistantCapture = (event: AgentEvent<unknown>) => {
+      if (event.type === 'agent_message') {
+        const data = event.data;
+        if (data && typeof data === 'object' && !Array.isArray(data)) {
+          const record = data as Record<string, unknown>;
+          const chunk = typeof record.message === 'string'
+            ? record.message
+            : typeof record.content === 'string'
+              ? record.content
+              : typeof record.chunk === 'string'
+                ? record.chunk
+                : '';
+          if (chunk) {
+            streamedAssistantChunks.push(chunk);
+          }
+        }
+      }
+      emit(event);
+    };
 
     this.pruneSessionStores('run');
     const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
@@ -1836,7 +1925,7 @@ export class AgentHarness {
           contextWindow,
           goal,
           requestId,
-          emit,
+          emitWithAssistantCapture,
           llmAdapter,
           effectiveAgentType,
           effectiveWorkingDir,
@@ -1844,15 +1933,24 @@ export class AgentHarness {
           store,
           isResume ? undefined : hookRegistry
         );
+        const responseContent = result.finalText.trim().length > 0
+          ? result.finalText
+          : streamedAssistantChunks.join('');
+        const responseHasContent = responseContent.trim().length > 0;
+
+        // Persist canonical messages before emitting response/status events.
+        // The dashboard refreshes on SSE response events, so persistence must
+        // happen first to avoid transient "missing assistant message" gaps.
+        this.persistToGraphD(sessionKey, requestId, inputText, responseContent, result.durationMs, userMessagePersisted);
 
         if (result.paused && result.userPrompt) {
           // Pausing for user input - emit response first (if any), then user prompt
-          if (result.finalText) {
+          if (responseHasContent) {
             eventQueue.push(
               createResponseEvent(
                 requestId,
                 true, // Partial success - got response before pause
-                result.finalText,
+                responseContent,
                 result.toolsUsed,
                 result.durationMs,
                 undefined,
@@ -1861,7 +1959,7 @@ export class AgentHarness {
             );
             emit(createEvent('harness_response', {
               success: true,
-              content: result.finalText,
+              content: responseContent,
               toolsUsed: result.toolsUsed,
               durationMs: result.durationMs,
               metadata: result.metadata,
@@ -1890,7 +1988,7 @@ export class AgentHarness {
             createResponseEvent(
               requestId,
               result.success,
-              result.finalText,
+              responseContent,
               result.toolsUsed,
               result.durationMs,
               result.errorMessage,
@@ -1899,7 +1997,7 @@ export class AgentHarness {
           );
           emit(createEvent('harness_response', {
             success: result.success,
-            content: result.finalText,
+            content: responseContent,
             toolsUsed: result.toolsUsed,
             durationMs: result.durationMs,
             error: result.errorMessage,
@@ -1909,8 +2007,6 @@ export class AgentHarness {
 
         eventQueue.push(createStatusEvent('idle'));
         emit(createEvent('harness_status', { state: 'idle' }));
-
-        this.persistToGraphD(sessionKey, requestId, inputText, result.finalText, result.durationMs, userMessagePersisted);
 
         return result;
       } catch (error) {
@@ -2038,9 +2134,11 @@ export class AgentHarness {
       if (!userMessagePersisted) {
         this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
       }
-      this.graphd!.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
-        duration_ms: durationMs,
-      });
+      if (assistantResponse.trim().length > 0) {
+        this.graphd!.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
+          duration_ms: durationMs,
+        });
+      }
       this.graphd!.sessionUpdateMetadata(sessionKey, {
         last_request_id: requestId,
         last_duration_ms: durationMs,
@@ -2651,14 +2749,13 @@ export class AgentHarness {
   private async runWatcherAgent(
     objective: string,
     sessionKey: string,
-    trigger?: WatcherTrigger,
+    trigger: WatcherTrigger,
     signal?: AbortSignal,
     workingDir?: string
   ): Promise<WatcherAction> {
     // Get the watcher agent config from registry
     if (!this.agentRegistry.has('watcher')) {
-      this.logger.warning('Watcher agent type not registered, defaulting to allow');
-      return { watcherAction: 'allow', reason: 'Watcher agent not configured' };
+      throw new Error('Watcher agent type not registered');
     }
 
     const agentConfig = this.agentRegistry.getConfig('watcher');
@@ -2668,8 +2765,7 @@ export class AgentHarness {
     const modelSelection = store?.getModelSelection('watcher');
 
     if (!modelSelection) {
-      this.logger.warning('No model selection available for watcher agent');
-      return { watcherAction: 'allow', reason: 'No model selection for watcher' };
+      throw new Error('No model selection available for watcher agent');
     }
 
     // Update TraceSubscriber with current model
@@ -2690,7 +2786,7 @@ export class AgentHarness {
 
     // Build trigger-specific schema that ONLY includes valid actions for this trigger
     // This prevents the LLM from seeing/using actions that would be rejected
-    const validActions = trigger ? getValidActions(trigger) : [];
+    const validActions = getValidActions(trigger);
     const triggerSpecificSchema = validActions.length > 0
       ? getWatcherSchemaJsonForActions(validActions)
       : agentConfig.outputSchema;
@@ -2702,7 +2798,7 @@ export class AgentHarness {
     };
 
     // Create watcher-specific emit callback so watcher appears in dashboard
-    const watcherRequestId = `watcher-${trigger ?? 'unknown'}-${Date.now()}`;
+    const watcherRequestId = `watcher-${trigger}-${Date.now()}`;
     const watcherRunId = `watcher-run-${Date.now()}`;
     const emit = createEventEmitCallback(this.eventBus, watcherRequestId, watcherRunId, sessionKey);
 
@@ -2748,84 +2844,78 @@ export class AgentHarness {
       },
     });
 
-    try {
-      if (signal?.aborted) {
-        return { watcherAction: 'allow', reason: 'Watcher aborted' };
-      }
-      const result = await agent.run({ globalContext: context, workItem, cwd: effectiveWorkingDir, signal });
-      let structured = result.structuredOutput as WatcherActionOutput | undefined;
-
-      if (!structured && result.response) {
-        const parsed = parseAndValidateOutput('watcher_action', result.response);
-        if (parsed) {
-          structured = parsed as WatcherActionOutput;
-        }
-      }
-
-      if (structured) {
-        if (structured.action !== 'done' || structured.goalStateReached !== true) {
-          this.logger.warning('Watcher structured output ended without done', {
-            sessionKey,
-            action: structured.action,
-            goalStateReached: structured.goalStateReached,
-            terminationReason: result.terminationReason,
-          });
-        }
-
-        switch (structured.watcherAction) {
-          case 'answer':
-            return {
-              watcherAction: 'answer',
-              reason: structured.reason,
-              answer: {
-                text: structured.answer.text,
-                contextAddendum: structured.answer.contextAddendum ?? undefined,
-              },
-            };
-          case 'realign':
-            return {
-              watcherAction: 'realign',
-              reason: structured.reason,
-              realign: {
-                systemMessage: structured.realign.systemMessage,
-                newGoal: structured.realign.newGoal ?? undefined,
-              },
-            };
-          case 'split':
-            return { watcherAction: 'split', reason: structured.reason, workItems: structured.workItems };
-          case 'create_work_item':
-            return { watcherAction: 'create_work_item', reason: structured.reason, workItems: structured.workItems };
-          case 'stop_work_item':
-            return {
-              watcherAction: 'stop_work_item',
-              reason: structured.reason,
-              ...(structured.escalationId ? { escalationId: structured.escalationId } : {}),
-            };
-          case 'quality_gate':
-            return { watcherAction: 'quality_gate', reason: structured.reason, qualityGate: structured.qualityGate };
-          case 'allow':
-            return { watcherAction: 'allow', reason: structured.reason };
-          case 'continue':
-            return { watcherAction: 'allow', reason: structured.reason };
-        }
-      }
-
-      // Fallback: structured output missing or malformed
-      this.logger.warning('Watcher agent returned invalid structured output', {
-        sessionKey,
-        hasStructured: !!result.structuredOutput,
-        watcherAction: (result.structuredOutput as WatcherActionOutput | undefined)?.watcherAction,
-        terminationReason: result.terminationReason,
-        error: result.error,
-      });
-      return { watcherAction: 'allow', reason: result.response || result.error || 'Watcher produced no valid structured output' };
-    } catch (err) {
-      this.logger.error('Watcher agent execution failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionKey,
-      });
-      return { watcherAction: 'allow', reason: `Watcher error: ${err instanceof Error ? err.message : String(err)}` };
+    if (signal?.aborted) {
+      throw new Error('Watcher aborted before execution');
     }
+    const result = await agent.run({ globalContext: context, workItem, cwd: effectiveWorkingDir, signal });
+    let structured = result.structuredOutput as WatcherActionOutput | undefined;
+
+    if (!structured && result.response) {
+      const parsed = parseAndValidateOutput('watcher_action', result.response);
+      if (parsed) {
+        structured = parsed as WatcherActionOutput;
+      }
+    }
+
+    if (structured) {
+      if (structured.action !== 'done' || structured.goalStateReached !== true) {
+        this.logger.warning('Watcher structured output ended without done', {
+          sessionKey,
+          action: structured.action,
+          goalStateReached: structured.goalStateReached,
+          terminationReason: result.terminationReason,
+        });
+      }
+
+      // Validate the LLM's action is actually valid for this trigger BEFORE returning.
+      // The trigger-specific schema should constrain this, but if it leaks through,
+      // this assertion catches it at the boundary instead of returning an invalid action.
+      assertValidActionForTrigger(trigger, structured.watcherAction);
+
+      switch (structured.watcherAction) {
+        case 'answer':
+          return {
+            watcherAction: 'answer',
+            reason: structured.reason,
+            answer: {
+              text: structured.answer.text,
+              contextAddendum: structured.answer.contextAddendum ?? undefined,
+            },
+          };
+        case 'realign':
+          return {
+            watcherAction: 'realign',
+            reason: structured.reason,
+            realign: {
+              systemMessage: structured.realign.systemMessage,
+              newGoal: structured.realign.newGoal ?? undefined,
+            },
+          };
+        case 'split':
+          return { watcherAction: 'split', reason: structured.reason, workItems: structured.workItems };
+        case 'create_work_item':
+          return { watcherAction: 'create_work_item', reason: structured.reason, workItems: structured.workItems };
+        case 'stop_work_item':
+          return {
+            watcherAction: 'stop_work_item',
+            reason: structured.reason,
+            ...(structured.escalationId ? { escalationId: structured.escalationId } : {}),
+          };
+        case 'quality_gate':
+          return { watcherAction: 'quality_gate', reason: structured.reason, qualityGate: structured.qualityGate };
+        case 'allow':
+          return { watcherAction: 'allow', reason: structured.reason };
+        case 'continue':
+          return { watcherAction: 'allow', reason: structured.reason };
+      }
+    }
+
+    // No valid structured output — throw so the caller (runAndLog) routes to
+    // getFallbackAction which returns a trigger-valid action.
+    throw new Error(
+      `Watcher produced no valid structured output (trigger=${trigger}, ` +
+      `terminationReason=${result.terminationReason}, error=${result.error ?? 'none'})`
+    );
   }
 
   private emitInternalHookAsync(event: InternalHookEvent, context: InternalHookContext): void {
@@ -2933,6 +3023,36 @@ export class AgentHarness {
       }
     };
 
+    const publishWorkItemStatus = (
+      payload: {
+        workId: string;
+        objective: string;
+        delta?: string;
+        agent: string;
+        dependencies: string[];
+        status: 'started' | 'completed' | 'failed' | 'skipped';
+        response?: string;
+        metrics?: {
+          llmCallsMade: number;
+          toolCallsMade: number;
+          durationMs: number;
+        };
+        error?: string;
+        toolErrors?: string[];
+        terminationReason?: string;
+        reason?: string;
+      },
+      requestId: string
+    ): void => {
+      this.eventBus.publish(createEvent(
+        'workitem_status',
+        payload,
+        payload.workId,
+        requestId,
+        sessionKey
+      ));
+    };
+
     // Write session_start entry
     await safeAppend('Work log write failed (session_start)', () => workLog.append({
       type: 'session_start',
@@ -3014,6 +3134,14 @@ export class AgentHarness {
             agent: ctx.agentType,
           }));
         }
+
+        publishWorkItemStatus({
+          workId: ctx.workId,
+          objective: ctx.objective ?? 'unknown',
+          agent: ctx.agentType,
+          dependencies: [],
+          status: 'started',
+        }, ctx.requestId);
       }
     });
 
@@ -3125,6 +3253,11 @@ export class AgentHarness {
           `Modified: ${event.paths.join(', ')}`
         ));
       }
+
+      // Publish to EventBus so dashboard SSE stream can refresh open files
+      this.eventBus.publish(createEvent('files_modified', {
+        paths: event.paths,
+      }, ctx.workId, ctx.requestId, ctx.sessionKey));
     });
 
     registerSessionInternalHook('agent_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
@@ -3156,6 +3289,54 @@ export class AgentHarness {
             filesModified: event.invalidatedPaths,
           } : undefined
         ));
+      }
+
+      const terminalStatus: 'completed' | 'failed' | 'skipped' =
+        event.success
+          ? 'completed'
+          : (event.terminationReason === 'watcher_stopped'
+              || event.terminationReason === 'watcher_work_item_stopped'
+              || event.terminationReason === 'user_stopped')
+            ? 'skipped'
+            : 'failed';
+      const objective = ctx.objective ?? 'unknown';
+
+      if (terminalStatus === 'completed') {
+        publishWorkItemStatus({
+          workId,
+          objective,
+          agent: ctx.agentType,
+          dependencies: [],
+          status: 'completed',
+          response: event.response ?? '',
+          metrics: {
+            llmCallsMade: event.metrics?.llmCallsMade ?? 0,
+            toolCallsMade: event.metrics?.toolCallsMade ?? 0,
+            durationMs: 0,
+          },
+          terminationReason: event.terminationReason,
+        }, ctx.requestId);
+      } else if (terminalStatus === 'skipped') {
+        publishWorkItemStatus({
+          workId,
+          objective,
+          agent: ctx.agentType,
+          dependencies: [],
+          status: 'skipped',
+          reason: event.terminationReason,
+          terminationReason: event.terminationReason,
+        }, ctx.requestId);
+      } else {
+        publishWorkItemStatus({
+          workId,
+          objective,
+          agent: ctx.agentType,
+          dependencies: [],
+          status: 'failed',
+          error: `Work item failed (${event.terminationReason})`,
+          toolErrors: [],
+          terminationReason: event.terminationReason,
+        }, ctx.requestId);
       }
     });
 

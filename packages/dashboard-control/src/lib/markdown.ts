@@ -2,7 +2,7 @@ import type { CockpitMarkdownTreeNode } from './api';
 
 // ============ Frontmatter Utilities ============
 
-export type DocumentType = 'note' | 'issue' | 'workflow' | 'executable';
+export type DocumentType = 'note' | 'issue' | 'workflow';
 
 export function parseFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
@@ -52,15 +52,9 @@ export function serializeFrontmatter(frontmatter: Record<string, unknown>, body:
 export function getDocumentType(content: string): DocumentType {
   const { frontmatter } = parseFrontmatter(content);
   const type = frontmatter.type;
-  if (frontmatter.sessionKey) return 'executable';
   if (type === 'workflow') return 'workflow';
   if (type === 'issue') return 'issue';
   return 'note';
-}
-
-export function getDocumentSessionKey(content: string): string | null {
-  const { frontmatter } = parseFrontmatter(content);
-  return typeof frontmatter.sessionKey === 'string' ? frontmatter.sessionKey : null;
 }
 
 export function promoteToIssue(content: string): string {

@@ -136,4 +136,22 @@ describe('deriveLiveWorkItems', () => {
 
     expect(rows[0]?.objective).toBe('Work item wk-9');
   });
+
+  it('drops stale non-terminal work items so idle cards are not rendered', () => {
+    const rows = deriveLiveWorkItems([
+      event({
+        at: '2026-02-08T10:00:00.000Z',
+        workItemId: 'idle-1',
+        objective: 'Old background task',
+      }),
+      event({
+        at: '2026-02-08T10:01:00.000Z',
+        workItemId: 'active-1',
+        status: 'started',
+        objective: 'Current task',
+      }),
+    ], { nowMs: Date.parse('2026-02-08T10:02:00.000Z') });
+
+    expect(rows.map((row) => row.workItemId)).toEqual(['active-1']);
+  });
 });

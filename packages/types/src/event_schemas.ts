@@ -21,6 +21,7 @@ export const AgentCoreEventTypeSchema = z.enum([
   'llm_error',
   'agent_bounds_hit',
   'memory_injected',
+  'files_modified',
 ]);
 
 /**

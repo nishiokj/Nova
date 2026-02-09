@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type KeyboardEvent } from 'react';
 import type { MarkdownWorkspace } from '@/hooks/use-markdown-workspace';
 import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
-import { getDocumentType, getDocumentSessionKey, parseFrontmatter, type DocumentType } from '@/lib/markdown';
+import { getDocumentType, parseFrontmatter, type DocumentType } from '@/lib/markdown';
 import { ChatMarkdown } from '@/components/shared/ChatMarkdown';
 
 const MarkdownEditor = lazy(() => import('./MarkdownEditor'));
@@ -10,7 +10,6 @@ const TYPE_BADGE_COLORS: Record<DocumentType, { color: string; bg: string }> = {
   note: { color: 'var(--text-muted)', bg: 'var(--text-muted)' },
   issue: { color: 'var(--accent-amber)', bg: 'var(--accent-amber)' },
   workflow: { color: 'var(--accent-cyan)', bg: 'var(--accent-cyan)' },
-  executable: { color: 'var(--accent-green)', bg: 'var(--accent-green)' },
 };
 
 function firstNonEmptyString(values: unknown[]): string | null {
@@ -45,12 +44,10 @@ function shouldExitPreviewOnKey(event: KeyboardEvent<HTMLDivElement>): boolean {
 export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) {
   const { state, setContent, editorRef } = workspace;
   const templates = useCockpit(s => s.templates);
-  const autocompleteEnabled = useCockpit(s => s.autocompleteEnabled);
   const store = useCockpitStore();
   const [previewMode, setPreviewMode] = useState(false);
 
   const docType = getDocumentType(state.content);
-  const sessionKey = getDocumentSessionKey(state.content);
   const { frontmatter, body } = parseFrontmatter(state.content);
   const templateName = firstNonEmptyString([
     frontmatter.template,
@@ -65,7 +62,7 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
   ]);
   const frontmatterSpecs = normalizeSpecsValue(frontmatter.specs);
   const templateBadge = templateName ?? templateId;
-  const workflowLike = docType === 'workflow' || docType === 'executable';
+  const workflowLike = docType === 'workflow';
   const hasTemplateBinding = workflowLike && (templateName !== null || templateId !== null || frontmatterSpecs.length > 0);
   const matchedTemplate = hasTemplateBinding
     ? templates.find((template) => (
@@ -90,29 +87,23 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
   const needsSaveForWorkflow = workflowLike && !state.selectedPath;
   const workflowHint = !workflowLike
     ? null
-    : docType === 'executable'
+    : needsProjectScopeForWorkflow
       ? {
-          tone: 'info' as const,
-          text: 'Session linked. Use chat below to continue this workflow.',
-          action: 'chat' as const,
+          tone: 'warning' as const,
+          text: 'Workflow docs run from project workspaces. Save this file into a project folder first.',
+          action: 'save-picker' as const,
         }
-      : needsProjectScopeForWorkflow
+      : needsSaveForWorkflow
         ? {
             tone: 'warning' as const,
-            text: 'Workflow docs run from project workspaces. Save this file into a project folder first.',
-            action: 'save-picker' as const,
+            text: 'Workflow is unsaved. Save it (Ctrl+S), then send a chat message to start execution.',
+            action: 'save' as const,
           }
-        : needsSaveForWorkflow
-          ? {
-              tone: 'warning' as const,
-              text: 'Workflow is unsaved. Save it (Ctrl+S), then send a chat message to start execution.',
-              action: 'save' as const,
-            }
-          : {
-              tone: 'info' as const,
-              text: 'Ready to run. Send a chat message below; first message creates a linked session.',
-              action: 'chat' as const,
-            };
+        : {
+            tone: 'info' as const,
+            text: 'Ready to run. Use /feature or /bugfix with a prompt to create a session.',
+            action: 'chat' as const,
+          };
 
   useEffect(() => {
     setPreviewMode(false);
@@ -138,16 +129,6 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
           </span>
         )}
 
-        {/* Session key link */}
-        {sessionKey && (
-          <button
-            onClick={() => store.set({ focusTarget: { type: 'session', id: sessionKey } })}
-            className="px-1.5 py-0.5 rounded text-[9px] font-mono text-[var(--accent-green)] hover:underline"
-          >
-            {sessionKey.slice(0, 20)}...
-          </button>
-        )}
-
         {state.loading && <span className="text-[var(--accent-cyan)]">Loading...</span>}
         {state.autoSaving && <span className="text-[var(--accent-cyan)]">Autosaving...</span>}
         {state.conflictVersion !== null && (
@@ -164,22 +145,12 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
             + New
           </button>
           {/* Promote button */}
-          {docType !== 'executable' && (
-            <button
-              onClick={() => store.handleOpenUpgradePicker()}
-              className="px-1.5 py-0.5 rounded text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/10"
-              title="Promote document (Ctrl+U)"
-            >
-              Promote
-            </button>
-          )}
           <button
-            onClick={() => store.set({ autocompleteEnabled: !autocompleteEnabled })}
-            className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]"
-            style={{ color: autocompleteEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)' }}
-            title="Toggle inline autocomplete"
+            onClick={() => store.handleOpenUpgradePicker()}
+            className="px-1.5 py-0.5 rounded text-[var(--accent-cyan)] hover:bg-[var(--accent-cyan)]/10"
+            title="Promote document (Ctrl+U)"
           >
-            AC
+            Promote
           </button>
           <button
             onClick={() => {
@@ -280,9 +251,7 @@ export function DocumentEditor({ workspace }: { workspace: MarkdownWorkspace }) 
               ref={editorRef}
               content={state.content}
               onChange={setContent}
-              fileSuggestions={workspace.files}
               placeholder="# Start writing..."
-              autocompleteEnabled={autocompleteEnabled}
             />
           </Suspense>
         )}

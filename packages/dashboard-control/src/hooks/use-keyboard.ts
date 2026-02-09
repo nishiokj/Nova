@@ -18,8 +18,17 @@ function isAsyncFocus(
 }
 
 function getFocusableTabs(
-  state: ReturnType<CockpitStoreImpl['getSnapshot']>
+  state: ReturnType<CockpitStoreImpl['getSnapshot']>,
+  store: CockpitStoreImpl,
 ): FocusTab[] {
+  const sessionKey = state.focusData?.sessionKey;
+  if (sessionKey && store.getDocumentSessionPath(sessionKey)) {
+    const tabs: FocusTab[] = ['document', 'permissions'];
+    if (isAsyncFocus(state)) {
+      tabs.splice(1, 0, 'escalations');
+    }
+    return tabs;
+  }
   const tabs: FocusTab[] = ['live', 'diff', 'tests', 'trace', 'permissions'];
   if (isAsyncFocus(state)) {
     tabs.splice(1, 0, 'escalations');
@@ -106,6 +115,14 @@ export function useKeyboard(store: CockpitStoreImpl, workspace: MarkdownWorkspac
         || target instanceof HTMLSelectElement
         || target.isContentEditable
       );
+
+      if (state.permissionDialogOpen) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          store.dismissPermissionDialog();
+        }
+        return;
+      }
 
       // While the filename picker is open, keep keyboard handling scoped there.
       if (ws.state.newFileDropdownOpen && event.key !== 'Escape') return;
@@ -231,7 +248,7 @@ export function useKeyboard(store: CockpitStoreImpl, workspace: MarkdownWorkspac
 
         if (state.focusTarget && state.globalTool === 'none' && activePane === 'center') {
           event.preventDefault();
-          const focusTabs = getFocusableTabs(state);
+          const focusTabs = getFocusableTabs(state, store);
           const idx = focusTabs.indexOf(state.focusTab);
           if (idx < 0) {
             store.set({ focusTab: focusTabs[0] ?? 'live' });

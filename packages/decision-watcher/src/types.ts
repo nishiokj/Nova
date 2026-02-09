@@ -11,6 +11,8 @@ import type { LLMAdapter } from 'llm';
 import {
   VALID_ACTIONS_BY_TRIGGER,
   getValidActions,
+  assertValidActionForTrigger,
+  type ValidActionsFor,
   type WatcherActionType,
   type WatcherNoInterventionAction,
   type WatcherTrigger,
@@ -470,6 +472,7 @@ export type {
 export {
   VALID_ACTIONS_BY_TRIGGER,
   getValidActions,
+  assertValidActionForTrigger,
 };
 
 import type { SemanticOutput } from './semantic/schemas.js';
@@ -537,6 +540,19 @@ export type WatcherActionWithWorkItems = Extract<
   WatcherAction,
   { watcherAction: 'split' | 'create_work_item' }
 >;
+
+/**
+ * WatcherAction narrowed to only the variants valid for trigger T.
+ * For unconstrained triggers (session_init: []), returns the full union.
+ *
+ * Usage:
+ *   type BoundsAction = WatcherActionFor<'bounds_exceeded'>;
+ *   // = Extract<WatcherAction, { watcherAction: 'realign' | 'split' | 'create_work_item' }>
+ */
+export type WatcherActionFor<T extends WatcherTrigger> =
+  [ValidActionsFor<T>] extends [never]
+    ? WatcherAction
+    : Extract<WatcherAction, { watcherAction: ValidActionsFor<T> }>;
 
 // ============================================
 // WORK LOG TYPES (Session Level)

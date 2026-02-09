@@ -250,6 +250,18 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
       };
     }
 
+    case 'files_modified': {
+      const filesData = data as { paths?: string[] };
+      const paths = Array.isArray(filesData.paths) ? filesData.paths : [];
+      return {
+        type: 'files_modified',
+        data: {
+          request_id: requestId,
+          paths,
+        },
+      };
+    }
+
     case 'artifact_discovered': {
       const artData = data as {
         artifact: { name?: string; kind?: string };

@@ -6,6 +6,7 @@ export interface AtMentionMatch {
 
 const MENTION_BODY_RE = /^[A-Za-z0-9_./-]*$/;
 const MENTION_BOUNDARY_RE = /[\s([{"'`]/;
+const AT_REF_RE = /(?:^|\s)@([A-Za-z0-9_./-]+)/g;
 const MARKDOWN_EXT_RE = /\.(md|markdown|mdx)$/i;
 const SEGMENT_BOUNDARY_RE = /[\/._-]/;
 
@@ -239,4 +240,20 @@ export function rankPathSuggestions(
     ));
 
   return ranked.slice(0, Math.max(1, limit)).map((row) => row.path);
+}
+
+/**
+ * Extracts `@path` references from submitted text.
+ * Returns the referenced paths and the remaining text with refs removed.
+ */
+export function extractAtRefs(text: string): { refs: string[]; rest: string } {
+  const refs: string[] = [];
+  let rest = text;
+  for (const match of text.matchAll(AT_REF_RE)) {
+    refs.push(match[1]);
+  }
+  if (refs.length > 0) {
+    rest = text.replace(AT_REF_RE, '').replace(/\s{2,}/g, ' ').trim();
+  }
+  return { refs, rest };
 }

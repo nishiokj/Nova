@@ -102,9 +102,8 @@ export function EventDrawer() {
   const eventDrawerOpen = useCockpit(s => s.eventDrawerOpen);
   const eventDrawerHeight = useCockpit(s => s.eventDrawerHeight);
   const events = useCockpit(s => s.events);
-  const streamingText = useCockpit(s => s.streamingText);
   const store = useCockpitStore();
-  const filteredEvents = useMemo(() => selectFilteredEvents(store.getSnapshot()), [events, eventFilter, streamingText]);
+  const filteredEvents = useMemo(() => selectFilteredEvents(store.getSnapshot()), [events, eventFilter]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isChatMode = eventFilter === 'messages';
 

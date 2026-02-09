@@ -91,6 +91,8 @@ import {
   type ArchitectureAlertStatus,
 } from './cockpit_architecture.js';
 
+const cockpitSnapshotInFlight = new Map<string, Promise<CockpitRollupSnapshotResult>>();
+
 // ── internal packet helpers ─────────────────────────────────────────
 
 function parsePackets(value: unknown, defaultSessionKey?: string): FocusPacket[] {
@@ -909,9 +911,11 @@ function collectWorkItemObjectives(agentEvents: unknown[]): Map<string, string> 
     asString(entry.work_item_id)
     ?? asString(entry.workItemId)
     ?? asString(entry.workId)
+    ?? asString(entry.work_id)
     ?? asString(data.work_item_id)
     ?? asString(data.workItemId)
     ?? asString(data.workId)
+    ?? asString(data.work_id)
     ?? null;
 
   const readObjective = (entry: Record<string, unknown>, data: Record<string, unknown>): string | null =>
@@ -953,16 +957,191 @@ function collectWorkItemObjectives(agentEvents: unknown[]): Map<string, string> 
   return map;
 }
 
+function normalizedEventWorkItemId(event: NormalizedSessionEvent): string | null {
+  const payload = event.payload;
+  const data = isRecord(payload.data) ? payload.data : {};
+  return asString(payload.workItemId)
+    ?? asString(payload.work_item_id)
+    ?? asString(payload.workId)
+    ?? asString(payload.work_id)
+    ?? asString(data.workItemId)
+    ?? asString(data.work_item_id)
+    ?? asString(data.workId)
+    ?? asString(data.work_id)
+    ?? null;
+}
+
+interface SessionEventEnvelope {
+  ts: number;
+  sequence: number;
+  cursorValue: number;
+  event: NormalizedSessionEvent;
+}
+
+function eventPayloadContent(payload: Record<string, unknown>): string {
+  return typeof payload.content === 'string' ? payload.content : '';
+}
+
+function hasNonEmptyPayloadContent(payload: Record<string, unknown>): boolean {
+  return eventPayloadContent(payload).trim().length > 0;
+}
+
+function isFromMessagesTable(payload: Record<string, unknown>): boolean {
+  return typeof payload.id === 'number' && !payload.eventType;
+}
+
+function extractAgentMessageContent(entry: Record<string, unknown>, data: Record<string, unknown>): string {
+  const directCandidates = [
+    data.content,
+    data.message,
+    data.chunk,
+    data.text,
+    data.response,
+    entry.content,
+    entry.message,
+  ];
+  for (const value of directCandidates) {
+    if (typeof value === 'string') {
+      if (value.length > 0) return value;
+      continue;
+    }
+  }
+
+  return (
+    extractText(data.content)
+    ?? extractText(data.message)
+    ?? extractText(data.chunk)
+    ?? extractText(data.text)
+    ?? extractText(data.response)
+    ?? extractText(entry.content)
+    ?? extractText(entry.message)
+    ?? ''
+  );
+}
+
+function updateMessageEnvelopeContent(
+  target: SessionEventEnvelope,
+  source: SessionEventEnvelope,
+  content: string
+): void {
+  target.event = {
+    ...target.event,
+    at: source.event.at,
+    payload: {
+      ...target.event.payload,
+      content,
+    },
+  };
+  target.event.signalPriority = getSignalPriority(target.event);
+  target.event.isStatusOnly = isStatusOnlyEvent(target.event);
+  target.ts = source.ts;
+  target.sequence = source.sequence;
+  target.cursorValue = source.cursorValue;
+}
+
+function compactAssistantStreamMessages(messageEntries: SessionEventEnvelope[]): SessionEventEnvelope[] {
+  if (messageEntries.length <= 1) return messageEntries;
+
+  const canonicalByRequestRole = new Set<string>();
+  for (const entry of messageEntries) {
+    const payload = entry.event.payload;
+    const role = asString(payload.role);
+    const requestId = asString(payload.requestId);
+    const eventType = asString(payload.eventType);
+    if (role !== 'assistant' || !requestId) continue;
+    const isCanonical = hasNonEmptyPayloadContent(payload)
+      && (isFromMessagesTable(payload) || (eventType !== undefined && eventType !== 'agent_message'));
+    if (!isCanonical) continue;
+    canonicalByRequestRole.add(`${requestId}:${role}`);
+  }
+
+  const compacted: SessionEventEnvelope[] = [];
+  const chunkIndexByRequestRole = new Map<string, number>();
+
+  const shiftIndexes = (removedIdx: number): void => {
+    for (const [key, idx] of Array.from(chunkIndexByRequestRole.entries())) {
+      if (idx === removedIdx) {
+        chunkIndexByRequestRole.delete(key);
+      } else if (idx > removedIdx) {
+        chunkIndexByRequestRole.set(key, idx - 1);
+      }
+    }
+  };
+
+  for (const entry of messageEntries) {
+    const payload = entry.event.payload;
+    const role = asString(payload.role);
+    const requestId = asString(payload.requestId);
+    const eventType = asString(payload.eventType);
+    const isChunk = role === 'assistant' && eventType === 'agent_message';
+
+    if (!isChunk) {
+      if (role === 'assistant' && requestId) {
+        const isCanonical = hasNonEmptyPayloadContent(payload)
+          && (isFromMessagesTable(payload) || (eventType !== undefined && eventType !== 'agent_message'));
+        if (isCanonical) {
+          const key = `${requestId}:${role}`;
+          const chunkIdx = chunkIndexByRequestRole.get(key);
+          if (chunkIdx !== undefined) {
+            compacted.splice(chunkIdx, 1);
+            shiftIndexes(chunkIdx);
+          }
+        }
+      }
+      compacted.push(entry);
+      continue;
+    }
+
+    const chunk = eventPayloadContent(payload);
+    if (chunk.length === 0) continue;
+
+    if (requestId) {
+      const key = `${requestId}:${role}`;
+      if (canonicalByRequestRole.has(key)) continue;
+      const existingIdx = chunkIndexByRequestRole.get(key);
+      if (existingIdx === undefined) {
+        compacted.push(entry);
+        chunkIndexByRequestRole.set(key, compacted.length - 1);
+        continue;
+      }
+      const existing = compacted[existingIdx];
+      const merged = `${eventPayloadContent(existing.event.payload)}${chunk}`;
+      updateMessageEnvelopeContent(existing, entry, merged);
+      continue;
+    }
+
+    const prev = compacted[compacted.length - 1];
+    if (prev) {
+      const prevPayload = prev.event.payload;
+      const prevRole = asString(prevPayload.role);
+      const prevEventType = asString(prevPayload.eventType);
+      const prevRequestId = asString(prevPayload.requestId);
+      if (prevRole === 'assistant' && prevEventType === 'agent_message' && !prevRequestId) {
+        const merged = `${eventPayloadContent(prevPayload)}${chunk}`;
+        updateMessageEnvelopeContent(prev, entry, merged);
+        continue;
+      }
+    }
+
+    compacted.push(entry);
+  }
+
+  return compacted;
+}
+
 function buildSessionEvents(
   session: SessionRow,
   messages: MessageRow[],
   limit: number,
   cursor?: number
 ): { events: NormalizedSessionEvent[]; nextCursor: number | null } {
-  const normalized: Array<{ ts: number; event: NormalizedSessionEvent }> = [];
+  const boundedLimit = clampInteger(limit, 200, 1, 500);
+  const normalized: SessionEventEnvelope[] = [];
+  let sequence = 0;
 
   for (const message of messages) {
-    const ts = message.createdAt * 1000;
+    const ts = parseTimestampMs(message.createdAt);
+    if (!ts) continue;
     const event: NormalizedSessionEvent = {
       at: new Date(ts).toISOString(),
       type: 'message',
@@ -976,7 +1155,13 @@ function buildSessionEvents(
     };
     event.signalPriority = getSignalPriority(event);
     event.isStatusOnly = isStatusOnlyEvent(event);
-    normalized.push({ ts, event });
+    normalized.push({
+      ts,
+      sequence,
+      cursorValue: ts,
+      event,
+    });
+    sequence += 1;
   }
 
   const agentEvents = Array.isArray(session.metadata?.agent_events) ? session.metadata?.agent_events : [];
@@ -997,9 +1182,11 @@ function buildSessionEvents(
     const eventWorkItemId = asString(entry.work_item_id)
       ?? asString(entry.workItemId)
       ?? asString(entry.workId)
+      ?? asString(entry.work_id)
       ?? asString(data.work_item_id)
       ?? asString(data.workItemId)
-      ?? asString(data.workId);
+      ?? asString(data.workId)
+      ?? asString(data.work_id);
     const existingObjective = asString(data.objective)
       ?? asString(data.current_objective)
       ?? asString(data.goal);
@@ -1009,14 +1196,16 @@ function buildSessionEvents(
     }
     const defaultRole = (type === 'user_message' || type === 'send_text') ? 'user' : 'assistant';
     const messageRole = asString(data.role) ?? asString(entry.role) ?? defaultRole;
-    const messageContent = extractText(data.content)
-      ?? extractText(data.message)
-      ?? extractText(data.chunk)
-      ?? extractText(data.text)
-      ?? extractText(data.response)
-      ?? extractText(entry.content)
-      ?? extractText(entry.message)
-      ?? '';
+    const messageContent = type === 'agent_message'
+      ? extractAgentMessageContent(entry, data)
+      : extractText(data.content)
+        ?? extractText(data.message)
+        ?? extractText(data.chunk)
+        ?? extractText(data.text)
+        ?? extractText(data.response)
+        ?? extractText(entry.content)
+        ?? extractText(entry.message)
+        ?? '';
     const event: NormalizedSessionEvent = {
       at: new Date(ts).toISOString(),
       type: normalizedType,
@@ -1030,41 +1219,121 @@ function buildSessionEvents(
     };
     event.signalPriority = getSignalPriority(event);
     event.isStatusOnly = isStatusOnlyEvent(event);
-    normalized.push({ ts, event });
+    normalized.push({
+      ts,
+      sequence,
+      cursorValue: ts,
+      event,
+    });
+    sequence += 1;
   }
 
-  normalized.sort((a, b) => a.ts - b.ts);
-  const filtered = cursor
-    ? normalized.filter((entry) => entry.ts > cursor)
+  normalized.sort((a, b) => (a.ts - b.ts) || (a.sequence - b.sequence));
+
+  let prevTs = Number.NaN;
+  let sameTsOrdinal = 0;
+  for (const entry of normalized) {
+    if (entry.ts === prevTs) {
+      sameTsOrdinal += 1;
+    } else {
+      prevTs = entry.ts;
+      sameTsOrdinal = 0;
+    }
+    // Cursor is timestamp + 1ms sub-slot, so events sharing the same millisecond
+    // are still incrementally pageable without being dropped.
+    entry.cursorValue = entry.ts + (Math.min(sameTsOrdinal, 999) / 1000);
+  }
+
+  const filtered = typeof cursor === 'number' && Number.isFinite(cursor)
+    ? normalized.filter((entry) => entry.cursorValue > cursor)
     : normalized;
 
   // Partition into messages and non-messages
   const messageEntries = filtered.filter(e => e.event.type === 'message');
   const otherEntries = filtered.filter(e => e.event.type !== 'message');
 
-  // Deduplicate: messages-table entries (numeric id, no eventType) win over agent_events duplicates
-  const seenRequestRoles = new Set<string>();
-  const dedupedMessages: typeof messageEntries = [];
+  // Deduplicate: messages-table entries (numeric id, no eventType) win over
+  // agent_events duplicates for the same requestId+role only when the table row
+  // actually carries content. Empty canonical rows should not hide stream content.
+  const tableRequestRoles = new Set<string>();
   for (const entry of messageEntries) {
-    const p = entry.event.payload;
-    const key = `${(p.requestId as string) ?? ''}:${(p.role as string) ?? ''}`;
-    const isFromTable = typeof p.id === 'number' && !p.eventType;
-    if (isFromTable) {
-      seenRequestRoles.add(key);
-      dedupedMessages.push(entry);
-    } else if (!seenRequestRoles.has(key)) {
-      dedupedMessages.push(entry);
-    }
+    const payload = entry.event.payload;
+    const isFromTable = isFromMessagesTable(payload);
+    if (!isFromTable) continue;
+    const requestId = asString(payload.requestId);
+    const role = asString(payload.role);
+    if (!requestId || !role || !hasNonEmptyPayloadContent(payload)) continue;
+    tableRequestRoles.add(`${requestId}:${role}`);
   }
 
-  // Budget: messages get priority (up to half), rest fills remaining slots
-  const messageBudget = Math.min(dedupedMessages.length, Math.floor(limit * 0.5));
-  const eventBudget = limit - messageBudget;
-  const selectedMessages = dedupedMessages.slice(-messageBudget);
-  const selectedOther = otherEntries.slice(-eventBudget);
+  const dedupedMessages: typeof messageEntries = [];
+  for (const entry of messageEntries) {
+    const payload = entry.event.payload;
+    const isFromTable = isFromMessagesTable(payload);
+    if (isFromTable) {
+      dedupedMessages.push(entry);
+      continue;
+    }
+    const requestId = asString(payload.requestId);
+    const role = asString(payload.role);
+    if (requestId && role && tableRequestRoles.has(`${requestId}:${role}`)) {
+      continue;
+    }
+    dedupedMessages.push(entry);
+  }
 
-  const combined = [...selectedMessages, ...selectedOther].sort((a, b) => a.ts - b.ts);
-  const nextCursor = combined.length > 0 ? combined[combined.length - 1].ts : null;
+  // Keep ordering stable after dedupe.
+  dedupedMessages.sort((a, b) => (a.ts - b.ts) || (a.sequence - b.sequence));
+  const compactedMessages = compactAssistantStreamMessages(dedupedMessages);
+
+  if (compactedMessages.length === 0 && otherEntries.length === 0) {
+    return {
+      events: [],
+      nextCursor: null,
+    };
+  }
+
+  // Reserve up to half the budget for non-message events when both types exist.
+  const reservedMessageSlots = compactedMessages.length > 0 && otherEntries.length > 0
+    ? Math.floor(boundedLimit * 0.5)
+    : boundedLimit;
+  const eventBudget = Math.max(
+    0,
+    boundedLimit - Math.min(compactedMessages.length, reservedMessageSlots)
+  );
+  let selectedOther: typeof otherEntries = [];
+
+  if (eventBudget > 0) {
+    // Keep at least one recent non-message event per work item so Live view
+    // does not collapse to whichever work item produced the noisiest stream.
+    const latestByWorkItem = new Map<string, (typeof otherEntries)[number]>();
+    for (let idx = otherEntries.length - 1; idx >= 0; idx -= 1) {
+      const entry = otherEntries[idx];
+      const workItemId = normalizedEventWorkItemId(entry.event);
+      if (!workItemId || latestByWorkItem.has(workItemId)) continue;
+      latestByWorkItem.set(workItemId, entry);
+    }
+
+    const anchors = Array.from(latestByWorkItem.values())
+      .sort((a, b) => a.ts - b.ts)
+      .slice(-eventBudget);
+    const anchorSet = new Set(anchors);
+    const remainingBudget = Math.max(0, eventBudget - anchors.length);
+    const tail = remainingBudget > 0
+      ? otherEntries.filter((entry) => !anchorSet.has(entry)).slice(-remainingBudget)
+      : [];
+
+    selectedOther = [...anchors, ...tail].sort((a, b) => a.ts - b.ts);
+  }
+
+  // Backfill with messages if non-message events did not consume their budget.
+  const messageCapacity = Math.max(0, boundedLimit - selectedOther.length);
+  const selectedMessages = compactedMessages.slice(-messageCapacity);
+
+  const combined = [...selectedMessages, ...selectedOther]
+    .sort((a, b) => (a.ts - b.ts) || (a.sequence - b.sequence))
+    .slice(-boundedLimit);
+  const nextCursor = combined.length > 0 ? combined[combined.length - 1].cursorValue : null;
 
   return {
     events: combined.map((entry) => entry.event),
@@ -1489,10 +1758,21 @@ export async function handleGetCockpitRollupSnapshot(
       return;
     }
 
-    const snapshot = await buildCockpitRollupSnapshot(ctx, options);
+    let inFlight = cockpitSnapshotInFlight.get(cacheKey);
+    if (!inFlight) {
+      const buildPromise = buildCockpitRollupSnapshot(ctx, options);
+      cockpitSnapshotInFlight.set(cacheKey, buildPromise);
+      void buildPromise.finally(() => {
+        if (cockpitSnapshotInFlight.get(cacheKey) === buildPromise) {
+          cockpitSnapshotInFlight.delete(cacheKey);
+        }
+      });
+      inFlight = buildPromise;
+    }
+    const snapshot = await inFlight;
     setCockpitSnapshotCache({
       key: cacheKey,
-      expiresAt: now + COCKPIT_SNAPSHOT_CACHE_TTL_MS,
+      expiresAt: Date.now() + COCKPIT_SNAPSHOT_CACHE_TTL_MS,
       data: snapshot,
     });
     sendJson(res, snapshot);
@@ -2110,14 +2390,15 @@ export function handleGetCockpitSessionEvents(
     sendJson(res, { events: [], nextCursor: null, error: 'Session not found' }, 404);
     return;
   }
-  const messagesResult = ctx.graphd.messagesGet(sessionKey, Math.max(limit * 2, 200), 0) as {
+  const boundedLimit = clampInteger(limit, 200, 1, 500);
+  const messagesResult = ctx.graphd.messagesGet(sessionKey, Math.max(boundedLimit * 2, 200), 0) as {
     messages?: MessageRow[];
   };
   const cursor = cursorRaw ? Number(cursorRaw) : undefined;
   const { events, nextCursor } = buildSessionEvents(
     session,
     messagesResult.messages ?? [],
-    limit,
+    boundedLimit,
     Number.isFinite(cursor) ? cursor : undefined
   );
   sendJson(res, { events, nextCursor });
@@ -2136,7 +2417,8 @@ export function handleGetCockpitSessionPackets(
   }
 
   const packets = parsePackets(session.metadata?.packets, session.sessionKey);
-  sendJson(res, { packets: packets.slice(0, limit) });
+  const boundedLimit = clampInteger(limit, 20, 1, 200);
+  sendJson(res, { packets: packets.slice(0, boundedLimit) });
 }
 
 export async function handleGetCockpitSessionPermissions(
@@ -2320,6 +2602,56 @@ export async function handlePostCockpitSessionPermissions(
     customConfigExists: settingsFile.exists,
     customConfigJson: settingsFile.content ?? null,
     ...(settingsFile.error ? { warning: settingsFile.error } : {}),
+  });
+}
+
+export async function handlePostCockpitPermissionResponse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext
+): Promise<void> {
+  if (!ctx.respondToPermissionRequest) {
+    sendJson(res, { success: false, error: 'Permission responses are not available in this daemon context' }, 501);
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const sessionKey = asString(body.sessionKey ?? body.session_key);
+  const requestId = asString(body.requestId ?? body.request_id);
+  const decisionRaw = asString(body.decision)?.toLowerCase();
+  const decision = decisionRaw === 'allow' || decisionRaw === 'always_allow' || decisionRaw === 'deny'
+    ? decisionRaw
+    : null;
+  const pattern = asString(body.pattern);
+
+  if (!sessionKey) {
+    sendJson(res, { success: false, error: 'Missing required field: sessionKey' }, 400);
+    return;
+  }
+  if (!requestId) {
+    sendJson(res, { success: false, error: 'Missing required field: requestId' }, 400);
+    return;
+  }
+  if (!decision) {
+    sendJson(res, { success: false, error: 'Invalid decision. Expected allow|always_allow|deny' }, 400);
+    return;
+  }
+
+  const response = await ctx.respondToPermissionRequest(sessionKey, {
+    requestId,
+    decision,
+    ...(typeof pattern === 'string' && pattern.trim().length > 0 ? { pattern: pattern.trim() } : {}),
+  });
+  if (!response.success) {
+    sendJson(res, { success: false, error: response.error ?? 'Failed sending permission response' }, 500);
+    return;
+  }
+
+  sendJson(res, {
+    success: true,
+    sessionKey,
+    requestId,
+    decision,
   });
 }
 
@@ -2636,6 +2968,68 @@ export async function handlePostCockpitSessionCreate(
     sessionKey,
     workingDir,
   });
+}
+
+// ── async session management ────────────────────────────────────────
+
+export async function handlePostCockpitSessionAsyncStart(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  sessionKey: string
+): Promise<void> {
+  if (!ctx.startSessionAsync) {
+    sendJson(res, { success: false, error: 'Async start not available in this daemon context' }, 501);
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const goal = asString(body.goal);
+  if (!goal) {
+    sendJson(res, { success: false, error: 'Missing goal' }, 400);
+    return;
+  }
+
+  const result = await ctx.startSessionAsync(sessionKey, goal);
+  if (!result.success) {
+    sendJson(res, { success: false, error: result.error ?? 'Failed to start async session' }, 400);
+    return;
+  }
+
+  sendJson(res, result);
+}
+
+export async function handlePostCockpitSessionAsyncCancel(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  sessionKey: string
+): Promise<void> {
+  if (!ctx.cancelSessionAsync) {
+    sendJson(res, { success: false, error: 'Async cancel not available in this daemon context' }, 501);
+    return;
+  }
+
+  const result = await ctx.cancelSessionAsync(sessionKey);
+  if (!result.success) {
+    sendJson(res, { success: false, error: result.error ?? 'Failed to cancel async session' }, 400);
+    return;
+  }
+
+  sendJson(res, { success: true });
+}
+
+export async function handleGetCockpitSessionAsyncStatus(
+  res: ServerResponse,
+  ctx: ControlPlaneContext,
+  sessionKey: string
+): Promise<void> {
+  if (!ctx.getSessionAsyncStatus) {
+    sendJson(res, { success: false, error: 'Async status not available in this daemon context' }, 501);
+    return;
+  }
+
+  const result = await ctx.getSessionAsyncStatus(sessionKey);
+  sendJson(res, result);
 }
 
 // ── architecture ────────────────────────────────────────────────────

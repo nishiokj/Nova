@@ -83,7 +83,7 @@ export function RenderedMarkdownSurface({ content, onChange }: RenderedMarkdownS
   // Typically workflow descriptions and objective sections
   const editableBlockIds = useMemo(() => {
     const ids = new Set<string>();
-    if (docType === 'workflow' || docType === 'executable') {
+    if (docType === 'workflow') {
       // Mark blocks that come after certain headings as editable
       let afterEditableHeading = false;
       for (const block of parsed.blocks) {
@@ -105,8 +105,8 @@ export function RenderedMarkdownSurface({ content, onChange }: RenderedMarkdownS
 
   return (
     <div className="h-full overflow-y-auto px-3 py-2 text-[12px] text-[var(--text-primary)]">
-      {/* Workflow Descriptor - shown only for workflow/executable types */}
-      {(docType === 'workflow' || docType === 'executable') && (
+      {/* Workflow Descriptor */}
+      {(docType === 'workflow') && (
         <div className="mb-3 rounded border border-[var(--accent-cyan)]/30 bg-[var(--accent-cyan)]/5 px-3 py-2">
           <div className="text-[11px] font-medium text-[var(--accent-cyan)] mb-1">
             Agentic workflow with predefined stages
@@ -118,7 +118,7 @@ export function RenderedMarkdownSurface({ content, onChange }: RenderedMarkdownS
       )}
 
       {/* Custom Spec Link Field - for workflows that need external spec references */}
-      {(docType === 'workflow' || docType === 'executable') && (
+      {(docType === 'workflow') && (
         <div className="mb-3 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2">
           <div className="text-[10px] text-[var(--text-muted)] mb-1">Custom Spec Link (optional)</div>
           <input

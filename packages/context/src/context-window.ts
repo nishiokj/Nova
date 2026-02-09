@@ -5,7 +5,7 @@
  * - items[] directly maps to OpenAI Responses API input format
  * - Mutations increment _version for optimistic concurrency
  * - getItemsForLLM() handles provider-specific conversion
- * - Optional disk backing: pass filePath to constructor for write-through persistence
+ * - Optional disk backing: pass filePath to constructor for disk-authoritative persistence
  */
 
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
@@ -486,8 +486,17 @@ export class ContextWindow {
   }
 
   // =========================================================================
-  // Disk I/O (write-through model — RAM is authoritative)
+  // Disk I/O (disk-authoritative model with in-memory cache)
   // =========================================================================
+
+  /**
+   * Sync in-memory cache from disk when file-backed.
+   * This prevents stale in-memory state from overwriting newer persisted context.
+   */
+  private _syncFromDiskIfBacked(): void {
+    if (!this.filePath || !existsSync(this.filePath)) return;
+    this._loadFromDisk();
+  }
 
   private _renderFrontmatter(): string {
     return serializeFrontmatter({
@@ -510,6 +519,7 @@ export class ContextWindow {
 
     const body = content.slice(parsed.bodyStart);
     this._items = parseItemBlocks(body);
+    this._readFiles = new Set<string>();
 
     // Rebuild _readFiles from file_content items
     for (const item of this._items) {
@@ -517,6 +527,11 @@ export class ContextWindow {
         this._readFiles.add(item.path);
       }
     }
+
+    this._metrics = {
+      ...this._metrics,
+      messageCount: this._items.filter(i => i.type === 'message').length,
+    };
   }
 
   private _writeDisk(): void {
@@ -555,6 +570,7 @@ export class ContextWindow {
    * Add a message to the context window.
    */
   addMessage(role: MessageItem['role'], content: string | ContentBlock[], workItemId?: string): void {
+    this._syncFromDiskIfBacked();
     this._items.push({
       type: 'message',
       role,
@@ -575,6 +591,7 @@ export class ContextWindow {
    * Add a function call (tool invocation by model).
    */
   addFunctionCall(callId: string, name: string, args: Record<string, unknown>, workItemId?: string): void {
+    this._syncFromDiskIfBacked();
     this._items.push({
       type: 'function_call',
       callId,
@@ -597,6 +614,7 @@ export class ContextWindow {
     durationMs?: number,
     workItemId?: string
   ): void {
+    this._syncFromDiskIfBacked();
     this._items.push({
       type: 'function_call_output',
       callId,
@@ -615,6 +633,7 @@ export class ContextWindow {
    * Add reasoning content (chain of thought).
    */
   addReasoning(content: string, workItemId?: string): void {
+    this._syncFromDiskIfBacked();
     this._items.push({
       type: 'reasoning',
       content,
@@ -629,6 +648,7 @@ export class ContextWindow {
    * Add file content to context. Returns the generated ID.
    */
   addFileContent(path: string, content: string, language?: string, workItemId?: string): string {
+    this._syncFromDiskIfBacked();
     const id = `fc_${this.sessionKey.slice(0, 4)}_${++this._fileContentCounter}`;
     this._items.push({
       type: 'file_content',
@@ -653,6 +673,7 @@ export class ContextWindow {
     artifact: Omit<ArtifactItem, 'type' | 'id' | 'timestamp'>,
     workItemId?: string
   ): string {
+    this._syncFromDiskIfBacked();
     const id = `art_${this.sessionKey.slice(0, 4)}_${++this._artifactCounter}`;
     this._items.push({
       type: 'artifact',
@@ -673,6 +694,7 @@ export class ContextWindow {
     artifacts: Array<Omit<ArtifactItem, 'type' | 'id' | 'timestamp'>>,
     workItemId?: string
   ): string[] {
+    this._syncFromDiskIfBacked();
     return artifacts.map(a => this.addArtifact(a, workItemId));
   }
 
@@ -701,6 +723,7 @@ export class ContextWindow {
    * Update metrics after an LLM response.
    */
   updateMetrics(promptTokens: number, completionTokens: number, cachedTokens?: number): void {
+    this._syncFromDiskIfBacked();
     this._metrics = updateContextMetrics(
       this._metrics,
       promptTokens,
@@ -715,6 +738,7 @@ export class ContextWindow {
    * Mark a file as read (without adding content to context).
    */
   markFileRead(path: string): void {
+    this._syncFromDiskIfBacked();
     this._readFiles.add(path);
   }
 
@@ -722,6 +746,7 @@ export class ContextWindow {
    * Append a pre-built context item (used by Orchestrator to merge Agent results).
    */
   appendItem(item: ContextItem): void {
+    this._syncFromDiskIfBacked();
     this._items.push(item);
     this._version++;
     this._writeDisk();
@@ -732,6 +757,7 @@ export class ContextWindow {
    * Items for which the predicate returns false are removed.
    */
   filterItems(predicate: (item: ContextItem) => boolean): void {
+    this._syncFromDiskIfBacked();
     this._items = this._items.filter(predicate);
     this._version++;
     this._writeDisk();
@@ -741,6 +767,7 @@ export class ContextWindow {
    * Get read files as array (for Agent tracking).
    */
   getReadFilesArray(): string[] {
+    this._syncFromDiskIfBacked();
     return Array.from(this._readFiles);
   }
 
@@ -753,6 +780,7 @@ export class ContextWindow {
    * Removes the path from _readFiles if no items remain.
    */
   ejectFileContentByPath(path: string): EjectResult {
+    this._syncFromDiskIfBacked();
     const ejectedIds: string[] = [];
     this._items = this._items.filter((item) => {
       if (item.type === 'file_content' && item.path === path) {
@@ -800,6 +828,7 @@ export class ContextWindow {
    * Eject a specific file_content item by ID.
    */
   ejectFileContentById(id: string): EjectResult {
+    this._syncFromDiskIfBacked();
     let ejectedPath: string | null = null;
 
     this._items = this._items.filter((item) => {
@@ -834,6 +863,7 @@ export class ContextWindow {
    * Invalidate file content and artifacts after a file modification.
    */
   invalidateFileContent(path: string): EjectResult {
+    this._syncFromDiskIfBacked();
     const result = this.ejectFileContentByPath(path);
     this.ejectArtifactsByPath(path);
     if (this._readFiles.delete(path)) {
@@ -846,6 +876,7 @@ export class ContextWindow {
    * Compact the context window to reduce size.
    */
   compact(options: CompactOptions = {}): CompactResult {
+    this._syncFromDiskIfBacked();
     const {
       maxFileContentAgeMs,
       maxFileContentCount,
@@ -969,6 +1000,7 @@ export class ContextWindow {
    * Clear all items and reset state.
    */
   clear(): void {
+    this._syncFromDiskIfBacked();
     this._items = [];
     this._readFiles.clear();
     this._version++;
@@ -981,18 +1013,22 @@ export class ContextWindow {
   // =========================================================================
 
   get items(): readonly ContextItem[] {
+    this._syncFromDiskIfBacked();
     return this._items;
   }
 
   get metrics(): Readonly<ContextWindowMetrics> {
+    this._syncFromDiskIfBacked();
     return this._metrics;
   }
 
   get version(): number {
+    this._syncFromDiskIfBacked();
     return this._version;
   }
 
   get readFiles(): ReadonlySet<string> {
+    this._syncFromDiskIfBacked();
     return this._readFiles;
   }
 
@@ -1001,6 +1037,7 @@ export class ContextWindow {
    * Useful when creating filtered context views.
    */
   rebuildReadFilesFromItems(): void {
+    this._syncFromDiskIfBacked();
     const next = new Set<string>();
     for (const item of this._items) {
       if (item.type === 'file_content') {
@@ -1015,6 +1052,7 @@ export class ContextWindow {
    * Check if a file has been read in this session.
    */
   hasReadFile(path: string): boolean {
+    this._syncFromDiskIfBacked();
     return this._readFiles.has(path);
   }
 
@@ -1023,6 +1061,7 @@ export class ContextWindow {
    * Helps the model avoid re-reading files or re-discovering artifacts.
    */
   buildContextSummary(): string | null {
+    this._syncFromDiskIfBacked();
     const parts: string[] = [];
 
     // List files already in context
@@ -1052,6 +1091,7 @@ export class ContextWindow {
    * Get items filtered by type.
    */
   getItemsByType<T extends ContextItem>(type: ContextItemType): T[] {
+    this._syncFromDiskIfBacked();
     return this._items.filter(item => item.type === type) as T[];
   }
 
@@ -1059,6 +1099,7 @@ export class ContextWindow {
    * Get the last N items.
    */
   getRecentItems(count: number): readonly ContextItem[] {
+    this._syncFromDiskIfBacked();
     return this._items.slice(-count);
   }
 
@@ -1072,6 +1113,7 @@ export class ContextWindow {
    * Batches artifacts into a single message to reduce token overhead.
    */
   getItemsForLLM(): LLMItem[] {
+    this._syncFromDiskIfBacked();
     const result: LLMItem[] = [];
     const artifactItems: ArtifactItem[] = [];
 
@@ -1149,6 +1191,7 @@ export class ContextWindow {
    * Batches artifacts into a single message to reduce token overhead.
    */
   getItemsForAnthropic(): { system: string; messages: Array<Record<string, unknown>> } {
+    this._syncFromDiskIfBacked();
     const systemParts: string[] = [];
     const messages: Array<Record<string, unknown>> = [];
     const artifactItems: ArtifactItem[] = [];
@@ -1266,6 +1309,7 @@ export class ContextWindow {
    * Serialize to snapshot for persistence.
    */
   serialize(): ContextWindowSnapshot {
+    this._syncFromDiskIfBacked();
     return {
       sessionKey: this.sessionKey,
       maxTokens: this.maxTokens,
@@ -1304,6 +1348,7 @@ export class ContextWindow {
    * Returns only message-type items with role, content, timestamp, and optional requestId.
    */
   getMessageHistory(): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
+    this._syncFromDiskIfBacked();
     return this._items
       .filter((item): item is MessageItem => item.type === 'message')
       .map((item) => {
@@ -1350,6 +1395,7 @@ export class ContextWindow {
     invalidatedPaths: string[];
     localContext?: ContextWindow;
   }): void {
+    this._syncFromDiskIfBacked();
     // Invalidate stale file content and artifacts from writes/edits
     for (const path of result.invalidatedPaths) {
       this.invalidateFileContent(path);
@@ -1381,6 +1427,7 @@ export class ContextWindow {
    * @param threshold - Fraction of maxTokens (0.0 to 1.0), default 0.8
    */
   isNearFull(threshold: number = 0.8): boolean {
+    this._syncFromDiskIfBacked();
     return this.estimateTokenUsage() / this.maxTokens >= threshold;
   }
 
@@ -1419,6 +1466,7 @@ export class ContextWindow {
    * Generate telemetry data for observability.
    */
   toTelemetry(): ContextWindowTelemetry {
+    this._syncFromDiskIfBacked();
     const itemsByType: Record<ContextItemType, number> = {
       message: 0,
       function_call: 0,

@@ -64,6 +64,12 @@ const GATEWAY_MODEL_PROVIDERS = new Set<string>([
   'claude',
 ]);
 
+type PersistedModelSelection = {
+  provider: string;
+  model: string;
+  reasoning?: string;
+};
+
 interface HarnessLike {
   run(params: {
     requestId: string;
@@ -86,6 +92,7 @@ interface HarnessLike {
   setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('agent').ModelSelection | null): void;
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
+  clearAllSessionSelectedModels?(sessionKey: string): void;
   getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
   isSessionPaused?(sessionKey: string): boolean;
   getAsyncModeStatus?(): { ok: boolean; issues: string[] };
@@ -595,6 +602,11 @@ export class BridgeGateway {
     register('control_plane_memory_info', (_data, ctx) => this.handleControlPlaneMemoryInfo(ctx.connectionId));
     register('control_plane_model_get', (data, ctx) => this.handleControlPlaneModelGet(ctx.connectionId, data));
     register('control_plane_model_set', (data, ctx) => this.handleControlPlaneModelSet(ctx.connectionId, data));
+    register('control_plane_async_start', (data, ctx) => {
+      void this.handleControlPlaneAsyncStart(ctx.connectionId, data);
+    });
+    register('control_plane_async_cancel', (data, ctx) => this.handleControlPlaneAsyncCancel(ctx.connectionId, data));
+    register('control_plane_async_status', (data, ctx) => this.handleControlPlaneAsyncStatus(ctx.connectionId, data));
     register('shutdown', (_data, ctx) => this.sendError(ctx.connectionId, 'Shutdown is not supported via bridge'));
 
     return registry;
@@ -1050,6 +1062,14 @@ export class BridgeGateway {
 
     // Clear session selections if they match the deleted model
     if (sessionKey) {
+      const inMemorySelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      for (const [agentType, selection] of inMemorySelections) {
+        const selectionModel = typeof selection?.model === 'string' ? selection.model.trim().toLowerCase() : '';
+        if (selectionModel === normalizedModelId && !clearedAgentTypes.includes(agentType)) {
+          clearedAgentTypes.push(agentType);
+        }
+      }
+
       const session = graphd.sessionGet(sessionKey);
       const metadata = session?.metadata as Record<string, unknown> | undefined;
       const sessionSelections = (metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string }>) ?? {};
@@ -1063,6 +1083,10 @@ export class BridgeGateway {
       }
       if (sessionSelectionsUpdated) {
         graphd.sessionUpdateMetadata(sessionKey, { model_selections: sessionSelections });
+      }
+
+      for (const clearedAgentType of clearedAgentTypes) {
+        this.harness.setSessionSelectedModel?.(sessionKey, clearedAgentType, null);
       }
     }
 
@@ -1702,6 +1726,58 @@ export class BridgeGateway {
   // Model Selection Handlers
   // =========================================================================
 
+  private persistModelSelection(
+    sessionKey: string,
+    agentType: string,
+    selection: PersistedModelSelection
+  ): void {
+    const graphd = this.harness.getGraphD?.();
+    if (!graphd) {
+      return;
+    }
+    const globalSelections = graphd.getUserPreference<Record<string, PersistedModelSelection>>(
+      'user_prefs:model_selections'
+    ) ?? {};
+    const updatedSelections = { ...globalSelections, [agentType]: selection };
+    graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
+    graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
+  }
+
+  private clearAllModelSelections(sessionKey: string): string[] {
+    const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+    const clearedAgentTypes = Array.from(existingSelections.keys());
+
+    if (this.harness.clearAllSessionSelectedModels) {
+      this.harness.clearAllSessionSelectedModels(sessionKey);
+    } else {
+      for (const agentType of clearedAgentTypes) {
+        this.harness.setSessionSelectedModel?.(sessionKey, agentType, null);
+      }
+    }
+
+    const graphd = this.harness.getGraphD?.();
+    if (graphd) {
+      graphd.sessionUpdateMetadata(sessionKey, { model_selections: null });
+      graphd.deleteUserPreference('user_prefs:model_selections');
+      graphd.deleteUserPreference('user_prefs:selected_model');
+      graphd.deleteUserPreference('user_prefs:last_model');
+    }
+
+    return clearedAgentTypes;
+  }
+
+  private ensureAsyncCompanionSelections(
+    sessionKey: string,
+    fallbackSelection: PersistedModelSelection
+  ): void {
+    for (const companionAgentType of ['planner', 'watcher'] as const) {
+      const existingSelection = this.harness.getSessionSelectedModel?.(sessionKey, companionAgentType);
+      if (!existingSelection?.model || !existingSelection?.provider) {
+        this.harness.setSessionSelectedModel?.(sessionKey, companionAgentType, fallbackSelection);
+      }
+    }
+  }
+
   private handleSetModel(
     connectionId: string,
     data: Record<string, unknown> | undefined,
@@ -1722,33 +1798,27 @@ export class BridgeGateway {
     const model = typeof data?.model === 'string' ? data.model : null;
     const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : null;
 
-    const graphd = this.harness.getGraphD?.();
-
     // Handle reset - clear all model selections
     if (data?.reset === true) {
-      if (graphd) {
-        graphd.sessionUpdateMetadata(sessionKey, { model_selections: null });
-        graphd.deleteUserPreference('user_prefs:model_selections');
-        graphd.deleteUserPreference('user_prefs:selected_model');
-        graphd.deleteUserPreference('user_prefs:last_model');
-      }
-      // Note: harness.clearModelSelections would be needed, but we don't have that exposed
-      // The store will be cleared on next session init
+      const clearedAgentTypes = this.clearAllModelSelections(sessionKey);
+      const agentTypesToEmit = clearedAgentTypes.length > 0 ? clearedAgentTypes : [agentType];
       this.sendAuthResponse(connectionId, 'set_model', {
         success: true,
         selected_model: null,
         message: 'All model selections cleared',
       });
-      this.sendEvent(connectionId, {
-        type: 'model_changed',
-        data: {
-          agentType,
-          selectedModel: null,
-          provider: null,
-          model: null,
-          reasoning: null,
-        },
-      });
+      for (const clearedAgentType of agentTypesToEmit) {
+        this.sendEvent(connectionId, {
+          type: 'model_changed',
+          data: {
+            agentType: clearedAgentType,
+            selectedModel: null,
+            provider: null,
+            model: null,
+            reasoning: null,
+          },
+        });
+      }
       return;
     }
 
@@ -1771,18 +1841,7 @@ export class BridgeGateway {
     // Store selected model for this agent type
     const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
     this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
-
-    // Persist to GraphD as per-agent-type model_selections map
-    if (graphd) {
-      // Read from GLOBAL user preferences first (source of truth), then merge new selection
-      // This ensures selections from other sessions aren't lost
-      const globalSelections = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections') ?? {};
-      const updatedSelections = { ...globalSelections, [agentType]: selectedModel };
-
-      // Persist to both session metadata and global preferences
-      graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
-      graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
-    }
+    this.persistModelSelection(sessionKey, agentType, selectedModel);
 
     // Emit model_changed event with agentType
     this.sendEvent(connectionId, {
@@ -2074,7 +2133,11 @@ export class BridgeGateway {
     }
 
     const requestId = typeof data?.request_id === 'string' ? data.request_id : '';
-    const decision = typeof data?.decision === 'string' ? data.decision : '';
+    const decisionFromField = typeof data?.decision === 'string' ? data.decision : '';
+    const decisionFromAllowed = typeof data?.allowed === 'boolean'
+      ? (data.allowed ? 'allow' : 'deny')
+      : '';
+    const decision = decisionFromField || decisionFromAllowed;
     const pattern = typeof data?.pattern === 'string' ? data.pattern : undefined;
 
     if (!requestId) {
@@ -2164,6 +2227,14 @@ export class BridgeGateway {
     const handoffSpec = metadata && isRecord(metadata.cockpit_handoff_spec)
       ? metadata.cockpit_handoff_spec
       : undefined;
+
+    // Browser-originated sessions default to dangerous mode (no permission prompts).
+    this.harness.ensureSessionHydrated?.(input.sessionKey, {
+      workingDir,
+      dangerousMode: true,
+      includeUserPreferences: true,
+    });
+    this.harness.getSessionPermissionChecker?.(input.sessionKey)?.setDangerousMode(true);
 
     try {
       const runHandle = this.harness.run({
@@ -2448,14 +2519,7 @@ export class BridgeGateway {
     }
     const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
     this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
-
-    const graphd = this.harness.getGraphD?.();
-    if (graphd) {
-      const globalSelections = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections') ?? {};
-      const updatedSelections = { ...globalSelections, [agentType]: selectedModel };
-      graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
-      graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
-    }
+    this.persistModelSelection(sessionKey, agentType, selectedModel);
 
     this.sendAuthResponse(connectionId, 'control_plane_model_set', {
       success: true,
@@ -2530,14 +2594,7 @@ export class BridgeGateway {
     }
 
     // Ensure planner/watcher model selections exist (defaults to standard selection if unset)
-    const plannerSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'planner');
-    if (!plannerSelection?.model || !plannerSelection?.provider) {
-      this.harness.setSessionSelectedModel?.(sessionKey, 'planner', activeSelection);
-    }
-    const watcherSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'watcher');
-    if (!watcherSelection?.model || !watcherSelection?.provider) {
-      this.harness.setSessionSelectedModel?.(sessionKey, 'watcher', activeSelection);
-    }
+    this.ensureAsyncCompanionSelections(sessionKey, activeSelection);
 
     // Extract goal from data
     const goal = typeof data?.goal === 'string' ? data.goal.trim() : '';
@@ -2685,6 +2742,184 @@ export class BridgeGateway {
     }
 
     this.sendAuthResponse(connectionId, 'async_status', {
+      success: true,
+      running: true,
+      requestId: sessionAsyncRun.requestId,
+      goal: sessionAsyncRun.goal,
+      startedAt: sessionAsyncRun.startedAt,
+      elapsedMs: Date.now() - sessionAsyncRun.startedAt,
+    });
+  }
+
+  // =========================================================================
+  // Control Plane Async Handlers (bridge commands from cockpit dashboard)
+  // =========================================================================
+
+  private async handleControlPlaneAsyncStart(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): Promise<void> {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const goal = typeof data?.goal === 'string' ? data.goal.trim() : '';
+
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_start', { success: false, error: 'Missing session_key' });
+      return;
+    }
+    if (!goal) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_start', { success: false, error: 'Missing goal' });
+      return;
+    }
+
+    // Check for concurrent async run
+    const existingAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
+    if (existingAsyncRun) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_start', {
+        success: false,
+        error: `An async run is already active on this session (request: ${existingAsyncRun.requestId})`,
+      });
+      return;
+    }
+
+    // Resolve workingDir from GraphD session record
+    const graphd = this.harness.getGraphD?.();
+    const sessionResult = graphd?.sessionGet(sessionKey) as
+      | { session?: { workingDir?: string | null } }
+      | undefined;
+    const workingDir = sessionResult?.session?.workingDir ?? this.workingDir;
+
+    // Check async mode availability
+    const asyncStatus = this.harness.getAsyncModeStatus?.();
+    if (asyncStatus && !asyncStatus.ok) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_start', {
+        success: false,
+        error: `Async mode is unavailable: ${asyncStatus.issues.join('; ')}`,
+      });
+      return;
+    }
+
+    // Hydrate session with dangerous mode (cockpit sessions default to dangerous)
+    this.harness.ensureSessionHydrated?.(sessionKey, {
+      workingDir,
+      dangerousMode: true,
+      includeUserPreferences: true,
+    });
+    this.harness.getSessionPermissionChecker?.(sessionKey)?.setDangerousMode(true);
+
+    // Ensure planner/watcher model selections exist (defaults to standard selection if unset)
+    const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
+    if (activeSelection?.model && activeSelection?.provider) {
+      this.ensureAsyncCompanionSelections(sessionKey, activeSelection);
+    }
+
+    // Persist goal to GraphD
+    if (graphd) {
+      graphd.sessionUpdateWorkflow(sessionKey, { goal });
+    }
+
+    // Create watcher hook registry
+    if (!this.harness.createWatcherHookRegistryForSession) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_start', {
+        success: false,
+        error: 'Async sessions are not supported by this harness',
+      });
+      return;
+    }
+
+    try {
+      this.harness.setSessionAsyncModeEnabled?.(sessionKey, true);
+      const { hookRegistry, planningObjective } = await this.harness.createWatcherHookRegistryForSession(
+        sessionKey, goal, workingDir, this.workingDir
+      );
+
+      const requestId = generateRequestId();
+
+      // Track at session level
+      const asyncRunInfo = { requestId, goal, cancelled: false, startedAt: Date.now() };
+      if (!this.harness.startSessionAsyncRun?.(sessionKey, asyncRunInfo)) {
+        this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
+        this.sendAuthResponse(connectionId, 'control_plane_async_start', {
+          success: false,
+          error: 'An async session was started by another connection',
+        });
+        return;
+      }
+
+      // Start the harness run with watcher hook registry
+      const handle = this.harness.run({
+        requestId,
+        inputText: planningObjective,
+        tier: 'planner',
+        sessionKey,
+        workingDir,
+        hookRegistry,
+      });
+
+      this.streamRunEvents(requestId, handle, (result) => {
+        if (result?.paused) return;
+        const currentAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
+        if (currentAsyncRun?.requestId === requestId) {
+          this.harness.clearSessionAsyncRun?.(sessionKey);
+        }
+        this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
+      }, sessionKey);
+
+      this.sendAuthResponse(connectionId, 'control_plane_async_start', {
+        success: true,
+        requestId,
+        goal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.harness.clearSessionAsyncRun?.(sessionKey);
+      this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
+      this.sendAuthResponse(connectionId, 'control_plane_async_start', {
+        success: false,
+        error: `Failed to start async session: ${message}`,
+      });
+    }
+  }
+
+  private handleControlPlaneAsyncCancel(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_cancel', { success: false, error: 'Missing session_key' });
+      return;
+    }
+
+    const sessionAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
+    if (!sessionAsyncRun) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_cancel', { success: false, error: 'No async run is active on this session' });
+      return;
+    }
+
+    this.harness.cancelSessionAsyncRun?.(sessionKey);
+    this.harness.clearSessionAsyncRun?.(sessionKey);
+    this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
+
+    this.sendAuthResponse(connectionId, 'control_plane_async_cancel', { success: true });
+  }
+
+  private handleControlPlaneAsyncStatus(
+    connectionId: string,
+    data: Record<string, unknown> | undefined
+  ): void {
+    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_status', { success: false, error: 'Missing session_key' });
+      return;
+    }
+
+    const sessionAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
+    if (!sessionAsyncRun) {
+      this.sendAuthResponse(connectionId, 'control_plane_async_status', { success: true, running: false });
+      return;
+    }
+
+    this.sendAuthResponse(connectionId, 'control_plane_async_status', {
       success: true,
       running: true,
       requestId: sessionAsyncRun.requestId,

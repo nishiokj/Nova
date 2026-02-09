@@ -147,6 +147,84 @@ body {
   animation: spin 1s linear infinite;
 }
 
+/* Agent working spinner — conic gradient ring with glow */
+@keyframes agent-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes agent-glow {
+  0%, 100% { filter: drop-shadow(0 0 2px var(--accent-cyan)); opacity: 0.8; }
+  50% { filter: drop-shadow(0 0 6px var(--accent-cyan)) drop-shadow(0 0 12px rgba(121, 192, 255, 0.3)); opacity: 1; }
+}
+
+.agent-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0%, transparent 55%, var(--accent-cyan) 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), black calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), black calc(100% - 2px));
+  animation: agent-orbit 0.8s linear infinite, agent-glow 2s ease-in-out infinite;
+}
+
+/* ── Mobile bottom nav ── */
+.mobile-bottom-nav {
+  display: flex;
+  height: 48px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.mobile-bottom-nav-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.15s;
+}
+
+.mobile-bottom-nav-btn.active {
+  color: var(--accent-cyan);
+  box-shadow: inset 0 2px 0 var(--accent-cyan);
+}
+
+.mobile-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--warning);
+  color: var(--bg-base);
+}
+
+/* ── Mobile touch-friendly adjustments ── */
+@media (max-width: 767px) {
+  html {
+    font-size: 13px;
+  }
+
+  /* Larger tap targets */
+  button, [role="button"] {
+    min-height: 32px;
+    min-width: 32px;
+  }
+}
+
 /* Toast slide-in */
 @keyframes slide-up {
   from { transform: translateY(0.5rem); opacity: 0; }

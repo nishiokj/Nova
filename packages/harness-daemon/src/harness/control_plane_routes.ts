@@ -75,6 +75,7 @@ import {
   handleGetCockpitSessionPackets,
   handleGetCockpitSessionPermissions,
   handlePostCockpitSessionPermissions,
+  handlePostCockpitPermissionResponse,
   handlePostCockpitPacket,
   handleResolveCockpitEscalation,
   handleGetCockpitTemplates,
@@ -84,10 +85,24 @@ import {
   handleGetCockpitArchitectureAlerts,
   handleGetCockpitSessionModel,
   handlePostCockpitSessionModel,
+  handlePostCockpitSessionAsyncStart,
+  handlePostCockpitSessionAsyncCancel,
+  handleGetCockpitSessionAsyncStatus,
 } from './routes/cockpit.js';
 
 // Re-export helpers needed by other modules
 export { buildForkSessionKey, maybeBuildWorkflowTemplateDispatch } from './routes/sessions.js';
+
+function parseBoundedInt(
+  raw: string | null,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
 
 export function handleControlPlaneRequest(
   req: IncomingMessage,
@@ -146,7 +161,7 @@ export function handleControlPlaneRequest(
 
   // GET /control-plane/sessions
   if (pathname === '/control-plane/sessions' && req.method === 'GET') {
-    const limit = parseInt(query.get('limit') ?? '50', 10);
+    const limit = parseBoundedInt(query.get('limit'), 50, 1, 1000);
     handleGetSessions(res, ctx, limit);
     return true;
   }
@@ -207,7 +222,7 @@ export function handleControlPlaneRequest(
 
   // GET /control-plane/traces
   if (pathname === '/control-plane/traces' && req.method === 'GET') {
-    const limit = parseInt(query.get('limit') ?? '50', 10);
+    const limit = parseBoundedInt(query.get('limit'), 50, 1, 500);
     void handleGetTraces(res, ctx, limit);
     return true;
   }
@@ -228,16 +243,16 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/rollups/sessions
   if (pathname === '/control-plane/cockpit/rollups/sessions' && req.method === 'GET') {
     const status = query.get('status');
-    const limit = parseInt(query.get('limit') ?? '100', 10);
+    const limit = parseBoundedInt(query.get('limit'), 100, 1, 500);
     void handleGetCockpitSessionRollups(res, ctx, status, limit);
     return true;
   }
 
   // GET /control-plane/cockpit/rollups/snapshot
   if (pathname === '/control-plane/cockpit/rollups/snapshot' && req.method === 'GET') {
-    const sessionLimit = parseInt(query.get('sessionLimit') ?? '120', 10);
-    const escalationLimit = parseInt(query.get('escalationLimit') ?? '120', 10);
-    const repoLimit = parseInt(query.get('repoLimit') ?? '50', 10);
+    const sessionLimit = parseBoundedInt(query.get('sessionLimit'), 120, 10, 500);
+    const escalationLimit = parseBoundedInt(query.get('escalationLimit'), 120, 10, 500);
+    const repoLimit = parseBoundedInt(query.get('repoLimit'), 50, 5, 200);
     const includeRepo = query.get('includeRepo') !== '0';
     const date = query.get('date');
     void handleGetCockpitRollupSnapshot(res, ctx, {
@@ -253,14 +268,14 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/rollups/escalations
   if (pathname === '/control-plane/cockpit/rollups/escalations' && req.method === 'GET') {
     const status = query.get('status');
-    const limit = parseInt(query.get('limit') ?? '100', 10);
+    const limit = parseBoundedInt(query.get('limit'), 100, 1, 500);
     handleGetCockpitEscalationRollups(res, ctx, status, limit);
     return true;
   }
 
   // GET /control-plane/cockpit/rollups/commits
   if (pathname === '/control-plane/cockpit/rollups/commits' && req.method === 'GET') {
-    const limit = parseInt(query.get('limit') ?? '50', 10);
+    const limit = parseBoundedInt(query.get('limit'), 50, 1, 200);
     void handleGetCockpitCommitRollups(res, ctx, limit);
     return true;
   }
@@ -268,7 +283,7 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/rollups/prs
   if (pathname === '/control-plane/cockpit/rollups/prs' && req.method === 'GET') {
     const status = query.get('status');
-    const limit = parseInt(query.get('limit') ?? '50', 10);
+    const limit = parseBoundedInt(query.get('limit'), 50, 1, 200);
     void handleGetCockpitPRRollups(res, ctx, status, limit);
     return true;
   }
@@ -293,7 +308,7 @@ export function handleControlPlaneRequest(
   if (pathname === '/control-plane/cockpit/traces' && req.method === 'GET') {
     const sessionKey = query.get('sessionKey');
     const workItemId = query.get('workItemId');
-    const limit = parseInt(query.get('limit') ?? '200', 10);
+    const limit = parseBoundedInt(query.get('limit'), 200, 1, 500);
     void handleGetCockpitTraces(res, ctx, sessionKey, workItemId, limit);
     return true;
   }
@@ -312,7 +327,7 @@ export function handleControlPlaneRequest(
   if (pathname === '/control-plane/cockpit/tests' && req.method === 'GET') {
     const sessionKey = query.get('sessionKey');
     const workItemId = query.get('workItemId');
-    const limit = parseInt(query.get('limit') ?? '20', 10);
+    const limit = parseBoundedInt(query.get('limit'), 20, 1, 100);
     void handleGetCockpitTestReports(res, sessionKey, workItemId, limit);
     return true;
   }
@@ -329,7 +344,7 @@ export function handleControlPlaneRequest(
     const q = query.get('q');
     const kind = query.get('kind');
     const sessionKey = query.get('sessionKey');
-    const limit = parseInt(query.get('limit') ?? '120', 10);
+    const limit = parseBoundedInt(query.get('limit'), 120, 1, 300);
     void handleGetCockpitRepoLens(res, ctx, q, kind, sessionKey, limit);
     return true;
   }
@@ -416,7 +431,7 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/session/:sessionKey/events
   params = matchRoute('/control-plane/cockpit/session/:sessionKey/events', pathname);
   if (params && req.method === 'GET') {
-    const limit = parseInt(query.get('limit') ?? '200', 10);
+    const limit = parseBoundedInt(query.get('limit'), 200, 1, 500);
     const cursor = query.get('cursor');
     handleGetCockpitSessionEvents(res, ctx, params.sessionKey, limit, cursor);
     return true;
@@ -425,7 +440,7 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/session/:sessionKey/packets
   params = matchRoute('/control-plane/cockpit/session/:sessionKey/packets', pathname);
   if (params && req.method === 'GET') {
-    const limit = parseInt(query.get('limit') ?? '20', 10);
+    const limit = parseBoundedInt(query.get('limit'), 20, 1, 200);
     handleGetCockpitSessionPackets(res, ctx, params.sessionKey, limit);
     return true;
   }
@@ -504,6 +519,27 @@ export function handleControlPlaneRequest(
     return true;
   }
 
+  // POST /control-plane/cockpit/session/:sessionKey/async/start
+  params = matchRoute('/control-plane/cockpit/session/:sessionKey/async/start', pathname);
+  if (params && req.method === 'POST') {
+    void handlePostCockpitSessionAsyncStart(req, res, ctx, params.sessionKey);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/session/:sessionKey/async/cancel
+  params = matchRoute('/control-plane/cockpit/session/:sessionKey/async/cancel', pathname);
+  if (params && req.method === 'POST') {
+    void handlePostCockpitSessionAsyncCancel(res, ctx, params.sessionKey);
+    return true;
+  }
+
+  // GET /control-plane/cockpit/session/:sessionKey/async/status
+  params = matchRoute('/control-plane/cockpit/session/:sessionKey/async/status', pathname);
+  if (params && req.method === 'GET') {
+    void handleGetCockpitSessionAsyncStatus(res, ctx, params.sessionKey);
+    return true;
+  }
+
   // GET /control-plane/cockpit/entity-graph
   if (pathname === '/control-plane/cockpit/entity-graph' && req.method === 'GET') {
     const sessionKey = query.get('sessionKey');
@@ -516,9 +552,9 @@ export function handleControlPlaneRequest(
   if (pathname === '/control-plane/cockpit/architecture/overview' && req.method === 'GET') {
     const sessionKey = query.get('sessionKey');
     const runId = query.get('runId');
-    const concernLimit = parseInt(query.get('concernLimit') ?? '8', 10);
-    const boundaryLimit = parseInt(query.get('boundaryLimit') ?? '12', 10);
-    const alertLimit = parseInt(query.get('alertLimit') ?? '20', 10);
+    const concernLimit = parseBoundedInt(query.get('concernLimit'), 8, 1, 40);
+    const boundaryLimit = parseBoundedInt(query.get('boundaryLimit'), 12, 1, 80);
+    const alertLimit = parseBoundedInt(query.get('alertLimit'), 20, 1, 200);
     void handleGetCockpitArchitectureOverview(
       res,
       ctx,
@@ -538,7 +574,7 @@ export function handleControlPlaneRequest(
     const status = query.get('status');
     const severity = query.get('severity');
     const type = query.get('type');
-    const limit = parseInt(query.get('limit') ?? '200', 10);
+    const limit = parseBoundedInt(query.get('limit'), 200, 1, 1000);
     void handleGetCockpitArchitectureAlerts(res, ctx, {
       sessionKey,
       runId,
@@ -553,6 +589,12 @@ export function handleControlPlaneRequest(
   // POST /control-plane/cockpit/autocomplete/complete
   if (pathname === '/control-plane/cockpit/autocomplete/complete' && req.method === 'POST') {
     void handlePostAutocomplete(req, res);
+    return true;
+  }
+
+  // POST /control-plane/cockpit/permissions/response
+  if (pathname === '/control-plane/cockpit/permissions/response' && req.method === 'POST') {
+    void handlePostCockpitPermissionResponse(req, res, ctx);
     return true;
   }
 

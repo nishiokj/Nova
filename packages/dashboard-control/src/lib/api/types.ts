@@ -264,6 +264,26 @@ export interface CockpitSessionPermissions {
   warning?: string;
 }
 
+export type CockpitPermissionDecision = 'allow' | 'always_allow' | 'deny';
+
+export interface CockpitPendingPermissionRequest {
+  requestId: string;
+  sessionKey: string;
+  tool: 'Bash' | 'Write' | 'Edit';
+  target: string;
+  suggestedPattern: string;
+  workingDirectory: string;
+  description: string;
+  createdAt: string;
+}
+
+export interface CockpitPermissionResponseInput {
+  sessionKey: string;
+  requestId: string;
+  decision: CockpitPermissionDecision;
+  pattern?: string;
+}
+
 export interface NormalizedSessionEvent {
   at: string;
   type: 'message' | 'tool' | 'workflow' | 'packet' | 'test' | 'trace';
@@ -468,6 +488,7 @@ export interface CockpitMarkdownContextInput {
   isDirty?: boolean;
   selectionStart?: number;
   selectionEnd?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export type EntityKind = 'file' | 'class' | 'function' | 'method' | 'type' | 'interface' | 'enum';

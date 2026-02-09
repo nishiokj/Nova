@@ -28,6 +28,7 @@ export type AgentCoreEventType =
   | 'memory_injected'
   | 'permission_request'
   | 'git_commit'
+  | 'files_modified'
   | 'harness_response'
   | 'harness_status'
   | 'harness_error'

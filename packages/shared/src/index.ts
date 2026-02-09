@@ -38,6 +38,8 @@ export {
   isWatcherActionType,
   isWatcherTrigger,
   getValidWatcherActions,
+  assertValidActionForTrigger,
+  type ValidActionsFor,
   type WatcherTrigger,
   type WatcherActionType,
   type WatcherNoInterventionAction,

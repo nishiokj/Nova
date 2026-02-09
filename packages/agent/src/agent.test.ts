@@ -134,6 +134,55 @@ describe('Agent', () => {
     expect(result.structuredOutput?.escalationId).toBe('esc_test_123');
   });
 
+  it('falls back to structured work_done when response is empty', async () => {
+    const emitted: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const llm = createMockLLM({
+      content: JSON.stringify({
+        action: 'done',
+        response: '',
+        goalStateReached: true,
+        handoffSpec: null,
+        awaitingUserInput: false,
+        work_done: 'Implemented the requested change.',
+      }),
+      stopReason: 'end_turn',
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      model: 'test-model',
+      durationMs: 1,
+    });
+
+    const config: AgentConfig = {
+      type: 'standard',
+      systemPrompt: 'Test prompt',
+      tools: [],
+      budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+      outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+    };
+
+    const agent = new Agent(config, {
+      llm,
+      toolRegistry: createMockToolRegistry(),
+      emit: (event) => {
+        emitted.push({ type: event.type, data: event.data as Record<string, unknown> });
+      },
+      llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+    });
+    const context = new ContextWindow('test-session', 200_000);
+    const workItem = createWorkItem({ goal: 'test', objective: 'test' });
+
+    const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
+
+    expect(result.success).toBe(true);
+    expect(result.response).toBe('Implemented the requested change.');
+    expect(
+      emitted.some((event) =>
+        event.type === 'agent_message'
+        && typeof event.data.message === 'string'
+        && event.data.message.includes('Implemented the requested change.')
+      )
+    ).toBe(true);
+  });
+
   describe('Bounds Checking', () => {
     it('emits agent_bounds_hit event and terminates with max_tool_calls_exceeded', async () => {
       const events: Array<{ type: string; data: unknown }> = [];

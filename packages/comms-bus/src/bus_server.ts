@@ -59,6 +59,8 @@ export class BusServer {
   private runSubscriptions = new Map<string, () => void>();
   /** Unsubscribe function for a global EventBus subscription */
   private allEventsUnsubscribe: (() => void) | null = null;
+  /** Extra unsubscribers for stream events that are not emitted on subscribeAll. */
+  private allEventsStreamUnsubscribes: Array<() => void> = [];
 
   constructor(options: BusServerOptions) {
     this.host = options.host;
@@ -102,12 +104,21 @@ export class BusServer {
   private subscribeToAllEvents(channel: string): void {
     if (!this.eventBus || this.allEventsUnsubscribe) return;
 
-    this.allEventsUnsubscribe = this.eventBus.subscribeAll((event) => {
+    const forward = (event: unknown) => {
       const wireEvent = this.eventTranslator ? this.eventTranslator(event) : event;
       if (wireEvent !== null) {
         this.publish(channel, wireEvent);
       }
-    });
+    };
+
+    this.allEventsUnsubscribe = this.eventBus.subscribeAll(forward);
+
+    // EventBus optimizes streaming events by bypassing subscribeAll/global fan-out.
+    // Mirror those explicitly so events:all remains a complete real-time channel.
+    this.allEventsStreamUnsubscribes = [
+      this.eventBus.subscribe('agent_message', forward),
+      this.eventBus.subscribe('agent_reasoning', forward),
+    ];
   }
 
   private unsubscribeFromAllEvents(): void {
@@ -115,6 +126,10 @@ export class BusServer {
       this.allEventsUnsubscribe();
       this.allEventsUnsubscribe = null;
     }
+    for (const unsubscribe of this.allEventsStreamUnsubscribes) {
+      unsubscribe();
+    }
+    this.allEventsStreamUnsubscribes = [];
   }
 
   /**

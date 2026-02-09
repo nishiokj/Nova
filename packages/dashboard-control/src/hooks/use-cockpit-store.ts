@@ -8,8 +8,11 @@ import {
   getCockpitSessionPermissions,
   getCockpitSessionPackets,
   getCockpitSessionModel,
+  postCockpitPermissionResponse,
   postCockpitSessionModel,
   postCockpitSessionPermissions,
+  type CockpitPermissionDecision,
+  type CockpitPendingPermissionRequest,
   type CockpitMarkdownContextInput,
   type CockpitModelEntry,
   type CockpitModelSelection,
@@ -28,6 +31,7 @@ import {
   type SessionRollup,
   type TraceRecord,
   type WorkItemTemplate,
+  getCockpitMarkdownFile,
   getCockpitTemplates,
   getCockpitTestReport,
   getCockpitTestReports,
@@ -35,6 +39,9 @@ import {
   postCockpitSessionCreate,
   postCockpitSessionMessage,
   postCockpitSessionReviewDecision,
+  postCockpitSessionAsyncStart,
+  postCockpitSessionAsyncCancel,
+  getCockpitSessionAsyncStatus,
   resolveCockpitEscalation,
   searchCockpitRepoLens,
 } from '@/lib/api';
@@ -45,7 +52,7 @@ import {
   isMessageLikeEvent,
   messageRoleForEvent,
 } from '@/lib/events';
-import { parseFrontmatter, serializeFrontmatter } from '@/lib/markdown';
+import { extractAtRefs } from '@/lib/autocomplete';
 import { parsePacketMarkdown } from '@/lib/packets';
 
 // ─── Types ───────────────────────────────────────────────────
@@ -54,7 +61,7 @@ export type FocusTarget =
   | { type: 'session'; id: string }
   | { type: 'escalation'; id: string };
 
-export type FocusTab = 'live' | 'packet' | 'escalations' | 'diff' | 'tests' | 'trace' | 'permissions';
+export type FocusTab = 'live' | 'document' | 'packet' | 'escalations' | 'diff' | 'tests' | 'trace' | 'permissions';
 export type GlobalTool = 'none' | 'grep' | 'browser';
 export type EventFilter = 'all' | 'messages' | 'failures' | 'audit';
 
@@ -90,6 +97,7 @@ export interface CockpitState {
   focusTab: FocusTab;
   globalTool: GlobalTool;
   events: NormalizedSessionEvent[];
+  eventsSessionKey: string | null;
   sessionPackets: FocusPacket[];
   selectedPacketId: string | null;
   diffData: CockpitDiff | null;
@@ -134,6 +142,10 @@ export interface CockpitState {
   reviewDecisionAction: 'accept' | 'request_changes' | null;
   permissionsSaving: boolean;
   permissionsSaveStatus: string | null;
+  pendingPermissionRequests: CockpitPendingPermissionRequest[];
+  permissionDialogOpen: boolean;
+  permissionResponseSubmitting: boolean;
+  permissionResponseError: string | null;
 
   // Lens
   lensLoading: boolean;
@@ -143,24 +155,16 @@ export interface CockpitState {
 
   // Workflows
   templates: WorkItemTemplate[];
-
-  // Document session (lazy creation)
-  documentSessionKey: string | null;
+  workspaceProjectPath: string | null;
 
   // Promote picker
   upgradePickerOpen: boolean;
-
-  // SSE streaming — live agent message text before REST canonicalization
-  streamingText: string;
 
   // Keyboard nav highlight in right pane
   highlightedSessionIdx: number | null;
   commandPaletteOpen: boolean;
   commandPaletteQuery: string;
   shortcutSheetOpen: boolean;
-
-  // Inline ghost autocomplete
-  autocompleteEnabled: boolean;
 
   // Model selection
   sessionModelSelection: CockpitModelSelection | null;
@@ -182,6 +186,7 @@ const initialState: CockpitState = {
   focusTab: 'packet',
   globalTool: 'none',
   events: [],
+  eventsSessionKey: null,
   sessionPackets: [],
   selectedPacketId: null,
   diffData: null,
@@ -222,22 +227,22 @@ const initialState: CockpitState = {
   reviewDecisionAction: null,
   permissionsSaving: false,
   permissionsSaveStatus: null,
+  pendingPermissionRequests: [],
+  permissionDialogOpen: false,
+  permissionResponseSubmitting: false,
+  permissionResponseError: null,
 
   lensLoading: false,
   pendingCommitRange: null,
 
   templates: [],
-  documentSessionKey: null,
+  workspaceProjectPath: null,
   upgradePickerOpen: false,
-
-  streamingText: '',
 
   highlightedSessionIdx: null,
   commandPaletteOpen: false,
   commandPaletteQuery: '',
   shortcutSheetOpen: false,
-
-  autocompleteEnabled: false,
 
   sessionModelSelection: null,
   sessionModelCatalog: [],
@@ -291,6 +296,10 @@ export function selectFocusEscalationId(state: CockpitState): string | null {
   return state.focusData?.type === 'escalation' ? state.focusData.id : null;
 }
 
+export function selectActivePermissionRequest(state: CockpitState): CockpitPendingPermissionRequest | null {
+  return state.pendingPermissionRequests[0] ?? null;
+}
+
 export function selectFilteredEvents(state: CockpitState): NormalizedSessionEvent[] {
   const { events, eventFilter } = state;
 
@@ -303,7 +312,7 @@ export function selectFilteredEvents(state: CockpitState): NormalizedSessionEven
   }
 
   if (eventFilter === 'messages') {
-    const result = events.filter((event) => {
+    return events.filter((event) => {
       if (!isMessageLikeEvent(event)) return false;
       const content = extractMessageContent(event.payload);
       const role = messageRoleForEvent(event);
@@ -321,15 +330,6 @@ export function selectFilteredEvents(state: CockpitState): NormalizedSessionEven
       // Other agent events: only if substantial text content
       return content.length > 80;
     });
-    // Append live streaming text from SSE as a synthetic assistant message
-    if (state.streamingText) {
-      result.push({
-        at: new Date().toISOString(),
-        type: 'message',
-        payload: { role: 'assistant', content: state.streamingText, streaming: true },
-      });
-    }
-    return result;
   }
   if (eventFilter === 'failures') return events.filter(isFailureEvent);
   if (eventFilter === 'all') {
@@ -338,17 +338,86 @@ export function selectFilteredEvents(state: CockpitState): NormalizedSessionEven
   return events;
 }
 
+function toSessionMessageContent(event: NormalizedSessionEvent): string {
+  if (event.type !== 'message') return '';
+  return extractMessageContent(event.payload);
+}
+
+function messageReconcileKeys(event: NormalizedSessionEvent): string[] {
+  if (event.type !== 'message') return [];
+  const payload = event.payload as Record<string, unknown>;
+  const role = typeof payload.role === 'string' ? payload.role.trim().toLowerCase() : '';
+  const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
+  const content = toSessionMessageContent(event);
+  const keys: string[] = [];
+
+  if (typeof payload.id === 'number') {
+    keys.push(`db:${String(payload.id)}`);
+  } else if (typeof payload.id === 'string' && payload.id.trim() && payload.optimistic !== true) {
+    keys.push(`id:${payload.id.trim()}`);
+  }
+
+  if (requestId && role && content) {
+    keys.push(`req-role-content:${requestId}:${role}:${content}`);
+  } else if (requestId && role) {
+    keys.push(`req-role-empty:${requestId}:${role}`);
+  }
+
+  return keys;
+}
+
+function mergeServerAndLocalMessageEvents(
+  serverEvents: NormalizedSessionEvent[],
+  localEvents: NormalizedSessionEvent[],
+  maxEvents: number
+): NormalizedSessionEvent[] {
+  if (localEvents.length === 0) return serverEvents;
+
+  const serverMessageKeys = new Set<string>();
+  for (const event of serverEvents) {
+    for (const key of messageReconcileKeys(event)) {
+      serverMessageKeys.add(key);
+    }
+  }
+
+  const carryForwardLocalMessages = localEvents.filter((event) => {
+    if (event.type !== 'message') return false;
+    const keys = messageReconcileKeys(event);
+    if (keys.length === 0) return true;
+    return !keys.some((key) => serverMessageKeys.has(key));
+  });
+
+  if (carryForwardLocalMessages.length === 0) return serverEvents;
+
+  const merged = [...serverEvents, ...carryForwardLocalMessages]
+    .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+
+  if (merged.length <= maxEvents) return merged;
+  return merged.slice(-maxEvents);
+}
+
+function isEphemeralLocalMessageEvent(event: NormalizedSessionEvent): boolean {
+  if (event.type !== 'message') return false;
+  const payload = event.payload as Record<string, unknown>;
+  if (payload.streaming === true || payload.optimistic === true) return true;
+  const id = payload.id;
+  if (typeof id !== 'string') return false;
+  return id.startsWith('optimistic-') || id.startsWith('streaming-assistant-');
+}
+
 // ─── Store ───────────────────────────────────────────────────
 
 export class CockpitStoreImpl {
   state: CockpitState = initialState;
   private listeners = new Set<() => void>();
+  private focusRefreshSeq = 0;
   private diffPatchRequestSeq = 0;
   private diffPatchCache = new Map<string, string | null>();
   private lastRepoRollupRefreshAt = Date.now();
   private lastHeavyFocusRefreshAt = 0;
+  private documentSessionPaths = new Map<string, string>();
+  private localMessageCarryBySession = new Map<string, NormalizedSessionEvent[]>();
   private markdownContextProvider: (() => CockpitMarkdownContextInput | null) | null = null;
-  private markdownSetContent: ((content: string) => void) | null = null;
   private beforeSendMessageHook: (() => Promise<boolean> | boolean) | null = null;
 
   // ─── useSyncExternalStore contract ─────────────────────────
@@ -362,6 +431,20 @@ export class CockpitStoreImpl {
 
   private notify() {
     for (const l of this.listeners) l();
+  }
+
+  private getLocalMessageCarry(sessionKey: string): NormalizedSessionEvent[] {
+    return this.localMessageCarryBySession.get(sessionKey) ?? [];
+  }
+
+  private syncLocalMessageCarry(sessionKey: string | null, events: NormalizedSessionEvent[]) {
+    if (!sessionKey) return;
+    const localMessages = events.filter(isEphemeralLocalMessageEvent);
+    if (localMessages.length > 0) {
+      this.localMessageCarryBySession.set(sessionKey, localMessages);
+    } else {
+      this.localMessageCarryBySession.delete(sessionKey);
+    }
   }
 
   // ─── Mutations ─────────────────────────────────────────────
@@ -386,6 +469,12 @@ export class CockpitStoreImpl {
     const changed = entries.some(([k, v]) => (this.state as unknown as Record<string, unknown>)[k] !== v);
     if (!changed) return;
     this.state = { ...this.state, ...normalizedPayload };
+    const eventsTouched = Object.prototype.hasOwnProperty.call(normalizedPayload, 'events')
+      || Object.prototype.hasOwnProperty.call(normalizedPayload, 'eventsSessionKey');
+    if (eventsTouched) {
+      const eventsSessionKey = this.state.eventsSessionKey ?? this.state.focusData?.sessionKey ?? null;
+      this.syncLocalMessageCarry(eventsSessionKey, this.state.events);
+    }
     this.notify();
   };
 
@@ -407,6 +496,16 @@ export class CockpitStoreImpl {
 
   setFocusData(payload: { focusData: FocusData | null; events: NormalizedSessionEvent[]; traces: TraceRecord[]; testReports: CockpitTestReport[]; diffData: CockpitDiff | null; packets: FocusPacket[]; sessionPermissions: CockpitSessionPermissions | null }) {
     const { focusData, events, traces, testReports, diffData, packets, sessionPermissions } = payload;
+    const nextSessionKey = focusData?.sessionKey ?? null;
+    const currentSessionKey = this.state.eventsSessionKey ?? this.state.focusData?.sessionKey ?? null;
+    const localEvents = nextSessionKey
+      ? (currentSessionKey === nextSessionKey
+          ? this.state.events
+          : this.getLocalMessageCarry(nextSessionKey))
+      : [];
+    const mergedEvents = nextSessionKey
+      ? mergeServerAndLocalMessageEvents(events, localEvents, 1200)
+      : events;
     const currentSelectedPacketId = this.state.selectedPacketId;
     const selectedPacketId = currentSelectedPacketId && packets.some((packet) => packet.packetId === currentSelectedPacketId)
       ? currentSelectedPacketId
@@ -418,11 +517,12 @@ export class CockpitStoreImpl {
     const highlightedDiffIdx = selectedDiffFile && diffData
       ? Math.max(diffData.hotspots.findIndex((h) => h.path === selectedDiffFile), 0)
       : (diffData?.hotspots?.length ? 0 : null);
-    const hasMessages = events.some((e) => e.type === 'message');
+    const hasMessages = mergedEvents.some((e) => e.type === 'message');
     this.state = {
       ...this.state,
       focusData,
-      events,
+      events: mergedEvents,
+      eventsSessionKey: focusData?.sessionKey ?? null,
       sessionPackets: packets,
       selectedPacketId,
       traces,
@@ -448,15 +548,17 @@ export class CockpitStoreImpl {
       sessionModelLoading: false,
       ...(hasMessages && !this.state.eventDrawerOpen ? { eventDrawerOpen: true } : {}),
     };
+    this.syncLocalMessageCarry(nextSessionKey, mergedEvents);
     this.notify();
   }
 
   clearFocus() {
     this.state = {
       ...this.state,
+      focusTarget: null,
       focusData: null,
       events: [],
-      streamingText: '',
+      eventsSessionKey: null,
       sessionPackets: [],
       selectedPacketId: null,
       diffData: null,
@@ -485,17 +587,334 @@ export class CockpitStoreImpl {
   // ─── SSE streaming injection ─────────────────────────────
 
   /** Append a stream chunk from the SSE event stream for the focused session. */
-  injectStreamChunk(sessionKey: string, chunk: string) {
-    const focused = this.state.focusData?.sessionKey ?? this.state.documentSessionKey ?? null;
+  injectStreamChunk(sessionKey: string, chunk: string, requestId?: string) {
+    const focused = this.state.focusData?.sessionKey ?? null;
     if (!focused || focused !== sessionKey) return;
-    this.set({ streamingText: this.state.streamingText + chunk });
+    if (!chunk) return;
+
+    const trimmedRequestId = typeof requestId === 'string' && requestId.trim().length > 0
+      ? requestId.trim()
+      : null;
+    let streamEventIdx = -1;
+    let unattributedStreamEventIdx = -1;
+
+    for (let idx = this.state.events.length - 1; idx >= 0; idx -= 1) {
+      const event = this.state.events[idx];
+      if (event.type !== 'message') continue;
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.role !== 'assistant') continue;
+      if (payload.streaming !== true) continue;
+      const payloadRequestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+      if (trimmedRequestId) {
+        if (payloadRequestId === trimmedRequestId) {
+          streamEventIdx = idx;
+          break;
+        }
+        if (!payloadRequestId && unattributedStreamEventIdx < 0) {
+          unattributedStreamEventIdx = idx;
+        }
+        continue;
+      }
+      if (!payloadRequestId) {
+        streamEventIdx = idx;
+        break;
+      }
+    }
+    if (streamEventIdx < 0 && trimmedRequestId && unattributedStreamEventIdx >= 0) {
+      streamEventIdx = unattributedStreamEventIdx;
+    }
+
+    let nextEvents = this.state.events;
+    if (streamEventIdx >= 0) {
+      const event = this.state.events[streamEventIdx];
+      const payload = event.payload as Record<string, unknown>;
+      const existingContent = typeof payload.content === 'string' ? payload.content : '';
+      const updatedEvent: NormalizedSessionEvent = {
+        ...event,
+        at: new Date().toISOString(),
+        payload: {
+          ...payload,
+          content: `${existingContent}${chunk}`,
+          optimistic: true,
+          streaming: true,
+          ...(trimmedRequestId ? { requestId: trimmedRequestId } : {}),
+        },
+      };
+      nextEvents = [...this.state.events];
+      nextEvents[streamEventIdx] = updatedEvent;
+    } else {
+      const streamMessageId = trimmedRequestId
+        ? `streaming-assistant-${trimmedRequestId}`
+        : `streaming-assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const streamEvent: NormalizedSessionEvent = {
+        at: new Date().toISOString(),
+        type: 'message',
+        payload: {
+          role: 'assistant',
+          content: chunk,
+          id: streamMessageId,
+          optimistic: true,
+          streaming: true,
+          ...(trimmedRequestId ? { requestId: trimmedRequestId } : {}),
+        },
+      };
+      nextEvents = [...this.state.events, streamEvent];
+    }
+
+    this.set({
+      events: nextEvents,
+      eventsSessionKey: sessionKey,
+      eventDrawerOpen: true,
+      eventFilter: 'messages',
+    });
   }
 
-  /** Clear accumulated streaming text (called on response event or focus change). */
-  clearStreaming() {
-    if (!this.state.streamingText) return;
-    this.set({ streamingText: '' });
+  /**
+   * Inject an optimistic assistant message from SSE response payloads.
+   * This prevents the chat timeline from dropping completed replies when
+   * the REST event refresh races ahead of GraphD persistence.
+   */
+  injectOptimisticAssistantMessage(sessionKey: string, content: string, requestId?: string) {
+    const rawTrimmedContent = content.trim();
+    const trimmedRequestId = typeof requestId === 'string' && requestId.trim().length > 0
+      ? requestId.trim()
+      : null;
+    const focused = this.state.focusData?.sessionKey ?? null;
+    if (!focused || focused !== sessionKey) {
+      if (rawTrimmedContent.length === 0) return;
+      const cached = this.getLocalMessageCarry(sessionKey);
+      const alreadyPresent = cached.some((event) => {
+        if (event.type !== 'message') return false;
+        const payload = event.payload as Record<string, unknown>;
+        if (payload.role !== 'assistant') return false;
+        const payloadContent = typeof payload.content === 'string' ? payload.content.trim() : '';
+        if (payloadContent !== rawTrimmedContent) return false;
+        if (trimmedRequestId) return payload.requestId === trimmedRequestId;
+        return payload.optimistic === true;
+      });
+      if (alreadyPresent) return;
+      const optimisticMessageId = `optimistic-assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      this.syncLocalMessageCarry(sessionKey, [
+        ...cached,
+        {
+          at: new Date().toISOString(),
+          type: 'message',
+          payload: {
+            role: 'assistant',
+            content,
+            id: optimisticMessageId,
+            optimistic: true,
+            ...(trimmedRequestId ? { requestId: trimmedRequestId } : {}),
+          },
+        },
+      ]);
+      return;
+    }
+    let streamingEventIdx = -1;
+    let unattributedStreamingEventIdx = -1;
+    for (let idx = this.state.events.length - 1; idx >= 0; idx -= 1) {
+      const event = this.state.events[idx];
+      if (event.type !== 'message') continue;
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.role !== 'assistant') continue;
+      if (payload.streaming !== true) continue;
+      const payloadRequestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+      const payloadContent = typeof payload.content === 'string' ? payload.content.trim() : '';
+      if (trimmedRequestId) {
+        if (payloadRequestId === trimmedRequestId) {
+          streamingEventIdx = idx;
+          break;
+        }
+        if (!payloadRequestId && unattributedStreamingEventIdx < 0) {
+          unattributedStreamingEventIdx = idx;
+        }
+      } else if (payloadContent === rawTrimmedContent) {
+        streamingEventIdx = idx;
+        break;
+      }
+    }
+    if (streamingEventIdx < 0 && trimmedRequestId && unattributedStreamingEventIdx >= 0) {
+      streamingEventIdx = unattributedStreamingEventIdx;
+    }
+    if (streamingEventIdx < 0 && !trimmedRequestId && rawTrimmedContent.length === 0) {
+      for (let idx = this.state.events.length - 1; idx >= 0; idx -= 1) {
+        const event = this.state.events[idx];
+        if (event.type !== 'message') continue;
+        const payload = event.payload as Record<string, unknown>;
+        if (payload.role !== 'assistant') continue;
+        if (payload.streaming !== true) continue;
+        streamingEventIdx = idx;
+        break;
+      }
+    }
+    const streamFallbackContent = streamingEventIdx >= 0
+      ? (() => {
+          const streamPayload = this.state.events[streamingEventIdx].payload as Record<string, unknown>;
+          return typeof streamPayload.content === 'string' ? streamPayload.content : '';
+        })()
+      : '';
+    const effectiveContent = rawTrimmedContent.length > 0 ? content : streamFallbackContent;
+    const trimmedContent = effectiveContent.trim();
+    if (!trimmedContent) return;
+    if (streamingEventIdx >= 0) {
+      const nextEvents = [...this.state.events];
+      const streamEvent = nextEvents[streamingEventIdx];
+      const streamPayload = streamEvent.payload as Record<string, unknown>;
+      nextEvents[streamingEventIdx] = {
+        ...streamEvent,
+        at: new Date().toISOString(),
+        payload: {
+          ...streamPayload,
+          content: effectiveContent,
+          optimistic: true,
+          streaming: false,
+          ...(trimmedRequestId ? { requestId: trimmedRequestId } : {}),
+        },
+      };
+      this.set({
+        events: nextEvents,
+        eventsSessionKey: sessionKey,
+        eventDrawerOpen: true,
+        eventFilter: 'messages',
+      });
+      return;
+    }
+    const alreadyPresent = this.state.events.some((event) => {
+      if (event.type !== 'message') return false;
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.role !== 'assistant') return false;
+      if (payload.streaming === true) return false;
+      const payloadContent = typeof payload.content === 'string' ? payload.content.trim() : '';
+      if (payloadContent !== trimmedContent) return false;
+      if (trimmedRequestId) {
+        return payload.requestId === trimmedRequestId;
+      }
+      return payload.optimistic === true;
+    });
+    if (alreadyPresent) return;
+    const optimisticMessageId = `optimistic-assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimistic: NormalizedSessionEvent = {
+      at: new Date().toISOString(),
+      type: 'message',
+      payload: {
+        role: 'assistant',
+        content: effectiveContent,
+        id: optimisticMessageId,
+        optimistic: true,
+        ...(trimmedRequestId ? { requestId: trimmedRequestId } : {}),
+      },
+    };
+    this.set({
+      events: [...this.state.events, optimistic],
+      eventsSessionKey: sessionKey,
+      eventDrawerOpen: true,
+      eventFilter: 'messages',
+    });
   }
+
+  /** Remove transient streaming events (called on response event or focus change). */
+  clearStreaming(sessionKey?: string, requestId?: string) {
+    const focused = this.state.focusData?.sessionKey ?? null;
+    const targetSessionKey = typeof sessionKey === 'string' && sessionKey.trim().length > 0
+      ? sessionKey.trim()
+      : this.state.eventsSessionKey ?? focused;
+    const effectiveRequestId = typeof requestId === 'string' && requestId.trim().length > 0
+      ? requestId.trim()
+      : null;
+
+    if (
+      targetSessionKey
+      && this.state.eventsSessionKey
+      && targetSessionKey !== this.state.eventsSessionKey
+    ) {
+      return;
+    }
+
+    const shouldRemoveStreamingEvent = (event: NormalizedSessionEvent): boolean => {
+      if (event.type !== 'message') return false;
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.streaming !== true) return false;
+      if (payload.role !== 'assistant') return false;
+      const payloadRequestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+      if (effectiveRequestId) return payloadRequestId === effectiveRequestId || !payloadRequestId;
+      // Legacy cleanup path: only remove unattributed stream events.
+      return !payloadRequestId;
+    };
+
+    const hasStreamingEvents = this.state.events.some(shouldRemoveStreamingEvent);
+    const nextEvents = hasStreamingEvents
+      ? this.state.events.filter((event) => !shouldRemoveStreamingEvent(event))
+      : this.state.events;
+
+    if (!hasStreamingEvents) {
+      return;
+    }
+
+    this.set({
+      events: nextEvents,
+    });
+  }
+
+  enqueuePermissionRequest = (request: CockpitPendingPermissionRequest) => {
+    const requestId = request.requestId.trim();
+    const sessionKey = request.sessionKey.trim();
+    if (!requestId || !sessionKey) return;
+
+    const alreadyQueued = this.state.pendingPermissionRequests.some(
+      (entry) => entry.requestId === requestId && entry.sessionKey === sessionKey
+    );
+    if (alreadyQueued) return;
+
+    this.set({
+      pendingPermissionRequests: [...this.state.pendingPermissionRequests, request],
+      permissionDialogOpen: true,
+      permissionResponseError: null,
+    });
+  };
+
+  dismissPermissionDialog = () => {
+    this.set({ permissionDialogOpen: false, permissionResponseError: null });
+  };
+
+  handleRespondToPermissionRequest = async (
+    decision: CockpitPermissionDecision,
+    pattern?: string
+  ) => {
+    const active = this.state.pendingPermissionRequests[0];
+    if (!active) return;
+    this.set({ permissionResponseSubmitting: true, permissionResponseError: null });
+    try {
+      const response = await postCockpitPermissionResponse({
+        sessionKey: active.sessionKey,
+        requestId: active.requestId,
+        decision,
+        ...(typeof pattern === 'string' && pattern.trim().length > 0 ? { pattern: pattern.trim() } : {}),
+      });
+      if (!response.success) {
+        this.set({
+          permissionResponseSubmitting: false,
+          permissionResponseError: response.error ?? 'Failed to submit permission response',
+        });
+        return;
+      }
+
+      const remaining = this.state.pendingPermissionRequests.filter(
+        (entry) => !(entry.requestId === active.requestId && entry.sessionKey === active.sessionKey)
+      );
+      this.set({
+        pendingPermissionRequests: remaining,
+        permissionDialogOpen: remaining.length > 0,
+        permissionResponseSubmitting: false,
+        permissionResponseError: null,
+        commandStatus: `Permission ${decision.replace('_', ' ')} sent`,
+      });
+    } catch (err) {
+      this.set({
+        permissionResponseSubmitting: false,
+        permissionResponseError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   // ─── Async handlers ────────────────────────────────────────
 
@@ -545,10 +964,17 @@ export class CockpitStoreImpl {
 
   refreshFocus = async (target: FocusTarget | null, options?: { includeHeavy?: boolean }) => {
     if (!target) {
+      this.focusRefreshSeq += 1;
       this.clearFocus();
       return;
     }
+    const requestSeq = this.focusRefreshSeq + 1;
+    this.focusRefreshSeq = requestSeq;
+    const isStale = (): boolean => {
+      return requestSeq !== this.focusRefreshSeq;
+    };
     const focusData = await getCockpitFocus(target.type, target.id);
+    if (isStale()) return;
     if (!focusData) {
       this.clearFocus();
       return;
@@ -559,6 +985,7 @@ export class CockpitStoreImpl {
       getCockpitSessionPackets(focusData.sessionKey, 50).catch(() => [] as FocusPacket[]),
       getCockpitSessionPermissions(focusData.sessionKey).catch(() => null),
     ]);
+    if (isStale()) return;
     let traceRows: TraceRecord[];
     let reportRows: CockpitTestReport[];
     let diffResponse: CockpitDiff | null;
@@ -568,12 +995,14 @@ export class CockpitStoreImpl {
         getCockpitTestReports({ sessionKey: focusData.sessionKey, limit: 20 }).catch(() => [] as CockpitTestReport[]),
         getCockpitDiff({ sessionKey: focusData.sessionKey }).catch(() => null),
       ]);
+      if (isStale()) return;
       [traceRows, reportRows, diffResponse] = heavyResults;
     } else {
       traceRows = this.state.traces;
       reportRows = this.state.testReports;
       diffResponse = this.state.diffData;
     }
+    if (isStale()) return;
     const selectedPacket = focusData.packet ?? packetRows[0] ?? null;
     this.setFocusData({
       focusData: { ...focusData, packet: selectedPacket },
@@ -600,29 +1029,21 @@ export class CockpitStoreImpl {
     try {
       const eventResponse = await getCockpitSessionEvents(key, { limit });
       const focusedSessionKey = this.state.focusData?.sessionKey ?? null;
-      const documentSessionKey = this.state.documentSessionKey;
-      const shouldApply = focusedSessionKey === key || (!focusedSessionKey && documentSessionKey === key);
-      if (!shouldApply) return;
-      // Carry forward optimistic messages not yet matched by a server-side entry
-      const optimistic = this.state.events.filter(e =>
-        e.type === 'message' && (e.payload as Record<string, unknown>).optimistic === true
+      if (focusedSessionKey !== key) return;
+      const currentEventsSessionKey = this.state.eventsSessionKey ?? focusedSessionKey;
+      const localEvents = currentEventsSessionKey === key
+        ? this.state.events
+        : this.getLocalMessageCarry(key);
+      const maxEvents = Math.max(limit * 4, 800);
+      const mergedEvents = mergeServerAndLocalMessageEvents(
+        eventResponse.events,
+        localEvents,
+        maxEvents
       );
-      const serverMessages = eventResponse.events.filter(e => e.type === 'message');
-      const survivingOptimistic = optimistic.filter(opt => {
-        const optContent = (opt.payload as Record<string, unknown>).content;
-        return !serverMessages.some(s =>
-          (s.payload as Record<string, unknown>).role === (opt.payload as Record<string, unknown>).role
-          && (s.payload as Record<string, unknown>).content === optContent
-        );
-      });
-      const mergedEvents = survivingOptimistic.length > 0
-        ? [...eventResponse.events, ...survivingOptimistic].sort(
-            (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()
-          )
-        : eventResponse.events;
       const hasMessages = mergedEvents.some((event) => event.type === 'message');
       this.set({
         events: mergedEvents,
+        eventsSessionKey: key,
         ...(hasMessages && !this.state.eventDrawerOpen ? { eventDrawerOpen: true } : {}),
       });
     } catch {
@@ -924,6 +1345,96 @@ export class CockpitStoreImpl {
       return true;
     }
 
+    if (command === 'async') {
+      // /async cancel — cancel running async on focused session
+      if (args.toLowerCase() === 'cancel') {
+        const focusedKey = this.state.focusData?.sessionKey ?? this.state.focusTarget?.id;
+        if (!focusedKey) {
+          this.set({ commandStatus: 'No session focused' });
+          return true;
+        }
+        this.set({ commandStatus: 'Cancelling async run…' });
+        try {
+          const result = await postCockpitSessionAsyncCancel(focusedKey);
+          this.set({ commandStatus: result.success ? 'Async run cancelled' : (result.error ?? 'Failed to cancel') });
+        } catch (err) {
+          this.set({ commandStatus: err instanceof Error ? err.message : String(err) });
+        }
+        return true;
+      }
+
+      // /async status — check async status on focused session
+      if (args.toLowerCase() === 'status') {
+        const focusedKey = this.state.focusData?.sessionKey ?? this.state.focusTarget?.id;
+        if (!focusedKey) {
+          this.set({ commandStatus: 'No session focused' });
+          return true;
+        }
+        this.set({ commandStatus: 'Checking async status…' });
+        try {
+          const result = await getCockpitSessionAsyncStatus(focusedKey);
+          if (result.running) {
+            const elapsed = typeof result.elapsedMs === 'number' ? `${Math.round(result.elapsedMs / 1000)}s` : '?';
+            this.set({ commandStatus: `Async running: "${result.goal}" (${elapsed})` });
+          } else {
+            this.set({ commandStatus: 'No async run active on this session' });
+          }
+        } catch (err) {
+          this.set({ commandStatus: err instanceof Error ? err.message : String(err) });
+        }
+        return true;
+      }
+
+      // /async <goal> — create session + start async
+      const goal = args;
+      if (!goal) {
+        this.set({ commandStatus: 'Usage: /async <goal>' });
+        return true;
+      }
+      const projectPath = this.state.workspaceProjectPath;
+      if (!projectPath) {
+        this.set({ commandStatus: 'Select a project workspace first' });
+        return true;
+      }
+
+      this.set({ commandStatus: 'Creating async session…' });
+      try {
+        const createResult = await postCockpitSessionCreate({
+          goal,
+          projectPath,
+          createProjectPath: true,
+          metadata: { source: 'cockpit-async-command' },
+        });
+        if (!createResult.success || !createResult.sessionKey) {
+          this.set({ commandStatus: createResult.error ?? 'Failed to create session' });
+          return true;
+        }
+
+        const asyncResult = await postCockpitSessionAsyncStart(createResult.sessionKey, goal);
+        if (!asyncResult.success) {
+          this.set({ commandStatus: asyncResult.error ?? 'Failed to start async session' });
+          return true;
+        }
+
+        this.set({
+          focusTarget: { type: 'session', id: createResult.sessionKey },
+          focusTab: 'live',
+          globalTool: 'none',
+          eventDrawerOpen: true,
+          eventFilter: 'messages',
+          inputVisible: true,
+          commandStatus: `Async session ${createResult.sessionKey} started`,
+        });
+        focusChatInputOrCenterPane();
+
+        void this.refreshFocusEvents(createResult.sessionKey, 200);
+        void this.refreshRollups();
+      } catch (err) {
+        this.set({ commandStatus: err instanceof Error ? err.message : String(err) });
+      }
+      return true;
+    }
+
     if (command === 'new') {
       const goal = args || 'New session';
       this.set({ commandStatus: 'Creating session…' });
@@ -970,8 +1481,95 @@ export class CockpitStoreImpl {
       return false;
     }
 
+    // Workflow template commands — match against all loaded templates
+    const matchedTemplate = this.state.templates.find(
+      (t) => t.name.toLowerCase() === command
+    );
+    if (matchedTemplate) {
+      await this.handleWorkflowCommand(matchedTemplate, args);
+      return true;
+    }
+
     this.set({ commandStatus: `Unknown command: /${command}` });
     return true;
+  };
+
+  handleWorkflowCommand = async (template: WorkItemTemplate, rawArgs: string) => {
+    const { refs, rest: prompt } = extractAtRefs(rawArgs);
+    if (!prompt) {
+      this.set({ commandStatus: `Usage: /${template.name} <prompt>` });
+      return;
+    }
+    const projectPath = this.state.workspaceProjectPath;
+    if (!projectPath) {
+      this.set({ commandStatus: 'Select a project workspace first' });
+      return;
+    }
+
+    this.set({ commandStatus: `Creating ${template.name} workflow…` });
+
+    try {
+      // Load spec file content if @refs provided
+      let specContent: string | undefined;
+      if (refs.length > 0) {
+        try {
+          const file = await getCockpitMarkdownFile(refs[0], { projectPath });
+          specContent = file.content;
+        } catch (err) {
+          this.set({ commandStatus: `Failed to load @${refs[0]}: ${err instanceof Error ? err.message : String(err)}` });
+          return;
+        }
+      }
+
+      const metadata: Record<string, unknown> = {
+        source: 'cockpit-workflow-command',
+        documentType: 'workflow',
+        templateName: template.name,
+        templateId: template.id,
+      };
+
+      // Create session
+      const result = await postCockpitSessionCreate({
+        goal: prompt,
+        projectPath,
+        createProjectPath: true,
+        metadata,
+      });
+      if (!result.success || !result.sessionKey) {
+        this.set({ commandStatus: result.error ?? 'Failed to create session' });
+        return;
+      }
+
+      // Send first message with workflow metadata + optional spec content
+      const markdownContext: CockpitMarkdownContextInput = {
+        projectPath,
+        metadata: {
+          documentType: 'workflow',
+          templateName: template.name,
+          templateId: template.id,
+          workspaceProjectPath: projectPath,
+        },
+        ...(specContent ? { content: specContent } : {}),
+      };
+
+      await postCockpitSessionMessage(result.sessionKey, prompt, { markdownContext });
+
+      this.set({
+        focusTarget: { type: 'session', id: result.sessionKey },
+        focusTab: 'live',
+        globalTool: 'none',
+        eventDrawerOpen: true,
+        eventFilter: 'messages',
+        inputVisible: true,
+        commandStatus: `${template.name} session ${result.sessionKey} created`,
+      });
+      focusChatInputOrCenterPane();
+
+      void this.refreshFocusEvents(result.sessionKey, 200);
+      void this.refreshRollups();
+    } catch (err) {
+      this.set({ commandStatus: err instanceof Error ? err.message : String(err) });
+    }
   };
 
   handleSendMessage = async (draftOverride?: string) => {
@@ -991,93 +1589,37 @@ export class CockpitStoreImpl {
       }
 
       const markdownContext = this.markdownContextProvider?.() ?? null;
-      const markdownMetadata = (
-        markdownContext?.metadata
-        && typeof markdownContext.metadata === 'object'
-        && !Array.isArray(markdownContext.metadata)
-      )
-        ? markdownContext.metadata as Record<string, unknown>
-        : {};
-      const markdownBoundSessionKey = typeof markdownMetadata.documentSessionKey === 'string'
-        && markdownMetadata.documentSessionKey.trim().length > 0
-        ? markdownMetadata.documentSessionKey.trim()
-        : null;
+      let sessionKey = focusData?.sessionKey ?? null;
 
-      let sessionKey = focusData?.sessionKey ?? this.state.documentSessionKey ?? null;
-      if (!focusData?.sessionKey && markdownBoundSessionKey) {
-        sessionKey = markdownBoundSessionKey;
-        if (this.state.documentSessionKey !== markdownBoundSessionKey) {
-          this.set({ documentSessionKey: markdownBoundSessionKey });
+      // No focused session but a document is open — create a document session
+      if (!sessionKey && markdownContext?.path) {
+        const projectPath = this.state.workspaceProjectPath;
+        if (!projectPath) {
+          this.set({ sendingMessage: false, error: 'Select a project workspace first' });
+          return;
         }
-      }
-
-      // Lazy session creation: no focused session, but we have markdown context
-      if (!sessionKey && !this.state.focusTarget && this.state.globalTool === 'none') {
-        if (markdownContext) {
-          const firstLine = trimmedDraft.split('\n')[0].slice(0, 200);
-          const workspaceProjectPath = typeof markdownMetadata.workspaceProjectPath === 'string'
-            && markdownMetadata.workspaceProjectPath.trim().length > 0
-            ? markdownMetadata.workspaceProjectPath.trim()
-            : undefined;
-          const documentType = typeof markdownMetadata.documentType === 'string'
-            ? markdownMetadata.documentType
-            : undefined;
-          if ((documentType === 'workflow' || documentType === 'executable') && !workspaceProjectPath) {
-            this.set({
-              sendingMessage: false,
-              error: 'Workflow/executable docs need project scope before creating a session. Pick a project in the Files workspace selector.',
-            });
-            return;
-          }
-          const result = await postCockpitSessionCreate({
-            goal: firstLine,
-            markdownPath: markdownContext.path,
-            ...(workspaceProjectPath ? { projectPath: workspaceProjectPath } : {}),
-            ...(workspaceProjectPath ? { createProjectPath: true } : {}),
-            metadata: {
-              source: 'cockpit-document',
-              markdownPath: markdownContext.path,
-              ...(typeof markdownMetadata.documentType === 'string'
-                ? { documentType: markdownMetadata.documentType }
-                : {}),
-              ...(typeof markdownMetadata.templateName === 'string'
-                ? { templateName: markdownMetadata.templateName }
-                : {}),
-              ...(typeof markdownMetadata.templateId === 'string'
-                ? { templateId: markdownMetadata.templateId }
-                : {}),
-              ...(Array.isArray(markdownMetadata.specs)
-                ? { specs: markdownMetadata.specs }
-                : {}),
-              chatScope: 'document',
-            },
-          });
-          if (result.success && result.sessionKey) {
-            sessionKey = result.sessionKey;
-            this.set({
-              documentSessionKey: result.sessionKey,
-              focusTarget: { type: 'session', id: result.sessionKey },
-              eventDrawerOpen: true,
-              eventFilter: 'messages',
-              inputVisible: true,
-              globalTool: 'none',
-            });
-            focusChatInputOrCenterPane();
-            // Persist sessionKey into the markdown file's frontmatter
-            if (markdownContext.content && this.markdownSetContent) {
-              const { frontmatter: fm, body: bd } = parseFrontmatter(markdownContext.content);
-              fm.sessionKey = result.sessionKey;
-              this.markdownSetContent(serializeFrontmatter(fm, bd));
-            }
-          } else {
-            this.set({ sendingMessage: false, error: result.error ?? 'Failed to create session' });
-            return;
-          }
+        const result = await postCockpitSessionCreate({
+          goal: trimmedDraft,
+          markdownPath: markdownContext.path,
+          projectPath,
+          createProjectPath: true,
+          metadata: { source: 'cockpit-document-chat', documentPath: markdownContext.path },
+        });
+        if (!result.success || !result.sessionKey) {
+          this.set({ sendingMessage: false, error: result.error ?? 'Failed to create session' });
+          return;
         }
+        sessionKey = result.sessionKey;
+        this.documentSessionPaths.set(sessionKey, markdownContext.path);
+        this.set({
+          focusTarget: { type: 'session', id: sessionKey },
+          focusTab: 'document',
+        });
+        void this.refreshRollups();
       }
 
       if (!sessionKey) {
-        this.set({ sendingMessage: false, error: 'Select a session to send a message' });
+        this.set({ sendingMessage: false, error: 'Select a session or open a document to send a message' });
         return;
       }
       if (this.beforeSendMessageHook) {
@@ -1097,19 +1639,42 @@ export class CockpitStoreImpl {
         messageDraft: '',
         commandStatus: null,
         events: [...this.state.events, optimistic],
+        eventsSessionKey: sessionKey,
         eventDrawerOpen: true,
         eventFilter: 'messages',
-        streamingText: '',
       });
 
-      await postCockpitSessionMessage(
+      const response = await postCockpitSessionMessage(
         sessionKey,
         trimmedDraft,
         markdownContext ? { markdownContext } : undefined
       );
-      this.set({
-        sendingMessage: false,
-      });
+      const responseRequestId = typeof response.requestId === 'string' && response.requestId.trim().length > 0
+        ? response.requestId.trim()
+        : null;
+      if (responseRequestId) {
+        const nextEvents = this.state.events.map((event) => {
+          if (event.type !== 'message') return event;
+          const payload = event.payload;
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return event;
+          if ((payload as Record<string, unknown>).id !== optimisticMessageId) return event;
+          return {
+            ...event,
+            payload: {
+              ...(payload as Record<string, unknown>),
+              requestId: responseRequestId,
+            },
+          };
+        });
+        this.set({
+          events: nextEvents,
+          sendingMessage: false,
+        });
+      } else {
+        this.set({
+          sendingMessage: false,
+        });
+      }
       // Background refresh: prioritize focused session events first, then rollups.
       void this.refreshFocusEvents(sessionKey, 200);
       void this.refreshRollups();
@@ -1281,20 +1846,15 @@ export class CockpitStoreImpl {
 
   // ─── Registration hooks (called from App.tsx) ──────────────
 
+  getDocumentSessionPath = (sessionKey: string): string | null => {
+    return this.documentSessionPaths.get(sessionKey) ?? null;
+  };
+
   registerMarkdownContextProvider = (provider: () => CockpitMarkdownContextInput | null): (() => void) => {
     this.markdownContextProvider = provider;
     return () => {
       if (this.markdownContextProvider === provider) {
         this.markdownContextProvider = null;
-      }
-    };
-  };
-
-  registerMarkdownSetContent = (setter: (content: string) => void): (() => void) => {
-    this.markdownSetContent = setter;
-    return () => {
-      if (this.markdownSetContent === setter) {
-        this.markdownSetContent = null;
       }
     };
   };

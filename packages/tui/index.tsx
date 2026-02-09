@@ -57,6 +57,7 @@ import {
   DEFAULT_MAX_INPUT_LINES,
   STREAM_CURSOR_FRAMES,
   STATUS_SPINNER_FRAMES,
+  INPUT_SPINNER_FRAMES,
   HORIZONTAL_PADDING,
   TOP_PADDING,
   BOTTOM_PADDING,
@@ -3332,11 +3333,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       lines[cursorLine] = line.slice(0, cursorCol) + "|" + line.slice(cursorCol);
     }
 
+    // When agent is busy, replace the `>` prompt with a spinning braille character
+    const activePrompt = isBusy
+      ? `${INPUT_SPINNER_FRAMES[statusTick % INPUT_SPINNER_FRAMES.length]} `
+      : prompt;
+
     const start = snapshot.inputScrollOffset;
     const end = start + inputVisibleLines;
     return lines.slice(start, end).map((line, idx) => {
       const globalIndex = start + idx;
-      const prefix = globalIndex === 0 ? prompt : " ".repeat(prompt.length);
+      const prefix = globalIndex === 0 ? activePrompt : " ".repeat(prompt.length);
       return `${prefix}${line}`.padEnd(contentWidth, " ").slice(0, contentWidth);
     });
   };
@@ -3686,9 +3692,18 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           {!isQuestionMode && <Text color={colors.border}>{horizontalLine}</Text>}
 
           {/* Input lines - no side borders */}
-          {!isQuestionMode && inputLines.map((line, index) => (
-            <Text key={`input-${index}`} color={colors.text}>{line}</Text>
-          ))}
+          {!isQuestionMode && inputLines.map((line, index) => {
+            // Color the spinner character on the first line when agent is busy
+            if (index === 0 && isBusy) {
+              return (
+                <Text key={`input-${index}`}>
+                  <Text color={colors.accent}>{line.slice(0, 1)}</Text>
+                  <Text color={colors.text}>{line.slice(1)}</Text>
+                </Text>
+              );
+            }
+            return <Text key={`input-${index}`} color={colors.text}>{line}</Text>;
+          })}
 
           {/* Bottom separator line - runs edge to edge */}
           {!isQuestionMode && <Text color={colors.border}>{horizontalLine}</Text>}

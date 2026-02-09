@@ -6,6 +6,7 @@ import type {
   CockpitArchitectureOverview,
   CockpitMarkdownContextInput,
   CockpitSessionControlInput,
+  CockpitPermissionResponseInput,
   CockpitSessionPermissions,
   CockpitSessionPermissionUpdateInput,
   CockpitSessionReviewDecisionInput,
@@ -54,6 +55,19 @@ export async function postCockpitSessionPermissions(
   input: CockpitSessionPermissionUpdateInput
 ): Promise<{ success: boolean } & CockpitSessionPermissions> {
   return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/permissions`, input);
+}
+
+export async function postCockpitPermissionResponse(
+  input: CockpitPermissionResponseInput
+): Promise<{ success: boolean; error?: string }> {
+  return postAPI('/cockpit/permissions/response', {
+    sessionKey: input.sessionKey,
+    requestId: input.requestId,
+    decision: input.decision,
+    ...(typeof input.pattern === 'string' && input.pattern.trim().length > 0
+      ? { pattern: input.pattern.trim() }
+      : {}),
+  });
 }
 
 export interface CockpitModelEntry {
@@ -122,6 +136,25 @@ export async function postCockpitSessionCreate(input: {
   metadata?: Record<string, unknown>;
 }): Promise<{ success: boolean; sessionKey?: string; workingDir?: string; error?: string }> {
   return postAPI('/cockpit/session/create', input);
+}
+
+export async function postCockpitSessionAsyncStart(
+  sessionKey: string,
+  goal: string
+): Promise<{ success: boolean; requestId?: string; goal?: string; error?: string }> {
+  return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/async/start`, { goal });
+}
+
+export async function postCockpitSessionAsyncCancel(
+  sessionKey: string
+): Promise<{ success: boolean; error?: string }> {
+  return postAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/async/cancel`, {});
+}
+
+export async function getCockpitSessionAsyncStatus(
+  sessionKey: string
+): Promise<{ success: boolean; running: boolean; requestId?: string; goal?: string; startedAt?: number; elapsedMs?: number; error?: string }> {
+  return fetchAPI(`/cockpit/session/${encodeURIComponent(sessionKey)}/async/status`);
 }
 
 const EMPTY_SUBGRAPH: SubgraphResponse = {

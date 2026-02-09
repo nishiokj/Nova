@@ -48,7 +48,6 @@ const TYPE_COLORS: Record<DocumentType, string> = {
   note: 'var(--text-muted)',
   issue: 'var(--accent-amber)',
   workflow: 'var(--accent-cyan)',
-  executable: 'var(--accent-green)',
 };
 
 export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
@@ -189,7 +188,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
     }
   };
 
-  const atMax = docType === 'workflow' || docType === 'executable';
+  const atMax = docType === 'workflow';
 
   return (
     <div
@@ -246,7 +245,7 @@ export function PromotePicker({ workspace }: { workspace: MarkdownWorkspace }) {
 
       {atMax ? (
         <div className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
-          {docType === 'executable' ? 'Already executable — session linked.' : 'Already a workflow. Use chat to execute.'}
+          Already a workflow. Use a slash command to create a session.
         </div>
       ) : options.length === 0 ? (
         <div className="px-3 py-3 text-[11px] text-[var(--text-muted)]">

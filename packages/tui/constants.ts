@@ -56,11 +56,14 @@ export const SCROLL_AMOUNT = 3;
 /** Frames for streaming cursor animation */
 export const STREAM_CURSOR_FRAMES = ["|", " "] as const;
 
-/** Frames for status spinner animation */
-export const STATUS_SPINNER_FRAMES = ["-", "\\", "|", "/"] as const;
+/** Frames for status spinner animation (braille sweep) */
+export const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+/** Frames for input prompt spinner when agent is busy (braille rotation) */
+export const INPUT_SPINNER_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"] as const;
 
 /** Interval (ms) between status animation ticks */
-export const STATUS_TICK_INTERVAL = 150;
+export const STATUS_TICK_INTERVAL = 80;
 
 /** Session stale threshold (seconds) - 5 minutes */
 export const SESSION_STALE_THRESHOLD = 5 * 60;

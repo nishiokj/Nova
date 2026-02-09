@@ -1373,6 +1373,12 @@ export async function buildMarkdownMessageContext(
     truncated = true;
   }
 
+  // Resolve workspace scope to determine mode
+  const scope = await resolveMarkdownWorkspaceScope(ctx, {
+    projectPath: scopeProjectPath ?? null,
+  });
+  const scopeMode = 'mode' in scope ? (scope.mode === 'project' ? 'project' : 'global') : 'global';
+
   const contextMetadata: Record<string, unknown> = {
     source: 'markdown-editor',
     path: resolvedPath ?? rawPath ?? null,
@@ -1382,12 +1388,16 @@ export async function buildMarkdownMessageContext(
     isDirty,
     truncated,
     hash: fullContentHash,
+    scopeMode,
+    ...(scopeMode === 'project' && 'projectPath' in scope ? { scopeProjectPath: scope.projectPath } : {}),
+    ...(scopeMode === 'global' ? { scopeSessionKey: null } : {}),
   };
 
   const contextText = [
     'Control-plane active markdown context:',
     `path: ${resolvedPath ?? rawPath ?? 'unknown'}`,
     `writeTargetPath: ${resolvedAbsolutePath ?? 'unknown'}`,
+    `scopeMode: ${scopeMode}`,
     `version: ${resolvedVersion ?? 'unknown'}`,
     `dirty: ${isDirty ? 'true' : 'false'}`,
     `truncated: ${truncated ? 'true' : 'false'}`,

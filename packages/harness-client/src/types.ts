@@ -82,6 +82,9 @@ export type BridgeCommandType =
   | 'control_plane_memory_info'
   | 'control_plane_model_get'
   | 'control_plane_model_set'
+  | 'control_plane_async_start'
+  | 'control_plane_async_cancel'
+  | 'control_plane_async_status'
   | 'shutdown';
 
 export interface InitCommandData extends CommandDataBase {
@@ -141,7 +144,13 @@ export interface UserPromptResponseCommandData extends CommandDataBase {
 
 export interface PermissionResponseCommandData extends CommandDataBase {
   request_id: string;
-  allowed: boolean;
+  decision?: 'allow' | 'always_allow' | 'deny';
+  pattern?: string;
+  /**
+   * Backwards compatibility for older scripts.
+   * `allowed: true` maps to `decision: "allow"`, false maps to `decision: "deny"`.
+   */
+  allowed?: boolean;
 }
 
 export interface AuthStartCommandData extends CommandDataBase {
@@ -286,6 +295,15 @@ export interface ControlPlaneModelSetCommandData extends CommandDataBase {
   reasoning?: string;
 }
 
+export interface ControlPlaneAsyncStartCommandData extends CommandDataBase {
+  session_key: string;
+  goal: string;
+}
+
+export interface ControlPlaneAsyncSessionKeyCommandData extends CommandDataBase {
+  session_key: string;
+}
+
 export interface BridgeCommandDataMap {
   init: InitCommandData;
   send_text: SendTextCommandData;
@@ -354,6 +372,9 @@ export interface BridgeCommandDataMap {
   control_plane_memory_info: NoData;
   control_plane_model_get: ControlPlaneModelGetCommandData;
   control_plane_model_set: ControlPlaneModelSetCommandData;
+  control_plane_async_start: ControlPlaneAsyncStartCommandData;
+  control_plane_async_cancel: ControlPlaneAsyncSessionKeyCommandData;
+  control_plane_async_status: ControlPlaneAsyncSessionKeyCommandData;
   shutdown: NoData;
 }
 

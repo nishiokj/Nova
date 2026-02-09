@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 export interface ResizableLayoutState {
   leftWidth: number;
@@ -70,6 +70,23 @@ export function useResizableLayout() {
       right: { min: MIN_RIGHT_WIDTH, max: MAX_RIGHT_WIDTH },
     },
   };
+}
+
+const MOBILE_QUERY = '(max-width: 767px)';
+
+function subscribeMobile(cb: () => void) {
+  const mql = window.matchMedia(MOBILE_QUERY);
+  mql.addEventListener('change', cb);
+  return () => mql.removeEventListener('change', cb);
+}
+
+function getMobileSnapshot() {
+  return window.matchMedia(MOBILE_QUERY).matches;
+}
+
+/** Reactive boolean — true when viewport is < 768px. */
+export function useIsMobile(): boolean {
+  return useSyncExternalStore(subscribeMobile, getMobileSnapshot);
 }
 
 // Hook for handling drag-to-resize

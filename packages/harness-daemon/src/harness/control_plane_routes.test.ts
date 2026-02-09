@@ -69,6 +69,12 @@ interface TestHarness {
     workingDir?: string;
     input: Record<string, unknown>;
   }>;
+  permissionResponses: Array<{
+    sessionKey: string;
+    requestId: string;
+    decision: 'allow' | 'always_allow' | 'deny';
+    pattern?: string;
+  }>;
 }
 
 class MockResponse extends EventEmitter {
@@ -133,6 +139,12 @@ function createHarness(options?: {
     workingDir?: string;
     input: Record<string, unknown>;
   }> = [];
+  const permissionResponses: Array<{
+    sessionKey: string;
+    requestId: string;
+    decision: 'allow' | 'always_allow' | 'deny';
+    pattern?: string;
+  }> = [];
 
   const graphd = {
     sessionGet: () => ({ session: createSessionRow(options?.sessionMetadata ?? {}) }),
@@ -175,9 +187,18 @@ function createHarness(options?: {
         ...(Array.isArray(input.restrictWriteToPaths) ? { restrictWriteToPaths: input.restrictWriteToPaths } : {}),
       };
     },
+    respondToPermissionRequest: (sessionKey, input) => {
+      permissionResponses.push({
+        sessionKey,
+        requestId: input.requestId,
+        decision: input.decision,
+        ...(typeof input.pattern === 'string' ? { pattern: input.pattern } : {}),
+      });
+      return { success: true };
+    },
   };
 
-  return { ctx, dispatchCalls, metadataUpdates, permissionUpdates };
+  return { ctx, dispatchCalls, metadataUpdates, permissionUpdates, permissionResponses };
 }
 
 async function waitForFinish(res: MockResponse, timeoutMs = 500): Promise<void> {
@@ -498,14 +519,8 @@ describe('control-plane cockpit session message routes', () => {
         message: 'Implement this workflow now',
         markdownContext: {
           path: 'plans/ship-api.md',
-          content: [
-            '---',
-            'type: workflow',
-            'template: "  Ship API  "',
-            '---',
-            '# Workflow',
-          ].join('\n'),
-          metadata: { documentType: 'workflow' },
+          content: '# Workflow',
+          metadata: { template: 'Ship API' },
         },
       },
     });
@@ -550,8 +565,8 @@ describe('control-plane cockpit session message routes', () => {
       body: {
         message: 'Follow-up prompt',
         markdownContext: {
-          content: '---\ntype: workflow\ntemplate: History Template\n---\n',
-          metadata: { documentType: 'workflow' },
+          content: '',
+          metadata: { template: 'History Template' },
         },
       },
     });
@@ -576,8 +591,8 @@ describe('control-plane cockpit session message routes', () => {
       body: {
         message: 'Start missing template',
         markdownContext: {
-          content: '---\ntype: workflow\ntemplate: Missing Template\n---\n',
-          metadata: { documentType: 'workflow' },
+          content: '',
+          metadata: { template: 'Missing Template' },
         },
       },
     });
@@ -611,8 +626,8 @@ describe('control-plane cockpit session message routes', () => {
       body: {
         message: 'Another follow-up',
         markdownContext: {
-          content: '---\ntype: workflow\ntemplate: Already Applied\n---\n',
-          metadata: { documentType: 'workflow' },
+          content: '',
+          metadata: { template: 'Already Applied' },
         },
       },
     });
@@ -623,6 +638,55 @@ describe('control-plane cockpit session message routes', () => {
     expect(harness.dispatchCalls).toHaveLength(1);
     expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
     expect(postgresMockState.queries).toHaveLength(0);
+  });
+});
+
+describe('control-plane cockpit permission response routes', () => {
+  it('forwards permission response decisions to the daemon context', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/permissions/response',
+      ctx: harness.ctx,
+      body: {
+        sessionKey: 'sess-1',
+        requestId: 'perm-req-1',
+        decision: 'always_allow',
+        pattern: 'Write(src/**)',
+      },
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    expect(result.json?.success).toBe(true);
+    expect(harness.permissionResponses).toEqual([
+      {
+        sessionKey: 'sess-1',
+        requestId: 'perm-req-1',
+        decision: 'always_allow',
+        pattern: 'Write(src/**)',
+      },
+    ]);
+  });
+
+  it('validates request body fields', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/permissions/response',
+      ctx: harness.ctx,
+      body: {
+        sessionKey: 'sess-1',
+        requestId: 'perm-req-1',
+        decision: 'invalid',
+      },
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(400);
+    expect(result.json?.success).toBe(false);
+    expect(String(result.json?.error ?? '')).toContain('Invalid decision');
+    expect(harness.permissionResponses).toHaveLength(0);
   });
 });
 
@@ -657,6 +721,435 @@ describe('control-plane cockpit rollup routes', () => {
     expect(Array.isArray(result.json?.runningSessions)).toBe(true);
     expect((result.json?.runningSessions as unknown[] | undefined)?.length).toBe(1);
     expect(result.json?.error).toBeUndefined();
+  });
+});
+
+describe('control-plane cockpit event/message routes', () => {
+  it('normalizes millisecond message timestamps for session messages', async () => {
+    const harness = createHarness({ historyCount: 1 });
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/sessions/sess-1/messages',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const messages = Array.isArray(result.json?.messages) ? result.json?.messages : [];
+    expect(messages.length).toBe(1);
+    const createdAt = String((messages[0] as Record<string, unknown>)?.createdAt ?? '');
+    expect(Number.isFinite(Date.parse(createdAt))).toBe(true);
+    expect(new Date(createdAt).getUTCFullYear()).toBeLessThan(2100);
+  });
+
+  it('returns recent messages even when limit=1', async () => {
+    const harness = createHarness({ historyCount: 3 });
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=1',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json?.events : [];
+    expect(events.length).toBe(1);
+    expect(typeof result.json?.nextCursor).toBe('number');
+  });
+
+  it('falls back to default event limit for non-numeric limit values', async () => {
+    const harness = createHarness({ historyCount: 2 });
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=not-a-number',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json?.events : [];
+    expect(events.length).toBeGreaterThan(0);
+  });
+
+  it('maps data.work_id to payload.workItemId for normalized events', async () => {
+    const harness = createHarness({
+      sessionMetadata: {
+        agent_events: [
+          {
+            type: 'iteration_completed',
+            timestamp: new Date('2026-02-08T10:01:00.000Z').toISOString(),
+            data: {
+              work_id: 'wk-2',
+              result: { success: true },
+            },
+          },
+        ],
+      },
+    });
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=20',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json.events : [];
+    expect(events.length).toBe(1);
+    const payload = (events[0] as Record<string, unknown>)?.payload as Record<string, unknown> | undefined;
+    expect(payload?.workItemId).toBe('wk-2');
+  });
+
+  it('backfills objective from iteration_started goal keyed by data.work_id', async () => {
+    const harness = createHarness({
+      sessionMetadata: {
+        agent_events: [
+          {
+            type: 'iteration_started',
+            timestamp: new Date('2026-02-08T10:00:00.000Z').toISOString(),
+            data: {
+              iteration: 1,
+              work_id: 'wk-9',
+              goal: 'Implement checkout objective',
+            },
+          },
+          {
+            type: 'tool_call',
+            timestamp: new Date('2026-02-08T10:00:01.000Z').toISOString(),
+            work_item_id: 'wk-9',
+            data: {
+              tool_name: 'Read',
+              phase: 'completed',
+              success: true,
+            },
+          },
+        ],
+      },
+    });
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=20',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json.events : [];
+    const toolEvent = events.find((raw) => {
+      const event = raw as Record<string, unknown>;
+      const payload = event.payload as Record<string, unknown> | undefined;
+      return payload?.eventType === 'tool_call';
+    }) as Record<string, unknown> | undefined;
+    expect(toolEvent).toBeDefined();
+    const payload = toolEvent?.payload as Record<string, unknown> | undefined;
+    expect(payload?.workItemId).toBe('wk-9');
+    const data = payload?.data as Record<string, unknown> | undefined;
+    expect(data?.objective).toBe('Implement checkout objective');
+  });
+
+  it('deduplicates table-vs-agent message duplicates independent of ordering', async () => {
+    const invokeWithAgentTimestamp = async (agentTimestamp: string) => {
+      const ctx: ControlPlaneContext = {
+        graphd: {
+          sessionGet: () => ({
+            session: createSessionRow({
+              agent_events: [
+                {
+                  type: 'agent_message',
+                  timestamp: agentTimestamp,
+                  request_id: 'req-1',
+                  data: {
+                    role: 'assistant',
+                    message: 'Hello world',
+                  },
+                },
+              ],
+            }),
+          }),
+          messagesGet: () => ({
+            messages: [
+              {
+                id: 101,
+                role: 'assistant',
+                content: 'Hello world',
+                requestId: 'req-1',
+                createdAt: Date.parse('2026-02-08T10:00:01.000Z'),
+              },
+            ],
+          }),
+        } as unknown as ControlPlaneContext['graphd'],
+        isGraphDReady: () => true,
+        workingDir: process.cwd(),
+      };
+      return invokeRoute({
+        method: 'GET',
+        url: '/control-plane/cockpit/session/sess-1/events?limit=20',
+        ctx,
+      });
+    };
+
+    const olderAgent = await invokeWithAgentTimestamp('2026-02-08T10:00:00.000Z');
+    const newerAgent = await invokeWithAgentTimestamp('2026-02-08T10:00:02.000Z');
+
+    for (const result of [olderAgent, newerAgent]) {
+      expect(result.handled).toBe(true);
+      expect(result.statusCode).toBe(200);
+      const events = Array.isArray(result.json?.events) ? result.json.events : [];
+      const assistantMessages = events.filter((raw) => {
+        const event = raw as Record<string, unknown>;
+        if (event.type !== 'message') return false;
+        const payload = event.payload as Record<string, unknown> | undefined;
+        return payload?.role === 'assistant';
+      }) as Array<Record<string, unknown>>;
+      expect(assistantMessages).toHaveLength(1);
+      const payload = assistantMessages[0].payload as Record<string, unknown>;
+      expect(payload.id).toBe(101);
+      expect(payload.requestId).toBe('req-1');
+    }
+  });
+
+  it('keeps streamed assistant content when canonical table row is empty', async () => {
+    const ctx: ControlPlaneContext = {
+      graphd: {
+        sessionGet: () => ({
+          session: createSessionRow({
+            agent_events: [
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:00.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  message: 'Love ',
+                },
+              },
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:01.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  message: 'it',
+                },
+              },
+            ],
+          }),
+        }),
+        messagesGet: () => ({
+          messages: [
+            {
+              id: 201,
+              role: 'assistant',
+              content: '',
+              requestId: 'req-1',
+              createdAt: Date.parse('2026-02-08T10:00:02.000Z'),
+            },
+          ],
+        }),
+      } as unknown as ControlPlaneContext['graphd'],
+      isGraphDReady: () => true,
+      workingDir: process.cwd(),
+    };
+
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=20',
+      ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json.events : [];
+    const nonEmptyAssistantMessages = events.filter((raw) => {
+      const event = raw as Record<string, unknown>;
+      if (event.type !== 'message') return false;
+      const payload = event.payload as Record<string, unknown> | undefined;
+      if (payload?.role !== 'assistant') return false;
+      return typeof payload.content === 'string' && payload.content.trim().length > 0;
+    }) as Array<Record<string, unknown>>;
+    expect(nonEmptyAssistantMessages).toHaveLength(1);
+    const payload = nonEmptyAssistantMessages[0].payload as Record<string, unknown>;
+    expect(payload.content).toBe('Love it');
+    expect(payload.requestId).toBe('req-1');
+  });
+
+  it('coalesces agent_message chunks into a single assistant message per request', async () => {
+    const ctx: ControlPlaneContext = {
+      graphd: {
+        sessionGet: () => ({
+          session: createSessionRow({
+            agent_events: [
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:00.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  message: 'Love ',
+                },
+              },
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:01.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  message: 'it',
+                },
+              },
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:02.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  message: ' — let',
+                },
+              },
+            ],
+          }),
+        }),
+        messagesGet: () => ({ messages: [] }),
+      } as unknown as ControlPlaneContext['graphd'],
+      isGraphDReady: () => true,
+      workingDir: process.cwd(),
+    };
+
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=20',
+      ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json.events : [];
+    const assistantMessages = events.filter((raw) => {
+      const event = raw as Record<string, unknown>;
+      if (event.type !== 'message') return false;
+      const payload = event.payload as Record<string, unknown> | undefined;
+      return payload?.role === 'assistant';
+    }) as Array<Record<string, unknown>>;
+    expect(assistantMessages).toHaveLength(1);
+    const payload = assistantMessages[0].payload as Record<string, unknown>;
+    expect(payload.requestId).toBe('req-1');
+    expect(payload.eventType).toBe('agent_message');
+    expect(payload.content).toBe('Love it — let');
+  });
+
+  it('drops agent_message chunks when a non-empty harness response exists for the same request', async () => {
+    const ctx: ControlPlaneContext = {
+      graphd: {
+        sessionGet: () => ({
+          session: createSessionRow({
+            agent_events: [
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:00.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  message: 'Love ',
+                },
+              },
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:01.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  message: 'it',
+                },
+              },
+              {
+                type: 'harness_response',
+                timestamp: '2026-02-08T10:00:02.000Z',
+                request_id: 'req-1',
+                data: {
+                  role: 'assistant',
+                  content: 'Love it for real',
+                },
+              },
+            ],
+          }),
+        }),
+        messagesGet: () => ({ messages: [] }),
+      } as unknown as ControlPlaneContext['graphd'],
+      isGraphDReady: () => true,
+      workingDir: process.cwd(),
+    };
+
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=20',
+      ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json.events : [];
+    const assistantMessages = events.filter((raw) => {
+      const event = raw as Record<string, unknown>;
+      if (event.type !== 'message') return false;
+      const payload = event.payload as Record<string, unknown> | undefined;
+      return payload?.role === 'assistant';
+    }) as Array<Record<string, unknown>>;
+    expect(assistantMessages).toHaveLength(1);
+    const payload = assistantMessages[0].payload as Record<string, unknown>;
+    expect(payload.requestId).toBe('req-1');
+    expect(payload.eventType).toBe('harness_response');
+    expect(payload.content).toBe('Love it for real');
+  });
+
+  it('does not dedupe messages when requestId is missing', async () => {
+    const ctx: ControlPlaneContext = {
+      graphd: {
+        sessionGet: () => ({
+          session: createSessionRow({
+            agent_events: [
+              {
+                type: 'agent_message',
+                timestamp: '2026-02-08T10:00:00.000Z',
+                data: {
+                  role: 'assistant',
+                  message: 'Live no request id',
+                },
+              },
+            ],
+          }),
+        }),
+        messagesGet: () => ({
+          messages: [
+            {
+              id: 102,
+              role: 'assistant',
+              content: 'Persisted no request id',
+              requestId: null,
+              createdAt: Date.parse('2026-02-08T10:00:01.000Z'),
+            },
+          ],
+        }),
+      } as unknown as ControlPlaneContext['graphd'],
+      isGraphDReady: () => true,
+      workingDir: process.cwd(),
+    };
+
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/events?limit=20',
+      ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    const events = Array.isArray(result.json?.events) ? result.json.events : [];
+    const assistantMessages = events.filter((raw) => {
+      const event = raw as Record<string, unknown>;
+      if (event.type !== 'message') return false;
+      const payload = event.payload as Record<string, unknown> | undefined;
+      return payload?.role === 'assistant';
+    });
+    expect(assistantMessages).toHaveLength(2);
   });
 });
 
