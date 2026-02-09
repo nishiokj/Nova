@@ -19,18 +19,19 @@ describe("parseTextSegments", () => {
     expect(segments.some((s) => s.italic)).toBe(true);
   });
 
-  it("renders markdown links as link text with underline", () => {
+  it("renders markdown links as link text", () => {
     const segments = parseTextSegments("[OpenAI](https://openai.com)");
     const text = joinText(segments).trimEnd();
     expect(text).toBe("OpenAI");
-    expect(segments.some((s) => s.underline)).toBe(true);
+    expect(segments.some((s) => s.underline)).toBe(false);
   });
 
   it("formats headers as emphasized text", () => {
     const segments = parseTextSegments("## Title");
     const text = joinText(segments).trim();
     expect(text).toBe("Title");
-    expect(segments.some((s) => s.bold && s.underline)).toBe(true);
+    expect(segments.some((s) => s.bold)).toBe(true);
+    expect(segments.some((s) => s.underline)).toBe(false);
   });
 
   it("formats list bullets", () => {
@@ -46,9 +47,9 @@ describe("parseTextSegments", () => {
     expect(segments.some((s) => s.italic)).toBe(true);
   });
 
-  it("highlights URLs in plain text", () => {
+  it("highlights URLs in plain text without underline", () => {
     const segments = parseTextSegments("See https://example.com for details");
-    expect(segments.some((s) => s.underline)).toBe(true);
+    expect(segments.some((s) => s.underline)).toBe(false);
   });
 });
 

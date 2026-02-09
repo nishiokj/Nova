@@ -82,9 +82,6 @@ export type BridgeCommandType =
   | 'control_plane_memory_info'
   | 'control_plane_model_get'
   | 'control_plane_model_set'
-  | 'control_plane_async_start'
-  | 'control_plane_async_cancel'
-  | 'control_plane_async_status'
   | 'shutdown';
 
 export interface InitCommandData extends CommandDataBase {
@@ -217,6 +214,11 @@ export interface PermissionSetDangerousModeData extends CommandDataBase {
 export interface AsyncStartCommandData extends CommandDataBase {
   goal: string;
   working_dir?: string;
+  session_key?: string;
+}
+
+export interface AsyncSessionKeyCommandData extends CommandDataBase {
+  session_key?: string;
 }
 
 export interface WatcherSearchCommandData extends CommandDataBase {
@@ -295,15 +297,6 @@ export interface ControlPlaneModelSetCommandData extends CommandDataBase {
   reasoning?: string;
 }
 
-export interface ControlPlaneAsyncStartCommandData extends CommandDataBase {
-  session_key: string;
-  goal: string;
-}
-
-export interface ControlPlaneAsyncSessionKeyCommandData extends CommandDataBase {
-  session_key: string;
-}
-
 export interface BridgeCommandDataMap {
   init: InitCommandData;
   send_text: SendTextCommandData;
@@ -361,8 +354,8 @@ export interface BridgeCommandDataMap {
   watcher_reanchor: WatcherReanchorCommandData;
   watcher_summarize: NoData;
   async_start: AsyncStartCommandData;
-  async_cancel: NoData;
-  async_status: NoData;
+  async_cancel: AsyncSessionKeyCommandData;
+  async_status: AsyncSessionKeyCommandData;
   control_plane_dispatch: ControlPlaneDispatchCommandData;
   control_plane_stop: ControlPlaneStopCommandData;
   control_plane_fork: ControlPlaneForkCommandData;
@@ -372,9 +365,6 @@ export interface BridgeCommandDataMap {
   control_plane_memory_info: NoData;
   control_plane_model_get: ControlPlaneModelGetCommandData;
   control_plane_model_set: ControlPlaneModelSetCommandData;
-  control_plane_async_start: ControlPlaneAsyncStartCommandData;
-  control_plane_async_cancel: ControlPlaneAsyncSessionKeyCommandData;
-  control_plane_async_status: ControlPlaneAsyncSessionKeyCommandData;
   shutdown: NoData;
 }
 

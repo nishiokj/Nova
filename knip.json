@@ -1,0 +1,119 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "ignore": [
+    ".lab/**",
+    "**/dist/**",
+    "config/skills/**"
+  ],
+  "ignoreDependencies": [
+    "typescript",
+    "autoprefixer",
+    "postcss",
+    "tailwindcss",
+    "ink-testing-library"
+  ],
+  "workspaces": {
+    ".": {
+      "entry": [
+        "scripts/**/*.{ts,js,mjs}",
+        "tests/**/*.test.ts"
+      ],
+      "project": [
+        "scripts/**/*.{ts,js,mjs}",
+        "tests/**/*.test.ts"
+      ]
+    },
+    "packages/types": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/shared": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/protocol": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/prompt-protocol": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/work": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/llm": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/context": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/tools": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/agent": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/agent-memory": {
+      "entry": ["src/index.ts", "src/connectors/telegram/index.ts", "src/connectors/telegram/types.ts", "scripts/**/*.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts", "scripts/**/*.ts"]
+    },
+    "packages/comms-bus": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/entity-graph": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/graphd": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/harness-client": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/harness-daemon": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/memory-injector": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/decision-watcher": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/orchestrator": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/launcher": {
+      "entry": ["index.ts", "standalone.ts"],
+      "project": ["**/*.ts"]
+    },
+    "packages/tui": {
+      "entry": ["main.ts", "index.tsx", "components/index.ts", "**/*.test.{ts,tsx}"],
+      "project": ["**/*.{ts,tsx}"]
+    },
+    "packages/dashboard": {
+      "entry": ["src/main.tsx"],
+      "project": ["src/**/*.{ts,tsx}"]
+    },
+    "packages/dashboard-compact": {
+      "entry": ["src/main.tsx"],
+      "project": ["src/**/*.{ts,tsx}"]
+    },
+    "packages/dashboard-control": {
+      "entry": ["src/main.tsx", "src/**/*.test.{ts,tsx}"],
+      "project": ["src/**/*.{ts,tsx}"]
+    }
+  }
+}

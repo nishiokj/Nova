@@ -41,9 +41,9 @@ type ControlPlaneBridgeRequestType =
   | 'control_plane_memory_info'
   | 'control_plane_model_get'
   | 'control_plane_model_set'
-  | 'control_plane_async_start'
-  | 'control_plane_async_cancel'
-  | 'control_plane_async_status';
+  | 'async_start'
+  | 'async_cancel'
+  | 'async_status';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -442,7 +442,7 @@ export class ControlPlaneServer {
             requestId?: string;
             goal?: string;
             error?: string;
-          }>('control_plane_async_start', {
+          }>('async_start', {
             session_key: sessionKey,
             goal,
           });
@@ -461,7 +461,7 @@ export class ControlPlaneServer {
           const result = await this.requestBridge<{
             success?: boolean;
             error?: string;
-          }>('control_plane_async_cancel', {
+          }>('async_cancel', {
             session_key: sessionKey,
           });
           return { success: result.success === true, ...(typeof result.error === 'string' ? { error: result.error } : {}) };
@@ -479,7 +479,7 @@ export class ControlPlaneServer {
             startedAt?: number;
             elapsedMs?: number;
             error?: string;
-          }>('control_plane_async_status', {
+          }>('async_status', {
             session_key: sessionKey,
           });
           return {

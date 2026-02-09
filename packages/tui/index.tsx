@@ -1234,12 +1234,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
     if (kind === "async_cancel") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.success === false) {
+        store.addMessage("system", `Failed to cancel async session: ${payload?.error ?? "unknown error"}`);
+        return;
+      }
       const cancelGoal = (payload?.goal as string) ?? "";
       store.addMessage("system", `Async session cancelled.${cancelGoal ? `\nGoal was: ${cancelGoal}` : ""}`);
       return;
     }
     if (kind === "async_status") {
       const payload = metadata.payload as Record<string, unknown> | undefined;
+      if (payload?.success === false) {
+        store.addMessage("system", `Failed to fetch async status: ${payload?.error ?? "unknown error"}`);
+        return;
+      }
       if (payload?.running) {
         const elapsed = typeof payload.elapsedMs === "number" ? Math.round(payload.elapsedMs / 1000) : null;
         store.addMessage(
@@ -4046,7 +4054,6 @@ function renderHistorySegments(segments: HistoryTextSegment[], baseColor: string
           backgroundColor={resolveSegmentBg(seg.bgColor)}
           bold={seg.bold}
           italic={lineItalic || seg.italic}
-          underline={seg.underline}
           dimColor={seg.dim}
         >
           {seg.text}
@@ -4091,7 +4098,6 @@ function StyledLine({
             backgroundColor={seg.backgroundColor}
             bold={seg.bold}
             italic={lineItalic || seg.italic}
-            underline={seg.underline}
           >
             {seg.text}
           </Text>
