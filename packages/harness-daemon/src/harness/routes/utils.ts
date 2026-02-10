@@ -67,6 +67,20 @@ export interface ControlPlaneContext {
     queued?: boolean;
     error?: string;
   }>;
+  respondToPermissionRequest?: (
+    sessionKey: string,
+    input: {
+      requestId: string;
+      decision: 'allow' | 'always_allow' | 'deny';
+      pattern?: string;
+    }
+  ) => {
+    success: boolean;
+    error?: string;
+  } | Promise<{
+    success: boolean;
+    error?: string;
+  }>;
   stopSession?: (
     sessionKey: string,
     note?: string
@@ -164,6 +178,32 @@ export interface ControlPlaneContext {
     success: boolean;
     agentType: string;
     selection: { provider: string; model: string; reasoning?: string };
+    error?: string;
+  }>;
+  startSessionAsync?: (
+    sessionKey: string,
+    goal: string
+  ) => AsyncOrSync<{
+    success: boolean;
+    requestId?: string;
+    goal?: string;
+    error?: string;
+  }>;
+  cancelSessionAsync?: (
+    sessionKey: string
+  ) => AsyncOrSync<{
+    success: boolean;
+    error?: string;
+  }>;
+  getSessionAsyncStatus?: (
+    sessionKey: string
+  ) => AsyncOrSync<{
+    success: boolean;
+    running: boolean;
+    requestId?: string;
+    goal?: string;
+    startedAt?: number;
+    elapsedMs?: number;
     error?: string;
   }>;
 }
@@ -652,8 +692,10 @@ export function matchRoute(pattern: string, pathname: string): Record<string, st
 }
 
 export function formatSession(row: SessionRow) {
-  const createdAt = row.createdAt ? new Date(row.createdAt * 1000).toISOString() : null;
-  const lastAccessedAt = row.lastAccessedAt ? new Date(row.lastAccessedAt * 1000).toISOString() : null;
+  const createdAtMs = parseTimestampMs(row.createdAt);
+  const lastAccessedAtMs = parseTimestampMs(row.lastAccessedAt);
+  const createdAt = createdAtMs ? new Date(createdAtMs).toISOString() : null;
+  const lastAccessedAt = lastAccessedAtMs ? new Date(lastAccessedAtMs).toISOString() : null;
   return {
     id: row.sessionKey,
     clientType: row.clientType,
@@ -666,7 +708,8 @@ export function formatSession(row: SessionRow) {
 }
 
 export function formatMessage(row: MessageRow) {
-  const createdAt = row.createdAt ? new Date(row.createdAt * 1000).toISOString() : null;
+  const createdAtMs = parseTimestampMs(row.createdAt);
+  const createdAt = createdAtMs ? new Date(createdAtMs).toISOString() : null;
   return {
     id: row.id,
     role: row.role,

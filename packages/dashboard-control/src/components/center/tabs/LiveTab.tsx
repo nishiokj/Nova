@@ -179,6 +179,7 @@ export function deriveLiveWorkItems(
       const isLive = !isTerminalStatus(entry.status) && (entry.status === 'started' || recentlyActive || entry.workItemId === activeWorkItemId);
       return { ...entry, isLive };
     })
+    .filter((entry) => entry.isLive || isTerminalStatus(entry.status))
     .sort((a, b) => {
       if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
       return b.lastEventAtMs - a.lastEventAtMs;

@@ -6,6 +6,7 @@ import { ModelSwitcher } from '@/components/shared/ModelSwitcher';
 import { ResizeHandle } from '@/components/shared/ResizeHandle';
 import { LiveTab } from './tabs/LiveTab';
 import { PacketTab } from './tabs/PacketTab';
+import { DocumentTab } from './tabs/DocumentTab';
 import { EscalationsTab } from './tabs/EscalationsTab';
 import { DiffTab } from './tabs/DiffTab';
 import { TestsTab } from './tabs/TestsTab';
@@ -13,6 +14,11 @@ import { TraceTab } from './tabs/TraceTab';
 import { PermissionsTab } from './tabs/PermissionsTab';
 import { EventDrawer } from './EventDrawer';
 import { MessageInput } from './MessageInput';
+
+const DOCUMENT_TABS: { key: FocusTab; label: string }[] = [
+  { key: 'document', label: 'Document' },
+  { key: 'permissions', label: 'Permissions' },
+];
 
 const BASE_TABS: { key: FocusTab; label: string }[] = [
   { key: 'live', label: 'Live' },
@@ -31,9 +37,10 @@ const ASYNC_TABS: { key: FocusTab; label: string }[] = [
   { key: 'permissions', label: 'Permissions' },
 ];
 
-function TabContent({ tab }: { tab: FocusTab }) {
+function TabContent({ tab, documentPath, projectPath }: { tab: FocusTab; documentPath?: string | null; projectPath?: string | null }) {
   switch (tab) {
     case 'live': return <LiveTab />;
+    case 'document': return documentPath ? <DocumentTab documentPath={documentPath} projectPath={projectPath} /> : null;
     case 'packet': return <PacketTab />;
     case 'escalations': return <EscalationsTab />;
     case 'diff': return <DiffTab />;
@@ -77,13 +84,25 @@ export function SessionDetail({ mentionFiles = [] }: { mentionFiles?: string[] }
       || focusRollup?.isAsync
       || focusRollup?.blocking.unresolvedEscalationsCount
   );
+  // Derive from focusTarget (sync) rather than focusData (async) to avoid
+  // the tab guard resetting focusTab before focusData loads.
+  const focusTarget = useCockpit(s => s.focusTarget);
+  const documentPath = focusTarget?.type === 'session'
+    ? store.getDocumentSessionPath(focusTarget.id)
+    : null;
+  const isDocumentSession = !!documentPath;
+  const baseTabs = isDocumentSession
+    ? (isAsyncFocus
+      ? [...DOCUMENT_TABS.slice(0, 1), { key: 'escalations' as FocusTab, label: 'Escalations' }, ...DOCUMENT_TABS.slice(1)]
+      : DOCUMENT_TABS)
+    : (isAsyncFocus ? ASYNC_TABS : BASE_TABS);
   const tabs = useMemo(
-    () => (isAsyncFocus ? ASYNC_TABS : BASE_TABS).map((tab) => (
+    () => baseTabs.map((tab) => (
       tab.key === 'escalations' && escalationCount > 0
         ? { ...tab, label: `Escalations ${escalationCount}` }
         : tab
     )),
-    [isAsyncFocus, escalationCount]
+    [baseTabs, escalationCount]
   );
 
   const handleModelChange = useCallback((provider: string, model: string) => {
@@ -92,12 +111,15 @@ export function SessionDetail({ mentionFiles = [] }: { mentionFiles?: string[] }
 
   const setEventDrawerHeight = (height: number) => store.set({ eventDrawerHeight: Math.max(80, Math.min(600, height)) });
 
+  // Guard: if focusTab isn't in the current tab set, select the first available tab.
   useEffect(() => {
     const tabVisible = tabs.some((tab) => tab.key === focusTab);
-    if (!tabVisible) {
-      store.set({ focusTab: 'live' });
+    if (!tabVisible && tabs.length > 0) {
+      store.set({ focusTab: tabs[0].key });
     }
   }, [focusTab, store, tabs]);
+
+  const workspaceProjectPath = useCockpit(s => s.workspaceProjectPath);
 
   if (!focusData) {
     return (
@@ -107,6 +129,40 @@ export function SessionDetail({ mentionFiles = [] }: { mentionFiles?: string[] }
     );
   }
 
+  // ─── Document session: document-first layout ────────────────
+  if (isDocumentSession) {
+    return (
+      <div className="h-full flex flex-col">
+        {/* Minimal header */}
+        <div className="px-3 py-1 border-b border-[var(--border-subtle)] shrink-0 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+          <span className="font-mono truncate">{focusData.sessionKey}</span>
+          <span className="text-[10px] text-[var(--accent-cyan)]">{documentPath}</span>
+          {toolSignal && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--accent-cyan)]/15 text-[var(--accent-cyan)] text-[10px]">
+              <span aria-hidden>{toolSignal.icon}</span>
+              <span>{toolSignal.label}</span>
+            </span>
+          )}
+        </div>
+
+        {/* Document content — primary surface */}
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <TabContent tab="document" documentPath={documentPath} projectPath={workspaceProjectPath} />
+        </div>
+
+        {/* Resize handle for event drawer */}
+        <ResizeHandle direction="vertical" onResize={(delta) => setEventDrawerHeight(eventDrawerHeight - delta)} aria-label="Resize chat panel" />
+
+        {/* Event drawer */}
+        <EventDrawer />
+
+        {/* Message input */}
+        <MessageInput fileSuggestions={mentionFiles} />
+      </div>
+    );
+  }
+
+  // ─── Execution session: full session chrome ─────────────────
   return (
     <div className="h-full flex flex-col">
       <div className="px-3 py-1.5 border-b border-[var(--border-subtle)] shrink-0">

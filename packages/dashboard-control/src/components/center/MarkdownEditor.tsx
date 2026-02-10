@@ -1,21 +1,10 @@
-import { useEffect, useImperativeHandle, useMemo, useRef, forwardRef } from 'react';
+import { useEffect, useImperativeHandle, useRef, forwardRef } from 'react';
 import { EditorView, keymap, placeholder as cmPlaceholder } from '@codemirror/view';
 import { Compartment, EditorState } from '@codemirror/state';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
 import { defaultKeymap, indentWithTab, history, historyKeymap } from '@codemirror/commands';
-import {
-  autocompletion,
-  closeBrackets,
-  closeBracketsKeymap,
-  completeAnyWord,
-  type Completion,
-  type CompletionContext,
-} from '@codemirror/autocomplete';
 import { markdownDecorations, cockpitEditorTheme } from './markdown-extensions';
-import { detectAtMention, rankPathSuggestions } from '@/lib/autocomplete';
-import { ghostCompletion } from '@/lib/ghost-completion';
-import { streamCompletion } from '@/lib/api/autocomplete';
 
 const CHANGE_SYNC_DEBOUNCE_MS = 90;
 
@@ -31,67 +20,6 @@ interface MarkdownEditorProps {
   onChange: (content: string) => void;
   readOnly?: boolean;
   placeholder?: string;
-  fileSuggestions?: string[];
-  autocompleteEnabled?: boolean;
-}
-
-const STATIC_MARKDOWN_COMPLETIONS: Completion[] = [
-  { label: 'title', type: 'property' },
-  { label: 'summary', type: 'property' },
-  { label: 'context', type: 'property' },
-  { label: 'steps', type: 'property' },
-  { label: 'notes', type: 'property' },
-  { label: 'sessionKey', type: 'property' },
-  { label: 'template', type: 'property' },
-  { label: 'templateId', type: 'property' },
-  { label: 'specs', type: 'property' },
-  { label: 'workflow', type: 'keyword' },
-  { label: 'executable', type: 'keyword' },
-  { label: 'issue', type: 'keyword' },
-  { label: 'checklist', type: 'keyword' },
-  { label: 'acceptance-criteria', type: 'keyword' },
-];
-
-function buildAutocompleteSource(fileSuggestions: string[]) {
-  const mentionPool = Array.from(new Set(fileSuggestions.filter((path) => path && path.trim().length > 0)));
-  return (context: CompletionContext) => {
-    const line = context.state.doc.lineAt(context.pos);
-    const mentionInLine = detectAtMention(line.text, context.pos - line.from);
-    if (mentionInLine) {
-      const options = rankPathSuggestions(mentionPool, mentionInLine.query, 12).map((path) => ({
-        label: `@${path}`,
-        type: 'variable',
-        apply: `@${path}`,
-      }));
-      if (options.length === 0) return null;
-      return {
-        from: line.from + mentionInLine.from,
-        to: line.from + mentionInLine.to,
-        options,
-        validFor: /@[A-Za-z0-9_./-]*/,
-      };
-    }
-
-    const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_-]*/);
-    if (!word) {
-      if (!context.explicit) return null;
-      return { from: context.pos, options: STATIC_MARKDOWN_COMPLETIONS };
-    }
-    if (word.from === word.to && !context.explicit) return null;
-
-    const query = word.text.toLowerCase();
-    const options = STATIC_MARKDOWN_COMPLETIONS
-      .filter((item) => query.length === 0 || item.label.toLowerCase().includes(query))
-      .slice(0, 12);
-
-    if (options.length === 0 && !context.explicit) return null;
-    return {
-      from: word.from,
-      to: context.pos,
-      options: options.length > 0 ? options : STATIC_MARKDOWN_COMPLETIONS.slice(0, 8),
-      validFor: /[A-Za-z0-9_-]*/,
-    };
-  };
 }
 
 /** Keybindings that should bubble up to the window-level cockpit handler. */
@@ -109,21 +37,17 @@ function isCockpitGlobal(e: KeyboardEvent): boolean {
 }
 
 const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
-  function MarkdownEditor({ content, onChange, readOnly, placeholder, fileSuggestions = [], autocompleteEnabled = false }, ref) {
+  function MarkdownEditor({ content, onChange, readOnly, placeholder }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
     const onChangeRef = useRef(onChange);
     onChangeRef.current = onChange;
     const pendingChangeRef = useRef<string | null>(null);
     const pendingChangeTimerRef = useRef<number | null>(null);
-    const autocompleteEnabledRef = useRef(autocompleteEnabled);
-    autocompleteEnabledRef.current = autocompleteEnabled;
     const readOnlyCompartment = useRef(new Compartment());
-    const autocompleteCompartment = useRef(new Compartment());
-    const completionSource = useMemo(
-      () => buildAutocompleteSource(fileSuggestions),
-      [fileSuggestions],
-    );
+    // Track the last value we sent to the parent via onChange so we can
+    // distinguish our own round-tripped content from genuinely external changes.
+    const lastSyncedOutRef = useRef(content);
     const clearPendingChange = () => {
       if (pendingChangeTimerRef.current !== null) {
         window.clearTimeout(pendingChangeTimerRef.current);
@@ -139,6 +63,7 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
       if (pendingChangeRef.current === null) return;
       const nextDoc = pendingChangeRef.current;
       pendingChangeRef.current = null;
+      lastSyncedOutRef.current = nextDoc;
       onChangeRef.current(nextDoc);
     };
     const scheduleChangeSync = (nextDoc: string) => {
@@ -151,6 +76,7 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
         if (pendingChangeRef.current === null) return;
         const latestDoc = pendingChangeRef.current;
         pendingChangeRef.current = null;
+        lastSyncedOutRef.current = latestDoc;
         onChangeRef.current(latestDoc);
       }, CHANGE_SYNC_DEBOUNCE_MS);
     };
@@ -202,23 +128,12 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
         doc: content,
         extensions: [
           passthroughKeymap,
-          ghostCompletion({
-            fetchCompletion: (textBefore, textAfter, signal, onToken) =>
-              streamCompletion({ textBefore, textAfter }, signal, onToken),
-            isEnabled: () => autocompleteEnabledRef.current,
-          }),
           keymap.of([
-            ...closeBracketsKeymap,
             ...historyKeymap,
             indentWithTab,
             ...defaultKeymap,
           ]),
           history(),
-          closeBrackets(),
-          autocompleteCompartment.current.of(autocompletion({
-            activateOnTyping: true,
-            override: [completionSource, completeAnyWord],
-          })),
           markdown({ base: markdownLanguage, codeLanguages: languages }),
           markdownDecorations,
           cockpitEditorTheme,
@@ -241,13 +156,18 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once
     }, []);
 
-    // Sync external content changes into CodeMirror
+    // Sync external content changes into CodeMirror.
+    // Skip if the incoming content is just our own debounced value round-tripping
+    // back through the parent — applying it would clobber any characters typed
+    // between the debounce flush and this render.
     useEffect(() => {
       const view = viewRef.current;
       if (!view) return;
+      if (content === lastSyncedOutRef.current) return;
       const currentDoc = view.state.doc.toString();
       if (content !== currentDoc) {
         clearPendingChange();
+        lastSyncedOutRef.current = content;
         view.dispatch({
           changes: { from: 0, to: currentDoc.length, insert: content },
         });
@@ -264,18 +184,6 @@ const MarkdownEditor = forwardRef<EditorHandle, MarkdownEditorProps>(
         ),
       });
     }, [readOnly]);
-
-    // Sync autocomplete source.
-    useEffect(() => {
-      const view = viewRef.current;
-      if (!view) return;
-      view.dispatch({
-        effects: autocompleteCompartment.current.reconfigure(autocompletion({
-          activateOnTyping: true,
-          override: [completionSource, completeAnyWord],
-        })),
-      });
-    }, [completionSource]);
 
     return <div ref={containerRef} className="h-full min-h-0 overflow-hidden" />;
   },

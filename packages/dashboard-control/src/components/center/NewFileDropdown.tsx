@@ -48,6 +48,7 @@ function buildFolderOptions(workspace: MarkdownWorkspace): FolderOption[] {
 
 export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace }) {
   const ref = useRef<HTMLDivElement>(null);
+  const rootSelectRef = useRef<HTMLSelectElement>(null);
   const filenameRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -84,11 +85,14 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
     let rafId = 0;
     let attempts = 0;
     const focusInput = () => {
-      const input = filenameRef.current;
-      if (!input) return false;
-      input.focus();
-      input.select();
-      return document.activeElement === input;
+      const rootSelect = rootSelectRef.current;
+      if (!rootSelect) return false;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== rootSelect) {
+        active.blur();
+      }
+      rootSelect.focus({ preventScroll: true });
+      return document.activeElement === rootSelect;
     };
 
     const keepFocusing = () => {
@@ -134,6 +138,21 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
     void workspace.createFileInFolder(normalizedFolder, { filename });
   };
 
+  const getFocusableElements = (): HTMLElement[] => {
+    const container = ref.current;
+    if (!container) return [];
+    const elements = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    return elements.filter((element) => {
+      if (!element.isConnected) return false;
+      if (element.getAttribute('aria-hidden') === 'true') return false;
+      return true;
+    });
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent) => {
     // Stop all keyboard events in the dropdown from propagating to global handler
     event.stopPropagation();
@@ -144,6 +163,28 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
     if (event.key === 'Escape') {
       event.preventDefault();
       workspace.closeNewFilePicker();
+      return;
+    }
+
+    if (event.key === 'Tab') {
+      const focusableElements = getFocusableElements();
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const currentIndex = active ? focusableElements.indexOf(active) : -1;
+      const direction = event.shiftKey ? -1 : 1;
+      const nextIndex = currentIndex === -1
+        ? (event.shiftKey ? focusableElements.length - 1 : 0)
+        : (currentIndex + direction + focusableElements.length) % focusableElements.length;
+      const next = focusableElements[nextIndex];
+      if (!next) return;
+      event.preventDefault();
+      next.focus({ preventScroll: true });
+      if (next === filenameRef.current || next === folderRef.current) {
+        (next as HTMLInputElement).select();
+      }
       return;
     }
 
@@ -197,6 +238,8 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
         <div>{intent === 'save' ? 'Save markdown in...' : 'New markdown in...'}</div>
         <div className="mt-1">
           <select
+            ref={rootSelectRef}
+            data-new-file-root-select="true"
             value={rootSelectValue}
             onChange={(event) => {
               event.stopPropagation();
@@ -235,7 +278,7 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
         </label>
         <input
           ref={filenameRef}
-          autoFocus
+          data-new-file-filename-input="true"
           value={filename}
           onChange={(event) => {
             setFilename(event.target.value);
@@ -303,7 +346,7 @@ export function NewFileDropdown({ workspace }: { workspace: MarkdownWorkspace })
         )}
       </div>
       <div className="px-2.5 py-1 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)]">
-        Enter save · Tab next field · Ctrl/Cmd+L folder · Ctrl/Cmd+N name · Alt+↑/↓ folders · Esc cancel
+        Enter save · Tab cycle popup · Ctrl/Cmd+L folder · Ctrl/Cmd+N name · Alt+↑/↓ folders · Esc cancel
       </div>
     </div>
   );

@@ -70,13 +70,6 @@ export function touchSession(state: SessionState): void {
 }
 
 /**
- * Check if session has expired based on TTL.
- */
-export function isSessionExpired(state: SessionState, ttlMs: number): boolean {
-  return Date.now() - state.lastAccessMs > ttlMs;
-}
-
-/**
  * Clear mutable state before session eviction.
  * Prevents unbounded accumulation in long-lived sessions.
  */

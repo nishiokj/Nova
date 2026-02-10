@@ -629,6 +629,25 @@ describe('ContextWindow (disk-backed)', () => {
     expect(existsSync(fp + '.tmp')).toBe(false);
     expect(existsSync(fp)).toBe(true);
   });
+
+  it('syncs from disk to avoid stale overwrite across concurrent instances', () => {
+    const fp = tmpFilePath('concurrent');
+    const ctx1 = new ContextWindow('shared', 100_000, fp);
+    const ctx2 = new ContextWindow('shared', 100_000, fp);
+
+    ctx1.addMessage('user', 'from-ctx1');
+    ctx2.addMessage('assistant', 'from-ctx2');
+
+    const reloaded = new ContextWindow('shared', 100_000, fp);
+    const messages = reloaded.items.filter((item): item is MessageItem => item.type === 'message');
+    const contents = messages.map(m => m.content);
+    expect(contents).toContain('from-ctx1');
+    expect(contents).toContain('from-ctx2');
+
+    // Existing instances should also refresh from disk on reads.
+    const ctx1History = ctx1.getMessageHistory().map(m => m.content);
+    expect(ctx1History).toContain('from-ctx2');
+  });
 });
 
 // ============================================

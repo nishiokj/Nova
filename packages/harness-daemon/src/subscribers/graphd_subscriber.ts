@@ -30,7 +30,8 @@ export interface GraphDSubscriberConfig {
 export class GraphDSubscriber {
   private graphd: GraphDManager;
   private config: Required<GraphDSubscriberConfig>;
-  private unsubscribe: (() => void) | null = null;
+  private unsubscribeAll: (() => void) | null = null;
+  private streamUnsubscribes: Array<() => void> = [];
   private eventBatch: AgentEvent<unknown>[] = [];
   private pendingEvents: AgentEvent<unknown>[] = [];
   private flushScheduled = false;
@@ -49,7 +50,13 @@ export class GraphDSubscriber {
       batchSize: config.batchSize ?? 50,
     };
 
-    this.unsubscribe = eventBus.subscribeAll((event) => this.enqueueEvent(event));
+    this.unsubscribeAll = eventBus.subscribeAll((event) => this.enqueueEvent(event));
+    // EventBus dispatches streaming events on a fast path that bypasses subscribeAll.
+    // Subscribe explicitly so agent stream chunks are persisted for dashboard recovery.
+    this.streamUnsubscribes = [
+      eventBus.subscribe('agent_message', (event) => this.enqueueEvent(event)),
+      eventBus.subscribe('agent_reasoning', (event) => this.enqueueEvent(event)),
+    ];
   }
 
   /**
@@ -161,20 +168,39 @@ export class GraphDSubscriber {
     if (!sessionKey) return;
     const data = event.data as Record<string, unknown> | undefined;
     if (!data) return;
+    const readText = (...values: unknown[]): string | null => {
+      for (const value of values) {
+        if (typeof value !== 'string') continue;
+        const trimmed = value.trim();
+        if (trimmed.length > 0) return trimmed;
+      }
+      return null;
+    };
 
     switch (event.type) {
       case 'runtime_script_created': {
-        const goal = typeof data.goal === 'string' ? data.goal : null;
+        const goal = readText(data.goal);
         if (goal) {
           this.graphd.sessionSetGoalIfEmpty(sessionKey, goal);
         }
         break;
       }
 
+      case 'iteration_started': {
+        const workId = readText(data.workId, data.work_id);
+        if (!workId) break;
+        const objective = readText(data.objective, data.currentObjective, data.current_objective, data.goal);
+        this.graphd.sessionUpdateWorkflow(sessionKey, {
+          currentWorkItemId: workId,
+          currentObjective: objective,
+        });
+        break;
+      }
+
       case 'workitem_status': {
-        const status = typeof data.status === 'string' ? data.status : null;
-        const workId = typeof data.workId === 'string' ? data.workId : null;
-        const objective = typeof data.objective === 'string' ? data.objective : null;
+        const status = readText(data.status);
+        const workId = readText(data.workId, data.work_id);
+        const objective = readText(data.objective, data.currentObjective, data.current_objective, data.goal);
         if (status === 'started' && workId) {
           this.graphd.sessionUpdateWorkflow(sessionKey, {
             currentWorkItemId: workId,
@@ -190,7 +216,7 @@ export class GraphDSubscriber {
       }
 
       case 'goal_achieved': {
-        const goal = typeof data.goal === 'string' ? data.goal : null;
+        const goal = readText(data.goal);
         if (goal) this.graphd.sessionSetGoalIfEmpty(sessionKey, goal);
         this.graphd.sessionUpdateWorkflow(sessionKey, {
           currentWorkItemId: null,
@@ -200,7 +226,7 @@ export class GraphDSubscriber {
       }
 
       case 'goal_not_achieved': {
-        const goal = typeof data.goal === 'string' ? data.goal : null;
+        const goal = readText(data.goal);
         if (goal) this.graphd.sessionSetGoalIfEmpty(sessionKey, goal);
         this.graphd.sessionUpdateWorkflow(sessionKey, {
           currentWorkItemId: null,
@@ -282,10 +308,14 @@ export class GraphDSubscriber {
    * Flush any remaining events and close the subscriber.
    */
   close(): void {
-    if (this.unsubscribe) {
-      this.unsubscribe();
-      this.unsubscribe = null;
+    if (this.unsubscribeAll) {
+      this.unsubscribeAll();
+      this.unsubscribeAll = null;
     }
+    for (const unsubscribe of this.streamUnsubscribes) {
+      unsubscribe();
+    }
+    this.streamUnsubscribes = [];
     this.closed = true;
     this.flushPending(true);
     // Single checkpoint on close for WAL space reclamation (not visibility)

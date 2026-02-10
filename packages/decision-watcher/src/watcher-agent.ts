@@ -106,9 +106,24 @@ const MAX_WORK_LOG_CHARS = 12000;
 const MAX_SALIENCE_CHARS = 12000;
 const MAX_SALIENCE_HEAD_CHARS = 4000;
 const MAX_SALIENCE_TAIL_CHARS = 4000;
+const MAX_CADENCE_ACTIVITY_CHARS = 700;
+const ESCALATION_OBJECTIVE_MAX_CHARS = 220;
+const ESCALATION_SNAPSHOT_MAX_CHARS = 1800;
+const ESCALATION_WORKITEM_EXCERPT_MAX_CHARS = 1400;
 
 const EVIDENCE_STALL_DURATION_MS = 120_000;
 const EVIDENCE_EMPTY_OUTPUT_ESCALATION = 2;
+const CADENCE_ESCALATION_MIN_ELAPSED_MS = 90_000;
+const CADENCE_ESCALATION_MIN_TOOL_CALLS = 8;
+const CADENCE_STEERING_SIGNAL_PATTERNS: RegExp[] = [
+  /\barchitectural\b/i,
+  /\bhigh[ -]?level\b/i,
+  /\btrade[ -]?off\b/i,
+  /\bstyle\b/i,
+  /\btaste\b/i,
+  /\bhuman decision\b/i,
+  /\bsteering\b/i,
+];
 
 type EvidenceSummary = {
   hasWorkItemLog: boolean;
@@ -180,6 +195,82 @@ function buildEvidenceGuidance(summary: EvidenceSummary): string {
     return `${base} You must produce concrete output (files modified or non-empty response) or split into smaller, testable work items before next audit.`;
   }
   return `${base} Provide concrete output (files modified or non-empty response) before the next audit.`;
+}
+
+function truncateWithMarker(value: string, maxChars: number): string {
+  const compact = value.trim();
+  if (compact.length <= maxChars) return compact;
+  return `${compact.slice(0, maxChars)}\n... [truncated ${compact.length - maxChars} chars]`;
+}
+
+function summarizeObjectiveForEscalation(objective: string): string {
+  const lines = objective
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return 'No objective available.';
+  const goalHeadingIndex = lines.findIndex(line => /^##\s*goal$/i.test(line));
+  const candidate = goalHeadingIndex >= 0 && lines[goalHeadingIndex + 1]
+    ? lines[goalHeadingIndex + 1]
+    : lines[0];
+  const flattened = candidate.replace(/\s+/g, ' ');
+  return flattened.length <= ESCALATION_OBJECTIVE_MAX_CHARS
+    ? flattened
+    : `${flattened.slice(0, ESCALATION_OBJECTIVE_MAX_CHARS)}...`;
+}
+
+function cadenceNeedsHumanSteering(reasonText: string): boolean {
+  return CADENCE_STEERING_SIGNAL_PATTERNS.some((pattern) => pattern.test(reasonText));
+}
+
+function buildCadenceRequiredEvidence(summary: EvidenceSummary): string {
+  const observed = [
+    `filesModified=${summary.filesModifiedCount}`,
+    `assistantNonEmpty=${summary.assistantNonEmpty}`,
+    `assistantEmpty=${summary.assistantEmpty}`,
+    `toolCalls=${summary.toolCalls}`,
+  ].join(', ');
+  return `Need to see before "allow": at least one concrete artifact (file change, non-empty response, or test/log output). Observed: ${observed}.`;
+}
+
+function buildCadenceEscalationOptions(
+  action: WatcherAction,
+  summary: EvidenceSummary
+): RaisedEscalation['options'] {
+  const reasonText = action.reason.toLowerCase();
+  const watcherUnavailable = reasonText.includes('watcher unavailable') || reasonText.includes('oversight unavailable');
+  return [
+    {
+      id: 'continue_with_checkpoint',
+      label: 'Continue with checkpoint',
+      description: buildCadenceRequiredEvidence(summary),
+      implications: [
+        'Execution resumes with strict evidence requirements for the next audit.',
+        'Avoids blocking on watcher internals unless the next checkpoint still fails.',
+      ],
+      recommended: true,
+    },
+    {
+      id: 'retry_with_stronger_evidence',
+      label: 'Retry audit after evidence',
+      description: 'Require the agent to produce concrete output first, then re-run cadence audit.',
+      implications: [
+        'Adds one controlled iteration before the next watcher decision.',
+      ],
+      recommended: false,
+    },
+    {
+      id: 'stop_and_debug_watcher',
+      label: 'Stop and debug watcher',
+      description: watcherUnavailable
+        ? 'Pause execution to diagnose watcher timeout or availability issues.'
+        : 'Pause execution and investigate why evidence remains weak.',
+      implications: [
+        'Stops delivery progress and shifts focus to debugging.',
+      ],
+      recommended: false,
+    },
+  ];
 }
 
 function enforceEvidence(
@@ -578,7 +669,7 @@ function buildEscalationContext(params: {
   const sections: string[] = [
     `Trigger: ${params.trigger}`,
     `Reason: ${params.reason}`,
-    `Objective: ${params.hook.objective}`,
+    `Objective: ${summarizeObjectiveForEscalation(params.hook.objective)}`,
     `Iteration: ${params.hook.iteration}`,
   ];
 
@@ -587,32 +678,38 @@ function buildEscalationContext(params: {
   }
 
   if (params.snapshotContext.trim().length > 0) {
-    sections.push(`Snapshot:\n${params.snapshotContext.slice(0, 3000)}`);
+    sections.push(`Snapshot:\n${truncateWithMarker(params.snapshotContext, ESCALATION_SNAPSHOT_MAX_CHARS)}`);
   }
 
   if (params.workItemLogContent && params.workItemLogContent.trim().length > 0) {
-    sections.push(`Work Item Log Excerpt:\n${params.workItemLogContent.slice(0, 5000)}`);
+    sections.push(`Work Item Log Excerpt:\n${truncateWithMarker(params.workItemLogContent, ESCALATION_WORKITEM_EXCERPT_MAX_CHARS)}`);
   }
 
   return sections.join('\n\n');
 }
 
-function shouldEscalateCadence(action: WatcherAction, evidence: EvidenceSummary): boolean {
+function shouldEscalateCadence(
+  action: WatcherAction,
+  evidence: EvidenceSummary,
+  event: Extract<ControlEvent, { type: 'cadence_audit' }>
+): boolean {
   if (action.watcherAction !== 'realign') return false;
-  const reasonText = `${action.reason}\n${action.realign.systemMessage}`.toLowerCase();
-  const uncertaintySignals = [
-    'insufficient evidence',
-    'uncertain',
-    'watcher unavailable',
-    'oversight failed',
-    'cannot verify',
-    'cannot determine',
-    'unknown',
-  ];
-  if (uncertaintySignals.some(signal => reasonText.includes(signal))) {
+  const reasonText = `${action.reason}\n${action.realign.systemMessage}`;
+  if (cadenceNeedsHumanSteering(reasonText)) {
     return true;
   }
-  return isEvidenceInsufficient(evidence);
+  if (!isEvidenceInsufficient(evidence)) {
+    return false;
+  }
+  const elapsedMs = Math.max(event.elapsedMs, evidence.durationMs);
+  const hasElapsedEnough = elapsedMs >= CADENCE_ESCALATION_MIN_ELAPSED_MS;
+  const hasCallVolume = Math.max(event.toolCallsSinceLastAudit, evidence.toolCalls) >= CADENCE_ESCALATION_MIN_TOOL_CALLS;
+  if (!hasElapsedEnough && !hasCallVolume) {
+    return false;
+  }
+  const sustainedStall = elapsedMs >= EVIDENCE_STALL_DURATION_MS;
+  const repeatedEmpty = evidence.assistantEmpty >= EVIDENCE_EMPTY_OUTPUT_ESCALATION;
+  return sustainedStall || repeatedEmpty;
 }
 
 async function raiseEscalation(
@@ -839,8 +936,11 @@ ${filesModified.map(f => `- ${f}`).join('\n')}`);
   }
 
   if (event.type === 'cadence_audit') {
+    const recentActivity = event.recentActivity.length > MAX_CADENCE_ACTIVITY_CHARS
+      ? `${event.recentActivity.slice(0, MAX_CADENCE_ACTIVITY_CHARS)}\n... [recent activity truncated]`
+      : event.recentActivity;
     sections.push(`### Recent Activity
-${event.recentActivity}`);
+${recentActivity}`);
   }
 
   const responsePreview = response.length > 500
@@ -1707,20 +1807,28 @@ Each semantic entry must contain:
     });
   }
 
-  if (shouldEscalateCadence(action, evidenceSummary)) {
+  if (shouldEscalateCadence(action, evidenceSummary, event)) {
     const escalationContext = buildEscalationContext({
       trigger: 'cadence_audit',
       reason: action.reason,
       hook: ctx.hook,
       snapshotContext,
-      workItemLogContent,
-      extra: `elapsedMs=${event.elapsedMs}, toolCallsSinceLastAudit=${event.toolCallsSinceLastAudit}`,
+      extra: [
+        `elapsedMs=${event.elapsedMs}`,
+        `toolCallsSinceLastAudit=${event.toolCallsSinceLastAudit}`,
+        buildCadenceRequiredEvidence(evidenceSummary),
+      ].join('\n'),
     });
+    const realignMessage = action.watcherAction === 'realign' ? action.realign.systemMessage : '';
+    const humanSteering = cadenceNeedsHumanSteering(`${action.reason}\n${realignMessage}`);
     const escalation = await raiseEscalation(config, ctx, 'cadence_audit', {
       type: 'resource',
-      title: `Cadence uncertainty after ${Math.round(event.elapsedMs / 1000)}s`,
+      title: humanSteering
+        ? 'Cadence decision needed: human steering requested'
+        : `Cadence checkpoint failed after ${Math.max(1, Math.round(event.elapsedMs / 1000))}s`,
       reason: action.reason,
       context: escalationContext,
+      options: buildCadenceEscalationOptions(action, evidenceSummary),
     });
     return {
       decision: {
@@ -1910,9 +2018,9 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
       return {
         watcherAction: 'realign',
         realign: {
-          systemMessage: `[Watcher unavailable] Oversight failed (${errorMsg.slice(0, 50)}). Provide concrete evidence of progress (files modified or non-empty output) before continuing.`,
+          systemMessage: `[Watcher unavailable] Oversight failed (${errorMsg.slice(0, 50)}). Continue with a strict checkpoint: provide at least one concrete artifact (file diff, test/log output, or non-empty status update) before the next audit.`,
         },
-        reason: `Oversight unavailable (${errorMsg.slice(0, 50)}): Insufficient evidence to allow`,
+        reason: `Oversight unavailable (${errorMsg.slice(0, 50)}): applying strict checkpoint policy`,
       };
 
     case 'bounds_exceeded':

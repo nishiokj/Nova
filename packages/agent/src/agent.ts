@@ -628,12 +628,13 @@ export class Agent {
     const contentFallback = avoidRawStructured && (structuredOutput || coerceStructuredOutput(content))
       ? ''
       : content;
+    const structuredFallback = this.extractStructuredFallbackResponse(structuredOutput);
 
     // Check awaitingUserInput first (fallback for conversational questions)
     if (!result.needsUserInput && structuredOutput?.awaitingUserInput === true) {
       result.needsUserInput = true;
       result.userPrompt = {
-        question: responseText || contentFallback || 'Waiting for your response...',
+        question: responseText || contentFallback || structuredFallback || 'Waiting for your response...',
       };
       result.terminationReason = 'user_input_required';
       return 'user_input';
@@ -646,7 +647,7 @@ export class Agent {
 
     const shouldInferUserPrompt = action !== 'done' || structuredOutput?.goalStateReached !== true;
     if (shouldInferUserPrompt) {
-      const responseCandidate = responseText ?? contentFallback;
+      const responseCandidate = (responseText ?? contentFallback ?? structuredFallback ?? '').trim();
       const inferredPrompt = inferUserPromptFromResponse(responseCandidate);
       if (inferredPrompt) {
         result.needsUserInput = true;
@@ -668,7 +669,9 @@ export class Agent {
         return 'done';
       }
 
-      const finalText = responseText ?? contentFallback;
+      const finalText = (responseText ?? contentFallback ?? '').trim()
+        ? (responseText ?? contentFallback ?? '')
+        : (structuredFallback ?? '');
       if (isRefusal(finalText)) {
         result.isRefusal = true;
         result.error = 'LLM refused to complete the task';
@@ -688,8 +691,9 @@ export class Agent {
 
     // Handle continue action
     if (action === 'continue') {
-      if (responseText?.trim()) {
-        result.response = responseText;
+      const continueText = responseText?.trim() ? responseText : structuredFallback;
+      if (continueText?.trim()) {
+        result.response = continueText;
       }
       return 'continue';
     }
@@ -775,6 +779,35 @@ export class Agent {
   }
 
   /**
+   * Extract a user-facing text fallback from structured output when `response`
+   * is missing/empty, so harness persistence does not collapse to empty replies.
+   */
+  private extractStructuredFallbackResponse(
+    structuredOutput: Record<string, unknown> | null
+  ): string | undefined {
+    if (!structuredOutput || typeof structuredOutput !== 'object' || Array.isArray(structuredOutput)) {
+      return undefined;
+    }
+    const read = (value: unknown): string | undefined => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    };
+    const answer = structuredOutput.answer;
+    const realign = structuredOutput.realign;
+    return (
+      read(structuredOutput.work_done)
+      ?? read((answer && typeof answer === 'object' && !Array.isArray(answer))
+        ? (answer as Record<string, unknown>).text
+        : undefined)
+      ?? read((realign && typeof realign === 'object' && !Array.isArray(realign))
+        ? (realign as Record<string, unknown>).systemMessage
+        : undefined)
+      ?? read(structuredOutput.summary)
+    );
+  }
+
+  /**
    * Emit fallback response for TUI when streaming didn't capture content.
    * Only used when structured output was expected but streaming captured nothing.
    */
@@ -788,11 +821,11 @@ export class Agent {
     // If we already streamed the response field, don't re-emit
     if (streamedContent.length > 0) return;
 
-    const trimmedResponse = responseText?.trim();
-    if (trimmedResponse) {
+    const fallbackResponse = responseText?.trim() || this.extractStructuredFallbackResponse(structuredOutput);
+    if (fallbackResponse?.trim()) {
       this.emit(createEvent('agent_message', {
         agentType: this.config.type,
-        message: trimmedResponse,
+        message: fallbackResponse,
       }, workItemId));
       return;
     }

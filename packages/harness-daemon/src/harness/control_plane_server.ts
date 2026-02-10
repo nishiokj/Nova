@@ -31,6 +31,20 @@ export interface ControlPlaneServerOptions {
   busPort?: number;
 }
 
+type ControlPlaneBridgeRequestType =
+  | 'control_plane_dispatch'
+  | 'control_plane_stop'
+  | 'control_plane_fork'
+  | 'control_plane_permissions_get'
+  | 'control_plane_permissions_update'
+  | 'control_plane_resolve_escalation'
+  | 'control_plane_memory_info'
+  | 'control_plane_model_get'
+  | 'control_plane_model_set'
+  | 'async_start'
+  | 'async_cancel'
+  | 'async_status';
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -159,16 +173,7 @@ export class ControlPlaneServer {
   }
 
   private async requestBridge<T extends Record<string, unknown>>(
-    type:
-      | 'control_plane_dispatch'
-      | 'control_plane_stop'
-      | 'control_plane_fork'
-      | 'control_plane_permissions_get'
-      | 'control_plane_permissions_update'
-      | 'control_plane_resolve_escalation'
-      | 'control_plane_memory_info'
-      | 'control_plane_model_get'
-      | 'control_plane_model_set',
+    type: ControlPlaneBridgeRequestType,
     data: Record<string, unknown>
   ): Promise<T> {
     return this.withBridgeClient((client) => client.request<T>(type, data));
@@ -201,6 +206,40 @@ export class ControlPlaneServer {
             requestId: typeof result.requestId === 'string' ? result.requestId : requestId,
             ...(typeof result.error === 'string' ? { error: result.error } : {}),
           };
+        } catch (error) {
+          return { success: false, error: errorMessage(error) };
+        }
+      },
+      respondToPermissionRequest: async (sessionKey, input) => {
+        try {
+          return await this.withBridgeClient(async (client) => {
+            const initSent = client.send({
+              type: 'init',
+              data: {
+                session_key: sessionKey,
+              },
+            });
+            if (!initSent) {
+              return { success: false, error: 'Failed to initialize bridge session for permission response' };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+
+            const sent = client.send({
+              type: 'permission_response',
+              data: {
+                request_id: input.requestId,
+                decision: input.decision,
+                ...(typeof input.pattern === 'string' && input.pattern.trim().length > 0
+                  ? { pattern: input.pattern.trim() }
+                  : {}),
+              },
+            });
+            if (!sent) {
+              return { success: false, error: 'Failed sending permission response to bridge' };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            return { success: true };
+          });
         } catch (error) {
           return { success: false, error: errorMessage(error) };
         }
@@ -396,29 +435,151 @@ export class ControlPlaneServer {
           return { success: false, agentType, selection, error: errorMessage(error) };
         }
       },
+      startSessionAsync: async (sessionKey, goal) => {
+        try {
+          const result = await this.requestBridge<{
+            success?: boolean;
+            requestId?: string;
+            goal?: string;
+            error?: string;
+          }>('async_start', {
+            session_key: sessionKey,
+            goal,
+          });
+          return {
+            success: result.success === true,
+            ...(typeof result.requestId === 'string' ? { requestId: result.requestId } : {}),
+            ...(typeof result.goal === 'string' ? { goal: result.goal } : {}),
+            ...(typeof result.error === 'string' ? { error: result.error } : {}),
+          };
+        } catch (error) {
+          return { success: false, error: errorMessage(error) };
+        }
+      },
+      cancelSessionAsync: async (sessionKey) => {
+        try {
+          const result = await this.requestBridge<{
+            success?: boolean;
+            error?: string;
+          }>('async_cancel', {
+            session_key: sessionKey,
+          });
+          return { success: result.success === true, ...(typeof result.error === 'string' ? { error: result.error } : {}) };
+        } catch (error) {
+          return { success: false, error: errorMessage(error) };
+        }
+      },
+      getSessionAsyncStatus: async (sessionKey) => {
+        try {
+          const result = await this.requestBridge<{
+            success?: boolean;
+            running?: boolean;
+            requestId?: string;
+            goal?: string;
+            startedAt?: number;
+            elapsedMs?: number;
+            error?: string;
+          }>('async_status', {
+            session_key: sessionKey,
+          });
+          return {
+            success: result.success === true,
+            running: result.running === true,
+            ...(typeof result.requestId === 'string' ? { requestId: result.requestId } : {}),
+            ...(typeof result.goal === 'string' ? { goal: result.goal } : {}),
+            ...(typeof result.startedAt === 'number' ? { startedAt: result.startedAt } : {}),
+            ...(typeof result.elapsedMs === 'number' ? { elapsedMs: result.elapsedMs } : {}),
+            ...(typeof result.error === 'string' ? { error: result.error } : {}),
+          };
+        } catch (error) {
+          return { success: false, running: false, error: errorMessage(error) };
+        }
+      },
       subscribeEvents: (handler) => {
-        const bus = new BusClient({ host: this.busHost, port: this.busPort });
+        let closed = false;
+        let connecting = false;
+        let bus: BusClient | null = null;
+        let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-        bus.on('event', (payload, channel) => {
-          if (channel !== 'events:all' || !isRecord(payload)) {
-            return;
+        const clearReconnectTimer = () => {
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
           }
-          const type = typeof payload.type === 'string' ? payload.type : 'unknown';
-          const data = isRecord(payload.data) ? payload.data : {};
-          const sessionKeyRaw = data.session_key ?? data.sessionKey;
-          const sessionKey = typeof sessionKeyRaw === 'string' ? sessionKeyRaw : undefined;
-          handler({ type, ...(sessionKey ? { sessionKey } : {}), data });
-        });
+        };
 
-        void bus.connect()
-          .then(() => bus.subscribe('events:all'))
-          .catch((error) => {
-            console.warn('[control-plane] Failed to subscribe to events:', errorMessage(error));
+        const scheduleReconnect = () => {
+          if (closed || reconnectTimer) return;
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            void connectAndSubscribe();
+          }, 300);
+        };
+
+        const detachCurrentBus = () => {
+          if (!bus) return;
+          try {
+            bus.unsubscribe('events:all');
+          } catch {
+            // Ignore unsubscribe errors during reconnect.
+          }
+          bus.close();
+          bus = null;
+        };
+
+        const connectAndSubscribe = async () => {
+          if (closed || connecting) return;
+          connecting = true;
+          detachCurrentBus();
+
+          const nextBus = new BusClient({ host: this.busHost, port: this.busPort });
+          bus = nextBus;
+
+          nextBus.on('event', (payload, channel) => {
+            if (channel !== 'events:all' || !isRecord(payload)) {
+              return;
+            }
+            const type = typeof payload.type === 'string' ? payload.type : 'unknown';
+            const data = isRecord(payload.data) ? payload.data : payload;
+            const sessionKeyRaw = data.session_key
+              ?? data.sessionKey
+              ?? payload.session_key
+              ?? payload.sessionKey;
+            const sessionKey = typeof sessionKeyRaw === 'string' ? sessionKeyRaw : undefined;
+            handler({ type, ...(sessionKey ? { sessionKey } : {}), data });
           });
 
+          nextBus.on('close', () => {
+            if (closed) return;
+            scheduleReconnect();
+          });
+
+          nextBus.on('error', () => {
+            if (closed) return;
+            scheduleReconnect();
+          });
+
+          try {
+            await nextBus.connect();
+            if (closed) {
+              nextBus.close();
+              return;
+            }
+            nextBus.subscribe('events:all');
+          } catch (error) {
+            console.warn('[control-plane] Failed to subscribe to events:', errorMessage(error));
+            scheduleReconnect();
+          } finally {
+            connecting = false;
+          }
+        };
+
+        void connectAndSubscribe();
+
         return () => {
-          bus.unsubscribe('events:all');
-          bus.close();
+          closed = true;
+          clearReconnectTimer();
+          detachCurrentBus();
         };
       },
     };

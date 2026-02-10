@@ -13,12 +13,15 @@ import {
   VALID_WATCHER_ACTIONS_BY_TRIGGER,
   isWatcherActionType,
   isWatcherTrigger,
+  assertValidActionForTrigger,
+  type ValidActionsFor,
   type WatcherTrigger,
   type WatcherActionType,
   type WatcherNoInterventionAction,
 } from 'shared';
 
 export type {
+  ValidActionsFor,
   WatcherTrigger,
   WatcherActionType,
   WatcherNoInterventionAction,
@@ -30,6 +33,7 @@ export {
   WATCHER_NO_INTERVENTION_ACTION_VALUES,
   isWatcherActionType,
   isWatcherTrigger,
+  assertValidActionForTrigger,
 };
 
 /**

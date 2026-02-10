@@ -631,6 +631,18 @@ export class SessionStore {
   }
 
   /**
+   * Clear model selection for a specific agent type.
+   * Returns true when a selection existed and was removed.
+   */
+  clearModelSelection(agentType: string): boolean {
+    const removed = this.modelSelections.delete(agentType);
+    if (removed) {
+      this.persistSessionState();
+    }
+    return removed;
+  }
+
+  /**
    * Get model selection for a specific agent type.
    * Returns null if no selection exists for that agent type.
    */
@@ -649,7 +661,11 @@ export class SessionStore {
    * Clear all model selections.
    */
   clearModelSelections(): void {
+    if (this.modelSelections.size === 0) {
+      return;
+    }
     this.modelSelections.clear();
+    this.persistSessionState();
   }
 
   // --- Permission management (per-session) ---

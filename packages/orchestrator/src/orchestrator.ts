@@ -883,7 +883,13 @@ export class Orchestrator {
       });
 
       for (const [workId, { item }] of state.inProgress) {
-        this.emit(createEvent('iteration_started', { iteration, goal: item.goal, requestId: this.requestId, workId }));
+        this.emit(createEvent('iteration_started', {
+          iteration,
+          goal: item.goal,
+          objective: item.objective,
+          requestId: this.requestId,
+          workId,
+        }));
       }
 
       const executions = Array.from(state.inProgress.entries()).map(async ([workId, { item, agent }]) => {

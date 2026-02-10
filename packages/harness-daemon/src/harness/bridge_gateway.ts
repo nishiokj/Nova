@@ -64,6 +64,12 @@ const GATEWAY_MODEL_PROVIDERS = new Set<string>([
   'claude',
 ]);
 
+type PersistedModelSelection = {
+  provider: string;
+  model: string;
+  reasoning?: string;
+};
+
 interface HarnessLike {
   run(params: {
     requestId: string;
@@ -86,6 +92,7 @@ interface HarnessLike {
   setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('agent').ModelSelection | null): void;
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
+  clearAllSessionSelectedModels?(sessionKey: string): void;
   getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
   isSessionPaused?(sessionKey: string): boolean;
   getAsyncModeStatus?(): { ok: boolean; issues: string[] };
@@ -568,8 +575,8 @@ export class BridgeGateway {
     register('async_start', (data, ctx) => {
       void this.handleAsyncStart(ctx.connectionId, data, ctx.state);
     });
-    register('async_cancel', (_data, ctx) => this.handleAsyncCancel(ctx.connectionId, ctx.state));
-    register('async_status', (_data, ctx) => this.handleAsyncStatus(ctx.connectionId, ctx.state));
+    register('async_cancel', (data, ctx) => this.handleAsyncCancel(ctx.connectionId, data, ctx.state));
+    register('async_status', (data, ctx) => this.handleAsyncStatus(ctx.connectionId, data, ctx.state));
     register('watcher_status', (_data, ctx) => this.handleWatcherStatus(ctx.connectionId, ctx.state));
     register('watcher_context', (_data, ctx) => this.handleWatcherContext(ctx.connectionId, ctx.state));
     register('watcher_search', (data, ctx) => {
@@ -1050,6 +1057,14 @@ export class BridgeGateway {
 
     // Clear session selections if they match the deleted model
     if (sessionKey) {
+      const inMemorySelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      for (const [agentType, selection] of inMemorySelections) {
+        const selectionModel = typeof selection?.model === 'string' ? selection.model.trim().toLowerCase() : '';
+        if (selectionModel === normalizedModelId && !clearedAgentTypes.includes(agentType)) {
+          clearedAgentTypes.push(agentType);
+        }
+      }
+
       const session = graphd.sessionGet(sessionKey);
       const metadata = session?.metadata as Record<string, unknown> | undefined;
       const sessionSelections = (metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string }>) ?? {};
@@ -1063,6 +1078,10 @@ export class BridgeGateway {
       }
       if (sessionSelectionsUpdated) {
         graphd.sessionUpdateMetadata(sessionKey, { model_selections: sessionSelections });
+      }
+
+      for (const clearedAgentType of clearedAgentTypes) {
+        this.harness.setSessionSelectedModel?.(sessionKey, clearedAgentType, null);
       }
     }
 
@@ -1702,6 +1721,58 @@ export class BridgeGateway {
   // Model Selection Handlers
   // =========================================================================
 
+  private persistModelSelection(
+    sessionKey: string,
+    agentType: string,
+    selection: PersistedModelSelection
+  ): void {
+    const graphd = this.harness.getGraphD?.();
+    if (!graphd) {
+      return;
+    }
+    const globalSelections = graphd.getUserPreference<Record<string, PersistedModelSelection>>(
+      'user_prefs:model_selections'
+    ) ?? {};
+    const updatedSelections = { ...globalSelections, [agentType]: selection };
+    graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
+    graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
+  }
+
+  private clearAllModelSelections(sessionKey: string): string[] {
+    const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+    const clearedAgentTypes = Array.from(existingSelections.keys());
+
+    if (this.harness.clearAllSessionSelectedModels) {
+      this.harness.clearAllSessionSelectedModels(sessionKey);
+    } else {
+      for (const agentType of clearedAgentTypes) {
+        this.harness.setSessionSelectedModel?.(sessionKey, agentType, null);
+      }
+    }
+
+    const graphd = this.harness.getGraphD?.();
+    if (graphd) {
+      graphd.sessionUpdateMetadata(sessionKey, { model_selections: null });
+      graphd.deleteUserPreference('user_prefs:model_selections');
+      graphd.deleteUserPreference('user_prefs:selected_model');
+      graphd.deleteUserPreference('user_prefs:last_model');
+    }
+
+    return clearedAgentTypes;
+  }
+
+  private ensureAsyncCompanionSelections(
+    sessionKey: string,
+    fallbackSelection: PersistedModelSelection
+  ): void {
+    for (const companionAgentType of ['planner', 'watcher'] as const) {
+      const existingSelection = this.harness.getSessionSelectedModel?.(sessionKey, companionAgentType);
+      if (!existingSelection?.model || !existingSelection?.provider) {
+        this.harness.setSessionSelectedModel?.(sessionKey, companionAgentType, fallbackSelection);
+      }
+    }
+  }
+
   private handleSetModel(
     connectionId: string,
     data: Record<string, unknown> | undefined,
@@ -1722,33 +1793,27 @@ export class BridgeGateway {
     const model = typeof data?.model === 'string' ? data.model : null;
     const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : null;
 
-    const graphd = this.harness.getGraphD?.();
-
     // Handle reset - clear all model selections
     if (data?.reset === true) {
-      if (graphd) {
-        graphd.sessionUpdateMetadata(sessionKey, { model_selections: null });
-        graphd.deleteUserPreference('user_prefs:model_selections');
-        graphd.deleteUserPreference('user_prefs:selected_model');
-        graphd.deleteUserPreference('user_prefs:last_model');
-      }
-      // Note: harness.clearModelSelections would be needed, but we don't have that exposed
-      // The store will be cleared on next session init
+      const clearedAgentTypes = this.clearAllModelSelections(sessionKey);
+      const agentTypesToEmit = clearedAgentTypes.length > 0 ? clearedAgentTypes : [agentType];
       this.sendAuthResponse(connectionId, 'set_model', {
         success: true,
         selected_model: null,
         message: 'All model selections cleared',
       });
-      this.sendEvent(connectionId, {
-        type: 'model_changed',
-        data: {
-          agentType,
-          selectedModel: null,
-          provider: null,
-          model: null,
-          reasoning: null,
-        },
-      });
+      for (const clearedAgentType of agentTypesToEmit) {
+        this.sendEvent(connectionId, {
+          type: 'model_changed',
+          data: {
+            agentType: clearedAgentType,
+            selectedModel: null,
+            provider: null,
+            model: null,
+            reasoning: null,
+          },
+        });
+      }
       return;
     }
 
@@ -1771,18 +1836,7 @@ export class BridgeGateway {
     // Store selected model for this agent type
     const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
     this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
-
-    // Persist to GraphD as per-agent-type model_selections map
-    if (graphd) {
-      // Read from GLOBAL user preferences first (source of truth), then merge new selection
-      // This ensures selections from other sessions aren't lost
-      const globalSelections = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections') ?? {};
-      const updatedSelections = { ...globalSelections, [agentType]: selectedModel };
-
-      // Persist to both session metadata and global preferences
-      graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
-      graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
-    }
+    this.persistModelSelection(sessionKey, agentType, selectedModel);
 
     // Emit model_changed event with agentType
     this.sendEvent(connectionId, {
@@ -2074,7 +2128,11 @@ export class BridgeGateway {
     }
 
     const requestId = typeof data?.request_id === 'string' ? data.request_id : '';
-    const decision = typeof data?.decision === 'string' ? data.decision : '';
+    const decisionFromField = typeof data?.decision === 'string' ? data.decision : '';
+    const decisionFromAllowed = typeof data?.allowed === 'boolean'
+      ? (data.allowed ? 'allow' : 'deny')
+      : '';
+    const decision = decisionFromField || decisionFromAllowed;
     const pattern = typeof data?.pattern === 'string' ? data.pattern : undefined;
 
     if (!requestId) {
@@ -2164,6 +2222,14 @@ export class BridgeGateway {
     const handoffSpec = metadata && isRecord(metadata.cockpit_handoff_spec)
       ? metadata.cockpit_handoff_spec
       : undefined;
+
+    // Browser-originated sessions default to dangerous mode (no permission prompts).
+    this.harness.ensureSessionHydrated?.(input.sessionKey, {
+      workingDir,
+      dangerousMode: true,
+      includeUserPreferences: true,
+    });
+    this.harness.getSessionPermissionChecker?.(input.sessionKey)?.setDangerousMode(true);
 
     try {
       const runHandle = this.harness.run({
@@ -2448,14 +2514,7 @@ export class BridgeGateway {
     }
     const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
     this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
-
-    const graphd = this.harness.getGraphD?.();
-    if (graphd) {
-      const globalSelections = graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>('user_prefs:model_selections') ?? {};
-      const updatedSelections = { ...globalSelections, [agentType]: selectedModel };
-      graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
-      graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
-    }
+    this.persistModelSelection(sessionKey, agentType, selectedModel);
 
     this.sendAuthResponse(connectionId, 'control_plane_model_set', {
       success: true,
@@ -2473,76 +2532,95 @@ export class BridgeGateway {
     data: Record<string, unknown> | undefined,
     state: ConnectionState
   ): Promise<void> {
-    const sessionKey = state.sessionKey;
+    const explicitSessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const sessionKey = explicitSessionKey || state.sessionKey;
     if (!sessionKey) {
-      this.sendError(connectionId, 'Session not initialized. Call init first.');
+      this.sendAuthResponse(connectionId, 'async_start', {
+        success: false,
+        error: 'Session not initialized. Call init first.',
+      });
       return;
     }
+
+    const sendFailure = (error: string) => {
+      this.sendAuthResponse(connectionId, 'async_start', { success: false, error });
+    };
 
     // Prevent concurrent async runs (check session-level state, not connection-level)
     const existingAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
     if (existingAsyncRun) {
-      this.sendError(connectionId, `An async session is already running (request: ${existingAsyncRun.requestId}). Wait for it to finish or close the session.`);
+      sendFailure(`An async session is already running (request: ${existingAsyncRun.requestId}). Wait for it to finish or close the session.`);
       return;
     }
 
     // Allow per-request working_dir overrides (mirrors send_text behavior)
     const requestWorkingDir =
       typeof data?.working_dir === 'string' && data.working_dir.length > 0 ? data.working_dir : undefined;
-    const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
+    let workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
     if (requestWorkingDir) {
       state.workingDir = requestWorkingDir;
+    }
+
+    // Control-plane callers can target a session directly and should default to the
+    // session's working directory if one exists.
+    if (explicitSessionKey && !requestWorkingDir) {
+      const graphd = this.harness.getGraphD?.();
+      const sessionResult = graphd?.sessionGet(sessionKey) as
+        | { session?: { workingDir?: string | null } }
+        | undefined;
+      workingDir = sessionResult?.session?.workingDir ?? workingDir;
     }
 
     this.harness.ensureSessionHydrated?.(sessionKey, {
       workingDir,
       includeUserPreferences: true,
+      ...(explicitSessionKey ? { dangerousMode: true } : {}),
     });
+    if (explicitSessionKey) {
+      this.harness.getSessionPermissionChecker?.(sessionKey)?.setDangerousMode(true);
+    }
 
     const asyncStatus = this.harness.getAsyncModeStatus?.();
     if (asyncStatus && !asyncStatus.ok) {
-      this.sendError(connectionId, `Async mode is unavailable: ${asyncStatus.issues.join('; ')}`);
+      sendFailure(`Async mode is unavailable: ${asyncStatus.issues.join('; ')}`);
       return;
     }
 
     if (this.harness.isSessionPaused?.(sessionKey)) {
-      this.sendError(connectionId, 'Session is paused awaiting user input. Resume or close the session before starting async mode.');
+      sendFailure('Session is paused awaiting user input. Resume or close the session before starting async mode.');
       return;
     }
 
-    // Validate model selection
+    // For connection-scoped async starts we require an explicit valid model selection.
+    // Control-plane starts can proceed with defaults, but we still sync companion selections
+    // when a standard selection already exists.
     const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
-    if (!activeSelection?.model || !activeSelection?.provider) {
-      this.sendError(connectionId, 'No model selected. Use /models to choose one before starting an async session.');
-      return;
-    }
-    if (!this.harness.hasApiKey(activeSelection.provider)) {
-      this.sendEvent(connectionId, {
-        type: 'provider_key_required',
-        data: {
-          provider: activeSelection.provider,
-          model: activeSelection.model,
-          reasoning: activeSelection.reasoning,
-        },
-      });
-      this.sendError(connectionId, `No API key configured for provider: ${activeSelection.provider}`);
-      return;
-    }
-
-    // Ensure planner/watcher model selections exist (defaults to standard selection if unset)
-    const plannerSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'planner');
-    if (!plannerSelection?.model || !plannerSelection?.provider) {
-      this.harness.setSessionSelectedModel?.(sessionKey, 'planner', activeSelection);
-    }
-    const watcherSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'watcher');
-    if (!watcherSelection?.model || !watcherSelection?.provider) {
-      this.harness.setSessionSelectedModel?.(sessionKey, 'watcher', activeSelection);
+    if (!explicitSessionKey) {
+      if (!activeSelection?.model || !activeSelection?.provider) {
+        sendFailure('No model selected. Use /models to choose one before starting an async session.');
+        return;
+      }
+      if (!this.harness.hasApiKey(activeSelection.provider)) {
+        this.sendEvent(connectionId, {
+          type: 'provider_key_required',
+          data: {
+            provider: activeSelection.provider,
+            model: activeSelection.model,
+            reasoning: activeSelection.reasoning,
+          },
+        });
+        sendFailure(`No API key configured for provider: ${activeSelection.provider}`);
+        return;
+      }
+      this.ensureAsyncCompanionSelections(sessionKey, activeSelection);
+    } else if (activeSelection?.model && activeSelection?.provider) {
+      this.ensureAsyncCompanionSelections(sessionKey, activeSelection);
     }
 
     // Extract goal from data
     const goal = typeof data?.goal === 'string' ? data.goal.trim() : '';
     if (!goal) {
-      this.sendError(connectionId, 'Async session requires a goal.');
+      sendFailure('Async session requires a goal.');
       return;
     }
 
@@ -2554,7 +2632,7 @@ export class BridgeGateway {
 
     // Create watcher hook registry for this session
     if (!this.harness.createWatcherHookRegistryForSession) {
-      this.sendError(connectionId, 'Async sessions are not supported by this harness.');
+      sendFailure('Async sessions are not supported by this harness.');
       return;
     }
 
@@ -2569,13 +2647,14 @@ export class BridgeGateway {
       // Track at session level (prevents race condition with multiple connections)
       const asyncRunInfo = { requestId, goal, cancelled: false, startedAt: Date.now() };
       if (!this.harness.startSessionAsyncRun?.(sessionKey, asyncRunInfo)) {
-        // Another connection started one between our check and now (rare but possible)
         this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
-        this.sendError(connectionId, 'An async session was started by another connection. Wait for it to finish or close the session.');
+        sendFailure('An async session was started by another connection. Wait for it to finish or close the session.');
         return;
       }
-      // Also track at connection level for backward compat and cleanup on disconnect
-      state.asyncRun = asyncRunInfo;
+      // Track connection-local state when this command is bound to the current session.
+      if (!explicitSessionKey) {
+        state.asyncRun = asyncRunInfo;
+      }
 
       // Start the harness run with the watcher hook registry and planning objective as input
       const handle = this.harness.run({
@@ -2591,15 +2670,12 @@ export class BridgeGateway {
         // Only clean up async state when the run actually completes (success or failure),
         // NOT when it pauses for user input. Paused runs should resume with async mode still on.
         if (result?.paused) {
-          // Run paused for user input - keep async mode enabled for resume
           return;
         }
-        // Clear session-level state
         const currentAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
         if (currentAsyncRun?.requestId === requestId) {
           this.harness.clearSessionAsyncRun?.(sessionKey);
         }
-        // Clear connection-level state
         if (state.asyncRun?.requestId === requestId) {
           state.asyncRun = null;
         }
@@ -2609,7 +2685,6 @@ export class BridgeGateway {
         this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
       }, sessionKey);
 
-      // Notify client that async session started
       this.sendAuthResponse(connectionId, 'async_start', {
         success: true,
         sessionKey,
@@ -2619,23 +2694,36 @@ export class BridgeGateway {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.harness.clearSessionAsyncRun?.(sessionKey);
-      state.asyncRun = null;
+      if (state.asyncRun?.requestId) {
+        state.asyncRun = null;
+      }
       this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
-      this.sendError(connectionId, `Failed to start async session: ${message}`);
+      sendFailure(`Failed to start async session: ${message}`);
     }
   }
 
-  private handleAsyncCancel(connectionId: string, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
+  private handleAsyncCancel(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): void {
+    const explicitSessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const sessionKey = explicitSessionKey || state.sessionKey;
     if (!sessionKey) {
-      this.sendError(connectionId, 'Session not initialized. Call init first.');
+      this.sendAuthResponse(connectionId, 'async_cancel', {
+        success: false,
+        error: 'Session not initialized. Call init first.',
+      });
       return;
     }
 
     // Check session-level state (works across all connections)
     const sessionAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
     if (!sessionAsyncRun) {
-      this.sendError(connectionId, 'No async session is currently running.');
+      this.sendAuthResponse(connectionId, 'async_cancel', {
+        success: false,
+        error: 'No async session is currently running.',
+      });
       return;
     }
 
@@ -2643,18 +2731,23 @@ export class BridgeGateway {
 
     // Mark as cancelled at session level so the watcher hook can detect it
     this.harness.cancelSessionAsyncRun?.(sessionKey);
-
-    // Clear session-level async state
     this.harness.clearSessionAsyncRun?.(sessionKey);
 
-    // Also clear connection-level state for backward compat
-    state.asyncRun = null;
+    if (state.asyncRun?.requestId === requestId) {
+      state.asyncRun = null;
+    }
     if (state.activeRequestId === requestId) {
       state.activeRequestId = null;
     }
     this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
 
-    // Emit cancellation response on the session channel
+    this.sendAuthResponse(connectionId, 'async_cancel', {
+      success: true,
+      requestId,
+      goal,
+    });
+
+    // Emit cancellation response on the session channel.
     this.sendEvent(connectionId, {
       type: 'response',
       data: {
@@ -2669,13 +2762,26 @@ export class BridgeGateway {
           },
         },
       },
-    }, sessionKey ? sessionChannel(sessionKey) : 'direct');
+    }, sessionChannel(sessionKey));
   }
 
-  private handleAsyncStatus(connectionId: string, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    // Check session-level state (works across all connections)
-    const sessionAsyncRun = sessionKey ? this.harness.getSessionAsyncRun?.(sessionKey) : null;
+  private handleAsyncStatus(
+    connectionId: string,
+    data: Record<string, unknown> | undefined,
+    state: ConnectionState
+  ): void {
+    const explicitSessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
+    const sessionKey = explicitSessionKey || state.sessionKey;
+    if (!sessionKey) {
+      this.sendAuthResponse(connectionId, 'async_status', {
+        success: false,
+        running: false,
+        error: 'Session not initialized. Call init first.',
+      });
+      return;
+    }
+
+    const sessionAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
     if (!sessionAsyncRun) {
       this.sendAuthResponse(connectionId, 'async_status', {
         success: true,

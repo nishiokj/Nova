@@ -1,6 +1,6 @@
 import { useCockpit, useCockpitStore } from '@/hooks/use-cockpit-store';
 
-export function Header() {
+export function Header({ isMobile }: { isMobile?: boolean }) {
   const loading = useCockpit(s => s.loading);
   const lastUpdate = useCockpit(s => s.lastUpdate);
   const runningSessions = useCockpit(s => s.runningSessions);
@@ -12,11 +12,13 @@ export function Header() {
     <header className="h-9 shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 flex items-center justify-between">
       <div className="flex items-center gap-3">
         <span className="text-[var(--text-primary)] font-semibold">Cockpit</span>
-        <div className="flex items-center gap-2 text-[10px]">
-          <span className="text-[var(--running)]">{runningSessions.length} running</span>
-          <span className="text-[var(--accent-cyan)]">{readySessions.length} ready</span>
-          <span className="text-[var(--text-muted)]">{doneSessions.length} done</span>
-        </div>
+        {!isMobile && (
+          <div className="flex items-center gap-2 text-[10px]">
+            <span className="text-[var(--running)]">{runningSessions.length} running</span>
+            <span className="text-[var(--accent-cyan)]">{readySessions.length} ready</span>
+            <span className="text-[var(--text-muted)]">{doneSessions.length} done</span>
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-3 text-xs text-[var(--text-muted)]">
         <span>{lastUpdate.toLocaleTimeString()}</span>
@@ -27,13 +29,15 @@ export function Header() {
         >
           {'\u21BB'}
         </button>
-        <button
-          onClick={() => store.set({ shortcutSheetOpen: true })}
-          className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)]"
-          title="Keyboard shortcuts (?)"
-        >
-          ?
-        </button>
+        {!isMobile && (
+          <button
+            onClick={() => store.set({ shortcutSheetOpen: true })}
+            className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)]"
+            title="Keyboard shortcuts (?)"
+          >
+            ?
+          </button>
+        )}
       </div>
     </header>
   );

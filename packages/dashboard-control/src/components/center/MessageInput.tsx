@@ -43,8 +43,12 @@ function isPaneSwitchShortcut(event: ReactKeyboardEvent<HTMLTextAreaElement>): b
 export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
   const inputVisible = useCockpit(s => s.inputVisible);
   const sendingMessage = useCockpit(s => s.sendingMessage);
-  const focusData = useCockpit(s => s.focusData);
+  const focusSessionKey = useCockpit(s => s.focusData?.sessionKey ?? null);
   const commandStatus = useCockpit(s => s.commandStatus);
+  const permissionDialogOpen = useCockpit(s => s.permissionDialogOpen);
+  const commandPaletteOpen = useCockpit(s => s.commandPaletteOpen);
+  const shortcutSheetOpen = useCockpit(s => s.shortcutSheetOpen);
+  const upgradePickerOpen = useCockpit(s => s.upgradePickerOpen);
   const storeDraft = useCockpit(s => s.messageDraft);
   const store = useCockpitStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -62,9 +66,20 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
   // Focus textarea when chat opens or session changes
   useEffect(() => {
     if (inputVisible) {
-      requestAnimationFrame(() => inputRef.current?.focus());
+      requestAnimationFrame(() => {
+        if (permissionDialogOpen || commandPaletteOpen || shortcutSheetOpen || upgradePickerOpen) return;
+        if (document.querySelector('[data-new-file-dropdown="true"]')) return;
+        inputRef.current?.focus();
+      });
     }
-  }, [inputVisible, focusData?.sessionKey]);
+  }, [
+    inputVisible,
+    focusSessionKey,
+    permissionDialogOpen,
+    commandPaletteOpen,
+    shortcutSheetOpen,
+    upgradePickerOpen,
+  ]);
 
   // Sync from store only for external updates (e.g. failed send restore / explicit clear).
   const prevStoreDraftRef = useRef(storeDraft);
@@ -176,7 +191,7 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
   if (!inputVisible) {
     return (
       <button
-        onClick={() => store.set({ inputVisible: true })}
+        onClick={() => store.set({ inputVisible: true, eventDrawerOpen: true, eventFilter: 'messages' })}
         className="shrink-0 border-t border-[var(--border-subtle)] px-3 py-1.5 text-left text-[11px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
       >
         Ctrl+` to chat
@@ -187,6 +202,11 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
   return (
     <div className="shrink-0 border-t border-[var(--border-subtle)] px-2 py-1.5">
       <div className="flex items-end gap-1.5">
+        {sendingMessage && (
+          <div className="shrink-0 flex items-center justify-center w-[18px] h-[26px]">
+            <div className="agent-spinner" />
+          </div>
+        )}
         <textarea
           ref={inputRef}
           data-cockpit-chat-input="true"
@@ -213,6 +233,11 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
           onKeyDown={(e) => {
             // Ctrl+` — let it bubble to global handler for chat toggle
             if (e.ctrlKey && e.key === '`') return;
+            // Let global keyboard handler process workspace shortcuts while cursor is in chat input.
+            if (e.ctrlKey && !e.metaKey && !e.altKey) {
+              const lower = e.key.toLowerCase();
+              if (lower === 's' || lower === 'n' || lower === 'u') return;
+            }
             // Alt+h/j/k/l — let global pane navigation handler process this.
             if (isPaneSwitchShortcut(e)) return;
             // Keep chat input keyboard handling local; avoid global shortcut interference.
@@ -265,7 +290,7 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
               return;
             }
           }}
-          placeholder={focusData?.sessionKey ? `Message ${focusData.sessionKey}` : '/grep · /browser · /doc'}
+          placeholder={focusSessionKey ? `Message ${focusSessionKey}` : '/feature · /bugfix · /prototype · @spec.md'}
           className="flex-1 min-w-0 resize-none overflow-y-auto bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded px-2 py-1 text-[12px] text-[var(--text-secondary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-cyan)]/40 leading-snug"
           style={{ maxHeight: MAX_HEIGHT }}
         />
@@ -274,7 +299,7 @@ export function MessageInput({ fileSuggestions = [] }: MessageInputProps) {
           disabled={sendingMessage || !canSend}
           className="shrink-0 h-[26px] w-[26px] flex items-center justify-center rounded bg-[var(--running)]/20 text-[var(--running)] hover:bg-[var(--running)]/30 disabled:opacity-30 transition-colors text-xs"
         >
-          {sendingMessage ? <span className="animate-pulse">·</span> : '\u21B5'}
+          {sendingMessage ? <div className="agent-spinner" style={{ width: 12, height: 12 }} /> : '\u21B5'}
         </button>
       </div>
       {mention.open && (

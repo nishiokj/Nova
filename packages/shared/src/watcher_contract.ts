@@ -49,6 +49,14 @@ export const VALID_WATCHER_ACTIONS_BY_TRIGGER = {
   handoff_approval: ['allow', 'realign'],
 } as const satisfies Record<WatcherTrigger, readonly WatcherActionType[]>;
 
+/**
+ * Compile-time extraction of valid action types for a given trigger.
+ * Use with Extract<WatcherAction, { watcherAction: ValidActionsFor<T> }>
+ * to narrow WatcherAction to only the variants valid for trigger T.
+ */
+export type ValidActionsFor<T extends WatcherTrigger> =
+  (typeof VALID_WATCHER_ACTIONS_BY_TRIGGER)[T][number];
+
 const WATCHER_ACTION_SET = new Set<string>(WATCHER_ACTION_VALUES);
 const WATCHER_TRIGGER_SET = new Set<string>(WATCHER_TRIGGER_VALUES);
 
@@ -62,4 +70,17 @@ export function isWatcherTrigger(value: string): value is WatcherTrigger {
 
 export function getValidWatcherActions(trigger: WatcherTrigger): readonly WatcherActionType[] {
   return VALID_WATCHER_ACTIONS_BY_TRIGGER[trigger];
+}
+
+/**
+ * Runtime assertion: throws if action is not valid for the given trigger.
+ * Skips validation for triggers with no constraints (e.g. session_init).
+ */
+export function assertValidActionForTrigger(trigger: WatcherTrigger, action: string): void {
+  const valid = VALID_WATCHER_ACTIONS_BY_TRIGGER[trigger];
+  if (valid.length > 0 && !(valid as readonly string[]).includes(action)) {
+    throw new Error(
+      `Invalid watcher action "${action}" for trigger "${trigger}". Valid: [${valid.join(', ')}]`
+    );
+  }
 }

@@ -141,7 +141,13 @@ export interface UserPromptResponseCommandData extends CommandDataBase {
 
 export interface PermissionResponseCommandData extends CommandDataBase {
   request_id: string;
-  allowed: boolean;
+  decision?: 'allow' | 'always_allow' | 'deny';
+  pattern?: string;
+  /**
+   * Backwards compatibility for older scripts.
+   * `allowed: true` maps to `decision: "allow"`, false maps to `decision: "deny"`.
+   */
+  allowed?: boolean;
 }
 
 export interface AuthStartCommandData extends CommandDataBase {
@@ -208,6 +214,11 @@ export interface PermissionSetDangerousModeData extends CommandDataBase {
 export interface AsyncStartCommandData extends CommandDataBase {
   goal: string;
   working_dir?: string;
+  session_key?: string;
+}
+
+export interface AsyncSessionKeyCommandData extends CommandDataBase {
+  session_key?: string;
 }
 
 export interface WatcherSearchCommandData extends CommandDataBase {
@@ -343,8 +354,8 @@ export interface BridgeCommandDataMap {
   watcher_reanchor: WatcherReanchorCommandData;
   watcher_summarize: NoData;
   async_start: AsyncStartCommandData;
-  async_cancel: NoData;
-  async_status: NoData;
+  async_cancel: AsyncSessionKeyCommandData;
+  async_status: AsyncSessionKeyCommandData;
   control_plane_dispatch: ControlPlaneDispatchCommandData;
   control_plane_stop: ControlPlaneStopCommandData;
   control_plane_fork: ControlPlaneForkCommandData;

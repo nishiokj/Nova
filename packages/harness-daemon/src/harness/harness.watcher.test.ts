@@ -152,7 +152,7 @@ describe('AgentHarness watcher memory injector wiring', () => {
     const state = (harness as unknown as { getOrCreateSessionState: (key: string) => { store: { setModelSelection: (agentType: string, selection: { provider: string; model: string }) => void } } }).getOrCreateSessionState(sessionKey);
     state.store.setModelSelection('watcher', { provider: 'openai', model: 'test-model' });
 
-    await (harness as unknown as { runWatcherAgent: (objective: string, sessionKey: string, trigger?: string) => Promise<unknown> }).runWatcherAgent(
+    await (harness as unknown as { runWatcherAgent: (objective: string, sessionKey: string, trigger: string) => Promise<unknown> }).runWatcherAgent(
       'Watcher objective',
       sessionKey,
       'session_init'

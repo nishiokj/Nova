@@ -148,7 +148,7 @@ function parseInlineMarkdown(text: string, baseColor: string | undefined): Inter
         segments.push({ text: innerText, color: colors.code, bold: true, kind: "styled" });
         break;
       case "link":
-        segments.push({ text: innerText, color: colors.linkText, underline: true, kind: "styled" });
+        segments.push({ text: innerText, color: colors.linkText, kind: "styled" });
         break;
       case "bold":
         segments.push({ text: innerText, color: colors.bold, bold: true, kind: "styled" });
@@ -188,7 +188,7 @@ function highlightPlainText(text: string, baseColor: string | undefined): Parsed
     const matchedText = next.match[0];
     switch (next.token.type) {
       case "url":
-        segments.push({ text: matchedText, color: colors.url, underline: true });
+        segments.push({ text: matchedText, color: colors.url });
         break;
       case "path":
         segments.push({ text: matchedText, color: colors.path });
@@ -274,7 +274,7 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
   const headerMatch = text.match(/^(#{1,6})\s+(.+)$/);
   if (headerMatch) {
     const headerText = headerMatch[2];
-    return { segments: [{ text: headerText, color: colors.header, bold: true, underline: true }] };
+    return { segments: [{ text: headerText, color: colors.header, bold: true }] };
   }
 
   const blockquoteMatch = text.match(/^(\s*)>\s+(.+)$/);

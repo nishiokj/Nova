@@ -61,11 +61,15 @@ export type {
 
   // Watcher Work Item (with bounds)
   WatcherWorkItem,
+
+  // Trigger→Action type constraint
+  WatcherActionFor,
 } from './types.js';
 
 export {
   isDecision,
   isPreference,
+  assertValidActionForTrigger,
 } from './types.js';
 
 // ============================================

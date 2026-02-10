@@ -44,6 +44,13 @@ import type {
 } from './types.js';
 import { nowSeconds, safeJsonParse } from './utils.js';
 
+const APPEND_ONLY_METADATA_ARRAY_KEYS = new Set([
+  'agent_events',
+  'packets',
+  'escalations',
+  'review_decisions',
+]);
+
 // ============================================
 // ERRORS
 // ============================================
@@ -678,10 +685,13 @@ export class GraphStore {
         existing = safeJsonParse(row.metadata_json, {});
       }
 
-      // Smart merge: for arrays, append instead of replace
+      // Append only explicit event-log style arrays. Stateful arrays should replace.
       for (const [key, value] of Object.entries(metadata)) {
-        if (Array.isArray(value) && Array.isArray(existing[key])) {
-          // Append new items to existing array
+        if (
+          Array.isArray(value)
+          && Array.isArray(existing[key])
+          && APPEND_ONLY_METADATA_ARRAY_KEYS.has(key)
+        ) {
           existing[key] = [...(existing[key] as unknown[]), ...value];
         } else {
           existing[key] = value;
@@ -781,21 +791,28 @@ export class GraphStore {
 
     const rows = this.db.query(query).all(...params) as Record<string, unknown>[];
 
-    return rows.map((row) => ({
-      sessionKey: row.session_key as string,
-      clientType: row.client_type as string,
-      createdAt: row.created_at as number,
-      lastAccessedAt: row.last_accessed_at as number,
-      expiresAt: row.expires_at as number | null,
-      workingDir: row.working_dir as string | null,
-      status: row.status as SessionStatus,
-      metadataJson: row.metadata_json as string | null,
-      lastUserMessagePreview: includePreview ? (row.last_user_preview as string | null) : undefined,
-      // Workflow fields (v6)
-      goal: row.goal as string | null,
-      currentWorkItemId: row.current_work_item_id as string | null,
-      currentObjective: row.current_objective as string | null,
-    }));
+    return rows.map((row) => {
+      const metadataJson = row.metadata_json as string | null;
+      const session: GraphDSession = {
+        sessionKey: row.session_key as string,
+        clientType: row.client_type as string,
+        createdAt: row.created_at as number,
+        lastAccessedAt: row.last_accessed_at as number,
+        expiresAt: row.expires_at as number | null,
+        workingDir: row.working_dir as string | null,
+        status: row.status as SessionStatus,
+        metadataJson,
+        lastUserMessagePreview: includePreview ? (row.last_user_preview as string | null) : undefined,
+        // Workflow fields (v6)
+        goal: row.goal as string | null,
+        currentWorkItemId: row.current_work_item_id as string | null,
+        currentObjective: row.current_objective as string | null,
+      };
+      if (metadataJson) {
+        session.metadata = safeJsonParse(metadataJson, {});
+      }
+      return session;
+    });
   }
 
   /**

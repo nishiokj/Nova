@@ -103,6 +103,72 @@ describe('SessionStore paused_work_items', () => {
   });
 });
 
+describe('SessionStore model selections', () => {
+  it('clears one model selection and persists metadata', () => {
+    const metadataUpdates: Record<string, unknown>[] = [];
+    const fakeGraphd = {
+      sessionGet: () => ({ metadata: {} }),
+      contextGet: () => ({}),
+      sessionUpdateMetadata: (_sessionKey: string, patch: Record<string, unknown>) => {
+        metadataUpdates.push(patch);
+        return { success: true };
+      },
+    } as unknown as GraphDManager;
+
+    const store = new SessionStore({
+      sessionKey: 'session_model_clear_one',
+      maxTokens: 1000,
+      graphd: fakeGraphd,
+      isGraphDReady: () => true,
+      logger,
+      workingDir: process.cwd(),
+    });
+
+    store.setModelSelection('standard', { provider: 'openai', model: 'gpt-4o' });
+    const latestSetPatch = metadataUpdates.at(-1) as { model_selections?: Record<string, unknown> } | undefined;
+    expect(latestSetPatch?.model_selections?.standard).toEqual({
+      provider: 'openai',
+      model: 'gpt-4o',
+    });
+
+    const removed = store.clearModelSelection('standard');
+    expect(removed).toBe(true);
+    expect(metadataUpdates.at(-1)?.model_selections).toEqual({});
+  });
+
+  it('clearModelSelections persists empty selections once', () => {
+    const metadataUpdates: Record<string, unknown>[] = [];
+    const fakeGraphd = {
+      sessionGet: () => ({ metadata: {} }),
+      contextGet: () => ({}),
+      sessionUpdateMetadata: (_sessionKey: string, patch: Record<string, unknown>) => {
+        metadataUpdates.push(patch);
+        return { success: true };
+      },
+    } as unknown as GraphDManager;
+
+    const store = new SessionStore({
+      sessionKey: 'session_model_clear_all',
+      maxTokens: 1000,
+      graphd: fakeGraphd,
+      isGraphDReady: () => true,
+      logger,
+      workingDir: process.cwd(),
+    });
+
+    store.setModelSelection('standard', { provider: 'openai', model: 'gpt-4o' });
+    store.setModelSelection('planner', { provider: 'openai', model: 'gpt-4o-mini' });
+    const updateCountBeforeClear = metadataUpdates.length;
+
+    store.clearModelSelections();
+    expect(metadataUpdates.length).toBe(updateCountBeforeClear + 1);
+    expect(metadataUpdates.at(-1)?.model_selections).toEqual({});
+
+    store.clearModelSelections();
+    expect(metadataUpdates.length).toBe(updateCountBeforeClear + 1);
+  });
+});
+
 // ============================================
 // DISK-BACKED CONTEXT INTEGRATION
 // ============================================

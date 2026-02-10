@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'bun:test';
-import { detectAtMention, rankByQuery, rankPathSuggestions } from './autocomplete';
+import { describe, expect, it } from 'vitest';
+import { detectAtMention, extractAtRefs, rankByQuery, rankPathSuggestions } from './autocomplete';
 
 describe('detectAtMention', () => {
   it('detects a mention token at the cursor', () => {
@@ -52,6 +52,56 @@ describe('rankPathSuggestions', () => {
       'scratch/plan-draft.md',
       '.internal/plan.md',
     ]);
+  });
+});
+
+describe('extractAtRefs', () => {
+  it('extracts a single @ref and returns remaining text', () => {
+    const result = extractAtRefs('Build JWT auth @specs/auth.md');
+    expect(result.refs).toEqual(['specs/auth.md']);
+    expect(result.rest).toBe('Build JWT auth');
+  });
+
+  it('extracts @ref at the start of text', () => {
+    const result = extractAtRefs('@specs/auth.md Build JWT auth');
+    expect(result.refs).toEqual(['specs/auth.md']);
+    expect(result.rest).toBe('Build JWT auth');
+  });
+
+  it('extracts multiple @refs', () => {
+    const result = extractAtRefs('@specs/auth.md @specs/db.md Build JWT auth');
+    expect(result.refs).toEqual(['specs/auth.md', 'specs/db.md']);
+    expect(result.rest).toBe('Build JWT auth');
+  });
+
+  it('returns empty refs when no @ references', () => {
+    const result = extractAtRefs('Build JWT auth');
+    expect(result.refs).toEqual([]);
+    expect(result.rest).toBe('Build JWT auth');
+  });
+
+  it('returns empty rest when only @refs', () => {
+    const result = extractAtRefs('@specs/auth.md');
+    expect(result.refs).toEqual(['specs/auth.md']);
+    expect(result.rest).toBe('');
+  });
+
+  it('handles @ref embedded mid-text', () => {
+    const result = extractAtRefs('Build @specs/auth.md JWT auth');
+    expect(result.refs).toEqual(['specs/auth.md']);
+    expect(result.rest).toBe('Build JWT auth');
+  });
+
+  it('handles empty string', () => {
+    const result = extractAtRefs('');
+    expect(result.refs).toEqual([]);
+    expect(result.rest).toBe('');
+  });
+
+  it('does not match email-like @refs without whitespace boundary', () => {
+    const result = extractAtRefs('user@example.com Build something');
+    expect(result.refs).toEqual([]);
+    expect(result.rest).toBe('user@example.com Build something');
   });
 });
 

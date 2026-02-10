@@ -50,7 +50,6 @@ const mockStore = {
   clearStreaming: vi.fn(),
   handleOpenUpgradePicker: vi.fn(),
   registerMarkdownContextProvider: vi.fn(() => () => {}),
-  registerMarkdownSetContent: vi.fn(() => () => {}),
   registerBeforeSendMessageHook: vi.fn(() => () => {}),
   getSnapshot: () => ({
     runningSessions: [],
@@ -103,14 +102,11 @@ const mockStore = {
     lensLoading: false,
     pendingCommitRange: null,
     templates: [],
-    documentSessionKey: null,
     upgradePickerOpen: false,
-    streamingText: '',
     highlightedSessionIdx: null,
     commandPaletteOpen: false,
     commandPaletteQuery: '',
     shortcutSheetOpen: false,
-    autocompleteEnabled: false,
   }),
   subscribe: vi.fn(() => () => {}),
 };

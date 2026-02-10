@@ -171,6 +171,10 @@ export function useMarkdownWorkspace() {
       : null;
 
     editorRef.current?.blur();
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) {
+      active.blur();
+    }
     set({
       newFileDropdownOpen: true,
       newFileIntent: intent,
