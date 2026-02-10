@@ -112,11 +112,14 @@ export interface MemoryInjector {
       touchedFiles?: string[];
       iteration: number;
       sessionId: string;
+      runId?: string;
       workItemId?: string;
     };
     budget: {
       maxTokens: number;
       maxItems?: number;
+      topK?: number;
+      filters?: Record<string, unknown>;
       minCoverage?: Partial<Record<string, number>>;
     };
     options?: {
@@ -126,6 +129,7 @@ export interface MemoryInjector {
   }) => Promise<{
     content: string;
     atoms: unknown[];
+    trainingSignal?: Record<string, unknown>;
     metrics: {
       totalTokens: number;
       attentionTax: number;
@@ -163,6 +167,7 @@ export class Agent {
     coverage?: Record<string, number>;
     discriminatorsIncluded?: number;
     totalTokens?: number;
+    trainingSignal?: Record<string, unknown>;
   }>();
 
   constructor(config: AgentConfig, runtime: {
@@ -211,23 +216,6 @@ export class Agent {
 
   private getMemoryCacheKey(workItem: WorkItem): string {
     return workItem.workId || this.sessionKey || 'default';
-  }
-
-  /**
-   * Summarize tool arguments for logging (strip large content, keep paths/patterns).
-   */
-  private summarizeToolArgs(args: Record<string, unknown>): Record<string, unknown> {
-    const summary: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(args)) {
-      if (typeof value === 'string' && value.length > 200) {
-        summary[key] = value.slice(0, 200) + '...';
-      } else if (Array.isArray(value) && value.length > 10) {
-        summary[key] = [...value.slice(0, 10), `... and ${value.length - 10} more`];
-      } else {
-        summary[key] = value;
-      }
-    }
-    return summary;
   }
 
   /**
@@ -383,7 +371,18 @@ export class Agent {
           || (shouldUseV2 && cached.fallbackToV1 && cached.version === 'v1')
         );
 
-        let v2Result: { content: string; atoms: unknown[]; metrics: { totalTokens: number; attentionTax: number; coverage: Record<string, number>; discriminatorsIncluded: number; latencyMs: number } } | null = null;
+        let v2Result: {
+          content: string;
+          atoms: unknown[];
+          trainingSignal?: Record<string, unknown>;
+          metrics: {
+            totalTokens: number;
+            attentionTax: number;
+            coverage: Record<string, number>;
+            discriminatorsIncluded: number;
+            latencyMs: number;
+          };
+        } | null = null;
         let fallbackToV1 = false;
 
         if (canReuseCached) {
@@ -404,6 +403,7 @@ export class Agent {
             discriminatorsIncluded: cached.discriminatorsIncluded,
             totalTokens: cached.totalTokens,
             fallbackToV1: cached.fallbackToV1,
+            trainingSignal: cached.trainingSignal,
           }, this.buildHookContext(workItem));
           this.emit(createEvent('memory_injected', {
             query: eventQuery,
@@ -419,6 +419,7 @@ export class Agent {
             discriminatorsIncluded: cached.discriminatorsIncluded,
             totalTokens: cached.totalTokens,
             fallbackToV1: cached.fallbackToV1,
+            trainingSignal: cached.trainingSignal,
           }, workItem.workId));
         } else if (shouldUseV2 && this.memoryInjector.injectV2) {
           const recentMessages = recentMessageItems
@@ -449,15 +450,18 @@ export class Agent {
               touchedFiles,
               iteration,
               sessionId: this.sessionKey,
+              runId: this.requestId || undefined,
               workItemId: workItem.workId,
             },
             budget: {
               maxTokens: 1000,
-              maxItems: 20,
-              minCoverage: {
-                code_entity: 3,
-                test_spec: 1,
+              maxItems: 3,
+              topK: 12,
+              filters: {
+                intent,
+                mode: 'memory_injection_v2',
               },
+              minCoverage: {},
             },
           });
         }
@@ -476,6 +480,7 @@ export class Agent {
             coverage: v2Result.metrics?.coverage,
             discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
             totalTokens: v2Result.metrics?.totalTokens,
+            trainingSignal: v2Result.trainingSignal,
           });
           this.internalHookQueue.enqueue({
             type: 'memory_injected',
@@ -492,6 +497,7 @@ export class Agent {
             discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
             totalTokens: v2Result.metrics?.totalTokens,
             fallbackToV1: false,
+            trainingSignal: v2Result.trainingSignal,
           }, this.buildHookContext(workItem));
           this.emit(createEvent('memory_injected', {
             query: eventQuery,
@@ -507,6 +513,7 @@ export class Agent {
             discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
             totalTokens: v2Result.metrics?.totalTokens,
             fallbackToV1: false,
+            trainingSignal: v2Result.trainingSignal,
           }, workItem.workId));
         } else {
           fallbackToV1 = shouldUseV2;
@@ -1951,25 +1958,26 @@ export class Agent {
 
       // For event emission, include error message for failed tools (output is empty in errorResult)
       const failureMessage = toolResult.isSuccess ? '' : (toolResult.error || 'Unknown error');
-      const eventResult = toolResult.isSuccess
+      const eventResultPreview = toolResult.isSuccess
         ? toolResult.output.slice(0, 10000)
         : failureMessage.slice(0, 10000);
+      const auditResult = toolResult.isSuccess ? toolResult.output : failureMessage;
       this.emit(createEvent('tool_call', {
         toolName: call.name,
         arguments: call.arguments,
         phase: 'completed',
-        result: eventResult,
+        result: eventResultPreview,
         success: toolResult.isSuccess,
         durationMs: toolDurationMs,
       }, workItemId));
 
-      // Fire tool_call_completed hook for workitem logging (captures args + result preview)
+      // Fire tool_call_completed hook for workitem logging (captures full args + full result)
       this.internalHookQueue.enqueue({
         type: 'tool_call_completed',
         tool: call.name,
-        args: this.summarizeToolArgs(call.arguments),
+        args: call.arguments,
         success: toolResult.isSuccess,
-        result: eventResult,
+        result: auditResult,
         durationMs: toolDurationMs,
       }, this.buildHookContext(workItem));
 

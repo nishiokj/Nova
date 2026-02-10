@@ -23,13 +23,53 @@ export interface RetrievalRequest {
     touchedFiles?: string[]
     iteration: number
     sessionId: string
+    runId?: string
     workItemId?: string
   }
   budget: {
     maxTokens: number
     maxItems: number
+    topK?: number
     minCoverage: Partial<Record<EvidenceCategory, number>>
+    filters?: Record<string, unknown>
   }
+}
+
+export type RetrievalSourceType = 'file' | 'symbol' | 'summary' | 'tool_output' | 'web'
+
+export interface RetrievalCandidateTrace {
+  doc_id: string
+  chunk_id: string | null
+  source_type: RetrievalSourceType
+  scores: {
+    embedding_score: number | null
+    bm25_score: number | null
+    heuristic_score: number | null
+    reranker_score: number | null
+  }
+  token_size: number
+  freshness: string | null
+  scope: string | null
+}
+
+export interface RetrievalTrainingSignal {
+  retrieval_id: string
+  query: {
+    raw: string
+    state_summary: string
+  }
+  candidate_list: RetrievalCandidateTrace[]
+  selected_set: RetrievalCandidateTrace[]
+  budget: {
+    max_tokens: number
+    k: number
+    max_items: number
+    filters: Record<string, unknown> | null
+    min_coverage: Partial<Record<EvidenceCategory, number>>
+  }
+  run_id: string | null
+  session_id: string
+  work_item_id: string | null
 }
 
 export interface RetrievalResult {
@@ -48,6 +88,7 @@ export interface RetrievalResult {
     packedIds: string[]
     rejectionReasons: Record<string, string>
   }
+  trainingSignal: RetrievalTrainingSignal
 }
 
 interface Approach {
@@ -64,6 +105,18 @@ interface PackingResult {
   rejectionReasons: Record<string, string>
 }
 
+interface NormalizedBudget {
+  maxTokens: number
+  maxItems: number
+  topK: number
+  minCoverage: Partial<Record<EvidenceCategory, number>>
+  filters: Record<string, unknown> | null
+}
+
+const MAX_INJECT_ITEMS = 3
+const DEFAULT_TOP_K = 12
+const MAX_TOP_K = 40
+
 export class EvidenceRetriever {
   private readonly sql: Sql
 
@@ -73,19 +126,23 @@ export class EvidenceRetriever {
 
   async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
     const startedAt = Date.now()
+    const retrievalId = generateCanonicalId()
     const audit = { retrievedIds: [] as string[], packedIds: [] as string[], rejectionReasons: {} as Record<string, string> }
+    const normalizedBudget = this.normalizeBudget(request.budget)
+    const queryText = this.buildQueryText(request.task)
+    const stateSummary = this.buildStateSummary(request.task)
 
     const retrievalStart = Date.now()
     const approaches = await this.inferApproaches(request.task)
-    const queryText = this.buildQueryText(request.task)
     const candidates = await this.hybridRetrieve(request.task, approaches, queryText)
     const retrievalLatency = Date.now() - retrievalStart
     audit.retrievedIds = candidates.map((c) => c.id)
 
     const scored = this.scoreWithDiscriminators(candidates)
+    const topCandidates = scored.slice(0, normalizedBudget.topK)
 
     const packingStart = Date.now()
-    const packed = this.packWithCoverage(scored, request.budget)
+    const packed = this.packWithCoverage(topCandidates, normalizedBudget)
     const packingLatency = Date.now() - packingStart
     audit.packedIds = packed.selected.map((a) => a.id)
     audit.rejectionReasons = packed.rejectionReasons
@@ -100,8 +157,17 @@ export class EvidenceRetriever {
       discriminatorsIncluded: packed.selected.filter((a) => a.retrieval.isDiscriminator).length,
       latencyMs: Date.now() - startedAt,
     }
+    const trainingSignal = this.buildTrainingSignal({
+      retrievalId,
+      request,
+      queryText,
+      stateSummary,
+      topCandidates,
+      selected: packed.selected,
+      budget: normalizedBudget,
+    })
 
-    await this.logRetrieval(request, queryText, packed, audit, {
+    await this.logRetrieval(retrievalId, request, queryText, packed, audit, trainingSignal, {
       retrievalLatency,
       packingLatency,
       totalLatency: metrics.latencyMs,
@@ -112,6 +178,7 @@ export class EvidenceRetriever {
       atoms: packed.selected,
       metrics,
       audit,
+      trainingSignal,
     }
   }
 
@@ -166,6 +233,35 @@ export class EvidenceRetriever {
       parts.push(...task.recentMessages.filter((m) => typeof m === 'string' && m.trim().length > 0))
     }
     return parts.join(' ').slice(0, 500)
+  }
+
+  private buildStateSummary(task: RetrievalRequest['task']): string {
+    const touchedFiles = task.touchedFiles ?? []
+    const sampleFiles = touchedFiles.slice(0, 3).join(', ')
+    const objective = truncate(collapseWhitespace(task.objective || ''), 120)
+    return [
+      `objective=${objective || 'n/a'}`,
+      `iteration=${task.iteration}`,
+      `touched_files=${touchedFiles.length}`,
+      sampleFiles ? `sample=${sampleFiles}` : null,
+    ].filter(Boolean).join(' | ')
+  }
+
+  private normalizeBudget(budget: RetrievalRequest['budget']): NormalizedBudget {
+    const maxTokensRaw = Number.isFinite(budget.maxTokens) ? Math.floor(budget.maxTokens) : 0
+    const maxTokens = Math.max(0, maxTokensRaw)
+    const requestedMaxItems = Number.isFinite(budget.maxItems) ? Math.floor(budget.maxItems) : MAX_INJECT_ITEMS
+    const maxItems = Math.max(0, Math.min(MAX_INJECT_ITEMS, requestedMaxItems))
+    const requestedTopK = Number.isFinite(budget.topK) ? Math.floor(budget.topK ?? DEFAULT_TOP_K) : DEFAULT_TOP_K
+    const topK = Math.max(1, Math.min(MAX_TOP_K, requestedTopK))
+
+    return {
+      maxTokens,
+      maxItems,
+      topK,
+      minCoverage: budget.minCoverage ?? {},
+      filters: budget.filters ?? null,
+    }
   }
 
   private async searchEntities(keyword: string): Promise<CodeEntity[]> {
@@ -323,7 +419,7 @@ export class EvidenceRetriever {
       LIMIT 5
     `
     for (const row of tests) {
-      atoms.push(this.wrapTestSpec(row, 0.7))
+      atoms.push(this.wrapTestSpec(row, 0.7, 'structural'))
     }
 
     const configs = await this.sql<any[]>`
@@ -333,7 +429,7 @@ export class EvidenceRetriever {
       LIMIT 5
     `
     for (const row of configs) {
-      atoms.push(this.wrapConfigFact(row, 0.7))
+      atoms.push(this.wrapConfigFact(row, 0.7, 'structural'))
     }
 
     const runtime = await this.sql<any[]>`
@@ -343,7 +439,7 @@ export class EvidenceRetriever {
       LIMIT 5
     `
     for (const row of runtime) {
-      atoms.push(this.wrapRuntimeFact(row, 0.7))
+      atoms.push(this.wrapRuntimeFact(row, 0.7, 'structural'))
     }
 
     return atoms
@@ -355,17 +451,20 @@ export class EvidenceRetriever {
       const atom = sorted[i]
       const higherRanked = sorted.slice(0, i)
       atom.retrieval.novelty = this.computeNovelty(atom, higherRanked)
+      let rerankerScore = atom.retrieval.score
       if (atom.retrieval.isDiscriminator) {
-        atom.retrieval.score *= 1.5
+        rerankerScore *= 1.5
       }
-      atom.retrieval.score *= (0.5 + 0.5 * atom.retrieval.novelty)
+      rerankerScore *= (0.5 + 0.5 * atom.retrieval.novelty)
+      atom.retrieval.rerankerScore = rerankerScore
+      atom.retrieval.score = rerankerScore
     }
     return sorted.sort((a, b) => b.retrieval.score - a.retrieval.score)
   }
 
   private packWithCoverage(
     candidates: AnyEvidenceAtom[],
-    budget: RetrievalRequest['budget']
+    budget: NormalizedBudget
   ): PackingResult {
     const selected: AnyEvidenceAtom[] = []
     const rejectionReasons: Record<string, string> = {}
@@ -379,6 +478,13 @@ export class EvidenceRetriever {
     }
     let totalTokens = 0
     let totalAttentionTax = 0
+
+    if (budget.maxItems <= 0 || budget.maxTokens <= 0) {
+      for (const atom of candidates) {
+        rejectionReasons[atom.id] = budget.maxItems <= 0 ? 'max_items_zero' : 'budget_zero'
+      }
+      return { selected, totalTokens, totalAttentionTax, coverage, rejectionReasons }
+    }
 
     for (const [category, minCount] of Object.entries(budget.minCoverage)) {
       const inCategory = candidates.filter((c) => c.category === category)
@@ -426,6 +532,7 @@ export class EvidenceRetriever {
   }
 
   private wrapEntity(entity: CodeEntity, matchType: 'structural' | 'graph'): CodeEntityAtom {
+    const baseScore = matchType === 'structural' ? 0.9 : 0.7
     return {
       id: entity.id,
       category: 'code_entity',
@@ -444,7 +551,11 @@ export class EvidenceRetriever {
         redacted: false,
       },
       retrieval: {
-        score: matchType === 'structural' ? 0.9 : 0.7,
+        score: baseScore,
+        embeddingScore: null,
+        bm25Score: null,
+        heuristicScore: baseScore,
+        rerankerScore: baseScore,
         matchType,
         isDiscriminator: false,
         novelty: 1.0,
@@ -462,7 +573,7 @@ export class EvidenceRetriever {
     }
   }
 
-  private wrapConfigFact(row: any, score: number): ConfigFactAtom {
+  private wrapConfigFact(row: any, score: number, matchType: 'lexical' | 'structural' = 'lexical'): ConfigFactAtom {
     const isSensitive = row.is_sensitive ?? false
     const redacted = isSensitive || row.redacted_value !== null
     const value = isSensitive ? row.redacted_value ?? '[REDACTED]' : row.current_value ?? row.default_value
@@ -497,7 +608,11 @@ export class EvidenceRetriever {
       },
       retrieval: {
         score,
-        matchType: 'lexical',
+        embeddingScore: null,
+        bm25Score: matchType === 'lexical' ? score : null,
+        heuristicScore: matchType === 'structural' ? score : null,
+        rerankerScore: score,
+        matchType,
         isDiscriminator: false,
         novelty: 1.0,
         retrievedAt: Date.now(),
@@ -509,7 +624,7 @@ export class EvidenceRetriever {
     }
   }
 
-  private wrapRuntimeFact(row: any, score: number): RuntimeFactAtom {
+  private wrapRuntimeFact(row: any, score: number, matchType: 'lexical' | 'structural' = 'lexical'): RuntimeFactAtom {
     const original = row.sanitized_message ?? row.message ?? ''
     const message = this.sanitizeRuntimeMessage(original)
     const wasRedacted = row.sanitized_message ? true : message !== (row.message ?? '')
@@ -536,7 +651,11 @@ export class EvidenceRetriever {
       },
       retrieval: {
         score,
-        matchType: 'lexical',
+        embeddingScore: null,
+        bm25Score: matchType === 'lexical' ? score : null,
+        heuristicScore: matchType === 'structural' ? score : null,
+        rerankerScore: score,
+        matchType,
         isDiscriminator: false,
         novelty: 1.0,
         retrievedAt: Date.now(),
@@ -548,7 +667,7 @@ export class EvidenceRetriever {
     }
   }
 
-  private wrapTestSpec(row: any, score: number): TestSpecAtom {
+  private wrapTestSpec(row: any, score: number, matchType: 'lexical' | 'structural' = 'lexical'): TestSpecAtom {
     const suite = row.test_suite ? ` (${row.test_suite})` : ''
     const displayText = this.sanitizeDisplayText(
       `TEST ${row.test_name}${suite}${row.last_result ? ` — last: ${row.last_result}` : ''}`
@@ -579,7 +698,11 @@ export class EvidenceRetriever {
       },
       retrieval: {
         score,
-        matchType: 'lexical',
+        embeddingScore: null,
+        bm25Score: matchType === 'lexical' ? score : null,
+        heuristicScore: matchType === 'structural' ? score : null,
+        rerankerScore: score,
+        matchType,
         isDiscriminator: false,
         novelty: 1.0,
         retrievedAt: Date.now(),
@@ -591,7 +714,7 @@ export class EvidenceRetriever {
     }
   }
 
-  private wrapPreference(row: any, score: number): AnyEvidenceAtom {
+  private wrapPreference(row: any, score: number, matchType: 'lexical' | 'structural' = 'lexical'): AnyEvidenceAtom {
     const displayText = this.sanitizeDisplayText(`PREF ${row.preference} — ${row.scope}`)
     return {
       id: row.id,
@@ -610,7 +733,11 @@ export class EvidenceRetriever {
       },
       retrieval: {
         score,
-        matchType: 'lexical',
+        embeddingScore: null,
+        bm25Score: matchType === 'lexical' ? score : null,
+        heuristicScore: matchType === 'structural' ? score : null,
+        rerankerScore: score,
+        matchType,
         isDiscriminator: false,
         novelty: 1.0,
         retrievedAt: Date.now(),
@@ -622,7 +749,7 @@ export class EvidenceRetriever {
     }
   }
 
-  private wrapDecision(row: any, score: number): AnyEvidenceAtom {
+  private wrapDecision(row: any, score: number, matchType: 'lexical' | 'structural' = 'lexical'): AnyEvidenceAtom {
     const displayText = this.sanitizeDisplayText(`DECISION ${row.decision} — ${row.rationale}`)
     return {
       id: row.id,
@@ -641,7 +768,11 @@ export class EvidenceRetriever {
       },
       retrieval: {
         score,
-        matchType: 'lexical',
+        embeddingScore: null,
+        bm25Score: matchType === 'lexical' ? score : null,
+        heuristicScore: matchType === 'structural' ? score : null,
+        rerankerScore: score,
+        matchType,
         isDiscriminator: false,
         novelty: 1.0,
         retrievedAt: Date.now(),
@@ -788,11 +919,85 @@ export class EvidenceRetriever {
     return this.computeNovelty(atom, selected) < 0.3
   }
 
+  private mapSourceType(atom: AnyEvidenceAtom): RetrievalSourceType {
+    if (atom.category === 'code_entity') return 'symbol'
+    if (atom.category === 'runtime_fact') return 'tool_output'
+    if (atom.category === 'test_spec' || atom.category === 'config_fact') return 'file'
+    return 'summary'
+  }
+
+  private extractFreshness(atom: AnyEvidenceAtom): string | null {
+    const version = atom.provenance.version
+    if (!version || version === 'current') return null
+    return String(version)
+  }
+
+  private extractScope(atom: AnyEvidenceAtom): string | null {
+    if (atom.category === 'preference') {
+      const scope = (atom.data as { scope?: unknown }).scope
+      if (typeof scope === 'string' && scope.trim().length > 0) return scope
+    }
+    if (atom.category === 'decision') {
+      const category = (atom.data as { category?: unknown }).category
+      if (typeof category === 'string' && category.trim().length > 0) return category
+    }
+    return null
+  }
+
+  private toCandidateTrace(atom: AnyEvidenceAtom): RetrievalCandidateTrace {
+    return {
+      doc_id: atom.id,
+      chunk_id: null,
+      source_type: this.mapSourceType(atom),
+      scores: {
+        embedding_score: atom.retrieval.embeddingScore ?? null,
+        bm25_score: atom.retrieval.bm25Score ?? null,
+        heuristic_score: atom.retrieval.heuristicScore ?? null,
+        reranker_score: atom.retrieval.rerankerScore ?? atom.retrieval.score ?? null,
+      },
+      token_size: atom.cost.tokens,
+      freshness: this.extractFreshness(atom),
+      scope: this.extractScope(atom),
+    }
+  }
+
+  private buildTrainingSignal(input: {
+    retrievalId: string
+    request: RetrievalRequest
+    queryText: string
+    stateSummary: string
+    topCandidates: AnyEvidenceAtom[]
+    selected: AnyEvidenceAtom[]
+    budget: NormalizedBudget
+  }): RetrievalTrainingSignal {
+    return {
+      retrieval_id: input.retrievalId,
+      query: {
+        raw: input.queryText,
+        state_summary: input.stateSummary,
+      },
+      candidate_list: input.topCandidates.map((atom) => this.toCandidateTrace(atom)),
+      selected_set: input.selected.map((atom) => this.toCandidateTrace(atom)),
+      budget: {
+        max_tokens: input.budget.maxTokens,
+        k: input.budget.topK,
+        max_items: input.budget.maxItems,
+        filters: input.budget.filters,
+        min_coverage: input.budget.minCoverage,
+      },
+      run_id: input.request.task.runId ?? null,
+      session_id: input.request.task.sessionId,
+      work_item_id: input.request.task.workItemId ?? null,
+    }
+  }
+
   private async logRetrieval(
+    retrievalId: string,
     request: RetrievalRequest,
     queryText: string,
     packed: PackingResult,
     audit: RetrievalResult['audit'],
+    trainingSignal: RetrievalTrainingSignal,
     timing: { retrievalLatency: number; packingLatency: number; totalLatency: number }
   ): Promise<void> {
     const repo = createEvidenceRetrievalLogRepository({ sql: this.sql })
@@ -800,11 +1005,11 @@ export class EvidenceRetriever {
       id: generateCanonicalId(),
       session_id: request.task.sessionId,
       work_item_id: request.task.workItemId ?? null,
-      request_id: generateCanonicalId(),
+      request_id: retrievalId,
       injector_version: 'v2',
       task_objective: request.task.objective,
       query_text: queryText,
-      budget: request.budget,
+      budget: trainingSignal.budget,
       retrieved_count: audit.retrievedIds.length,
       packed_count: audit.packedIds.length,
       total_tokens: packed.totalTokens,
@@ -818,6 +1023,7 @@ export class EvidenceRetriever {
       retrieved_ids: audit.retrievedIds,
       packed_ids: audit.packedIds,
       rejection_reasons: audit.rejectionReasons,
+      training_signal: trainingSignal,
     })
   }
 }

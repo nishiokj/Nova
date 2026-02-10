@@ -29,6 +29,7 @@ export interface EvidenceRetrievalLogRow {
   retrieved_ids: string[] | null
   packed_ids: string[] | null
   rejection_reasons: unknown | null
+  training_signal: unknown | null
 }
 
 export interface EvidenceRetrievalLogInput {
@@ -55,6 +56,7 @@ export interface EvidenceRetrievalLogInput {
   retrieved_ids?: string[] | null
   packed_ids?: string[] | null
   rejection_reasons?: unknown | null
+  training_signal?: unknown | null
 }
 
 export interface EvidenceRetrievalLogRepository {
@@ -93,7 +95,8 @@ export function createEvidenceRetrievalLogRepository(
           error_message,
           retrieved_ids,
           packed_ids,
-          rejection_reasons
+          rejection_reasons,
+          training_signal
         ) VALUES (
           ${id},
           ${input.session_id},
@@ -117,7 +120,8 @@ export function createEvidenceRetrievalLogRepository(
           ${input.error_message ?? null},
           ${input.retrieved_ids ? sql.array(input.retrieved_ids) : null},
           ${input.packed_ids ? sql.array(input.packed_ids) : null},
-          ${input.rejection_reasons !== undefined ? sql.json(input.rejection_reasons as any) : null}
+          ${input.rejection_reasons !== undefined ? sql.json(input.rejection_reasons as any) : null},
+          ${input.training_signal !== undefined ? sql.json(input.training_signal as any) : null}
         )
         RETURNING *
       `

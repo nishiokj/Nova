@@ -62,6 +62,7 @@ export type {
   ArtifactDiscoveredData,
   AgentProgressData,
   AgentReasoningData,
+  MemoryInjectionTrainingSignal,
   MemoryInjectedData,
   EventCallback,
   PermissionRequestEventData,
@@ -88,6 +89,7 @@ export {
   LLMCallDataSchema,
   LLMErrorDataSchema,
   MemoryInjectedDataSchema,
+  MemoryInjectionTrainingSignalSchema,
   parseEvent,
   isValidEvent,
 } from './event_schemas.js';

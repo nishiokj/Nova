@@ -220,6 +220,41 @@ Turn untangled boundaries into operational deployment units.
 
 ---
 
+## Phase 6: Post-Shakeup Verification Hardening (1-2 days)
+
+### Objective
+Add targeted typechecks and regression tests for split-runtime contracts and bridge/control-plane compatibility.
+
+### Deliverables
+- Dedicated split-runtime typecheck script covering:
+  - contract/shared layers (`types`, `shared`, `protocol`)
+  - split transport/client layers (`comms-bus`, `harness-client`)
+  - split deployables (`graphd`, `agent-memory`, `harness-daemon`, `control-plane`)
+- Focused split-runtime regression test suite for:
+  - GraphD metadata merge behavior
+  - Bridge gateway command wiring and error handling
+  - Control-plane cockpit routes for permissions and model selection
+- CI job that runs split-runtime typecheck + regression tests.
+
+### Progress
+- 2026-02-10: Added `typecheck:split-runtime` and `test:split-runtime` scripts in root `package.json`.
+- 2026-02-10: Added CI job `split-runtime-contracts` in `.github/workflows/ci.yml`.
+- 2026-02-10: Expanded bridge gateway regression coverage in `packages/harness-daemon/src/harness/bridge_gateway.test.ts`.
+- 2026-02-10: Expanded cockpit route coverage for permissions/model endpoints in `packages/control-plane/src/harness/control_plane_routes.test.ts`.
+
+### Validation
+```bash
+bun run typecheck:split-runtime
+bun run test:split-runtime
+bun run smoke:interprocess
+```
+
+### Exit Gate
+- Split-runtime contracts are typechecked in CI with dedicated coverage.
+- Bridge and control-plane route regressions have automated tests for core compatibility paths.
+
+---
+
 ## Execution Order (Strict)
 1. Contract core stability checks (`protocol`, `types`, `prompt-protocol`, `shared`)
 2. Phase 1 (orchestrator/decision-watcher compile untangle)
@@ -227,6 +262,7 @@ Turn untangled boundaries into operational deployment units.
 4. Phase 3 (control-plane extraction)
 5. Phase 4 (Graph/Data ownership cleanup)
 6. Phase 5 (deployment hardening + CI)
+7. Phase 6 (post-shakeup verification hardening)
 
 ---
 

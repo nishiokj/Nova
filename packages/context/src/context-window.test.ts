@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { existsSync, readFileSync, mkdirSync, rmSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync } from 'fs';
 import path from 'path';
 import { ContextWindow } from './context-window.js';
 import type {
@@ -619,6 +619,26 @@ describe('ContextWindow (disk-backed)', () => {
     // Should only have one file_content block
     const headerCount = (content.match(/### file_content/g) || []).length;
     expect(headerCount).toBe(1);
+  });
+
+  it('compaction snapshots continue versioning across reloads', () => {
+    const fp = tmpFilePath('compact-versioning');
+    const dir = path.dirname(fp);
+
+    const ctx1 = new ContextWindow('cmpv', 100_000, fp);
+    ctx1.addMessage('user', 'first pass');
+    ctx1.compact({ deduplicateByPath: true });
+
+    const ctx2 = new ContextWindow('cmpv', 100_000, fp);
+    ctx2.addMessage('assistant', 'second pass');
+    ctx2.compact({ deduplicateByPath: true });
+
+    const snapshots = readdirSync(dir)
+      .filter((name) => /^context\.v\d+\.md$/.test(name))
+      .sort();
+
+    expect(snapshots).toContain('context.v1.md');
+    expect(snapshots).toContain('context.v2.md');
   });
 
   it('atomic write: no .tmp file left behind', () => {

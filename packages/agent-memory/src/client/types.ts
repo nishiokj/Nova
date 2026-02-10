@@ -587,17 +587,66 @@ export interface EvidenceRetrieveRequest {
     touchedFiles?: string[]
     iteration: number
     sessionId: string
+    runId?: string
     workItemId?: string
   }
   budget: {
     maxTokens: number
     maxItems?: number
+    topK?: number
     minCoverage?: Partial<Record<string, number>>
+    filters?: Record<string, unknown>
   }
   options?: {
     forceV1Fallback?: boolean
     trace?: boolean
   }
+}
+
+export interface EvidenceRetrievalTrainingSignal {
+  retrieval_id: string
+  query: {
+    raw: string
+    state_summary: string
+  }
+  candidate_list: Array<{
+    doc_id: string
+    chunk_id: string | null
+    source_type: 'file' | 'symbol' | 'summary' | 'tool_output' | 'web'
+    scores: {
+      embedding_score: number | null
+      bm25_score: number | null
+      heuristic_score: number | null
+      reranker_score: number | null
+    }
+    token_size: number
+    freshness: string | null
+    scope: string | null
+  }>
+  selected_set: Array<{
+    doc_id: string
+    chunk_id: string | null
+    source_type: 'file' | 'symbol' | 'summary' | 'tool_output' | 'web'
+    scores: {
+      embedding_score: number | null
+      bm25_score: number | null
+      heuristic_score: number | null
+      reranker_score: number | null
+    }
+    token_size: number
+    freshness: string | null
+    scope: string | null
+  }>
+  budget: {
+    max_tokens: number
+    k: number
+    max_items: number
+    filters: Record<string, unknown> | null
+    min_coverage: Record<string, number>
+  }
+  run_id: string | null
+  session_id: string
+  work_item_id: string | null
 }
 
 export interface EvidenceRetrieveResponse {
@@ -610,6 +659,7 @@ export interface EvidenceRetrieveResponse {
     discriminatorsIncluded: number
     latencyMs: number
   }
+  trainingSignal?: EvidenceRetrievalTrainingSignal
 }
 
 // ============ Agent Goals ============

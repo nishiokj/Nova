@@ -16,6 +16,7 @@ function parseRequest(body: unknown): RetrievalRequest | null {
   if (typeof task.objective !== 'string' || typeof task.sessionId !== 'string') return null
 
   const minCoverage = isObject(budget.minCoverage) ? budget.minCoverage : {}
+  const filters = isObject(budget.filters) ? budget.filters : undefined
 
   return {
     task: {
@@ -28,12 +29,15 @@ function parseRequest(body: unknown): RetrievalRequest | null {
         : undefined,
       iteration: typeof task.iteration === 'number' ? task.iteration : 0,
       sessionId: task.sessionId,
+      runId: typeof task.runId === 'string' ? task.runId : undefined,
       workItemId: typeof task.workItemId === 'string' ? task.workItemId : undefined,
     },
     budget: {
       maxTokens: typeof budget.maxTokens === 'number' ? budget.maxTokens : 1000,
-      maxItems: typeof budget.maxItems === 'number' ? budget.maxItems : 20,
+      maxItems: typeof budget.maxItems === 'number' ? budget.maxItems : 3,
+      topK: typeof budget.topK === 'number' ? budget.topK : undefined,
       minCoverage: minCoverage as Record<string, number>,
+      filters,
     },
   }
 }
@@ -63,6 +67,7 @@ export function registerEvidenceRoutes(server: HttpServer, daemon: SyncDaemon): 
           content: result.content,
           atoms: result.atoms,
           metrics: result.metrics,
+          trainingSignal: result.trainingSignal,
         },
       }
     } catch (error) {

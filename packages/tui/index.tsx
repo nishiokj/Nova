@@ -85,6 +85,47 @@ import {
   PROMPT_MAX_CONTENT_HEIGHT,
 } from "./constants.js";
 
+// ==================== Supernova Animation Frames ====================
+
+const NOVA_ANIM_FRAMES = [
+  [
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠠⡀⠂⢀⡄⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠂⢸⣿⡇⠠⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠘⠁⠔⠈⠃⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+  ],
+  [
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠢⡀⣃⢀⠤⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠐⠀⢾⣿⡷⠀⠄⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⢀⠖⠁⡭⠈⠲⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+  ],
+  [
+    "⠀⠀⠐⠀⠀⠀⠀⡀⠀⠀⠀⠠⠂⠀⠀",
+    "⠀⠀⠀⠀⠈⠢⡀⣽⢀⡴⠂⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠂⠰⣿⣿⣿⠄⠠⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⢠⠖⠉⣻⠉⠲⡀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠁⠀⠀⠁⠀⠀⠀⠀⠄⠀⠀",
+  ],
+  [
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠢⡀⣃⢀⠤⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠐⠀⢾⣿⡷⠀⠄⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⢀⠖⠁⡭⠈⠲⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+  ],
+  [
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠠⡀⠂⢀⡄⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠂⢸⣿⡇⠠⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠘⠁⠔⠈⠃⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+  ],
+];
+const NOVA_ANIM_INTERVAL = 300;
+
 // ==================== Ralph Loop Argument Parsing ====================
 
 interface RalphArgs {
@@ -448,6 +489,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const store = useMemo(() => new Store(), []);
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
   const [statusTick, setStatusTick] = useState(0);
+  const [novaFrame, setDolphinFrame] = useState(0);
   const clientRef = useRef<BridgeClient | null>(null);
   const loggerRef = useRef<UILogger | null>(null);
   const fileCacheRef = useRef<FileCache | null>(null);
@@ -513,6 +555,13 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       clearInterval(interval);
     };
   }, [isBusy]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDolphinFrame((f) => (f + 1) % NOVA_ANIM_FRAMES.length);
+    }, NOVA_ANIM_INTERVAL);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -3062,31 +3111,18 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
   const rightStatus = [scrollInfo, newMessageInfo].filter(Boolean).join(" | ");
 
-  // Helper function to create "big" text (300% larger) by stacking characters
-  // Returns an array of 3 strings for each row of the big text
-  const makeBigText = (text: string): string[] => {
-    // Create 3-line tall big text using unicode block elements
-    const charMaps: Record<string, string[]> = {
-      'N': ['█▀▀', '█ █', '█ █'],
-      'O': ['▄▀▄', '█ █', '▀▄▀'],
-      'V': ['█ █', '█ █', ' ▀ '],
-      'A': ['▀█▀', '█ █', '█ █'],
-      '-': ['   ', '───', '   '],
-      ' ': ['   ', '   ', '   '],
-    };
+  // NOVA banner (figlet "small" font) + animated dolphin
+  const novaTextLines = [
+    " _  _  _____   ___   ",
+    "| \\| |/ _ \\ \\ / /_\\  ",
+    "| .` | (_) \\ V / _ \\ ",
+    "|_|\\_|\\___/ \\_/_/ \\_\\",
+  ];
 
-    const lines = ['', '', ''];
-    for (const char of text.toUpperCase()) {
-      const map = charMaps[char] || ['   ', ' █ ', '   '];
-      lines[0] += map[0];
-      lines[1] += map[1];
-      lines[2] += map[2];
-    }
-    return lines;
-  };
-
-  // Get the big NOVA text lines
-  const novaTextLines = makeBigText("NOVA");
+  const novaAnim = NOVA_ANIM_FRAMES[novaFrame];
+  const gap = "  ";
+  const novaTextPadded = [" ".repeat(novaTextLines[0].length), ...novaTextLines];
+  const bannerLines = novaAnim.map((line, i) => `${novaTextPadded[i]}${gap}${line}`);
 
   const headerRows: Array<{
     left: string;
@@ -3099,30 +3135,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     boldRight?: boolean;
     boldCenter?: boolean;
   }> = [
-    // Row 1: Top line of big NOVA
-    {
-      center: novaTextLines[0],
-      leftColor: colors.accent,
-      rightColor: colors.muted,
+    ...bannerLines.map((line) => ({
+      left: "",
+      center: line,
       centerColor: colors.accent,
       boldCenter: true,
-    },
-    // Row 2: Middle line of big NOVA
-    {
-      center: novaTextLines[1],
-      leftColor: colors.accent,
-      rightColor: colors.muted,
-      centerColor: colors.accent,
-      boldCenter: true,
-    },
-    // Row 3: Bottom line of big NOVA
-    {
-      center: novaTextLines[2],
-      leftColor: colors.accent,
-      rightColor: colors.muted,
-      centerColor: colors.accent,
-      boldCenter: true,
-    },
+    })),
     {
       left: `${snapshot.sessionKey ?? "-"}`,
       right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}${snapshot.state !== "idle" ? ` | State: ${snapshot.state}` : ""}${snapshot.planMode ? " | PLAN" : ""}`,

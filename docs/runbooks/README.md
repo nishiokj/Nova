@@ -30,3 +30,10 @@ This validates:
 - event streaming
 - session operations
 - permission and escalation route flow
+
+## Post-Shakeup Verification
+
+```bash
+bun run typecheck:split-runtime
+bun run test:split-runtime
+```

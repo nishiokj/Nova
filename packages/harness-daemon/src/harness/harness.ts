@@ -3215,6 +3215,7 @@ export class AgentHarness {
           discriminatorsIncluded: event.discriminatorsIncluded,
           totalTokens: event.totalTokens,
           fallbackToV1: event.fallbackToV1,
+          trainingSignal: event.trainingSignal,
         }));
       }
 
@@ -3232,6 +3233,7 @@ export class AgentHarness {
         discriminatorsIncluded: event.discriminatorsIncluded,
         totalTokens: event.totalTokens,
         fallbackToV1: event.fallbackToV1,
+        trainingSignal: event.trainingSignal,
       }, ctx.workId, ctx.requestId, ctx.sessionKey));
     });
 

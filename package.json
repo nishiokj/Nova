@@ -56,6 +56,8 @@
     "start:tui": "bun run --cwd packages/tui start",
     "start": "bun run --cwd packages/launcher start",
     "smoke:interprocess": "bun run scripts/smoke/interprocess-smoke.ts",
+    "typecheck:split-runtime": "bun run --cwd packages/types lint && bun run --cwd packages/shared lint && bun run --cwd packages/protocol lint && bun run --cwd packages/comms-bus lint && bun run --cwd packages/harness-client lint && bun run --cwd packages/graphd lint && bun run --cwd packages/agent-memory lint && bun run --cwd packages/harness-daemon lint && bun run --cwd packages/control-plane lint",
+    "test:split-runtime": "bun test packages/graphd/src/store.metadata_merge.test.ts packages/harness-daemon/src/harness/bridge_gateway.test.ts packages/control-plane/src/harness/control_plane_routes.test.ts",
     "profile": "PROFILE=1 bun run start",
     "profile:daemon": "PROFILE=1 bun run start:daemon"
   },

@@ -692,7 +692,7 @@ export interface WorkItemToolCallEntry {
   /** Full args - paths relative to cwd, content included for audit trail */
   args: Record<string, unknown>;
   success: boolean;
-  /** Result summary - full for Read/Grep, may be truncated for very large outputs */
+  /** Full tool result output (or full error string) for audit trail */
   resultSummary?: string;
   durationMs: number;
 }
@@ -729,6 +729,8 @@ export interface WorkItemMemoryInjectionEntry {
   totalTokens?: number;
   /** Whether v2 fell back to v1 */
   fallbackToV1?: boolean;
+  /** Full retrieval training signal payload (v2 only) */
+  trainingSignal?: Record<string, unknown>;
 }
 
 /**

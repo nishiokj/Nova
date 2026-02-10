@@ -113,6 +113,25 @@ jobs:
       - name: Run split-runtime smoke test
         run: bun run smoke:interprocess
 
+  split-runtime-contracts:
+    name: Split Runtime Typecheck + Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck split runtime contracts
+        run: bun run typecheck:split-runtime
+
+      - name: Run split runtime regression tests
+        run: bun run test:split-runtime
+
   dead-code:
     name: Dead Code + Unused Exports
     runs-on: ubuntu-latest

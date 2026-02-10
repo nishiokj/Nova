@@ -10,7 +10,7 @@
  * Entry types:
  * - init: WorkItem creation metadata
  * - message: Conversation turn (system/user/assistant)
- * - tool_call: Tool invocation with summarized result
+ * - tool_call: Tool invocation with full args/result for audit
  * - memory_injection: Memory injection record (query + injected content)
  * - decision: Watcher decision scoped to this workitem
  * - status: Status change (started, completed, failed)
@@ -410,8 +410,7 @@ function parseJsonl<T>(content: string): T[] {
 /**
  * Process tool args for logging:
  * - Convert absolute paths to relative (based on cwd)
- * - Keep full content for Edit tools (the watcher needs to see what was written)
- * - Apply reasonable limits only for truly massive content
+ * - Keep full content (the watcher and audit trail need full fidelity)
  */
 function processArgsForLogging(args: Record<string, unknown>, cwd: string): Record<string, unknown> {
   const processed: Record<string, unknown> = {};
@@ -427,11 +426,8 @@ function processArgsForLogging(args: Record<string, unknown>, cwd: string): Reco
       } else if (value.startsWith(cwd + '/')) {
         // Handle case without trailing slash
         processed[key] = value.slice(cwd.length + 1);
-      } else if (isLargeContentKey(key) && value.length > 10000) {
-        // Only truncate truly massive content (10k+), but preserve most of it
-        processed[key] = value.slice(0, 10000) + `\n... [truncated ${value.length - 10000} chars]`;
       } else {
-        // Keep full content - this is crucial for Edit oldString/newString
+        // Keep full content - crucial for full-fidelity audit logs
         processed[key] = value;
       }
     } else if (Array.isArray(value)) {
@@ -454,12 +450,6 @@ function processArgsForLogging(args: Record<string, unknown>, cwd: string): Reco
 function isPathKey(key: string): boolean {
   const pathKeys = ['path', 'file_path', 'filePath', 'file', 'directory', 'dir', 'cwd'];
   return pathKeys.includes(key.toLowerCase()) || key.toLowerCase().endsWith('path');
-}
-
-/** Keys that might have very large content (but we still want most of it) */
-function isLargeContentKey(key: string): boolean {
-  const contentKeys = ['content', 'output', 'result', 'body'];
-  return contentKeys.includes(key.toLowerCase());
 }
 
 /**

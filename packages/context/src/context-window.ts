@@ -553,20 +553,28 @@ export class ContextWindow {
   private _snapshotBeforeCompact(): void {
     if (!this.filePath || !existsSync(this.filePath)) return;
 
-    this._compactionCount++;
     const dir = nodePath.dirname(this.filePath);
-    const snapshotPath = nodePath.join(dir, `context.v${this._compactionCount}.md`);
-    copyFileSync(this.filePath, snapshotPath);
-
-    // Prune oldest versions if we exceed 10
-    const files = readdirSync(dir);
-    const versionedFiles = files
+    const versionedFiles = readdirSync(dir)
       .filter(f => /^context\.v(\d+)\.md$/.test(f))
       .map(f => ({
         name: f,
         version: parseInt(f.match(/^context\.v(\d+)\.md$/)![1], 10),
       }))
       .sort((a, b) => a.version - b.version);
+
+    // Ensure monotonic versioning across process restarts by deriving from disk.
+    const maxVersionOnDisk = versionedFiles.length > 0
+      ? versionedFiles[versionedFiles.length - 1].version
+      : 0;
+    this._compactionCount = Math.max(this._compactionCount, maxVersionOnDisk) + 1;
+
+    const snapshotName = `context.v${this._compactionCount}.md`;
+    const snapshotPath = nodePath.join(dir, snapshotName);
+    copyFileSync(this.filePath, snapshotPath);
+    versionedFiles.push({ name: snapshotName, version: this._compactionCount });
+
+    // Prune oldest versions if we exceed 10
+    versionedFiles.sort((a, b) => a.version - b.version);
 
     while (versionedFiles.length > 10) {
       const oldest = versionedFiles.shift()!;

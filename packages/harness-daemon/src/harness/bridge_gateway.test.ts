@@ -99,6 +99,44 @@ class FakeHarness {
     return createReadyEvent(sessionKey, []);
   }
 
+  hasApiKey(_provider: string): boolean {
+    return true;
+  }
+
+  getSessionSelectedModel(_sessionKey: string, _agentType: string): { provider: string; model: string } {
+    return { provider: 'openai', model: 'test-model' };
+  }
+
+  getDebugMemoryInfo(): {
+    sessionCount: number;
+    maxSessions: number;
+    sessions: Array<{
+      sessionKey: string;
+      contextItemCount: number;
+      contextEstimatedTokens: number;
+      watcherContextItemCount: number;
+      workItemLogCount: number;
+      workItemsCreatedCount: number;
+      lastAccessMs: number;
+      isExecuting: boolean;
+    }>;
+  } {
+    return {
+      sessionCount: 1,
+      maxSessions: 200,
+      sessions: [{
+        sessionKey: 'sess-memory',
+        contextItemCount: 0,
+        contextEstimatedTokens: 0,
+        watcherContextItemCount: 0,
+        workItemLogCount: 0,
+        workItemsCreatedCount: 0,
+        lastAccessMs: Date.now(),
+        isExecuting: false,
+      }],
+    };
+  }
+
   getConfig(): FullHarnessConfig {
     return this.config;
   }
@@ -156,4 +194,84 @@ describe('BridgeGateway', () => {
     client.close();
     await server.stop();
   });
+
+  it('emits an error when bridge payload is invalid', async () => {
+    const harness = new FakeHarness();
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const events: BridgeEvent[] = [];
+    client.on('event', (payload) => {
+      events.push(payload as BridgeEvent);
+    });
+    await client.connect();
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, 'bad payload');
+    await waitFor(() => events.some((event) => event.type === 'error'));
+
+    const errorEvent = events.find((event) => event.type === 'error');
+    expect(String(errorEvent?.data?.message ?? '')).toContain('Invalid bridge command payload');
+
+    client.close();
+    await server.stop();
+  });
+
+  it('returns debug memory info over control-plane bridge command', async () => {
+    const harness = new FakeHarness();
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const events: BridgeEvent[] = [];
+    client.on('event', (payload) => {
+      events.push(payload as BridgeEvent);
+    });
+    await client.connect();
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'control_plane_memory_info', data: {} });
+    await waitFor(() => events.some((event) =>
+      event.type === 'response'
+      && isRecord(event.data?.metadata)
+      && event.data.metadata.kind === 'control_plane_memory_info'
+    ));
+
+    const response = events.find((event) =>
+      event.type === 'response'
+      && isRecord(event.data?.metadata)
+      && event.data.metadata.kind === 'control_plane_memory_info'
+    );
+    if (!response || !isRecord(response.data?.metadata)) {
+      throw new Error('Expected control_plane_memory_info response');
+    }
+    const payload = response.data.metadata.payload;
+    expect(isRecord(payload)).toBe(true);
+    if (!isRecord(payload)) {
+      throw new Error('Expected payload record');
+    }
+    expect(payload.success).toBe(true);
+    expect(payload.sessionCount).toBe(1);
+    expect(Array.isArray(payload.sessions)).toBe(true);
+
+    client.close();
+    await server.stop();
+  });
 });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
