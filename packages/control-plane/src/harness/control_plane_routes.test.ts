@@ -305,8 +305,7 @@ describe('control-plane cockpit session message routes', () => {
     expect(harness.dispatchCalls[0].message).toBe('Summarize this note');
     expect(typeof harness.dispatchCalls[0].options?.context).toBe('string');
     expect(harness.dispatchCalls[0].options?.context).toContain('Control-plane active markdown context:');
-    expect(harness.dispatchCalls[0].options?.context).toContain('scopeMode: session');
-    expect(harness.dispatchCalls[0].options?.context).toContain('isDraft: true');
+    expect(harness.dispatchCalls[0].options?.context).toContain('scopeMode: global');
     expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
 
     expect(harness.permissionUpdates).toHaveLength(1);
@@ -321,9 +320,9 @@ describe('control-plane cockpit session message routes', () => {
     if (!isRecord(activeMarkdown)) {
       throw new Error('Expected cockpit_active_markdown metadata record');
     }
-    expect(activeMarkdown.isDraft).toBe(true);
+    expect(activeMarkdown.scopeMode).toBe('global');
     expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-    expect(String(activeMarkdown.writeTargetPath)).toContain(`${process.cwd()}/.cockpit/markdown/.drafts/session-sess-1/`);
+    expect(String(activeMarkdown.writeTargetPath)).toContain(`${process.cwd()}/.cockpit/scratch/`);
     expect(String(activeMarkdown.writeTargetPath)).toMatch(/\.md$/);
   });
 
@@ -352,10 +351,10 @@ describe('control-plane cockpit session message routes', () => {
     if (!isRecord(activeMarkdown)) {
       throw new Error('Expected cockpit_active_markdown metadata record');
     }
-    expect(activeMarkdown.isDraft).toBe(true);
-    expect(activeMarkdown.draftId).toBe('draft-abc-123');
+    expect(activeMarkdown.scopeMode).toBe('global');
     expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-    expect(String(activeMarkdown.writeTargetPath)).toContain('draft-abc-123.md');
+    expect(String(activeMarkdown.writeTargetPath)).toContain(`${process.cwd()}/.cockpit/scratch/`);
+    expect(String(activeMarkdown.writeTargetPath)).toMatch(/untitled-\d+\.md$/);
   });
 
   it('respects global markdown scope and includes an explicit write target in context', async () => {
@@ -382,8 +381,8 @@ describe('control-plane cockpit session message routes', () => {
     expect(harness.dispatchCalls).toHaveLength(1);
     const contextText = harness.dispatchCalls[0].options?.context ?? '';
     expect(contextText).toContain('scopeMode: global');
-    expect(contextText).toContain('workspacePath: .cockpit/markdown/notes/todo.md');
-    expect(contextText).toContain('If the user requests document edits, persist changes to writeTargetPath/absolutePath above');
+    expect(contextText).toContain('path: notes/todo.md');
+    expect(contextText).toContain('If the user requests document edits, persist changes to writeTargetPath above');
 
     expect(harness.metadataUpdates).toHaveLength(1);
     const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
@@ -394,7 +393,7 @@ describe('control-plane cockpit session message routes', () => {
     expect(activeMarkdown.scopeMode).toBe('global');
     expect(activeMarkdown.scopeSessionKey).toBeNull();
     expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-    expect(String(activeMarkdown.writeTargetPath)).toContain('.cockpit/markdown/notes/todo.md');
+    expect(String(activeMarkdown.writeTargetPath)).toContain('.cockpit/scratch/notes/todo.md');
   });
 
   it('respects project markdown scope and targets the real project directory', async () => {
@@ -424,8 +423,8 @@ describe('control-plane cockpit session message routes', () => {
       expect(harness.dispatchCalls).toHaveLength(1);
       const contextText = harness.dispatchCalls[0].options?.context ?? '';
       expect(contextText).toContain('scopeMode: project');
-      expect(contextText).toContain('workspacePath: docs/plan.md');
-      expect(contextText).not.toContain('.cockpit/markdown/docs/plan.md');
+      expect(contextText).toContain('path: docs/plan.md');
+      expect(contextText).not.toContain('.cockpit/scratch/docs/plan.md');
 
       expect(harness.metadataUpdates).toHaveLength(1);
       const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
@@ -473,12 +472,10 @@ describe('control-plane cockpit session message routes', () => {
       }
       expect(activeMarkdown.scopeMode).toBe('project');
       expect(activeMarkdown.scopeProjectPath).toBe(projectRoot);
-      expect(activeMarkdown.isDraft).toBe(true);
-      expect(activeMarkdown.draftId).toBe('project-draft-001');
+      expect(activeMarkdown.scopeMode).toBe('project');
       expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-      expect(String(activeMarkdown.writeTargetPath)).toBe(
-        join(projectRoot, '.cockpit/drafts/project/project-draft-001.md')
-      );
+      expect(String(activeMarkdown.writeTargetPath)).toContain(`${projectRoot}/`);
+      expect(String(activeMarkdown.writeTargetPath)).toMatch(/untitled-\d+\.md$/);
     } finally {
       await rm(projectRoot, { recursive: true, force: true });
     }

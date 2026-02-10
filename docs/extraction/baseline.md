@@ -106,7 +106,7 @@ bun run start:tui
 # equivalent: bun run --cwd packages/tui start
 
 # Control-plane direct
-bun run packages/harness-daemon/src/harness/control_plane_server.ts
+bun run packages/control-plane/src/control-plane.ts
 ```
 
 Build / lint paths used for extraction gates:

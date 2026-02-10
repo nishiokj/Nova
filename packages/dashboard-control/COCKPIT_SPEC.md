@@ -299,8 +299,8 @@ Overview of all sessions, live and historical.
 
 | Location | Operation | Description |
 |----------|-----------|-------------|
-| `packages/harness-daemon/src/harness/control_plane_routes.ts` | `GET /cockpit/escalations` | Cockpit polls/streams pending escalations |
-| `packages/harness-daemon/src/harness/control_plane_routes.ts` | `POST /cockpit/escalations/:id/resolve` | Human resolves via Cockpit |
+| `packages/control-plane/src/harness/control_plane_routes.ts` | `GET /cockpit/escalations` | Cockpit polls/streams pending escalations |
+| `packages/control-plane/src/harness/control_plane_routes.ts` | `POST /cockpit/escalations/:id/resolve` | Human resolves via Cockpit |
 | `packages/orchestrator/src/orchestrator.ts` | Subscribes to `escalation_resolved` | Unblocks session and resumes work |
 | `packages/decision-watcher/src/watcher-agent.ts` | Resolution injected as context | Watcher uses resolution to inform future decisions |
 

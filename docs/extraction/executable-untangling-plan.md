@@ -120,6 +120,7 @@ Control plane is embedded and started by harness-daemon, coupling deployment lif
   - `packages/harness-daemon/src/harness/control_plane_server.ts`
   - `packages/harness-daemon/src/harness/control_plane_routes.ts`
   - `packages/harness-daemon/src/harness/routes/*`
+  - to `packages/control-plane/src/harness/*`
 - Update:
   - `packages/harness-daemon/src/harness/daemon.ts`
   - `packages/launcher/index.ts`
@@ -153,7 +154,7 @@ Service ownership is mixed (control-plane starts/manages GraphD in some paths). 
 4. Update config defaults and startup docs accordingly.
 
 ### Files
-- `packages/harness-daemon/src/harness/control_plane_server.ts`
+- `packages/control-plane/src/harness/control_plane_server.ts`
 - `packages/graphd/src/manager.ts`
 - `config/defaults.json`
 
@@ -233,4 +234,3 @@ Turn untangled boundaries into operational deployment units.
 - `orchestrator`
 - `decision-watcher`
 - `harness-daemon` runtime block
-

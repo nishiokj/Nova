@@ -408,8 +408,6 @@ function useTerminalSize() {
     columns: stdout?.columns ?? 80,
     rows: stdout?.rows ?? 24,
   });
-  // Force re-render counter - incrementing this triggers a full component tree re-render
-  const [, forceUpdate] = useState(0);
 
   useEffect(() => {
     if (!stdout) {
@@ -417,18 +415,16 @@ function useTerminalSize() {
     }
 
     const handler = () => {
-      // Clear screen and reset cursor to force Ink to repaint everything
-      // \x1b[2J = clear entire screen
-      // \x1b[H = move cursor to home (1,1)
-      // \x1b[3J = clear scrollback buffer (helps with some terminals)
-      stdout.write("\x1b[2J\x1b[H\x1b[3J");
-
-      // Update size
-      setSize({ columns: stdout.columns ?? DEFAULT_TERMINAL_WIDTH, rows: stdout.rows ?? DEFAULT_TERMINAL_HEIGHT });
-
-      // Force a full re-render by updating a counter
-      // This helps Ink recalculate its entire virtual buffer
-      forceUpdate((n) => n + 1);
+      const nextSize = {
+        columns: stdout.columns ?? DEFAULT_TERMINAL_WIDTH,
+        rows: stdout.rows ?? DEFAULT_TERMINAL_HEIGHT,
+      };
+      setSize((current) => {
+        if (current.columns === nextSize.columns && current.rows === nextSize.rows) {
+          return current;
+        }
+        return nextSize;
+      });
     };
 
     stdout.on("resize", handler);
@@ -462,9 +458,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   } | null>(null);
   const maxScrollRef = useRef(0);
   const historyHeightRef = useRef(0);
-  const width = Math.max(MIN_TERMINAL_WIDTH, size.columns || DEFAULT_TERMINAL_WIDTH);
-  const height = Math.max(MIN_TERMINAL_HEIGHT, size.rows || DEFAULT_TERMINAL_HEIGHT);
-  const contentWidth = width - HORIZONTAL_PADDING * 2;
+  const width = Math.max(1, size.columns || DEFAULT_TERMINAL_WIDTH);
+  const height = Math.max(1, size.rows || DEFAULT_TERMINAL_HEIGHT);
+  const isTerminalTooSmall = width < MIN_TERMINAL_WIDTH || height < MIN_TERMINAL_HEIGHT;
+  const contentWidth = Math.max(1, width - HORIZONTAL_PADDING * 2);
   const MESSAGE_GUTTER = 2;
   const messageWidth = Math.max(10, contentWidth - MESSAGE_GUTTER * 2);
   const prompt = "> ";
@@ -3376,6 +3373,29 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     : null;
   const lastModelName = lastModelId ? (lastModelEntry?.name ?? lastModelId) : null;
   const showLastModel = !!lastModelName;
+
+  if (isTerminalTooSmall) {
+    const lines = [
+      "Terminal too small for full TUI layout.",
+      `Current: ${width}x${height}`,
+      `Minimum: ${MIN_TERMINAL_WIDTH}x${MIN_TERMINAL_HEIGHT}`,
+      "Resize the terminal to continue.",
+    ];
+    const visibleLines = lines.slice(0, Math.max(1, height));
+    return (
+      <Box flexDirection="column" width={width} height={height}>
+        {visibleLines.map((line, index) => (
+          <Text
+            key={`small-terminal-${index}`}
+            color={index === 0 ? colors.warning : colors.muted}
+            bold={index === 0}
+          >
+            {truncateText(line, width)}
+          </Text>
+        ))}
+      </Box>
+    );
+  }
 
   if (snapshot.helpVisible) {
     return (

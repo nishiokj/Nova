@@ -11,6 +11,7 @@
     "start": "bun run src/control-plane.ts",
     "build": "tsc",
     "lint": "tsc --noEmit",
+    "test": "bun test",
     "clean": "rm -rf dist"
   },
   "dependencies": {
