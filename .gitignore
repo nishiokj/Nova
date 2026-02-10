@@ -84,3 +84,7 @@ temp_query.sql
 ask_claude
 lab
 harness_manifest.json
+.rgignore
+
+# Project config (local overrides)
+.config/settings.local.json

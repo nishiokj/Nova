@@ -90,7 +90,7 @@ import {
   assertValidActionForTrigger,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
-import { createHookRegistry, registerHook, executeHooks, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
+import { createHookRegistry, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
 import { createWorkItem } from 'work';
 import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 import { getProtocolId } from 'protocol';
@@ -100,6 +100,7 @@ import {
   resolveSessionEscalationState,
   type EscalationResolutionInput,
 } from './escalation_state.js';
+import { executeHooks, registerHook } from './legacy_hooks.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -2523,6 +2524,9 @@ export class AgentHarness {
 
     const runtime = {
       hookRegistry: asyncEnabledForRun ? effectiveHookRegistry : undefined,
+      executeLegacyHook: async (event: InternalHookEvent, hookContext: InternalHookContext) => {
+        await executeHooks(event.type, event, hookContext);
+      },
       onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
       // Pass interruption check callback so orchestrator can avoid premature termination
       // when user messages arrived during execution.

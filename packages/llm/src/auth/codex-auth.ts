@@ -21,7 +21,7 @@ export const CODEX_OAUTH_CONFIG: CodexOAuthConfig = {
 const REFRESH_BUFFER_SECONDS = 300;
 
 /** Token storage path */
-const TOKEN_PATH = join(homedir(), '.jesus', 'codex-auth.json');
+const TOKEN_PATH = join(homedir(), '.config', 'rex', 'codex-auth.json');
 
 /**
  * Manages Codex OAuth tokens - storage, refresh, and retrieval.
@@ -131,7 +131,7 @@ export class CodexTokenManager implements TokenManager {
 
   async storeTokens(tokens: CodexTokens): Promise<void> {
     this.tokens = tokens;
-    const dir = join(homedir(), '.jesus');
+    const dir = join(homedir(), '.config', 'rex');
     if (!existsSync(dir)) {
       await mkdir(dir, { recursive: true });
     }

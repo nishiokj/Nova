@@ -3579,9 +3579,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       {!isFullScreenMode && (
         <Box flexDirection="column" height={historyHeight}>
           {visibleHistoryLines.map((line, index) => {
-            const isUserLine = line.role === "user";
             const isReasoning = line.role === "reasoning";
-            const bgColor = isUserLine ? colors.userBg : undefined;
             const leftPad = MESSAGE_GUTTER;
             const rightPad = MESSAGE_GUTTER;
             const baseText = line.text ?? "";
@@ -3590,7 +3588,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
             const rightFill = remainingWidth > 0 ? remainingWidth : 0;
             return (
               <Box key={line.id ?? `hist-${index}`}>
-                <Text width={contentWidth} backgroundColor={bgColor}>
+                <Text width={contentWidth}>
                   <StyledLine
                     text={baseText}
                     baseColor={roleColor(line.role)}

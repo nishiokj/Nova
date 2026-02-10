@@ -24,7 +24,6 @@
     "context": "workspace:*",
     "work": "workspace:*",
     "comms-bus": "workspace:*",
-    "decision-watcher": "workspace:*",
     "protocol": "workspace:*"
   },
   "devDependencies": {

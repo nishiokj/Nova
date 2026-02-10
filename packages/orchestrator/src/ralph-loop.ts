@@ -20,8 +20,7 @@
  * ```
  */
 
-import type { StopHookHandler, StopHookContext } from './hooks.js';
-import type { StopHookResult } from 'agent';
+import type { StopHookHandler, StopHookContext, StopHookResult } from 'agent';
 
 export interface RalphLoopConfig {
   /** The prompt to repeat each iteration */

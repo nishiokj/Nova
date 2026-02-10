@@ -43,7 +43,46 @@ The Factory is not a container orchestrator. It's not a sandbox. It's not a dash
 
 Sits between the agent and the LLM API. Captures every request and response. Correlates API calls with tool executions and file mutations.
 
-**Mechanism:** `ANTHROPIC_BASE_URL=http://localhost:9500` (or `proxy.company.com:9500` for teams). The agent calls the Factory. The Factory logs, optionally enriches, forwards to the real API, logs the response, returns it.
+**Mechanism:** Environment variable overrides per provider. One-time setup via `rex init`:
+
+```bash
+# rex init writes these to shell profile — covers all agents automatically
+export ANTHROPIC_BASE_URL=http://localhost:9500    # Claude Code, Antigravity
+export OPENAI_BASE_URL=http://localhost:9500        # Codex, Aider, OpenCode
+export GOOGLE_GEMINI_BASE_URL=http://localhost:9500 # Gemini CLI
+```
+
+For teams: replace `localhost:9500` with `proxy.company.com:9500`.
+
+Every agent that respects its provider's base URL env var routes through the Factory automatically. No per-agent hooks, no per-agent config files. One proxy, one set of env vars.
+
+**Multi-provider routing:** The proxy detects the API format from the request path and content:
+
+```
+localhost:9500
+  ├── /v1/messages              → Anthropic Messages API
+  ├── /v1/responses             → OpenAI Responses API
+  ├── /v1/chat/completions      → OpenAI Chat Completions API
+  ├── /v1beta/models/*          → Google Gemini API
+  └── All routes:
+      ├── Parse request for capture (model, messages, tools, system prompt)
+      ├── [Optional] Inject knowledge into system prompt
+      ├── Forward to real API (swap base URL, pass through everything else)
+      ├── Parse response for capture (tokens, cost, tool calls, content)
+      └── Return response unchanged to caller
+```
+
+**Agent compatibility:**
+
+| Agent | Env Var | Works with localhost? |
+|-------|---------|----------------------|
+| Claude Code | `ANTHROPIC_BASE_URL` | Yes |
+| Codex (OpenAI) | `OPENAI_BASE_URL` or `config.toml` | Yes |
+| Gemini CLI | `GOOGLE_GEMINI_BASE_URL` | Yes |
+| Antigravity | `ANTHROPIC_BASE_URL` | Yes |
+| Aider | `OPENAI_API_BASE` | Yes |
+| OpenCode | Provider config | Yes |
+| Cursor | Settings → Override Base URL | No (requires HTTPS + public URL) |
 
 **What it captures per API call:**
 - Full prompt (system + conversation + tools)
@@ -64,7 +103,19 @@ The proxy captures the LLM-level data. Hooks capture the execution-level data. T
 
 **Latency overhead:** ~1-5ms per API call. LLM calls take 500-30,000ms. Imperceptible.
 
-**Build vs. buy:** The proxy layer itself is commodity. LiteLLM, Helicone, Bifrost all do request forwarding + logging. The Factory can use an existing proxy for plumbing and focus on the intelligence layer. Alternatively, a minimal custom proxy (just forward + log) is ~500 lines of code — the complexity is in what you do with the data, not in the forwarding.
+**Existing assets:** `packages/llm/src/providers/` already contains full provider adapters for all major API formats:
+
+| Provider Adapter | API Format | What It Parses |
+|-----------------|------------|----------------|
+| `anthropic.ts` | Anthropic Messages | messages, tools, token usage, tool calls, streaming SSE |
+| `openai.ts` | OpenAI Responses | input, tools, token usage, tool calls, reasoning, streaming SSE |
+| `openai-compat.ts` | OpenAI Chat Completions | messages, tools, token usage, tool calls, reasoning, streaming SSE |
+| `codex.ts` | Codex (OpenAI variant) | Same as OpenAI with Codex-specific handling |
+| `vercel-gateway.ts` | Vercel AI Gateway | Gateway-specific routing |
+
+These adapters already handle request formatting, response parsing, streaming SSE consumption, token extraction, tool call parsing, and error handling. The proxy reuses this parsing logic to extract structured fields from passthrough traffic — **the format-specific work is already done.**
+
+The proxy itself is a thin HTTP forwarding layer. It receives requests in provider-native format, parses them for capture using the existing adapter logic, forwards unchanged to the real API, parses the response, and returns it unchanged to the caller.
 
 ### 2. Knowledge Store (Intelligence)
 
@@ -274,32 +325,38 @@ The same architecture scales from a single developer to an enterprise. The compo
 ```
 Developer machine
   ├── rex daemon (localhost:9500)
-  │   ├── Proxy: forward to api.anthropic.com
+  │   ├── Proxy: multi-provider routing
+  │   │   ├── /v1/messages → api.anthropic.com
+  │   │   ├── /v1/responses, /v1/chat/completions → api.openai.com
+  │   │   └── /v1beta/models/* → generativelanguage.googleapis.com
   │   ├── Knowledge store: SQLite at ~/.rex/knowledge.db
   │   ├── Trace store: SQLite at ~/.rex/traces.db
   │   └── Context generator: writes ~/.rex/projects/*/context.md
   │
-  └── claude (ANTHROPIC_BASE_URL=http://localhost:9500)
+  ├── claude   (ANTHROPIC_BASE_URL=http://localhost:9500)
+  ├── codex    (OPENAI_BASE_URL=http://localhost:9500)
+  └── gemini   (GOOGLE_GEMINI_BASE_URL=http://localhost:9500)
 ```
 
-One process. Local SQLite. No infrastructure. All knowledge is personal — what YOUR sessions have learned.
+One process. Local SQLite. No infrastructure. All agents on the machine route through the same proxy. All knowledge is personal — what YOUR sessions have learned.
 
 ### Team (Shared Knowledge)
 
 ```
 Team server (or cloud service)
   ├── Factory API (proxy.team.com:9500)
-  │   ├── Proxy: forward to api.anthropic.com
+  │   ├── Proxy: multi-provider routing (Anthropic, OpenAI, Gemini)
   │   ├── Knowledge store: Postgres (shared across team)
   │   ├── Trace store: Postgres or object storage
   │   └── Context generator: per-session, queries shared store
   │
-Developer A: ANTHROPIC_BASE_URL=https://proxy.team.com:9500
-Developer B: ANTHROPIC_BASE_URL=https://proxy.team.com:9500
-Developer C: ANTHROPIC_BASE_URL=https://proxy.team.com:9500
+Developer A: rex init --team https://proxy.team.com:9500
+  → ANTHROPIC_BASE_URL, OPENAI_BASE_URL, GOOGLE_GEMINI_BASE_URL all set
+Developer B: rex init --team https://proxy.team.com:9500
+Developer C: rex init --team https://proxy.team.com:9500
 ```
 
-Same architecture. Shared Postgres instead of local SQLite. Knowledge from Developer A's sessions is available to Developer B's agents. Team leads can curate team-level knowledge.
+Same architecture. Shared Postgres instead of local SQLite. Knowledge from Developer A's Claude Code sessions is available to Developer B's Codex agent. Cross-agent, cross-provider learning. Team leads can curate team-level knowledge.
 
 ### Enterprise (Policy + Compliance)
 
@@ -402,27 +459,28 @@ Not Day 1.
 
 ## What We Build
 
-### Phase 1: Proxy + Trace Capture
+### Phase 1: Multi-Provider Proxy + Trace Capture
 
-**Goal:** `rex start` runs a local proxy. Developer uses Claude Code normally. Every API call is captured with full request/response data.
+**Goal:** `rex start` runs a local proxy. Developer uses any agent (Claude Code, Codex, Gemini CLI, Aider, etc.) normally. Every API call is captured with full request/response data.
 
 ```
+rex init → writes env vars to shell profile (one-time)
 rex start → proxy on localhost:9500
-ANTHROPIC_BASE_URL=http://localhost:9500
-claude → works normally, all calls captured
+claude / codex / gemini → all route through proxy, all calls captured
 rex trace list → show sessions
 rex trace show <id> → full session replay
-rex cost → cost breakdown
+rex cost → cost breakdown by provider, model, session
 ```
 
 Deliverables:
-- `rex` CLI binary
-- HTTP proxy that forwards Anthropic API calls
+- `rex` CLI with `init`, `start`, `trace`, `cost` subcommands
+- Multi-provider HTTP proxy with route detection (Anthropic, OpenAI Responses, OpenAI Chat Completions, Gemini)
+- Request/response parsing using existing `packages/llm/src/providers/` adapter logic
 - Request/response logging to local SQLite
-- Supplementary capture via Claude Code hooks (tool calls, file diffs)
+- Supplementary capture via Claude Code hooks (tool calls, file diffs) — optional, for execution-level detail
 - `rex trace` and `rex cost` commands
 
-**Done when:** After a Claude Code session, `rex trace show` displays every API call, tool execution, and file change in a coherent timeline with cost breakdown.
+**Done when:** Developer runs `rex start`, uses Claude Code AND Codex in the same day, and `rex trace list` shows both sessions with full API call history, token usage, and cost breakdown across providers.
 
 ### Phase 2: Knowledge Extraction
 
@@ -467,7 +525,8 @@ Deliverables:
 ### Deferred
 
 - Sandbox / container isolation (fleet-only, Day N)
-- Multi-provider support (OpenAI, Bedrock, Vertex)
+- Cursor support (requires HTTPS + public URL — needs tunnel or deployed proxy)
+- Additional provider formats (Bedrock, Vertex — different auth models)
 - Dashboard UI
 - CI/CD integration (auto-merge, risk classification)
 - Enterprise SSO, RBAC, compliance reporting

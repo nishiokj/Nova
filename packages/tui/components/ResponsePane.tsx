@@ -17,13 +17,12 @@ import { getColors } from "../theme.js";
 const getDiffColors = () => {
   const theme = getColors();
   return {
-    header: { fg: theme.diffHeader, bg: theme.diffHeaderBg }, // From theme (matches userBg)
-    added: { fg: "#4ade80", bg: undefined },      // Light green text, no background
-    removed: { fg: "#f87171", bg: undefined },    // Light red text, no background
-    context: { fg: theme.text, bg: undefined },   // No background for non-affected lines
-    separator: { fg: theme.muted, bg: undefined }, // No background for separators
-    text: { fg: theme.text, bg: undefined },       // Theme text
-    pane: theme.diffContextBg,                     // Theme pane background
+    header: { fg: theme.diffHeader, bg: undefined }, // Text-only header styling
+    added: { fg: "#4ade80", bg: undefined },        // Light green text, no background
+    removed: { fg: "#f87171", bg: undefined },      // Light red text, no background
+    context: { fg: theme.text, bg: undefined },      // No background for non-affected lines
+    separator: { fg: theme.muted, bg: undefined },   // No background for separators
+    text: { fg: theme.text, bg: undefined },         // Theme text
   };
 };
 
@@ -47,9 +46,9 @@ export function ResponsePane({ content, width, height }: ResponsePaneProps): JSX
       {visibleLines.map((line, i) => (
         <ResponseLineRow key={i} line={line} width={width} />
       ))}
-      {/* Fill remaining space with background */}
+      {/* Fill remaining space */}
       {Array.from({ length: Math.max(0, height - visibleLines.length) }).map((_, i) => (
-        <Text key={`empty-${i}`} backgroundColor={colors.pane}>
+        <Text key={`empty-${i}`}>
           {" ".repeat(width)}
         </Text>
       ))}

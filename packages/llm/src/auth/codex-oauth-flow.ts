@@ -143,7 +143,7 @@ export function hasCodexCredentials(): boolean {
   const { existsSync } = require('fs');
   const { homedir } = require('os');
   const { join } = require('path');
-  const tokenPath = join(homedir(), '.jesus', 'codex-auth.json');
+  const tokenPath = join(homedir(), '.config', 'rex', 'codex-auth.json');
   if (!existsSync(tokenPath)) return false;
   try {
     const content = require('fs').readFileSync(tokenPath, 'utf-8');

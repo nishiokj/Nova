@@ -2,7 +2,7 @@
  * Permission Checker - Default-deny permission system for agent tool execution.
  *
  * Only Bash, Write, and Edit tools require permission checks.
- * Loads rules from ~/.jesus/settings.json, .jesus/settings.json, .jesus/settings.local.json
+ * Loads rules from ~/.config/rex/settings.json, .config/settings.json, .config/settings.local.json
  */
 
 import * as fs from 'fs';
@@ -477,9 +477,9 @@ export class PermissionChecker {
 
     // Config files in priority order (lowest to highest)
     const configPaths = [
-      path.join(os.homedir(), '.jesus', 'settings.json'),      // Global
-      path.join(workingDir, '.jesus', 'settings.json'),        // Project
-      path.join(workingDir, '.jesus', 'settings.local.json'),  // Local override
+      path.join(os.homedir(), '.config', 'rex', 'settings.json'),  // Global
+      path.join(workingDir, '.config', 'settings.json'),        // Project
+      path.join(workingDir, '.config', 'settings.local.json'),  // Local override
     ];
 
     for (const configPath of configPaths) {
@@ -540,7 +540,7 @@ export class PermissionChecker {
   }
 
   /**
-   * Persist "always allow" to .jesus/settings.json
+   * Persist "always allow" to .config/settings.json
    */
   private addPersistentRule(
     type: 'allow' | 'deny',
@@ -548,7 +548,7 @@ export class PermissionChecker {
     pattern: string,
     workingDir: string
   ): void {
-    const configDir = path.join(workingDir, '.jesus');
+    const configDir = path.join(workingDir, '.config');
     const configPath = path.join(configDir, 'settings.json');
 
     try {
