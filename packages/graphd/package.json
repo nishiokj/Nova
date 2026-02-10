@@ -6,6 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
+    "start": "bun run src/graphd.ts",
     "build": "tsc",
     "lint": "npx tsc --noEmit",
     "clean": "rm -rf dist"

@@ -130,9 +130,16 @@ export class ControlPlaneServer {
       });
 
       this.graphd = new GraphDManager(graphdConfig);
-      this.graphdStarted = await this.graphd.start();
+      this.graphdStarted = await this.graphd.connect();
+      if (!this.graphdStarted) {
+        const graphdAddress = `${config.graphd.host}:${config.graphd.port}`;
+        console.warn(
+          `[control-plane] GraphD is not running at ${graphdAddress}; start GraphD before control-plane for full API support`
+        );
+        this.graphd = null;
+      }
     } catch (error) {
-      console.warn('[control-plane] Failed to start GraphD:', errorMessage(error));
+      console.warn('[control-plane] Failed to connect to GraphD:', errorMessage(error));
       this.graphd = null;
       this.graphdStarted = false;
     }

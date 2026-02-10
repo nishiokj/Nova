@@ -192,6 +192,9 @@ bun run packages/tui/index.tsx
 # Run harness daemon (bus server)
 bun run packages/harness-daemon/src/index.ts
 
+# Run GraphD (standalone datastore process)
+bun run packages/graphd/src/graphd.ts
+
 # Run control-plane server (HTTP API + dashboard)
 bun run packages/control-plane/src/control-plane.ts
 

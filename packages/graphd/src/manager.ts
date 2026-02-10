@@ -128,6 +128,14 @@ export interface GraphDConfig {
   sessionCleanupIntervalS: number;
 }
 
+export interface GraphDStartOptions {
+  /**
+   * When false, only attach to an already-running GraphD server.
+   * The manager will not start an HTTP server if no owner is reachable.
+   */
+  allowServerStart?: boolean;
+}
+
 /**
  * Create default GraphD configuration.
  */
@@ -203,8 +211,9 @@ export class GraphDManager {
    * Start the GraphD manager.
    * Throws on failure with detailed error message.
    */
-  async start(): Promise<boolean> {
+  async start(options: GraphDStartOptions = {}): Promise<boolean> {
     this.lastError = null;
+    const allowServerStart = options.allowServerStart ?? true;
 
     try {
       // Check if port is already in use BEFORE opening database
@@ -237,6 +246,16 @@ export class GraphDManager {
         }
 
         return true;
+      }
+
+      // Client-only mode: attach only if another GraphD process already owns the server.
+      if (!allowServerStart) {
+        this.running = false;
+        this.reusingExisting = false;
+        this.lastError = new Error(
+          `GraphD is not reachable at ${this.config.host}:${this.config.port} (client-only mode)`
+        );
+        return false;
       }
 
       // Ensure database directory exists
@@ -327,6 +346,14 @@ export class GraphDManager {
       // Re-throw with detailed message so callers get the info
       throw this.lastError;
     }
+  }
+
+  /**
+   * Attach to an already-running GraphD instance without starting a server.
+   * Returns false when no GraphD server is reachable.
+   */
+  async connect(): Promise<boolean> {
+    return this.start({ allowServerStart: false });
   }
 
   /**

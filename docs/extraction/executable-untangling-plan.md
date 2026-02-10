@@ -153,6 +153,9 @@ Service ownership is mixed (control-plane starts/manages GraphD in some paths). 
 3. Keep `agent-memory` as an independent daemon.
 4. Update config defaults and startup docs accordingly.
 
+### Progress
+- 2026-02-10: `control-plane` switched to GraphD client-only attach mode (no implicit GraphD bootstrap).
+
 ### Files
 - `packages/control-plane/src/harness/control_plane_server.ts`
 - `packages/graphd/src/manager.ts`

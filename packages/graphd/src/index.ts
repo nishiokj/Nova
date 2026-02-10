@@ -106,5 +106,5 @@ export {
 // ============================================
 // MANAGER
 // ============================================
-export type { GraphDConfig } from './manager.js';
+export type { GraphDConfig, GraphDStartOptions } from './manager.js';
 export { GraphDManager, createGraphDConfig } from './manager.js';
