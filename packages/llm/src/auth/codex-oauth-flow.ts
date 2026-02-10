@@ -19,6 +19,7 @@ import {
   buildAuthUrl,
   exchangeCodeForTokens,
   getCodexTokenManager,
+  hasStoredCodexTokens,
 } from './codex-auth.js';
 
 export interface OAuthFlowCallbacks {
@@ -140,19 +141,7 @@ export async function isCodexAuthenticated(): Promise<boolean> {
  * Use this for synchronous auth checks; use isCodexAuthenticated for full validation.
  */
 export function hasCodexCredentials(): boolean {
-  const { existsSync } = require('fs');
-  const { homedir } = require('os');
-  const { join } = require('path');
-  const tokenPath = join(homedir(), '.jesus', 'codex-auth.json');
-  if (!existsSync(tokenPath)) return false;
-  try {
-    const content = require('fs').readFileSync(tokenPath, 'utf-8');
-    const tokens = JSON.parse(content);
-    // Check if tokens object has required fields (not just empty {})
-    return !!(tokens.access_token && tokens.refresh_token);
-  } catch {
-    return false;
-  }
+  return hasStoredCodexTokens();
 }
 
 /**

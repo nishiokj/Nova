@@ -1,17 +1,12 @@
 /**
- * Hook System - Simple registry + executor pattern.
+ * Legacy Internal Hook System (harness-owned).
  *
- * Register callbacks (TypeScript functions or shell commands) for fixed event types.
- * Shell commands receive JSON on stdin and return exit codes (0=success, 2=block).
+ * Registry + executor for internal async hooks that are not part of the
+ * protocol control-plane hook path.
  */
 
 import { spawn } from 'child_process';
-import type { InternalHookEvent, InternalHookContext, StopHookResult, StopHookContext, StopHookHandler } from 'agent';
-
-// Re-export stop hook types from agent (canonical location)
-export type { StopHookContext, StopHookHandler };
-
-// --- Event Types ---
+import type { InternalHookEvent, InternalHookContext } from 'agent';
 
 export type HookEventType = InternalHookEvent['type'] | 'stop' | 'prompt_user';
 
@@ -45,8 +40,6 @@ export type PromptUserHookResult =
   | { action: 'answer'; answer: string | string[]; contextAddendum?: string }
   | { action: 'block'; reason: string };
 
-// --- Callback Types ---
-
 /** TypeScript callback for internal hooks */
 export type HookCallback<T extends InternalHookEvent = InternalHookEvent> = (
   event: T,
@@ -66,8 +59,6 @@ export interface ShellHook {
 
 export type HookEntry = HookCallback | ShellHook | PromptUserHookHandler;
 
-// --- Registry ---
-
 const registry = new Map<HookEventType, HookEntry[]>();
 
 /**
@@ -79,7 +70,6 @@ export function registerHook(event: HookEventType, hook: HookEntry): () => void 
   hooks.push(hook);
   registry.set(event, hooks);
 
-  // Return disposer to prevent long-lived processes from leaking hook handlers.
   return () => {
     const existing = registry.get(event);
     if (!existing || existing.length === 0) return;
@@ -108,8 +98,6 @@ export function getHooks(event: HookEventType): HookEntry[] {
   return registry.get(event) ?? [];
 }
 
-// --- Executor ---
-
 function isShellHook(h: HookEntry): h is ShellHook {
   return typeof h === 'object' && 'command' in h;
 }
@@ -137,12 +125,7 @@ async function executeShellHook(
       timeout,
     });
 
-    let stdout = '';
     let stderr = '';
-
-    child.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
 
     child.stderr?.on('data', (data: Buffer) => {
       stderr += data.toString();
@@ -156,10 +139,8 @@ async function executeShellHook(
       if (code === 0) {
         resolve();
       } else if (code === 2) {
-        // Exit 2 = blocking error
         reject(new Error(stderr.trim() || 'Hook blocked execution'));
       } else {
-        // Non-blocking warning
         if (stderr) {
           console.error(`[HOOK:${payload.type}] Warning: ${stderr.trim()}`);
         }
@@ -167,7 +148,6 @@ async function executeShellHook(
       }
     });
 
-    // Write payload to stdin
     child.stdin?.write(input);
     child.stdin?.end();
   });
@@ -190,7 +170,6 @@ export async function executeHooks(
       if (isShellHook(hook)) {
         await executeShellHook(hook, payload, ctx);
       } else if (isPromptUserHook(event, hook)) {
-        // PromptUser hooks have different signature - they return PromptUserHookResult
         await hook(payload as unknown as PromptUserHookEvent);
       } else {
         const callback = hook as HookCallback;
@@ -204,19 +183,12 @@ export async function executeHooks(
   await Promise.all(executions);
 }
 
-// --- Config Loading ---
-
 export interface HooksConfig {
   [event: string]: Array<{ command: string; timeout?: number }>;
 }
 
 /**
  * Load hooks from JSON config object.
- * Config format:
- * {
- *   "files_modified": [{ "command": "./scripts/on-change.sh", "timeout": 5000 }],
- *   "agent_completed": [{ "command": "python3 ./hooks/log.py" }]
- * }
  */
 export function loadHooksFromConfig(config: HooksConfig): void {
   for (const [event, hooks] of Object.entries(config)) {
@@ -253,13 +225,10 @@ function isValidEventType(event: string): event is HookEventType {
   return validEvents.includes(event as HookEventType);
 }
 
-// --- Backwards Compat (deprecated, remove after migration) ---
-
 /** @deprecated Use executeHooks instead */
 export function getHandlers<T extends InternalHookEvent['type']>(
   eventType: T
 ): Array<HookCallback> {
   const hooks = registry.get(eventType) ?? [];
-  // Filter to only TypeScript callbacks (shell hooks can't be returned as handlers)
   return hooks.filter((h): h is HookCallback => !isShellHook(h));
 }

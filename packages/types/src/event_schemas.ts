@@ -146,6 +146,41 @@ export const LLMErrorDataSchema = z.object({
 /**
  * Data for memory_injected event.
  */
+const MemoryInjectionCandidateSchema = z.object({
+  doc_id: z.string(),
+  chunk_id: z.string().nullable(),
+  source_type: z.enum(['file', 'symbol', 'summary', 'tool_output', 'web']),
+  scores: z.object({
+    embedding_score: z.number().nullable(),
+    bm25_score: z.number().nullable(),
+    heuristic_score: z.number().nullable(),
+    reranker_score: z.number().nullable(),
+  }),
+  token_size: z.number(),
+  freshness: z.string().nullable(),
+  scope: z.string().nullable(),
+});
+
+export const MemoryInjectionTrainingSignalSchema = z.object({
+  retrieval_id: z.string(),
+  query: z.object({
+    raw: z.string(),
+    state_summary: z.string(),
+  }),
+  candidate_list: z.array(MemoryInjectionCandidateSchema),
+  selected_set: z.array(MemoryInjectionCandidateSchema),
+  budget: z.object({
+    max_tokens: z.number(),
+    k: z.number(),
+    max_items: z.number(),
+    filters: z.record(z.string(), z.unknown()).nullable(),
+    min_coverage: z.record(z.string(), z.number()),
+  }),
+  run_id: z.string().nullable(),
+  session_id: z.string(),
+  work_item_id: z.string().nullable(),
+});
+
 export const MemoryInjectedDataSchema = z.object({
   query: z.string(),
   resultPreview: z.string().optional(),
@@ -160,6 +195,7 @@ export const MemoryInjectedDataSchema = z.object({
   discriminatorsIncluded: z.number().optional(),
   totalTokens: z.number().optional(),
   fallbackToV1: z.boolean().optional(),
+  trainingSignal: MemoryInjectionTrainingSignalSchema.optional(),
 });
 /**
  * Work item summary in runtime script.
@@ -388,6 +424,7 @@ export type ToolCallData = z.infer<typeof ToolCallDataSchema>;
 export type HookCallData = z.infer<typeof HookCallDataSchema>;
 export type LLMCallData = z.infer<typeof LLMCallDataSchema>;
 export type LLMErrorData = z.infer<typeof LLMErrorDataSchema>;
+export type MemoryInjectionTrainingSignal = z.infer<typeof MemoryInjectionTrainingSignalSchema>;
 export type MemoryInjectedData = z.infer<typeof MemoryInjectedDataSchema>;
 export type RuntimeScriptCreatedData = z.infer<typeof RuntimeScriptCreatedDataSchema>;
 export type WorkItemStatusValue = z.infer<typeof WorkItemStatusValueSchema>;

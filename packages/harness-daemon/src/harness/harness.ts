@@ -84,13 +84,14 @@ import {
   type WatcherTrigger,
   type DecisionDatabase,
   type WorkItemLog,
+  type WorkLog,
   type WatcherAction,
   type RaisedEscalation,
   type SemanticOutput,
   assertValidActionForTrigger,
 } from 'decision-watcher';
 import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
-import { createHookRegistry, registerHook, executeHooks, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
+import { createHookRegistry, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
 import { createWorkItem } from 'work';
 import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 import { getProtocolId } from 'protocol';
@@ -100,6 +101,7 @@ import {
   resolveSessionEscalationState,
   type EscalationResolutionInput,
 } from './escalation_state.js';
+import { executeHooks, registerHook } from './legacy_hooks.js';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -640,6 +642,7 @@ export class AgentHarness {
   private traceSubscriber: TraceSubscriber | null = null;
   private memoryClient: SyncClient | null = null;
   private asyncModeIssues: string[] = [];
+  private initializedModelSelections = new Set<string>();
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
@@ -1017,6 +1020,7 @@ export class AgentHarness {
       state.store.close();
       clearSessionState(state);
       this.sessions.delete(sessionKey);
+      this.initializedModelSelections.delete(sessionKey);
     }
 
     // Always mark session as inactive in GraphD, even if in-memory state was already evicted
@@ -1036,10 +1040,10 @@ export class AgentHarness {
   async start(): Promise<boolean> {
     if (this.graphd && !this.graphdStarted) {
       try {
-        const started = await this.graphd.start();
-        this.graphdStarted = started;
-        if (started) {
-          this.logger.info('GraphD started', {
+        const connected = await this.graphd.connect();
+        this.graphdStarted = connected;
+        if (connected) {
+          this.logger.info('GraphD connected (external owner)', {
             port: this.config.graphd.port,
             dbPath: this.config.graphd.dbPath,
             reusing: this.graphd.isReusing(),
@@ -1048,11 +1052,19 @@ export class AgentHarness {
             this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd, { batchMode: false });
             this.logger.debug('GraphDSubscriber created');
           }
+        } else {
+          this.logger.warning('GraphD not reachable; starting harness without GraphD features', {
+            host: this.config.graphd.host,
+            port: this.config.graphd.port,
+            dbPath: this.config.graphd.dbPath,
+          });
+          this.graphd = null;
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.logger.error('GraphD failed to start', { error: message });
-        throw error;
+        this.logger.warning('GraphD connect failed; starting harness without GraphD features', { error: message });
+        this.graphd = null;
+        this.graphdStarted = false;
       }
     }
 
@@ -1157,6 +1169,7 @@ export class AgentHarness {
     state.store.close();
     clearSessionState(state);
     this.sessions.delete(oldestKey);
+    this.initializedModelSelections.delete(oldestKey);
     this.logger.debug('LRU evicted session (maxSessions reached)', {
       sessionKey: oldestKey,
       maxSessions: this.maxSessions,
@@ -1189,9 +1202,93 @@ export class AgentHarness {
 
     if (options.includeUserPreferences !== false) {
       this.hydrateModelSelectionsFromPreferences(sessionKey, store);
+      this.seedDefaultModelSelections(sessionKey, store);
     }
 
     return store;
+  }
+
+  private modelSelectionForAgent(agentType: string, hiddenModels: Set<string>): ModelSelection | null {
+    const agentConfig = this.config.agents[agentType];
+    const model = agentConfig?.llm.model?.trim();
+    if (!model || hiddenModels.has(model.toLowerCase())) {
+      return null;
+    }
+    const provider = (agentConfig.llm.displayProvider || agentConfig.llm.provider)?.trim();
+    if (!provider) {
+      return null;
+    }
+    return { provider, model };
+  }
+
+  private resolveFallbackModelSelection(hiddenModels: Set<string>): ModelSelection | null {
+    const defaultModel = this.config.models.default?.trim();
+    if (defaultModel && !hiddenModels.has(defaultModel.toLowerCase())) {
+      const modelEntry = this.config.models.available.find(
+        (entry) => entry.id.trim().toLowerCase() === defaultModel.toLowerCase()
+      );
+      if (modelEntry?.provider) {
+        return { provider: modelEntry.provider, model: modelEntry.id };
+      }
+    }
+
+    const firstVisible = this.config.models.available.find(
+      (entry) => !hiddenModels.has(entry.id.trim().toLowerCase())
+    );
+    if (!firstVisible?.provider) {
+      return null;
+    }
+    return { provider: firstVisible.provider, model: firstVisible.id };
+  }
+
+  private seedDefaultModelSelections(sessionKey: string, store: SessionStore): void {
+    if (this.initializedModelSelections.has(sessionKey)) {
+      return;
+    }
+
+    const hiddenModels = new Set<string>();
+    if (this.isGraphDReady() && this.graphd) {
+      const hiddenModelList = this.graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+      for (const hidden of hiddenModelList) {
+        hiddenModels.add(hidden.trim().toLowerCase());
+      }
+    }
+
+    let applied = 0;
+    let standardSelection = store.getModelSelection('standard');
+    if (!standardSelection) {
+      standardSelection =
+        this.modelSelectionForAgent('standard', hiddenModels)
+        ?? this.modelSelectionForAgent(this.config.defaultAgent, hiddenModels)
+        ?? this.resolveFallbackModelSelection(hiddenModels);
+      if (standardSelection) {
+        store.setModelSelection('standard', standardSelection);
+        applied += 1;
+      }
+    }
+
+    for (const agentType of Object.keys(this.config.agents)) {
+      if (store.getModelSelection(agentType)) {
+        continue;
+      }
+      const selection =
+        this.modelSelectionForAgent(agentType, hiddenModels)
+        ?? standardSelection
+        ?? this.resolveFallbackModelSelection(hiddenModels);
+      if (!selection) {
+        continue;
+      }
+      store.setModelSelection(agentType, selection);
+      applied += 1;
+    }
+
+    this.initializedModelSelections.add(sessionKey);
+    if (applied > 0) {
+      this.logger.debug('Initialized session model selections from config defaults', {
+        sessionKey,
+        applied,
+      });
+    }
   }
 
   private hydrateModelSelectionsFromPreferences(sessionKey: string, store: SessionStore): void {
@@ -1573,6 +1670,7 @@ export class AgentHarness {
         clearSessionState(state);
         markInactive(sessionKey);
         this.sessions.delete(sessionKey);
+        this.initializedModelSelections.delete(sessionKey);
         this.logger.debug('Evicted paused session (timeout)', {
           sessionKey,
           reason,
@@ -1586,6 +1684,7 @@ export class AgentHarness {
         clearSessionState(state);
         markInactive(sessionKey);
         this.sessions.delete(sessionKey);
+        this.initializedModelSelections.delete(sessionKey);
         this.logger.debug('Evicted session store', {
           sessionKey,
           reason,
@@ -2496,6 +2595,17 @@ export class AgentHarness {
     const watcherCompactTrigger = DEFAULT_ORCHESTRATOR_CONFIG.compactTriggerPercent;
     const asyncEnabledForRun = (store?.isAsyncModeEnabled() ?? false) || !!hookRegistry;
 
+    // Register logging hooks for ALL sessions (async and interactive)
+    if (!sessionState?.workLog) {
+      await this.registerSessionLoggingHooks(
+        sessionKey,
+        goal,
+        effectiveWorkingDir,
+        this.config.tools.workingDir,
+        asyncEnabledForRun ? 'async' : 'interactive'
+      );
+    }
+
     // Only create/use watcher hooks when async mode is enabled for this session/run
     let effectiveHookRegistry = hookRegistry;
     if (asyncEnabledForRun && !hookRegistry) {
@@ -2523,6 +2633,9 @@ export class AgentHarness {
 
     const runtime = {
       hookRegistry: asyncEnabledForRun ? effectiveHookRegistry : undefined,
+      executeLegacyHook: async (event: InternalHookEvent, hookContext: InternalHookContext) => {
+        await executeHooks(event.type, event, hookContext);
+      },
       onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
       // Pass interruption check callback so orchestrator can avoid premature termination
       // when user messages arrived during execution.
@@ -2931,32 +3044,31 @@ export class AgentHarness {
   }
 
   /**
-   * Create a watcher-backed hook registry for a session.
-   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed watcher.
+   * Register session-level logging hooks that run for ALL sessions (async and interactive).
+   * Creates work log, workitem logs, and registers internal hooks for execution audit trail.
+   * Idempotent — skips if workLog already exists on session state.
    *
    * @param sessionKey - Session identifier
-   * @param goal - The goal for the async session
+   * @param goal - The goal for the session
    * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
    * @param watcherDir - Directory for watcher artifacts (.watcher/), defaults to workingDir
+   * @param mode - Session mode for the work log entry
    */
-  async createWatcherHookRegistryForSession(
+  async registerSessionLoggingHooks(
     sessionKey: string,
     goal: string,
     workingDir: string,
-    watcherDir?: string
-  ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
+    watcherDir?: string,
+    mode: 'async' | 'interactive' = 'interactive'
+  ): Promise<{ workLog: WorkLog }> {
     const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
-    // Use watcherDir for watcher artifacts, fallback to workingDir for backwards compatibility
     const effectiveWatcherDir = watcherDir ?? workingDir;
 
-    // NOTE: Skill knowledge is baked into system prompts. No need to discover skill files.
-    const saliencePath = await writeSalienceFile(effectiveWatcherDir, {
-      sessionId: sessionKey,
-      goal,
-      mode: 'async',
-    });
+    // Idempotent — if work log already exists, logging hooks are already registered
+    if (sessionState.workLog) {
+      return { workLog: sessionState.workLog };
+    }
 
-    const decisionLog = await createDecisionLog(effectiveWatcherDir, sessionKey);
     const workLog = await createWorkLog(effectiveWatcherDir, sessionKey);
     sessionState.workLog = workLog;
 
@@ -2989,15 +3101,13 @@ export class AgentHarness {
     ): Promise<WorkItemLog> => {
       let log = sessionState.workItemLogs.get(workId);
       if (!log) {
-        // Try to get existing log first (artifacts in watcherDir)
         log = await getWorkItemLog(effectiveWatcherDir, sessionKey, workId) ?? undefined;
         if (!log) {
-          // Create new log: artifact in watcherDir, cwd for path resolution in workingDir
           log = await createWorkItemLog(effectiveWatcherDir, sessionKey, {
             workId,
             objective: objective ?? 'unknown',
             agent: agentType,
-            cwd: workingDir,  // All paths in this log will be relative to agent's working dir
+            cwd: workingDir,
             domain: meta?.domain,
             dependencies: meta?.dependencies,
             targetPaths: meta?.targetPaths,
@@ -3058,7 +3168,7 @@ export class AgentHarness {
       type: 'session_start',
       timestamp: new Date().toISOString(),
       goal,
-      mode: 'async',
+      mode,
     }));
 
     // Register auto-logging hooks for workitem activity
@@ -3109,20 +3219,16 @@ export class AgentHarness {
     });
     registerSessionInternalHook('turn_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'turn_completed') return;
-      if (ctx.sessionKey !== sessionKey) return; // Filter by session
+      if (ctx.sessionKey !== sessionKey) return;
 
-      // Get or create workitem log - use objective from context
       const itemLog = await getWorkItemLogSafe('turn_completed', ctx.workId, ctx.agentType, ctx.objective);
 
       if (itemLog) {
-        // Mark as started on first turn
         if (event.iteration === 1) {
           await safeAppend('WorkItem log write failed (markStarted)', () => itemLog.markStarted());
         }
-        // Note: actual message content comes via agent_message hook, not here
       }
 
-      // Also log to session-level work log on first turn (fallback if creation hook missed)
       if (event.iteration === 1) {
         if (!sessionState.workItemsCreated.has(ctx.workId)) {
           sessionState.workItemsCreated.add(ctx.workId);
@@ -3145,8 +3251,6 @@ export class AgentHarness {
       }
     });
 
-    // Log actual agent messages (real content + reasoning for audit trail)
-    // NOTE: Uses getOrCreateWorkItemLog because agent_message fires BEFORE turn_completed
     registerSessionInternalHook('agent_message', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'agent_message') return;
       if (ctx.sessionKey !== sessionKey) return;
@@ -3156,14 +3260,12 @@ export class AgentHarness {
         await safeAppend('WorkItem log write failed (agent_message)', () => itemLog.appendMessage(
           event.role,
           event.content,
-          undefined,  // watcherInjected
-          event.reasoning  // Include reasoning for decision audit
+          undefined,
+          event.reasoning
         ));
       }
     });
 
-    // Log individual tool calls with full details
-    // NOTE: Uses getOrCreateWorkItemLog because tool_call_completed can fire before turn_completed
     registerSessionInternalHook('tool_call_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'tool_call_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
@@ -3174,13 +3276,12 @@ export class AgentHarness {
           event.tool,
           event.args,
           event.success,
-          event.resultPreview,
+          event.result,
           event.durationMs
         ));
       }
     });
 
-    // Log memory injections with full content for observability
     registerSessionInternalHook('memory_injected', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'memory_injected') return;
       if (ctx.sessionKey !== sessionKey) return;
@@ -3203,6 +3304,7 @@ export class AgentHarness {
           discriminatorsIncluded: event.discriminatorsIncluded,
           totalTokens: event.totalTokens,
           fallbackToV1: event.fallbackToV1,
+          trainingSignal: event.trainingSignal,
         }));
       }
 
@@ -3220,21 +3322,19 @@ export class AgentHarness {
         discriminatorsIncluded: event.discriminatorsIncluded,
         totalTokens: event.totalTokens,
         fallbackToV1: event.fallbackToV1,
+        trainingSignal: event.trainingSignal,
       }, ctx.workId, ctx.requestId, ctx.sessionKey));
     });
 
-    // Legacy batch hook - kept for backwards compatibility but tool_call_completed is primary
     registerSessionInternalHook('tool_batch_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'tool_batch_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
-      // tool_call_completed handles individual calls now, this is just for summary events
     });
 
     registerSessionInternalHook('files_modified', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'files_modified') return;
-      if (ctx.sessionKey !== sessionKey) return; // Filter by session
+      if (ctx.sessionKey !== sessionKey) return;
 
-      // Log to session-level work log
       await safeAppend('Work log write failed (files_modified)', () => workLog.append({
         type: 'note',
         timestamp: new Date().toISOString(),
@@ -3243,7 +3343,6 @@ export class AgentHarness {
         source: 'orchestrator',
       }));
 
-      // Also log to workitem log
       const itemLog = await getWorkItemLogSafe('files_modified', ctx.workId, ctx.agentType, ctx.objective);
       if (itemLog) {
         await safeAppend('WorkItem log write failed (files_modified)', () => itemLog.appendToolCall(
@@ -3254,7 +3353,6 @@ export class AgentHarness {
         ));
       }
 
-      // Publish to EventBus so dashboard SSE stream can refresh open files
       this.eventBus.publish(createEvent('files_modified', {
         paths: event.paths,
       }, ctx.workId, ctx.requestId, ctx.sessionKey));
@@ -3262,11 +3360,10 @@ export class AgentHarness {
 
     registerSessionInternalHook('agent_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'agent_completed') return;
-      if (ctx.sessionKey !== sessionKey) return; // Filter by session
+      if (ctx.sessionKey !== sessionKey) return;
 
       const workId = ctx.workId ?? event.workId ?? 'unknown';
 
-      // Log to session-level work log
       await safeAppend('Work log write failed (agent_completed)', () => workLog.append({
         type: 'workitem_status',
         timestamp: new Date().toISOString(),
@@ -3275,7 +3372,6 @@ export class AgentHarness {
         filesModified: event.invalidatedPaths,
       }));
 
-      // Mark workitem as completed
       const itemLog = await getWorkItemLogSafe('agent_completed', workId, ctx.agentType, ctx.objective);
       if (itemLog) {
         await safeAppend('WorkItem log write failed (markCompleted)', () => itemLog.markCompleted(
@@ -3284,7 +3380,7 @@ export class AgentHarness {
             llmCalls: event.metrics.llmCallsMade,
             toolCalls: event.metrics.toolCallsMade,
             contextPercentUsed: event.contextPercentUsed ?? 0,
-            durationMs: 0, // Not available in InternalHookEvent
+            durationMs: 0,
             filesRead: event.filesRead,
             filesModified: event.invalidatedPaths,
           } : undefined
@@ -3339,6 +3435,56 @@ export class AgentHarness {
         }, ctx.requestId);
       }
     });
+
+    return { workLog };
+  }
+
+  /**
+   * Create a watcher-backed hook registry for a session.
+   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed watcher.
+   * Calls registerSessionLoggingHooks first (idempotent), then adds watcher-specific setup.
+   *
+   * @param sessionKey - Session identifier
+   * @param goal - The goal for the async session
+   * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
+   * @param watcherDir - Directory for watcher artifacts (.watcher/), defaults to workingDir
+   */
+  async createWatcherHookRegistryForSession(
+    sessionKey: string,
+    goal: string,
+    workingDir: string,
+    watcherDir?: string
+  ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
+    const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
+    const effectiveWatcherDir = watcherDir ?? workingDir;
+
+    // Register logging hooks first (idempotent — skips if already registered)
+    const { workLog } = await this.registerSessionLoggingHooks(sessionKey, goal, workingDir, watcherDir, 'async');
+
+    // NOTE: Skill knowledge is baked into system prompts. No need to discover skill files.
+    const saliencePath = await writeSalienceFile(effectiveWatcherDir, {
+      sessionId: sessionKey,
+      goal,
+      mode: 'async',
+    });
+
+    const decisionLog = await createDecisionLog(effectiveWatcherDir, sessionKey);
+
+    const safeAppend = async (label: string, op: () => Promise<void>): Promise<void> => {
+      try {
+        await op();
+      } catch (err) {
+        console.warn(`[HARNESS] ${label}:`, err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    const registerSessionInternalHook = (
+      event: InternalHookEvent['type'],
+      hook: (event: InternalHookEvent, ctx: InternalHookContext) => Promise<void>
+    ): void => {
+      const unregister = registerHook(event, hook);
+      sessionState.internalHookUnregisters.push(unregister);
+    };
 
     registerSessionInternalHook('watcher_agent_stopped', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'watcher_agent_stopped') return;
@@ -3779,7 +3925,7 @@ export class AgentHarness {
     if (this.isGraphDReady()) {
       try {
         await this.graphd!.stop();
-        this.logger.info('GraphD stopped');
+        this.logger.info('GraphD disconnected');
       } catch (error) {
         this.logger.warning('GraphD stop failed', { error: String(error) });
       }

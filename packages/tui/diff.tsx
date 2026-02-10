@@ -1,7 +1,7 @@
 /**
  * Diff rendering utilities for the TUI.
  *
- * Computes line-level diffs and renders them with colored backgrounds
+ * Computes line-level diffs and renders them with text-only coloring
  * (red for deletions, green for additions) while preserving syntax highlighting.
  */
 
@@ -121,16 +121,16 @@ interface DiffBlockProps {
 
 /** Colors for diff rendering - text-only highlighting (no background) */
 const DIFF_COLORS = {
-  added: { bg: undefined, fg: "#4ade80" },      // Light green text, no background
-  removed: { bg: undefined, fg: "#f87171" },    // Light red text, no background
-  context: { bg: undefined, fg: "#9ca3af" },    // No bg, gray text
-  lineNum: "#6b7280",                           // Gray for line numbers
-  header: "#60a5fa",                            // Blue for file path
+  added: { fg: "#4ade80" },      // Light green text
+  removed: { fg: "#f87171" },    // Light red text
+  context: { fg: "#9ca3af" },    // Gray text
+  lineNum: "#6b7280",            // Gray for line numbers
+  header: "#60a5fa",             // Blue for file path
   stats: { added: "#4ade80", removed: "#f87171" },
 };
 
 /**
- * Render a diff block with colored backgrounds.
+ * Render a diff block with text-only coloring.
  * Integrates with the TUI's visual style.
  */
 export function DiffBlock({ oldStr, newStr, filePath, width = 80, contextLines = 3 }: DiffBlockProps): JSX.Element {

@@ -1,5 +1,5 @@
 /**
- * Control Plane API Routes for harness-daemon
+ * Control Plane API Routes
  *
  * Thin dispatcher that imports handler functions from ./routes/* modules
  * and dispatches incoming requests to the appropriate handler.

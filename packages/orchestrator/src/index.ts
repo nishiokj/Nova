@@ -23,21 +23,7 @@ export {
   type BoundsCheckResult,
 } from './bounds-checker.js';
 
-export {
-  registerHook,
-  clearHooks,
-  getHooks,
-  executeHooks,
-  loadHooksFromConfig,
-  getHandlers, // deprecated
-  type HookEventType,
-  type HookCallback,
-  type ShellHook,
-  type HookEntry,
-  type HooksConfig,
-  type StopHookHandler,
-  type StopHookContext,
-} from './hooks.js';
+export type { StopHookHandler, StopHookContext } from 'agent';
 
 // New protocol hook registry/runner (orchestrator-owned)
 export {

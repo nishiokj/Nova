@@ -56,7 +56,6 @@ import {
   type WorkItemCompletedDecision,
   type TerminationReason,
 } from 'protocol';
-import { executeHooks } from './hooks.js';
 import { applyPatches } from './hookRunner/applyPatches.js';
 import { runHooksForEvent, type HookExecutionResult } from './hookRunner/runHooksForEvent.js';
 import type { HookRegistry } from './hookRegistry/index.js';
@@ -70,13 +69,43 @@ import {
   mapWorkItemDecisionToStopResult,
 } from './decision_mappers.js';
 import { createExecutionState, getElapsedMs, nextIteration, updateMetrics, type ExecutionState } from './execution_state.js';
-import { buildPlanContextFromHandoff, writePlanContext } from 'decision-watcher';
-import type {
-  DecisionDatabase,
-  DecisionWatcherConfig,
-} from 'decision-watcher';
+import { buildPlanContextFromHandoff, writePlanContext } from './plan-context.js';
 
 // --- Types ---
+
+/**
+ * Structural async-mode DB contract.
+ * Kept local so orchestrator can compile independently from decision-watcher.
+ */
+export interface AsyncDecisionDatabase {
+  search(query: string, options?: {
+    category?: string;
+    scope?: string;
+    limit?: number;
+  }): Promise<unknown[]>;
+  get(id: string): Promise<unknown | null>;
+  getAll(): Promise<unknown[]>;
+  upsert(entry: unknown): Promise<void>;
+  delete(id: string): Promise<void>;
+}
+
+/**
+ * Structural async-mode watcher config contract.
+ * Kept local so orchestrator can compile independently from decision-watcher.
+ */
+export interface AsyncDecisionWatcherConfig {
+  enabled: boolean;
+  minConfidenceThreshold: number;
+  maxDecisionsToConsult: number;
+  useLLMSynthesis: boolean;
+  enableConsistencyChecking: boolean;
+  llm?: LLMAdapter;
+  llmModel?: {
+    provider: string;
+    model: string;
+  };
+  customDatabase?: AsyncDecisionDatabase;
+}
 
 /**
  * Orchestrator configuration.
@@ -111,9 +140,9 @@ export interface OrchestratorConfig {
     /** Whether async mode is enabled */
     enabled: boolean;
     /** Decision database for async mode */
-    database?: DecisionDatabase;
+    database?: AsyncDecisionDatabase;
     /** Optional custom watcher configuration */
-    watcherConfig?: Partial<DecisionWatcherConfig>;
+    watcherConfig?: Partial<AsyncDecisionWatcherConfig>;
   };
   /**
    * Optional memory injector for injecting relevant memory into agent context.
@@ -139,6 +168,11 @@ export interface IterationState {
 export interface OrchestratorRuntime {
   /** Control-plane hook registry (orchestrator-owned) */
   hookRegistry?: HookRegistry;
+  /**
+   * Legacy internal hook executor (harness-owned runtime path).
+   * Orchestrator enqueues internal hook events and delegates execution to this callback.
+   */
+  executeLegacyHook?: (event: InternalHookEvent, context: InternalHookContext) => Promise<void>;
   /**
    * Check for pending user interruption that arrived during execution.
    * Called before terminating on goal_state_reached.
@@ -309,6 +343,7 @@ export class Orchestrator {
   private hookMetadata: Map<string, unknown> = new Map();
   private hookAuditLog: Array<{ timestamp: number; source: string; event: string; details: Record<string, unknown> }> = [];
   private hookTerminationReason: TerminationReason | null = null;
+  private legacyHookExecutor?: (event: InternalHookEvent, context: InternalHookContext) => Promise<void>;
 
   constructor(
     config: Partial<OrchestratorConfig>,
@@ -393,7 +428,7 @@ export class Orchestrator {
             hookType: event.type,
             event,
             hookContext: context,
-            handler: () => executeHooks(event.type, event, context),
+            handler: () => this.executeLegacyHook(event, context),
           },
         });
 
@@ -491,6 +526,13 @@ export class Orchestrator {
     })();
   }
 
+  private async executeLegacyHook(event: InternalHookEvent, context: InternalHookContext): Promise<void> {
+    if (!this.legacyHookExecutor) {
+      return;
+    }
+    await this.legacyHookExecutor(event, context);
+  }
+
   /**
    * Main entry point: Execute until goal is reached or bounds exceeded.
    *
@@ -526,6 +568,7 @@ export class Orchestrator {
     cwd: string,
     runtime?: OrchestratorRuntime
   ): Promise<OrchestratorResult> {
+    this.legacyHookExecutor = runtime?.executeLegacyHook;
     this.resetExecutionState(context);
 
     const workQueue = this.createWorkQueueAdapter();

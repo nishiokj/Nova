@@ -396,8 +396,8 @@ export type InternalHookEvent =
       /** Tool arguments (summarized - file paths, patterns, not full content) */
       args: Record<string, unknown>;
       success: boolean;
-      /** Result preview - first 500 chars of output */
-      resultPreview?: string;
+      /** Full tool result output */
+      result?: string;
       durationMs: number;
     }
   | {
@@ -446,6 +446,8 @@ export type InternalHookEvent =
       totalTokens?: number;
       /** Whether v2 fell back to v1 */
       fallbackToV1?: boolean;
+      /** Full retrieval training signal payload (v2 only) */
+      trainingSignal?: Record<string, unknown>;
     }
   | {
       /** Fired when a git commit is detected from Bash tool output */

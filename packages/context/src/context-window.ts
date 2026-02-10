@@ -8,7 +8,7 @@
  * - Optional disk backing: pass filePath to constructor for disk-authoritative persistence
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'fs';
 import nodePath from 'path';
 import type {
   ContentBlock,
@@ -456,6 +456,7 @@ export class ContextWindow {
   private _fileContentCounter = 0;
   private _artifactCounter = 0;
   private _created: string;
+  private _compactionCount = 0;
 
   constructor(sessionKey: string, maxTokens = 200_000, filePath?: string) {
     this.sessionKey = sessionKey;
@@ -543,6 +544,42 @@ export class ContextWindow {
     const tmp = this.filePath + '.tmp';
     writeFileSync(tmp, content, 'utf-8');
     renameSync(tmp, this.filePath);
+  }
+
+  /**
+   * Snapshot the current context file before compaction destroys items.
+   * Copies context.md → context.v{N}.md, caps at 10 versions.
+   */
+  private _snapshotBeforeCompact(): void {
+    if (!this.filePath || !existsSync(this.filePath)) return;
+
+    const dir = nodePath.dirname(this.filePath);
+    const versionedFiles = readdirSync(dir)
+      .filter(f => /^context\.v(\d+)\.md$/.test(f))
+      .map(f => ({
+        name: f,
+        version: parseInt(f.match(/^context\.v(\d+)\.md$/)![1], 10),
+      }))
+      .sort((a, b) => a.version - b.version);
+
+    // Ensure monotonic versioning across process restarts by deriving from disk.
+    const maxVersionOnDisk = versionedFiles.length > 0
+      ? versionedFiles[versionedFiles.length - 1].version
+      : 0;
+    this._compactionCount = Math.max(this._compactionCount, maxVersionOnDisk) + 1;
+
+    const snapshotName = `context.v${this._compactionCount}.md`;
+    const snapshotPath = nodePath.join(dir, snapshotName);
+    copyFileSync(this.filePath, snapshotPath);
+    versionedFiles.push({ name: snapshotName, version: this._compactionCount });
+
+    // Prune oldest versions if we exceed 10
+    versionedFiles.sort((a, b) => a.version - b.version);
+
+    while (versionedFiles.length > 10) {
+      const oldest = versionedFiles.shift()!;
+      unlinkSync(nodePath.join(dir, oldest.name));
+    }
   }
 
   // =========================================================================
@@ -877,6 +914,7 @@ export class ContextWindow {
    */
   compact(options: CompactOptions = {}): CompactResult {
     this._syncFromDiskIfBacked();
+    this._snapshotBeforeCompact();
     const {
       maxFileContentAgeMs,
       maxFileContentCount,

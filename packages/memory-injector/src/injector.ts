@@ -147,6 +147,7 @@ const DEFAULT_MEMORY_CONNECTORS = (() => {
 
 const RECENCY_WINDOW_DAYS = 30;
 const RECENCY_MAX_BONUS = 0.25;
+const MAX_INJECTED_ITEMS = 3;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -1048,6 +1049,9 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
       let tokens = 0;
 
       for (const item of dedupedItems) {
+        if (result.length >= MAX_INJECTED_ITEMS) {
+          break;
+        }
         const rendered = renderItem(item);
         const itemTokens = estimateTokens(rendered);
         // Skip items that individually exceed maxTokens, but continue checking others
@@ -1117,6 +1121,9 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         let tokens = 0;
 
         for (const item of items) {
+          if (result.length >= MAX_INJECTED_ITEMS) {
+            break;
+          }
           const rendered = formatRecent(item);
           if (!rendered) continue;
           const itemTokens = estimateTokens(rendered);
@@ -1150,6 +1157,8 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         touchedFiles: task?.touchedFiles?.length ?? 0,
         touchedFileNames: task?.touchedFiles?.slice(0, 5) ?? [],
         sessionId: task?.sessionId ?? null,
+        runId: task?.runId ?? null,
+        workItemId: task?.workItemId ?? null,
         iteration: task?.iteration ?? null,
         query: debugParams.query ?? null,
         maxTokens: debugParams.maxTokens ?? null,
@@ -1180,6 +1189,9 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
           contentLength: response.content.length,
           atomCount: response.atoms?.length ?? 0,
           metrics: response.metrics,
+          retrievalId: response.trainingSignal?.retrieval_id ?? null,
+          candidateCount: response.trainingSignal?.candidate_list?.length ?? 0,
+          selectedCount: response.trainingSignal?.selected_set?.length ?? 0,
         });
 
         return response;

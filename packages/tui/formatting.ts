@@ -232,7 +232,7 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
   const colors = getColors();
 
   if (/^[✓✗] Edit .+$/.test(text)) {
-    const segment = { text, color: colors.diffHeader, backgroundColor: colors.diffHeaderBg, bold: true };
+    const segment = { text, color: colors.diffHeader, bold: true };
     return { segments: [segment], fill: segment };
   }
 
@@ -247,7 +247,7 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
   }
 
   if (/^\s*\d+\s{3}.*$/.test(text)) {
-    const segment = { text, color: colors.text, backgroundColor: colors.diffContextBg };
+    const segment = { text, color: colors.text };
     return { segments: [segment], fill: segment };
   }
 

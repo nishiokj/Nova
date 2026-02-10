@@ -30,6 +30,10 @@ export interface EvidenceAtom<T = unknown> {
 
   retrieval: {
     score: number
+    embeddingScore?: number | null
+    bm25Score?: number | null
+    heuristicScore?: number | null
+    rerankerScore?: number | null
     matchType: 'lexical' | 'semantic' | 'structural' | 'graph'
     isDiscriminator: boolean
     novelty: number

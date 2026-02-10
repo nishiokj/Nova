@@ -19,10 +19,6 @@ export interface HarnessDaemonOptions {
   wsPort?: number;
   /** Enable WebSocket bridge (default: true). Disable for TCP-only deployments. */
   enableWsBridge?: boolean;
-  /** HTTP port for serving the Control Plane dashboard. Set to enable dashboard serving. */
-  dashboardPort?: number;
-  /** Path to dashboard static files (default: auto-detect dashboard-control/dist) */
-  dashboardPath?: string;
   workingDir?: string;
   configPath?: string;
   /** Idle timeout in ms before daemon shuts down when no clients connected. Set to 0 to disable. */
@@ -39,8 +35,6 @@ export class HarnessDaemon {
   private readonly port: number;
   private readonly wsPort: number;
   private readonly enableWsBridge: boolean;
-  private readonly dashboardPort?: number;
-  private readonly dashboardPath?: string;
   private readonly workingDir: string;
   private readonly configPath?: string;
   private readonly idleTimeoutMs: number;
@@ -48,10 +42,6 @@ export class HarnessDaemon {
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
   private wsBridge: WsBridgeServer | null = null;
-  private controlPlaneServer: {
-    start(): Promise<{ host: string; port: number }>;
-    stop(): Promise<void>;
-  } | null = null;
   private gateway: BridgeGateway | null = null;
   private authService: AuthService | null = null;
   private authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | null = null;
@@ -64,8 +54,6 @@ export class HarnessDaemon {
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
     this.wsPort = options.wsPort ?? this.port + 1; // Default: 9556
     this.enableWsBridge = options.enableWsBridge ?? true;
-    this.dashboardPort = options.dashboardPort;
-    this.dashboardPath = options.dashboardPath;
     this.workingDir = options.workingDir ?? process.cwd();
     this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -167,34 +155,12 @@ export class HarnessDaemon {
       console.log('[harness-daemon] WebSocket bridge disabled');
     }
 
-    // Start control-plane HTTP server if port is configured.
-    // Use lazy import so daemon hot path does not load control-plane modules.
-    if (this.dashboardPort && !this.controlPlaneServer) {
-      const { ControlPlaneServer } = await import('./control_plane_server.js');
-      this.controlPlaneServer = new ControlPlaneServer({
-        host: this.host,
-        port: this.dashboardPort,
-        dashboardPath: this.dashboardPath,
-        workingDir: this.workingDir,
-        configPath: this.configPath,
-        busHost: this.host,
-        busPort: this.port,
-      });
-      const dashboardAddress = await this.controlPlaneServer.start();
-      console.log(`[harness-daemon] Dashboard available at http://${dashboardAddress.host}:${dashboardAddress.port}`);
-    }
-
     return tcpAddress;
   }
 
   async stop(): Promise<void> {
     this.cancelIdleTimer();
     this.shutdownRequested = true;
-
-    if (this.controlPlaneServer) {
-      await this.controlPlaneServer.stop();
-      this.controlPlaneServer = null;
-    }
 
     if (this.wsBridge) {
       await this.wsBridge.stop();
@@ -266,10 +232,6 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       options.workingDir = args[++i];
     } else if (arg === '--idle-timeout' && i + 1 < args.length) {
       options.idleTimeoutMs = parseInt(args[++i], 10);
-    } else if (arg === '--dashboard-port' && i + 1 < args.length) {
-      options.dashboardPort = parseInt(args[++i], 10);
-    } else if (arg === '--dashboard-path' && i + 1 < args.length) {
-      options.dashboardPath = args[++i];
     }
   }
 

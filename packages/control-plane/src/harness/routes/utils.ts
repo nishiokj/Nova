@@ -588,7 +588,7 @@ export const MARKDOWN_CHAT_CONTEXT_MAX_BYTES = 120 * 1024;
 export const COCKPIT_PROJECT_DISCOVERY_MAX_RESULTS = 40;
 export const COCKPIT_PROJECT_DISCOVERY_MAX_DEPTH = 3;
 export const COCKPIT_SNAPSHOT_CACHE_TTL_MS = 1_500;
-export const SESSION_PERMISSION_SETTINGS_RELATIVE_PATH = '.jesus/settings.local.json';
+export const SESSION_PERMISSION_SETTINGS_RELATIVE_PATH = '.config/settings.local.json';
 export const SESSION_PERMISSION_SETTINGS_MAX_BYTES = 256 * 1024;
 
 // ── generic utility functions ───────────────────────────────────────

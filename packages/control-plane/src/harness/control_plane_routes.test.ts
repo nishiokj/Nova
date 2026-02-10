@@ -305,8 +305,7 @@ describe('control-plane cockpit session message routes', () => {
     expect(harness.dispatchCalls[0].message).toBe('Summarize this note');
     expect(typeof harness.dispatchCalls[0].options?.context).toBe('string');
     expect(harness.dispatchCalls[0].options?.context).toContain('Control-plane active markdown context:');
-    expect(harness.dispatchCalls[0].options?.context).toContain('scopeMode: session');
-    expect(harness.dispatchCalls[0].options?.context).toContain('isDraft: true');
+    expect(harness.dispatchCalls[0].options?.context).toContain('scopeMode: global');
     expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
 
     expect(harness.permissionUpdates).toHaveLength(1);
@@ -321,9 +320,9 @@ describe('control-plane cockpit session message routes', () => {
     if (!isRecord(activeMarkdown)) {
       throw new Error('Expected cockpit_active_markdown metadata record');
     }
-    expect(activeMarkdown.isDraft).toBe(true);
+    expect(activeMarkdown.scopeMode).toBe('global');
     expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-    expect(String(activeMarkdown.writeTargetPath)).toContain(`${process.cwd()}/.cockpit/markdown/.drafts/session-sess-1/`);
+    expect(String(activeMarkdown.writeTargetPath)).toContain(`${process.cwd()}/.cockpit/scratch/`);
     expect(String(activeMarkdown.writeTargetPath)).toMatch(/\.md$/);
   });
 
@@ -352,10 +351,10 @@ describe('control-plane cockpit session message routes', () => {
     if (!isRecord(activeMarkdown)) {
       throw new Error('Expected cockpit_active_markdown metadata record');
     }
-    expect(activeMarkdown.isDraft).toBe(true);
-    expect(activeMarkdown.draftId).toBe('draft-abc-123');
+    expect(activeMarkdown.scopeMode).toBe('global');
     expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-    expect(String(activeMarkdown.writeTargetPath)).toContain('draft-abc-123.md');
+    expect(String(activeMarkdown.writeTargetPath)).toContain(`${process.cwd()}/.cockpit/scratch/`);
+    expect(String(activeMarkdown.writeTargetPath)).toMatch(/untitled-\d+\.md$/);
   });
 
   it('respects global markdown scope and includes an explicit write target in context', async () => {
@@ -382,8 +381,8 @@ describe('control-plane cockpit session message routes', () => {
     expect(harness.dispatchCalls).toHaveLength(1);
     const contextText = harness.dispatchCalls[0].options?.context ?? '';
     expect(contextText).toContain('scopeMode: global');
-    expect(contextText).toContain('workspacePath: .cockpit/markdown/notes/todo.md');
-    expect(contextText).toContain('If the user requests document edits, persist changes to writeTargetPath/absolutePath above');
+    expect(contextText).toContain('path: notes/todo.md');
+    expect(contextText).toContain('If the user requests document edits, persist changes to writeTargetPath above');
 
     expect(harness.metadataUpdates).toHaveLength(1);
     const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
@@ -394,7 +393,7 @@ describe('control-plane cockpit session message routes', () => {
     expect(activeMarkdown.scopeMode).toBe('global');
     expect(activeMarkdown.scopeSessionKey).toBeNull();
     expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-    expect(String(activeMarkdown.writeTargetPath)).toContain('.cockpit/markdown/notes/todo.md');
+    expect(String(activeMarkdown.writeTargetPath)).toContain('.cockpit/scratch/notes/todo.md');
   });
 
   it('respects project markdown scope and targets the real project directory', async () => {
@@ -424,8 +423,8 @@ describe('control-plane cockpit session message routes', () => {
       expect(harness.dispatchCalls).toHaveLength(1);
       const contextText = harness.dispatchCalls[0].options?.context ?? '';
       expect(contextText).toContain('scopeMode: project');
-      expect(contextText).toContain('workspacePath: docs/plan.md');
-      expect(contextText).not.toContain('.cockpit/markdown/docs/plan.md');
+      expect(contextText).toContain('path: docs/plan.md');
+      expect(contextText).not.toContain('.cockpit/scratch/docs/plan.md');
 
       expect(harness.metadataUpdates).toHaveLength(1);
       const activeMarkdown = harness.metadataUpdates[0].cockpit_active_markdown;
@@ -473,12 +472,10 @@ describe('control-plane cockpit session message routes', () => {
       }
       expect(activeMarkdown.scopeMode).toBe('project');
       expect(activeMarkdown.scopeProjectPath).toBe(projectRoot);
-      expect(activeMarkdown.isDraft).toBe(true);
-      expect(activeMarkdown.draftId).toBe('project-draft-001');
+      expect(activeMarkdown.scopeMode).toBe('project');
       expect(typeof activeMarkdown.writeTargetPath).toBe('string');
-      expect(String(activeMarkdown.writeTargetPath)).toBe(
-        join(projectRoot, '.cockpit/drafts/project/project-draft-001.md')
-      );
+      expect(String(activeMarkdown.writeTargetPath)).toContain(`${projectRoot}/`);
+      expect(String(activeMarkdown.writeTargetPath)).toMatch(/untitled-\d+\.md$/);
     } finally {
       await rm(projectRoot, { recursive: true, force: true });
     }
@@ -687,6 +684,158 @@ describe('control-plane cockpit permission response routes', () => {
     expect(result.json?.success).toBe(false);
     expect(String(result.json?.error ?? '')).toContain('Invalid decision');
     expect(harness.permissionResponses).toHaveLength(0);
+  });
+});
+
+describe('control-plane cockpit session permissions routes', () => {
+  it('returns normalized session permission state for GET requests', async () => {
+    const harness = createHarness({
+      sessionMetadata: {
+        permission_state: { dangerousMode: true },
+        permission_flags: {
+          allowOutsideRoot: true,
+          webSearchEnabled: false,
+          writesNoDeletes: true,
+          restrictWriteToPaths: ['src', 'docs'],
+        },
+      },
+    });
+
+    const result = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/permissions',
+      ctx: harness.ctx,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    expect(result.json?.sessionKey).toBe('sess-1');
+    expect(isRecord(result.json?.state)).toBe(true);
+    if (!isRecord(result.json?.state)) {
+      throw new Error('Expected state object');
+    }
+    expect(result.json.state.dangerousMode).toBe(true);
+    expect(result.json.state.allowOutsideRoot).toBe(true);
+    expect(result.json.state.webSearchEnabled).toBe(false);
+    expect(result.json.state.writesNoDeletes).toBe(true);
+    expect(Array.isArray(result.json.state.restrictWriteToPaths)).toBe(true);
+  });
+
+  it('forwards permission updates to daemon context for POST requests', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/session/sess-1/permissions',
+      ctx: harness.ctx,
+      body: {
+        writesNoDeletes: true,
+        webSearchEnabled: false,
+      },
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(200);
+    expect(result.json?.success).toBe(true);
+    expect(harness.permissionUpdates).toHaveLength(1);
+    expect(harness.permissionUpdates[0].sessionKey).toBe('sess-1');
+    expect(harness.permissionUpdates[0].input).toMatchObject({
+      writesNoDeletes: true,
+      webSearchEnabled: false,
+    });
+  });
+
+  it('rejects POST updates with no permission fields', async () => {
+    const harness = createHarness();
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/session/sess-1/permissions',
+      ctx: harness.ctx,
+      body: {},
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(400);
+    expect(result.json?.success).toBe(false);
+    expect(String(result.json?.error ?? '')).toContain('No permission updates provided');
+    expect(harness.permissionUpdates).toHaveLength(0);
+  });
+});
+
+describe('control-plane cockpit session model routes', () => {
+  it('forwards model selections to daemon context and returns current selections', async () => {
+    const harness = createHarness();
+    const setCalls: Array<{
+      sessionKey: string;
+      agentType: string;
+      selection: { provider: string; model: string; reasoning?: string };
+    }> = [];
+    const selections = {
+      standard: { provider: 'openai', model: 'gpt-4o-mini' },
+      watcher: { provider: 'openai', model: 'gpt-4o-mini' },
+    };
+    const ctx: ControlPlaneContext = {
+      ...harness.ctx,
+      setSessionModelSelection: (sessionKey, agentType, selection) => {
+        setCalls.push({ sessionKey, agentType, selection });
+        return { success: true, agentType, selection };
+      },
+      getSessionModelSelections: () => ({ success: true, selections }),
+    };
+
+    const update = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/session/sess-1/model',
+      ctx,
+      body: {
+        agentType: 'standard',
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+      },
+    });
+
+    expect(update.handled).toBe(true);
+    expect(update.statusCode).toBe(200);
+    expect(update.json?.success).toBe(true);
+    expect(setCalls).toEqual([{
+      sessionKey: 'sess-1',
+      agentType: 'standard',
+      selection: { provider: 'openai', model: 'gpt-4o-mini' },
+    }]);
+
+    const query = await invokeRoute({
+      method: 'GET',
+      url: '/control-plane/cockpit/session/sess-1/model',
+      ctx,
+    });
+
+    expect(query.handled).toBe(true);
+    expect(query.statusCode).toBe(200);
+    expect(isRecord(query.json?.selections)).toBe(true);
+    expect((query.json?.selections as Record<string, unknown>)?.standard).toEqual({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+    });
+    expect(Array.isArray(query.json?.models)).toBe(true);
+  });
+
+  it('validates required model route fields', async () => {
+    const harness = createHarness();
+    const ctx: ControlPlaneContext = {
+      ...harness.ctx,
+      setSessionModelSelection: (sessionKey, agentType, selection) => ({ success: true, agentType, selection }),
+      getSessionModelSelections: () => ({ success: true, selections: {} }),
+    };
+
+    const result = await invokeRoute({
+      method: 'POST',
+      url: '/control-plane/cockpit/session/sess-1/model',
+      ctx,
+      body: { provider: 'openai' },
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.statusCode).toBe(400);
+    expect(String(result.json?.error ?? '')).toContain('provider and model are required');
   });
 });
 

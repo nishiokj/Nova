@@ -49,6 +49,7 @@ function getProjectName(workingDir: string | null): string {
  * Truncate text to fit width with ellipsis
  */
 function truncate(text: string, maxLen: number): string {
+  if (maxLen <= 0) return "";
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - 1) + "…";
 }
@@ -63,11 +64,11 @@ export function SessionsView({
   const colors = getColors();
 
   // Calculate layout dimensions
-  const contentWidth = Math.max(40, width - 4); // 2px padding each side
+  const contentWidth = Math.max(1, width - 4); // 2px padding each side
   const cardHeight = 3; // Each session card is 3 lines
   const headerHeight = 4; // Title + instructions + divider + spacer
   const footerHeight = 2; // Divider + hint
-  const availableHeight = height - headerHeight - footerHeight;
+  const availableHeight = Math.max(1, height - headerHeight - footerHeight);
   const visibleCards = Math.max(1, Math.floor(availableHeight / (cardHeight + 1))); // +1 for spacing
 
   // Calculate visible window (scroll if needed)
@@ -80,11 +81,10 @@ export function SessionsView({
   // Column widths (responsive)
   const statusWidth = 10;
   const timeWidth = 6;
-  const projectMinWidth = 12;
-  const previewMinWidth = 20;
-  const availableForContent = contentWidth - statusWidth - timeWidth - 6; // 6 for spacing
+  const projectMinWidth = 8;
+  const availableForContent = Math.max(8, contentWidth - statusWidth - timeWidth - 6); // 6 for spacing
   const projectWidth = Math.min(Math.max(projectMinWidth, Math.floor(availableForContent * 0.3)), 24);
-  const previewWidth = Math.max(previewMinWidth, availableForContent - projectWidth);
+  const previewWidth = Math.max(8, contentWidth - 3);
 
   if (sessions.length === 0) {
     return (
@@ -111,6 +111,7 @@ export function SessionsView({
           const isCurrent = session.sessionKey === currentSessionKey;
 
           const project = getProjectName(session.workingDir);
+          const projectLabel = truncate(project, projectWidth);
           const time = formatRelativeTime(session.lastAccessedAt);
           const preview = session.lastUserMessagePreview || "(no messages)";
           const statusIcon = session.status === "active" ? "●" : "○";
@@ -137,11 +138,11 @@ export function SessionsView({
                   color={isSelected ? colors.text : colors.muted}
                   bold={isSelected}
                 >
-                  {truncate(project, projectWidth)}
+                  {projectLabel}
                 </Text>
                 <Text color={colors.accent}>{currentMarker}</Text>
                 <Text color={colors.muted}>
-                  {" ".repeat(Math.max(1, projectWidth - project.length - currentMarker.length + 2))}
+                  {" ".repeat(Math.max(1, projectWidth - projectLabel.length - currentMarker.length + 2))}
                 </Text>
                 <Text color={colors.muted}>{time.padStart(timeWidth)}</Text>
               </Box>

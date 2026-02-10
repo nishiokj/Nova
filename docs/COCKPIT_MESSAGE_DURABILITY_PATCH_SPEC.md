@@ -110,8 +110,8 @@ Acceptance tests:
 
 Files:
 
-- `packages/harness-daemon/src/harness/routes/cockpit.ts`
-- `packages/harness-daemon/src/harness/control_plane_routes.test.ts`
+- `packages/control-plane/src/harness/routes/cockpit.ts`
+- `packages/control-plane/src/harness/control_plane_routes.test.ts`
 
 Changes:
 

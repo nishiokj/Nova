@@ -177,6 +177,7 @@
   },
 
   "graphd": {
+    "$comment": "Runtime ownership: run GraphD as its own process. Harness-daemon and control-plane connect client-only and will not bootstrap GraphD.",
     "enabled": true,
     "host": "127.0.0.1",
     "port": 9444,

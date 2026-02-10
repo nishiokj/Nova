@@ -192,8 +192,16 @@ bun run packages/tui/index.tsx
 # Run harness daemon (bus server)
 bun run packages/harness-daemon/src/index.ts
 
+# Run GraphD (standalone datastore process)
+bun run packages/graphd/src/graphd.ts
+
 # Run control-plane server (HTTP API + dashboard)
-bun run packages/harness-daemon/src/control-plane.ts
+bun run packages/control-plane/src/control-plane.ts
+
+# Recommended split startup order:
+# 1) bun run start:graphd
+# 2) bun run packages/harness-daemon/src/index.ts
+# 3) bun run packages/control-plane/src/control-plane.ts
 
 # Type check all packages
 bun run --filter '*' tsc --noEmit

@@ -69,6 +69,7 @@ function formatDuration(ms: number): string {
  * Truncate text to fit width with ellipsis
  */
 function truncate(text: string, maxLen: number): string {
+  if (maxLen <= 0) return "";
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - 1) + "\u2026";
 }
@@ -88,7 +89,7 @@ export function UsageView({
   onClose,
 }: UsageViewProps) {
   const colors = getColors();
-  const contentWidth = Math.max(40, width - 4);
+  const contentWidth = Math.max(1, width - 4);
 
   // Handle input
   useInput((input, key) => {

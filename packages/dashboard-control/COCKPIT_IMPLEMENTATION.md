@@ -323,7 +323,7 @@ async function handleEscalationResolved(
 
 ### Step 8: Cockpit API Routes
 
-**Package:** `packages/harness-daemon`
+**Package:** `packages/control-plane`
 **File:** `src/harness/control_plane_routes.ts`
 
 **Endpoints to add:**

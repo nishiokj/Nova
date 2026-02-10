@@ -325,6 +325,52 @@ export interface AgentReasoningData {
  * Data for memory_injected event.
  * Emitted when memory is injected into the agent context.
  */
+export interface MemoryInjectionTrainingSignal {
+  retrieval_id: string;
+  query: {
+    raw: string;
+    state_summary: string;
+  };
+  candidate_list: Array<{
+    doc_id: string;
+    chunk_id: string | null;
+    source_type: 'file' | 'symbol' | 'summary' | 'tool_output' | 'web';
+    scores: {
+      embedding_score: number | null;
+      bm25_score: number | null;
+      heuristic_score: number | null;
+      reranker_score: number | null;
+    };
+    token_size: number;
+    freshness: string | null;
+    scope: string | null;
+  }>;
+  selected_set: Array<{
+    doc_id: string;
+    chunk_id: string | null;
+    source_type: 'file' | 'symbol' | 'summary' | 'tool_output' | 'web';
+    scores: {
+      embedding_score: number | null;
+      bm25_score: number | null;
+      heuristic_score: number | null;
+      reranker_score: number | null;
+    };
+    token_size: number;
+    freshness: string | null;
+    scope: string | null;
+  }>;
+  budget: {
+    max_tokens: number;
+    k: number;
+    max_items: number;
+    filters: Record<string, unknown> | null;
+    min_coverage: Record<string, number>;
+  };
+  run_id: string | null;
+  session_id: string;
+  work_item_id: string | null;
+}
+
 export interface MemoryInjectedData {
   /** Search query used to retrieve memory */
   query: string;
@@ -352,6 +398,8 @@ export interface MemoryInjectedData {
   totalTokens?: number;
   /** Whether v2 fell back to v1 */
   fallbackToV1?: boolean;
+  /** Full retrieval training signal payload (v2 only) */
+  trainingSignal?: MemoryInjectionTrainingSignal;
 }
 
 /**
