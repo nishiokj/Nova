@@ -3121,7 +3121,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   const novaAnim = NOVA_ANIM_FRAMES[novaFrame];
   const gap = "  ";
-  const novaTextPadded = [" ".repeat(novaTextLines[0].length), ...novaTextLines];
+  const pad = " ".repeat(novaTextLines[0].length);
+  const novaTextPadded = [...novaTextLines, pad];
   const bannerLines = novaAnim.map((line, i) => `${novaTextPadded[i]}${gap}${line}`);
 
   const headerRows: Array<{
@@ -3141,18 +3142,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       centerColor: colors.accent,
       boldCenter: true,
     })),
-    {
-      left: `${snapshot.sessionKey ?? "-"}`,
-      right: `Voice ${snapshot.voiceMode ? "on" : "off"} | Mode ${snapshot.uiMode}${snapshot.state !== "idle" ? ` | State: ${snapshot.state}` : ""}${snapshot.planMode ? " | PLAN" : ""}`,
-      leftColor: colors.muted,
-      rightColor: colors.muted,
-    },
-    {
-      left: `${statusText}`,
-      right: rightStatus,
-      leftColor: statusColor,
-      rightColor: colors.muted,
-    },
     {
       left: "─".repeat(contentWidth),
       leftColor: colors.border,

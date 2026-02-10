@@ -642,6 +642,7 @@ export class AgentHarness {
   private traceSubscriber: TraceSubscriber | null = null;
   private memoryClient: SyncClient | null = null;
   private asyncModeIssues: string[] = [];
+  private initializedModelSelections = new Set<string>();
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
@@ -1019,6 +1020,7 @@ export class AgentHarness {
       state.store.close();
       clearSessionState(state);
       this.sessions.delete(sessionKey);
+      this.initializedModelSelections.delete(sessionKey);
     }
 
     // Always mark session as inactive in GraphD, even if in-memory state was already evicted
@@ -1167,6 +1169,7 @@ export class AgentHarness {
     state.store.close();
     clearSessionState(state);
     this.sessions.delete(oldestKey);
+    this.initializedModelSelections.delete(oldestKey);
     this.logger.debug('LRU evicted session (maxSessions reached)', {
       sessionKey: oldestKey,
       maxSessions: this.maxSessions,
@@ -1199,9 +1202,93 @@ export class AgentHarness {
 
     if (options.includeUserPreferences !== false) {
       this.hydrateModelSelectionsFromPreferences(sessionKey, store);
+      this.seedDefaultModelSelections(sessionKey, store);
     }
 
     return store;
+  }
+
+  private modelSelectionForAgent(agentType: string, hiddenModels: Set<string>): ModelSelection | null {
+    const agentConfig = this.config.agents[agentType];
+    const model = agentConfig?.llm.model?.trim();
+    if (!model || hiddenModels.has(model.toLowerCase())) {
+      return null;
+    }
+    const provider = (agentConfig.llm.displayProvider || agentConfig.llm.provider)?.trim();
+    if (!provider) {
+      return null;
+    }
+    return { provider, model };
+  }
+
+  private resolveFallbackModelSelection(hiddenModels: Set<string>): ModelSelection | null {
+    const defaultModel = this.config.models.default?.trim();
+    if (defaultModel && !hiddenModels.has(defaultModel.toLowerCase())) {
+      const modelEntry = this.config.models.available.find(
+        (entry) => entry.id.trim().toLowerCase() === defaultModel.toLowerCase()
+      );
+      if (modelEntry?.provider) {
+        return { provider: modelEntry.provider, model: modelEntry.id };
+      }
+    }
+
+    const firstVisible = this.config.models.available.find(
+      (entry) => !hiddenModels.has(entry.id.trim().toLowerCase())
+    );
+    if (!firstVisible?.provider) {
+      return null;
+    }
+    return { provider: firstVisible.provider, model: firstVisible.id };
+  }
+
+  private seedDefaultModelSelections(sessionKey: string, store: SessionStore): void {
+    if (this.initializedModelSelections.has(sessionKey)) {
+      return;
+    }
+
+    const hiddenModels = new Set<string>();
+    if (this.isGraphDReady() && this.graphd) {
+      const hiddenModelList = this.graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
+      for (const hidden of hiddenModelList) {
+        hiddenModels.add(hidden.trim().toLowerCase());
+      }
+    }
+
+    let applied = 0;
+    let standardSelection = store.getModelSelection('standard');
+    if (!standardSelection) {
+      standardSelection =
+        this.modelSelectionForAgent('standard', hiddenModels)
+        ?? this.modelSelectionForAgent(this.config.defaultAgent, hiddenModels)
+        ?? this.resolveFallbackModelSelection(hiddenModels);
+      if (standardSelection) {
+        store.setModelSelection('standard', standardSelection);
+        applied += 1;
+      }
+    }
+
+    for (const agentType of Object.keys(this.config.agents)) {
+      if (store.getModelSelection(agentType)) {
+        continue;
+      }
+      const selection =
+        this.modelSelectionForAgent(agentType, hiddenModels)
+        ?? standardSelection
+        ?? this.resolveFallbackModelSelection(hiddenModels);
+      if (!selection) {
+        continue;
+      }
+      store.setModelSelection(agentType, selection);
+      applied += 1;
+    }
+
+    this.initializedModelSelections.add(sessionKey);
+    if (applied > 0) {
+      this.logger.debug('Initialized session model selections from config defaults', {
+        sessionKey,
+        applied,
+      });
+    }
   }
 
   private hydrateModelSelectionsFromPreferences(sessionKey: string, store: SessionStore): void {
@@ -1583,6 +1670,7 @@ export class AgentHarness {
         clearSessionState(state);
         markInactive(sessionKey);
         this.sessions.delete(sessionKey);
+        this.initializedModelSelections.delete(sessionKey);
         this.logger.debug('Evicted paused session (timeout)', {
           sessionKey,
           reason,
@@ -1596,6 +1684,7 @@ export class AgentHarness {
         clearSessionState(state);
         markInactive(sessionKey);
         this.sessions.delete(sessionKey);
+        this.initializedModelSelections.delete(sessionKey);
         this.logger.debug('Evicted session store', {
           sessionKey,
           reason,

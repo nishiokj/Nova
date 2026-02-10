@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { createHash, randomBytes } from 'crypto';
@@ -22,6 +22,112 @@ const REFRESH_BUFFER_SECONDS = 300;
 
 /** Token storage path */
 const TOKEN_PATH = join(homedir(), '.config', 'rex', 'codex-auth.json');
+const LEGACY_TOKEN_PATH = join(homedir(), '.codex', 'auth.json');
+const KNOWN_TOKEN_PATHS = [TOKEN_PATH, LEGACY_TOKEN_PATH] as const;
+
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as JsonRecord)
+    : null;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asPositiveNumber(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return value;
+}
+
+function extractTokenExpiry(token: string): number | undefined {
+  try {
+    const payload = parseJwt(token);
+    return asPositiveNumber(payload.exp);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeStoredTokens(raw: unknown): CodexTokens | null {
+  const root = asRecord(raw);
+  if (!root) return null;
+
+  const nestedTokens = asRecord(root.tokens);
+  const tokenSource = nestedTokens ?? root;
+
+  const accessToken = asNonEmptyString(tokenSource.access_token);
+  const refreshToken = asNonEmptyString(tokenSource.refresh_token);
+  if (!accessToken || !refreshToken) {
+    return null;
+  }
+
+  const expiresAt =
+    asPositiveNumber(tokenSource.expires_at) ??
+    asPositiveNumber(root.expires_at) ??
+    extractTokenExpiry(accessToken) ??
+    Math.floor(Date.now() / 1000) + 3600;
+  const scope = asNonEmptyString(tokenSource.scope) ?? asNonEmptyString(root.scope);
+  const accountId =
+    asNonEmptyString(root.chatgpt_account_id) ??
+    asNonEmptyString(tokenSource.chatgpt_account_id) ??
+    asNonEmptyString(tokenSource.account_id) ??
+    extractAccountId(asNonEmptyString(tokenSource.id_token) ?? '');
+
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    token_type: 'Bearer',
+    expires_at: expiresAt,
+    ...(scope ? { scope } : {}),
+    ...(accountId ? { chatgpt_account_id: accountId } : {}),
+  };
+}
+
+function readStoredTokensFromPathSync(filePath: string): CodexTokens | null {
+  if (!existsSync(filePath)) return null;
+  try {
+    const content = readFileSync(filePath, 'utf-8');
+    return normalizeStoredTokens(JSON.parse(content));
+  } catch {
+    return null;
+  }
+}
+
+async function readStoredTokensFromPath(filePath: string): Promise<CodexTokens | null> {
+  if (!existsSync(filePath)) return null;
+  try {
+    const content = await readFile(filePath, 'utf-8');
+    return normalizeStoredTokens(JSON.parse(content));
+  } catch {
+    return null;
+  }
+}
+
+export function hasStoredCodexTokens(): boolean {
+  for (const tokenPath of KNOWN_TOKEN_PATHS) {
+    if (readStoredTokensFromPathSync(tokenPath)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function loadStoredCodexTokens(): Promise<CodexTokens | null> {
+  for (const tokenPath of KNOWN_TOKEN_PATHS) {
+    const tokens = await readStoredTokensFromPath(tokenPath);
+    if (tokens) {
+      return tokens;
+    }
+  }
+  return null;
+}
 
 /**
  * Manages Codex OAuth tokens - storage, refresh, and retrieval.
@@ -36,14 +142,7 @@ export class CodexTokenManager implements TokenManager {
    * Load tokens from disk on startup.
    */
   async initialize(): Promise<void> {
-    if (existsSync(TOKEN_PATH)) {
-      try {
-        const data = await readFile(TOKEN_PATH, 'utf-8');
-        this.tokens = JSON.parse(data);
-      } catch {
-        this.tokens = null;
-      }
-    }
+    this.tokens = await loadStoredCodexTokens();
   }
 
   /**
