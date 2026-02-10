@@ -176,7 +176,7 @@ export function DiffBlock({ oldStr, newStr, filePath, width = 80, contextLines =
           const colors = DIFF_COLORS[line.type];
 
           return (
-            <Text key={i} backgroundColor={colors.bg}>
+            <Text key={i}>
               <Text color={DIFF_COLORS.lineNum}>{lineNum}</Text>
               <Text color={colors.fg}> {prefix} </Text>
               <Text color={colors.fg}>{displayContent}</Text>

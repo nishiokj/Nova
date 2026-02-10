@@ -55,6 +55,7 @@ packages/
   harness-client/    # Harness client library
   entity-graph/      # Entity relationship graph
   decision-watcher/  # Decision tracking
+  semantic-compiler/ # Semantic invariant compiler (VP + verification planning)
   memory-injector/   # Memory injection utilities
 
 scripts/             # Shell and utility scripts

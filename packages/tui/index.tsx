@@ -89,39 +89,29 @@ import {
 
 const NOVA_ANIM_FRAMES = [
   [
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠠⡀⠂⢀⡄⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠂⢸⣿⡇⠠⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠘⠁⠔⠈⠃⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠠⡀⠂⢀⡄⠀⠀",
+    "⠀⠀⠂⢸⣿⡇⠠⠀⠀",
+    "⠀⠀⠘⠁⠔⠈⠃⠀⠀",
   ],
   [
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠢⡀⣃⢀⠤⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠐⠀⢾⣿⡷⠀⠄⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⢀⠖⠁⡭⠈⠲⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠢⡀⣃⢀⠤⠀⠀",
+    "⠀⠐⠀⢾⣿⡷⠀⠄⠀",
+    "⠀⢀⠖⠁⡭⠈⠲⠀⠀",
   ],
   [
-    "⠀⠀⠐⠀⠀⠀⠀⡀⠀⠀⠀⠠⠂⠀⠀",
-    "⠀⠀⠀⠀⠈⠢⡀⣽⢀⡴⠂⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠂⠰⣿⣿⣿⠄⠠⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⢠⠖⠉⣻⠉⠲⡀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠁⠀⠀⠁⠀⠀⠀⠀⠄⠀⠀",
+    "⠀⠈⠢⡀⣽⢀⡴⠂⠀",
+    "⠀⠂⠰⣿⣿⣿⠄⠠⠀",
+    "⠀⢠⠖⠉⣻⠉⠲⡀⠀",
   ],
   [
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠢⡀⣃⢀⠤⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠐⠀⢾⣿⡷⠀⠄⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⢀⠖⠁⡭⠈⠲⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠢⡀⣃⢀⠤⠀⠀",
+    "⠀⠐⠀⢾⣿⡷⠀⠄⠀",
+    "⠀⢀⠖⠁⡭⠈⠲⠀⠀",
   ],
   [
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠠⡀⠂⢀⡄⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠂⢸⣿⡇⠠⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠘⠁⠔⠈⠃⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠠⡀⠂⢀⡄⠀⠀",
+    "⠀⠀⠂⢸⣿⡇⠠⠀⠀",
+    "⠀⠀⠘⠁⠔⠈⠃⠀⠀",
   ],
 ];
 const NOVA_ANIM_INTERVAL = 300;
@@ -520,6 +510,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const escapeLeaderRef = useRef<number>(0);
   // Track when user explicitly requested models mode (vs startup fetch)
   const pendingModelsModeRef = useRef(false);
+  // Dedup response events — harness emits via both eventQueue and EventBus,
+  // both paths deliver to the same run channel causing duplicate 'response' events.
+  // The second delivery can overwrite streamed content after finalizeStreaming() clears it.
+  const processedResponsesRef = useRef(new Set<string>());
   useEffect(() => {
     return store.subscribe(() => {
       setSnapshot(store.getSnapshot());
@@ -796,13 +790,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     if (data?.session_key) {
       store.setSessionKey(data.session_key);
     }
-    // Clear all model selections on session start - will be repopulated by model_changed events
-    store.batch(() => {
-      store.setModelSelection('standard', null);
-      store.setModelSelection('explorer', null);
-      store.setModelSelection('coding', null);
-    });
     store.clearLastLlmCall();
+    if (isNewSession) {
+      processedResponsesRef.current.clear();
+    }
 
     // Hydrate message history if provided (session rehydration)
     if (data?.history && data.history.length > 0) {
@@ -1097,6 +1088,20 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     const metadata = data.metadata ?? {};
     const kind = typeof metadata.kind === "string" ? metadata.kind : null;
+
+    // Skip duplicate response events for the same request.
+    // Harness emits responses via both eventQueue and EventBus; both paths
+    // publish to the same run channel, so the TUI receives two 'response'
+    // events. The first correctly uses streamingText; the second (after
+    // finalizeStreaming clears it) would overwrite with response.content,
+    // which may be only the last turn's text in a multi-turn conversation.
+    // Kind-specific responses (models, config, etc.) are stateless and safe to repeat.
+    if (!kind && data.request_id) {
+      if (processedResponsesRef.current.has(data.request_id)) {
+        return;
+      }
+      processedResponsesRef.current.add(data.request_id);
+    }
     const content = data.content ?? "";
     const error =
       typeof data.error === "string"
@@ -3111,19 +3116,16 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const newMessageInfo = snapshot.newMessages ? "New messages" : "";
   const rightStatus = [scrollInfo, newMessageInfo].filter(Boolean).join(" | ");
 
-  // NOVA banner (figlet "small" font) + animated dolphin
+  // NOVA banner + supernova animation
   const novaTextLines = [
-    " _  _  _____   ___   ",
-    "| \\| |/ _ \\ \\ / /_\\  ",
-    "| .` | (_) \\ V / _ \\ ",
-    "|_|\\_|\\___/ \\_/_/ \\_\\",
+    "╔╗╔ ╔═╗ ╦  ╦ ╔═╗",
+    "║║║ ║ ║ ╚╗╔╝ ╠═╣",
+    "╝╚╝ ╚═╝  ╚╝  ╩ ╩",
   ];
 
   const novaAnim = NOVA_ANIM_FRAMES[novaFrame];
   const gap = "  ";
-  const pad = " ".repeat(novaTextLines[0].length);
-  const novaTextPadded = [...novaTextLines, pad];
-  const bannerLines = novaAnim.map((line, i) => `${novaTextPadded[i]}${gap}${line}`);
+  const bannerLines = novaAnim.map((line, i) => `${novaTextLines[i]}${gap}${line}`);
 
   const headerRows: Array<{
     left: string;
@@ -4041,34 +4043,6 @@ function resolveSegmentColor(color: HistoryTextSegment["color"], baseColor: stri
   }
 }
 
-function resolveSegmentBg(bgColor: HistoryTextSegment["bgColor"]): string | undefined {
-  const colors = getColors();
-  switch (bgColor) {
-    case "red":
-      return colors.error;
-    case "green":
-      return colors.success;
-    case "yellow":
-      return colors.warning;
-    case "blue":
-      return colors.info;
-    case "magenta":
-      return colors.header;
-    case "cyan":
-      return colors.info;
-    case "white":
-      return colors.text;
-    case "gray":
-      return colors.muted;
-    case "userBg":
-      return colors.userBg;
-    case "diffContextBg":
-      return colors.diffContextBg;
-    default:
-      return undefined;
-  }
-}
-
 function renderHistorySegments(segments: HistoryTextSegment[], baseColor: string | undefined, lineItalic: boolean | undefined): JSX.Element {
   return (
     <>
@@ -4076,7 +4050,6 @@ function renderHistorySegments(segments: HistoryTextSegment[], baseColor: string
         <Text
           key={i}
           color={resolveSegmentColor(seg.color, baseColor)}
-          backgroundColor={resolveSegmentBg(seg.bgColor)}
           bold={seg.bold}
           italic={lineItalic || seg.italic}
           dimColor={seg.dim}
@@ -4120,7 +4093,6 @@ function StyledLine({
           <Text
             key={i}
             color={seg.color}
-            backgroundColor={seg.backgroundColor}
             bold={seg.bold}
             italic={lineItalic || seg.italic}
           >

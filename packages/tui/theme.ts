@@ -62,7 +62,6 @@ export interface ThemeColors {
   muted: string;
   border: string;
   accent: string;
-  userBg: string;  // Background color for user message blocks
   // Status levels
   success: string;
   error: string;
@@ -71,11 +70,7 @@ export interface ThemeColors {
   // Diff colors
   diffAdd: string;
   diffRemove: string;
-  diffAddBg: string;
-  diffRemoveBg: string;
-  diffHeader: string;     // File header text (e.g., "✓ Edit /path/to/file.ts")
-  diffHeaderBg: string;   // File header background (matches userBg for cohesion)
-  diffContextBg: string;  // Context line background (matches userBg for cohesion)
+  diffHeader: string;
 }
 
 export interface Theme {
@@ -113,18 +108,13 @@ export const themes: Record<string, Theme> = {
       muted: "#6c7086",     // Overlay0
       border: "#45475a",    // Surface1
       accent: "#cba6f7",    // Mauve - for headers/UI
-      userBg: "#45475a",    // Surface1 - user message background (more visible)
       success: "#a6e3a1",   // Green
       error: "#f38ba8",     // Red
       warning: "#f9e2af",   // Yellow
       info: "#74c7ec",      // Sapphire
       diffAdd: "#a6e3a1",   // Green - same as success
       diffRemove: "#f38ba8", // Red - same as error
-      diffAddBg: "#1e3a1e",   // Dark green background
-      diffRemoveBg: "#3a1e1e", // Dark red background
       diffHeader: "#89b4fa", // Blue - file path header
-      diffHeaderBg: "#45475a", // Same as userBg for cohesion
-      diffContextBg: "#45475a", // Same as userBg for cohesion
     },
   },
 
@@ -151,18 +141,13 @@ export const themes: Record<string, Theme> = {
       muted: "#737994",     // Overlay0
       border: "#51576d",    // Surface1
       accent: "#ca9ee6",    // Mauve
-      userBg: "#51576d",    // Surface1 - user message background (more visible)
       success: "#a6d189",   // Green
       error: "#e78284",     // Red
       warning: "#e5c890",   // Yellow
       info: "#85c1dc",      // Sapphire
       diffAdd: "#a6d189",   // Green
       diffRemove: "#e78284", // Red
-      diffAddBg: "#1e3a1e",   // Dark green background
-      diffRemoveBg: "#3a1e1e", // Dark red background
       diffHeader: "#8caaee", // Blue - file path header
-      diffHeaderBg: "#51576d", // Same as userBg for cohesion
-      diffContextBg: "#51576d", // Same as userBg for cohesion
     },
   },
 
@@ -190,18 +175,13 @@ export const themes: Record<string, Theme> = {
       muted: "#6e6a86",     // Muted
       border: "#403d52",    // Highlight med
       accent: "#c4a7e7",    // Iris
-      userBg: "#403d52",    // Highlight med - user message background (more visible)
       success: "#31748f",   // Pine
       error: "#eb6f92",     // Love
       warning: "#f6c177",   // Gold
       info: "#9ccfd8",      // Foam
       diffAdd: "#31748f",   // Pine
       diffRemove: "#eb6f92", // Love
-      diffAddBg: "#1a2e2e",   // Dark teal background
-      diffRemoveBg: "#2e1a22", // Dark rose background
       diffHeader: "#9ccfd8", // Foam - file path header
-      diffHeaderBg: "#403d52", // Same as userBg for cohesion
-      diffContextBg: "#403d52", // Same as userBg for cohesion
     },
   },
 
@@ -228,18 +208,13 @@ export const themes: Record<string, Theme> = {
       muted: "#6e6a86",     // Muted
       border: "#44415a",    // Highlight med
       accent: "#c4a7e7",    // Iris
-      userBg: "#44415a",    // Highlight med - user message background (more visible)
       success: "#3e8fb0",   // Pine
       error: "#eb6f92",     // Love
       warning: "#f6c177",   // Gold
       info: "#9ccfd8",      // Foam
       diffAdd: "#3e8fb0",   // Pine
       diffRemove: "#eb6f92", // Love
-      diffAddBg: "#1a2e2e",   // Dark teal background
-      diffRemoveBg: "#2e1a22", // Dark rose background
       diffHeader: "#9ccfd8", // Foam - file path header
-      diffHeaderBg: "#44415a", // Same as userBg for cohesion
-      diffContextBg: "#44415a", // Same as userBg for cohesion
     },
   },
 
@@ -267,18 +242,13 @@ export const themes: Record<string, Theme> = {
       muted: "#565f89",     // Comment
       border: "#3b4261",    // Border
       accent: "#bb9af7",    // Purple
-      userBg: "#3b4261",    // Border - user message background (more visible)
       success: "#9ece6a",   // Green
       error: "#f7768e",     // Red
       warning: "#e0af68",   // Yellow
       info: "#7dcfff",      // Cyan
       diffAdd: "#9ece6a",   // Green
       diffRemove: "#f7768e", // Red
-      diffAddBg: "#1a2e1a",   // Dark green background
-      diffRemoveBg: "#2e1a1e", // Dark red background
       diffHeader: "#7aa2f7", // Blue - file path header
-      diffHeaderBg: "#3b4261", // Same as userBg for cohesion
-      diffContextBg: "#3b4261", // Same as userBg for cohesion
     },
   },
 
@@ -306,18 +276,13 @@ export const themes: Record<string, Theme> = {
       muted: "#4C566A",     // Nord3 - Bright black
       border: "#3B4252",    // Nord1 - Dark
       accent: "#88C0D0",    // Nord8
-      userBg: "#4C566A",    // Nord3 - user message background (more visible)
       success: "#A3BE8C",   // Nord14 - Green
       error: "#BF616A",     // Nord11 - Red
       warning: "#EBCB8B",   // Nord13 - Yellow
       info: "#88C0D0",      // Nord8 - Cyan
       diffAdd: "#A3BE8C",   // Nord14 - Green
       diffRemove: "#BF616A", // Nord11 - Red
-      diffAddBg: "#1e2e1e",   // Dark green background
-      diffRemoveBg: "#2e1e1e", // Dark red background
       diffHeader: "#88C0D0", // Nord8 - file path header
-      diffHeaderBg: "#4C566A", // Same as userBg for cohesion
-      diffContextBg: "#4C566A", // Same as userBg for cohesion
     },
   },
 
@@ -345,18 +310,13 @@ export const themes: Record<string, Theme> = {
       muted: "#665c54",     // Dark3
       border: "#504945",    // Dark2
       accent: "#d3869b",    // Bright purple
-      userBg: "#504945",    // Dark2 - user message background (more visible)
       success: "#b8bb26",   // Bright green
       error: "#fb4934",     // Bright red
       warning: "#fabd2f",   // Bright yellow
       info: "#83a598",      // Bright blue
       diffAdd: "#b8bb26",   // Bright green
       diffRemove: "#fb4934", // Bright red
-      diffAddBg: "#2a2e1a",   // Dark olive background
-      diffRemoveBg: "#2e1a1a", // Dark red background
       diffHeader: "#83a598", // Bright blue - file path header
-      diffHeaderBg: "#504945", // Same as userBg for cohesion
-      diffContextBg: "#504945", // Same as userBg for cohesion
     },
   },
 
@@ -384,18 +344,13 @@ export const themes: Record<string, Theme> = {
       muted: "#727169",     // Fuji gray
       border: "#54546D",    // Sumi ink6
       accent: "#957FB8",    // Oni violet
-      userBg: "#54546D",    // Sumi ink6 - user message background (more visible)
       success: "#76946A",   // Autumn green
       error: "#E82424",     // Samurai red
       warning: "#FF9E3B",   // Ronin yellow
       info: "#7E9CD8",      // Crystal blue
       diffAdd: "#76946A",   // Autumn green
       diffRemove: "#E82424", // Samurai red
-      diffAddBg: "#1e2a1e",   // Dark green background
-      diffRemoveBg: "#2a1e1e", // Dark red background
       diffHeader: "#7E9CD8", // Crystal blue - file path header
-      diffHeaderBg: "#54546D", // Same as userBg for cohesion
-      diffContextBg: "#54546D", // Same as userBg for cohesion
     },
   },
 
@@ -423,18 +378,13 @@ export const themes: Record<string, Theme> = {
       muted: "#7a8478",     // Gray1
       border: "#4f5b58",    // Gray0 dim
       accent: "#a7c080",    // Green
-      userBg: "#4f5b58",    // Gray0 dim - user message background (more visible)
       success: "#a7c080",   // Bright green
       error: "#e67e80",     // Red
       warning: "#dbbc7f",   // Yellow
       info: "#7fbbb3",      // Aqua
       diffAdd: "#a7c080",   // Bright green
       diffRemove: "#e67e80", // Red
-      diffAddBg: "#1e2a1e",   // Dark green background
-      diffRemoveBg: "#2a1e1e", // Dark red background
       diffHeader: "#7fbbb3", // Aqua - file path header
-      diffHeaderBg: "#4f5b58", // Same as userBg for cohesion
-      diffContextBg: "#4f5b58", // Same as userBg for cohesion
     },
   },
 
@@ -462,18 +412,13 @@ export const themes: Record<string, Theme> = {
       muted: "#5c6370",     // Comment gray
       border: "#3e4451",    // Gutter gray
       accent: "#c678dd",    // Purple
-      userBg: "#3e4451",    // Gutter gray - user message background (more visible)
       success: "#98c379",   // Green
       error: "#e06c75",     // Red
       warning: "#e5c07b",   // Yellow
       info: "#56b6c2",      // Cyan
       diffAdd: "#98c379",   // Green
       diffRemove: "#e06c75", // Red
-      diffAddBg: "#1e2a1e",   // Dark green background
-      diffRemoveBg: "#2a1e1e", // Dark red background
       diffHeader: "#61afef", // Blue - file path header
-      diffHeaderBg: "#3e4451", // Same as userBg for cohesion
-      diffContextBg: "#3e4451", // Same as userBg for cohesion
     },
   },
 };

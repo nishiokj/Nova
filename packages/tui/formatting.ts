@@ -4,7 +4,6 @@ import type { HistoryLine } from "./store.js";
 export interface ParsedSegment {
   text: string;
   color?: string;
-  backgroundColor?: string;
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
@@ -237,12 +236,12 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
   }
 
   if (/^\s*\d+\s+\+ .*$/.test(text)) {
-    const segment = { text, color: "#4ade80", backgroundColor: undefined };
+    const segment = { text, color: "#4ade80" };
     return { segments: [segment], fill: segment };
   }
 
   if (/^\s*\d+\s+- .*$/.test(text)) {
-    const segment = { text, color: "#f87171", backgroundColor: undefined };
+    const segment = { text, color: "#f87171" };
     return { segments: [segment], fill: segment };
   }
 

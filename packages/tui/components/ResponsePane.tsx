@@ -17,12 +17,12 @@ import { getColors } from "../theme.js";
 const getDiffColors = () => {
   const theme = getColors();
   return {
-    header: { fg: theme.diffHeader, bg: undefined }, // Text-only header styling
-    added: { fg: "#4ade80", bg: undefined },        // Light green text, no background
-    removed: { fg: "#f87171", bg: undefined },      // Light red text, no background
-    context: { fg: theme.text, bg: undefined },      // No background for non-affected lines
-    separator: { fg: theme.muted, bg: undefined },   // No background for separators
-    text: { fg: theme.text, bg: undefined },         // Theme text
+    header: { fg: theme.diffHeader },
+    added: { fg: "#4ade80" },
+    removed: { fg: "#f87171" },
+    context: { fg: theme.text },
+    separator: { fg: theme.muted },
+    text: { fg: theme.text },
   };
 };
 
@@ -71,13 +71,13 @@ function ResponseLineRow({ line, width }: ResponseLineRowProps): JSX.Element {
   const paddedText = line.text.padEnd(width, " ").slice(0, width);
 
   return (
-    <Text color={colors.fg} backgroundColor={colors.bg}>
+    <Text color={colors.fg}>
       {paddedText}
     </Text>
   );
 }
 
-function getLineColors(type: ResponseLine["type"]): { fg: string; bg?: string } {
+function getLineColors(type: ResponseLine["type"]): { fg: string } {
   const colors = getDiffColors();
   switch (type) {
     case "header":

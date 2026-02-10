@@ -282,8 +282,6 @@ export interface TextSegment {
   dim?: boolean;
   /** Optional color name (for theme mapping) */
   color?: "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "gray" | "text" | "muted";
-  /** Optional background color */
-  bgColor?: "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "gray" | "userBg" | "diffContextBg";
 }
 
 /** Model entry from the harness */

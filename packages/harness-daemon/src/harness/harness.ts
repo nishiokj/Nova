@@ -1267,7 +1267,13 @@ export class AgentHarness {
       }
     }
 
-    for (const agentType of Object.keys(this.config.agents)) {
+    const seedAgentTypes = new Set<string>([
+      ...Object.keys(this.config.agents),
+      'standard',
+      'explorer',
+      'coding',
+    ]);
+    for (const agentType of seedAgentTypes) {
       if (store.getModelSelection(agentType)) {
         continue;
       }
