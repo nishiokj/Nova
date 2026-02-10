@@ -1,45 +1,68 @@
+# Python
 venv
 .venv
+*/venv
 __pycache__
+.pycache
 .pycache_eval
+.pyc_cache
 .pytest_cache
-.claude
-.lab/**/workspace/
-config/skills/**/agent-browser/
-logs
-tui/logs
-evals/logs
-src/app/logs
-dist
-build
-.env
+*.egg-info
 .coverage
 .mypy_cache
 .ruff_cache
-.idea
-.vscode
-*.egg-info
+
+# Node.js / TypeScript
+node_modules/
+dist/
+build/
+*.lock
+bun.lockb
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+packages/*/bun.lock
+tui-ts/dist/
+
+# Environment / Secrets
 .env
-temp
-*/venv
-logs/*
-logs/*.jsonl
-*/*.jsonl
-evals/results/*
-evals/results/*/*/*
-.pyc_cache
-.pycache
-
-# Graphd database (local cache, not shared)
-.graphd/
-
-# Authentication states (sensitive cookies)
-auth-states/
-
-# OAuth tokens (Codex, etc.)
+.env.local
+.env.*.local
+.envrc
 codex-auth.json
 **/codex-auth.json
-.cockpit/*
+auth-states/
+
+# IDE
+.idea
+.vscode
+.claude
+
+# OS
+.DS_Store
+*.DS_Store
+
+# Local runtime / data
+.graphd/
+.cockpit/
+.haiku/
+.watcher/
+.meta/
+.lab/
+data/
+logs/
+tui/logs
+evals/logs
+evals/results/
+*/*.jsonl
+temp/
+htmlcovrepo-test/
+
+# Skills (installed per-editor, not shared)
+config/skills/**/agent-browser/
+config/skills/.*/
+config/skills/skills/
+
 # Release binaries
 dist/binaries/
 *.exe
@@ -47,47 +70,17 @@ rex-linux-*
 rex-darwin-*
 rex-windows-*
 latest-version.txt
-.haiku/*
-# Node.js / TypeScript
-node_modules/
-*.lock
-bun.lockb
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
 
-# TypeScript TUI build artifacts
-tui-ts/dist/
-
-# OS files
-.DS_Store
-*.DS_Store
-htmlcovrepo-test/
-
-# ignore nested worktree
+# Worktrees
 /tui-ts/**/repo-test/
 
-# local worktrees
-/tui-ts/**/repo-test/
-.claude
-.envrc
-
-# Regenerate rebuild log
-.regenerate.log
-
-.watcher/
-data/
-
-# Debug/Profile artifacts
+# Debug / Profile artifacts
 debug.log
+.regenerate.log
 profile-*.json
 temp_query.sql
 
-# Package-level lock files (workspace handles deps)
-packages/*/bun.lock
-
-# Additional .env patterns
-.env.local
-.env.*.local
-
-.haiku/*
+# Local tools / symlinks
+ask_claude
+lab
+harness_manifest.json
