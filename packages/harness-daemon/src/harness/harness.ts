@@ -84,6 +84,7 @@ import {
   type WatcherTrigger,
   type DecisionDatabase,
   type WorkItemLog,
+  type WorkLog,
   type WatcherAction,
   type RaisedEscalation,
   type SemanticOutput,
@@ -2505,6 +2506,17 @@ export class AgentHarness {
     const watcherCompactTrigger = DEFAULT_ORCHESTRATOR_CONFIG.compactTriggerPercent;
     const asyncEnabledForRun = (store?.isAsyncModeEnabled() ?? false) || !!hookRegistry;
 
+    // Register logging hooks for ALL sessions (async and interactive)
+    if (!sessionState?.workLog) {
+      await this.registerSessionLoggingHooks(
+        sessionKey,
+        goal,
+        effectiveWorkingDir,
+        this.config.tools.workingDir,
+        asyncEnabledForRun ? 'async' : 'interactive'
+      );
+    }
+
     // Only create/use watcher hooks when async mode is enabled for this session/run
     let effectiveHookRegistry = hookRegistry;
     if (asyncEnabledForRun && !hookRegistry) {
@@ -2943,32 +2955,31 @@ export class AgentHarness {
   }
 
   /**
-   * Create a watcher-backed hook registry for a session.
-   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed watcher.
+   * Register session-level logging hooks that run for ALL sessions (async and interactive).
+   * Creates work log, workitem logs, and registers internal hooks for execution audit trail.
+   * Idempotent — skips if workLog already exists on session state.
    *
    * @param sessionKey - Session identifier
-   * @param goal - The goal for the async session
+   * @param goal - The goal for the session
    * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
    * @param watcherDir - Directory for watcher artifacts (.watcher/), defaults to workingDir
+   * @param mode - Session mode for the work log entry
    */
-  async createWatcherHookRegistryForSession(
+  async registerSessionLoggingHooks(
     sessionKey: string,
     goal: string,
     workingDir: string,
-    watcherDir?: string
-  ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
+    watcherDir?: string,
+    mode: 'async' | 'interactive' = 'interactive'
+  ): Promise<{ workLog: WorkLog }> {
     const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
-    // Use watcherDir for watcher artifacts, fallback to workingDir for backwards compatibility
     const effectiveWatcherDir = watcherDir ?? workingDir;
 
-    // NOTE: Skill knowledge is baked into system prompts. No need to discover skill files.
-    const saliencePath = await writeSalienceFile(effectiveWatcherDir, {
-      sessionId: sessionKey,
-      goal,
-      mode: 'async',
-    });
+    // Idempotent — if work log already exists, logging hooks are already registered
+    if (sessionState.workLog) {
+      return { workLog: sessionState.workLog };
+    }
 
-    const decisionLog = await createDecisionLog(effectiveWatcherDir, sessionKey);
     const workLog = await createWorkLog(effectiveWatcherDir, sessionKey);
     sessionState.workLog = workLog;
 
@@ -3001,15 +3012,13 @@ export class AgentHarness {
     ): Promise<WorkItemLog> => {
       let log = sessionState.workItemLogs.get(workId);
       if (!log) {
-        // Try to get existing log first (artifacts in watcherDir)
         log = await getWorkItemLog(effectiveWatcherDir, sessionKey, workId) ?? undefined;
         if (!log) {
-          // Create new log: artifact in watcherDir, cwd for path resolution in workingDir
           log = await createWorkItemLog(effectiveWatcherDir, sessionKey, {
             workId,
             objective: objective ?? 'unknown',
             agent: agentType,
-            cwd: workingDir,  // All paths in this log will be relative to agent's working dir
+            cwd: workingDir,
             domain: meta?.domain,
             dependencies: meta?.dependencies,
             targetPaths: meta?.targetPaths,
@@ -3070,7 +3079,7 @@ export class AgentHarness {
       type: 'session_start',
       timestamp: new Date().toISOString(),
       goal,
-      mode: 'async',
+      mode,
     }));
 
     // Register auto-logging hooks for workitem activity
@@ -3121,20 +3130,16 @@ export class AgentHarness {
     });
     registerSessionInternalHook('turn_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'turn_completed') return;
-      if (ctx.sessionKey !== sessionKey) return; // Filter by session
+      if (ctx.sessionKey !== sessionKey) return;
 
-      // Get or create workitem log - use objective from context
       const itemLog = await getWorkItemLogSafe('turn_completed', ctx.workId, ctx.agentType, ctx.objective);
 
       if (itemLog) {
-        // Mark as started on first turn
         if (event.iteration === 1) {
           await safeAppend('WorkItem log write failed (markStarted)', () => itemLog.markStarted());
         }
-        // Note: actual message content comes via agent_message hook, not here
       }
 
-      // Also log to session-level work log on first turn (fallback if creation hook missed)
       if (event.iteration === 1) {
         if (!sessionState.workItemsCreated.has(ctx.workId)) {
           sessionState.workItemsCreated.add(ctx.workId);
@@ -3157,8 +3162,6 @@ export class AgentHarness {
       }
     });
 
-    // Log actual agent messages (real content + reasoning for audit trail)
-    // NOTE: Uses getOrCreateWorkItemLog because agent_message fires BEFORE turn_completed
     registerSessionInternalHook('agent_message', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'agent_message') return;
       if (ctx.sessionKey !== sessionKey) return;
@@ -3168,14 +3171,12 @@ export class AgentHarness {
         await safeAppend('WorkItem log write failed (agent_message)', () => itemLog.appendMessage(
           event.role,
           event.content,
-          undefined,  // watcherInjected
-          event.reasoning  // Include reasoning for decision audit
+          undefined,
+          event.reasoning
         ));
       }
     });
 
-    // Log individual tool calls with full details
-    // NOTE: Uses getOrCreateWorkItemLog because tool_call_completed can fire before turn_completed
     registerSessionInternalHook('tool_call_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'tool_call_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
@@ -3186,13 +3187,12 @@ export class AgentHarness {
           event.tool,
           event.args,
           event.success,
-          event.resultPreview,
+          event.result,
           event.durationMs
         ));
       }
     });
 
-    // Log memory injections with full content for observability
     registerSessionInternalHook('memory_injected', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'memory_injected') return;
       if (ctx.sessionKey !== sessionKey) return;
@@ -3235,18 +3235,15 @@ export class AgentHarness {
       }, ctx.workId, ctx.requestId, ctx.sessionKey));
     });
 
-    // Legacy batch hook - kept for backwards compatibility but tool_call_completed is primary
     registerSessionInternalHook('tool_batch_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'tool_batch_completed') return;
       if (ctx.sessionKey !== sessionKey) return;
-      // tool_call_completed handles individual calls now, this is just for summary events
     });
 
     registerSessionInternalHook('files_modified', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'files_modified') return;
-      if (ctx.sessionKey !== sessionKey) return; // Filter by session
+      if (ctx.sessionKey !== sessionKey) return;
 
-      // Log to session-level work log
       await safeAppend('Work log write failed (files_modified)', () => workLog.append({
         type: 'note',
         timestamp: new Date().toISOString(),
@@ -3255,7 +3252,6 @@ export class AgentHarness {
         source: 'orchestrator',
       }));
 
-      // Also log to workitem log
       const itemLog = await getWorkItemLogSafe('files_modified', ctx.workId, ctx.agentType, ctx.objective);
       if (itemLog) {
         await safeAppend('WorkItem log write failed (files_modified)', () => itemLog.appendToolCall(
@@ -3266,7 +3262,6 @@ export class AgentHarness {
         ));
       }
 
-      // Publish to EventBus so dashboard SSE stream can refresh open files
       this.eventBus.publish(createEvent('files_modified', {
         paths: event.paths,
       }, ctx.workId, ctx.requestId, ctx.sessionKey));
@@ -3274,11 +3269,10 @@ export class AgentHarness {
 
     registerSessionInternalHook('agent_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'agent_completed') return;
-      if (ctx.sessionKey !== sessionKey) return; // Filter by session
+      if (ctx.sessionKey !== sessionKey) return;
 
       const workId = ctx.workId ?? event.workId ?? 'unknown';
 
-      // Log to session-level work log
       await safeAppend('Work log write failed (agent_completed)', () => workLog.append({
         type: 'workitem_status',
         timestamp: new Date().toISOString(),
@@ -3287,7 +3281,6 @@ export class AgentHarness {
         filesModified: event.invalidatedPaths,
       }));
 
-      // Mark workitem as completed
       const itemLog = await getWorkItemLogSafe('agent_completed', workId, ctx.agentType, ctx.objective);
       if (itemLog) {
         await safeAppend('WorkItem log write failed (markCompleted)', () => itemLog.markCompleted(
@@ -3296,7 +3289,7 @@ export class AgentHarness {
             llmCalls: event.metrics.llmCallsMade,
             toolCalls: event.metrics.toolCallsMade,
             contextPercentUsed: event.contextPercentUsed ?? 0,
-            durationMs: 0, // Not available in InternalHookEvent
+            durationMs: 0,
             filesRead: event.filesRead,
             filesModified: event.invalidatedPaths,
           } : undefined
@@ -3351,6 +3344,56 @@ export class AgentHarness {
         }, ctx.requestId);
       }
     });
+
+    return { workLog };
+  }
+
+  /**
+   * Create a watcher-backed hook registry for a session.
+   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed watcher.
+   * Calls registerSessionLoggingHooks first (idempotent), then adds watcher-specific setup.
+   *
+   * @param sessionKey - Session identifier
+   * @param goal - The goal for the async session
+   * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
+   * @param watcherDir - Directory for watcher artifacts (.watcher/), defaults to workingDir
+   */
+  async createWatcherHookRegistryForSession(
+    sessionKey: string,
+    goal: string,
+    workingDir: string,
+    watcherDir?: string
+  ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
+    const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
+    const effectiveWatcherDir = watcherDir ?? workingDir;
+
+    // Register logging hooks first (idempotent — skips if already registered)
+    const { workLog } = await this.registerSessionLoggingHooks(sessionKey, goal, workingDir, watcherDir, 'async');
+
+    // NOTE: Skill knowledge is baked into system prompts. No need to discover skill files.
+    const saliencePath = await writeSalienceFile(effectiveWatcherDir, {
+      sessionId: sessionKey,
+      goal,
+      mode: 'async',
+    });
+
+    const decisionLog = await createDecisionLog(effectiveWatcherDir, sessionKey);
+
+    const safeAppend = async (label: string, op: () => Promise<void>): Promise<void> => {
+      try {
+        await op();
+      } catch (err) {
+        console.warn(`[HARNESS] ${label}:`, err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    const registerSessionInternalHook = (
+      event: InternalHookEvent['type'],
+      hook: (event: InternalHookEvent, ctx: InternalHookContext) => Promise<void>
+    ): void => {
+      const unregister = registerHook(event, hook);
+      sessionState.internalHookUnregisters.push(unregister);
+    };
 
     registerSessionInternalHook('watcher_agent_stopped', async (event: InternalHookEvent, ctx: InternalHookContext) => {
       if (event.type !== 'watcher_agent_stopped') return;

@@ -1248,6 +1248,11 @@ export class Agent {
       // Add reasoning content to context for multi-turn salience
       if (reasoningContent) {
         localContext.addReasoning(reasoningContent, workItem.workId);
+        this.emit(createEvent('agent_reasoning', {
+          agentType: this.config.type,
+          content: reasoningContent,
+          isFinal: true,
+        }, workItem.workId));
       }
 
       // 3. Parse response content
@@ -1964,7 +1969,7 @@ export class Agent {
         tool: call.name,
         args: this.summarizeToolArgs(call.arguments),
         success: toolResult.isSuccess,
-        resultPreview: eventResult?.slice(0, 500),
+        result: eventResult,
         durationMs: toolDurationMs,
       }, this.buildHookContext(workItem));
 

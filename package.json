@@ -55,6 +55,7 @@
     "split": "bun run start:split",
     "start:tui": "bun run --cwd packages/tui start",
     "start": "bun run --cwd packages/launcher start",
+    "smoke:interprocess": "bun run scripts/smoke/interprocess-smoke.ts",
     "profile": "PROFILE=1 bun run start",
     "profile:daemon": "PROFILE=1 bun run start:daemon"
   },

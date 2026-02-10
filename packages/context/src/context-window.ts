@@ -8,7 +8,7 @@
  * - Optional disk backing: pass filePath to constructor for disk-authoritative persistence
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'fs';
 import nodePath from 'path';
 import type {
   ContentBlock,
@@ -456,6 +456,7 @@ export class ContextWindow {
   private _fileContentCounter = 0;
   private _artifactCounter = 0;
   private _created: string;
+  private _compactionCount = 0;
 
   constructor(sessionKey: string, maxTokens = 200_000, filePath?: string) {
     this.sessionKey = sessionKey;
@@ -543,6 +544,34 @@ export class ContextWindow {
     const tmp = this.filePath + '.tmp';
     writeFileSync(tmp, content, 'utf-8');
     renameSync(tmp, this.filePath);
+  }
+
+  /**
+   * Snapshot the current context file before compaction destroys items.
+   * Copies context.md → context.v{N}.md, caps at 10 versions.
+   */
+  private _snapshotBeforeCompact(): void {
+    if (!this.filePath || !existsSync(this.filePath)) return;
+
+    this._compactionCount++;
+    const dir = nodePath.dirname(this.filePath);
+    const snapshotPath = nodePath.join(dir, `context.v${this._compactionCount}.md`);
+    copyFileSync(this.filePath, snapshotPath);
+
+    // Prune oldest versions if we exceed 10
+    const files = readdirSync(dir);
+    const versionedFiles = files
+      .filter(f => /^context\.v(\d+)\.md$/.test(f))
+      .map(f => ({
+        name: f,
+        version: parseInt(f.match(/^context\.v(\d+)\.md$/)![1], 10),
+      }))
+      .sort((a, b) => a.version - b.version);
+
+    while (versionedFiles.length > 10) {
+      const oldest = versionedFiles.shift()!;
+      unlinkSync(nodePath.join(dir, oldest.name));
+    }
   }
 
   // =========================================================================
@@ -877,6 +906,7 @@ export class ContextWindow {
    */
   compact(options: CompactOptions = {}): CompactResult {
     this._syncFromDiskIfBacked();
+    this._snapshotBeforeCompact();
     const {
       maxFileContentAgeMs,
       maxFileContentCount,

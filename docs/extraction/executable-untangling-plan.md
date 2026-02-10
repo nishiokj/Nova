@@ -194,6 +194,13 @@ Turn untangled boundaries into operational deployment units.
 - CI jobs per deployable component
 - Inter-process smoke tests for compatibility
 
+### Progress
+- 2026-02-10: Added deployable runbooks under `docs/runbooks/*`.
+- 2026-02-10: Added per-component CI matrix job (`deployable-components`) and inter-process smoke CI job.
+- 2026-02-10: Added inter-process smoke script: `scripts/smoke/interprocess-smoke.ts`.
+- 2026-02-10: Verified smoke compatibility flow passes locally via `bun run smoke:interprocess`.
+- 2026-02-10: Core services (`graphd`, `harness-daemon`, `control-plane`, `agent-memory`) use build+lint verification in component CI; launcher/UI entries run build verification while existing UI type debt is stabilized.
+
 ### Validation
 ```bash
 # Per component:

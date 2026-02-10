@@ -147,19 +147,6 @@ export interface WorkItemLog {
 }
 
 // ============================================
-// CONSTANTS
-// ============================================
-
-/** Max result summary length for tool outputs (generous - we want useful context) */
-const MAX_RESULT_SUMMARY_LENGTH = 5000;
-
-/** Max reasoning length (extended thinking can be verbose) */
-const MAX_REASONING_LENGTH = 10000;
-
-/** Max agent summary length (for completed status) */
-const MAX_CONTENT_LENGTH = 10000;
-
-// ============================================
 // IMPLEMENTATION
 // ============================================
 
@@ -300,7 +287,7 @@ function createWorkItemLogInstance(
         timestamp: new Date().toISOString(),
         role,
         content,  // Full content - no truncation for proper audit trail
-        reasoning: reasoning ? truncate(reasoning, MAX_REASONING_LENGTH) : undefined,
+        reasoning,
         watcherInjected,
       };
       await append(entry);
@@ -319,7 +306,7 @@ function createWorkItemLogInstance(
         tool,
         args: processArgsForLogging(args, cwd),  // Full args with relative paths
         success,
-        resultSummary: resultSummary ? truncate(resultSummary, MAX_RESULT_SUMMARY_LENGTH) : undefined,
+        resultSummary,
         durationMs: durationMs ?? 0,
       };
       await append(entry);
@@ -361,7 +348,7 @@ function createWorkItemLogInstance(
         type: 'status',
         timestamp: new Date().toISOString(),
         status: 'completed',
-        agentSummary: truncate(agentSummary, MAX_CONTENT_LENGTH),
+        agentSummary,
       };
       await append(statusEntry);
 
@@ -418,11 +405,6 @@ function parseJsonl<T>(content: string): T[] {
     }
   }
   return entries;
-}
-
-function truncate(str: string, maxLen: number): string {
-  if (str.length <= maxLen) return str;
-  return str.slice(0, maxLen) + '... [truncated]';
 }
 
 /**

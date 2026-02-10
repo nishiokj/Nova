@@ -396,8 +396,8 @@ export type InternalHookEvent =
       /** Tool arguments (summarized - file paths, patterns, not full content) */
       args: Record<string, unknown>;
       success: boolean;
-      /** Result preview - first 500 chars of output */
-      resultPreview?: string;
+      /** Full tool result output */
+      result?: string;
       durationMs: number;
     }
   | {
