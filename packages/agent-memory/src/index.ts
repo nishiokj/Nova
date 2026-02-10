@@ -274,6 +274,25 @@ export {
   DerivedTaskIntegration,
   type DerivedIntegrationConfig,
 } from './derived/integration.js'
+
+// Agentic Tasks
+export {
+  createAgenticTaskRepository,
+  type AgenticTaskRepository,
+} from './db/repositories/agentic-task.js'
+export {
+  createAgenticRunRepository,
+  type AgenticRunRepository,
+} from './db/repositories/agentic-run.js'
+export {
+  executeAgenticRun,
+  type AgenticRunContext,
+  type AgenticRunResult,
+} from './agentic/runner.js'
+export {
+  AgenticTaskIntegration,
+  type AgenticIntegrationConfig,
+} from './agentic/integration.js'
 export {
   runDerivedScript,
   loadScriptMetadata,

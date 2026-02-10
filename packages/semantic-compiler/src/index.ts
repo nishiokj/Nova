@@ -78,6 +78,7 @@ export {
 } from './report.js';
 
 export type {
+  WorkItemSpec,
   UserReviewPrompt,
 } from './adapters.js';
 

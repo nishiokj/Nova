@@ -28,6 +28,7 @@ import { registerMemoryRoutes } from './memory.js'
 import { registerControlPlaneRoutes } from './control-plane.js'
 import { registerEscalationsRoutes } from './escalations.js'
 import { registerArchitectureRoutes } from './architecture.js'
+import { registerAgenticTaskRoutes } from './agentic-tasks.js'
 
 /**
  * Register all API routes.
@@ -55,6 +56,7 @@ export function registerRoutes(server: HttpServer, daemon: SyncDaemon): void {
   registerControlPlaneRoutes(server, daemon)
   registerEscalationsRoutes(server, daemon.escalationsRepo)
   registerArchitectureRoutes(server, daemon)
+  registerAgenticTaskRoutes(server, daemon)
 }
 
 export { registerAccountRoutes } from './accounts.js'
@@ -79,3 +81,4 @@ export { registerMemoryRoutes } from './memory.js'
 export { registerControlPlaneRoutes } from './control-plane.js'
 export { registerEscalationsRoutes } from './escalations.js'
 export { registerArchitectureRoutes } from './architecture.js'
+export { registerAgenticTaskRoutes } from './agentic-tasks.js'

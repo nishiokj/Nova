@@ -43,6 +43,11 @@ import { createAgentTracesRepository } from '../db/repositories/agent-traces.js'
 import type { AgentTracesRepository } from '../db/repositories/agent-traces.js'
 import { createEscalationsRepository } from '../db/repositories/escalations.js'
 import type { EscalationsRepository } from '../db/repositories/escalations.js'
+import { createAgenticTaskRepository } from '../db/repositories/agentic-task.js'
+import type { AgenticTaskRepository } from '../db/repositories/agentic-task.js'
+import { createAgenticRunRepository } from '../db/repositories/agentic-run.js'
+import type { AgenticRunRepository } from '../db/repositories/agentic-run.js'
+import { AgenticTaskIntegration, type AgenticIntegrationConfig } from '../agentic/integration.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
 import { Scheduler, type SchedulerConfig } from '../sync/scheduler.js'
@@ -84,6 +89,8 @@ export interface DaemonConfig {
   engine?: SyncEngineConfig
   /** Derived task integration config */
   derived?: DerivedIntegrationConfig
+  /** Agentic task integration config */
+  agentic?: AgenticIntegrationConfig
 }
 
 interface AuthStatePayload {
@@ -146,6 +153,9 @@ export class SyncDaemon {
   readonly actionsRepo: AgentActionsRepository
   readonly tracesRepo: AgentTracesRepository
   readonly escalationsRepo: EscalationsRepository
+  readonly agenticTaskRepo: AgenticTaskRepository
+  readonly agenticRunRepo: AgenticRunRepository
+  readonly agenticIntegration: AgenticTaskIntegration
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
@@ -177,7 +187,10 @@ export class SyncDaemon {
     goalsRepo: AgentGoalsRepository,
     actionsRepo: AgentActionsRepository,
     tracesRepo: AgentTracesRepository,
-    escalationsRepo: EscalationsRepository
+    escalationsRepo: EscalationsRepository,
+    agenticTaskRepo: AgenticTaskRepository,
+    agenticRunRepo: AgenticRunRepository,
+    agenticIntegration: AgenticTaskIntegration,
   ) {
     this.config = config
     this.sql = config.sql
@@ -203,6 +216,9 @@ export class SyncDaemon {
     this.actionsRepo = actionsRepo
     this.tracesRepo = tracesRepo
     this.escalationsRepo = escalationsRepo
+    this.agenticTaskRepo = agenticTaskRepo
+    this.agenticRunRepo = agenticRunRepo
+    this.agenticIntegration = agenticIntegration
   }
 
   /**
@@ -235,6 +251,8 @@ export class SyncDaemon {
     const actionsRepo = createAgentActionsRepository(ctx)
     const tracesRepo = createAgentTracesRepository(ctx)
     const escalationsRepo = createEscalationsRepository(ctx)
+    const agenticTaskRepo = createAgenticTaskRepository(ctx)
+    const agenticRunRepo = createAgenticRunRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -259,6 +277,10 @@ export class SyncDaemon {
     const derivedIntegration = new DerivedTaskIntegration(sql, config.derived)
     derivedIntegration.registerHandlers(engine)
 
+    // Create agentic task integration (uses shared queue)
+    const agenticIntegration = new AgenticTaskIntegration(sql, config.agentic)
+    agenticIntegration.registerHandlers(engine)
+
     // Create collector (for direct webhook ingestion)
     const collector = new Collector(sql, {
       authProvider,
@@ -277,7 +299,9 @@ export class SyncDaemon {
       },
       accountRepo,
       derivedTaskRepo,
-      derivedIntegration
+      derivedIntegration,
+      agenticTaskRepo,
+      agenticIntegration,
     )
 
     // Create HTTP server
@@ -310,7 +334,10 @@ export class SyncDaemon {
       goalsRepo,
       actionsRepo,
       tracesRepo,
-      escalationsRepo
+      escalationsRepo,
+      agenticTaskRepo,
+      agenticRunRepo,
+      agenticIntegration,
     )
 
     // Store connectors map reference in daemon for registration

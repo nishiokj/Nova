@@ -271,6 +271,18 @@ export {
 } from './test-reports.js'
 
 export {
+  createAgenticTaskRepository,
+  type AgenticTaskRepository,
+  type AgenticTaskRow,
+} from './agentic-task.js'
+
+export {
+  createAgenticRunRepository,
+  type AgenticRunRepository,
+  type AgenticRunRow,
+} from './agentic-run.js'
+
+export {
   createArchitectureRepository,
   type ArchitectureRepository,
   type ArchitectureRunStatus,

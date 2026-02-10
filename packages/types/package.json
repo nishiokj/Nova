@@ -17,6 +17,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "semantic-compiler": "workspace:*",
     "zod": "^4.3.5"
   },
   "devDependencies": {

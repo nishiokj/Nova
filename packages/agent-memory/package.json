@@ -33,6 +33,7 @@
     "pgvector": "^0.2.1",
     "postgres": "^3.4.8",
     "protocol": "workspace:*",
+    "semantic-compiler": "workspace:*",
     "types": "workspace:*",
     "ulid": "^2.3.0",
     "zod": "^4.3.5"

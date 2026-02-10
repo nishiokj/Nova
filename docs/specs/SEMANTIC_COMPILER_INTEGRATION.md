@@ -69,6 +69,14 @@ Implementation: `packages/semantic-compiler/src/stages.ts`.
 5. Execute verification nodes through existing orchestrator/work queue.
 6. Emit verdict artifacts and surface through existing cockpit/test-report flows.
 
+## CLI Usage (MVP)
+
+Semantic compiler now exposes a `uow` CLI from `packages/semantic-compiler/src/cli.ts`:
+
+- `uow compile --input <compile-request.json> --out <dir> [--state <state.json>]`
+- `uow verify --vp <vp.json> --out <dir> [--run-id <id>] [--seed <number>]`
+- `uow report --vp <vp.json> --verdicts <invariant_results.json> --out <dir>`
+
 ## MVP Strategy Plugins
 
 `packages/semantic-compiler/src/plugins.ts` ships four strategies:

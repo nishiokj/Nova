@@ -1,8 +1,27 @@
-import type { WorkItemSpec } from 'protocol';
 import type {
   CompilerQuestion,
   VerificationProgram,
 } from './types.js';
+
+/**
+ * Minimal compatible shape for protocol.WorkItemSpec.
+ * Kept local to avoid hard package dependency from semantic-compiler core.
+ */
+export interface WorkItemSpec {
+  id?: string;
+  goal: string;
+  objective: string;
+  agent: string;
+  domain?: string;
+  dependencies?: string[];
+  targetPaths?: string[];
+  bounds?: {
+    maxToolCalls?: number;
+    maxLlmCalls?: number;
+    maxDurationMs?: number;
+  };
+  semantic?: unknown;
+}
 
 export interface UserReviewPrompt {
   question: string;
@@ -50,6 +69,8 @@ export function vpToWorkItemSpecs(
 
   const verifyIds: string[] = [];
   for (const invariant of vp.invariants) {
+    if (invariant.compile_status === 'failed') continue;
+
     const id = `verify_${invariant.inv_id.toLowerCase()}`;
     verifyIds.push(id);
 
@@ -66,14 +87,16 @@ export function vpToWorkItemSpecs(
     });
   }
 
-  specs.push({
-    id: 'emit_verdict',
-    goal,
-    objective: 'Emit invariant_results.json and 99_summary.md using collected evidence.',
-    agent: 'coder',
-    domain: 'verification',
-    dependencies: verifyIds,
-  });
+  if (verifyIds.length > 0) {
+    specs.push({
+      id: 'emit_verdict',
+      goal,
+      objective: 'Emit invariant_results.json and 99_summary.md using collected evidence.',
+      agent: 'coder',
+      domain: 'verification',
+      dependencies: verifyIds,
+    });
+  }
 
   return specs;
 }

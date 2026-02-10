@@ -48,6 +48,50 @@ describe('compileVerificationProgram', () => {
     expect(vp.invariants[0].verification_plan.strategy_id).toBe('api_scenario');
     expect(vp.invariants[0].compile_status).toBe('compiled');
   });
+
+  test('fails all invariants when global system surface errors exist', () => {
+    const vp = compileVerificationProgram({
+      uow_id: 'UOW-2026-02-10-0011',
+      system_surface: {
+        services: [],
+        storage: [],
+        ui_surfaces: [],
+        external_dependencies: [],
+        main_flows: [],
+      },
+      invariants: [
+        {
+          text: 'GET /health returns HTTP 200.',
+        },
+      ],
+    });
+
+    expect(vp.compile_findings.some((finding) => finding.severity === 'error')).toBe(true);
+    expect(vp.invariants[0].compile_status).toBe('failed');
+  });
+
+  test('assigns unique finding IDs across global and invariant findings', () => {
+    const vp = compileVerificationProgram({
+      uow_id: 'UOW-2026-02-10-0012',
+      system_surface: {
+        services: ['svc'],
+        storage: [],
+        ui_surfaces: [],
+        external_dependencies: [],
+        main_flows: ['flow'],
+      },
+      invariants: [
+        {
+          inv_id: 'INV-001',
+          text: 'No interface changes and new required param should be fast.',
+        },
+      ],
+    });
+
+    const findingIds = vp.compile_findings.map((finding) => finding.finding_id);
+    const uniqueFindingIds = new Set(findingIds);
+    expect(uniqueFindingIds.size).toBe(findingIds.length);
+  });
 });
 
 describe('adapters', () => {
@@ -75,6 +119,29 @@ describe('adapters', () => {
 
     const prompts = buildUserReviewPrompts(vp);
     expect(prompts.length).toBeGreaterThan(0);
+  });
+
+  test('does not schedule failed invariants for verification', () => {
+    const vp = compileVerificationProgram({
+      uow_id: 'UOW-2026-02-10-0013',
+      system_surface: {
+        services: [],
+        storage: [],
+        ui_surfaces: [],
+        external_dependencies: [],
+        main_flows: [],
+      },
+      invariants: [
+        {
+          inv_id: 'INV-001',
+          text: 'GET /health returns HTTP 200.',
+        },
+      ],
+    });
+
+    const specs = vpToWorkItemSpecs(vp);
+    expect(specs.some((item) => item.id.startsWith('verify_'))).toBe(false);
+    expect(specs.some((item) => item.id === 'emit_verdict')).toBe(false);
   });
 });
 

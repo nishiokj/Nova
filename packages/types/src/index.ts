@@ -359,3 +359,26 @@ export {
   buildCategorySummary,
   buildAllCategorySummaries,
 } from './test-report.js';
+
+// ============================================
+// AGENTIC TASKS
+// ============================================
+export type {
+  AgenticTaskMode,
+  AgenticTaskStatus,
+  CapabilityScope,
+  MutationBudget,
+  AgenticTask,
+  AgenticTaskCreateInput,
+  AgenticTaskUpdateInput,
+  AgenticRunStatus,
+  AgenticRunVerdict,
+  MutationObservation,
+  AgenticRun,
+  AgenticRunCreateInput,
+} from './agentic-task.js';
+
+export {
+  isAgenticRunTerminal,
+  isAgenticTaskSchedulable,
+} from './agentic-task.js';

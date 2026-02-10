@@ -32,6 +32,13 @@ function pushFinding(
   });
 }
 
+function reindexFindings(findings: CompileFinding[]): CompileFinding[] {
+  return findings.map((finding, index) => ({
+    ...finding,
+    finding_id: makeFindingId(index),
+  }));
+}
+
 function detectGlobalContradictions(request: CompileRequest): CompileFinding[] {
   const findings: CompileFinding[] = [];
   const normalized = request.invariants.map((inv) => inv.text.toLowerCase()).join('\n');
@@ -164,6 +171,9 @@ export function compileVerificationProgram(
     ...detectSystemSurfaceFindings(request),
     ...detectGlobalContradictions(request),
   ];
+  const hasGlobalError = compileFindings.some(
+    (finding) => finding.severity === 'error' && !finding.invariant_id
+  );
 
   const invariants: CompiledInvariant[] = request.invariants.map((invariantInput, index) => {
     const invId = invariantInput.inv_id ?? makeInvariantId(index);
@@ -223,7 +233,7 @@ export function compileVerificationProgram(
     );
 
     let status: CompileStatus = 'compiled';
-    if (hasErrorFinding) status = 'failed';
+    if (hasGlobalError || hasErrorFinding) status = 'failed';
     else if (questions.length > 0) status = 'needs_user_answer';
 
     return {
@@ -238,12 +248,14 @@ export function compileVerificationProgram(
     };
   });
 
+  const normalizedFindings = reindexFindings(compileFindings);
+
   return {
     vp_version: '0.1',
     uow_id: request.uow_id,
     generated_at: now.toISOString(),
     system_surface: request.system_surface,
     invariants,
-    compile_findings: compileFindings,
+    compile_findings: normalizedFindings,
   };
 }

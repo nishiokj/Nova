@@ -4,11 +4,18 @@
   "description": "Semantic invariant compiler that emits Verification Programs (VP)",
   "type": "module",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./src/index.ts",
+  "bin": {
+    "uow": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./src/index.ts"
+    },
+    "./cli": {
+      "import": "./dist/cli.js",
+      "types": "./src/cli.ts"
     }
   },
   "scripts": {
@@ -18,7 +25,6 @@
     "test": "bun test"
   },
   "dependencies": {
-    "protocol": "workspace:*",
     "zod": "^4.3.5"
   },
   "devDependencies": {

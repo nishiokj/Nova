@@ -15,6 +15,9 @@ import type { SyncJob } from '../db/repositories/sync-job.js'
 import type { DerivedTask, DerivedTaskRepository } from '../db/repositories/derived-task.js'
 import type { DerivedJob } from '../db/repositories/derived-job.js'
 import { DerivedTaskIntegration } from '../derived/integration.js'
+import type { AgenticTask, AgenticRun } from 'types'
+import type { AgenticTaskRepository } from '../db/repositories/agentic-task.js'
+import type { AgenticTaskIntegration } from '../agentic/integration.js'
 import { isAgentMemoryError } from '../errors/index.js'
 
 // ============ Configuration ============
@@ -224,6 +227,9 @@ export type SchedulerEvent =
   | { type: 'scheduler:derived_task_executed'; task: DerivedTask; job: DerivedJob }
   | { type: 'scheduler:derived_task_disabled'; task: DerivedTask }
   | { type: 'scheduler:derived_task_error'; task: DerivedTask; error: Error }
+  | { type: 'scheduler:agentic_task_executed'; task: AgenticTask; run: AgenticRun }
+  | { type: 'scheduler:agentic_task_disabled'; task: AgenticTask }
+  | { type: 'scheduler:agentic_task_error'; task: AgenticTask; error: Error }
   | { type: 'scheduler:webhook_subscribed'; task: SyncTask; subscription: WebhookSubscription }
   | { type: 'scheduler:webhook_unsubscribed'; task: SyncTask }
   | { type: 'scheduler:webhook_error'; task: SyncTask; error: Error }
@@ -265,7 +271,9 @@ export class Scheduler {
     config: SchedulerConfig = {},
     private accountRepo?: AccountRepository,
     private derivedTaskRepo?: DerivedTaskRepository,
-    private derivedIntegration?: DerivedTaskIntegration
+    private derivedIntegration?: DerivedTaskIntegration,
+    private agenticTaskRepo?: AgenticTaskRepository,
+    private agenticIntegration?: AgenticTaskIntegration,
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config }
   }
@@ -382,6 +390,7 @@ export class Scheduler {
     }
 
     processed += await this.tickDerivedTasks()
+    processed += await this.tickAgenticTasks()
 
     this.emit({ type: 'scheduler:tick', processed })
     return processed
@@ -708,6 +717,47 @@ export class Scheduler {
     }
 
     this.emit({ type: 'scheduler:derived_task_executed', task, job })
+  }
+
+  private async tickAgenticTasks(): Promise<number> {
+    if (!this.agenticTaskRepo || !this.agenticIntegration) return 0
+
+    const tasks = await this.agenticTaskRepo.findDueForExecution(this.config.batchSize)
+    let processed = 0
+
+    for (const task of tasks) {
+      try {
+        const run = await this.agenticIntegration.scheduleTask(this.engine, task)
+        if (!run) continue // Already has active run
+
+        await this.agenticTaskRepo.markExecuted(task.id, run.id)
+
+        if (task.mode === 'once') {
+          await this.agenticTaskRepo.disable(task.id)
+          this.emit({ type: 'scheduler:agentic_task_disabled', task })
+        } else if (task.mode === 'recurring' && task.intervalMs) {
+          await this.agenticTaskRepo.updateNextRunAt(task.id, new Date(Date.now() + task.intervalMs))
+        }
+
+        this.emit({ type: 'scheduler:agentic_task_executed', task, run })
+        processed++
+
+        console.log('[Scheduler] Agentic task executed:', {
+          taskId: task.id,
+          name: task.name,
+          mode: task.mode,
+        })
+      } catch (error) {
+        const err = toError(error)
+        console.error('[Scheduler] Agentic task error:', {
+          task: sanitizeForLog(task),
+          error: serializeError(error),
+        })
+        this.emit({ type: 'scheduler:agentic_task_error', task, error: err })
+      }
+    }
+
+    return processed
   }
 
   private emit(event: SchedulerEvent): void {

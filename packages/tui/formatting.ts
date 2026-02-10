@@ -150,10 +150,10 @@ function parseInlineMarkdown(text: string, baseColor: string | undefined): Inter
         segments.push({ text: innerText, color: colors.linkText, kind: "styled" });
         break;
       case "bold":
-        segments.push({ text: innerText, color: colors.bold, bold: true, kind: "styled" });
+        segments.push({ text: innerText, color: baseColor, bold: true, kind: "styled" });
         break;
       case "italic":
-        segments.push({ text: innerText, color: colors.italic, italic: true, kind: "styled" });
+        segments.push({ text: innerText, color: baseColor, italic: true, kind: "styled" });
         break;
       case "strike":
         segments.push({ text: innerText, color: colors.strikethrough, kind: "styled" });
@@ -185,26 +185,11 @@ function highlightPlainText(text: string, baseColor: string | undefined): Parsed
     }
 
     const matchedText = next.match[0];
-    switch (next.token.type) {
-      case "url":
-        segments.push({ text: matchedText, color: colors.url });
-        break;
-      case "path":
-        segments.push({ text: matchedText, color: colors.path });
-        break;
-      case "duration":
-        segments.push({ text: matchedText, color: colors.number });
-        break;
-      case "tool":
-        segments.push({ text: matchedText, color: colors.func, bold: true });
-        break;
-      case "classCall":
-      case "funcCall":
-        segments.push({ text: matchedText, color: colors.func });
-        break;
-      default:
-        segments.push({ text: matchedText, color: baseColor });
-    }
+    segments.push({
+      text: matchedText,
+      color: colors.muted,
+      bold: next.token.type === "tool" ? true : undefined,
+    });
 
     cursor = next.index + matchedText.length;
   }
@@ -302,7 +287,7 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
     return {
       segments: [
         { text: indent, color: baseColor },
-        { text: checked ? "☑ " : "☐ ", color: colors.listBullet },
+        { text: checked ? "☑ " : "☐ ", color: colors.text },
         ...restSegments,
       ],
     };
@@ -317,7 +302,7 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
     return {
       segments: [
         { text: indent, color: baseColor },
-        { text: "• ", color: colors.listBullet },
+        { text: "• ", color: colors.text },
         ...restSegments,
       ],
     };
@@ -333,7 +318,7 @@ function parseBlockLine(text: string, baseColor: string | undefined): { segments
     return {
       segments: [
         { text: indent, color: baseColor },
-        { text: `${marker} `, color: colors.listBullet },
+        { text: `${marker} `, color: colors.text },
         ...restSegments,
       ],
     };

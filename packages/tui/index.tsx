@@ -3118,9 +3118,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   // NOVA banner + supernova animation
   const novaTextLines = [
-    "╔╗╔ ╔═╗ ╦  ╦ ╔═╗",
-    "║║║ ║ ║ ╚╗╔╝ ╠═╣",
-    "╝╚╝ ╚═╝  ╚╝  ╩ ╩",
+    "⣧⠀⢸ ⡎⠉⢱ ⡇⠀⢸ ⠀⣿⠀",
+    "⡇⢣⢸ ⡇⠀⢸ ⢸⠀⡇ ⢸⠀⡇",
+    "⡇⠀⢻ ⢇⣀⡸ ⠀⣿⠀ ⡏⠉⢹",
   ];
 
   const novaAnim = NOVA_ANIM_FRAMES[novaFrame];
