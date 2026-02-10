@@ -5,7 +5,6 @@
 export { AgentHarness, createHarnessFromEnv } from './harness.js';
 export { BridgeGateway } from './bridge_gateway.js';
 export { HarnessDaemon, runHarnessDaemon, type HarnessDaemonOptions } from './daemon.js';
-export { ControlPlaneServer, runControlPlaneServer, type ControlPlaneServerOptions } from './control_plane_server.js';
 export {
   translateAgentEvent,
   createStreamEvent,

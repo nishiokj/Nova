@@ -193,7 +193,7 @@ bun run packages/tui/index.tsx
 bun run packages/harness-daemon/src/index.ts
 
 # Run control-plane server (HTTP API + dashboard)
-bun run packages/harness-daemon/src/control-plane.ts
+bun run packages/control-plane/src/control-plane.ts
 
 # Type check all packages
 bun run --filter '*' tsc --noEmit

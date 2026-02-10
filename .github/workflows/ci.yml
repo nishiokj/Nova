@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  lint:
-    name: Lint
+  build:
+    name: Build + Typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,12 +20,21 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Type check
+      - name: Build all packages
+        run: bun run build
+
+      - name: Typecheck (post-build)
         run: bun run lint
 
-      - name: Check formatting
-        run: bunx biome check --error-on-warnings .
-        continue-on-error: true
+      - name: Standalone binary
+        run: |
+          bun build --compile \
+            --target=bun-linux-x64 \
+            --minify \
+            --define "process.env.REX_VERSION='\"ci-test\"'" \
+            ./packages/launcher/standalone.ts \
+            --outfile ./rex-test
+          ./rex-test --version
 
   test:
     name: Test
@@ -43,8 +52,8 @@ jobs:
       - name: Run tests
         run: bun test
 
-  build:
-    name: Build Check
+  dead-code:
+    name: Dead Code + Unused Exports
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,15 +65,109 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build packages
+      - name: Build (knip needs compiled declarations)
         run: bun run build
 
-      - name: Test standalone build
+      - name: Run knip
+        run: bunx knip --no-exit-code --reporter compact
+
+  hygiene:
+    name: Code Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Explicit any usage
         run: |
-          bun build --compile \
-            --target=bun-linux-x64 \
-            --minify \
-            --define "process.env.REX_VERSION='\"ci-test\"'" \
-            ./packages/launcher/standalone.ts \
-            --outfile ./rex-test
-          ./rex-test --version
+          echo "## Explicit 'any' usage in source files"
+          count=0
+          while IFS= read -r file; do
+            matches=$(grep -n ': any\b\|as any\b\|<any>' "$file" 2>/dev/null || true)
+            if [ -n "$matches" ]; then
+              echo ""
+              echo "### $file"
+              echo "$matches"
+              count=$((count + $(echo "$matches" | wc -l)))
+            fi
+          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' ! -name '*.d.ts' -type f)
+          echo ""
+          echo "Total: $count explicit any annotations"
+          if [ "$count" -gt 0 ]; then
+            echo "::warning::Found $count explicit 'any' annotations in source files"
+          fi
+
+      - name: Type assertions (as casts)
+        run: |
+          echo "## Type assertions in source files"
+          count=0
+          while IFS= read -r file; do
+            matches=$(grep -n ' as [A-Z]\| as {' "$file" 2>/dev/null || true)
+            if [ -n "$matches" ]; then
+              echo ""
+              echo "### $file"
+              echo "$matches"
+              count=$((count + $(echo "$matches" | wc -l)))
+            fi
+          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' ! -name '*.d.ts' -type f)
+          echo ""
+          echo "Total: $count type assertions"
+          if [ "$count" -gt 0 ]; then
+            echo "::warning::Found $count type assertions — consider narrowing types instead"
+          fi
+
+      - name: Suppressed type errors
+        run: |
+          echo "## @ts-ignore / @ts-expect-error / @ts-nocheck"
+          count=0
+          while IFS= read -r file; do
+            matches=$(grep -n '@ts-ignore\|@ts-expect-error\|@ts-nocheck' "$file" 2>/dev/null || true)
+            if [ -n "$matches" ]; then
+              echo ""
+              echo "### $file"
+              echo "$matches"
+              count=$((count + $(echo "$matches" | wc -l)))
+            fi
+          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' -type f)
+          echo ""
+          echo "Total: $count type suppressions"
+          if [ "$count" -gt 0 ]; then
+            echo "::warning::Found $count @ts-ignore/@ts-expect-error/@ts-nocheck suppressions"
+          fi
+
+      - name: Console.log in production code
+        run: |
+          echo "## console.log in source files (not tests)"
+          count=0
+          while IFS= read -r file; do
+            matches=$(grep -n 'console\.log\b' "$file" 2>/dev/null || true)
+            if [ -n "$matches" ]; then
+              echo ""
+              echo "### $file"
+              echo "$matches"
+              count=$((count + $(echo "$matches" | wc -l)))
+            fi
+          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' -type f)
+          echo ""
+          echo "Total: $count console.log calls"
+          if [ "$count" -gt 0 ]; then
+            echo "::warning::Found $count console.log calls in source files"
+          fi
+
+      - name: TODO/FIXME/HACK markers
+        run: |
+          echo "## TODO / FIXME / HACK markers"
+          count=0
+          while IFS= read -r file; do
+            matches=$(grep -n 'TODO\|FIXME\|HACK\|XXX' "$file" 2>/dev/null || true)
+            if [ -n "$matches" ]; then
+              echo ""
+              echo "### $file"
+              echo "$matches"
+              count=$((count + $(echo "$matches" | wc -l)))
+            fi
+          done < <(find packages/*/src -name '*.ts' -type f)
+          echo ""
+          echo "Total: $count markers"
+          if [ "$count" -gt 0 ]; then
+            echo "::notice::Found $count TODO/FIXME/HACK markers"
+          fi

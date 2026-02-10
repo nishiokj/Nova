@@ -123,7 +123,7 @@ async function main(): Promise<void> {
       idleTimeoutMs: 0, // Disable idle timeout in standalone mode
     });
 
-    const { ControlPlaneServer } = await import('../harness-daemon/src/harness/control_plane_server.js');
+    const { ControlPlaneServer } = await import('../control-plane/src/harness/control_plane_server.js');
     const controlPlane = new ControlPlaneServer({
       host: process.env.CONTROL_PLANE_HOST ?? '127.0.0.1',
       port: Number(process.env.CONTROL_PLANE_PORT ?? '9445'),
