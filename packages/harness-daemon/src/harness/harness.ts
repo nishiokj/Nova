@@ -1037,10 +1037,10 @@ export class AgentHarness {
   async start(): Promise<boolean> {
     if (this.graphd && !this.graphdStarted) {
       try {
-        const started = await this.graphd.start();
-        this.graphdStarted = started;
-        if (started) {
-          this.logger.info('GraphD started', {
+        const connected = await this.graphd.connect();
+        this.graphdStarted = connected;
+        if (connected) {
+          this.logger.info('GraphD connected (external owner)', {
             port: this.config.graphd.port,
             dbPath: this.config.graphd.dbPath,
             reusing: this.graphd.isReusing(),
@@ -1049,11 +1049,19 @@ export class AgentHarness {
             this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd, { batchMode: false });
             this.logger.debug('GraphDSubscriber created');
           }
+        } else {
+          this.logger.warning('GraphD not reachable; starting harness without GraphD features', {
+            host: this.config.graphd.host,
+            port: this.config.graphd.port,
+            dbPath: this.config.graphd.dbPath,
+          });
+          this.graphd = null;
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.logger.error('GraphD failed to start', { error: message });
-        throw error;
+        this.logger.warning('GraphD connect failed; starting harness without GraphD features', { error: message });
+        this.graphd = null;
+        this.graphdStarted = false;
       }
     }
 
@@ -3783,7 +3791,7 @@ export class AgentHarness {
     if (this.isGraphDReady()) {
       try {
         await this.graphd!.stop();
-        this.logger.info('GraphD stopped');
+        this.logger.info('GraphD disconnected');
       } catch (error) {
         this.logger.warning('GraphD stop failed', { error: String(error) });
       }

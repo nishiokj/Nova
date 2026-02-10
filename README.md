@@ -198,6 +198,11 @@ bun run packages/graphd/src/graphd.ts
 # Run control-plane server (HTTP API + dashboard)
 bun run packages/control-plane/src/control-plane.ts
 
+# Recommended split startup order:
+# 1) bun run start:graphd
+# 2) bun run packages/harness-daemon/src/index.ts
+# 3) bun run packages/control-plane/src/control-plane.ts
+
 # Type check all packages
 bun run --filter '*' tsc --noEmit
 ```

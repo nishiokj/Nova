@@ -155,6 +155,7 @@ Service ownership is mixed (control-plane starts/manages GraphD in some paths). 
 
 ### Progress
 - 2026-02-10: `control-plane` switched to GraphD client-only attach mode (no implicit GraphD bootstrap).
+- 2026-02-10: `harness-daemon` switched to GraphD client-only attach mode (no implicit GraphD bootstrap).
 
 ### Files
 - `packages/control-plane/src/harness/control_plane_server.ts`
